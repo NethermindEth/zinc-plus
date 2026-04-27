@@ -145,7 +145,7 @@ where
         let public = PublicColumnLayout::new(0, 0, cols::NUM_INT_PUB);
         // No shifts — every row is independent.
         let shifts: Vec<ShiftSpec> = vec![];
-        UairSignature::new(total, public, shifts, vec![])
+        UairSignature::new(total, public, shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(

@@ -6,8 +6,9 @@ use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
     lookup::booleanity::{
-        finalize_booleanity_verifier, prepare_booleanity_verifier,
-        verify_bit_decomposition_consistency,
+        compute_bit_slices_flat, compute_virtual_binary_poly_closing_overrides,
+        compute_virtual_closing_overrides, finalize_booleanity_verifier,
+        prepare_booleanity_verifier, verify_bit_decomposition_consistency,
     },
     multipoint_eval::{self, MultipointEval},
     projections::{
@@ -16,13 +17,16 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
-use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::{
+    EvaluatablePolynomial, mle::MultilinearExtensionWithConfig,
+    univariate::dynamic::over_field::DynamicPolynomialF,
+};
 use zinc_transcript::{
     Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair, UairSignature, UairTrace,
+    BitOp, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
@@ -35,6 +39,26 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsVerifierTranscript,
 };
+
+/// Drop the witness binary_poly column evals the UAIR opted out of
+/// (sorted, dedup'd `skip_indices` relative to the witness slice). The
+/// surviving evals line up positionally with the bit-slice blocks
+/// `bit_slice_evals[col*D..col*D+D]`, so the bit-decomposition
+/// consistency check pairs the right parent eval with the right block.
+fn filter_skipped_parent_evals<F: Clone>(
+    witness_parent_evals: &[F],
+    skip_indices: &[usize],
+) -> Vec<F> {
+    if skip_indices.is_empty() {
+        return witness_parent_evals.to_vec();
+    }
+    witness_parent_evals
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !skip_indices.contains(i))
+        .map(|(_, e)| e.clone())
+        .collect()
+}
 
 //
 // Shared base
@@ -339,7 +363,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
-        + for<'b> FromWithConfig<&'b Zt::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + for<'b> MulByScalar<&'b F>
         + FromRef<F>
@@ -437,7 +463,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
-        + for<'b> FromWithConfig<&'b Zt::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + for<'b> MulByScalar<&'b F>
         + FromRef<F>
@@ -461,9 +489,22 @@ where
             .num_binary_poly_cols();
         let num_total_bin =
             self.base.uair_signature.total_cols().num_binary_poly_cols();
-        // Booleanity covers witness binary_poly columns only — public ones
-        // are recomputed locally by the verifier in step 6.
-        let num_bit_slices = (num_total_bin - num_pub_bin) * D;
+        let bool_skip = self.base.uair_signature.booleanity_skip_indices();
+        // Booleanity covers: witness binary_poly cols (minus
+        // `booleanity_skip_indices`), packed virtual binary_poly cols,
+        // declared int bit cols, and virtual booleanity linear-combo cols.
+        let num_int_bit_cols =
+            self.base.uair_signature.int_witness_bit_cols().len();
+        let num_virtual_cols =
+            self.base.uair_signature.virtual_booleanity_cols().len();
+        let num_virtual_bp_cols =
+            self.base.uair_signature.virtual_binary_poly_cols().len();
+        let num_bit_slices = ((num_total_bin - num_pub_bin) - bool_skip.len()) * D
+            + num_virtual_bp_cols * D
+            + num_int_bit_cols
+            + num_virtual_cols;
+        let num_shifted_bit_slices =
+            self.base.uair_signature.shifted_bit_slice_specs().len() * D;
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -472,6 +513,7 @@ where
             &self.ic_subclaim,
             num_constraints,
             num_bit_slices,
+            num_shifted_bit_slices,
             self.base.num_vars,
             &self.projecting_element_f,
             &self.field_cfg,
@@ -513,11 +555,85 @@ where
         )?;
 
         // 4c: Booleanity verifier finalize — validates the booleanity
-        // group's expected_evaluation at r*.
+        // group's expected_evaluation at r*. For declared int bit cols
+        // and virtual cols we substitute `up_eval` (or a reconstructed
+        // linear-combo eval) into the closing in place of the
+        // bit-slice eval emitted by the prover; this ties the
+        // booleanity-bound MLE to the committed sources without a
+        // separate equality check.
+        let int_offset = self.base.uair_signature.total_cols().num_binary_poly_cols()
+            + self.base.uair_signature.total_cols().num_arbitrary_poly_cols();
+        let num_pub_int = self.base.uair_signature.public_cols().num_int_cols();
+        let num_wit_int = self.base.uair_signature.witness_cols().num_int_cols();
+        let num_binary_bit_slices_for_overrides = (num_total_bin - num_pub_bin) * D;
+        let virtual_bp_specs = self.base.uair_signature.virtual_binary_poly_cols();
+        let virtual_specs = self.base.uair_signature.virtual_booleanity_cols();
+
+        // Public binary_poly bit slice evals at the shared sumcheck
+        // point — verifier computes locally from public_trace; reused
+        // by both virtual-bool and virtual-binary-poly overrides.
+        let public_bit_slice_evals: Vec<F> = if !virtual_bp_specs.is_empty()
+            || !virtual_specs.is_empty()
+        {
+            let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
+                &self.base.public_trace.binary_poly,
+                &self.field_cfg,
+            );
+            public_bit_slice_mles
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &self.field_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        } else {
+            Vec::new()
+        };
+
+        // closing_overrides_tail layout (in trailing-position order):
+        //   [virtual_binary_poly_per_bit (V_b * D),
+        //    int_witness_bit_col evals (E_int),
+        //    virtual_booleanity per-spec evals (V_f)]
+        // The virtual binary_poly section sits *between* the genuine
+        // binary col bit slices and the extra_bit_cols, matching the
+        // prover's binary_cols append order.
+        let mut closing_overrides_tail: Vec<F> = Vec::new();
+        if !virtual_bp_specs.is_empty() {
+            let virtual_bp_overrides = compute_virtual_binary_poly_closing_overrides::<F, D>(
+                virtual_bp_specs,
+                &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices_for_overrides],
+                &cpr_subclaim.shifted_bit_slice_evals,
+                &public_bit_slice_evals,
+                &self.field_cfg,
+            );
+            closing_overrides_tail.extend(virtual_bp_overrides);
+        }
+        closing_overrides_tail.extend(
+            self.base
+                .uair_signature
+                .int_witness_bit_cols()
+                .iter()
+                .map(|&idx| cpr_subclaim.up_evals[int_offset + idx].clone()),
+        );
+        if !virtual_specs.is_empty() {
+            let int_witness_up_evals: Vec<F> = (0..num_wit_int)
+                .map(|i| {
+                    cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone()
+                })
+                .collect();
+            let virtual_overrides = compute_virtual_closing_overrides::<F, D>(
+                virtual_specs,
+                &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices_for_overrides],
+                &cpr_subclaim.shifted_bit_slice_evals,
+                &public_bit_slice_evals,
+                &int_witness_up_evals,
+                &self.field_cfg,
+            );
+            closing_overrides_tail.extend(virtual_overrides);
+        }
         if let Some(ba) = bool_verifier_ancillary_opt {
             finalize_booleanity_verifier::<F>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 &cpr_subclaim.bit_slice_evals,
+                &closing_overrides_tail,
                 md_subclaims.point(),
                 md_subclaims.expected_evaluations()[1].clone(),
                 ba,
@@ -526,12 +642,41 @@ where
             .map_err(ProtocolError::Booleanity)?;
         }
 
-        // Bit-decomposition consistency: each binary_poly column's
-        // F-projected MLE eval at r* must equal Σ_i a^i · bit_slice_eval[i],
-        // where `a` is the projecting element used in step 3 (ψ_a).
-        verify_bit_decomposition_consistency(
+        // Bit-decomposition consistency: each genuine (non-skipped)
+        // binary_poly column's F-projected MLE eval at r* must equal
+        // Σ_i a^i · bit_slice_eval[i], where `a` is the projecting
+        // element used in step 3 (ψ_a). Skip the columns the UAIR
+        // opted out of (`booleanity_skip_indices`) — their bit-slice
+        // evals don't appear in `bit_slice_evals`, so we filter
+        // `up_evals` accordingly. Virtual binary_poly cols' bit slices
+        // and extra (int / virtual-bool) bit cols follow in
+        // `bit_slice_evals`; they're not parented in `up_evals` and
+        // are bound via closing overrides below.
+        let parent_evals_for_bool = filter_skipped_parent_evals(
             &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
-            &cpr_subclaim.bit_slice_evals,
+            bool_skip,
+        );
+        let num_kept_binary_bit_slices = parent_evals_for_bool.len() * D;
+        verify_bit_decomposition_consistency(
+            &parent_evals_for_bool,
+            &cpr_subclaim.bit_slice_evals[..num_kept_binary_bit_slices],
+            &self.projecting_element_f,
+            D,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+
+        // Shifted bit-slice consistency: tie each spec's emitted bit
+        // slices to the corresponding `down_eval` (= parent col at
+        // shifted point) via the same projection-element trick.
+        let shifted_down_indices =
+            self.base.uair_signature.shifted_bit_slice_down_indices();
+        let shifted_parent_evals: Vec<F> = shifted_down_indices
+            .iter()
+            .map(|&i| cpr_subclaim.down_evals[i].clone())
+            .collect();
+        verify_bit_decomposition_consistency(
+            &shifted_parent_evals,
+            &cpr_subclaim.shifted_bit_slice_evals,
             &self.projecting_element_f,
             D,
         )
@@ -561,16 +706,29 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 5: Multi-point evaluation sumcheck.
+    /// Step 5: Multi-point evaluation sumcheck (under ψ_α).
+    ///
+    /// CPR's `up_evals` (one per base trace col) are extended with
+    /// `bit_op_down_evals` (one per `BitOpSpec`), forming the `up`
+    /// claim list mp_eval consumes. The shift list is unchanged.
+    /// At r_0 mp_eval needs `open_evals` of length
+    /// `num_total + num_bit_op` — the bit-op slots get derived in
+    /// Step 6 by applying the bit-op locally to each source's
+    /// lifted eval (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
+        let cpr_eval_point = self.cpr_subclaim.evaluation_point.clone();
+
+        let mut up_evals_with_bit_op = self.cpr_subclaim.up_evals.clone();
+        up_evals_with_bit_op.extend(self.cpr_subclaim.bit_op_down_evals.iter().cloned());
+
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_multipoint_eval,
-            &self.cpr_subclaim.evaluation_point,
-            &self.cpr_subclaim.up_evals,
+            &cpr_eval_point,
+            &up_evals_with_bit_op,
             &self.cpr_subclaim.down_evals,
             self.base.uair_signature.shifts(),
             self.base.num_vars,
@@ -610,6 +768,15 @@ where
 {
     /// Step 6: Recompute public lifted_evals, assemble full set, verify
     /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
+    ///
+    /// For each `BitOpSpec(src, op)` declared by the UAIR, the verifier
+    /// derives the bit-op slot's `open_eval` locally by applying `op` to
+    /// the source's `lifted_eval` in F_q[X] and ψ_α-projecting. This
+    /// closes the bit-op consistency loop without any new wire data:
+    /// `MLE[op(src)](r_0) == op(MLE[src])(r_0)` because bit-op (acts on
+    /// bit-position within a cell) and the MLE evaluation (acts on the
+    /// row index) commute. Mismatches surface as
+    /// `MultipointEval(ClaimMismatch)` from `verify_subclaim`.
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
     ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
@@ -652,11 +819,26 @@ where
             .cloned()
             .collect();
 
-        let open_evals: Vec<F> = all_lifted_evals
+        // Derive bit-op virtual lifted evals from the source's lifted
+        // eval via the structural permutation (rot_c / shift_r_c). They
+        // are appended to `open_evals` in the same order mp_eval used
+        // to extend the up-claim list.
+        let mut open_evals: Vec<F> = all_lifted_evals
             .iter()
             .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_element_f))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
+        for spec in self.base.uair_signature.bit_op_specs() {
+            let bar_u_src = &all_lifted_evals[spec.source_col()];
+            let op_e_src = match spec.op() {
+                BitOp::Rot(c) => bar_u_src.rot_c(c),
+                BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+            };
+            let psi = op_e_src
+                .evaluate_at_point(&self.projecting_element_f)
+                .map_err(ProtocolError::LiftedEvalProjection)?;
+            open_evals.push(psi);
+        }
 
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
@@ -696,7 +878,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
-        + for<'b> FromWithConfig<&'b Zt::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + for<'b> MulByScalar<&'b F>
         + FromRef<F>
@@ -808,7 +992,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::IntZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
@@ -902,7 +1088,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b ZtF::Int>
-        + for<'b> FromWithConfig<&'b ZtF::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b ZtF::Chal>
         + for<'b> MulByScalar<&'b F>
         + FromRef<F>
@@ -936,9 +1124,11 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1: Prime projection ────────────────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path and use the
+    // secp256k1 base prime as the projecting prime. See the prover-side
+    // comment in `prove_folded` for why UAIRs with EC arithmetic need
+    // the fixed prime here.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     // ── Step 2: Ideal check ─────────────────────────────────────────────
     let num_constraints = count_constraints::<U>();
@@ -963,9 +1153,16 @@ where
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
-    // Booleanity covers witness binary_poly columns only — public ones
-    // are recomputed locally by the verifier in step 6.
-    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
+    let bool_skip = uair_signature.booleanity_skip_indices();
+    let num_int_bit_cols = uair_signature.int_witness_bit_cols().len();
+    let num_virtual_cols = uair_signature.virtual_booleanity_cols().len();
+    let num_virtual_bp_cols = uair_signature.virtual_binary_poly_cols().len();
+    let num_bit_slices = ((num_total_bin - num_pub_bin) - bool_skip.len()) * D
+        + num_virtual_bp_cols * D
+        + num_int_bit_cols
+        + num_virtual_cols;
+    let num_shifted_bit_slices =
+        uair_signature.shifted_bit_slice_specs().len() * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
@@ -973,6 +1170,7 @@ where
         &ic_subclaim,
         num_constraints,
         num_bit_slices,
+        num_shifted_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
@@ -1009,10 +1207,66 @@ where
         &field_cfg,
     )?;
 
+    // Booleanity: substitute up_evals (for int bit cols) and computed
+    // linear-combo evals (for virtual cols) into the closing.
+    let int_offset = uair_signature.total_cols().num_binary_poly_cols()
+        + uair_signature.total_cols().num_arbitrary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let num_binary_bit_slices = (num_total_bin - num_pub_bin) * D;
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let public_bit_slice_evals: Vec<F> = if !virtual_bp_specs.is_empty()
+        || !virtual_specs.is_empty()
+    {
+        let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
+            &public_trace.binary_poly,
+            &field_cfg,
+        );
+        public_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    } else {
+        Vec::new()
+    };
+    let mut closing_overrides_tail: Vec<F> = Vec::new();
+    if !virtual_bp_specs.is_empty() {
+        let virtual_bp_overrides = compute_virtual_binary_poly_closing_overrides::<F, D>(
+            virtual_bp_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_bp_overrides);
+    }
+    closing_overrides_tail.extend(
+        uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| cpr_subclaim.up_evals[int_offset + idx].clone()),
+    );
+    if !virtual_specs.is_empty() {
+        let int_witness_up_evals: Vec<F> = (0..num_wit_int)
+            .map(|i| cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone())
+            .collect();
+        let virtual_overrides = compute_virtual_closing_overrides::<F, D>(
+            virtual_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &int_witness_up_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_overrides);
+    }
     if let Some(ba) = bool_verifier_ancillary_opt {
         finalize_booleanity_verifier::<F>(
             &mut pcs_transcript.fs_transcript,
             &cpr_subclaim.bit_slice_evals,
+            &closing_overrides_tail,
             md_subclaims.point(),
             md_subclaims.expected_evaluations()[1].clone(),
             ba,
@@ -1021,20 +1275,42 @@ where
         .map_err(ProtocolError::Booleanity)?;
     }
 
-    verify_bit_decomposition_consistency(
+    let parent_evals_for_bool = filter_skipped_parent_evals(
         &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
-        &cpr_subclaim.bit_slice_evals,
+        bool_skip,
+    );
+    let num_kept_binary_bit_slices = parent_evals_for_bool.len() * D;
+    verify_bit_decomposition_consistency(
+        &parent_evals_for_bool,
+        &cpr_subclaim.bit_slice_evals[..num_kept_binary_bit_slices],
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    // Shifted bit-slice consistency (see unfolded `verify` for rationale).
+    let shifted_down_indices = uair_signature.shifted_bit_slice_down_indices();
+    let shifted_parent_evals: Vec<F> = shifted_down_indices
+        .iter()
+        .map(|&i| cpr_subclaim.down_evals[i].clone())
+        .collect();
+    verify_bit_decomposition_consistency(
+        &shifted_parent_evals,
+        &cpr_subclaim.shifted_bit_slice_evals,
         &projecting_element_f,
         D,
     )
     .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
+    let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
-        &cpr_subclaim.evaluation_point,
-        &cpr_subclaim.up_evals,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_subclaim.down_evals,
         uair_signature.shifts(),
         num_vars,
@@ -1075,11 +1351,27 @@ where
         .cloned()
         .collect();
 
-    let open_evals: Vec<F> = all_lifted_evals
+    let mut open_evals: Vec<F> = all_lifted_evals
         .iter()
         .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ProtocolError::LiftedEvalProjection)?;
+    // Bit-op virtual MLE consistency: derive the bit-op slot's
+    // open_eval locally by applying the structural permutation
+    // (rot_c / shift_r_c) to the source's lifted eval, then
+    // ψ_α-projecting. Mismatch surfaces as
+    // `MultipointEval(ClaimMismatch)`.
+    for spec in uair_signature.bit_op_specs() {
+        let bar_u_src = &all_lifted_evals[spec.source_col()];
+        let op_e_src = match spec.op() {
+            BitOp::Rot(c) => bar_u_src.rot_c(c),
+            BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+        };
+        let psi = op_e_src
+            .evaluate_at_point(&projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        open_evals.push(psi);
+    }
 
     MultipointEval::verify_subclaim(
         &mp_subclaim,
@@ -1309,7 +1601,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b ZtF::Int>
-        + for<'b> FromWithConfig<&'b ZtF::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b ZtF::Chal>
         + for<'b> MulByScalar<&'b F>
         + FromRef<F>
@@ -1351,9 +1645,11 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1: Prime projection ────────────────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path and use the
+    // secp256k1 base prime as the projecting prime. See the prover-side
+    // comment in `prove_folded` for why UAIRs with EC arithmetic need
+    // the fixed prime here.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     // ── Step 2: Ideal check ─────────────────────────────────────────────
     let num_constraints = count_constraints::<U>();
@@ -1378,9 +1674,16 @@ where
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
-    // Booleanity covers witness binary_poly columns only — public ones
-    // are recomputed locally by the verifier in step 6.
-    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
+    let bool_skip = uair_signature.booleanity_skip_indices();
+    let num_int_bit_cols = uair_signature.int_witness_bit_cols().len();
+    let num_virtual_cols = uair_signature.virtual_booleanity_cols().len();
+    let num_virtual_bp_cols = uair_signature.virtual_binary_poly_cols().len();
+    let num_bit_slices = ((num_total_bin - num_pub_bin) - bool_skip.len()) * D
+        + num_virtual_bp_cols * D
+        + num_int_bit_cols
+        + num_virtual_cols;
+    let num_shifted_bit_slices =
+        uair_signature.shifted_bit_slice_specs().len() * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
@@ -1388,6 +1691,7 @@ where
         &ic_subclaim,
         num_constraints,
         num_bit_slices,
+        num_shifted_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
@@ -1424,10 +1728,66 @@ where
         &field_cfg,
     )?;
 
+    // Booleanity: substitute up_evals (for int bit cols) and computed
+    // linear-combo evals (for virtual cols) into the closing.
+    let int_offset = uair_signature.total_cols().num_binary_poly_cols()
+        + uair_signature.total_cols().num_arbitrary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let num_binary_bit_slices = (num_total_bin - num_pub_bin) * D;
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let public_bit_slice_evals: Vec<F> = if !virtual_bp_specs.is_empty()
+        || !virtual_specs.is_empty()
+    {
+        let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
+            &public_trace.binary_poly,
+            &field_cfg,
+        );
+        public_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    } else {
+        Vec::new()
+    };
+    let mut closing_overrides_tail: Vec<F> = Vec::new();
+    if !virtual_bp_specs.is_empty() {
+        let virtual_bp_overrides = compute_virtual_binary_poly_closing_overrides::<F, D>(
+            virtual_bp_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_bp_overrides);
+    }
+    closing_overrides_tail.extend(
+        uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| cpr_subclaim.up_evals[int_offset + idx].clone()),
+    );
+    if !virtual_specs.is_empty() {
+        let int_witness_up_evals: Vec<F> = (0..num_wit_int)
+            .map(|i| cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone())
+            .collect();
+        let virtual_overrides = compute_virtual_closing_overrides::<F, D>(
+            virtual_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &int_witness_up_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_overrides);
+    }
     if let Some(ba) = bool_verifier_ancillary_opt {
         finalize_booleanity_verifier::<F>(
             &mut pcs_transcript.fs_transcript,
             &cpr_subclaim.bit_slice_evals,
+            &closing_overrides_tail,
             md_subclaims.point(),
             md_subclaims.expected_evaluations()[1].clone(),
             ba,
@@ -1436,20 +1796,42 @@ where
         .map_err(ProtocolError::Booleanity)?;
     }
 
-    verify_bit_decomposition_consistency(
+    let parent_evals_for_bool = filter_skipped_parent_evals(
         &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
-        &cpr_subclaim.bit_slice_evals,
+        bool_skip,
+    );
+    let num_kept_binary_bit_slices = parent_evals_for_bool.len() * D;
+    verify_bit_decomposition_consistency(
+        &parent_evals_for_bool,
+        &cpr_subclaim.bit_slice_evals[..num_kept_binary_bit_slices],
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    // Shifted bit-slice consistency (see unfolded `verify` for rationale).
+    let shifted_down_indices = uair_signature.shifted_bit_slice_down_indices();
+    let shifted_parent_evals: Vec<F> = shifted_down_indices
+        .iter()
+        .map(|&i| cpr_subclaim.down_evals[i].clone())
+        .collect();
+    verify_bit_decomposition_consistency(
+        &shifted_parent_evals,
+        &cpr_subclaim.shifted_bit_slice_evals,
         &projecting_element_f,
         D,
     )
     .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
+    let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
-        &cpr_subclaim.evaluation_point,
-        &cpr_subclaim.up_evals,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_subclaim.down_evals,
         uair_signature.shifts(),
         num_vars,
@@ -1490,11 +1872,23 @@ where
         .cloned()
         .collect();
 
-    let open_evals: Vec<F> = all_lifted_evals
+    let mut open_evals: Vec<F> = all_lifted_evals
         .iter()
         .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ProtocolError::LiftedEvalProjection)?;
+    // Bit-op virtual MLE consistency at r_0 — see `verify_folded`.
+    for spec in uair_signature.bit_op_specs() {
+        let bar_u_src = &all_lifted_evals[spec.source_col()];
+        let op_e_src = match spec.op() {
+            BitOp::Rot(c) => bar_u_src.rot_c(c),
+            BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+        };
+        let psi = op_e_src
+            .evaluate_at_point(&projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        open_evals.push(psi);
+    }
 
     MultipointEval::verify_subclaim(
         &mp_subclaim,

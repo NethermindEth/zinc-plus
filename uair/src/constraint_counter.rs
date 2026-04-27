@@ -9,8 +9,11 @@ pub fn count_constraints<U: Uair>() -> usize {
     let sig = U::signature();
     let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
     let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
-    let down_row =
-        TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+        &down_dummy,
+        sig.down_cols().as_column_layout(),
+        sig.bit_op_down_count(),
+    );
 
     U::constrain(&mut cc, up_row, down_row);
 

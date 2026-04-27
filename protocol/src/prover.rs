@@ -6,7 +6,10 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{
-        finalize_booleanity_prover, prepare_booleanity_group,
+        build_shifted_bit_slice_mles, build_virtual_binary_poly_mles,
+        build_virtual_booleanity_mles, compute_bit_slices_flat,
+        compute_shifted_bit_slice_evals_streaming, finalize_booleanity_prover,
+        prepare_booleanity_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -16,7 +19,10 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
-use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+use zinc_poly::{
+    mle::MultilinearExtensionWithConfig,
+    univariate::dynamic::over_field::DynamicPolynomialF,
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{Uair, UairSignature, UairTrace, constraint_counter::count_constraints};
 use zinc_utils::{
@@ -27,6 +33,28 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+
+/// Drop the witness binary_poly columns the UAIR opted out of (sorted,
+/// dedup'd `skip_indices` relative to `witness_cols`) and return the
+/// remaining columns as an owned `Vec`. The booleanity prep then runs
+/// only on the kept columns. The verifier mirrors this filter on
+/// `up_evals[num_pub_bin..]` so the bit-decomposition consistency
+/// check pairs the right column eval with the right bit-slice block.
+fn filter_booleanity_witness<const D: usize>(
+    witness_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    skip_indices: &[usize],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<D>>> {
+    if skip_indices.is_empty() {
+        return witness_cols.to_vec();
+    }
+    witness_cols
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !skip_indices.contains(i))
+        .map(|(_, col)| col.clone())
+        .collect()
+}
 
 //
 // Shared base
@@ -117,6 +145,9 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
     ic_eval_point: Vec<F>,
 
     // New
+    /// ψ_α projection element (used by Step 4 CPR — including bit-op
+    /// virtual MLE materialization).
+    projecting_element_f: F,
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: ScalarMap<U::Scalar, F>,
 }
@@ -129,9 +160,14 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
-    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 
     // New
+    /// ψ_α projection element (used by Step 5 mp_eval — including
+    /// bit-op virtual MLE materialization).
+    projecting_element_f: F,
+    /// The ψ_α-projected trace MLEs (built in Step 3).
+    /// mp_eval reuses these as its base sources at `r*`.
+    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -202,7 +238,9 @@ macro_rules! impl_with_type_bounds {
             F: InnerTransparentField
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
-                + for<'b> FromWithConfig<&'b Zt::CombR>
+                + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+                + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+                + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
                 + for<'b> FromWithConfig<&'b Zt::Chal>
                 + for<'b> MulByScalar<&'b F>
                 + FromRef<F>
@@ -479,6 +517,7 @@ impl_with_type_bounds!(ProverIdealChecked
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_eval_point: self.ic_eval_point,
+            projecting_element_f,
             projected_trace_f,
             projected_scalars_f,
         })
@@ -506,7 +545,7 @@ impl_with_type_bounds!(ProverEvalProjected
         // dishonest prover could violate them undetected).
         let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
 
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.projected_trace_f.clone(),
             &self.ic_eval_point,
@@ -515,21 +554,107 @@ impl_with_type_bounds!(ProverEvalProjected
             self.base.num_vars,
             max_degree,
             &self.field_cfg,
+            &self.base.trace.binary_poly,
+            &self.projecting_element_f,
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
-        // Only witness binary_poly columns need this check — public ones
-        // are already known to the verifier (see step 6, where public
-        // lifted_evals are recomputed locally), so booleanity on them
-        // would be redundant work for both sides.
+        // Covers witness binary_poly columns (minus those the UAIR opts
+        // out of via `booleanity_skip_indices`), packed virtual
+        // binary_poly columns (`virtual_binary_poly_cols`), declared int
+        // bit cols (`int_witness_bit_cols`), and virtual booleanity
+        // linear-combo cols (`virtual_booleanity_cols`) — every entry
+        // must lie in `{0, 1}`.
         let num_pub_bin = self
             .base
             .uair_signature
             .public_cols()
             .num_binary_poly_cols();
+        let num_pub_int = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_int_cols();
+        let num_wit_int = self
+            .base
+            .uair_signature
+            .witness_cols()
+            .num_int_cols();
+        let int_offset = self.base.trace.binary_poly.len()
+            + self.base.trace.arbitrary_poly.len();
+        let int_bit_cols: Vec<_> = self
+            .base
+            .uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| self.projected_trace_f[int_offset + idx].clone())
+            .collect();
+        let virtual_specs = self.base.uair_signature.virtual_booleanity_cols();
+        // The F::Inner-valued shifted bit-slice MLEs are only needed
+        // when per-bit `VirtualBoolSpec` entries are registered; the
+        // packed `VirtualBinaryPolySpec` path reads source binary_polys
+        // directly. When no per-bit specs are present, we skip the
+        // O(num_shifted · D · n) materialization and compute the
+        // verifier's `shifted_bit_slice_evals` via streaming eq-table
+        // dot products after the sumcheck point is fixed.
+        let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            build_shifted_bit_slice_mles::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                self.base.uair_signature.shifted_bit_slice_specs(),
+                &self.field_cfg,
+            )
+        };
+        let virtual_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            let self_bit_slices = compute_bit_slices_flat::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                &self.field_cfg,
+            );
+            let public_bit_slices = compute_bit_slices_flat::<F, D>(
+                &self.base.trace.binary_poly[..num_pub_bin],
+                &self.field_cfg,
+            );
+            let int_witness_cols: Vec<_> = (0..num_wit_int)
+                .map(|i| self.projected_trace_f[int_offset + num_pub_int + i].clone())
+                .collect();
+            build_virtual_booleanity_mles::<F, D>(
+                &self_bit_slices,
+                &shifted_bit_slice_mles,
+                &public_bit_slices,
+                &int_witness_cols,
+                virtual_specs,
+                &self.field_cfg,
+            )
+        };
+        let mut extra_bit_cols = int_bit_cols;
+        extra_bit_cols.extend(virtual_mles);
+        // Materialize packed virtual binary_poly cols (e.g. SHA's B_1/
+        // B_2/B_3 affine combinations). They go through the booleanity
+        // batch as ordinary binary_cols, appended to the genuine witness
+        // binary_polys (after applying booleanity_skip_indices).
+        let virtual_bp_specs = self.base.uair_signature.virtual_binary_poly_cols();
+        let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+            &self.base.trace.binary_poly[num_pub_bin..],
+            &self.base.trace.binary_poly[..num_pub_bin],
+            self.base.uair_signature.shifted_bit_slice_specs(),
+            virtual_bp_specs,
+        );
+        let kept_witness_binary = filter_booleanity_witness(
+            &self.base.trace.binary_poly[num_pub_bin..],
+            self.base.uair_signature.booleanity_skip_indices(),
+        );
+        let booleanity_binary_cols: Vec<_> = kept_witness_binary
+            .iter()
+            .chain(virtual_binary_mles.iter())
+            .cloned()
+            .collect();
         let bool_prep = prepare_booleanity_group::<F, D>(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.base.trace.binary_poly[num_pub_bin..],
+            &booleanity_binary_cols,
+            &extra_bit_cols,
             &self.ic_eval_point,
             &self.field_cfg,
         )
@@ -559,6 +684,33 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
+        // Evaluate shifted bit-slice MLEs at the shared sumcheck point —
+        // bound on the verifier via the projection-element consistency
+        // check against the corresponding `down_evals`. Streaming when
+        // we didn't materialize the F::Inner MLEs above; otherwise eval
+        // each one directly to reuse the existing buffers.
+        let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+            compute_shifted_bit_slice_evals_streaming::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                self.base.uair_signature.shifted_bit_slice_specs(),
+                &cpr_prover_state.evaluation_point,
+                &self.field_cfg,
+            )
+            .map_err(|e| ProtocolError::Booleanity(e.into()))?
+        } else {
+            shifted_bit_slice_mles
+                .into_iter()
+                .map(|mle| {
+                    mle.evaluate_with_config(
+                        &cpr_prover_state.evaluation_point,
+                        &self.field_cfg,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        };
+        cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+
         // 4e: Finalize booleanity (bit_slice_evals).
         if let Some(ba) = bool_ancillary_opt {
             let bool_state = md_states.remove(0);
@@ -580,6 +732,7 @@ impl_with_type_bounds!(ProverEvalProjected
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
+            projecting_element_f: self.projecting_element_f,
             projected_trace_f: self.projected_trace_f,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
@@ -591,20 +744,54 @@ impl_with_type_bounds!(ProverEvalProjected
 
 impl_with_type_bounds!(ProverSumchecked
 {
-    /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
-    /// `down_evals` at `r'` into a single evaluation point `r_0`.
-    /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 6
+    /// Step 5: Multi-point evaluation sumcheck under ψ_α. Reduces all CPR
+    /// claims at `r*` (up evals + row-shift down evals + bit-op virtual
+    /// down evals) to a single point `r_0`.
+    ///
+    /// Bit-op virtual columns are folded into mp_eval as additional
+    /// **sources** (extending `trace_mles` past `num_total_cols`) with
+    /// their CPR-emitted `bit_op_down_evals` as the corresponding `up`
+    /// claims at `r*`. The mp_eval shift list is unchanged: existing
+    /// row-shifts continue to reference base trace columns, and bit-op
+    /// virtual columns themselves carry no row shift in any current UAIR.
+    /// At `r_0` mp_eval reduces each bit-op slot to `MLE[bit_op_src](r_0)`,
+    /// which the verifier checks in Step 6 by applying the bit-op locally
+    /// to the source's `lifted_eval` (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let sig = &self.base.uair_signature;
+
+        // Materialize the bit-op virtual MLEs (under ψ_α) — same shape
+        // as the CPR group already builds, but mp_eval needs its own
+        // copies since the CPR ones get consumed by the sumcheck.
+        let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+            &self.base.trace.binary_poly,
+            sig.bit_op_specs(),
+            sig.total_cols().num_binary_poly_cols(),
+            &self.projecting_element_f,
+            self.base.num_vars,
+            &self.field_cfg,
+        );
+
+        // Extended source list: base trace MLEs followed by bit-op
+        // virtual MLEs.
+        let mut sources = self.projected_trace_f.clone();
+        sources.extend(bit_op_mles);
+
+        // Extended `up` claims at r*: CPR's up_evals followed by
+        // bit_op_down_evals (which CPR emitted as the values of the
+        // bit-op virtual columns at r*).
+        let mut up_evals = self.cpr_proof.up_evals.clone();
+        up_evals.extend(self.cpr_proof.bit_op_down_evals.iter().cloned());
+
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.projected_trace_f,
+            &sources,
             &self.cpr_eval_point,
-            &self.cpr_proof.up_evals,
+            &up_evals,
             &self.cpr_proof.down_evals,
-            self.base.uair_signature.shifts(),
+            sig.shifts(),
             &self.field_cfg,
         )?;
 
@@ -771,7 +958,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::IntZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
@@ -900,6 +1089,7 @@ pub fn prove_folded<
     F,
     const D: usize,
     const HALF_D: usize,
+    const MLE_FIRST: bool,
     const CHECK_FOR_OVERFLOW: bool,
 >(
     pp: &(
@@ -920,7 +1110,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a ZtF::Int>
-        + for<'a> FromWithConfig<&'a ZtF::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a ZtF::Chal>
         + for<'a> FromWithConfig<&'a ZtF::Pt>
         + for<'a> MulByScalar<&'a F>
@@ -961,28 +1153,93 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
-    // ── Step 1 (combined): Prime projection ─────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // ── Step 1: Prime projection ────────────────────────────────────────
+    // `fixed-prime` branch: match the non-folded path (see
+    // `ProverCommitted::project_common`) and use the secp256k1 base
+    // prime as the projecting prime instead of drawing one from the
+    // transcript. UAIRs whose constraints are secp256k1-specific
+    // algebraic identities (e.g. `EcdsaUair`) only hold under this
+    // prime, so a random prime here would break verification.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
 
-    let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
-        project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-        project_scalars::<F, U>(|s| project_scalar(s, &field_cfg)),
-    );
-
-    // ── Step 2 (combined): Ideal check ──────────────────────────────────
+    // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
+    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
+    // - !MLE_FIRST                          → row-major + prove_combined
+    // - MLE_FIRST, all linear               → column-major + prove_linear
+    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
+    // - MLE_FIRST, all non-linear           → row-major + prove_combined
     let num_constraints = count_constraints::<U>();
-    let (ic_proof, ic_prover_state) = U::prove_combined(
-        &mut pcs_transcript.fs_transcript,
-        &projected_trace_rm,
-        &projected_scalars_fx,
-        num_constraints,
-        num_vars,
-        &field_cfg,
-    )?;
+    let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
+        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mut any_linear, mut any_nonlinear) = (false, false);
+        for (m, i) in mask.iter().zip(ideals.iter()) {
+            if i.is_zero_ideal() {
+                continue;
+            }
+            if *m {
+                any_linear = true
+            } else {
+                any_nonlinear = true
+            }
+        }
+        match (any_linear, any_nonlinear) {
+            (true, false) => {
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
+                let (p, s) = U::prove_linear(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
+            }
+            (true, true) => {
+                let (rm, cm) = cfg_join!(
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+                    project_trace_coeffs_column_major(trace, &field_cfg),
+                );
+                let (p, s) = U::prove_hybrid(
+                    &mut pcs_transcript.fs_transcript,
+                    &rm,
+                    &cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(rm))
+            }
+            (false, _) => {
+                let projected_trace_rm =
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+                let (p, s) = U::prove_combined(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_rm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+            }
+        }
+    } else {
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+        let (p, s) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_rm,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+        (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+    };
     let ic_eval_point = ic_prover_state.evaluation_point;
-    let projected_trace = ProjectedTrace::RowMajor(projected_trace_rm);
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
@@ -996,7 +1253,7 @@ where
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
-    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
         &ic_eval_point,
@@ -1005,15 +1262,79 @@ where
         num_vars,
         max_degree,
         &field_cfg,
+        &trace.binary_poly,
+        &projecting_element_f,
     )?;
 
-    // Witness binary_poly columns only — public ones are known to the
-    // verifier (recomputed locally in step 6) so booleanity on them is
-    // redundant.
+    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
+    // packed virtual binary_poly cols + declared int bit cols + virtual
+    // booleanity linear-combo cols. Public binary_poly cols are known
+    // to the verifier (recomputed locally in step 6) so booleanity on
+    // them is redundant.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
+    let int_bit_cols: Vec<_> = uair_signature
+        .int_witness_bit_cols()
+        .iter()
+        .map(|&idx| projected_trace_f[int_offset + idx].clone())
+        .collect();
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
+    let virtual_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        let self_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            &field_cfg,
+        );
+        let public_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[..num_pub_bin],
+            &field_cfg,
+        );
+        let int_witness_cols: Vec<_> = (0..num_wit_int)
+            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+            .collect();
+        build_virtual_booleanity_mles::<F, D>(
+            &self_bit_slices,
+            &shifted_bit_slice_mles,
+            &public_bit_slices,
+            &int_witness_cols,
+            virtual_specs,
+            &field_cfg,
+        )
+    };
+    let mut extra_bit_cols = int_bit_cols;
+    extra_bit_cols.extend(virtual_mles);
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+        &trace.binary_poly[num_pub_bin..],
+        &trace.binary_poly[..num_pub_bin],
+        uair_signature.shifted_bit_slice_specs(),
+        virtual_bp_specs,
+    );
+    let kept_witness_binary = filter_booleanity_witness(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.booleanity_skip_indices(),
+    );
+    let booleanity_binary_cols: Vec<_> = kept_witness_binary
+        .iter()
+        .chain(virtual_binary_mles.iter())
+        .cloned()
+        .collect();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly[num_pub_bin..],
+        &booleanity_binary_cols,
+        &extra_bit_cols,
         &ic_eval_point,
         &field_cfg,
     )
@@ -1039,6 +1360,22 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
+    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(
@@ -1052,12 +1389,25 @@ where
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
-    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    // ── Step 5: Multi-point evaluation sumcheck (extended sources) ──────
+    let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
+    let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+        &trace.binary_poly,
+        uair_signature.bit_op_specs(),
+        uair_signature.total_cols().num_binary_poly_cols(),
+        &projecting_element_f,
+        num_vars,
+        &field_cfg,
+    );
+    let mut sources = projected_trace_f.clone();
+    sources.extend(bit_op_mles);
+    let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
     let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
-        &projected_trace_f,
-        &cpr_prover_state.evaluation_point,
-        &cpr_proof.up_evals,
+        &sources,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
         &field_cfg,
@@ -1172,6 +1522,7 @@ pub fn prove_folded_4x<
     const D: usize,
     const HALF_D: usize,
     const QUARTER_D: usize,
+    const MLE_FIRST: bool,
     const CHECK_FOR_OVERFLOW: bool,
 >(
     pp: &(
@@ -1193,7 +1544,9 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a ZtF::Int>
-        + for<'a> FromWithConfig<&'a ZtF::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a ZtF::Chal>
         + for<'a> FromWithConfig<&'a ZtF::Pt>
         + for<'a> MulByScalar<&'a F>
@@ -1239,28 +1592,93 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
-    // ── Step 1 (combined): Prime projection ─────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // ── Step 1: Prime projection ────────────────────────────────────────
+    // `fixed-prime` branch: match the non-folded path (see
+    // `ProverCommitted::project_common`) and use the secp256k1 base
+    // prime as the projecting prime instead of drawing one from the
+    // transcript. UAIRs whose constraints are secp256k1-specific
+    // algebraic identities (e.g. `EcdsaUair`) only hold under this
+    // prime, so a random prime here would break verification.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
 
-    let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
-        project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-        project_scalars::<F, U>(|s| project_scalar(s, &field_cfg)),
-    );
-
-    // ── Step 2 (combined): Ideal check ──────────────────────────────────
+    // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
+    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
+    // - !MLE_FIRST                          → row-major + prove_combined
+    // - MLE_FIRST, all linear               → column-major + prove_linear
+    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
+    // - MLE_FIRST, all non-linear           → row-major + prove_combined
     let num_constraints = count_constraints::<U>();
-    let (ic_proof, ic_prover_state) = U::prove_combined(
-        &mut pcs_transcript.fs_transcript,
-        &projected_trace_rm,
-        &projected_scalars_fx,
-        num_constraints,
-        num_vars,
-        &field_cfg,
-    )?;
+    let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
+        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mut any_linear, mut any_nonlinear) = (false, false);
+        for (m, i) in mask.iter().zip(ideals.iter()) {
+            if i.is_zero_ideal() {
+                continue;
+            }
+            if *m {
+                any_linear = true
+            } else {
+                any_nonlinear = true
+            }
+        }
+        match (any_linear, any_nonlinear) {
+            (true, false) => {
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
+                let (p, s) = U::prove_linear(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
+            }
+            (true, true) => {
+                let (rm, cm) = cfg_join!(
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+                    project_trace_coeffs_column_major(trace, &field_cfg),
+                );
+                let (p, s) = U::prove_hybrid(
+                    &mut pcs_transcript.fs_transcript,
+                    &rm,
+                    &cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(rm))
+            }
+            (false, _) => {
+                let projected_trace_rm =
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+                let (p, s) = U::prove_combined(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_rm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+            }
+        }
+    } else {
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+        let (p, s) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_rm,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+        (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+    };
     let ic_eval_point = ic_prover_state.evaluation_point;
-    let projected_trace = ProjectedTrace::RowMajor(projected_trace_rm);
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
@@ -1274,7 +1692,7 @@ where
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
-    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
         &ic_eval_point,
@@ -1283,15 +1701,77 @@ where
         num_vars,
         max_degree,
         &field_cfg,
+        &trace.binary_poly,
+        &projecting_element_f,
     )?;
 
-    // Witness binary_poly columns only — public ones are known to the
-    // verifier (recomputed locally in step 6) so booleanity on them is
-    // redundant.
+    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
+    // packed virtual binary_poly cols + declared int bit cols + virtual
+    // booleanity linear-combo cols.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
+    let int_bit_cols: Vec<_> = uair_signature
+        .int_witness_bit_cols()
+        .iter()
+        .map(|&idx| projected_trace_f[int_offset + idx].clone())
+        .collect();
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
+    let virtual_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        let self_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            &field_cfg,
+        );
+        let public_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[..num_pub_bin],
+            &field_cfg,
+        );
+        let int_witness_cols: Vec<_> = (0..num_wit_int)
+            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+            .collect();
+        build_virtual_booleanity_mles::<F, D>(
+            &self_bit_slices,
+            &shifted_bit_slice_mles,
+            &public_bit_slices,
+            &int_witness_cols,
+            virtual_specs,
+            &field_cfg,
+        )
+    };
+    let mut extra_bit_cols = int_bit_cols;
+    extra_bit_cols.extend(virtual_mles);
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+        &trace.binary_poly[num_pub_bin..],
+        &trace.binary_poly[..num_pub_bin],
+        uair_signature.shifted_bit_slice_specs(),
+        virtual_bp_specs,
+    );
+    let kept_witness_binary = filter_booleanity_witness(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.booleanity_skip_indices(),
+    );
+    let booleanity_binary_cols: Vec<_> = kept_witness_binary
+        .iter()
+        .chain(virtual_binary_mles.iter())
+        .cloned()
+        .collect();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly[num_pub_bin..],
+        &booleanity_binary_cols,
+        &extra_bit_cols,
         &ic_eval_point,
         &field_cfg,
     )
@@ -1317,6 +1797,22 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
+    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(
@@ -1330,12 +1826,25 @@ where
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
-    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    // ── Step 5: Multi-point evaluation sumcheck (extended sources) ──────
+    let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
+    let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+        &trace.binary_poly,
+        uair_signature.bit_op_specs(),
+        uair_signature.total_cols().num_binary_poly_cols(),
+        &projecting_element_f,
+        num_vars,
+        &field_cfg,
+    );
+    let mut sources = projected_trace_f.clone();
+    sources.extend(bit_op_mles);
+    let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
     let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
-        &projected_trace_f,
-        &cpr_prover_state.evaluation_point,
-        &cpr_proof.up_evals,
+        &sources,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
         &field_cfg,

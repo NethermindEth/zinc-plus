@@ -29,15 +29,117 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    univariate::{
+        binary::BinaryPoly,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+    },
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{BitOp, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     UNCHECKED, add, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField, powers,
 };
+
+/// Materialize the bit-op virtual MLEs given by `bit_op_specs`.
+///
+/// For each `BitOpSpec(src, op)`, walks the source binary column
+/// cell-wise, applies `op` as a bit-position permutation on the 32
+/// coefficients of each cell, and ψ_α-projects the result. The
+/// output is a length-`n` MLE in `F::Inner` that downstream
+/// subprotocols can consume as an extra MLE source.
+///
+/// Used by both the CPR sumcheck (Step 4) and the multipoint-eval
+/// sumcheck (Step 5): bit-op virtual columns become additional
+/// sources for mp_eval's `up` reduction at `r*`.
+///
+/// # Panics
+///
+/// - If a `BitOpSpec.source_col()` references a non-binary-poly
+///   column (i.e. `>= num_total_bin`).
+/// - If `D != 32` (bit ops are defined on 32-coefficient cells).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_bit_op_mles<F, const D: usize>(
+    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    bit_op_specs: &[zinc_uair::BitOpSpec],
+    num_total_bin: usize,
+    projecting_element_f: &F,
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F: InnerTransparentField,
+    F::Inner: Zero + Default + Clone,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let zero_inner = zero.clone().into_inner();
+    let n = 1usize << num_vars;
+
+    // Pre-build per-op power arrays of length 32: position-`i` entry
+    // is α^{p(i)} where p is the bit-op's permutation. Coefficient
+    // positions past 31 (only relevant if D > 32, which we don't
+    // support for bit ops) get a zero entry.
+    let alpha_powers: Vec<F> = powers(projecting_element_f.clone(), one, 32);
+
+    bit_op_specs
+        .iter()
+        .map(|spec| {
+            assert!(
+                spec.source_col() < num_total_bin,
+                "BitOpSpec source_col {} must reference a binary_poly column \
+                 (num binary cols = {num_total_bin})",
+                spec.source_col(),
+            );
+            assert!(
+                D == 32,
+                "BitOpSpec virtual columns require D == 32, got D = {D}",
+            );
+            // Build the per-bit weight table `w[i] = α^{p(i)}` where
+            // `p` is the bit-op's coefficient permutation, returning
+            // `None` for positions dropped by ShiftR.
+            let mut weights: Vec<Option<F>> = vec![None; D];
+            match spec.op() {
+                BitOp::Rot(c) => {
+                    for i in 0..32usize.min(D) {
+                        let dst = (i + c as usize) % 32;
+                        weights[i] = Some(alpha_powers[dst].clone());
+                    }
+                }
+                BitOp::ShiftR(c) => {
+                    let c = c as usize;
+                    for i in c..32usize.min(D) {
+                        let dst = i - c;
+                        weights[i] = Some(alpha_powers[dst].clone());
+                    }
+                }
+            }
+            let col = &trace_bin_poly[spec.source_col()];
+            let evals: Vec<F::Inner> = col
+                .iter()
+                .map(|cell| {
+                    let mut acc = zero.clone();
+                    for (i, coeff) in cell.iter().enumerate().take(D) {
+                        if !coeff.into_inner() {
+                            continue;
+                        }
+                        if let Some(w) = &weights[i] {
+                            acc += w.clone();
+                        }
+                    }
+                    acc.into_inner()
+                })
+                .collect();
+            let mut evals = evals;
+            evals.resize(n, zero_inner.clone());
+            DenseMultilinearExtension {
+                evaluations: evals,
+                num_vars,
+            }
+        })
+        .collect()
+}
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
@@ -70,7 +172,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `max_degree`: The degree of the UAIR `U`.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-    pub fn prepare_sumcheck_group<U>(
+    pub fn prepare_sumcheck_group<U, const D: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
@@ -79,6 +181,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         num_vars: usize,
         max_degree: usize,
         field_cfg: &F::Config,
+        trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projecting_element_f: &F,
     ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
@@ -114,6 +218,19 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .collect();
 
+        // Bit-op virtual columns: materialize via the shared helper so
+        // mp_eval can build the same MLEs (mp_eval consumes them as
+        // additional sources at r*).
+        let bit_op_specs = uair_sig.bit_op_specs();
+        let bit_op_down = build_bit_op_mles::<F, D>(
+            trace_bin_poly,
+            bit_op_specs,
+            uair_sig.total_cols().num_binary_poly_cols(),
+            projecting_element_f,
+            num_vars,
+            field_cfg,
+        );
+
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
         // To get the constraints on the last row ignored
         // we multiply each constraint polynomial
@@ -135,14 +252,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         let num_cols = trace_matrix.len();
         let num_down_cols = down.len();
+        let num_bit_op_cols = bit_op_down.len();
         let mles: Vec<DenseMultilinearExtension<F::Inner>> = {
-            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols);
+            let mut mles = Vec::with_capacity(2 + num_cols + num_down_cols + num_bit_op_cols);
 
             mles.push(last_row_selector);
             mles.push(eq_r);
 
             mles.extend(trace_matrix);
             mles.extend(down);
+            mles.extend(bit_op_down);
 
             mles
         };
@@ -152,6 +271,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let uair_sig = U::signature();
             let up_layout = uair_sig.total_cols().as_column_layout();
             let down_layout = uair_sig.down_cols().as_column_layout();
+            let bit_op_count = uair_sig.bit_op_down_count();
 
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
@@ -183,7 +303,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             U::constrain_general(
                 &mut folder,
                 TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout),
-                TraceRow::from_slice_with_layout(&mle_values[num_cols + 2..], down_layout),
+                TraceRow::from_slice_with_layout_and_bit_op(
+                    &mle_values[num_cols + 2..],
+                    down_layout,
+                    bit_op_count,
+                ),
                 project,
                 |x, y| Some(project(y) * x),
                 ImpossibleIdeal::from_ref,
@@ -197,6 +321,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             CprProverAncillary {
                 num_cols,
                 num_down_cols,
+                num_bit_op_cols,
                 num_vars,
             },
         ))
@@ -247,13 +372,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .try_collect()?;
 
-        debug_assert_eq!(evals.len(), ancillary.num_cols + ancillary.num_down_cols);
+        debug_assert_eq!(
+            evals.len(),
+            ancillary.num_cols + ancillary.num_down_cols + ancillary.num_bit_op_cols
+        );
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
-        let (up_evals, down_evals) = (
-            evals[0..ancillary.num_cols].to_vec(),
-            evals[ancillary.num_cols..].to_vec(),
-        );
+        let down_end = ancillary.num_cols + ancillary.num_down_cols;
+        let up_evals = evals[0..ancillary.num_cols].to_vec();
+        let down_evals = evals[ancillary.num_cols..down_end].to_vec();
+        let bit_op_down_evals = evals[down_end..].to_vec();
         Ok((
             CprProof {
                 up_evals,
@@ -262,6 +390,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 // a separate booleanity sumcheck group is run alongside
                 // the CPR group; left empty here.
                 bit_slice_evals: Vec::new(),
+                bit_op_down_evals,
+                // Filled by the protocol-level prover after CPR finalize.
+                shifted_bit_slice_evals: Vec::new(),
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,
@@ -293,6 +424,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
         num_constraints: usize,
         num_bit_slices: usize,
+        num_shifted_bit_slices: usize,
         num_vars: usize,
         projecting_element: &F,
         field_cfg: &F::Config,
@@ -307,6 +439,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             uair_sig.total_cols().cols(),
             uair_sig.down_cols().cols(),
             num_bit_slices,
+            uair_sig.bit_op_specs().len(),
+            num_shifted_bit_slices,
         )?;
 
         let zero = F::zero_with_cfg(field_cfg);
@@ -394,6 +528,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     {
         let uair_sig = U::signature();
         let down_layout = uair_sig.down_cols().as_column_layout();
+        let bit_op_count = uair_sig.bit_op_down_count();
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
 
@@ -425,13 +560,24 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             v
         };
 
+        // Build the down trace row including the bit-op virtual column
+        // half: `[down_evals... | bit_op_down_evals...]`.
+        let mut down_combined: Vec<F> =
+            Vec::with_capacity(proof.down_evals.len() + proof.bit_op_down_evals.len());
+        down_combined.extend(proof.down_evals.iter().cloned());
+        down_combined.extend(proof.bit_op_down_evals.iter().cloned());
+
         U::constrain_general(
             &mut folder,
             TraceRow::from_slice_with_layout(
                 &proof.up_evals,
                 uair_sig.total_cols().as_column_layout(),
             ),
-            TraceRow::from_slice_with_layout(&proof.down_evals, down_layout),
+            TraceRow::from_slice_with_layout_and_bit_op(
+                &down_combined,
+                down_layout,
+                bit_op_count,
+            ),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -446,14 +592,23 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             });
         }
 
+        // Mirror prover-side single-slice absorption order
+        // `up || down || bit_op`.
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-        transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
-        transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
+        let mut evals_concat: Vec<F> = Vec::with_capacity(
+            proof.up_evals.len() + proof.down_evals.len() + proof.bit_op_down_evals.len(),
+        );
+        evals_concat.extend(proof.up_evals.iter().cloned());
+        evals_concat.extend(proof.down_evals.iter().cloned());
+        evals_concat.extend(proof.bit_op_down_evals.iter().cloned());
+        transcript.absorb_random_field_slice(&evals_concat, &mut transcription_buf);
 
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,
             down_evals: proof.down_evals,
             bit_slice_evals: proof.bit_slice_evals,
+            bit_op_down_evals: proof.bit_op_down_evals,
+            shifted_bit_slice_evals: proof.shifted_bit_slice_evals,
             evaluation_point: shared_point,
         })
     }
@@ -473,6 +628,10 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongDownEvalsNumber { got: usize, expected: usize },
     #[error("wrong bit-slice evaluations number: got {got}, expected {expected}")]
     WrongBitSliceEvalsNumber { got: usize, expected: usize },
+    #[error("wrong bit-op down evaluations number: got {got}, expected {expected}")]
+    WrongBitOpDownEvalsNumber { got: usize, expected: usize },
+    #[error("wrong shifted bit-slice evaluations number: got {got}, expected {expected}")]
+    WrongShiftedBitSliceEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
@@ -576,7 +735,7 @@ mod tests {
             project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare → MultiDegreeSumcheck → finalize
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, DEGREE_PLUS_ONE>(
             &mut prover_transcript,
             evaluate_trace_to_column_mles(
                 &ProjectedTrace::RowMajor(projected_trace),
@@ -588,6 +747,8 @@ mod tests {
             num_vars,
             max_degree,
             &test_config(),
+            &trace.binary_poly,
+            &projecting_element,
         )
         .expect("CPR prepare failed");
 
@@ -617,6 +778,7 @@ mod tests {
             &ic_check_subclaim,
             num_constraints,
             0, // num_bit_slices: this test has no binary_poly columns
+            0, // num_shifted_bit_slices
             num_vars,
             &projecting_element,
             &test_config(),

@@ -93,7 +93,7 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 0, cols::NUM_INT);
         let public = PublicColumnLayout::new(0, 0, cols::NUM_INT_PUB);
-        UairSignature::new(total, public, vec![], vec![])
+        UairSignature::new(total, public, vec![], vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(

@@ -31,8 +31,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
+    BitOp, BitOpSpec, ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout,
+    TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -50,7 +50,7 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
         let shifts = (0..3).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -157,7 +157,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -231,7 +231,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -280,7 +280,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(1, 0, 1);
-        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -346,7 +346,7 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(16, 0, 1);
         let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -480,7 +480,7 @@ where
         let total = TotalColumnLayout::new(16, 0, 1);
         let public = PublicColumnLayout::new(4, 0, 0);
         let shifts = (0..16).map(|i| ShiftSpec::new(i, 1)).collect();
-        UairSignature::new(total, public, shifts, vec![])
+        UairSignature::new(total, public, shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -545,7 +545,7 @@ where
         // c_1 (bp[0]) is shifted by 1 (used by C1 as bp[0][t+1]); c_5 (bp[4])
         // is shifted by 4 (used by C2 as bp[4][t+4]).
         let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(4, 4)];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -796,7 +796,7 @@ where
             ShiftSpec::new(0, 1), // a shifted by 1
             ShiftSpec::new(1, 2), // b shifted by 2
         ];
-        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![], vec![])
     }
 
     // Constraints:
@@ -903,7 +903,7 @@ where
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, 3, 0); // a, b, c
-        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -956,6 +956,87 @@ where
         UairTrace {
             arbitrary_poly: vec![zero_col(), zero_col(), zero_col()].into(),
             ..Default::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BitOpRotUair — synthetic UAIR exercising one BitOp::Rot virtual column.
+//
+// Two binary witness columns W (col 0) and V (col 1), each cell a 32-bit
+// `BinaryPoly`. One bit-op virtual column with `BitOp::Rot(7)` and
+// `source_col = 0` (= W). Witness generator sets V[i] = Rot(7)(W[i]) so the
+// constraint
+//
+//   up.binary_poly[1] - down.bit_op[0] == 0   mod (X − 2)
+//
+// holds row-wise: at X = 2 each side equals the u32-rotation of W[i].
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct BitOpRotUair<R>(PhantomData<R>);
+
+impl<R> Uair for BitOpRotUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(2, 0, 0);
+        let bit_op_specs = vec![BitOpSpec::new(0, BitOp::rot(7))];
+        UairSignature::new(
+            total,
+            PublicColumnLayout::default(),
+            vec![],
+            vec![],
+            bit_op_specs,
+        )
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let two_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::from(2)));
+        // V[i] − Rot(7)(W[i]) ≡ 0  mod (X − 2)
+        b.assert_in_ideal(
+            up.binary_poly[1].clone() - &down.bit_op[0],
+            &two_ideal,
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for BitOpRotUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        let n = 1usize << num_vars;
+        let w_u32: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
+        let v_u32: Vec<u32> = w_u32.iter().map(|w| w.rotate_left(7)).collect();
+        let w_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            w_u32.iter().map(|x| BinaryPoly::from(*x)).collect();
+        let v_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            v_u32.iter().map(|x| BinaryPoly::from(*x)).collect();
+        UairTrace {
+            binary_poly: vec![w_col, v_col].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
         }
     }
 }
