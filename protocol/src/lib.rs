@@ -533,14 +533,28 @@ mod tests {
     const K: usize = INT_LIMBS * 4;
     const M: usize = INT_LIMBS * 8;
 
-    const REP: usize = 4;
+    /// Repetition factor for linear code, an inverse rate. Defaults to 4
+    /// (rate 1/4); enabling the `iprs-rate-1-8` cargo feature switches
+    /// every `IprsCode<..., REP, ...>` instance in this test module to
+    /// inverse-rate 8 (rate 1/8).
+    const REP: usize = if cfg!(feature = "iprs-rate-1-8") { 8 } else { 4 };
+
+    /// Number of column openings the PCS performs. Tied to `REP`: rate 1/4
+    /// uses 147 openings, rate 1/8 uses 96 (lower opening count is sound
+    /// at the higher inverse rate because each column reveals more
+    /// information about the codeword).
+    const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-8") {
+        96
+    } else {
+        147
+    };
 
     type F = MontyField<FIELD_LIMBS>;
 
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -563,7 +577,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -589,7 +603,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -615,7 +629,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct IntZipTypes {}
     impl ZipTypes for IntZipTypes {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = ZtInt;
         type Cw = i128;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -1073,7 +1087,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypesHalf {}
     impl ZipTypes for BinPolyZipTypesHalf {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = BinaryPoly<HALF_DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, HALF_DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
@@ -1227,7 +1241,7 @@ mod tests {
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypesQuarter {}
     impl ZipTypes for BinPolyZipTypesQuarter {
-        const NUM_COLUMN_OPENINGS: usize = 147;
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = BinaryPoly<QUARTER_DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, QUARTER_DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;

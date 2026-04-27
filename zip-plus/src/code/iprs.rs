@@ -40,12 +40,27 @@ where
     /// number of columns in the base matrix small.
     /// Currently, keeps number of columns <= 2^8 but this might be tweaked in
     /// the future.
+    ///
+    /// At higher inverse-rates extra recursion layers are added on top of the
+    /// base heuristic: the higher redundancy lets the PCS get away with a
+    /// smaller base matrix, and the extra layers trade a small amount of
+    /// encoding work for that smaller base. One extra layer is added at
+    /// inverse-rate 8, and a second one at inverse-rate 16.
     pub fn new_with_optimal_depth(row_len: usize) -> Result<Self, ZipError> {
         const MAX_BASE_COLS_LOG2: usize = 8;
 
         let target_base_len = 1 << MAX_BASE_COLS_LOG2;
         // We want depth to be at least 1.
-        let depth = 1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+        let base_depth =
+            1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+        let extra = if REP >= 16 {
+            2
+        } else if REP >= 8 {
+            1
+        } else {
+            0
+        };
+        let depth = base_depth + extra;
 
         Self::new(row_len, depth)
     }
