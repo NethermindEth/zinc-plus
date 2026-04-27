@@ -37,6 +37,9 @@ workspace = true
 parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []
+# Switch the IPRS bench code from inverse-rate 4 (rate 1/4) to inverse-rate 8
+# (rate 1/8). Affects every `IprsCode<..., REP, ...>` instance in `benches/e2e.rs`.
+iprs-rate-1-8 = []
 
 [[bench]]
 name = "e2e"
