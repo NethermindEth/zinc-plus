@@ -22,14 +22,18 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{Proof, StepTimings, VerifyStepTimings, ZincPlusPiop, ZincTypes};
 use zinc_test_uair::{
-    BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair, EcdsaUair,
-    EcdsaUairLimbs, GenerateRandomTrace, ShaProxyEcdsaUair, TestAirNoMultiplication,
+    BigLinearUair, SHAProxy, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
+    EcdsaUair, EcdsaUairLimbs, EcdsaUairProxy, GenerateRandomTrace, Sha256CompressionSliceUair,
+    Sha256Ideal, ShaEcdsaUair, ShaProxyEcdsaUair, TestAirNoMultiplication,
 };
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_effective_max_degree,
-    ideal::{Ideal, IdealCheck, degree_one::DegreeOneIdeal, mixed::MixedDegreeOneOrXnMinusOne},
+    ideal::{
+        Ideal, IdealCheck, ImpossibleIdeal, degree_one::DegreeOneIdeal,
+        mixed::MixedDegreeOneOrXnMinusOne,
+    },
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
@@ -313,7 +317,9 @@ where
 
 const DEGREE_PLUS_ONE: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
-const FIELD_LIMBS: usize = U64::LIMBS * 3;
+// `fixed-prime` branch: 256-bit field modulus (4 × u64 limbs) so the
+// hardcoded secp256k1 base prime fits in `Fmod = Uint<FIELD_LIMBS>`.
+const FIELD_LIMBS: usize = U64::LIMBS * 4;
 
 type F = MontyField<FIELD_LIMBS>;
 
@@ -748,16 +754,57 @@ fn setup_pp_ecdsa(num_vars: usize) -> Pp<EcdsaBenchZincTypes> {
     )
 }
 
+//
+// Real-UAIR bench types — wired for the EcdsaUair / Sha256CompressionSliceUair
+// / ShaEcdsaUair ports from main-gamma. Cell type is `Int<5>` (= 320-bit,
+// matches `EC_FP_INT_LIMBS`); CwR and CombR scale 2× and 4× respectively, the
+// same ratios as `EcdsaBenchZincTypes`. `FIELD_LIMBS = 4` (256-bit) is shared
+// with the proxy bench above and holds the secp256k1 base prime for
+// `fixed_prime::secp256k1_field_cfg`.
+//
+
+type RealEcdsaInt = Int<EC_FP_INT_LIMBS>;
+
+type RealEcdsaBenchZincTypes = GenericBenchZincTypes<
+    /* Int = */ RealEcdsaInt,
+    /* CwR = */ Int<{ EC_FP_INT_LIMBS * 2 }>,
+    /* Chal = */ i128,
+    /* Pt = */ i128,
+    /* CombR = */ Int<{ EC_FP_INT_LIMBS * 4 }>,
+    /* Fmod = */ Uint<FIELD_LIMBS>,
+    MillerRabin,
+    DEGREE_PLUS_ONE,
+>;
+
+#[allow(clippy::unwrap_used)]
+fn setup_pp_real_ecdsa(num_vars: usize) -> Pp<RealEcdsaBenchZincTypes> {
+    let poly_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
+        ),
+        ZipPlus::setup(
+            poly_size,
+            IprsCode::new(poly_size, iprs_depth(poly_size)).unwrap(),
+        ),
+    )
+}
+
 fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let mut rng = rng();
-    let trace = EcdsaUair::generate_random_trace(num_vars, &mut rng);
+    let trace = EcdsaUairProxy::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_ecdsa(num_vars);
     let params = format!("ECDSA/nvars={num_vars}{RATE_TAG}");
 
     // Every ECDSA constraint is asserted via `assert_zero`, so its
     // effective max degree (over non-zero-ideal constraints) is 0, and
     // the MLE-first path is valid. See `do_bench` for the same gating.
-    let use_mle_first = count_effective_max_degree::<EcdsaUair>() <= 1;
+    let use_mle_first = count_effective_max_degree::<EcdsaUairProxy>() <= 1;
 
     macro_rules! bench_prove_ecdsa {
         ($label:literal, $mle_first:expr) => {
@@ -765,7 +812,7 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
                 bench.iter(|| {
                     black_box(ZincPlusPiop::<
                         EcdsaBenchZincTypes,
-                        EcdsaUair,
+                        EcdsaUairProxy,
                         F,
                         DEGREE_PLUS_ONE,
                     >::prove::<{ $mle_first }, PERFORM_CHECKS>(
@@ -786,7 +833,7 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     }
 
     let proof: Proof<F> =
-        ZincPlusPiop::<EcdsaBenchZincTypes, EcdsaUair, F, DEGREE_PLUS_ONE>::prove::<
+        ZincPlusPiop::<EcdsaBenchZincTypes, EcdsaUairProxy, F, DEGREE_PLUS_ONE>::prove::<
             false,
             PERFORM_CHECKS,
         >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
@@ -803,7 +850,7 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
                     let (proof, timings) = if use_mle_first {
                         ZincPlusPiop::<
                             EcdsaBenchZincTypes,
-                            EcdsaUair,
+                            EcdsaUairProxy,
                             F,
                             DEGREE_PLUS_ONE,
                         >::prove_with_step_timings::<true, PERFORM_CHECKS>(
@@ -815,7 +862,7 @@ fn bench_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
                     } else {
                         ZincPlusPiop::<
                             EcdsaBenchZincTypes,
-                            EcdsaUair,
+                            EcdsaUairProxy,
                             F,
                             DEGREE_PLUS_ONE,
                         >::prove_with_step_timings::<false, PERFORM_CHECKS>(
@@ -1059,6 +1106,86 @@ fn bench_ecdsa_limbs(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
 }
 
 //
+// Real-UAIR benches (ECDSA / SHA-256 / SHA+ECDSA from the main-gamma port).
+// Each uses `RealEcdsaBenchZincTypes` (cell type = `Int<5>`), and routes the
+// `IdealOverF` projection appropriate to the UAIR's ideal type:
+//
+//   - `EcdsaUair<R>::Ideal = ImpossibleIdeal` (only `assert_zero`); the
+//     project_ideal closure is unreachable at runtime.
+//   - `Sha256CompressionSliceUair<R>::Ideal = Sha256Ideal<R>` and
+//     `ShaEcdsaUair<R>::Ideal = Sha256Ideal<R>`; project to `Sha256Ideal<F>`
+//     via `Sha256Ideal::from_with_cfg`. The protocol filters out the zero
+//     branch upstream, so the `None` arm here is unreachable.
+//
+
+fn sha256_real_project_ideal(
+    ideal: &IdealOrZero<Sha256Ideal<RealEcdsaInt>>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Sha256Ideal<F> {
+    match &ideal.ideal_or_zero {
+        Some(i) => Sha256Ideal::from_with_cfg(i, field_cfg),
+        None => unreachable!("zero ideals are filtered before this closure runs"),
+    }
+}
+
+fn bench_real_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+
+    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
+                      _: &<F as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("EcdsaUair has only assert_zero constraints")
+    };
+
+    do_bench::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealEcdsa",
+        num_vars,
+        setup_pp_real_ecdsa,
+        trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_real_sha256(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+
+    do_bench::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealSha256",
+        num_vars,
+        setup_pp_real_ecdsa,
+        trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha_ecdsa(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+
+    do_bench::<RealEcdsaBenchZincTypes, U, _>(
+        group,
+        "RealShaEcdsa",
+        num_vars,
+        setup_pp_real_ecdsa,
+        trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+//
 // Criterion entry point
 //
 
@@ -1076,18 +1203,23 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_big_linear(&mut group, 8);
     // bench_big_linear(&mut group, 10);
     // bench_big_linear(&mut group, 12);
-    bench_big_linear(&mut group, 9);
+    // bench_big_linear(&mut group, 9);
 
     // bench_sha_proxy(&mut group, 8);
     // bench_sha_proxy(&mut group, 10);
     // bench_sha_proxy(&mut group, 12);
-    bench_sha_proxy(&mut group, 9);
+    // bench_sha_proxy(&mut group, 9);
 
-    bench_ecdsa(&mut group, 9);
+    // bench_ecdsa(&mut group, 9);
 
-    bench_sha_ecdsa(&mut group, 9);
+    // bench_sha_ecdsa(&mut group, 9);
 
-    bench_ecdsa_limbs(&mut group, 9);
+    // bench_ecdsa_limbs(&mut group, 9);
+
+    // Real-UAIR benches (ports from main-gamma).
+    bench_real_ecdsa(&mut group, 9);
+    bench_real_sha256(&mut group, 9);
+    bench_real_sha_ecdsa(&mut group, 9);
 
     // bench_big_linear_public_input(&mut group, 8);
     // bench_big_linear_public_input(&mut group, 10);

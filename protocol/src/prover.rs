@@ -161,9 +161,10 @@ where
         // === Step 1: Prime projection (\phi_q: Z[X] -> F_q[X]) ===
         let step_start = Instant::now();
 
-        let field_cfg = pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // `fixed-prime` branch: use the secp256k1 base field prime as the
+        // projecting prime instead of drawing one from the transcript.
+        // See `crate::fixed_prime` for the soundness caveat.
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         let num_constraints = count_constraints::<U>();

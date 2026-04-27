@@ -290,7 +290,9 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     ic_proof,
                     num_constraints,
                     num_vars,
-                    |_ideal_over_ring| IdealOrZero::zero(),
+                    |_ideal_over_ring| -> IdealOrZero<DegreeOneIdeal<F<FIELD_LIMBS>>> {
+                        IdealOrZero::zero()
+                    },
                     &field_cfg,
                 )
                 .expect("IC Verifier failed");

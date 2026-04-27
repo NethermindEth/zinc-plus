@@ -1,7 +1,19 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
+pub mod ecdsa;
+pub mod ecdsa_addition;
+pub mod ecdsa_affine;
+pub mod ecdsa_doubling;
 mod generate_trace;
+pub mod sha256;
+pub mod sha_ecdsa;
 
+pub use ecdsa::EcdsaUair;
+pub use ecdsa_addition::JacobianAdditionUair;
+pub use ecdsa_affine::AffineConversionUair;
+pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
+pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
+pub use sha_ecdsa::ShaEcdsaUair;
 
 use crypto_primitives::{
     ConstSemiring, FixedSemiring, Semiring, boolean::Boolean,
@@ -1436,9 +1448,9 @@ mod ecdsa_cols {
 /// `num_vars ≥ 9`.
 pub const ECDSA_NUM_REAL_ROWS: usize = 258;
 
-pub struct EcdsaUair;
+pub struct EcdsaUairProxy;
 
-impl Uair for EcdsaUair {
+impl Uair for EcdsaUairProxy {
     type Ideal = ImpossibleIdeal;
     type Scalar = DensePolynomial<CbInt<4>, 32>;
 
@@ -1618,7 +1630,7 @@ impl Uair for EcdsaUair {
     }
 }
 
-impl GenerateRandomTrace<32> for EcdsaUair {
+impl GenerateRandomTrace<32> for EcdsaUairProxy {
     type PolyCoeff = CbInt<4>;
     type Int = CbInt<4>;
 
@@ -1808,7 +1820,7 @@ impl Uair for ShaProxyEcdsaUair {
                 }
             })
             .collect();
-        for s in EcdsaUair::signature().shifts() {
+        for s in EcdsaUairProxy::signature().shifts() {
             // ECDSA int shift — bump by +14 (the bp prefix in the combined
             // layout). EcdsaUair has no bp cells of its own, so all of its
             // shifts are int shifts.
@@ -1846,13 +1858,13 @@ impl Uair for ShaProxyEcdsaUair {
             arbitrary_poly: &[],
             int: &down.int[0..3],
         };
-        EcdsaUair::constrain_general(
+        EcdsaUairProxy::constrain_general(
             b,
             ecdsa_up,
             ecdsa_down,
             &from_ref,
             &mbs,
-            // EcdsaUair never calls this — it only emits `assert_zero`.
+            // EcdsaUairProxy never calls this — it only emits `assert_zero`.
             |_: &ImpossibleIdeal| -> B::Ideal { unreachable!() },
         );
 
@@ -1899,7 +1911,7 @@ impl GenerateRandomTrace<32> for ShaProxyEcdsaUair {
         rng: &mut Rng,
     ) -> UairTrace<'static, CbInt<4>, CbInt<4>, 32> {
         let sha_trace = SHAProxy::<CbInt<4>>::generate_random_trace(num_vars, rng);
-        let ecdsa_trace = EcdsaUair::generate_random_trace(num_vars, rng);
+        let ecdsa_trace = EcdsaUairProxy::generate_random_trace(num_vars, rng);
 
         // ECDSA int cols first (so they're contiguous at int[0..14]),
         // then SHAProxy int cols (at int[14..18]).
@@ -2396,7 +2408,7 @@ mod tests {
         // C1, C2, C3, C4, W1 (H_sq), W2 (H_cu), W3 (R_a),
         // C5, C6, C7, B3, B4. The wire columns (R_a, H_sq, H_cu) drop the
         // max constraint degree from 13 to 5.
-        assert_uair_shape::<EcdsaUair>(&[2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4]);
+        assert_uair_shape::<EcdsaUairProxy>(&[2, 4, 5, 4, 2, 2, 5, 4, 4, 5, 2, 4]);
 
         // ShaProxyEcdsaUair: 23 constraints. The first 12 entries are the
         // ECDSA degrees (delegation order matches the impl: ECDSA first,
@@ -2453,7 +2465,7 @@ mod tests {
         // is intentionally non-satisfying — this test only checks that the
         // walk runs without panicking and yields the right column shape.
         let mut rng = StdRng::seed_from_u64(0xEC05A);
-        let trace = EcdsaUair::generate_random_trace(9, &mut rng);
+        let trace = EcdsaUairProxy::generate_random_trace(9, &mut rng);
         assert_eq!(trace.binary_poly.len(), 0);
         assert_eq!(trace.arbitrary_poly.len(), 0);
         assert_eq!(trace.int.len(), 14);

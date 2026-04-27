@@ -116,9 +116,10 @@ where
         absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
         // === Step 1: Prime projection ===
-        let field_cfg = pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // `fixed-prime` branch: use the secp256k1 base field prime as the
+        // projecting prime instead of drawing one from the transcript.
+        // See `crate::fixed_prime` for the soundness caveat.
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
         let num_constraints = count_constraints::<U>();
 
@@ -389,9 +390,10 @@ where
 
         // === Step 1: Prime projection ===
         let step_start = Instant::now();
-        let field_cfg = pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // `fixed-prime` branch: use the secp256k1 base field prime as the
+        // projecting prime instead of drawing one from the transcript.
+        // See `crate::fixed_prime` for the soundness caveat.
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
         let num_constraints = count_constraints::<U>();
         timings.prime_projection = step_start.elapsed();
