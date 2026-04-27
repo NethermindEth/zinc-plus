@@ -15,6 +15,12 @@ pub struct Proof<F: PrimeField> {
     /// The evaluations of the shifted projected trace columns MLEs at the
     /// shared point.
     pub down_evals: Vec<F>,
+    /// Evaluations of the per-binary_poly-column bit-slice MLEs at the
+    /// shared point, flat layout `col*D + bit`. Populated by the
+    /// algebraic booleanity sumcheck (a separate degree-3 group running
+    /// alongside the CPR group); empty when no binary_poly columns are
+    /// present.
+    pub bit_slice_evals: Vec<F>,
 }
 
 impl<F: PrimeField> GenTranscribable for Proof<F>
@@ -25,16 +31,19 @@ where
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (up_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         assert!(bytes.is_empty(), "All bytes should be consumed");
         Self {
             up_evals,
             down_evals,
+            bit_slice_evals,
         }
     }
 
     fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         let buf = self.up_evals.write_transcription_bytes_subset(buf);
         let buf = self.down_evals.write_transcription_bytes_subset(buf);
+        let buf = self.bit_slice_evals.write_transcription_bytes_subset(buf);
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
@@ -46,21 +55,26 @@ where
 {
     fn get_num_bytes(&self) -> usize {
         add!(
-            2 * u32::NUM_BYTES,
+            3 * u32::NUM_BYTES,
             add!(
                 self.up_evals.get_num_bytes(),
-                self.down_evals.get_num_bytes()
+                add!(
+                    self.down_evals.get_num_bytes(),
+                    self.bit_slice_evals.get_num_bytes()
+                )
             )
         )
     }
 }
 
 impl<F: PrimeField> Proof<F> {
-    /// Check if `up_evals` and `down_evals` vectors have the expected lengths.
+    /// Check that `up_evals`, `down_evals`, and `bit_slice_evals` have
+    /// the expected lengths.
     pub fn validate_evaluation_sizes(
         &self,
         num_cols: usize,
         num_down_cols: usize,
+        num_bit_slices: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
         if self.up_evals.len() != num_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
@@ -73,6 +87,13 @@ impl<F: PrimeField> Proof<F> {
             return Err(CombinedPolyResolverError::WrongDownEvalsNumber {
                 got: self.down_evals.len(),
                 expected: num_down_cols,
+            });
+        }
+
+        if self.bit_slice_evals.len() != num_bit_slices {
+            return Err(CombinedPolyResolverError::WrongBitSliceEvalsNumber {
+                got: self.bit_slice_evals.len(),
+                expected: num_bit_slices,
             });
         }
 
@@ -120,4 +141,6 @@ pub struct VerifierSubclaim<F: PrimeField> {
     pub up_evals: Vec<F>,
     /// Evaluation claims about the shifted trace columns.
     pub down_evals: Vec<F>,
+    /// Bit-slice MLE evaluation claims (flat `col*D + bit`).
+    pub bit_slice_evals: Vec<F>,
 }

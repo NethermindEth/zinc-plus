@@ -358,6 +358,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     LiftedEvalProjection(PolyEvaluationError),
     #[error("lookup argument failed: {0}")]
     Lookup(#[from] LookupError),
+    #[error("booleanity check failed: {0}")]
+    Booleanity(zinc_piop::lookup::booleanity::BooleanityError<F>),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]

@@ -62,6 +62,12 @@ pub struct ProverState<F: PrimeField> {
     pub round: usize,
     /// Claimed sum for the first round polynomial.
     pub asserted_sum: Option<F>,
+    /// When `true`, the next `prove_round` invocation pushes the verifier
+    /// challenge into `randomness` but skips the `fix_variables` fold of
+    /// `mles`. Used by round-1 fast paths that pre-fold the MLEs as part
+    /// of their setup, so the standard prover must not fold them a second
+    /// time. The flag is reset to `false` after the skipped fold.
+    pub skip_next_fold: bool,
 }
 
 impl<F: PrimeField> ProverState<F> {
@@ -79,6 +85,7 @@ impl<F: PrimeField> ProverState<F> {
             max_degree: degree,
             round: 0,
             asserted_sum: None,
+            skip_next_fold: false,
         }
     }
 }
@@ -104,13 +111,21 @@ where
             }
             self.randomness.push(msg.clone());
 
-            // fix the next variable at the verifier randomness for this round
-            let i = self.round;
-            let r = self.randomness[i - 1].clone();
+            if self.skip_next_fold {
+                // Round-1 fast path already produced pre-folded `mles`.
+                // Consume the flag and skip the fold; the just-pushed
+                // randomness still slots into `randomness[round - 1]`,
+                // matching the layout the next round expects.
+                self.skip_next_fold = false;
+            } else {
+                // fix the next variable at the verifier randomness for this round
+                let i = self.round;
+                let r = self.randomness[i - 1].clone();
 
-            cfg_iter_mut!(self.mles).for_each(|multiplicand| {
-                multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
-            });
+                cfg_iter_mut!(self.mles).for_each(|multiplicand| {
+                    multiplicand.fix_variables_with_config(slice::from_ref(&r), config);
+                });
+            }
         } else if self.round > 0 {
             panic!("verifier message is empty");
         }

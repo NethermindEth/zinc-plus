@@ -258,6 +258,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             CprProof {
                 up_evals,
                 down_evals,
+                // Filled by `booleanity::finalize_booleanity_prover` when
+                // a separate booleanity sumcheck group is run alongside
+                // the CPR group; left empty here.
+                bit_slice_evals: Vec::new(),
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,
@@ -288,6 +292,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         claimed_sum: F,
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
         num_constraints: usize,
+        num_bit_slices: usize,
         num_vars: usize,
         projecting_element: &F,
         field_cfg: &F::Config,
@@ -298,8 +303,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         U: Uair,
     {
         let uair_sig = U::signature();
-        proof
-            .validate_evaluation_sizes(uair_sig.total_cols().cols(), uair_sig.down_cols().cols())?;
+        proof.validate_evaluation_sizes(
+            uair_sig.total_cols().cols(),
+            uair_sig.down_cols().cols(),
+            num_bit_slices,
+        )?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -445,6 +453,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,
             down_evals: proof.down_evals,
+            bit_slice_evals: proof.bit_slice_evals,
             evaluation_point: shared_point,
         })
     }
@@ -462,6 +471,8 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongUpEvalsNumber { got: usize, expected: usize },
     #[error("wrong shifted trace columns evaluations number: got {got}, expected {expected}")]
     WrongDownEvalsNumber { got: usize, expected: usize },
+    #[error("wrong bit-slice evaluations number: got {got}, expected {expected}")]
+    WrongBitSliceEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
@@ -605,6 +616,7 @@ mod tests {
             md_proof.claimed_sums()[0].clone(),
             &ic_check_subclaim,
             num_constraints,
+            0, // num_bit_slices: this test has no binary_poly columns
             num_vars,
             &projecting_element,
             &test_config(),

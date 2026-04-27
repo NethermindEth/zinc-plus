@@ -5,6 +5,10 @@ use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
+    lookup::booleanity::{
+        finalize_booleanity_verifier, prepare_booleanity_verifier,
+        verify_bit_decomposition_consistency,
+    },
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
@@ -445,11 +449,21 @@ where
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
-    /// Step 4: Sumcheck verification (CPR + lookup groups).
+    /// Step 4: Sumcheck verification (CPR + algebraic booleanity).
     pub fn step4_sumcheck_verify(
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>> {
         let num_constraints = count_constraints::<U>();
+        let num_pub_bin = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_binary_poly_cols();
+        let num_total_bin =
+            self.base.uair_signature.total_cols().num_binary_poly_cols();
+        // Booleanity covers witness binary_poly columns only — public ones
+        // are recomputed locally by the verifier in step 6.
+        let num_bit_slices = (num_total_bin - num_pub_bin) * D;
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -457,10 +471,28 @@ where
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaim,
             num_constraints,
+            num_bit_slices,
             self.base.num_vars,
             &self.projecting_element_f,
             &self.field_cfg,
         )?;
+
+        // 4b: Booleanity verifier prep — samples α_b, validates that the
+        // booleanity group's claimed sum is zero (zerocheck).
+        let bool_verifier_ancillary_opt = if num_bit_slices > 0 {
+            let bool_claimed_sum =
+                self.proof_combined_sumcheck.claimed_sums()[1].clone();
+            prepare_booleanity_verifier::<F>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                bool_claimed_sum,
+                num_bit_slices,
+                &self.ic_subclaim.evaluation_point,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?
+        } else {
+            None
+        };
 
         let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -479,6 +511,31 @@ where
             &self.projected_scalars_f,
             &self.field_cfg,
         )?;
+
+        // 4c: Booleanity verifier finalize — validates the booleanity
+        // group's expected_evaluation at r*.
+        if let Some(ba) = bool_verifier_ancillary_opt {
+            finalize_booleanity_verifier::<F>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &cpr_subclaim.bit_slice_evals,
+                md_subclaims.point(),
+                md_subclaims.expected_evaluations()[1].clone(),
+                ba,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+        }
+
+        // Bit-decomposition consistency: each binary_poly column's
+        // F-projected MLE eval at r* must equal Σ_i a^i · bit_slice_eval[i],
+        // where `a` is the projecting element used in step 3 (ψ_a).
+        verify_bit_decomposition_consistency(
+            &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
+            &cpr_subclaim.bit_slice_evals,
+            &self.projecting_element_f,
+            D,
+        )
+        .map_err(ProtocolError::Booleanity)?;
 
         let _ = &self.proof_lookup_proof;
 
@@ -903,17 +960,38 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: Sumcheck verify (CPR) ───────────────────────────────────
+    // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
+    // Booleanity covers witness binary_poly columns only — public ones
+    // are recomputed locally by the verifier in step 6.
+    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
         proof.combined_sumcheck.claimed_sums()[0].clone(),
         &ic_subclaim,
         num_constraints,
+        num_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
     )?;
+
+    let bool_verifier_ancillary_opt = if num_bit_slices > 0 {
+        let bool_claimed_sum = proof.combined_sumcheck.claimed_sums()[1].clone();
+        prepare_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            bool_claimed_sum,
+            num_bit_slices,
+            &ic_subclaim.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?
+    } else {
+        None
+    };
+
     let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         num_vars,
@@ -930,6 +1008,26 @@ where
         &projected_scalars_f,
         &field_cfg,
     )?;
+
+    if let Some(ba) = bool_verifier_ancillary_opt {
+        finalize_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            &cpr_subclaim.bit_slice_evals,
+            md_subclaims.point(),
+            md_subclaims.expected_evaluations()[1].clone(),
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+    }
+
+    verify_bit_decomposition_consistency(
+        &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
+        &cpr_subclaim.bit_slice_evals,
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
@@ -1277,17 +1375,38 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: Sumcheck verify (CPR) ───────────────────────────────────
+    // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
+    // Booleanity covers witness binary_poly columns only — public ones
+    // are recomputed locally by the verifier in step 6.
+    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
         proof.combined_sumcheck.claimed_sums()[0].clone(),
         &ic_subclaim,
         num_constraints,
+        num_bit_slices,
         num_vars,
         &projecting_element_f,
         &field_cfg,
     )?;
+
+    let bool_verifier_ancillary_opt = if num_bit_slices > 0 {
+        let bool_claimed_sum = proof.combined_sumcheck.claimed_sums()[1].clone();
+        prepare_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            bool_claimed_sum,
+            num_bit_slices,
+            &ic_subclaim.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?
+    } else {
+        None
+    };
+
     let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         num_vars,
@@ -1304,6 +1423,26 @@ where
         &projected_scalars_f,
         &field_cfg,
     )?;
+
+    if let Some(ba) = bool_verifier_ancillary_opt {
+        finalize_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            &cpr_subclaim.bit_slice_evals,
+            md_subclaims.point(),
+            md_subclaims.expected_evaluations()[1].clone(),
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+    }
+
+    verify_bit_decomposition_consistency(
+        &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
+        &cpr_subclaim.bit_slice_evals,
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
     let mp_subclaim = MultipointEval::verify_as_subprotocol(

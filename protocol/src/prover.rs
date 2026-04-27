@@ -5,6 +5,9 @@ use std::fmt::Debug;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    lookup::booleanity::{
+        finalize_booleanity_prover, prepare_booleanity_group,
+    },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
@@ -514,30 +517,62 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        // 4b: Lookup prepare — placeholder
-        let lookup_specs = &self.base.uair_signature;
-        let groups = vec![cpr_group];
-        // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
-        //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
-        //   - push triple into groups, collect pending proofs + metas
-        let _ = lookup_specs; // suppress unused warning until logup is implemented
+        // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
+        // Only witness binary_poly columns need this check — public ones
+        // are already known to the verifier (see step 6, where public
+        // lifted_evals are recomputed locally), so booleanity on them
+        // would be redundant work for both sides.
+        let num_pub_bin = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_binary_poly_cols();
+        let bool_prep = prepare_booleanity_group::<F, D>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &self.base.trace.binary_poly[num_pub_bin..],
+            &self.ic_eval_point,
+            &self.field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
 
-        // 4c: Multi-degree sumcheck width CPR group and lookup groups
-        let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        let mut groups = vec![cpr_group];
+        let mut bool_ancillary_opt = None;
+        if let Some((bg, ba)) = bool_prep {
+            groups.push(bg);
+            bool_ancillary_opt = Some(ba);
+        }
+
+        // 4c: Multi-degree sumcheck on CPR + booleanity groups.
+        let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             groups,
             self.base.num_vars,
             &self.field_cfg,
         );
-        // 4c: Finalize up_evals, down_evals
-        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+
+        // 4d: Finalize CPR (up_evals, down_evals).
+        let cpr_state = md_states.remove(0);
+        let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
             &mut self.base.pcs_transcript.fs_transcript,
-            md_states.into_iter().next().expect("one CPR group"),
+            cpr_state,
             cpr_ancillary,
             &self.field_cfg,
         )?;
 
-        // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
+        // 4e: Finalize booleanity (bit_slice_evals).
+        if let Some(ba) = bool_ancillary_opt {
+            let bool_state = md_states.remove(0);
+            let bit_slice_evals = finalize_booleanity_prover(
+                &mut self.base.pcs_transcript.fs_transcript,
+                bool_state,
+                ba,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+            cpr_proof.bit_slice_evals = bit_slice_evals;
+        }
+
+        // Legacy stub field — currently always None.
         let lookup_proof = None;
 
         Ok(ProverSumchecked {
@@ -959,7 +994,7 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
+    // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
@@ -971,19 +1006,50 @@ where
         max_degree,
         &field_cfg,
     )?;
-    let groups = vec![cpr_group];
-    let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+
+    // Witness binary_poly columns only — public ones are known to the
+    // verifier (recomputed locally in step 6) so booleanity on them is
+    // redundant.
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let bool_prep = prepare_booleanity_group::<F, D>(
+        &mut pcs_transcript.fs_transcript,
+        &trace.binary_poly[num_pub_bin..],
+        &ic_eval_point,
+        &field_cfg,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    let mut groups = vec![cpr_group];
+    let mut bool_ancillary_opt = None;
+    if let Some((bg, ba)) = bool_prep {
+        groups.push(bg);
+        bool_ancillary_opt = Some(ba);
+    }
+
+    let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         groups,
         num_vars,
         &field_cfg,
     );
-    let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+    let cpr_state = md_states.remove(0);
+    let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
         &mut pcs_transcript.fs_transcript,
-        md_states.into_iter().next().expect("one CPR group"),
+        cpr_state,
         cpr_ancillary,
         &field_cfg,
     )?;
+    if let Some(ba) = bool_ancillary_opt {
+        let bool_state = md_states.remove(0);
+        let bit_slice_evals = finalize_booleanity_prover(
+            &mut pcs_transcript.fs_transcript,
+            bool_state,
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+        cpr_proof.bit_slice_evals = bit_slice_evals;
+    }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
     // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
@@ -1206,7 +1272,7 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-    // ── Step 4: CPR + multi-degree sumcheck ─────────────────────────────
+    // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
         &mut pcs_transcript.fs_transcript,
@@ -1218,19 +1284,50 @@ where
         max_degree,
         &field_cfg,
     )?;
-    let groups = vec![cpr_group];
-    let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+
+    // Witness binary_poly columns only — public ones are known to the
+    // verifier (recomputed locally in step 6) so booleanity on them is
+    // redundant.
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let bool_prep = prepare_booleanity_group::<F, D>(
+        &mut pcs_transcript.fs_transcript,
+        &trace.binary_poly[num_pub_bin..],
+        &ic_eval_point,
+        &field_cfg,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    let mut groups = vec![cpr_group];
+    let mut bool_ancillary_opt = None;
+    if let Some((bg, ba)) = bool_prep {
+        groups.push(bg);
+        bool_ancillary_opt = Some(ba);
+    }
+
+    let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         groups,
         num_vars,
         &field_cfg,
     );
-    let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+    let cpr_state = md_states.remove(0);
+    let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
         &mut pcs_transcript.fs_transcript,
-        md_states.into_iter().next().expect("one CPR group"),
+        cpr_state,
         cpr_ancillary,
         &field_cfg,
     )?;
+    if let Some(ba) = bool_ancillary_opt {
+        let bool_state = md_states.remove(0);
+        let bit_slice_evals = finalize_booleanity_prover(
+            &mut pcs_transcript.fs_transcript,
+            bool_state,
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+        cpr_proof.bit_slice_evals = bit_slice_evals;
+    }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
     // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
