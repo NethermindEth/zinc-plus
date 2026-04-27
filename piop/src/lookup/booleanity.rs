@@ -26,11 +26,16 @@ use zinc_poly::{
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{cfg_iter, inner_transparent_field::InnerTransparentField, powers};
+use zinc_utils::{
+    cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField, powers,
+};
 
 use crate::{
     CombFn,
-    sumcheck::{multi_degree::MultiDegreeSumcheckGroup, prover::ProverState as SumcheckProverState},
+    sumcheck::{
+        multi_degree::{MultiDegreeSumcheckGroup, Round1FastPath, Round1Output},
+        prover::ProverState as SumcheckProverState,
+    },
 };
 
 /// Build bit-slice MLEs over `F::Inner` for every binary_poly column.
@@ -80,6 +85,209 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Round-1 fast path
+// ---------------------------------------------------------------------------
+
+/// Round-1 fast path for the booleanity zerocheck.
+///
+/// Pre-fold, every bit-slice value `v_i^{(k)}(b)` lies in `{0, 1} ⊂ F`.
+/// In all four `(A, B) ∈ {0, 1}²` cases, the linear interpolation
+/// `v(X, b') = (1 − X) A + X B` satisfies
+///
+/// ```text
+/// v(X, b') · (v(X, b') − 1) = (A ⊕ B) · X(X − 1)
+/// ```
+///
+/// (Cases (0, 0) and (1, 1): the polynomial is identically zero. Cases
+/// (0, 1) and (1, 0): both expand to `X(X − 1)`.) The eq factor splits
+/// as `eq_r*(X, b') = e_0(X, ic_ep_0) · E_other(b')`, so the round-1
+/// polynomial collapses to
+///
+/// ```text
+/// p_1(X) = e_0(X, ic_ep_0) · X(X − 1) · T_1
+/// T_1 = Σ_{b'} S(b') · E_other(b')
+/// S(b') = Σ_{(k, i)} α^{k·D + i} · (A_{k,i,b'} ⊕ B_{k,i,b'})
+/// ```
+///
+/// The prover sends `[p_1(1), p_1(2), p_1(3)]`. `p_1(1) = 0` because
+/// `X(X − 1)` vanishes at X = 1. `p_1(0) = 0` (also vanishes), so
+/// the asserted sum `p_1(0) + p_1(1) = 0`. Computing `T_1` is one pass
+/// over `2^(num_vars − 1)` row pairs, doing `K · D` bit-XOR-tests per
+/// row pair — no F-multiplications inside the inner loop.
+pub struct BooleanityRound1FastPath<F: PrimeField, const D: usize> {
+    /// Owned clones of the binary_poly trace columns. Read directly to
+    /// avoid materializing F-valued bit-slice MLEs at full size.
+    binary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+    /// `[1, α, α², ..., α^{K·D − 1}]`.
+    alpha_powers: Vec<F>,
+    /// `eq(b', ic_evaluation_point[1..])` for `b' ∈ {0, 1}^(num_vars − 1)`.
+    eq_other_table: Vec<F::Inner>,
+    /// `ic_evaluation_point[0]`.
+    ic_ep_0: F,
+    /// Number of variables of the parent sumcheck.
+    num_vars: usize,
+}
+
+impl<F, const D: usize> Round1FastPath<F> for BooleanityRound1FastPath<F, D>
+where
+    F: InnerTransparentField + Send + Sync + 'static,
+    F::Inner: Send + Sync + Zero + Default,
+{
+    fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
+        debug_assert_eq!(
+            self.alpha_powers.len(),
+            self.binary_cols.len() * D,
+            "alpha_powers length must match K·D"
+        );
+        debug_assert_eq!(
+            self.eq_other_table.len(),
+            1usize << self.num_vars.saturating_sub(1),
+            "eq_other_table size must be 2^(num_vars - 1)"
+        );
+
+        let zero = F::zero_with_cfg(config);
+        let one = F::one_with_cfg(config);
+        let half = 1usize << (self.num_vars - 1);
+
+        // T_1 = Σ_{b'} S(b') · E_other(b'). Compute S(b') row pair by row
+        // pair: for each binary_poly column, a single XOR of the two adjacent
+        // BinaryPoly rows yields all D bit differences in one shot; iterate
+        // the bits and conditionally fold α-powers in.
+        let t1: F = cfg_into_iter!(0..half)
+            .map(|b_prime| {
+                let mut s_b: F = zero.clone();
+                for (k, col) in self.binary_cols.iter().enumerate() {
+                    let row_a = &col.evaluations[2 * b_prime];
+                    let row_b = &col.evaluations[2 * b_prime + 1];
+                    for (i, (a_bit, b_bit)) in row_a.iter().zip(row_b.iter()).enumerate() {
+                        if a_bit.into_inner() != b_bit.into_inner() {
+                            s_b = s_b + self.alpha_powers[k * D + i].clone();
+                        }
+                    }
+                }
+                let e_other =
+                    F::new_unchecked_with_cfg(self.eq_other_table[b_prime].clone(), config);
+                s_b * e_other
+            })
+            .reduce_with_or_default(zero.clone());
+
+        // p_1(2) = 2 · (3·ic_ep_0 − 1) · T_1
+        // p_1(3) = 6 · (5·ic_ep_0 − 2) · T_1
+        let two = one.clone() + one.clone();
+        let three = two.clone() + one.clone();
+        let five = three.clone() + two.clone();
+        let six = three.clone() + three.clone();
+
+        let coeff_2 = three * self.ic_ep_0.clone() - one.clone();
+        let coeff_3 = five * self.ic_ep_0.clone() - two.clone();
+
+        let p1_at_1 = zero.clone();
+        let p1_at_2 = (one.clone() + one.clone()) * coeff_2 * t1.clone();
+        let p1_at_3 = six * coeff_3 * t1;
+
+        Round1Output {
+            asserted_sum: zero,
+            tail_evaluations: vec![p1_at_1, p1_at_2, p1_at_3],
+        }
+    }
+
+    fn fold_with_r1(
+        self: Box<Self>,
+        r_1: &F,
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        let one = F::one_with_cfg(config);
+        let one_minus_r1 = one.clone() - r_1.clone();
+        let r1 = r_1.clone();
+        let half = 1usize << (self.num_vars - 1);
+
+        // eq_r_folded(b') = ((1 − r_1)(1 − ic_ep_0) + r_1 · ic_ep_0) · E_other(b').
+        let eq_scalar = one_minus_r1.clone() * (one.clone() - self.ic_ep_0.clone())
+            + r1.clone() * self.ic_ep_0.clone();
+        let eq_folded_evals: Vec<F::Inner> = cfg_iter!(self.eq_other_table)
+            .map(|e| {
+                let lifted = F::new_unchecked_with_cfg(e.clone(), config);
+                (eq_scalar.clone() * lifted).into_inner()
+            })
+            .collect();
+        let eq_folded = DenseMultilinearExtension {
+            num_vars: self.num_vars - 1,
+            evaluations: eq_folded_evals,
+        };
+
+        // For each (k, i) bit-slice: fold over variable 0 with r_1.
+        // (A, B) ∈ {0, 1}² → folded ∈ {0, r_1, 1 − r_1, 1} via lookup.
+        let zero_inner = F::zero_with_cfg(config).into_inner();
+        let one_inner = one.inner().clone();
+        let r1_inner = r1.inner().clone();
+        let one_minus_r1_inner = one_minus_r1.inner().clone();
+
+        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(1 + self.binary_cols.len() * D);
+        mles.push(eq_folded);
+
+        // BinaryPoly<D> does not impl Index<usize> on every backend
+        // (the simd-feature `BinaryU64Poly` exposes only `iter()`).
+        // Iterate via `iter().zip(...)` per row pair, distributing each
+        // bit's folded value into a per-bit accumulator.
+        for col in &self.binary_cols {
+            let mut per_bit: Vec<Vec<F::Inner>> =
+                (0..D).map(|_| Vec::with_capacity(half)).collect();
+            for b_prime in 0..half {
+                let row_a = &col.evaluations[2 * b_prime];
+                let row_b = &col.evaluations[2 * b_prime + 1];
+                for (bit_idx, (a_bit, b_bit)) in row_a.iter().zip(row_b.iter()).enumerate() {
+                    let v = match (a_bit.into_inner(), b_bit.into_inner()) {
+                        (false, false) => zero_inner.clone(),
+                        (true, true) => one_inner.clone(),
+                        (false, true) => r1_inner.clone(),
+                        (true, false) => one_minus_r1_inner.clone(),
+                    };
+                    per_bit[bit_idx].push(v);
+                }
+            }
+            for evals in per_bit {
+                mles.push(DenseMultilinearExtension {
+                    num_vars: self.num_vars - 1,
+                    evaluations: evals,
+                });
+            }
+        }
+
+        mles
+    }
+}
+
+/// Helper: reduce_with on a parallel iterator, falling back to a default
+/// when the iterator is empty. Provided here to keep the parallel and
+/// sequential paths uniform.
+trait ReduceWithOrDefault<T: Clone> {
+    fn reduce_with_or_default(self, default: T) -> T;
+}
+
+#[cfg(feature = "parallel")]
+impl<I, T> ReduceWithOrDefault<T> for I
+where
+    I: ParallelIterator<Item = T>,
+    T: Clone + Send + Sync + std::ops::Add<Output = T>,
+{
+    fn reduce_with_or_default(self, default: T) -> T {
+        self.reduce(|| default.clone(), |a, b| a + b)
+    }
+}
+
+#[cfg(not(feature = "parallel"))]
+impl<I, T> ReduceWithOrDefault<T> for I
+where
+    I: Iterator<Item = T>,
+    T: Clone + std::ops::Add<Output = T>,
+{
+    fn reduce_with_or_default(self, default: T) -> T {
+        self.fold(default, |a, b| a + b)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sumcheck group prep / finalize (separate degree-3 group)
 // ---------------------------------------------------------------------------
 
@@ -101,40 +309,62 @@ pub struct BooleanityVerifierAncillary<F: PrimeField> {
 }
 
 /// Build a degree-3 multi-degree sumcheck group for the booleanity
-/// zerocheck. MLE layout: `[eq_r, v_0, v_1, ..., v_{B-1}]`.
+/// zerocheck. MLE layout (post round-1 fold): `[eq_r, v_0, v_1, ..., v_{B-1}]`
+/// where `B = K · D`.
 ///
-/// Returns `None` when `bit_slices` is empty (no binary_poly columns →
+/// Round 1 is supplied via [`BooleanityRound1FastPath`], which reads the
+/// `binary_cols` directly and never materializes F-valued bit-slice MLEs
+/// at full size. Rounds 2..n use the standard sumcheck path on the
+/// half-size folded MLEs the fast path emits.
+///
+/// Returns `None` when `binary_cols` is empty (no binary_poly columns →
 /// no booleanity check needed; caller should skip pushing this group).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn prepare_booleanity_group<F>(
+pub fn prepare_booleanity_group<F, const D: usize>(
     transcript: &mut impl Transcript,
-    bit_slices: Vec<DenseMultilinearExtension<F::Inner>>,
+    binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
     ic_evaluation_point: &[F],
     field_cfg: &F::Config,
 ) -> Result<Option<(MultiDegreeSumcheckGroup<F>, BooleanityProverAncillary)>, BooleanityError<F>>
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
-    F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+    F::Inner: ConstTranscribable + Send + Sync + Zero + Default + Clone,
     F::Modulus: ConstTranscribable,
 {
-    let num_bit_slices = bit_slices.len();
-    if num_bit_slices == 0 {
+    if binary_cols.is_empty() {
         return Ok(None);
     }
 
+    let num_bit_slices = binary_cols.len() * D;
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
-
-    let eq_r = build_eq_x_r_inner(ic_evaluation_point, field_cfg)?;
 
     let folding_challenge: F = transcript.get_field_challenge(field_cfg);
     let folding_challenge_powers: Vec<F> =
         powers(folding_challenge, one.clone(), num_bit_slices);
 
-    let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
-        Vec::with_capacity(1 + num_bit_slices);
-    mles.push(eq_r);
-    mles.extend(bit_slices);
+    // Pre-build E_other = eq(b', ic_evaluation_point[1..]) for the
+    // round-1 fast path. The full-size eq_r is only needed for rounds
+    // 2..n in folded form, which fold_with_r1 produces directly.
+    assert!(
+        !ic_evaluation_point.is_empty(),
+        "ic_evaluation_point must be non-empty for booleanity (num_vars >= 1)"
+    );
+    let num_vars = ic_evaluation_point.len();
+    let eq_other_table: Vec<F::Inner> = if num_vars >= 2 {
+        build_eq_x_r_inner(&ic_evaluation_point[1..], field_cfg)?.evaluations
+    } else {
+        // num_vars == 1: the "other" subspace is empty, E_other is a single 1.
+        vec![one.inner().clone()]
+    };
+
+    let fast_path: Box<dyn Round1FastPath<F>> = Box::new(BooleanityRound1FastPath::<F, D> {
+        binary_cols: binary_cols.to_vec(),
+        alpha_powers: folding_challenge_powers.clone(),
+        eq_other_table,
+        ic_ep_0: ic_evaluation_point[0].clone(),
+        num_vars,
+    });
 
     let comb_fn: CombFn<F> = Box::new(move |mle_values: &[F]| {
         let eq_r = &mle_values[0];
@@ -151,8 +381,9 @@ where
         acc * eq_r.clone()
     });
 
+    // Empty `poly` — the fast path supplies post-round-1 MLEs.
     Ok(Some((
-        MultiDegreeSumcheckGroup::new(3, mles, comb_fn),
+        MultiDegreeSumcheckGroup::with_round_1_fast(3, Vec::new(), comb_fn, fast_path),
         BooleanityProverAncillary { num_bit_slices },
     )))
 }
@@ -380,7 +611,9 @@ pub enum BooleanityError<F: PrimeField> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::{boolean::Boolean, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        FromWithConfig, boolean::Boolean, crypto_bigint_monty::MontyField,
+    };
 
     type F = MontyField<4>;
 
@@ -497,6 +730,162 @@ mod tests {
         let parent_evals: Vec<F> = vec![];
         let bit_evals: Vec<F> = vec![];
         verify_bit_decomposition_consistency(&parent_evals, &bit_evals, &one, 8).unwrap();
+    }
+
+    /// Cross-validate the round-1 fast path against a faithful standard
+    /// run of `ProverState::prove_round`. Both must produce the same
+    /// tail evaluations and the same asserted sum (zero, since this is
+    /// a zerocheck).
+    #[test]
+    fn fast_path_round_1_matches_standard_prove_round() {
+        use crate::CombFn;
+        use crate::sumcheck::prover::ProverState as SumcheckProverState;
+
+        let cfg = test_cfg();
+        let one = F::one_with_cfg(&cfg);
+        let zero = F::zero_with_cfg(&cfg);
+
+        // 3-variable case (8 rows). Two binary_poly cols of width 8 each.
+        // Mix of fully-zero, fully-one, and varying patterns to exercise all
+        // four (A, B) cases for the XOR fold structure.
+        let binary_cols = vec![
+            col_from_u8s(&[0b00000000, 0b00010001, 0b00100010, 0b00110011, 0b01000100, 0b01010101, 0b01100110, 0b01110111]),
+            col_from_u8s(&[0b11110000, 0b11100001, 0b11010010, 0b11000011, 0b10110100, 0b10100101, 0b10010110, 0b10000111]),
+        ];
+        let num_vars = 3;
+        const D: usize = 8;
+        let k = binary_cols.len();
+        let num_bit_slices = k * D;
+
+        let alpha = F::from_with_cfg(7u64, &cfg);
+        let alpha_powers: Vec<F> = powers(alpha, one.clone(), num_bit_slices);
+
+        let ic_ep: Vec<F> = vec![
+            F::from_with_cfg(3u64, &cfg),
+            F::from_with_cfg(5u64, &cfg),
+            F::from_with_cfg(11u64, &cfg),
+        ];
+
+        // ---- Fast path ----
+        let eq_other_table = build_eq_x_r_inner(&ic_ep[1..], &cfg).unwrap().evaluations;
+        let fast_path = BooleanityRound1FastPath::<F, D> {
+            binary_cols: binary_cols.clone(),
+            alpha_powers: alpha_powers.clone(),
+            eq_other_table,
+            ic_ep_0: ic_ep[0].clone(),
+            num_vars,
+        };
+        let fast_out = fast_path.round_1_message(&cfg);
+
+        // ---- Standard path ----
+        let bit_slices = compute_bit_slices_flat::<F, D>(&binary_cols, &cfg);
+        let eq_r = build_eq_x_r_inner(&ic_ep, &cfg).unwrap();
+        let mut mles: Vec<DenseMultilinearExtension<<F as crypto_primitives::Field>::Inner>> =
+            Vec::with_capacity(1 + bit_slices.len());
+        mles.push(eq_r);
+        mles.extend(bit_slices);
+
+        let alpha_powers_for_comb = alpha_powers.clone();
+        let zero_for_comb = zero.clone();
+        let comb_fn: CombFn<F> = Box::new(move |mle_values: &[F]| {
+            let eq_r = &mle_values[0];
+            let bits = &mle_values[1..];
+            let mut acc = zero_for_comb.clone();
+            for (v, coeff) in bits.iter().zip(alpha_powers_for_comb.iter()) {
+                let v_sq = v.clone() * v.clone();
+                acc = acc + coeff.clone() * (v_sq - v.clone());
+            }
+            acc * eq_r.clone()
+        });
+
+        let mut state = SumcheckProverState::new(mles, num_vars, 3);
+        let std_msg = state.prove_round(&None, comb_fn, &cfg);
+        let std_asserted = state
+            .asserted_sum
+            .clone()
+            .expect("asserted_sum recorded after first round");
+
+        assert_eq!(
+            fast_out.tail_evaluations.len(),
+            std_msg.0.tail_evaluations.len(),
+            "tail length mismatch (fast vs standard)"
+        );
+        assert_eq!(
+            fast_out.tail_evaluations, std_msg.0.tail_evaluations,
+            "fast-path round-1 tail must match standard path"
+        );
+        assert_eq!(
+            fast_out.asserted_sum, std_asserted,
+            "fast-path asserted_sum must match standard path (zerocheck → 0)"
+        );
+        assert_eq!(
+            fast_out.asserted_sum, zero,
+            "booleanity zerocheck asserted_sum must be 0"
+        );
+    }
+
+    /// Cross-validate `fold_with_r1` against folding bit-slice MLEs via
+    /// the standard `fix_variables` path. Both must produce the same
+    /// post-round-1 MLE values for every (k, i) bit-slice.
+    #[test]
+    fn fast_path_fold_with_r1_matches_standard_fix_variables() {
+        use std::slice;
+        use zinc_poly::mle::MultilinearExtensionWithConfig;
+
+        let cfg = test_cfg();
+        let one = F::one_with_cfg(&cfg);
+
+        let binary_cols = vec![col_from_u8s(&[
+            0b00000000, 0b11111111, 0b01010101, 0b10101010, 0b11001100, 0b00110011, 0b11110000,
+            0b00001111,
+        ])];
+        let num_vars = 3;
+        const D: usize = 8;
+        let alpha = F::from_with_cfg(13u64, &cfg);
+        let alpha_powers: Vec<F> = powers(alpha, one.clone(), D);
+        let ic_ep: Vec<F> = vec![
+            F::from_with_cfg(2u64, &cfg),
+            F::from_with_cfg(4u64, &cfg),
+            F::from_with_cfg(8u64, &cfg),
+        ];
+        let r_1 = F::from_with_cfg(17u64, &cfg);
+
+        let eq_other_table = build_eq_x_r_inner(&ic_ep[1..], &cfg).unwrap().evaluations;
+        let fast_path = Box::new(BooleanityRound1FastPath::<F, D> {
+            binary_cols: binary_cols.clone(),
+            alpha_powers,
+            eq_other_table,
+            ic_ep_0: ic_ep[0].clone(),
+            num_vars,
+        });
+
+        let fast_mles = fast_path.fold_with_r1(&r_1, &cfg);
+        // [eq_r_folded, bit_0, bit_1, ..., bit_{D-1}].
+        assert_eq!(fast_mles.len(), 1 + D);
+
+        // Standard-path comparison: build full-size bit-slice MLEs and
+        // fold each with r_1. Build full-size eq_r and fold the same way.
+        let bit_slices_full = compute_bit_slices_flat::<F, D>(&binary_cols, &cfg);
+        let eq_r_full = build_eq_x_r_inner(&ic_ep, &cfg).unwrap();
+
+        let mut std_eq_r = eq_r_full;
+        std_eq_r.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
+        assert_eq!(
+            fast_mles[0].num_vars, num_vars - 1,
+            "fast-path eq_r_folded must have num_vars - 1 variables"
+        );
+        assert_eq!(
+            fast_mles[0].evaluations, std_eq_r.evaluations,
+            "fast-path eq_r_folded must match standard fix_variables"
+        );
+
+        for (idx, mut bit_mle) in bit_slices_full.into_iter().enumerate() {
+            bit_mle.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
+            assert_eq!(
+                fast_mles[1 + idx].evaluations, bit_mle.evaluations,
+                "fast-path bit-slice {idx} folded value must match standard fix_variables"
+            );
+        }
     }
 
     #[test]

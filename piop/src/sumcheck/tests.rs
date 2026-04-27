@@ -456,6 +456,7 @@ fn prover_panics_if_round_exceeds_num_vars() {
         max_degree: 2,
         round: num_vars, // Set to the last valid round
         asserted_sum: None,
+        skip_next_fold: false,
     };
 
     let comb_fn = |_vals: &[F]| F::ZERO;

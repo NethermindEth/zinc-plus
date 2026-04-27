@@ -6,7 +6,7 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{
-        compute_bit_slices_flat, finalize_booleanity_prover, prepare_booleanity_group,
+        finalize_booleanity_prover, prepare_booleanity_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -518,16 +518,12 @@ impl_with_type_bounds!(ProverEvalProjected
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
-        // Each binary_poly column adds D bit-slice MLEs. Running these
-        // in their own degree-3 group avoids paying the CPR group's
-        // higher per-variable degree on the booleanity term.
-        let bit_slices = compute_bit_slices_flat::<F, D>(
-            &self.base.trace.binary_poly,
-            &self.field_cfg,
-        );
-        let bool_prep = prepare_booleanity_group::<F>(
+        // The round-1 fast path inside `prepare_booleanity_group` reads
+        // bit values directly from `binary_poly` columns, avoiding
+        // materializing F-valued bit-slice MLEs at full size.
+        let bool_prep = prepare_booleanity_group::<F, D>(
             &mut self.base.pcs_transcript.fs_transcript,
-            bit_slices,
+            &self.base.trace.binary_poly,
             &self.ic_eval_point,
             &self.field_cfg,
         )
@@ -1005,10 +1001,9 @@ where
         &field_cfg,
     )?;
 
-    let bit_slices = compute_bit_slices_flat::<F, D>(&trace.binary_poly, &field_cfg);
-    let bool_prep = prepare_booleanity_group::<F>(
+    let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        bit_slices,
+        &trace.binary_poly,
         &ic_eval_point,
         &field_cfg,
     )
@@ -1280,10 +1275,9 @@ where
         &field_cfg,
     )?;
 
-    let bit_slices = compute_bit_slices_flat::<F, D>(&trace.binary_poly, &field_cfg);
-    let bool_prep = prepare_booleanity_group::<F>(
+    let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        bit_slices,
+        &trace.binary_poly,
         &ic_eval_point,
         &field_cfg,
     )
