@@ -518,12 +518,18 @@ impl_with_type_bounds!(ProverEvalProjected
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
-        // The round-1 fast path inside `prepare_booleanity_group` reads
-        // bit values directly from `binary_poly` columns, avoiding
-        // materializing F-valued bit-slice MLEs at full size.
+        // Only witness binary_poly columns need this check — public ones
+        // are already known to the verifier (see step 6, where public
+        // lifted_evals are recomputed locally), so booleanity on them
+        // would be redundant work for both sides.
+        let num_pub_bin = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_binary_poly_cols();
         let bool_prep = prepare_booleanity_group::<F, D>(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.base.trace.binary_poly,
+            &self.base.trace.binary_poly[num_pub_bin..],
             &self.ic_eval_point,
             &self.field_cfg,
         )
@@ -1001,9 +1007,13 @@ where
         &field_cfg,
     )?;
 
+    // Witness binary_poly columns only — public ones are known to the
+    // verifier (recomputed locally in step 6) so booleanity on them is
+    // redundant.
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly,
+        &trace.binary_poly[num_pub_bin..],
         &ic_eval_point,
         &field_cfg,
     )
@@ -1275,9 +1285,13 @@ where
         &field_cfg,
     )?;
 
+    // Witness binary_poly columns only — public ones are known to the
+    // verifier (recomputed locally in step 6) so booleanity on them is
+    // redundant.
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly,
+        &trace.binary_poly[num_pub_bin..],
         &ic_eval_point,
         &field_cfg,
     )

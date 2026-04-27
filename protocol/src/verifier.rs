@@ -453,9 +453,16 @@ where
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>> {
         let num_constraints = count_constraints::<U>();
-        let num_binary_poly_cols =
+        let num_pub_bin = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_binary_poly_cols();
+        let num_total_bin =
             self.base.uair_signature.total_cols().num_binary_poly_cols();
-        let num_bit_slices = num_binary_poly_cols * D;
+        // Booleanity covers witness binary_poly columns only — public ones
+        // are recomputed locally by the verifier in step 6.
+        let num_bit_slices = (num_total_bin - num_pub_bin) * D;
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -522,7 +529,7 @@ where
         // F-projected MLE eval at r* must equal Σ_i a^i · bit_slice_eval[i],
         // where `a` is the projecting element used in step 3 (ψ_a).
         verify_bit_decomposition_consistency(
-            &cpr_subclaim.up_evals[..num_binary_poly_cols],
+            &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
             &cpr_subclaim.bit_slice_evals,
             &self.projecting_element_f,
             D,
@@ -953,8 +960,11 @@ where
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
-    let num_binary_poly_cols = uair_signature.total_cols().num_binary_poly_cols();
-    let num_bit_slices = num_binary_poly_cols * D;
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
+    // Booleanity covers witness binary_poly columns only — public ones
+    // are recomputed locally by the verifier in step 6.
+    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
@@ -1011,7 +1021,7 @@ where
     }
 
     verify_bit_decomposition_consistency(
-        &cpr_subclaim.up_evals[..num_binary_poly_cols],
+        &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
         &cpr_subclaim.bit_slice_evals,
         &projecting_element_f,
         D,
@@ -1365,8 +1375,11 @@ where
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
-    let num_binary_poly_cols = uair_signature.total_cols().num_binary_poly_cols();
-    let num_bit_slices = num_binary_poly_cols * D;
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
+    // Booleanity covers witness binary_poly columns only — public ones
+    // are recomputed locally by the verifier in step 6.
+    let num_bit_slices = (num_total_bin - num_pub_bin) * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
@@ -1423,7 +1436,7 @@ where
     }
 
     verify_bit_decomposition_consistency(
-        &cpr_subclaim.up_evals[..num_binary_poly_cols],
+        &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
         &cpr_subclaim.bit_slice_evals,
         &projecting_element_f,
         D,
