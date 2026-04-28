@@ -1061,6 +1061,7 @@ pub fn prove_folded<
     F,
     const D: usize,
     const HALF_D: usize,
+    const MLE_FIRST: bool,
     const CHECK_FOR_OVERFLOW: bool,
 >(
     pp: &(
@@ -1122,7 +1123,7 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
-    // ── Step 1 (combined): Prime projection ─────────────────────────────
+    // ── Step 1: Prime projection ────────────────────────────────────────
     // `fixed-prime` branch: match the non-folded path (see
     // `ProverCommitted::project_common`) and use the secp256k1 base
     // prime as the projecting prime instead of drawing one from the
@@ -1130,24 +1131,85 @@ where
     // algebraic identities (e.g. `EcdsaUair`) only hold under this
     // prime, so a random prime here would break verification.
     let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
 
-    let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
-        project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-        project_scalars::<F, U>(|s| project_scalar(s, &field_cfg)),
-    );
-
-    // ── Step 2 (combined): Ideal check ──────────────────────────────────
+    // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
+    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
+    // - !MLE_FIRST                          → row-major + prove_combined
+    // - MLE_FIRST, all linear               → column-major + prove_linear
+    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
+    // - MLE_FIRST, all non-linear           → row-major + prove_combined
     let num_constraints = count_constraints::<U>();
-    let (ic_proof, ic_prover_state) = U::prove_combined(
-        &mut pcs_transcript.fs_transcript,
-        &projected_trace_rm,
-        &projected_scalars_fx,
-        num_constraints,
-        num_vars,
-        &field_cfg,
-    )?;
+    let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
+        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mut any_linear, mut any_nonlinear) = (false, false);
+        for (m, i) in mask.iter().zip(ideals.iter()) {
+            if i.is_zero_ideal() {
+                continue;
+            }
+            if *m {
+                any_linear = true
+            } else {
+                any_nonlinear = true
+            }
+        }
+        match (any_linear, any_nonlinear) {
+            (true, false) => {
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
+                let (p, s) = U::prove_linear(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
+            }
+            (true, true) => {
+                let (rm, cm) = cfg_join!(
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+                    project_trace_coeffs_column_major(trace, &field_cfg),
+                );
+                let (p, s) = U::prove_hybrid(
+                    &mut pcs_transcript.fs_transcript,
+                    &rm,
+                    &cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(rm))
+            }
+            (false, _) => {
+                let projected_trace_rm =
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+                let (p, s) = U::prove_combined(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_rm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+            }
+        }
+    } else {
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+        let (p, s) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_rm,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+        (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+    };
     let ic_eval_point = ic_prover_state.evaluation_point;
-    let projected_trace = ProjectedTrace::RowMajor(projected_trace_rm);
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
@@ -1416,6 +1478,7 @@ pub fn prove_folded_4x<
     const D: usize,
     const HALF_D: usize,
     const QUARTER_D: usize,
+    const MLE_FIRST: bool,
     const CHECK_FOR_OVERFLOW: bool,
 >(
     pp: &(
@@ -1483,7 +1546,7 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
-    // ── Step 1 (combined): Prime projection ─────────────────────────────
+    // ── Step 1: Prime projection ────────────────────────────────────────
     // `fixed-prime` branch: match the non-folded path (see
     // `ProverCommitted::project_common`) and use the secp256k1 base
     // prime as the projecting prime instead of drawing one from the
@@ -1491,24 +1554,85 @@ where
     // algebraic identities (e.g. `EcdsaUair`) only hold under this
     // prime, so a random prime here would break verification.
     let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
 
-    let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
-        project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-        project_scalars::<F, U>(|s| project_scalar(s, &field_cfg)),
-    );
-
-    // ── Step 2 (combined): Ideal check ──────────────────────────────────
+    // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
+    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
+    // - !MLE_FIRST                          → row-major + prove_combined
+    // - MLE_FIRST, all linear               → column-major + prove_linear
+    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
+    // - MLE_FIRST, all non-linear           → row-major + prove_combined
     let num_constraints = count_constraints::<U>();
-    let (ic_proof, ic_prover_state) = U::prove_combined(
-        &mut pcs_transcript.fs_transcript,
-        &projected_trace_rm,
-        &projected_scalars_fx,
-        num_constraints,
-        num_vars,
-        &field_cfg,
-    )?;
+    let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
+        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mut any_linear, mut any_nonlinear) = (false, false);
+        for (m, i) in mask.iter().zip(ideals.iter()) {
+            if i.is_zero_ideal() {
+                continue;
+            }
+            if *m {
+                any_linear = true
+            } else {
+                any_nonlinear = true
+            }
+        }
+        match (any_linear, any_nonlinear) {
+            (true, false) => {
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
+                let (p, s) = U::prove_linear(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
+            }
+            (true, true) => {
+                let (rm, cm) = cfg_join!(
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+                    project_trace_coeffs_column_major(trace, &field_cfg),
+                );
+                let (p, s) = U::prove_hybrid(
+                    &mut pcs_transcript.fs_transcript,
+                    &rm,
+                    &cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(rm))
+            }
+            (false, _) => {
+                let projected_trace_rm =
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+                let (p, s) = U::prove_combined(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_rm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+            }
+        }
+    } else {
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+        let (p, s) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_rm,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+        (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+    };
     let ic_eval_point = ic_prover_state.evaluation_point;
-    let projected_trace = ProjectedTrace::RowMajor(projected_trace_rm);
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();

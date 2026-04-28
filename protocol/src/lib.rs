@@ -1659,6 +1659,7 @@ mod tests {
             F,
             DEGREE_PLUS_ONE,
             HALF_DEGREE_PLUS_ONE,
+            false,
             CHECKED,
         >(&pp, &trace, num_vars, project_scalar_fn)
         .expect("Folded prover failed");
@@ -1815,6 +1816,7 @@ mod tests {
             DEGREE_PLUS_ONE,
             HALF_DEGREE_PLUS_ONE,
             QUARTER_DEGREE_PLUS_ONE,
+            false,
             CHECKED,
         >(&pp, &trace, num_vars, project_scalar_fn)
         .expect("Folded 4× prover failed");
