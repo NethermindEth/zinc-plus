@@ -1052,19 +1052,30 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
 {
     let params = format!("{label}/nvars={num_vars}");
 
-    group.bench_function(BenchmarkId::new("Prove (folded)", &params), |bench| {
-        bench.iter(|| {
-            black_box(zinc_protocol::prover::prove_folded::<
-                ZtF,
-                U,
-                F,
-                DEGREE_PLUS_ONE,
-                HALF_DEGREE_PLUS_ONE,
-                PERFORM_CHECKS,
-            >(pp, trace, num_vars, project_scalar))
-            .expect("Folded prover failed");
-        });
-    });
+    macro_rules! bench_prove_folded {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(zinc_protocol::prover::prove_folded::<
+                        ZtF,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(pp, trace, num_vars, project_scalar))
+                    .expect("Folded prover failed");
+                });
+            });
+        };
+    }
+
+    bench_prove_folded!("Prove (folded)", false);
+
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove_folded!("Prove (folded MLE-first)", true);
+    }
 
     let proof: Proof<F> = zinc_protocol::prover::prove_folded::<
         ZtF,
@@ -1072,6 +1083,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
         F,
         DEGREE_PLUS_ONE,
         HALF_DEGREE_PLUS_ONE,
+        false,
         PERFORM_CHECKS,
     >(pp, trace, num_vars, project_scalar)
     .expect("proof generation for folded verifier bench");
@@ -1182,20 +1194,31 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
 {
     let params = format!("{label}/nvars={num_vars}");
 
-    group.bench_function(BenchmarkId::new("Prove (folded 4×)", &params), |bench| {
-        bench.iter(|| {
-            black_box(zinc_protocol::prover::prove_folded_4x::<
-                ZtF,
-                U,
-                F,
-                DEGREE_PLUS_ONE,
-                HALF_DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-                PERFORM_CHECKS,
-            >(pp, trace, num_vars, project_scalar))
-            .expect("Folded 4× prover failed");
-        });
-    });
+    macro_rules! bench_prove_folded_4x {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(zinc_protocol::prover::prove_folded_4x::<
+                        ZtF,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        QUARTER_DEGREE_PLUS_ONE,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(pp, trace, num_vars, project_scalar))
+                    .expect("Folded 4× prover failed");
+                });
+            });
+        };
+    }
+
+    bench_prove_folded_4x!("Prove (folded 4×)", false);
+
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove_folded_4x!("Prove (folded 4× MLE-first)", true);
+    }
 
     let proof: Proof<F> = zinc_protocol::prover::prove_folded_4x::<
         ZtF,
@@ -1204,6 +1227,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         DEGREE_PLUS_ONE,
         HALF_DEGREE_PLUS_ONE,
         QUARTER_DEGREE_PLUS_ONE,
+        false,
         PERFORM_CHECKS,
     >(pp, trace, num_vars, project_scalar)
     .expect("proof generation for folded 4× verifier bench");
