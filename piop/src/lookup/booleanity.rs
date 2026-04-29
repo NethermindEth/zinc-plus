@@ -23,7 +23,7 @@ use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
     univariate::binary::BinaryPoly,
-    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+    utils::{ArithErrors, build_eq_x_r_inner, build_eq_x_r_vec, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -82,6 +82,65 @@ where
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Streaming evaluator for shifted bit-slice MLEs at the shared
+/// sumcheck point `r*`. Equivalent to
+/// `build_shifted_bit_slice_mles(...).iter().map(evaluate_at(r*))`,
+/// but skips materializing the `num_shifted_specs · D` F::Inner-valued
+/// MLE buffers (~`num_shifted · D · n` F::Inner allocations). Builds
+/// the size-`n` `eq(r*, ·)` table once and accumulates per-bit sums
+/// directly from the `BinaryPoly<D>` trace columns in a single pass
+/// per spec (t outer, bits inner — avoids `iter().nth(bit_idx)`'s
+/// linear cost on custom binary-poly iterators).
+///
+/// Used when the prover doesn't otherwise need the materialized bit-
+/// slice MLEs (i.e. when no `VirtualBoolSpec` is registered — the
+/// `VirtualBinaryPolySpec` path reads source binary_polys directly).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_shifted_bit_slice_evals_streaming<F, const D: usize>(
+    trace_witness_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    shifted_specs: &[ShiftedBitSliceSpec],
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ArithErrors>
+where
+    F: PrimeField + Send + Sync,
+    F::Config: Sync,
+{
+    if shifted_specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Single shared eq table — one O(n) pass + O(n) memory across all
+    // (spec, bit) sums.
+    let eq_table = build_eq_x_r_vec(point, field_cfg)?;
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let out: Vec<F> = cfg_iter!(shifted_specs)
+        .flat_map(|spec| {
+            let col = &trace_witness_binary_poly[spec.witness_col_idx];
+            let shift = spec.shift_amount;
+            let n = col.evaluations.len();
+            // Per-bit accumulators, one F-element each.
+            let mut accs: Vec<F> = vec![zero.clone(); D];
+            for t in 0..n {
+                let src_t = t.checked_add(shift).filter(|&v| v < n);
+                if let Some(s) = src_t {
+                    let bp = &col.evaluations[s];
+                    let eq_t = &eq_table[t];
+                    // Walk bits in their stored order; the iterator
+                    // visits each coefficient once in O(D).
+                    for (bit_idx, coeff) in bp.iter().enumerate() {
+                        if coeff.into_inner() {
+                            accs[bit_idx] = accs[bit_idx].clone() + eq_t.clone();
+                        }
+                    }
+                }
+            }
+            accs
+        })
+        .collect();
+    Ok(out)
 }
 
 /// Compute `coeff * value` in F::Inner using only `add_inner` /
