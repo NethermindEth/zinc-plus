@@ -425,7 +425,7 @@ where
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
     pub fn step3_eval_projection(
         mut self,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
@@ -1013,7 +1013,7 @@ where
         proof: Proof<F>,
         public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
     ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
@@ -1066,7 +1066,7 @@ pub fn verify_folded<
     mut proof: Proof<F>,
     public_trace: &UairTrace<ZtF::Int, ZtF::Int, D>,
     num_vars: usize,
-    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where

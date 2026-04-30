@@ -308,22 +308,15 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
 
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
-    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
+    project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F> + Sync,
 ) -> ScalarMap<U::Scalar, DynamicPolynomialF<F>> {
     let uair_scalars = collect_scalars::<U>();
 
-    // TODO(Ilia): if there's a lot of scalars
-    //             we should do this in parallel probably.
-    uair_scalars
-        .into_iter()
+    cfg_into_iter!(uair_scalars)
         .map(|scalar| {
-            (scalar.clone(), {
-                let mut dynamic_poly = project(&scalar);
-
-                dynamic_poly.trim();
-
-                dynamic_poly
-            })
+            let mut dynamic_poly = project(&scalar);
+            dynamic_poly.trim();
+            (scalar, dynamic_poly)
         })
         .collect()
 }
@@ -334,9 +327,6 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: ScalarMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
 ) -> Result<ScalarMap<R, F>, (R, F, EvaluationError)> {
-    // TODO(Ilia): Parallelising this might be good for big UAIRs.
-    //             We'd conditionally route between sequential and parallel
-    //             projection depending on how many scalars the UAIR has.
     let one = F::one_with_cfg(projecting_element.cfg());
     let zero = F::zero_with_cfg(projecting_element.cfg());
 
@@ -349,8 +339,7 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
-    Ok(scalars
-        .into_iter()
+    Ok(cfg_into_iter!(scalars)
         .map(|(scalar, value)| {
             let deg = value.degree().map_or(0, |d| d + 1);
             (
