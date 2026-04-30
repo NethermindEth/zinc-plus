@@ -16,15 +16,15 @@
 //!
 //! 1. `Sigma_0` rotation:  `a_hat · rho_Sig0 − Sig0_hat − 2·ov_Sig0 ∈ (X^32 − 1)`
 //! 2. `Sigma_1` rotation:  `e_hat · rho_Sig1 − Sig1_hat − 2·ov_Sig1 ∈ (X^32 − 1)`
-//! 3. `sigma_0` right-shift decomposition:
-//!    `W_hat − T_0 − X^3 · S_0 == 0`  (exact Z[X] equality; both sides are
-//!    bit-polynomials by construction).
-//! 4. `sigma_0` rotation:
-//!    `W_hat · rho_lsig0 + S_0 − lsig0_hat − 2·ov_lsig0 ∈ (X^32 − 1)`
-//! 5. `sigma_1` right-shift decomposition:
-//!    `W_hat − T_1 − X^10 · S_1 == 0`
-//! 6. `sigma_1` rotation:
-//!    `W_hat · rho_lsig1 + S_1 − lsig1_hat − 2·ov_lsig1 ∈ (X^32 − 1)`
+//! 4. `sigma_0` row-local Q[X] equality (with bit-XOR overflow):
+//!    `ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0_hat − 2·ov_lsig0 == 0`
+//!    where `ROT^c(W)` and `SHIFTR^c(W)` are CPR bit-op virtual columns
+//!    over `W` (declared in `signature()`'s `bit_op_specs`). Replaces
+//!    the previous `(X^32 − 1)` ideal lift and the C3 right-shift
+//!    decomposition constraint: ROT/SHIFTR virtual columns are mod
+//!    `X^32` by construction.
+//! 6. `sigma_1` row-local Q[X] equality:
+//!    `ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1_hat − 2·ov_lsig1 == 0`
 //! 7. Message-schedule modular sum:
 //!    `s_sched · (W[t] − W[t-16] − sigma_0(W[t-15]) − W[t-7] − sigma_1(W[t-2])
 //!      + 2·X^31 · mu_W[t]) ∈ (X − 2)`,
@@ -57,20 +57,22 @@
 //! slice adopts the same "lookup-gap" stance we already have for other
 //! bit-valued cells.
 //!
-//! The `rho_*` scalars encode the rotation parts of the SHA-256 Σ and σ
-//! functions:
+//! The `rho_*` scalars encode the rotation parts of the SHA-256 Σ
+//! functions (Σ_0 and Σ_1 still use the F_2[X] → Q[X] rotation lift;
+//! σ_0/σ_1 instead route through CPR bit-op virtual columns — see
+//! below):
 //!
 //! - `rho_Sig0(X) = X^30 + X^19 + X^10`     (= `X^{32-2} + X^{32-13} + X^{32-22}`)
 //! - `rho_Sig1(X) = X^26 + X^21 + X^7`      (= `X^{32-6} + X^{32-11} + X^{32-25}`)
-//! - `rho_lsig0(X) = X^25 + X^14`            (= `X^{32-7} + X^{32-18}`)
-//! - `rho_lsig1(X) = X^15 + X^13`            (= `X^{32-17} + X^{32-19}`)
 //!
-//! The right-shift parts of
+//! The full σ_0/σ_1 expressions
 //! `sigma_0(W) = ROTR(W, 7) ⊕ ROTR(W, 18) ⊕ SHR(W, 3)` and
 //! `sigma_1(W) = ROTR(W, 17) ⊕ ROTR(W, 19) ⊕ SHR(W, 10)`
-//! are carried by the `S_i` / `T_i` splits: `W = T_0 + X^3 · S_0` and
-//! `W = T_1 + X^10 · S_1` (both exact over bit-polynomials), and
-//! `SHR(W, k) = S_i` as polynomials.
+//! are materialized via CPR bit-op virtual columns over `W`: each
+//! `ROTR^c(W)` is `BitOp::Rot(32 − c)` (multiplication by `X^{32-c}
+//! mod (X^32 − 1)` in F_2[X]), and each `SHR(W, k)` is
+//! `BitOp::ShiftR(k)`. Six bit-op virtual columns total; no committed
+//! `S_i` / `T_i` operands.
 //!
 //! ## F_2[X] → Q[X] lifting
 //!
@@ -92,10 +94,11 @@
 //!
 //! **Overflow witnesses are bit-polynomials.** For `rho_Sig0` / `rho_Sig1`
 //! (3 terms each), per-position contribution counting caps the reduced
-//! coefficient at 3, giving overflow `∈ {0, 1}`. For `rho_lsig0` (2 terms)
-//! the reduced coefficient is in `{0, 1, 2}`, plus adding `S_0` (bit) gives
-//! `{0, 1, 2, 3}`, again with overflow `∈ {0, 1}`. See
-//! [`sigma0_overflow`] for the full Sig0 derivation; the others are analogous.
+//! coefficient at 3, giving overflow `∈ {0, 1}`. For σ_0 / σ_1
+//! (`ROT^a(W) + ROT^b(W) + SHIFTR^c(W)`, 3 bit-poly terms), the per-
+//! coefficient sum is in `{0, 1, 2, 3}`, again with overflow `∈ {0, 1}`.
+//! See [`sigma0_overflow`] for the full Sig0 derivation; the others are
+//! analogous.
 //!
 //! ### Soundness caveat
 //!
@@ -161,8 +164,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
-    TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
+    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -258,31 +261,31 @@ pub mod cols {
     // Sigma_1:
     pub const W_E: usize = 8;
     pub const W_SIG1: usize = 9;
-    // sigma_0 (with right-shift decomposition) — shares W_W with sigma_1:
+    // sigma_0 / sigma_1 — shares W_W. The σ_0/σ_1 right-shift
+    // decomposition columns (S_0/T_0/S_1/T_1) are gone: ROT^c(W) and
+    // SHIFTR^c(W) are now CPR bit-op virtual columns over W (declared in
+    // signature()'s `bit_op_specs`), so σ_0/σ_1 reduce to row-local
+    // Q[X] equalities with the `pa_ov_lsig{0,1}` XOR-overflow witnesses
+    // retained.
     pub const W_W: usize = 10;
     pub const W_LSIG0: usize = 11;
-    pub const W_S0: usize = 12;
-    pub const W_T0: usize = 13;
-    // sigma_1 (with right-shift decomposition):
-    pub const W_LSIG1: usize = 14;
-    pub const W_S1: usize = 15;
-    pub const W_T1: usize = 16;
+    pub const W_LSIG1: usize = 12;
     // Register update — Ch is replaced by two AND-operand bit-polys
     // (`u_ef = e ∧ f` and `u_{¬e,g} = ¬e ∧ g`). Maj is still a free
     // witness on this column. See the module doc for the Table 9 split.
-    pub const W_U_EF: usize = 17;
-    pub const W_U_NEG_E_G: usize = 18;
-    pub const W_MAJ: usize = 19;
+    pub const W_U_EF: usize = 13;
+    pub const W_U_NEG_E_G: usize = 14;
+    pub const W_MAJ: usize = 15;
     // Affine-combination materializations for the Table 9 lookups.
     // Each is constrained to equal the corresponding affine expression
     // (gated by S_B_ACTIVE) and is lookup-checked against the
     // `BitPoly { width: 32 }` table.
-    pub const W_B1: usize = 20;
-    pub const W_B2: usize = 21;
-    pub const W_B3: usize = 22;
+    pub const W_B1: usize = 16;
+    pub const W_B2: usize = 17;
+    pub const W_B3: usize = 18;
 
     /// Total number of binary_poly columns.
-    pub const NUM_BIN: usize = 23;
+    pub const NUM_BIN: usize = 19;
     /// Number of public binary_poly columns (prefix).
     pub const NUM_BIN_PUB: usize = 6;
 
@@ -447,38 +450,33 @@ where
             ShiftSpec::new(cols::FLAT_W_MU_A, 3),
             ShiftSpec::new(cols::FLAT_W_MU_E, 3),
         ];
-        // BitPoly { width: 32 } lookups for the Ch operand witnesses
-        // and the three Table 9 affine-combination materializations.
-        // Mu_{W,a,e} are int range-check candidates (Word{width:2/3});
-        // not declared here because the protocol's lookup pipeline
-        // currently only handles BitPoly tables.
-        let bitpoly32 = LookupTableType::BitPoly {
-            width: 32,
-            chunk_width: None,
-        };
-        let lookup_specs: Vec<LookupColumnSpec> = vec![
-            LookupColumnSpec {
-                column_index: cols::W_U_EF,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_U_NEG_E_G,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B1,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B2,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B3,
-                table_type: bitpoly32,
-            },
+        // No explicit `LookupColumnSpec`s. Booleanity already enforces
+        // the bit-poly property on every witness binary_poly column for
+        // free, which is precisely what a `BitPoly { width: 32 }`
+        // lookup would assert — making explicit lookup specs redundant.
+        // Mu_{W,a,e} are int range-check candidates (Word{width:2/3})
+        // and would need a different table type, but the protocol's
+        // lookup pipeline currently only handles BitPoly.
+        let lookup_specs: Vec<LookupColumnSpec> = Vec::new();
+        // Bit-op virtual columns over W for σ_0/σ_1. `Rot(c)` on the
+        // 32-coefficient F_2[X] cell is multiplication by `X^c mod
+        // (X^32 − 1)`, which equals `rotate_left(c)` on the underlying
+        // u32 — equivalently `ROTR^{32-c}`. So:
+        //   ROTR^7  on W = Rot(25)        ROTR^17 on W = Rot(15)
+        //   ROTR^18 on W = Rot(14)        ROTR^19 on W = Rot(13)
+        //   SHR^3   on W = ShiftR(3)      SHR^10  on W = ShiftR(10)
+        // The σ_0/σ_1 constraints (C4/C6) consume these via
+        // `down.bit_op` and the (X^32 − 1) modular lift goes away:
+        // ROT/SHIFTR virtual columns are mod X^32 by construction.
+        let bit_op_specs: Vec<BitOpSpec> = vec![
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)),    // σ_0: ROTR^7
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)),    // σ_0: ROTR^18
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)),  // σ_0: SHR^3
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
         ];
-        UairSignature::new(total, public, shifts, lookup_specs, vec![])
+        UairSignature::new(total, public, shifts, lookup_specs, bit_op_specs)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -510,11 +508,7 @@ where
         let w_sig1 = &bp[cols::W_SIG1];
         let w_big_w = &bp[cols::W_W];
         let w_lsig0 = &bp[cols::W_LSIG0];
-        let w_s0 = &bp[cols::W_S0];
-        let w_t0 = &bp[cols::W_T0];
         let w_lsig1 = &bp[cols::W_LSIG1];
-        let w_s1 = &bp[cols::W_S1];
-        let w_t1 = &bp[cols::W_T1];
 
         let s_init_prefix = &sel[cols::S_INIT_PREFIX];
         // s_feedforward is retained in the public layout for the future
@@ -561,6 +555,16 @@ where
         let down_w_mu_a_sh3 = &down.int[2];
         let down_w_mu_e_sh3 = &down.int[3];
 
+        // Bit-op virtual columns over W (sorted by `(source_col,
+        // op_kind, c)` inside `UairSignature::new` — Rot < ShiftR, then
+        // by amount ascending). Six slots, all with `source_col = W_W`.
+        let down_w_rot13 = &down.bit_op[0]; // σ_1: ROTR^19
+        let down_w_rot14 = &down.bit_op[1]; // σ_0: ROTR^18
+        let down_w_rot15 = &down.bit_op[2]; // σ_1: ROTR^17
+        let down_w_rot25 = &down.bit_op[3]; // σ_0: ROTR^7
+        let down_w_shr3 = &down.bit_op[4]; //  σ_0: SHR^3
+        let down_w_shr10 = &down.bit_op[5]; // σ_1: SHR^10
+
         // Ideals.
         let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
         let ideal_rot_x2 = ideal_from_ref(&Sha256Ideal::<R>::RotX2(
@@ -570,11 +574,7 @@ where
         // Scalars.
         let rho_sig0 = rho_poly::<R>(&[10, 19, 30]); // X^30 + X^19 + X^10
         let rho_sig1 = rho_poly::<R>(&[7, 21, 26]); //  X^26 + X^21 + X^7
-        let rho_lsig0 = rho_poly::<R>(&[14, 25]); //    X^25 + X^14
-        let rho_lsig1 = rho_poly::<R>(&[13, 15]); //    X^15 + X^13
         let two_scalar = const_scalar::<R>(R::ONE + R::ONE);
-        let x_pow_3 = mono_x_pow::<R>(3);
-        let x_pow_10 = mono_x_pow::<R>(10);
         // `two_times_x31` evaluates to 2 · 2^31 = 2^32 at X = 2 — a
         // representable proxy for the `X^32 · mu_W` carry term from the spec.
         let two_times_x31 = {
@@ -605,34 +605,23 @@ where
             &ideal_rot_xw1,
         );
 
-        // Constraint 3: sigma_0 right-shift decomposition (exact Z[X] equality,
-        // not an ideal check — both sides are bit-polynomials).
-        //   W_hat − T_0 − X^3 · S_0 == 0
+        // Constraint 4 (was σ_0 (X^32 − 1) ideal-lift): row-local Q[X]
+        // equality with bit-XOR overflow correction. The σ_0/σ_1 right-
+        // shift decomposition columns S_0/T_0 are gone — ROT/SHIFTR
+        // virtual columns are mod X^32 by construction so the modular
+        // lift goes away. `pa_ov_lsig0` still absorbs the F_2[X] → Q[X]
+        // coefficient sum {0..3} → bit XOR.
+        //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · pa_ov_lsig0 == 0
         b.assert_zero(
-            w_big_w.clone() - w_t0 - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow"),
-        );
-
-        // Constraint 4: sigma_0 rotation (with the shift piece pre-split into
-        // S_0), Q[X]-lifted.
-        //   (W_hat · rho_lsig0 + S_0 − lsig0_hat − 2 · ov_lsig0) ∈ (X^32 − 1)
-        b.assert_in_ideal(
-            mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
+            down_w_rot25.clone() + down_w_rot14 + down_w_shr3 - w_lsig0
                 - &mbs(pa_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
-            &ideal_rot_xw1,
         );
 
-        // Constraint 5: sigma_1 right-shift decomposition.
-        //   W_hat − T_1 − X^10 · S_1 == 0
+        // Constraint 6 (was σ_1 (X^32 − 1) ideal-lift): σ_1 analogue of C4.
+        //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · pa_ov_lsig1 == 0
         b.assert_zero(
-            w_big_w.clone() - w_t1 - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow"),
-        );
-
-        // Constraint 6: sigma_1 rotation, Q[X]-lifted.
-        //   (W_hat · rho_lsig1 + S_1 − lsig1_hat − 2 · ov_lsig1) ∈ (X^32 − 1)
-        b.assert_in_ideal(
-            mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
+            down_w_rot15.clone() + down_w_rot13 + down_w_shr10 - w_lsig1
                 - &mbs(pa_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
-            &ideal_rot_xw1,
         );
 
         // Constraint 7: Message-schedule modular sum, anchored at k = t − 16.
@@ -836,13 +825,6 @@ fn rho_poly<R: ConstSemiring>(positions: &[usize]) -> DensePolynomial<R, 32> {
     DensePolynomial::<R, 32>::new(coeffs)
 }
 
-/// Build the monomial `X^k` as a `DensePolynomial<R, 32>`.
-fn mono_x_pow<R: ConstSemiring>(k: usize) -> DensePolynomial<R, 32> {
-    let mut coeffs = [R::ZERO; 32];
-    coeffs[k] = R::ONE;
-    DensePolynomial::<R, 32>::new(coeffs)
-}
-
 /// Build the constant-polynomial `c` as a `DensePolynomial<R, 32>`.
 fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
     let mut coeffs = [R::ZERO; 32];
@@ -926,7 +908,7 @@ fn rotation_overflow(
     for k in 32..64 {
         reduced[k - 32] += prod[k];
     }
-    // Add the optional S_0 contribution.
+    // Add the optional bit-poly addend (e.g. SHR^3(W) for lsig0).
     for k in 0..32 {
         reduced[k] += (s0_bits >> k) & 1;
     }
@@ -967,16 +949,20 @@ fn sigma1_overflow(e_val: u32, sigma_val: u32) -> u32 {
 }
 
 fn lsig0_overflow(w_val: u32, lsig0_val: u32) -> u32 {
-    // S_0 = W >> 3 (high 29 bits shifted down). T_0 is unused here (it
-    // only appears in the decomposition constraint).
-    let s0 = w_val >> 3;
-    rotation_overflow(w_val, &[14, 25], s0, lsig0_val)
+    // The σ_0 constraint is now `ROT^25(W) + ROT^14(W) + SHR^3(W) −
+    // lsig0 − 2·ov_lsig0 == 0` (row-local Q[X], no committed S_0/T_0).
+    // `rotation_overflow` reduces `W·(X^25 + X^14)` modulo (X^32 − 1)
+    // — i.e. ROT^25(W) + ROT^14(W) — and adds `W >> 3` (= SHR^3(W)),
+    // matching the new constraint coefficient-wise.
+    let shr3 = w_val >> 3;
+    rotation_overflow(w_val, &[14, 25], shr3, lsig0_val)
 }
 
 fn lsig1_overflow(w_val: u32, lsig1_val: u32) -> u32 {
-    // S_1 = W >> 10 (high 22 bits shifted down).
-    let s1 = w_val >> 10;
-    rotation_overflow(w_val, &[13, 15], s1, lsig1_val)
+    // σ_1 analogue: ROT^15(W) + ROT^13(W) + SHR^10(W) − lsig1 −
+    // 2·ov_lsig1 == 0.
+    let shr10 = w_val >> 10;
+    rotation_overflow(w_val, &[13, 15], shr10, lsig1_val)
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,11 +1232,12 @@ where
             .map(|(&w, &l)| lsig1_overflow(w, l))
             .collect();
 
-        // Right-shift decomposition: S_i = W >> k, T_i = W & ((1<<k) - 1).
-        let s0_vals: Vec<u32> = w_vals.iter().map(|&w| w >> 3).collect();
-        let t0_vals: Vec<u32> = w_vals.iter().map(|&w| w & 0b111).collect();
-        let s1_vals: Vec<u32> = w_vals.iter().map(|&w| w >> 10).collect();
-        let t1_vals: Vec<u32> = w_vals.iter().map(|&w| w & 0x3FF).collect();
+        // The σ_0/σ_1 right-shift decomposition columns S_i / T_i are
+        // gone — their role (carrying SHR(W, k) for the F_2[X] sum) is
+        // taken over by the `BitOp::ShiftR(k)` virtual columns over W.
+        // `lsig0_overflow` / `lsig1_overflow` already compute the
+        // matching `pa_ov_lsig{0,1}` per-bit values for the new
+        // constraint (the algebraic identity is unchanged).
 
         let to_bits = |v: &[u32]| -> Vec<BinaryPoly<32>> {
             v.iter().copied().map(BinaryPoly::<32>::from).collect()
@@ -1261,7 +1248,7 @@ where
         > { col.into_iter().collect() };
 
         // Layout: 6 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
-        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1) + 17 witness cols.
+        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1) + 13 witness cols.
         // pa_a / pa_e were populated above with H_i values at init-prefix
         // rows (for compression i and the H_N output block) AND at junction
         // rows (where the feed-forward constraint reads the prior H_i).
@@ -1278,11 +1265,7 @@ where
             to_bin_mle(to_bits(&sig1_vals)),
             to_bin_mle(to_bits(&w_vals)),
             to_bin_mle(to_bits(&lsig0_vals)),
-            to_bin_mle(to_bits(&s0_vals)),
-            to_bin_mle(to_bits(&t0_vals)),
             to_bin_mle(to_bits(&lsig1_vals)),
-            to_bin_mle(to_bits(&s1_vals)),
-            to_bin_mle(to_bits(&t1_vals)),
             to_bin_mle(to_bits(&u_ef_vals)),
             to_bin_mle(to_bits(&u_neg_e_g_vals)),
             to_bin_mle(to_bits(&maj_vals)),

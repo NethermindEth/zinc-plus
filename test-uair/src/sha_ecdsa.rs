@@ -72,8 +72,8 @@ use zinc_poly::{
     univariate::dense::DensePolynomial,
 };
 use zinc_uair::{
-    ConstraintBuilder, LookupColumnSpec, LookupTableType, PublicColumnLayout, ShiftSpec,
-    TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
+    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
     ideal::rotation::RotationIdeal,
 };
 
@@ -109,20 +109,16 @@ pub mod cols {
     pub const W_SIG1: usize = 9;
     pub const W_W: usize = 10;
     pub const W_LSIG0: usize = 11;
-    pub const W_S0: usize = 12;
-    pub const W_T0: usize = 13;
-    pub const W_LSIG1: usize = 14;
-    pub const W_S1: usize = 15;
-    pub const W_T1: usize = 16;
+    pub const W_LSIG1: usize = 12;
     // Ch is split into two AND-operand bit-polys (see sha256.rs doc).
-    pub const W_U_EF: usize = 17;
-    pub const W_U_NEG_E_G: usize = 18;
-    pub const W_MAJ: usize = 19;
+    pub const W_U_EF: usize = 13;
+    pub const W_U_NEG_E_G: usize = 14;
+    pub const W_MAJ: usize = 15;
     // Table 9 affine-combination materializations.
-    pub const W_B1: usize = 20;
-    pub const W_B2: usize = 21;
-    pub const W_B3: usize = 22;
-    pub const NUM_BIN: usize = 23;
+    pub const W_B1: usize = 16;
+    pub const W_B2: usize = 17;
+    pub const W_B3: usize = 18;
+    pub const NUM_BIN: usize = 19;
     pub const NUM_BIN_PUB: usize = 6;
 
     // ===== int section =====
@@ -257,37 +253,24 @@ where
             ShiftSpec::new(cols::FLAT_ECDSA_W_Z, 1),
         ];
 
-        // BitPoly { width: 32 } lookups for the Ch operand witnesses
-        // and the three Table 9 affine-combination materializations
-        // — same set as the standalone SHA UAIR.
-        let bitpoly32 = LookupTableType::BitPoly {
-            width: 32,
-            chunk_width: None,
-        };
-        let lookup_specs: Vec<LookupColumnSpec> = vec![
-            LookupColumnSpec {
-                column_index: cols::W_U_EF,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_U_NEG_E_G,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B1,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B2,
-                table_type: bitpoly32.clone(),
-            },
-            LookupColumnSpec {
-                column_index: cols::W_B3,
-                table_type: bitpoly32,
-            },
+        // No explicit lookup specs — booleanity covers all witness
+        // binary_poly columns for free. See sha256.rs for the
+        // discussion.
+        let lookup_specs: Vec<LookupColumnSpec> = Vec::new();
+        // Bit-op virtual columns over W for σ_0/σ_1. Mirrors the SHA
+        // standalone UAIR — see `sha256::Sha256CompressionSliceUair::signature`
+        // for the full mapping (`Rot(c)` ≡ `ROTR^{32-c}` ≡ multiplication
+        // by `X^c mod (X^32 − 1)`). All six specs target FLAT_W_W.
+        let bit_op_specs: Vec<BitOpSpec> = vec![
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)),    // σ_0: ROTR^7
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)),    // σ_0: ROTR^18
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)),  // σ_0: SHR^3
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
         ];
 
-        UairSignature::new(total, public, shifts, lookup_specs, vec![])
+        UairSignature::new(total, public, shifts, lookup_specs, bit_op_specs)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
@@ -322,11 +305,7 @@ where
         let w_sig1 = &bp[cols::W_SIG1];
         let w_big_w = &bp[cols::W_W];
         let w_lsig0 = &bp[cols::W_LSIG0];
-        let w_s0 = &bp[cols::W_S0];
-        let w_t0 = &bp[cols::W_T0];
         let w_lsig1 = &bp[cols::W_LSIG1];
-        let w_s1 = &bp[cols::W_S1];
-        let w_t1 = &bp[cols::W_T1];
 
         let sha_s_init_prefix = &int[cols::SHA_S_INIT_PREFIX];
         // sha_s_feedforward is retained in the public layout for the
@@ -375,6 +354,17 @@ where
         let down_ecdsa_y_sh1 = &down.int[5];
         let down_ecdsa_z_sh1 = &down.int[6];
 
+        // Bit-op virtual columns over W (sorted by `(source_col,
+        // op_kind, c)` inside `UairSignature::new`). Six slots, all
+        // with `source_col = W_W`. See `sha256.rs` for the mapping
+        // between Rot/ShiftR amounts and SHA-256 ROTR/SHR.
+        let down_w_rot13 = &down.bit_op[0]; // σ_1: ROTR^19
+        let down_w_rot14 = &down.bit_op[1]; // σ_0: ROTR^18
+        let down_w_rot15 = &down.bit_op[2]; // σ_1: ROTR^17
+        let down_w_rot25 = &down.bit_op[3]; // σ_0: ROTR^7
+        let down_w_shr3 = &down.bit_op[4]; //  σ_0: SHR^3
+        let down_w_shr10 = &down.bit_op[5]; // σ_1: SHR^10
+
         let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
         let ideal_rot_x2 = ideal_from_ref(&Sha256Ideal::<R>::RotX2(RotationIdeal::new(
             R::ONE + R::ONE,
@@ -382,11 +372,7 @@ where
 
         let rho_sig0 = rho_poly::<R>(&[10, 19, 30]);
         let rho_sig1 = rho_poly::<R>(&[7, 21, 26]);
-        let rho_lsig0 = rho_poly::<R>(&[14, 25]);
-        let rho_lsig1 = rho_poly::<R>(&[13, 15]);
         let two_scalar_sha = const_scalar::<R>(R::ONE + R::ONE);
-        let x_pow_3 = mono_x_pow::<R>(3);
-        let x_pow_10 = mono_x_pow::<R>(10);
         let two_times_x31 = {
             let mut coeffs = [R::ZERO; 32];
             coeffs[31] = R::ONE + R::ONE;
@@ -407,28 +393,21 @@ where
             &ideal_rot_xw1,
         );
 
-        // C3: sigma_0 right-shift decomposition
+        // C4 (was σ_0 (X^32 − 1) ideal-lift): row-local Q[X] equality
+        // with bit-XOR overflow correction. See sha256.rs for the
+        // derivation. `pa_ov_lsig0` retained — only the modular lift
+        // and the C3/C5 right-shift decompositions go away.
+        //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · pa_ov_lsig0 == 0
         b.assert_zero(
-            w_big_w.clone() - w_t0 - &mbs(w_s0, &x_pow_3).expect("X^3 · S_0 overflow"),
-        );
-
-        // C4: sigma_0 rotation
-        b.assert_in_ideal(
-            mbs(w_big_w, &rho_lsig0).expect("W · rho_lsig0 overflow") + w_s0 - w_lsig0
+            down_w_rot25.clone() + down_w_rot14 + down_w_shr3 - w_lsig0
                 - &mbs(pa_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
-            &ideal_rot_xw1,
         );
 
-        // C5: sigma_1 right-shift decomposition
+        // C6 (was σ_1 (X^32 − 1) ideal-lift): σ_1 analogue of C4.
+        //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · pa_ov_lsig1 == 0
         b.assert_zero(
-            w_big_w.clone() - w_t1 - &mbs(w_s1, &x_pow_10).expect("X^10 · S_1 overflow"),
-        );
-
-        // C6: sigma_1 rotation
-        b.assert_in_ideal(
-            mbs(w_big_w, &rho_lsig1).expect("W · rho_lsig1 overflow") + w_s1 - w_lsig1
+            down_w_rot15.clone() + down_w_rot13 + down_w_shr10 - w_lsig1
                 - &mbs(pa_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
-            &ideal_rot_xw1,
         );
 
         // C7: Message-schedule modular sum.
@@ -672,12 +651,6 @@ fn rho_poly<R: ConstSemiring>(positions: &[usize]) -> DensePolynomial<R, 32> {
     DensePolynomial::<R, 32>::new(coeffs)
 }
 
-fn mono_x_pow<R: ConstSemiring>(k: usize) -> DensePolynomial<R, 32> {
-    let mut coeffs = [R::ZERO; 32];
-    coeffs[k] = R::ONE;
-    DensePolynomial::<R, 32>::new(coeffs)
-}
-
 fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
     let mut coeffs = [R::ZERO; 32];
     coeffs[0] = c;
@@ -772,20 +745,22 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 14 SHA + 11 ECDSA = 25 constraints. SHA went from 13 to
-    /// 14 because the chained-compressions rewrite split the 3 boundary
-    /// constraints (init-a, final-a, final-e) into 4 (init-prefix-a,
-    /// init-prefix-e, feed-forward-a, feed-forward-e). Max degree 6
-    /// from the ECDSA Y output-selection (and D4's `12·X³·Y²` term).
+    /// Sanity: 13 SHA + 11 ECDSA = 24 constraints (after the σ_0/σ_1
+    /// bit-op virtual-column rewrite removed C3 and C5, and the chained-
+    /// compressions rewrite split the 3 boundary constraints
+    /// (init-a, final-a, final-e) into 4 (init-prefix-a, init-prefix-e,
+    /// feed-forward-a, feed-forward-e)). Max degree 6 from the ECDSA Y
+    /// output-selection constraint (and from D4's `12·X³·Y²` term).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 25);
+        assert_eq!(count_constraints::<U>(), 24);
         assert_eq!(count_max_degree::<U>(), 6);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-6 (ECDSA Y output sel / D4),
         // some deg-2 (boundaries + chaining + B_i materializations),
-        // some deg-1 (SHA C1-C6 ideal checks).
+        // some deg-1 (SHA C1, C2, C4, C6 — including the new row-local
+        // σ_0/σ_1 equalities).
         assert!(degrees.iter().any(|&d| d == 6), "expected deg-6 from ECDSA");
         assert!(degrees.iter().filter(|&&d| d == 2).count() >= 6, "expected ≥6 deg-2");
     }
