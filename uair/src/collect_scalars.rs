@@ -14,8 +14,11 @@ pub fn collect_scalars<U: Uair>() -> HashSet<U::Scalar> {
     let sig = U::signature();
     let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
     let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
-    let down_row =
-        TraceRow::from_slice_with_layout(&down_dummy, sig.down_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+        &down_dummy,
+        sig.down_cols().as_column_layout(),
+        sig.bit_op_down_count(),
+    );
 
     U::constrain_general(
         &mut DoNothingBuilder,

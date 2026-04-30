@@ -120,6 +120,9 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
     ic_eval_point: Vec<F>,
 
     // New
+    /// ψ_α projection element (used by Step 4 CPR — including bit-op
+    /// virtual MLE materialization).
+    projecting_element_f: F,
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: HashMap<U::Scalar, F>,
 }
@@ -132,9 +135,14 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
-    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 
     // New
+    /// ψ_α projection element (used by Step 5 mp_eval — including
+    /// bit-op virtual MLE materialization).
+    projecting_element_f: F,
+    /// The ψ_α-projected trace MLEs (built in Step 3).
+    /// mp_eval reuses these as its base sources at `r*`.
+    projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -479,6 +487,7 @@ impl_with_type_bounds!(ProverIdealChecked
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_eval_point: self.ic_eval_point,
+            projecting_element_f,
             projected_trace_f,
             projected_scalars_f,
         })
@@ -506,7 +515,7 @@ impl_with_type_bounds!(ProverEvalProjected
         // dishonest prover could violate them undetected).
         let max_degree = count_max_degree::<U>();
 
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.projected_trace_f.clone(),
             &self.ic_eval_point,
@@ -515,6 +524,8 @@ impl_with_type_bounds!(ProverEvalProjected
             self.base.num_vars,
             max_degree,
             &self.field_cfg,
+            &self.base.trace.binary_poly,
+            &self.projecting_element_f,
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
@@ -580,6 +591,7 @@ impl_with_type_bounds!(ProverEvalProjected
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
+            projecting_element_f: self.projecting_element_f,
             projected_trace_f: self.projected_trace_f,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
@@ -591,20 +603,54 @@ impl_with_type_bounds!(ProverEvalProjected
 
 impl_with_type_bounds!(ProverSumchecked
 {
-    /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
-    /// `down_evals` at `r'` into a single evaluation point `r_0`.
-    /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 6
+    /// Step 5: Multi-point evaluation sumcheck under ψ_α. Reduces all CPR
+    /// claims at `r*` (up evals + row-shift down evals + bit-op virtual
+    /// down evals) to a single point `r_0`.
+    ///
+    /// Bit-op virtual columns are folded into mp_eval as additional
+    /// **sources** (extending `trace_mles` past `num_total_cols`) with
+    /// their CPR-emitted `bit_op_down_evals` as the corresponding `up`
+    /// claims at `r*`. The mp_eval shift list is unchanged: existing
+    /// row-shifts continue to reference base trace columns, and bit-op
+    /// virtual columns themselves carry no row shift in any current UAIR.
+    /// At `r_0` mp_eval reduces each bit-op slot to `MLE[bit_op_src](r_0)`,
+    /// which the verifier checks in Step 6 by applying the bit-op locally
+    /// to the source's `lifted_eval` (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let sig = &self.base.uair_signature;
+
+        // Materialize the bit-op virtual MLEs (under ψ_α) — same shape
+        // as the CPR group already builds, but mp_eval needs its own
+        // copies since the CPR ones get consumed by the sumcheck.
+        let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+            &self.base.trace.binary_poly,
+            sig.bit_op_specs(),
+            sig.total_cols().num_binary_poly_cols(),
+            &self.projecting_element_f,
+            self.base.num_vars,
+            &self.field_cfg,
+        );
+
+        // Extended source list: base trace MLEs followed by bit-op
+        // virtual MLEs.
+        let mut sources = self.projected_trace_f.clone();
+        sources.extend(bit_op_mles);
+
+        // Extended `up` claims at r*: CPR's up_evals followed by
+        // bit_op_down_evals (which CPR emitted as the values of the
+        // bit-op virtual columns at r*).
+        let mut up_evals = self.cpr_proof.up_evals.clone();
+        up_evals.extend(self.cpr_proof.bit_op_down_evals.iter().cloned());
+
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.projected_trace_f,
+            &sources,
             &self.cpr_eval_point,
-            &self.cpr_proof.up_evals,
+            &up_evals,
             &self.cpr_proof.down_evals,
-            self.base.uair_signature.shifts(),
+            sig.shifts(),
             &self.field_cfg,
         )?;
 
@@ -1000,7 +1046,7 @@ where
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = count_max_degree::<U>();
-    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
         &ic_eval_point,
@@ -1009,6 +1055,8 @@ where
         num_vars,
         max_degree,
         &field_cfg,
+        &trace.binary_poly,
+        &projecting_element_f,
     )?;
 
     // Witness binary_poly columns only — public ones are known to the
@@ -1056,12 +1104,25 @@ where
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
-    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    // ── Step 5: Multi-point evaluation sumcheck (extended sources) ──────
+    let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
+    let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+        &trace.binary_poly,
+        uair_signature.bit_op_specs(),
+        uair_signature.total_cols().num_binary_poly_cols(),
+        &projecting_element_f,
+        num_vars,
+        &field_cfg,
+    );
+    let mut sources = projected_trace_f.clone();
+    sources.extend(bit_op_mles);
+    let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
     let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
-        &projected_trace_f,
-        &cpr_prover_state.evaluation_point,
-        &cpr_proof.up_evals,
+        &sources,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
         &field_cfg,
@@ -1282,7 +1343,7 @@ where
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = count_max_degree::<U>();
-    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
         &ic_eval_point,
@@ -1291,6 +1352,8 @@ where
         num_vars,
         max_degree,
         &field_cfg,
+        &trace.binary_poly,
+        &projecting_element_f,
     )?;
 
     // Witness binary_poly columns only — public ones are known to the
@@ -1338,12 +1401,25 @@ where
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
-    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    // ── Step 5: Multi-point evaluation sumcheck (extended sources) ──────
+    let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
+    let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+        &trace.binary_poly,
+        uair_signature.bit_op_specs(),
+        uair_signature.total_cols().num_binary_poly_cols(),
+        &projecting_element_f,
+        num_vars,
+        &field_cfg,
+    );
+    let mut sources = projected_trace_f.clone();
+    sources.extend(bit_op_mles);
+    let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
     let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
-        &projected_trace_f,
-        &cpr_prover_state.evaluation_point,
-        &cpr_proof.up_evals,
+        &sources,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
         &field_cfg,

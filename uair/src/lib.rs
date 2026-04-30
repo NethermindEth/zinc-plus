@@ -76,6 +76,78 @@ impl ShiftSpec {
 }
 
 // ---------------------------------------------------------------------------
+// BitOpSpec
+// ---------------------------------------------------------------------------
+
+/// Bit-wise operation applied to the 32-coefficient F_2[X] interpretation
+/// of a binary-poly cell. Both variants require `c < 32`.
+///
+/// `Rot(c)`: cyclic rotation — `coeffs_out[(i + c) mod 32] = coeffs_in[i]`.
+/// `ShiftR(c)`: bitwise right shift — `coeffs_out[i] = coeffs_in[i + c]`
+/// for `i < 32 - c`, zero otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BitOp {
+    Rot(u32),
+    ShiftR(u32),
+}
+
+impl BitOp {
+    /// Construct `Rot(c)` with `c < 32`.
+    pub fn rot(c: u32) -> Self {
+        assert!(c < 32, "BitOp::rot: c must be < 32, got {c}");
+        BitOp::Rot(c)
+    }
+
+    /// Construct `ShiftR(c)` with `c < 32`.
+    pub fn shift_r(c: u32) -> Self {
+        assert!(c < 32, "BitOp::shift_r: c must be < 32, got {c}");
+        BitOp::ShiftR(c)
+    }
+
+    /// Sort key: discriminate on op kind first (Rot < ShiftR), then on
+    /// rotation/shift amount, so that `BitOpSpec` sort is deterministic.
+    fn sort_key(&self) -> (u8, u32) {
+        match self {
+            BitOp::Rot(c) => (0, *c),
+            BitOp::ShiftR(c) => (1, *c),
+        }
+    }
+}
+
+/// Specifies a bit-op virtual column.
+/// `BitOpSpec { source_col, op }` means
+/// "virtual column whose row i is `op` applied bitwise to the cell of
+/// `source_col` at row i" (treating each cell as a 32-coefficient F_2[X]
+/// polynomial).
+///
+/// Bit-op virtual columns are MLE-virtual columns referenced by
+/// `constrain_general` like row-shift virtual columns, but they reduce
+/// differently downstream — they never enter multipoint eval; their
+/// consistency is fully discharged in Step 4.5 by checking that the
+/// CPR-emitted F-eval matches `ψ(op(lifted_eval[source_col]))`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BitOpSpec {
+    /// Index of the source column in the flattened trace.
+    source_col: usize,
+    /// Bit-op applied to each cell of the source column.
+    op: BitOp,
+}
+
+impl BitOpSpec {
+    pub fn new(source_col: usize, op: BitOp) -> Self {
+        Self { source_col, op }
+    }
+
+    pub fn source_col(&self) -> usize {
+        self.source_col
+    }
+
+    pub fn op(&self) -> BitOp {
+        self.op
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Column layout types
 // ---------------------------------------------------------------------------
 
@@ -187,15 +259,37 @@ pub struct UairSignature {
     /// Lookup specifications: which trace columns are constrained against
     /// which table types.
     lookup_specs: Vec<LookupColumnSpec>,
+    /// Witness binary_poly column indices (relative to the witness section
+    /// — i.e., 0-based within `binary_poly[num_pub_bin..]`) that the UAIR
+    /// asks the protocol to skip from the algebraic booleanity sumcheck.
+    /// Use this for columns whose bit-poly nature is already pinned by
+    /// other constraints (e.g. shift-decomposition splits where the
+    /// equality `W = T + X^k · S` plus booleanity on `W` makes a
+    /// separate booleanity check on `T` and `S` redundant). Sorted and
+    /// dedup'd by the constructor; entries must be valid witness
+    /// binary_poly indices.
+    booleanity_skip_indices: Vec<usize>,
+    /// Bit-op virtual column specifications. Sorted by
+    /// `(source_col, op_kind, c)` for determinism. Bit-op virtual
+    /// columns are MLE-virtual columns referenced by
+    /// `constrain_general` via `down.bit_op`; they never enter
+    /// multipoint eval — their consistency is fully discharged in
+    /// Step 4.5.
+    bit_op_specs: Vec<BitOpSpec>,
 }
 
 impl UairSignature {
-    /// Create a new signature, sorting `shifts` by `source_col`.
+    /// Create a new signature, sorting `shifts` by `source_col` and
+    /// `bit_op_specs` by `(source_col, op_kind, c)`. No booleanity
+    /// skipping by default — every witness binary_poly column is
+    /// included in the booleanity sumcheck. Use
+    /// [`UairSignature::with_booleanity_skip_indices`] to opt out.
     pub fn new(
         total_cols: TotalColumnLayout,
         public_cols: PublicColumnLayout,
         mut shifts: Vec<ShiftSpec>,
         lookup_specs: Vec<LookupColumnSpec>,
+        mut bit_op_specs: Vec<BitOpSpec>,
     ) -> Self {
         for (name, pub_n, tot_n) in [
             (
@@ -226,8 +320,18 @@ impl UairSignature {
                 num_cols,
             );
         }
+        for spec in &bit_op_specs {
+            assert!(
+                spec.source_col() < num_cols,
+                "BitOpSpec source_col {} out of range (total_cols = {}). \
+                 source_col uses flat indexing: binary_poly || arbitrary_poly || int.",
+                spec.source_col(),
+                num_cols,
+            );
+        }
 
         shifts.sort_by_key(|spec| spec.source_col());
+        bit_op_specs.sort_by_key(|spec| (spec.source_col(), spec.op().sort_key()));
         let down_cols = Self::compute_down_layout(&total_cols, &shifts);
         let witness_cols = WitnessColumnLayout::new(
             sub!(
@@ -248,6 +352,8 @@ impl UairSignature {
             down_cols,
             witness_cols,
             lookup_specs,
+            booleanity_skip_indices: Vec::new(),
+            bit_op_specs,
         }
     }
 
@@ -298,12 +404,27 @@ impl UairSignature {
         &self.down_cols
     }
 
+    /// Bit-op virtual column specifications (sorted, deterministic).
+    pub fn bit_op_specs(&self) -> &[BitOpSpec] {
+        &self.bit_op_specs
+    }
+
+    /// Number of bit-op virtual columns (= length of the trailing
+    /// `bit_op` slice in the down trace row).
+    pub fn bit_op_down_count(&self) -> usize {
+        self.bit_op_specs.len()
+    }
+
     /// Build correctly-sized dummy up and down `TraceRow`s for static
     /// analysis (constraint counting, degree counting, scalar/ideal
     /// collection).
+    ///
+    /// The down dummy length includes both the row-shift virtual columns
+    /// and the bit-op virtual columns: layout is
+    /// `[binary_poly... | arbitrary_poly... | int... | bit_op...]`.
     pub fn dummy_rows<T: Clone>(&self, val: T) -> (Vec<T>, Vec<T>) {
         let up_size = self.total_cols.cols();
-        let down_size = self.down_cols.cols();
+        let down_size = add!(self.down_cols.cols(), self.bit_op_specs.len());
         (vec![val.clone(); up_size], vec![val; down_size])
     }
 }
@@ -353,17 +474,25 @@ impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff,
 /// A view on a row of the trace.
 /// Contains references to cells of the trace
 /// of all types lying in the same trace row.
+///
+/// On the up row, `bit_op` is always empty. On the down row it carries
+/// the bit-op virtual columns (one per `BitOpSpec` declared by the UAIR);
+/// when the UAIR declares no bit-ops, `bit_op` is empty there too.
 #[derive(Clone, Copy)]
 pub struct TraceRow<'a, Expr> {
     pub binary_poly: &'a [Expr],
     pub arbitrary_poly: &'a [Expr],
     pub int: &'a [Expr],
+    pub bit_op: &'a [Expr],
 }
 
 impl<'a, Expr> TraceRow<'a, Expr> {
     /// Given a slice that represents a raw row of the trace,
     /// creates a `TraceRow` from it.
     /// Subdivides the slice according to the given column layout.
+    /// `bit_op` is set to the empty slice — use
+    /// [`Self::from_slice_with_layout_and_bit_op`] to interpret a
+    /// trailing `bit_op_count` slots as bit-op virtual columns.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn from_slice_with_layout(row: &'a [Expr], layout: &ColumnLayout) -> Self {
         let num_binary_poly = layout.num_binary_poly_cols();
@@ -372,6 +501,31 @@ impl<'a, Expr> TraceRow<'a, Expr> {
             binary_poly: &row[0..num_binary_poly],
             arbitrary_poly: &row[num_binary_poly..num_binary_poly + num_arbitrary_poly],
             int: &row[num_binary_poly + num_arbitrary_poly..],
+            bit_op: &[],
+        }
+    }
+
+    /// Like [`Self::from_slice_with_layout`] but interprets the trailing
+    /// `bit_op_count` slots as bit-op virtual columns. The slice layout
+    /// is `[binary_poly... | arbitrary_poly... | int... | bit_op...]`,
+    /// where the first three sections are sized by `layout` and the
+    /// trailing section has `bit_op_count` entries.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn from_slice_with_layout_and_bit_op(
+        row: &'a [Expr],
+        layout: &ColumnLayout,
+        bit_op_count: usize,
+    ) -> Self {
+        let num_binary_poly = layout.num_binary_poly_cols();
+        let num_arbitrary_poly = layout.num_arbitrary_poly_cols();
+        let num_int = layout.num_int_cols();
+        let int_end = num_binary_poly + num_arbitrary_poly + num_int;
+        let bit_op_end = int_end + bit_op_count;
+        Self {
+            binary_poly: &row[0..num_binary_poly],
+            arbitrary_poly: &row[num_binary_poly..num_binary_poly + num_arbitrary_poly],
+            int: &row[num_binary_poly + num_arbitrary_poly..int_end],
+            bit_op: &row[int_end..bit_op_end],
         }
     }
 }

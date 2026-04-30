@@ -21,6 +21,10 @@ pub struct Proof<F: PrimeField> {
     /// alongside the CPR group); empty when no binary_poly columns are
     /// present.
     pub bit_slice_evals: Vec<F>,
+    /// Evaluations of the bit-op virtual (down) MLEs at the shared
+    /// point — one per `BitOpSpec`. Their consistency is verified in
+    /// Step 4.5 against `ψ(op(lifted_eval[source_col]))`.
+    pub bit_op_down_evals: Vec<F>,
 }
 
 impl<F: PrimeField> GenTranscribable for Proof<F>
@@ -32,11 +36,13 @@ where
         let (up_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (bit_op_down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         assert!(bytes.is_empty(), "All bytes should be consumed");
         Self {
             up_evals,
             down_evals,
             bit_slice_evals,
+            bit_op_down_evals,
         }
     }
 
@@ -44,6 +50,7 @@ where
         let buf = self.up_evals.write_transcription_bytes_subset(buf);
         let buf = self.down_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_slice_evals.write_transcription_bytes_subset(buf);
+        let buf = self.bit_op_down_evals.write_transcription_bytes_subset(buf);
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
@@ -55,12 +62,15 @@ where
 {
     fn get_num_bytes(&self) -> usize {
         add!(
-            3 * u32::NUM_BYTES,
+            4 * u32::NUM_BYTES,
             add!(
                 self.up_evals.get_num_bytes(),
                 add!(
                     self.down_evals.get_num_bytes(),
-                    self.bit_slice_evals.get_num_bytes()
+                    add!(
+                        self.bit_slice_evals.get_num_bytes(),
+                        self.bit_op_down_evals.get_num_bytes()
+                    )
                 )
             )
         )
@@ -68,13 +78,14 @@ where
 }
 
 impl<F: PrimeField> Proof<F> {
-    /// Check that `up_evals`, `down_evals`, and `bit_slice_evals` have
-    /// the expected lengths.
+    /// Check that `up_evals`, `down_evals`, `bit_slice_evals`, and
+    /// `bit_op_down_evals` have the expected lengths.
     pub fn validate_evaluation_sizes(
         &self,
         num_cols: usize,
         num_down_cols: usize,
         num_bit_slices: usize,
+        num_bit_ops: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
         if self.up_evals.len() != num_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
@@ -97,6 +108,13 @@ impl<F: PrimeField> Proof<F> {
             });
         }
 
+        if self.bit_op_down_evals.len() != num_bit_ops {
+            return Err(CombinedPolyResolverError::WrongBitOpDownEvalsNumber {
+                got: self.bit_op_down_evals.len(),
+                expected: num_bit_ops,
+            });
+        }
+
         Ok(())
     }
 }
@@ -114,6 +132,9 @@ pub struct CprProverAncillary {
     pub num_cols: usize,
     /// Number of shifted (down) columns.
     pub num_down_cols: usize,
+    /// Number of bit-op virtual (down) columns. Their evaluations at r*
+    /// land in `CprProof::bit_op_down_evals`.
+    pub num_bit_op_cols: usize,
     /// Number of variables — used to index the last challenge.
     pub num_vars: usize,
 }
@@ -143,4 +164,8 @@ pub struct VerifierSubclaim<F: PrimeField> {
     pub down_evals: Vec<F>,
     /// Bit-slice MLE evaluation claims (flat `col*D + bit`).
     pub bit_slice_evals: Vec<F>,
+    /// Bit-op virtual MLE evaluation claims at r* — one per
+    /// `BitOpSpec`. The verifier checks each against
+    /// `ψ(op(lifted_eval[source_col]))` in Step 4.5.
+    pub bit_op_down_evals: Vec<F>,
 }

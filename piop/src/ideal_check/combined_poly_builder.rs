@@ -13,7 +13,7 @@ use zinc_poly::{
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_uair::{
-    ColumnLayout, ConstraintBuilder, TraceRow, Uair,
+    BitOp, ColumnLayout, ConstraintBuilder, TraceRow, Uair,
     degree_counter::{count_constraint_degrees, count_effective_max_degree},
     ideal::ImpossibleIdeal,
 };
@@ -45,12 +45,14 @@ where
 
     let num_rows = trace_matrix.len();
 
+    let bit_op_count = uair_sig.bit_op_down_count();
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_into_iter!(0..num_rows - 1)
             .map(|row_idx| {
                 let up = &trace_matrix[row_idx];
 
-                let down: Vec<DynamicPolynomialF<F>> = uair_sig
+                // Row-shift virtual columns: lifted source value at row+shift.
+                let mut down: Vec<DynamicPolynomialF<F>> = uair_sig
                     .shifts()
                     .iter()
                     .map(|spec| {
@@ -62,12 +64,26 @@ where
                     })
                     .collect();
 
+                // Bit-op virtual columns: apply op (bit permutation on the
+                // 32 coefficients) to the row's source F_q[X] cell. Output
+                // appended after the row-shift down evals — the constraint
+                // builder reads them via `down.bit_op[k]`.
+                for spec in uair_sig.bit_op_specs() {
+                    let src_cell = &trace_matrix[row_idx][spec.source_col()];
+                    let op_cell = match spec.op() {
+                        BitOp::Rot(c) => src_cell.rot_c(c),
+                        BitOp::ShiftR(c) => src_cell.shift_r_c(c),
+                    };
+                    down.push(op_cell);
+                }
+
                 combine_rows_and_get_max_degree::<F, U>(
                     up,
                     &down,
                     num_constraints,
                     projected_scalars,
                     down_layout,
+                    bit_op_count,
                 )
             })
             .collect();
@@ -107,6 +123,7 @@ fn combine_rows_and_get_max_degree<F, U>(
     num_constraints: usize,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
+    bit_op_count: usize,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
     F: PrimeField,
@@ -124,7 +141,7 @@ where
     U::constrain_general(
         &mut constraint_builder,
         TraceRow::from_slice_with_layout(up, U::signature().total_cols().as_column_layout()),
-        TraceRow::from_slice_with_layout(down, down_layout),
+        TraceRow::from_slice_with_layout_and_bit_op(down, down_layout, bit_op_count),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
@@ -301,7 +318,7 @@ where
 
     // Evaluate down (only shifted columns, per-spec shift amount).
     let sorted_shifts = uair_sig.shifts();
-    let down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
+    let mut down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
         .map(|spec| {
             let col = &trace_matrix[spec.source_col()];
             let coeffs: Vec<F> = (0..max_num_coeffs)
@@ -310,6 +327,20 @@ where
             Ok(DynamicPolynomialF::new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
+
+    // Bit-op virtual columns: apply op to the source's already-evaluated
+    // up-eval (`up_evals[source_col]`). MLE[op(col)](point) =
+    // op(MLE[col](point)) for any bit permutation `op`.
+    let bit_op_count = uair_sig.bit_op_down_count();
+    for spec in uair_sig.bit_op_specs() {
+        let src = &up_evals[spec.source_col()];
+        let mut op_eval = match spec.op() {
+            BitOp::Rot(c) => src.rot_c(c),
+            BitOp::ShiftR(c) => src.shift_r_c(c),
+        };
+        op_eval.trim();
+        down_evals.push(op_eval);
+    }
 
     // Apply UAIR constraints to the evaluated trace values
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
@@ -324,7 +355,7 @@ where
     U::constrain_general(
         &mut constraint_builder,
         TraceRow::from_slice_with_layout(&up_evals, uair_sig.total_cols().as_column_layout()),
-        TraceRow::from_slice_with_layout(&down_evals, down_layout),
+        TraceRow::from_slice_with_layout_and_bit_op(&down_evals, down_layout, bit_op_count),
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,

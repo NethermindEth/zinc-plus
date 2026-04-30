@@ -66,6 +66,63 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
             DynamicPolynomialF { coeffs: vec![a] }
         }
     }
+
+    /// Cyclic left rotation of the 32-coefficient interpretation: returns
+    /// the polynomial whose i-th coefficient is the source's
+    /// `((i + 32 - c) mod 32)`-th coefficient — i.e.,
+    /// `coeffs_out[(i + c) mod 32] = coeffs_in[i]`.
+    ///
+    /// Used by `BitOp::Rot(c)` virtual columns; the input is interpreted
+    /// as a 32-coefficient polynomial (zero-padded if shorter; trailing
+    /// coefficients past index 31 are ignored). When the input has no
+    /// coefficients (zero polynomial), returns the zero polynomial
+    /// (empty coefficient vector).
+    ///
+    /// `c` must be `< 32`.
+    pub fn rot_c(&self, c: u32) -> Self {
+        assert!(c < 32, "rot_c: c must be < 32, got {c}");
+        let Some(any) = self.coeffs.first() else {
+            return Self::default();
+        };
+        let cfg = any.cfg();
+        let zero = F::zero_with_cfg(cfg);
+        let mut coeffs = vec![zero; 32];
+        for i in 0..32 {
+            if let Some(v) = self.coeffs.get(i).cloned() {
+                let dst = (i + c as usize) % 32;
+                coeffs[dst] = v;
+            }
+        }
+        Self { coeffs }
+    }
+
+    /// Bitwise right shift on the 32-coefficient interpretation:
+    /// `coeffs_out[i] = coeffs_in[i + c]` for `i < 32 - c`, zero
+    /// otherwise.
+    ///
+    /// Used by `BitOp::ShiftR(c)` virtual columns; the input is
+    /// interpreted as a 32-coefficient polynomial (zero-padded if
+    /// shorter; trailing coefficients past index 31 are ignored).
+    /// When the input has no coefficients (zero polynomial), returns
+    /// the zero polynomial (empty coefficient vector).
+    ///
+    /// `c` must be `< 32`.
+    pub fn shift_r_c(&self, c: u32) -> Self {
+        assert!(c < 32, "shift_r_c: c must be < 32, got {c}");
+        let c = c as usize;
+        let Some(any) = self.coeffs.first() else {
+            return Self::default();
+        };
+        let cfg = any.cfg();
+        let zero = F::zero_with_cfg(cfg);
+        let mut coeffs = vec![zero; 32];
+        for i in 0..(32 - c) {
+            if let Some(v) = self.coeffs.get(i + c).cloned() {
+                coeffs[i] = v;
+            }
+        }
+        Self { coeffs }
+    }
 }
 
 /// Inner product for dynamic polynomials over a prime field.
@@ -802,6 +859,53 @@ mod tests {
     }
 
     #[test]
+    fn rot_c_zero_is_identity() {
+        let field_cfg = test_config();
+        let coeffs: Vec<F> = (0..32)
+            .map(|v| F::from_with_cfg((v as u32 + 1) as u64, &field_cfg))
+            .collect();
+        let p = DynamicPolynomialF::new(coeffs.clone());
+        let q = p.rot_c(0);
+        // rot_c always produces 32 coeffs.
+        for i in 0..32 {
+            assert_eq!(q.coeffs[i], coeffs[i]);
+        }
+    }
+
+    #[test]
+    fn shift_r_c_zero_is_identity() {
+        let field_cfg = test_config();
+        let coeffs: Vec<F> = (0..32)
+            .map(|v| F::from_with_cfg((v as u32 + 1) as u64, &field_cfg))
+            .collect();
+        let p = DynamicPolynomialF::new(coeffs.clone());
+        let q = p.shift_r_c(0);
+        for i in 0..32 {
+            assert_eq!(q.coeffs[i], coeffs[i]);
+        }
+    }
+
+    #[test]
+    fn shift_r_c_zeroes_top() {
+        let field_cfg = test_config();
+        let coeffs: Vec<F> = (0..32)
+            .map(|v| F::from_with_cfg((v as u32 + 1) as u64, &field_cfg))
+            .collect();
+        let p = DynamicPolynomialF::new(coeffs.clone());
+        let c: u32 = 5;
+        let q = p.shift_r_c(c);
+        // Top c coefficients must be zero.
+        let zero = F::zero_with_cfg(&field_cfg);
+        for i in (32 - c as usize)..32 {
+            assert_eq!(q.coeffs[i], zero, "top index {i} should be zero");
+        }
+        // Lower coefficients should equal source[i + c].
+        for i in 0..(32 - c as usize) {
+            assert_eq!(q.coeffs[i], coeffs[i + c as usize]);
+        }
+    }
+
+    #[test]
     fn evaluate_zero_poly() {
         assert_eq!(
             DynamicPolynomialF::<F>::ZERO.evaluate_at_point(&F::one_with_cfg(&test_config())),
@@ -935,6 +1039,26 @@ mod tests {
             reconstructed_trimmed.trim();
 
             prop_assert_eq!(dividend_trimmed, reconstructed_trimmed);
+        }
+
+        #[test]
+        fn rot_c_then_inverse_is_identity(c in 0u32..32) {
+            let cfg = test_config();
+            let coeffs: Vec<F> = (0..32)
+                .map(|v| F::from_with_cfg((v as u32 + 1) as u64, &cfg))
+                .collect();
+            let p = DynamicPolynomialF::new(coeffs.clone());
+            let inv_c = (32 - c) % 32;
+            let round_trip = p.rot_c(c).rot_c(inv_c);
+            // round_trip is always 32-padded; pad p to 32 to compare.
+            let p_padded = DynamicPolynomialF::new(coeffs);
+            for i in 0..32 {
+                let lhs = round_trip.coeffs.get(i).cloned()
+                    .unwrap_or_else(|| F::zero_with_cfg(&cfg));
+                let rhs = p_padded.coeffs.get(i).cloned()
+                    .unwrap_or_else(|| F::zero_with_cfg(&cfg));
+                prop_assert_eq!(lhs, rhs);
+            }
         }
 
         #[test]

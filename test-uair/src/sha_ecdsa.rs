@@ -287,7 +287,7 @@ where
             },
         ];
 
-        UairSignature::new(total, public, shifts, lookup_specs)
+        UairSignature::new(total, public, shifts, lookup_specs, vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(

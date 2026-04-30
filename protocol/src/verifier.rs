@@ -21,7 +21,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair, UairSignature, UairTrace,
+    BitOp, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
@@ -560,16 +560,29 @@ where
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 5: Multi-point evaluation sumcheck.
+    /// Step 5: Multi-point evaluation sumcheck (under ψ_α).
+    ///
+    /// CPR's `up_evals` (one per base trace col) are extended with
+    /// `bit_op_down_evals` (one per `BitOpSpec`), forming the `up`
+    /// claim list mp_eval consumes. The shift list is unchanged.
+    /// At r_0 mp_eval needs `open_evals` of length
+    /// `num_total + num_bit_op` — the bit-op slots get derived in
+    /// Step 6 by applying the bit-op locally to each source's
+    /// lifted eval (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
     {
+        let cpr_eval_point = self.cpr_subclaim.evaluation_point.clone();
+
+        let mut up_evals_with_bit_op = self.cpr_subclaim.up_evals.clone();
+        up_evals_with_bit_op.extend(self.cpr_subclaim.bit_op_down_evals.iter().cloned());
+
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_multipoint_eval,
-            &self.cpr_subclaim.evaluation_point,
-            &self.cpr_subclaim.up_evals,
+            &cpr_eval_point,
+            &up_evals_with_bit_op,
             &self.cpr_subclaim.down_evals,
             self.base.uair_signature.shifts(),
             self.base.num_vars,
@@ -609,6 +622,15 @@ where
 {
     /// Step 6: Recompute public lifted_evals, assemble full set, verify
     /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
+    ///
+    /// For each `BitOpSpec(src, op)` declared by the UAIR, the verifier
+    /// derives the bit-op slot's `open_eval` locally by applying `op` to
+    /// the source's `lifted_eval` in F_q[X] and ψ_α-projecting. This
+    /// closes the bit-op consistency loop without any new wire data:
+    /// `MLE[op(src)](r_0) == op(MLE[src])(r_0)` because bit-op (acts on
+    /// bit-position within a cell) and the MLE evaluation (acts on the
+    /// row index) commute. Mismatches surface as
+    /// `MultipointEval(ClaimMismatch)` from `verify_subclaim`.
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
     ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
@@ -651,11 +673,26 @@ where
             .cloned()
             .collect();
 
-        let open_evals: Vec<F> = all_lifted_evals
+        // Derive bit-op virtual lifted evals from the source's lifted
+        // eval via the structural permutation (rot_c / shift_r_c). They
+        // are appended to `open_evals` in the same order mp_eval used
+        // to extend the up-claim list.
+        let mut open_evals: Vec<F> = all_lifted_evals
             .iter()
             .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_element_f))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
+        for spec in self.base.uair_signature.bit_op_specs() {
+            let bar_u_src = &all_lifted_evals[spec.source_col()];
+            let op_e_src = match spec.op() {
+                BitOp::Rot(c) => bar_u_src.rot_c(c),
+                BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+            };
+            let psi = op_e_src
+                .evaluate_at_point(&self.projecting_element_f)
+                .map_err(ProtocolError::LiftedEvalProjection)?;
+            open_evals.push(psi);
+        }
 
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
@@ -1031,11 +1068,14 @@ where
     .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
+    let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
-        &cpr_subclaim.evaluation_point,
-        &cpr_subclaim.up_evals,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_subclaim.down_evals,
         uair_signature.shifts(),
         num_vars,
@@ -1076,11 +1116,27 @@ where
         .cloned()
         .collect();
 
-    let open_evals: Vec<F> = all_lifted_evals
+    let mut open_evals: Vec<F> = all_lifted_evals
         .iter()
         .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ProtocolError::LiftedEvalProjection)?;
+    // Bit-op virtual MLE consistency: derive the bit-op slot's
+    // open_eval locally by applying the structural permutation
+    // (rot_c / shift_r_c) to the source's lifted eval, then
+    // ψ_α-projecting. Mismatch surfaces as
+    // `MultipointEval(ClaimMismatch)`.
+    for spec in uair_signature.bit_op_specs() {
+        let bar_u_src = &all_lifted_evals[spec.source_col()];
+        let op_e_src = match spec.op() {
+            BitOp::Rot(c) => bar_u_src.rot_c(c),
+            BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+        };
+        let psi = op_e_src
+            .evaluate_at_point(&projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        open_evals.push(psi);
+    }
 
     MultipointEval::verify_subclaim(
         &mp_subclaim,
@@ -1448,11 +1504,14 @@ where
     .map_err(ProtocolError::Booleanity)?;
 
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
+    let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
     let mp_subclaim = MultipointEval::verify_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
-        &cpr_subclaim.evaluation_point,
-        &cpr_subclaim.up_evals,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
         &cpr_subclaim.down_evals,
         uair_signature.shifts(),
         num_vars,
@@ -1493,11 +1552,23 @@ where
         .cloned()
         .collect();
 
-    let open_evals: Vec<F> = all_lifted_evals
+    let mut open_evals: Vec<F> = all_lifted_evals
         .iter()
         .map(|bar_u| bar_u.evaluate_at_point(&projecting_element_f))
         .collect::<Result<Vec<_>, _>>()
         .map_err(ProtocolError::LiftedEvalProjection)?;
+    // Bit-op virtual MLE consistency at r_0 — see `verify_folded`.
+    for spec in uair_signature.bit_op_specs() {
+        let bar_u_src = &all_lifted_evals[spec.source_col()];
+        let op_e_src = match spec.op() {
+            BitOp::Rot(c) => bar_u_src.rot_c(c),
+            BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+        };
+        let psi = op_e_src
+            .evaluate_at_point(&projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        open_evals.push(psi);
+    }
 
     MultipointEval::verify_subclaim(
         &mp_subclaim,

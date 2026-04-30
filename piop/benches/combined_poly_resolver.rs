@@ -89,7 +89,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             .expect("failed to project scalars to field");
 
         let (cpr_group, cpr_ancillary) =
-            CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
+            CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>, 32>(
                 transcript,
                 trace_f,
                 &ic_prover_state.evaluation_point,
@@ -98,6 +98,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 num_vars,
                 max_degree,
                 field_cfg,
+                &trace.binary_poly,
+                &projecting_element,
             )
             .expect("CPR prepare failed");
 
@@ -272,6 +274,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+            DEGREE_PLUS_ONE,
         >(
             transcript,
             trace_f,
@@ -281,6 +284,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             num_vars,
             max_degree,
             field_cfg,
+            &trace.binary_poly,
+            &projecting_element,
         )
         .expect("CPR prepare failed");
 

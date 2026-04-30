@@ -159,7 +159,7 @@ where
             ShiftSpec::new(cols::FLAT_W_Y, 1),
             ShiftSpec::new(cols::FLAT_W_Z, 1),
         ];
-        UairSignature::new(total, public, shifts, vec![])
+        UairSignature::new(total, public, shifts, vec![], vec![])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
