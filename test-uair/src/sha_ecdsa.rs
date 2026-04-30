@@ -122,10 +122,14 @@ pub mod cols {
     pub const W_U_EF: usize = 16;
     pub const W_U_NEG_E_G: usize = 17;
     pub const W_MAJ: usize = 18;
+    // Packed integer-carry witness column. Replaces the 5 prior int
+    // carry columns. See sha256.rs cols doc for bit layout +
+    // soundness argument.
+    pub const W_MU_PACKED: usize = 19;
     // The Table 9 affine combinations B_1 / B_2 / B_3 are now declared
     // as packed virtual binary_poly columns in `signature()` via
     // `with_virtual_binary_poly_cols` — no committed columns.
-    pub const NUM_BIN: usize = 19;
+    pub const NUM_BIN: usize = 20;
     pub const NUM_BIN_PUB: usize = 9;
 
     // ===== int section =====
@@ -163,30 +167,23 @@ pub mod cols {
     // pinned via the booleanity sumcheck (see sha256.rs doc).
     pub const NUM_INT_PUB: usize = 20;
 
-    // SHA witnesses (20..23) — carry-range columns.
-    pub const SHA_W_MU_W: usize = 20;
-    pub const SHA_W_MU_A: usize = 21;
-    pub const SHA_W_MU_E: usize = 22;
+    // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
+    // gone — replaced by W_MU_PACKED (binary_poly index 19), with
+    // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (23..31): chained Jacobian state + doubled
+    // ECDSA witnesses (20..28): chained Jacobian state + doubled
     // point + addition scratch. 8 cols; `S = Y²` and `Z_inv` are
     // inlined / off-protocol respectively.
-    pub const ECDSA_W_X: usize = 23;
-    pub const ECDSA_W_Y: usize = 24;
-    pub const ECDSA_W_Z: usize = 25;
-    pub const ECDSA_W_X_PA: usize = 26;
-    pub const ECDSA_W_Y_PA: usize = 27;
-    pub const ECDSA_W_Z_PA: usize = 28;
-    pub const ECDSA_W_C: usize = 29;
-    pub const ECDSA_W_D: usize = 30;
+    pub const ECDSA_W_X: usize = 20;
+    pub const ECDSA_W_Y: usize = 21;
+    pub const ECDSA_W_Z: usize = 22;
+    pub const ECDSA_W_X_PA: usize = 23;
+    pub const ECDSA_W_Y_PA: usize = 24;
+    pub const ECDSA_W_Z_PA: usize = 25;
+    pub const ECDSA_W_C: usize = 26;
+    pub const ECDSA_W_D: usize = 27;
 
-    // SHA feed-forward carry witnesses (mu_junction_a, mu_junction_e),
-    // appended after the ECDSA witnesses. Each is in {0, 1} on junction
-    // rows and 0 elsewhere.
-    pub const SHA_W_MU_JUNCTION_A: usize = 31;
-    pub const SHA_W_MU_JUNCTION_E: usize = 32;
-
-    pub const NUM_INT: usize = 33;
+    pub const NUM_INT: usize = 28;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -200,9 +197,7 @@ pub mod cols {
     pub const FLAT_W_U_NEG_E_G: usize = W_U_NEG_E_G;
     pub const FLAT_W_MAJ: usize = W_MAJ;
     pub const FLAT_SHA_PA_K: usize = NUM_BIN + SHA_PA_K;
-    pub const FLAT_SHA_W_MU_W: usize = NUM_BIN + SHA_W_MU_W;
-    pub const FLAT_SHA_W_MU_A: usize = NUM_BIN + SHA_W_MU_A;
-    pub const FLAT_SHA_W_MU_E: usize = NUM_BIN + SHA_W_MU_E;
+    pub const FLAT_W_MU_PACKED: usize = W_MU_PACKED;
     pub const FLAT_ECDSA_W_X: usize = NUM_BIN + ECDSA_W_X;
     pub const FLAT_ECDSA_W_Y: usize = NUM_BIN + ECDSA_W_Y;
     pub const FLAT_ECDSA_W_Z: usize = NUM_BIN + ECDSA_W_Z;
@@ -250,11 +245,11 @@ where
             ShiftSpec::new(cols::FLAT_W_U_NEG_E_G, 3),
             ShiftSpec::new(cols::FLAT_W_MAJ, 2),
             ShiftSpec::new(cols::FLAT_W_MAJ, 3),
-            // === SHA int shifts (PA_K, mu_W, mu_a, mu_e) ===
+            // === SHA int shifts: only PA_K survives. The 3 mu_*
+            //     shift specs are gone alongside the dropped int carry
+            //     columns — carries now packed in W_MU_PACKED, accessed
+            //     via BitOp::ShiftR virtuals declared below.
             ShiftSpec::new(cols::FLAT_SHA_PA_K, 3),
-            ShiftSpec::new(cols::FLAT_SHA_W_MU_W, 16),
-            ShiftSpec::new(cols::FLAT_SHA_W_MU_A, 3),
-            ShiftSpec::new(cols::FLAT_SHA_W_MU_E, 3),
             // === ECDSA int shifts (X, Y, Z by 1 each: down.X[t] = R_{t+1}) ===
             ShiftSpec::new(cols::FLAT_ECDSA_W_X, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_Y, 1),
@@ -274,6 +269,13 @@ where
             BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
             BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
             BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
+            // Bit-op virtuals over W_MU_PACKED for extracting the 5
+            // chained-comp carries. See sha256.rs cols doc.
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(2)),
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(5)),
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(8)),
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(9)),
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(10)),
         ];
 
         // Witness-relative col indices (post-public) for virtual specs.
@@ -440,8 +442,10 @@ where
         let pa_c_ff_e = &int[cols::SHA_PA_C_FF_E];
         let sha_s_active_sched = &int[cols::SHA_S_ACTIVE_SCHED];
         let sha_s_active_upd = &int[cols::SHA_S_ACTIVE_UPD];
-        let sha_w_mu_junction_a = &int[cols::SHA_W_MU_JUNCTION_A];
-        let sha_w_mu_junction_e = &int[cols::SHA_W_MU_JUNCTION_E];
+        // The 5 prior int carry columns are gone — replaced by
+        // W_MU_PACKED (binary_poly), accessed below via `up.bp[W_MU_PACKED]`
+        // and the BitOp::ShiftR virtuals.
+        let w_mu_packed = &bp[cols::W_MU_PACKED];
 
         // SHA `down` slots (in source-col-ascending order — see signature()).
         // bin slots (19 SHA shifts, then 0 ECDSA shifts on bin). The
@@ -468,25 +472,29 @@ where
         let down_w_u_neg_e_g_sh3 = &down.binary_poly[16];
         let _down_w_maj_sh2 = &down.binary_poly[17];
         let down_w_maj_sh3 = &down.binary_poly[18];
-        // int slots: SHA shifts come first (4), then ECDSA (3).
+        // int slots: SHA pa_K_sh3 (slot 0), then ECDSA X/Y/Z sh1 (1, 2, 3).
+        // The 3 prior SHA mu_* int shifts are gone alongside the
+        // dropped int carry columns.
         let down_pa_k_sh3 = &down.int[0];
-        let down_w_mu_w_sh16 = &down.int[1];
-        let down_w_mu_a_sh3 = &down.int[2];
-        let down_w_mu_e_sh3 = &down.int[3];
-        let down_ecdsa_x_sh1 = &down.int[4];
-        let down_ecdsa_y_sh1 = &down.int[5];
-        let down_ecdsa_z_sh1 = &down.int[6];
+        let down_ecdsa_x_sh1 = &down.int[1];
+        let down_ecdsa_y_sh1 = &down.int[2];
+        let down_ecdsa_z_sh1 = &down.int[3];
 
-        // Bit-op virtual columns over W (sorted by `(source_col,
-        // op_kind, c)` inside `UairSignature::new`). Six slots, all
-        // with `source_col = W_W`. See `sha256.rs` for the mapping
-        // between Rot/ShiftR amounts and SHA-256 ROTR/SHR.
+        // Bit-op virtual columns. With FLAT_W_W < FLAT_W_MU_PACKED,
+        // W's 6 bit-ops occupy slots 0-5, then W_MU_PACKED's 5
+        // bit-ops occupy slots 6-10.
         let down_w_rot13 = &down.bit_op[0]; // σ_1: ROTR^19
         let down_w_rot14 = &down.bit_op[1]; // σ_0: ROTR^18
         let down_w_rot15 = &down.bit_op[2]; // σ_1: ROTR^17
         let down_w_rot25 = &down.bit_op[3]; // σ_0: ROTR^7
         let down_w_shr3 = &down.bit_op[4]; //  σ_0: SHR^3
         let down_w_shr10 = &down.bit_op[5]; // σ_1: SHR^10
+        // Bit-extraction shifts on W_MU_PACKED.
+        let down_w_mu_packed_shr2 = &down.bit_op[6];
+        let down_w_mu_packed_shr5 = &down.bit_op[7];
+        let down_w_mu_packed_shr8 = &down.bit_op[8];
+        let down_w_mu_packed_shr9 = &down.bit_op[9];
+        let down_w_mu_packed_shr10 = &down.bit_op[10];
 
         let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
         let ideal_rot_x2 = ideal_from_ref(&Sha256Ideal::<R>::RotX2(RotationIdeal::new(
@@ -496,11 +504,34 @@ where
         let rho_sig0 = rho_poly::<R>(&[10, 19, 30]);
         let rho_sig1 = rho_poly::<R>(&[7, 21, 26]);
         let two_scalar_sha = const_scalar::<R>(R::ONE + R::ONE);
-        let two_times_x31 = {
-            let mut coeffs = [R::ZERO; 32];
-            coeffs[31] = R::ONE + R::ONE;
-            DensePolynomial::<R, 32>::new(coeffs)
-        };
+        // Carry-extraction multipliers (mirror sha256.rs). Each
+        // contribution `2^32 · mu_X` is built from
+        // `2^32 · ShiftR(k_low) − 2^{32+w} · ShiftR(k_low+w)`.
+        let const_2_to_32 = const_scalar::<R>(pow_two::<R>(32));
+        let const_2_to_33 = const_scalar::<R>(pow_two::<R>(33));
+        let const_2_to_34 = const_scalar::<R>(pow_two::<R>(34));
+        let const_2_to_35 = const_scalar::<R>(pow_two::<R>(35));
+
+        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32)
+            .expect("2^32 · w_mu_packed overflow")
+            - &mbs(down_w_mu_packed_shr2, &const_2_to_34)
+                .expect("2^34 · ShiftR(2)(w_mu_packed) overflow");
+        let mu_a_contrib = mbs(down_w_mu_packed_shr2, &const_2_to_32)
+            .expect("2^32 · ShiftR(2)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr5, &const_2_to_35)
+                .expect("2^35 · ShiftR(5)(w_mu_packed) overflow");
+        let mu_e_contrib = mbs(down_w_mu_packed_shr5, &const_2_to_32)
+            .expect("2^32 · ShiftR(5)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr8, &const_2_to_35)
+                .expect("2^35 · ShiftR(8)(w_mu_packed) overflow");
+        let mu_ff_a_contrib = mbs(down_w_mu_packed_shr8, &const_2_to_32)
+            .expect("2^32 · ShiftR(8)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr9, &const_2_to_33)
+                .expect("2^33 · ShiftR(9)(w_mu_packed) overflow");
+        let mu_ff_e_contrib = mbs(down_w_mu_packed_shr9, &const_2_to_32)
+            .expect("2^32 · ShiftR(9)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr10, &const_2_to_33)
+                .expect("2^33 · ShiftR(10)(w_mu_packed) overflow");
 
         // C1: Sigma_0 rotation
         b.assert_in_ideal(
@@ -533,20 +564,18 @@ where
                 - &mbs(pa_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
         );
 
-        // C7: Message-schedule modular sum.
-        let two_x31_mu_w =
-            mbs(down_w_mu_w_sh16, &two_times_x31).expect("2·X^31 · mu_W overflow");
+        // C7: Message-schedule modular sum. mu_W from up.w_mu_packed
+        // bits 0-1 via mu_w_contrib (chained-comp re-anchoring stores
+        // each carry at its constraint's anchor row).
         let sched_inner = down_w_w_sh16.clone()
             - w_big_w
             - down_w_lsig0_sh1
             - down_w_w_sh9
             - down_w_lsig1_sh14
-            + &two_x31_mu_w;
+            + &mu_w_contrib;
         b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
 
-        // C8: Register-update for `a`. Ch[t] = u_ef[t] + u_{¬e,g}[t].
-        let two_x31_mu_a =
-            mbs(down_w_mu_a_sh3, &two_times_x31).expect("2·X^31 · mu_a overflow");
+        // C8: Register-update for `a`. mu_a from bits 2-4 of W_MU_PACKED.
         let a_update_inner = down_w_a_sh4.clone()
             - w_e
             - down_w_sig1_sh3
@@ -556,12 +585,10 @@ where
             - down_w_w_sh3
             - down_w_sig0_sh3
             - down_w_maj_sh3
-            + &two_x31_mu_a;
+            + &mu_a_contrib;
         b.assert_in_ideal(a_update_inner + pa_c_c8, &ideal_rot_x2);
 
-        // C9: Register-update for `e`. Ch[t] = u_ef[t] + u_{¬e,g}[t].
-        let two_x31_mu_e =
-            mbs(down_w_mu_e_sh3, &two_times_x31).expect("2·X^31 · mu_e overflow");
+        // C9: Register-update for `e`. mu_e from bits 5-7 of W_MU_PACKED.
         let e_update_inner = down_w_e_sh4.clone()
             - w_a
             - w_e
@@ -570,7 +597,7 @@ where
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
             - down_w_w_sh3
-            + &two_x31_mu_e;
+            + &mu_e_contrib;
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
         // C13–C15 (B_1/B_2/B_3 materializations) are gone — the
@@ -596,20 +623,17 @@ where
         //   up.pa_a           = H_i, j-th component (junction copy)
         //   down.w_a^↓4       = w_a[k+4] = H_{i+1}, j-th component (pinned by C10)
         //   up.sha_w_mu_junction_a = carry ∈ {0, 1}
-        let two_x31_mu_ff_a = mbs(sha_w_mu_junction_a, &two_times_x31)
-            .expect("2·X^31 · mu_junction_a overflow");
+        // mu_ff_a / mu_ff_e from bits 8 / 9 of W_MU_PACKED.
         let ff_a_inner = down_w_a_sh4.clone()
             - w_a
             - pa_a
-            + &two_x31_mu_ff_a;
+            + &mu_ff_a_contrib;
         b.assert_in_ideal(ff_a_inner + pa_c_ff_a, &ideal_rot_x2);
 
-        let two_x31_mu_ff_e = mbs(sha_w_mu_junction_e, &two_times_x31)
-            .expect("2·X^31 · mu_junction_e overflow");
         let ff_e_inner = down_w_e_sh4.clone()
             - w_e
             - pa_e
-            + &two_x31_mu_ff_e;
+            + &mu_ff_e_contrib;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
 
         // C16: message init (Table 9 row 77). Pin w_W to public message
@@ -624,6 +648,12 @@ where
         b.assert_zero(sha_s_active_upd.clone() * pa_c_c9);
         b.assert_zero(sha_s_feedforward.clone() * pa_c_ff_a);
         b.assert_zero(sha_s_feedforward.clone() * pa_c_ff_e);
+
+        // C22: high-bits-zero pin on W_MU_PACKED. Forces positions
+        // 10..31 of w_mu_packed to be 0 at every row. Combined with
+        // booleanity, confines mu_X to declared bit widths. See
+        // sha256.rs cols doc for the soundness argument.
+        b.assert_zero(down_w_mu_packed_shr10.clone());
 
         // ===================================================================
         // ECDSA half — verbatim from ecdsa.rs's constrain_general,
@@ -752,6 +782,17 @@ fn rho_poly<R: ConstSemiring>(positions: &[usize]) -> DensePolynomial<R, 32> {
     DensePolynomial::<R, 32>::new(coeffs)
 }
 
+/// Compute `2^k` as an `R` value via repeated doubling. Mirrors the
+/// helper in sha256.rs (private there).
+fn pow_two<R: ConstSemiring>(k: u32) -> R {
+    let mut result = R::ONE;
+    for _ in 0..k {
+        let copy = result.clone();
+        result += &copy;
+    }
+    result
+}
+
 fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
     let mut coeffs = [R::ZERO; 32];
     coeffs[0] = c;
@@ -795,13 +836,11 @@ where
             sha_trace.binary_poly.into_owned();
 
         // Int section: merge per the layout in `cols`.
-        // SHA standalone int layout (16 cols):
+        // SHA standalone int layout (11 cols, all public — the 5 prior
+        // witness int carry columns are gone, packed into W_MU_PACKED):
         //   0..11  pubs (S_INIT_PREFIX, S_FEEDFORWARD, S_MSG_INIT, PA_K,
         //                PA_C_C7/8/9, PA_C_FF_A/E, S_ACTIVE_SCHED,
         //                S_ACTIVE_UPD)
-        //   11..14 witnesses (mu_W, mu_a, mu_e)
-        //   14..16 witnesses (mu_junction_a, mu_junction_e) — chained-comp
-        //          feed-forward carries.
         // ECDSA standalone int layout (17 cols):
         //   0..9   pubs
         //   9..17  witnesses (8 EC cols)
@@ -813,13 +852,8 @@ where
         int.extend(sha_ints[0..11].iter().cloned());
         // [11..20] ECDSA pubs (ecdsa[0..9])
         int.extend(ecdsa_ints[0..9].iter().cloned());
-        // [20..23] SHA carry witnesses (sha[11..14] = mu_W, mu_a, mu_e)
-        int.extend(sha_ints[11..14].iter().cloned());
-        // [23..31] ECDSA witnesses (ecdsa[9..17], 8 cols)
+        // [20..28] ECDSA witnesses (ecdsa[9..17], 8 cols)
         int.extend(ecdsa_ints[9..17].iter().cloned());
-        // [31..33] SHA junction-carry witnesses (sha[14..16]). Appended
-        // after ECDSA to preserve all existing ECDSA_W_* indices.
-        int.extend(sha_ints[14..16].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -844,14 +878,14 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 17 SHA + 11 ECDSA = 28 constraints. SHA gained the C17–C21
-    /// compensator-zero pins on top of the C16 message-init pinning
-    /// (Table 9 row 77). Max degree 6 from the ECDSA Y output-selection
-    /// (and D4's `12·X³·Y²` term).
+    /// Sanity: 18 SHA + 11 ECDSA = 29 constraints. SHA gained C22
+    /// (high-bits-zero pin on W_MU_PACKED) on top of C16 (message init)
+    /// and C17–C21 (compensator-zero pins). Max degree 6 from the
+    /// ECDSA Y output-selection (and D4's `12·X³·Y²` term).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 28);
+        assert_eq!(count_constraints::<U>(), 29);
         assert_eq!(count_max_degree::<U>(), 6);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-6 (ECDSA Y output sel / D4),
