@@ -216,8 +216,6 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     /// multilinear polynomials.
     type Pt: ConstIntRing;
 
-    type CombR;
-
     /// Randomly sampled field modulus type, used throughout the protocol for
     /// finite field operations.
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
@@ -226,11 +224,13 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     type PrimeTest: PrimalityTest<Self::Fmod>;
 
     /// Zip+ types for the binary polynomial trace columns.
+    /// `CombR` is independent per witness type — sized to fit the
+    /// inner products that lane actually performs (binary is much
+    /// narrower than arb/int).
     type BinaryZt: ZipTypes<
             Eval = BinaryPoly<DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -240,7 +240,6 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
             Eval = DensePolynomial<Self::Int, DEGREE_PLUS_ONE>,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -250,7 +249,6 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
             Eval = Self::Int,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -290,19 +288,17 @@ pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
 
     type Pt: ConstIntRing;
 
-    type CombR;
-
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
 
     type PrimeTest: PrimalityTest<Self::Fmod>;
 
     /// Zip+ types for the **split** binary trace columns.
     /// `Eval = BinaryPoly<HALF_D>` — one round of 2× folding.
+    /// `CombR` is independent per witness type.
     type BinaryZt: ZipTypes<
             Eval = BinaryPoly<HALF_D>,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -313,7 +309,6 @@ pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
             Eval = DensePolynomial<Self::Int, D>,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -323,7 +318,6 @@ pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
             Eval = Self::Int,
             Chal = Self::Chal,
             Pt = Self::Pt,
-            CombR = Self::CombR,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
@@ -551,14 +545,24 @@ mod tests {
     /// Repetition factor for linear code, an inverse rate. Defaults to 4
     /// (rate 1/4); enabling the `iprs-rate-1-8` cargo feature switches
     /// every `IprsCode<..., REP, ...>` instance in this test module to
-    /// inverse-rate 8 (rate 1/8).
-    const REP: usize = if cfg!(feature = "iprs-rate-1-8") { 8 } else { 4 };
+    /// inverse-rate 8 (rate 1/8), and `iprs-rate-1-16` switches to
+    /// inverse-rate 16 (rate 1/16). `iprs-rate-1-16` takes precedence if
+    /// both are enabled.
+    const REP: usize = if cfg!(feature = "iprs-rate-1-16") {
+        16
+    } else if cfg!(feature = "iprs-rate-1-8") {
+        8
+    } else {
+        4
+    };
 
     /// Number of column openings the PCS performs. Tied to `REP`: rate 1/4
-    /// uses 147 openings, rate 1/8 uses 96 (lower opening count is sound
-    /// at the higher inverse rate because each column reveals more
-    /// information about the codeword).
-    const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-8") {
+    /// uses 147 openings, rate 1/8 uses 96, rate 1/16 uses 72 (lower opening
+    /// count is sound at the higher inverse rate because each column reveals
+    /// more information about the codeword).
+    const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-16") {
+        72
+    } else if cfg!(feature = "iprs-rate-1-8") {
         96
     } else {
         147
@@ -665,7 +669,6 @@ mod tests {
         type Int = ZtInt;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<M>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
@@ -692,7 +695,6 @@ mod tests {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<M>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
@@ -759,7 +761,9 @@ mod tests {
             + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
         F: for<'a> FromWithConfig<&'a Zt::Int>
-            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
+            + for<'a> FromWithConfig<&'a <Zt::ArbitraryZt as ZipTypes>::CombR>
+            + for<'a> FromWithConfig<&'a <Zt::IntZt as ZipTypes>::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>,
         <F as Field>::Inner: FromRef<Zt::Fmod>,
@@ -1281,7 +1285,6 @@ mod tests {
         type Int = ShaEcdsaInt;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<{ EC_FP_INT_LIMBS * 4 }>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
@@ -1567,7 +1570,6 @@ mod tests {
         type Int = ZtInt;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<M>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 
@@ -1722,7 +1724,6 @@ mod tests {
         type Int = ZtInt;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<M>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
 

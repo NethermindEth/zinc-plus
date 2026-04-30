@@ -40,6 +40,9 @@ unchecked = []
 # Switch the IPRS bench code from inverse-rate 4 (rate 1/4) to inverse-rate 8
 # (rate 1/8). Affects every `IprsCode<..., REP, ...>` instance in `benches/e2e.rs`.
 iprs-rate-1-8 = []
+# Switch the IPRS bench code to inverse-rate 16 (rate 1/16). Takes precedence
+# over `iprs-rate-1-8` if both are enabled.
+iprs-rate-1-16 = []
 
 [[bench]]
 name = "e2e"
