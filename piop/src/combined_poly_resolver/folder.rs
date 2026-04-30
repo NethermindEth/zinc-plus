@@ -56,6 +56,17 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
         self.fold_constraint(expr);
     }
 
+    /// `assert_zero` constraints contribute to the folded RLC like any
+    /// other constraint. For an honest prover they evaluate to zero on
+    /// every row of the hypercube, so their fold-sum is 0 — but the
+    /// polynomial expression itself can have per-variable degree > 1
+    /// (e.g. `b·(b-1)·s_accum`), so the sumcheck protocol must run at
+    /// `count_max_degree::<U>() + 2`, NOT `count_effective_max_degree`.
+    /// A previous version of this method was a no-op coupled with
+    /// `count_effective_max_degree` for the protocol degree; that
+    /// combination silently dropped the binding between assert_zero
+    /// constraints and the witness, breaking soundness for every UAIR
+    /// with assert_zero constraints.
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
         self.fold_constraint(expr);

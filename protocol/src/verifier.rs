@@ -19,6 +19,7 @@ use zinc_transcript::{
 use zinc_uair::{
     Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
+    degree_counter::count_effective_max_degree,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };

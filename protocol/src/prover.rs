@@ -17,7 +17,7 @@ use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
+    degree_counter::count_effective_max_degree,
 };
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -420,7 +420,16 @@ impl_with_type_bounds!(ProverEvalProjected
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
-        let max_degree = count_max_degree::<U>();
+        // Sumcheck protocol degree must accommodate the actual fold
+        // polynomial's per-variable degree, including `assert_zero`
+        // constraints. Although their values are identically zero on the
+        // hypercube for an honest prover, the polynomial expression has
+        // non-trivial per-variable degree (e.g. `b·(b-1)·s_accum` is
+        // degree 3), and it appears in the fold via
+        // `ConstraintFolder::assert_zero`. Their inclusion is what binds
+        // the committed witness to the assert_zero claims (otherwise a
+        // dishonest prover could violate them undetected).
+        let max_degree = zinc_uair::degree_counter::count_max_degree::<U>();
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
