@@ -108,76 +108,81 @@ pub mod cols {
     pub const PA_OV_LSIG1: usize = 5;
     pub const PA_R_CH2_CORR: usize = 6;
     pub const PA_R_MAJ_CORR: usize = 7;
-    pub const W_A: usize = 8;
-    pub const W_SIG0: usize = 9;
-    pub const W_E: usize = 10;
-    pub const W_SIG1: usize = 11;
-    pub const W_W: usize = 12;
-    pub const W_LSIG0: usize = 13;
-    pub const W_LSIG1: usize = 14;
+    // Public message-block words (Table 9 row 77). See sha256.rs cols
+    // doc for the layout.
+    pub const PA_M: usize = 8;
+    pub const W_A: usize = 9;
+    pub const W_SIG0: usize = 10;
+    pub const W_E: usize = 11;
+    pub const W_SIG1: usize = 12;
+    pub const W_W: usize = 13;
+    pub const W_LSIG0: usize = 14;
+    pub const W_LSIG1: usize = 15;
     // Ch is split into two AND-operand bit-polys (see sha256.rs doc).
-    pub const W_U_EF: usize = 15;
-    pub const W_U_NEG_E_G: usize = 16;
-    pub const W_MAJ: usize = 17;
+    pub const W_U_EF: usize = 16;
+    pub const W_U_NEG_E_G: usize = 17;
+    pub const W_MAJ: usize = 18;
     // The Table 9 affine combinations B_1 / B_2 / B_3 are now declared
     // as packed virtual binary_poly columns in `signature()` via
     // `with_virtual_binary_poly_cols` — no committed columns.
-    pub const NUM_BIN: usize = 18;
-    pub const NUM_BIN_PUB: usize = 8;
+    pub const NUM_BIN: usize = 19;
+    pub const NUM_BIN_PUB: usize = 9;
 
     // ===== int section =====
-    // SHA publics (0..8) — see sha256.rs cols module for chained-
+    // SHA publics (0..9) — see sha256.rs cols module for chained-
     // compression layout details. S_INIT_PREFIX/S_FEEDFORWARD replace
     // the old S_INIT/S_FINAL pair. PA_C_FF_A/E are the feed-forward
     // compensators (added so C12/C13 stay degree-1 in the trace MLEs,
     // preserving MLE-first eligibility — see sha256.rs cols doc).
+    // S_MSG_INIT gates the C16 message-init pinning constraint.
     pub const SHA_S_INIT_PREFIX: usize = 0;
     pub const SHA_S_FEEDFORWARD: usize = 1;
-    pub const SHA_PA_K: usize = 2;
-    pub const SHA_PA_C_C7: usize = 3;
-    pub const SHA_PA_C_C8: usize = 4;
-    pub const SHA_PA_C_C9: usize = 5;
-    pub const SHA_PA_C_FF_A: usize = 6;
-    pub const SHA_PA_C_FF_E: usize = 7;
-    // ECDSA publics (8..17)
-    pub const ECDSA_S_INIT: usize = 8;
-    pub const ECDSA_S_ACTIVE: usize = 9;
-    pub const ECDSA_S_FINAL: usize = 10;
-    pub const ECDSA_S_ADD: usize = 11;
-    pub const ECDSA_PA_X_ADDEND: usize = 12;
-    pub const ECDSA_PA_Y_ADDEND: usize = 13;
-    pub const ECDSA_PA_R_INIT_X: usize = 14;
-    pub const ECDSA_PA_R_INIT_Y: usize = 15;
-    pub const ECDSA_PA_R_INIT_Z: usize = 16;
+    pub const SHA_S_MSG_INIT: usize = 2;
+    pub const SHA_PA_K: usize = 3;
+    pub const SHA_PA_C_C7: usize = 4;
+    pub const SHA_PA_C_C8: usize = 5;
+    pub const SHA_PA_C_C9: usize = 6;
+    pub const SHA_PA_C_FF_A: usize = 7;
+    pub const SHA_PA_C_FF_E: usize = 8;
+    // ECDSA publics (9..18)
+    pub const ECDSA_S_INIT: usize = 9;
+    pub const ECDSA_S_ACTIVE: usize = 10;
+    pub const ECDSA_S_FINAL: usize = 11;
+    pub const ECDSA_S_ADD: usize = 12;
+    pub const ECDSA_PA_X_ADDEND: usize = 13;
+    pub const ECDSA_PA_Y_ADDEND: usize = 14;
+    pub const ECDSA_PA_R_INIT_X: usize = 15;
+    pub const ECDSA_PA_R_INIT_Y: usize = 16;
+    pub const ECDSA_PA_R_INIT_Z: usize = 17;
     // SHA_S_B_ACTIVE is gone — the Table 9 materialization constraints
     // (C13–C15) are dropped, replaced by virtual binary_poly residuals
     // pinned via the booleanity sumcheck (see sha256.rs doc).
-    pub const NUM_INT_PUB: usize = 17;
+    pub const NUM_INT_PUB: usize = 18;
 
-    // SHA witnesses (17..20) — carry-range columns.
-    pub const SHA_W_MU_W: usize = 17;
-    pub const SHA_W_MU_A: usize = 18;
-    pub const SHA_W_MU_E: usize = 19;
+    // SHA witnesses (18..21) — carry-range columns.
+    pub const SHA_W_MU_W: usize = 18;
+    pub const SHA_W_MU_A: usize = 19;
+    pub const SHA_W_MU_E: usize = 20;
 
-    // ECDSA witnesses (20..28): chained Jacobian state + doubled
+    // ECDSA witnesses (21..29): chained Jacobian state + doubled
     // point + addition scratch. 8 cols; `S = Y²` and `Z_inv` are
     // inlined / off-protocol respectively.
-    pub const ECDSA_W_X: usize = 20;
-    pub const ECDSA_W_Y: usize = 21;
-    pub const ECDSA_W_Z: usize = 22;
-    pub const ECDSA_W_X_PA: usize = 23;
-    pub const ECDSA_W_Y_PA: usize = 24;
-    pub const ECDSA_W_Z_PA: usize = 25;
-    pub const ECDSA_W_C: usize = 26;
-    pub const ECDSA_W_D: usize = 27;
+    pub const ECDSA_W_X: usize = 21;
+    pub const ECDSA_W_Y: usize = 22;
+    pub const ECDSA_W_Z: usize = 23;
+    pub const ECDSA_W_X_PA: usize = 24;
+    pub const ECDSA_W_Y_PA: usize = 25;
+    pub const ECDSA_W_Z_PA: usize = 26;
+    pub const ECDSA_W_C: usize = 27;
+    pub const ECDSA_W_D: usize = 28;
 
     // SHA feed-forward carry witnesses (mu_junction_a, mu_junction_e),
     // appended after the ECDSA witnesses. Each is in {0, 1} on junction
     // rows and 0 elsewhere.
-    pub const SHA_W_MU_JUNCTION_A: usize = 28;
-    pub const SHA_W_MU_JUNCTION_E: usize = 29;
+    pub const SHA_W_MU_JUNCTION_A: usize = 29;
+    pub const SHA_W_MU_JUNCTION_E: usize = 30;
 
-    pub const NUM_INT: usize = 30;
+    pub const NUM_INT: usize = 31;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -412,6 +417,7 @@ where
         let pa_ov_sig1 = &bp[cols::PA_OV_SIG1];
         let pa_ov_lsig0 = &bp[cols::PA_OV_LSIG0];
         let pa_ov_lsig1 = &bp[cols::PA_OV_LSIG1];
+        let pa_m = &bp[cols::PA_M];
         let w_a = &bp[cols::W_A];
         let w_sig0 = &bp[cols::W_SIG0];
         let w_e = &bp[cols::W_E];
@@ -425,6 +431,7 @@ where
         // future verifier-side check that pa_c_ff_{a,e} are zero on
         // junction rows; the constraint expression doesn't reference it.
         let _sha_s_feedforward = &int[cols::SHA_S_FEEDFORWARD];
+        let sha_s_msg_init = &int[cols::SHA_S_MSG_INIT];
         let pa_c_c7 = &int[cols::SHA_PA_C_C7];
         let pa_c_c8 = &int[cols::SHA_PA_C_C8];
         let pa_c_c9 = &int[cols::SHA_PA_C_C9];
@@ -602,6 +609,11 @@ where
             + &two_x31_mu_ff_e;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
 
+        // C16: message init (Table 9 row 77). Pin w_W to public message
+        // words pa_m at the 16 message-block-seed rows of every
+        // compression. Mirrors the standalone SHA UAIR.
+        b.assert_zero(sha_s_msg_init.clone() * &(w_big_w.clone() - pa_m));
+
         // ===================================================================
         // ECDSA half — verbatim from ecdsa.rs's constrain_general,
         // referencing merged column indices.
@@ -772,11 +784,11 @@ where
             sha_trace.binary_poly.into_owned();
 
         // Int section: merge per the layout in `cols`.
-        // SHA standalone int layout (13 cols, post-S_B_ACTIVE removal):
-        //   0..8   pubs (S_INIT_PREFIX, S_FEEDFORWARD, PA_K,
+        // SHA standalone int layout (14 cols):
+        //   0..9   pubs (S_INIT_PREFIX, S_FEEDFORWARD, S_MSG_INIT, PA_K,
         //                PA_C_C7/8/9, PA_C_FF_A, PA_C_FF_E)
-        //   8..11  witnesses (mu_W, mu_a, mu_e)
-        //   11..13 witnesses (mu_junction_a, mu_junction_e) — chained-comp
+        //   9..12  witnesses (mu_W, mu_a, mu_e)
+        //   12..14 witnesses (mu_junction_a, mu_junction_e) — chained-comp
         //          feed-forward carries.
         // ECDSA standalone int layout (17 cols):
         //   0..9   pubs
@@ -785,17 +797,17 @@ where
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
 
-        // [0..8] SHA pubs (sha[0..8])
-        int.extend(sha_ints[0..8].iter().cloned());
-        // [8..17] ECDSA pubs (ecdsa[0..9])
+        // [0..9] SHA pubs (sha[0..9])
+        int.extend(sha_ints[0..9].iter().cloned());
+        // [9..18] ECDSA pubs (ecdsa[0..9])
         int.extend(ecdsa_ints[0..9].iter().cloned());
-        // [17..20] SHA carry witnesses (sha[8..11] = mu_W, mu_a, mu_e)
-        int.extend(sha_ints[8..11].iter().cloned());
-        // [20..28] ECDSA witnesses (ecdsa[9..17], 8 cols)
+        // [18..21] SHA carry witnesses (sha[9..12] = mu_W, mu_a, mu_e)
+        int.extend(sha_ints[9..12].iter().cloned());
+        // [21..29] ECDSA witnesses (ecdsa[9..17], 8 cols)
         int.extend(ecdsa_ints[9..17].iter().cloned());
-        // [28..30] SHA junction-carry witnesses (sha[11..13]). Appended
+        // [29..31] SHA junction-carry witnesses (sha[12..14]). Appended
         // after ECDSA to preserve all existing ECDSA_W_* indices.
-        int.extend(sha_ints[11..13].iter().cloned());
+        int.extend(sha_ints[12..14].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -820,14 +832,15 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 11 SHA + 11 ECDSA = 22 constraints. The B_1/B_2/B_3
+    /// Sanity: 12 SHA + 11 ECDSA = 23 constraints. SHA gained the C16
+    /// message-init pinning (Table 9 row 77). The B_1/B_2/B_3
     /// materialization triple (C13–C15) is gone: residuals are virtual
     /// binary_poly columns now, pinned by booleanity. Max degree 6
     /// from the ECDSA Y output-selection (and D4's `12·X³·Y²` term).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 22);
+        assert_eq!(count_constraints::<U>(), 23);
         assert_eq!(count_max_degree::<U>(), 6);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-6 (ECDSA Y output sel / D4),

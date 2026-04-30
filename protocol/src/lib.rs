@@ -1432,14 +1432,16 @@ mod tests {
         type U = ShaEcdsaUair<ShaEcdsaInt>;
 
         // SHA standalone signature pins (post-virtualization of B_1/
-        // B_2/B_3): NUM_BIN = 18 (3 committed B_i cols dropped, 2
-        // public correctors PA_R_*_CORR added — net −1), bit_op_specs
+        // B_2/B_3 and after adding PA_M for Table 9 row-77 message-init
+        // pinning): NUM_BIN = 19 (3 committed B_i cols dropped, 2 public
+        // correctors PA_R_*_CORR added, 1 public PA_M added — net 0
+        // from the earlier 18 baseline, then +1 from PA_M), bit_op_specs
         // = 6, virtual_binary_poly_cols = 3.
         let sha_sig = <Sha256CompressionSliceUair<ShaEcdsaInt> as Uair>::signature();
         assert_eq!(
             sha_sig.total_cols().num_binary_poly_cols(),
-            18,
-            "SHA-256 NUM_BIN drifted: expected 18 binary_poly columns post-virtualization",
+            19,
+            "SHA-256 NUM_BIN drifted: expected 19 binary_poly columns post-virtualization + PA_M",
         );
         assert_eq!(
             sha_sig.bit_op_specs().len(),
@@ -1457,8 +1459,8 @@ mod tests {
         let num_bit_op = sig.bit_op_specs().len();
         assert_eq!(
             sig.total_cols().num_binary_poly_cols(),
-            18,
-            "SHA-ECDSA NUM_BIN drifted: expected 18 binary_poly columns",
+            19,
+            "SHA-ECDSA NUM_BIN drifted: expected 19 binary_poly columns",
         );
         assert_eq!(
             num_bit_op, 6,

@@ -277,37 +277,43 @@ pub mod cols {
     pub const PA_OV_LSIG1: usize = 5;
     pub const PA_R_CH2_CORR: usize = 6;
     pub const PA_R_MAJ_CORR: usize = 7;
+    // Public message-block words. Holds the 16 message words M_i[0..16]
+    // of compression i ∈ [0, NUM_COMPRESSIONS) at rows
+    // [ROWS_PER_COMP·i, ROWS_PER_COMP·i + 16); zero elsewhere. Pinned
+    // to w_W at those rows by the C16 message-init constraint, gated
+    // by S_MSG_INIT. Implements Table 9 row (77).
+    pub const PA_M: usize = 8;
     // binary_poly, witness suffix. Grouped by constraint family for clarity.
     // Sigma_0:
-    pub const W_A: usize = 8;
-    pub const W_SIG0: usize = 9;
+    pub const W_A: usize = 9;
+    pub const W_SIG0: usize = 10;
     // Sigma_1:
-    pub const W_E: usize = 10;
-    pub const W_SIG1: usize = 11;
+    pub const W_E: usize = 11;
+    pub const W_SIG1: usize = 12;
     // sigma_0 / sigma_1 — shares W_W. The σ_0/σ_1 right-shift
     // decomposition columns (S_0/T_0/S_1/T_1) are gone: ROT^c(W) and
     // SHIFTR^c(W) are now CPR bit-op virtual columns over W (declared in
     // signature()'s `bit_op_specs`), so σ_0/σ_1 reduce to row-local
     // Q[X] equalities with the `pa_ov_lsig{0,1}` XOR-overflow witnesses
     // retained.
-    pub const W_W: usize = 12;
-    pub const W_LSIG0: usize = 13;
-    pub const W_LSIG1: usize = 14;
+    pub const W_W: usize = 13;
+    pub const W_LSIG0: usize = 14;
+    pub const W_LSIG1: usize = 15;
     // Register update — Ch is replaced by two AND-operand bit-polys
     // (`u_ef = e ∧ f` and `u_{¬e,g} = ¬e ∧ g`). Maj is still a free
     // witness on this column. See the module doc for the Table 9 split.
-    pub const W_U_EF: usize = 15;
-    pub const W_U_NEG_E_G: usize = 16;
-    pub const W_MAJ: usize = 17;
+    pub const W_U_EF: usize = 16;
+    pub const W_U_NEG_E_G: usize = 17;
+    pub const W_MAJ: usize = 18;
     // The Table 9 affine combinations B_1 / B_2 / B_3 are no longer
     // committed — they're declared as packed virtual binary_poly
     // columns in signature() via `with_virtual_binary_poly_cols`,
     // pinned by the booleanity sumcheck (per-bit closing override).
 
     /// Total number of binary_poly columns.
-    pub const NUM_BIN: usize = 18;
+    pub const NUM_BIN: usize = 19;
     /// Number of public binary_poly columns (prefix).
-    pub const NUM_BIN_PUB: usize = 8;
+    pub const NUM_BIN_PUB: usize = 9;
 
     // int columns. Public selectors come first (required by PublicColumnLayout
     // prefix convention), witness columns last.
@@ -325,7 +331,12 @@ pub mod cols {
     // as the "prior init" addend in the SHA-256 feed-forward addition).
     pub const S_INIT_PREFIX: usize = 0; // public: 1 on the (NUM_COMPRESSIONS+1) init-prefix blocks
     pub const S_FEEDFORWARD: usize = 1; // public: 1 on the NUM_COMPRESSIONS junction windows
-    pub const PA_K: usize = 2; // public: round constants column (free for this slice)
+    // Selector for the message-init constraint (C16). 1 on rows
+    // [ROWS_PER_COMP·i, ROWS_PER_COMP·i + 16) for each compression
+    // i ∈ [0, NUM_COMPRESSIONS) — the 16 trace rows where w_W must
+    // equal the public message word PA_M[k]; 0 elsewhere.
+    pub const S_MSG_INIT: usize = 2;
+    pub const PA_K: usize = 3; // public: round constants column (free for this slice)
     // Public compensator columns: zero on rows where the corresponding
     // constraint is honestly satisfied (the "active" range, now a union
     // of NUM_COMPRESSIONS disjoint per-compression windows), non-zero on
@@ -339,9 +350,9 @@ pub mod cols {
     // follow-up — harder to discharge now since the active range is a
     // union of NUM_COMPRESSIONS per-compression windows rather than one
     // contiguous block.
-    pub const PA_C_C7: usize = 3; // compensator for C7 (sched_anch)
-    pub const PA_C_C8: usize = 4; // compensator for C8 (upd_anch a)
-    pub const PA_C_C9: usize = 5; // compensator for C9 (upd_anch e)
+    pub const PA_C_C7: usize = 4; // compensator for C7 (sched_anch)
+    pub const PA_C_C8: usize = 5; // compensator for C8 (upd_anch a)
+    pub const PA_C_C9: usize = 6; // compensator for C9 (upd_anch e)
     // Compensators for the per-junction feed-forward addition
     // constraints (a-half and e-half). Same compensator pattern as
     // pa_c_c7/c8/c9: zero on the junction-window rows where the
@@ -350,22 +361,22 @@ pub mod cols {
     // `s_feedforward` selector multiplier and keep C12/C13 at degree 1
     // in the trace MLEs (so the UAIR remains MLE-first eligible —
     // `count_effective_max_degree::<U>() <= 1` in the bench gate).
-    pub const PA_C_FF_A: usize = 6; // compensator for C12 (feed-forward a-half)
-    pub const PA_C_FF_E: usize = 7; // compensator for C13 (feed-forward e-half)
-    pub const W_MU_W: usize = 8; // witness: integer carry for the modular-sum constraint
-    pub const W_MU_A: usize = 9; // witness: integer carry for the a-update
-    pub const W_MU_E: usize = 10; // witness: integer carry for the e-update
+    pub const PA_C_FF_A: usize = 7; // compensator for C12 (feed-forward a-half)
+    pub const PA_C_FF_E: usize = 8; // compensator for C13 (feed-forward e-half)
+    pub const W_MU_W: usize = 9; // witness: integer carry for the modular-sum constraint
+    pub const W_MU_A: usize = 10; // witness: integer carry for the a-update
+    pub const W_MU_E: usize = 11; // witness: integer carry for the e-update
     // Witnesses for the SHA-256 feed-forward addition at each junction
     // between consecutive compressions: `H_{i+1} = internal_final_i + H_i
     // mod 2^32` componentwise. Each carry is in {0, 1} since both
     // summands are < 2^32. Range check is NYI (same status as
     // mu_W/mu_a/mu_e). Nonzero only on the junction-window rows.
-    pub const W_MU_JUNCTION_A: usize = 11; // witness: feed-forward carry for a-half
-    pub const W_MU_JUNCTION_E: usize = 12; // witness: feed-forward carry for e-half
+    pub const W_MU_JUNCTION_A: usize = 12; // witness: feed-forward carry for a-half
+    pub const W_MU_JUNCTION_E: usize = 13; // witness: feed-forward carry for e-half
     /// Total number of int columns.
-    pub const NUM_INT: usize = 13;
+    pub const NUM_INT: usize = 14;
     /// Number of public int columns (prefix).
-    pub const NUM_INT_PUB: usize = 8;
+    pub const NUM_INT_PUB: usize = 9;
 
     // ---------------------------------------------------------------------
     // Chained-compression layout constants.
@@ -629,6 +640,7 @@ where
         let pa_ov_sig1 = &bp[cols::PA_OV_SIG1];
         let pa_ov_lsig0 = &bp[cols::PA_OV_LSIG0];
         let pa_ov_lsig1 = &bp[cols::PA_OV_LSIG1];
+        let pa_m = &bp[cols::PA_M];
         let w_a = &bp[cols::W_A];
         let w_sig0 = &bp[cols::W_SIG0];
         let w_e = &bp[cols::W_E];
@@ -643,6 +655,7 @@ where
         // rows (same status as the C7/C8/C9 compensator-zero TODO);
         // the constraint expression itself doesn't reference it.
         let _s_feedforward = &sel[cols::S_FEEDFORWARD];
+        let s_msg_init = &sel[cols::S_MSG_INIT];
         let pa_c_c7 = &sel[cols::PA_C_C7];
         let pa_c_c8 = &sel[cols::PA_C_C8];
         let pa_c_c9 = &sel[cols::PA_C_C9];
@@ -888,6 +901,20 @@ where
             - pa_e
             + &two_x31_mu_ff_e;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
+
+        // Constraint 16: message init (Table 9 row 77). For each
+        // compression `i ∈ [0, NUM_COMPRESSIONS)`, pin the 16 message-
+        // schedule seed rows `[ROWS_PER_COMP·i, ROWS_PER_COMP·i + 16)`
+        // to the public message-block words `pa_m`. Lets a verifier
+        // specify *which* message is being hashed; without this, w_W
+        // seeds are prover-chosen and the proof attests only to "some"
+        // SHA-256 round-trip.
+        //
+        //   s_msg_init · (w_W − pa_m) == 0
+        //
+        // Zero-ideal (assert_zero), so it doesn't count toward
+        // `count_effective_max_degree` — MLE-first eligibility intact.
+        b.assert_zero(s_msg_init.clone() * &(w_big_w.clone() - pa_m));
     }
 }
 
@@ -1111,6 +1138,10 @@ where
         // at different rows for different constraint uses.
         let mut pa_a_vals = vec![0u32; n];
         let mut pa_e_vals = vec![0u32; n];
+        // pa_m: per-compression message-block words. Holds M_i[0..16]
+        // at rows [start, start+16) for compression i; zero elsewhere.
+        // Pinned to w_W at those rows by C16 (s_msg_init).
+        let mut pa_m_vals = vec![0u32; n];
 
         // H_0: random initial state for testing. Stored as two 4-arrays
         // (d, c, b, a) for the a-half and (h, g, f, e) for the e-half, in
@@ -1140,11 +1171,15 @@ where
                 pa_e_vals[start + j] = h_e[j];
             }
 
-            // 2) Per-compression message block. 16 random seeds, then 48
-            //    derived via the SHA-256 message-schedule recurrence —
-            //    contained entirely within compression i's window.
+            // 2) Per-compression message block. 16 random seeds (which
+            //    also populate the public pa_m column so C16 pins them),
+            //    then 48 derived via the SHA-256 message-schedule
+            //    recurrence — contained entirely within compression i's
+            //    window.
             for j in 0..16 {
-                w_vals[start + j] = rng.next_u32();
+                let m_word = rng.next_u32();
+                w_vals[start + j] = m_word;
+                pa_m_vals[start + j] = m_word;
             }
             for j in 16..rpc {
                 let t = start + j;
@@ -1366,6 +1401,7 @@ where
             to_bin_mle(to_bits(&ov_lsig1_vals)),
             to_bin_mle(to_bits(&pa_r_ch2_corr_vals)),
             to_bin_mle(to_bits(&pa_r_maj_corr_vals)),
+            to_bin_mle(to_bits(&pa_m_vals)),
             to_bin_mle(to_bits(&a_vals)),
             to_bin_mle(to_bits(&sig0_vals)),
             to_bin_mle(to_bits(&e_vals)),
@@ -1397,6 +1433,14 @@ where
         for i in 0..big_n {
             for j in 0..4 {
                 s_feedforward_col[i * rpc + 64 + j] = R::ONE;
+            }
+        }
+        // s_msg_init: 1 on the 16 message-block-seed rows of every
+        // compression, 0 elsewhere. Gates C16 (`w_W − pa_m == 0`).
+        let mut s_msg_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+        for i in 0..big_n {
+            for j in 0..16 {
+                s_msg_init_col[i * rpc + j] = R::ONE;
             }
         }
 
@@ -1538,6 +1582,7 @@ where
         let int = vec![
             to_int_mle(s_init_prefix_col),
             to_int_mle(s_feedforward_col),
+            to_int_mle(s_msg_init_col),
             to_int_mle(k_col),
             to_int_mle(pa_c_c7_col),
             to_int_mle(pa_c_c8_col),
