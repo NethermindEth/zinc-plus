@@ -374,6 +374,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 // the CPR group; left empty here.
                 bit_slice_evals: Vec::new(),
                 bit_op_down_evals,
+                // Filled by the protocol-level prover after CPR finalize.
+                shifted_bit_slice_evals: Vec::new(),
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,
@@ -405,6 +407,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
         num_constraints: usize,
         num_bit_slices: usize,
+        num_shifted_bit_slices: usize,
         num_vars: usize,
         projecting_element: &F,
         field_cfg: &F::Config,
@@ -420,6 +423,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             uair_sig.down_cols().cols(),
             num_bit_slices,
             uair_sig.bit_op_specs().len(),
+            num_shifted_bit_slices,
         )?;
 
         let zero = F::zero_with_cfg(field_cfg);
@@ -575,6 +579,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             down_evals: proof.down_evals,
             bit_slice_evals: proof.bit_slice_evals,
             bit_op_down_evals: proof.bit_op_down_evals,
+            shifted_bit_slice_evals: proof.shifted_bit_slice_evals,
             evaluation_point: shared_point,
         })
     }
@@ -596,6 +601,8 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongBitSliceEvalsNumber { got: usize, expected: usize },
     #[error("wrong bit-op down evaluations number: got {got}, expected {expected}")]
     WrongBitOpDownEvalsNumber { got: usize, expected: usize },
+    #[error("wrong shifted bit-slice evaluations number: got {got}, expected {expected}")]
+    WrongShiftedBitSliceEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
@@ -742,6 +749,7 @@ mod tests {
             &ic_check_subclaim,
             num_constraints,
             0, // num_bit_slices: this test has no binary_poly columns
+            0, // num_shifted_bit_slices
             num_vars,
             &projecting_element,
             &test_config(),

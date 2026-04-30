@@ -25,6 +25,11 @@ pub struct Proof<F: PrimeField> {
     /// point — one per `BitOpSpec`. Their consistency is verified in
     /// Step 4.5 against `ψ(op(lifted_eval[source_col]))`.
     pub bit_op_down_evals: Vec<F>,
+    /// Evaluations of bit-slice MLEs at *shifted* shared points, per
+    /// declared `ShiftedBitSliceSpec`, flat layout `spec*D + bit`.
+    /// Bound to the corresponding `down_evals` entry by the projection-
+    /// element consistency check (no separate sumcheck participation).
+    pub shifted_bit_slice_evals: Vec<F>,
 }
 
 impl<F: PrimeField> GenTranscribable for Proof<F>
@@ -37,12 +42,14 @@ where
         let (down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (bit_op_down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (shifted_bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         assert!(bytes.is_empty(), "All bytes should be consumed");
         Self {
             up_evals,
             down_evals,
             bit_slice_evals,
             bit_op_down_evals,
+            shifted_bit_slice_evals,
         }
     }
 
@@ -51,6 +58,7 @@ where
         let buf = self.down_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_slice_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_op_down_evals.write_transcription_bytes_subset(buf);
+        let buf = self.shifted_bit_slice_evals.write_transcription_bytes_subset(buf);
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
@@ -62,14 +70,17 @@ where
 {
     fn get_num_bytes(&self) -> usize {
         add!(
-            4 * u32::NUM_BYTES,
+            5 * u32::NUM_BYTES,
             add!(
                 self.up_evals.get_num_bytes(),
                 add!(
                     self.down_evals.get_num_bytes(),
                     add!(
                         self.bit_slice_evals.get_num_bytes(),
-                        self.bit_op_down_evals.get_num_bytes()
+                        add!(
+                            self.bit_op_down_evals.get_num_bytes(),
+                            self.shifted_bit_slice_evals.get_num_bytes()
+                        )
                     )
                 )
             )
@@ -78,14 +89,14 @@ where
 }
 
 impl<F: PrimeField> Proof<F> {
-    /// Check that `up_evals`, `down_evals`, `bit_slice_evals`, and
-    /// `bit_op_down_evals` have the expected lengths.
+    /// Check that all eval vectors have the expected lengths.
     pub fn validate_evaluation_sizes(
         &self,
         num_cols: usize,
         num_down_cols: usize,
         num_bit_slices: usize,
         num_bit_ops: usize,
+        num_shifted_bit_slices: usize,
     ) -> Result<(), CombinedPolyResolverError<F>> {
         if self.up_evals.len() != num_cols {
             return Err(CombinedPolyResolverError::WrongUpEvalsNumber {
@@ -112,6 +123,13 @@ impl<F: PrimeField> Proof<F> {
             return Err(CombinedPolyResolverError::WrongBitOpDownEvalsNumber {
                 got: self.bit_op_down_evals.len(),
                 expected: num_bit_ops,
+            });
+        }
+
+        if self.shifted_bit_slice_evals.len() != num_shifted_bit_slices {
+            return Err(CombinedPolyResolverError::WrongShiftedBitSliceEvalsNumber {
+                got: self.shifted_bit_slice_evals.len(),
+                expected: num_shifted_bit_slices,
             });
         }
 
@@ -168,4 +186,6 @@ pub struct VerifierSubclaim<F: PrimeField> {
     /// `BitOpSpec`. The verifier checks each against
     /// `ψ(op(lifted_eval[source_col]))` in Step 4.5.
     pub bit_op_down_evals: Vec<F>,
+    /// Shifted bit-slice MLE evaluation claims (flat `spec*D + bit`).
+    pub shifted_bit_slice_evals: Vec<F>,
 }

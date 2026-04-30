@@ -367,6 +367,10 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Lookup(#[from] LookupError),
     #[error("booleanity check failed: {0}")]
     Booleanity(zinc_piop::lookup::booleanity::BooleanityError<F>),
+    #[error("public-trace consistency check failed: {0}")]
+    PublicConsistency(String),
+    #[error("shifted bit-slice evaluation failed: {0}")]
+    ShiftedBitSliceEval(zinc_poly::EvaluationError),
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
@@ -1424,18 +1428,25 @@ mod tests {
         type Zt = TestShaEcdsaZincTypes;
         type U = ShaEcdsaUair<ShaEcdsaInt>;
 
-        // SHA standalone signature pins (post-Commit-D):
-        //   NUM_BIN = 19, bit_op_specs.len() = 6.
+        // SHA standalone signature pins (post-virtualization of B_1/
+        // B_2/B_3): NUM_BIN = 18 (3 committed B_i cols dropped, 2
+        // public correctors PA_R_*_CORR added — net −1), bit_op_specs
+        // = 6, virtual_binary_poly_cols = 3.
         let sha_sig = <Sha256CompressionSliceUair<ShaEcdsaInt> as Uair>::signature();
         assert_eq!(
             sha_sig.total_cols().num_binary_poly_cols(),
-            19,
-            "SHA-256 NUM_BIN drifted: expected 19 binary_poly columns post-Commit-D",
+            18,
+            "SHA-256 NUM_BIN drifted: expected 18 binary_poly columns post-virtualization",
         );
         assert_eq!(
             sha_sig.bit_op_specs().len(),
             6,
             "SHA-256 bit_op_specs.len() drifted: expected 6",
+        );
+        assert_eq!(
+            sha_sig.virtual_binary_poly_cols().len(),
+            3,
+            "SHA-256 virtual_binary_poly_cols.len() drifted: expected 3 (B_1/B_2/B_3)",
         );
 
         // SHA-ECDSA composed signature (the actual UAIR exercised here).
@@ -1443,12 +1454,17 @@ mod tests {
         let num_bit_op = sig.bit_op_specs().len();
         assert_eq!(
             sig.total_cols().num_binary_poly_cols(),
-            19,
-            "SHA-ECDSA NUM_BIN drifted: expected 19 binary_poly columns",
+            18,
+            "SHA-ECDSA NUM_BIN drifted: expected 18 binary_poly columns",
         );
         assert_eq!(
             num_bit_op, 6,
             "SHA-ECDSA bit_op_specs.len() drifted: expected 6",
+        );
+        assert_eq!(
+            sig.virtual_binary_poly_cols().len(),
+            3,
+            "SHA-ECDSA virtual_binary_poly_cols.len() drifted: expected 3",
         );
 
         // Round-trip a real proof and pin the post-rewrite proof size.

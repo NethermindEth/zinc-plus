@@ -239,6 +239,109 @@ column_layout_wrapper!(/// Layout of the witness (total minus public) columns.
 // UairSignature
 // ---------------------------------------------------------------------------
 
+/// Declares that the bit slices of a witness binary_poly column should be
+/// opened at a shifted row, matching one of the existing `ShiftSpec`
+/// entries on the same flat column. Used by virtual booleanity specs that
+/// reference values from rows other than the booleanity batch's anchor.
+///
+/// `witness_col_idx` is witness-relative (0-based, post-public). The
+/// `shift_amount` must match one of `UairSignature::shifts()`'s entries
+/// targeting this column — its `down_eval` is what the verifier ties the
+/// shifted bit slices to via the projection-element consistency check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShiftedBitSliceSpec {
+    pub witness_col_idx: usize,
+    pub shift_amount: usize,
+}
+
+impl ShiftedBitSliceSpec {
+    pub fn new(witness_col_idx: usize, shift_amount: usize) -> Self {
+        assert!(shift_amount > 0, "shift must be non-zero");
+        Self {
+            witness_col_idx,
+            shift_amount,
+        }
+    }
+}
+
+/// Source for one term of a virtual booleanity linear combination.
+///
+/// Virtual booleanity asserts that `Σ_j coeff_j · v_j ∈ {0, 1}` per row,
+/// where each `v_j` is the eval of a `VirtualBoolSource`. Coefficients
+/// are signed integers cast to F at materialization time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VirtualBoolSource {
+    /// Bit slice of a witness binary_poly column at the un-shifted point.
+    /// `witness_col_idx` is witness-relative (0-based, post-public).
+    /// `bit_idx ∈ [0, D)`.
+    SelfBitSlice {
+        witness_col_idx: usize,
+        bit_idx: usize,
+    },
+    /// Bit slice of a witness binary_poly column at a shifted point.
+    /// `shifted_spec_idx` indexes into
+    /// `UairSignature::shifted_bit_slice_specs`. `bit_idx ∈ [0, D)`.
+    ShiftedBitSlice {
+        shifted_spec_idx: usize,
+        bit_idx: usize,
+    },
+    /// Bit slice of a *public* binary_poly column at the un-shifted
+    /// point. `public_col_idx ∈ [0, num_pub_bin)`. `bit_idx ∈ [0, D)`.
+    /// The verifier evaluates the public bit slice MLE at the shared
+    /// point locally (no proof bytes); the prover materializes it from
+    /// `public_trace`.
+    PublicBitSlice {
+        public_col_idx: usize,
+        bit_idx: usize,
+    },
+    /// A witness int column entry. `witness_col_idx` is witness-relative
+    /// (post-public).
+    IntCol { witness_col_idx: usize },
+}
+
+/// One virtual booleanity check: the prover materializes the linear
+/// combination as an MLE over rows; the booleanity batch verifies it is
+/// `{0, 1}`-valued; the verifier reconstructs its closing eval at `r*`
+/// from the relevant `bit_slice_evals` / `up_evals`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualBoolSpec {
+    pub terms: Vec<(i64, VirtualBoolSource)>,
+}
+
+/// Source for one term of a *packed* virtual binary_poly column.
+///
+/// A virtual binary_poly column is the per-row, per-bit residual
+/// `Σ_j coeff_j · v_j[t][i]`, packed into a `BinaryPoly<D>` with the
+/// per-bit contributions sharing the same linear-combo structure
+/// across all bits. Compared to `D` separate single-bit
+/// `VirtualBoolSpec`s, it collapses them into one binary_poly column —
+/// booleanity then runs the standard one-XOR-per-row-pair fast path
+/// on it instead of `D` separate per-bit dispatches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VirtualBinaryPolySource {
+    /// Witness binary_poly column at the un-shifted point.
+    /// `witness_col_idx` is witness-relative (0-based, post-public).
+    SelfWitnessCol { witness_col_idx: usize },
+    /// Witness binary_poly column at a shifted point.
+    /// `shifted_spec_idx` indexes into `shifted_bit_slice_specs`.
+    ShiftedWitnessCol { shifted_spec_idx: usize },
+    /// Public binary_poly column at the un-shifted point.
+    /// `public_col_idx ∈ [0, num_pub_bin)`.
+    PublicCol { public_col_idx: usize },
+}
+
+/// One packed virtual binary_poly column. Per row t, per bit i:
+///   `output[t].bit(i) = (Σ_j coeff_j · source_j[t].bit(i)) mod 2`
+/// where the residual `Σ_j coeff_j · source_j[t].bit(i)` must lie
+/// in `{0, 1}` for the lookup constraint to hold. The booleanity
+/// check on the resulting bit slices catches deviations: a residual
+/// outside `{0, 1}` makes its closing override (= residual eval at
+/// `r*`) fail the booleanity polynomial identity `v² − v == 0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualBinaryPolySpec {
+    pub terms: Vec<(i64, VirtualBinaryPolySource)>,
+}
+
 /// The signature of a UAIR.
 ///
 /// Public columns precede witness columns within each type group.
@@ -276,6 +379,26 @@ pub struct UairSignature {
     /// multipoint eval — their consistency is fully discharged in
     /// Step 4.5.
     bit_op_specs: Vec<BitOpSpec>,
+    /// Absolute indices of int trace columns whose entries are
+    /// `{0, 1}`-valued and whose binariness should be enforced by the
+    /// booleanity sumcheck (alongside binary_poly bit slices). Each
+    /// index must point at a *witness* int column (i.e. be `>=`
+    /// `public_cols.num_int_cols()`).
+    int_witness_bit_cols: Vec<usize>,
+    /// Witness binary_poly cols whose bit slices should be opened at
+    /// shifted points (in addition to the un-shifted self bit slices),
+    /// to support virtual booleanity references to prior/next rows.
+    shifted_bit_slice_specs: Vec<ShiftedBitSliceSpec>,
+    /// Virtual booleanity specs: each is a linear combination over
+    /// self bit slices, shifted bit slices, and witness int cols whose
+    /// every-row value must lie in `{0, 1}`.
+    virtual_booleanity_cols: Vec<VirtualBoolSpec>,
+    /// Packed virtual binary_poly columns: each spec produces one
+    /// `BinaryPoly<D>`-typed virtual column carrying `D` per-bit
+    /// residuals at once. Booleanity treats them as ordinary binary
+    /// cols (one XOR per row pair); per-bit closing overrides bind
+    /// them to the spec residual.
+    virtual_binary_poly_cols: Vec<VirtualBinaryPolySpec>,
 }
 
 impl UairSignature {
@@ -354,7 +477,227 @@ impl UairSignature {
             lookup_specs,
             booleanity_skip_indices: Vec::new(),
             bit_op_specs,
+            int_witness_bit_cols: Vec::new(),
+            shifted_bit_slice_specs: Vec::new(),
+            virtual_booleanity_cols: Vec::new(),
+            virtual_binary_poly_cols: Vec::new(),
         }
+    }
+
+    /// Replace the set of witness binary_poly columns the protocol
+    /// should skip from the booleanity sumcheck. Indices are relative
+    /// to the witness section (0-based within
+    /// `trace.binary_poly[num_pub_bin..]`) — equivalently,
+    /// `absolute_index − num_pub_bin`. Out-of-range entries panic so
+    /// the misuse is caught at signature construction.
+    pub fn with_booleanity_skip_indices(mut self, mut skip: Vec<usize>) -> Self {
+        let num_witness_bin = self.witness_cols.num_binary_poly_cols();
+        for &i in &skip {
+            assert!(
+                i < num_witness_bin,
+                "booleanity skip index {i} out of range \
+                 (num witness binary_poly cols = {num_witness_bin})"
+            );
+        }
+        skip.sort_unstable();
+        skip.dedup();
+        self.booleanity_skip_indices = skip;
+        self
+    }
+
+    /// Sorted, dedup'd witness binary_poly indices (relative to the
+    /// witness section) the UAIR has asked to skip from booleanity.
+    pub fn booleanity_skip_indices(&self) -> &[usize] {
+        &self.booleanity_skip_indices
+    }
+
+    /// Builder-style: declare shifted bit-slice openings. Each spec must
+    /// match an existing `ShiftSpec` on the same witness binary_poly col
+    /// (so the shifted parent's `down_eval` is available to bind the
+    /// shifted bit slices via the projection-element consistency check).
+    #[must_use]
+    pub fn with_shifted_bit_slice_specs(mut self, specs: Vec<ShiftedBitSliceSpec>) -> Self {
+        let num_pub_bin = self.public_cols.num_binary_poly_cols();
+        let num_wit_bin = self.witness_cols.num_binary_poly_cols();
+        for spec in &specs {
+            assert!(
+                spec.witness_col_idx < num_wit_bin,
+                "ShiftedBitSliceSpec witness_col_idx {} out of range (num_wit_bin = {num_wit_bin})",
+                spec.witness_col_idx,
+            );
+            let flat_col = spec.witness_col_idx + num_pub_bin;
+            let matched = self.shifts.iter().any(|s| {
+                s.source_col() == flat_col && s.shift_amount() == spec.shift_amount
+            });
+            assert!(
+                matched,
+                "ShiftedBitSliceSpec(col {}, shift {}) has no matching ShiftSpec",
+                spec.witness_col_idx, spec.shift_amount,
+            );
+        }
+        self.shifted_bit_slice_specs = specs;
+        self
+    }
+
+    pub fn shifted_bit_slice_specs(&self) -> &[ShiftedBitSliceSpec] {
+        &self.shifted_bit_slice_specs
+    }
+
+    /// For each `ShiftedBitSliceSpec`, return its index into the
+    /// `down.binary_poly` slice (i.e., its position among binary-source
+    /// shifts in `shifts()` order).
+    pub fn shifted_bit_slice_down_indices(&self) -> Vec<usize> {
+        let num_total_bin = self.total_cols.num_binary_poly_cols();
+        let num_pub_bin = self.public_cols.num_binary_poly_cols();
+        self.shifted_bit_slice_specs
+            .iter()
+            .map(|spec| {
+                let flat_col = spec.witness_col_idx + num_pub_bin;
+                let mut bin_down_idx = 0usize;
+                for s in &self.shifts {
+                    if s.source_col() < num_total_bin {
+                        if s.source_col() == flat_col
+                            && s.shift_amount() == spec.shift_amount
+                        {
+                            return bin_down_idx;
+                        }
+                        bin_down_idx += 1;
+                    }
+                }
+                panic!(
+                    "ShiftedBitSliceSpec(col {}, shift {}) not found in shifts",
+                    spec.witness_col_idx, spec.shift_amount
+                )
+            })
+            .collect()
+    }
+
+    /// Builder-style: declare absolute int column indices whose entries
+    /// are `{0, 1}`-valued, to be range-checked by the booleanity
+    /// sumcheck. Indices must be in the witness portion (after the
+    /// public int prefix).
+    #[must_use]
+    pub fn with_int_witness_bit_cols(mut self, cols: Vec<usize>) -> Self {
+        let num_int = self.total_cols.num_int_cols();
+        let num_int_pub = self.public_cols.num_int_cols();
+        for &c in &cols {
+            assert!(
+                c >= num_int_pub && c < num_int,
+                "int_witness_bit_col {c} out of witness int range \
+                 [{num_int_pub}, {num_int})",
+            );
+        }
+        self.int_witness_bit_cols = cols;
+        self
+    }
+
+    pub fn int_witness_bit_cols(&self) -> &[usize] {
+        &self.int_witness_bit_cols
+    }
+
+    /// Builder-style: register virtual booleanity checks. Each spec is
+    /// validated against the current column / bit layout. `bit_width`
+    /// is the binary_poly bit-poly width (D).
+    #[must_use]
+    pub fn with_virtual_booleanity_cols(
+        mut self,
+        cols: Vec<VirtualBoolSpec>,
+        bit_width: usize,
+    ) -> Self {
+        let num_wit_bin = self.witness_cols.num_binary_poly_cols();
+        let num_wit_int = self.witness_cols.num_int_cols();
+        let num_shifted = self.shifted_bit_slice_specs.len();
+        for (sidx, spec) in cols.iter().enumerate() {
+            for (tidx, (_coeff, source)) in spec.terms.iter().enumerate() {
+                match source {
+                    VirtualBoolSource::SelfBitSlice {
+                        witness_col_idx,
+                        bit_idx,
+                    } => {
+                        assert!(
+                            *witness_col_idx < num_wit_bin && *bit_idx < bit_width,
+                            "VirtualBoolSpec[{sidx}].terms[{tidx}] SelfBitSlice out of range",
+                        );
+                    }
+                    VirtualBoolSource::ShiftedBitSlice {
+                        shifted_spec_idx,
+                        bit_idx,
+                    } => {
+                        assert!(
+                            *shifted_spec_idx < num_shifted && *bit_idx < bit_width,
+                            "VirtualBoolSpec[{sidx}].terms[{tidx}] ShiftedBitSlice out of range",
+                        );
+                    }
+                    VirtualBoolSource::PublicBitSlice {
+                        public_col_idx,
+                        bit_idx,
+                    } => {
+                        let num_pub_bin = self.public_cols.num_binary_poly_cols();
+                        assert!(
+                            *public_col_idx < num_pub_bin && *bit_idx < bit_width,
+                            "VirtualBoolSpec[{sidx}].terms[{tidx}] PublicBitSlice out of range",
+                        );
+                    }
+                    VirtualBoolSource::IntCol { witness_col_idx } => {
+                        assert!(
+                            *witness_col_idx < num_wit_int,
+                            "VirtualBoolSpec[{sidx}].terms[{tidx}] IntCol witness idx out of range",
+                        );
+                    }
+                }
+            }
+        }
+        self.virtual_booleanity_cols = cols;
+        self
+    }
+
+    pub fn virtual_booleanity_cols(&self) -> &[VirtualBoolSpec] {
+        &self.virtual_booleanity_cols
+    }
+
+    /// Builder-style: register packed virtual binary_poly columns. Each
+    /// spec materializes into one `BinaryPoly<D>`-typed virtual column;
+    /// booleanity processes them through the same fast path as genuine
+    /// binary_poly cols. Per-bit closing overrides on the verifier side
+    /// bind each bit's MLE eval to the spec residual.
+    #[must_use]
+    pub fn with_virtual_binary_poly_cols(
+        mut self,
+        cols: Vec<VirtualBinaryPolySpec>,
+    ) -> Self {
+        let num_wit_bin = self.witness_cols.num_binary_poly_cols();
+        let num_pub_bin = self.public_cols.num_binary_poly_cols();
+        let num_shifted = self.shifted_bit_slice_specs.len();
+        for (sidx, spec) in cols.iter().enumerate() {
+            for (tidx, (_coeff, source)) in spec.terms.iter().enumerate() {
+                match source {
+                    VirtualBinaryPolySource::SelfWitnessCol { witness_col_idx } => {
+                        assert!(
+                            *witness_col_idx < num_wit_bin,
+                            "VirtualBinaryPolySpec[{sidx}].terms[{tidx}] SelfWitnessCol out of range",
+                        );
+                    }
+                    VirtualBinaryPolySource::ShiftedWitnessCol { shifted_spec_idx } => {
+                        assert!(
+                            *shifted_spec_idx < num_shifted,
+                            "VirtualBinaryPolySpec[{sidx}].terms[{tidx}] ShiftedWitnessCol out of range",
+                        );
+                    }
+                    VirtualBinaryPolySource::PublicCol { public_col_idx } => {
+                        assert!(
+                            *public_col_idx < num_pub_bin,
+                            "VirtualBinaryPolySpec[{sidx}].terms[{tidx}] PublicCol out of range",
+                        );
+                    }
+                }
+            }
+        }
+        self.virtual_binary_poly_cols = cols;
+        self
+    }
+
+    pub fn virtual_binary_poly_cols(&self) -> &[VirtualBinaryPolySpec] {
+        &self.virtual_binary_poly_cols
     }
 
     pub fn lookup_specs(&self) -> &[LookupColumnSpec] {

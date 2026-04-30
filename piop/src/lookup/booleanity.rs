@@ -13,7 +13,7 @@
 //! `max_degree + 3`. For SHA-style UAIRs (max_degree ≥ 6) with hundreds
 //! of bit-slice MLEs, this is a 2–2.5× saving on step 4 alone.
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, semiring::boolean::Boolean};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -26,9 +26,437 @@ use zinc_poly::{
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_uair::{
+    ShiftedBitSliceSpec, VirtualBinaryPolySource, VirtualBinaryPolySpec, VirtualBoolSource,
+    VirtualBoolSpec,
+};
 use zinc_utils::{
     cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField, powers,
 };
+
+/// Build the F::Inner-valued shifted bit-slice MLEs for each
+/// `ShiftedBitSliceSpec`, in flat layout `spec*D + bit`. Each MLE has
+/// `evaluations[t] = bit_idx-th bit of trace.binary_poly[col][t + shift]`,
+/// zero-padded past the trace tail (matching the protocol's shift
+/// convention used by `ShiftSpec` / down columns).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_shifted_bit_slice_mles<F, const D: usize>(
+    trace_witness_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    shifted_specs: &[ShiftedBitSliceSpec],
+    field_cfg: &F::Config,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F: InnerTransparentField,
+    F::Inner: Clone + Send + Sync,
+    F::Config: Sync,
+{
+    let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
+    let one_inner = F::one_with_cfg(field_cfg).into_inner();
+
+    cfg_iter!(shifted_specs)
+        .flat_map(|spec| {
+            let col = &trace_witness_binary_poly[spec.witness_col_idx];
+            let shift = spec.shift_amount;
+            let n = col.evaluations.len();
+            let num_vars = col.num_vars;
+
+            let mut bit_evals: Vec<Vec<F::Inner>> =
+                (0..D).map(|_| vec![zero_inner.clone(); n]).collect();
+            for t in 0..n {
+                let src_t = t.checked_add(shift).filter(|&v| v < n);
+                if let Some(s) = src_t {
+                    let bp = &col.evaluations[s];
+                    for (bit_idx, coeff) in bp.iter().enumerate() {
+                        if coeff.into_inner() {
+                            bit_evals[bit_idx][t] = one_inner.clone();
+                        }
+                    }
+                }
+            }
+            bit_evals
+                .into_iter()
+                .map(move |evaluations| DenseMultilinearExtension {
+                    evaluations,
+                    num_vars,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Compute `coeff * value` in F::Inner using only `add_inner` /
+/// `sub_inner`. Coefficients are small in practice (Maj uses ±1, ±2).
+///
+/// Generic fallback used by [`compute_virtual_closing_overrides`] (one
+/// call per spec, not per row, so the per-call overhead is fine). The
+/// per-row hot path in [`build_virtual_booleanity_mles`] inlines the
+/// ±1 / ±2 cases instead of going through this function.
+#[allow(clippy::arithmetic_side_effects)]
+fn apply_coeff_inner<F: InnerTransparentField>(
+    coeff: i64,
+    value: &F::Inner,
+    field_cfg: &F::Config,
+) -> F::Inner
+where
+    F::Inner: Clone,
+{
+    let zero = F::zero_with_cfg(field_cfg).into_inner();
+    let abs = coeff.unsigned_abs();
+    let mut acc = zero.clone();
+    for _ in 0..abs {
+        acc = F::add_inner(&acc, value, field_cfg);
+    }
+    if coeff < 0 {
+        F::sub_inner(&zero, &acc, field_cfg)
+    } else {
+        acc
+    }
+}
+
+/// Build F::Inner-valued virtual booleanity MLEs from `VirtualBoolSpec`s.
+///
+/// `self_bit_slices` is the flat (`witness_col*D + bit`) bit decomposition
+/// of the witness binary_poly cols; `int_witness_cols` is the per-row
+/// F::Inner values of witness int cols (length `num_witness_int`,
+/// indexed by witness-relative col).
+///
+/// The returned MLEs are in spec order; each MLE has `num_vars` matching
+/// the trace and `evaluations[t] = Σ_j coeff_j · v_j(t)` per the spec.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_virtual_booleanity_mles<F, const D: usize>(
+    self_bit_slices: &[DenseMultilinearExtension<F::Inner>],
+    shifted_bit_slice_mles: &[DenseMultilinearExtension<F::Inner>],
+    public_bit_slices: &[DenseMultilinearExtension<F::Inner>],
+    int_witness_cols: &[DenseMultilinearExtension<F::Inner>],
+    virtual_specs: &[VirtualBoolSpec],
+    field_cfg: &F::Config,
+) -> Vec<DenseMultilinearExtension<F::Inner>>
+where
+    F: InnerTransparentField,
+    F::Inner: Clone + Send + Sync,
+    F::Config: Sync,
+{
+    if virtual_specs.is_empty() {
+        return Vec::new();
+    }
+    let template = self_bit_slices
+        .first()
+        .or_else(|| shifted_bit_slice_mles.first())
+        .or_else(|| public_bit_slices.first())
+        .or_else(|| int_witness_cols.first())
+        .expect("virtual booleanity needs at least one source MLE");
+    let n = template.evaluations.len();
+    let num_vars = template.num_vars;
+    let zero = F::zero_with_cfg(field_cfg).into_inner();
+
+    cfg_iter!(virtual_specs)
+        .map(|spec| {
+            let mut evals: Vec<F::Inner> = vec![zero.clone(); n];
+            for (coeff, source) in &spec.terms {
+                // Hoist source-slice resolution outside the t loop —
+                // `source` is constant across rows.
+                let src: &[F::Inner] = match source {
+                    VirtualBoolSource::SelfBitSlice {
+                        witness_col_idx,
+                        bit_idx,
+                    } => &self_bit_slices[*witness_col_idx * D + *bit_idx]
+                        .evaluations,
+                    VirtualBoolSource::ShiftedBitSlice {
+                        shifted_spec_idx,
+                        bit_idx,
+                    } => &shifted_bit_slice_mles
+                        [*shifted_spec_idx * D + *bit_idx]
+                        .evaluations,
+                    VirtualBoolSource::PublicBitSlice {
+                        public_col_idx,
+                        bit_idx,
+                    } => &public_bit_slices[*public_col_idx * D + *bit_idx]
+                        .evaluations,
+                    VirtualBoolSource::IntCol { witness_col_idx } => {
+                        &int_witness_cols[*witness_col_idx].evaluations
+                    }
+                };
+                debug_assert_eq!(src.len(), n);
+                // Specialize the inner loop on |coeff|. Maj uses only
+                // ±1 / ±2; the generic fallback never fires for SHA but
+                // keeps the function general.
+                match *coeff {
+                    1 => {
+                        for t in 0..n {
+                            evals[t] =
+                                F::add_inner(&evals[t], &src[t], field_cfg);
+                        }
+                    }
+                    -1 => {
+                        for t in 0..n {
+                            evals[t] =
+                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                        }
+                    }
+                    2 => {
+                        for t in 0..n {
+                            evals[t] =
+                                F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] =
+                                F::add_inner(&evals[t], &src[t], field_cfg);
+                        }
+                    }
+                    -2 => {
+                        for t in 0..n {
+                            evals[t] =
+                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] =
+                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                        }
+                    }
+                    c => {
+                        for t in 0..n {
+                            let term =
+                                apply_coeff_inner::<F>(c, &src[t], field_cfg);
+                            evals[t] =
+                                F::add_inner(&evals[t], &term, field_cfg);
+                        }
+                    }
+                }
+            }
+            DenseMultilinearExtension { evaluations: evals, num_vars }
+        })
+        .collect()
+}
+
+/// Verifier-side reconstruction of each virtual booleanity MLE's eval
+/// at `r*`. Each output[s] = `Σ_j coeff_j · v_j` where `v_j` is looked
+/// up in the relevant eval slice based on the spec's source kind.
+/// Used as the `closing_overrides_tail` suffix when calling
+/// `finalize_booleanity_verifier`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_virtual_closing_overrides<F, const D: usize>(
+    virtual_specs: &[VirtualBoolSpec],
+    self_bit_slice_evals: &[F],
+    shifted_bit_slice_evals: &[F],
+    public_bit_slice_evals: &[F],
+    int_witness_up_evals: &[F],
+    field_cfg: &F::Config,
+) -> Vec<F>
+where
+    F: PrimeField,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    virtual_specs
+        .iter()
+        .map(|spec| {
+            let mut acc = zero.clone();
+            for (coeff, source) in &spec.terms {
+                let v: &F = match source {
+                    VirtualBoolSource::SelfBitSlice {
+                        witness_col_idx,
+                        bit_idx,
+                    } => &self_bit_slice_evals[*witness_col_idx * D + *bit_idx],
+                    VirtualBoolSource::ShiftedBitSlice {
+                        shifted_spec_idx,
+                        bit_idx,
+                    } => &shifted_bit_slice_evals
+                        [*shifted_spec_idx * D + *bit_idx],
+                    VirtualBoolSource::PublicBitSlice {
+                        public_col_idx,
+                        bit_idx,
+                    } => &public_bit_slice_evals
+                        [*public_col_idx * D + *bit_idx],
+                    VirtualBoolSource::IntCol { witness_col_idx } => {
+                        &int_witness_up_evals[*witness_col_idx]
+                    }
+                };
+                let abs = coeff.unsigned_abs();
+                let mut term = zero.clone();
+                for _ in 0..abs {
+                    term = term + v.clone();
+                }
+                if *coeff < 0 {
+                    acc = acc - term;
+                } else {
+                    acc = acc + term;
+                }
+            }
+            acc
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Packed virtual binary_poly columns
+// ---------------------------------------------------------------------------
+
+/// Read the bit pattern of a `BinaryPoly<D>` as a `u64` (low D bits set
+/// according to the polynomial's coefficients). Generic across the
+/// `binary_ref` / `binary_u64` backends — both expose `.iter()` over
+/// `Boolean` coefficients.
+#[allow(clippy::arithmetic_side_effects)]
+fn binary_poly_to_u64<const D: usize>(bp: &BinaryPoly<D>) -> u64 {
+    let mut out: u64 = 0;
+    for (i, b) in bp.iter().enumerate() {
+        if b.into_inner() {
+            out |= 1u64 << i;
+        }
+    }
+    out
+}
+
+/// Look up a virtual-binary-poly source's row-`t` value as a `u64` bit
+/// pattern (low `D` bits). Off-trace shifts return `0`, matching the
+/// `ShiftSpec` / down-column convention.
+#[allow(clippy::arithmetic_side_effects)]
+fn source_u_at<const D: usize>(
+    source: &VirtualBinaryPolySource,
+    t: usize,
+    self_witness_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    public_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    shifted_specs: &[ShiftedBitSliceSpec],
+) -> u64 {
+    match source {
+        VirtualBinaryPolySource::SelfWitnessCol { witness_col_idx } => {
+            let bp = &self_witness_binary_poly[*witness_col_idx].evaluations[t];
+            binary_poly_to_u64(bp)
+        }
+        VirtualBinaryPolySource::ShiftedWitnessCol { shifted_spec_idx } => {
+            let spec = &shifted_specs[*shifted_spec_idx];
+            let col = &self_witness_binary_poly[spec.witness_col_idx];
+            let n = col.evaluations.len();
+            let src_t = t.checked_add(spec.shift_amount).filter(|&v| v < n);
+            if let Some(s) = src_t {
+                binary_poly_to_u64(&col.evaluations[s])
+            } else {
+                0
+            }
+        }
+        VirtualBinaryPolySource::PublicCol { public_col_idx } => {
+            let bp = &public_binary_poly[*public_col_idx].evaluations[t];
+            binary_poly_to_u64(bp)
+        }
+    }
+}
+
+/// Build packed virtual binary_poly MLEs from `VirtualBinaryPolySpec`s.
+///
+/// Per row `t`, per bit `i ∈ [0, D)`, the output bit is the LSB of
+/// `Σ_j coeff_j · source_j[t].bit(i)`. Coefficients with even absolute
+/// value contribute zero mod 2; coefficients with odd absolute value
+/// contribute their source's bit pattern. So per row, the packed
+/// output is `XOR over odd-|coeff| sources` (per-bit XOR ≡ scalar
+/// XOR over u64 bit patterns), giving us one tight per-row inner
+/// loop instead of `D × terms` per-bit inner work.
+///
+/// **Soundness:** the materialization assumes the spec residual is
+/// bit-valued at every (t, i). For dishonest provers where the residual
+/// lands outside `{0, 1}`, the verifier's per-bit closing override
+/// (computed via [`compute_virtual_binary_poly_closing_overrides`])
+/// will not match the booleanity polynomial check on the override —
+/// concretely, `(override)² − override ≠ 0` when the residual is not
+/// in `{0, 1}` — so the booleanity check rejects.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_virtual_binary_poly_mles<const D: usize>(
+    self_witness_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    public_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    shifted_specs: &[ShiftedBitSliceSpec],
+    virtual_specs: &[VirtualBinaryPolySpec],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<D>>>
+where
+    BinaryPoly<D>: Send + Sync + Default + Clone,
+{
+    if virtual_specs.is_empty() {
+        return Vec::new();
+    }
+    let template = self_witness_binary_poly
+        .first()
+        .or_else(|| public_binary_poly.first())
+        .expect("virtual binary_poly needs at least one source binary_poly");
+    let n = template.evaluations.len();
+    let num_vars = template.num_vars;
+    debug_assert!(D <= 64, "build_virtual_binary_poly_mles assumes D <= 64");
+
+    cfg_iter!(virtual_specs)
+        .map(|spec| {
+            let mut evaluations: Vec<BinaryPoly<D>> = Vec::with_capacity(n);
+            // Reusable scratch for the per-row Boolean coeffs.
+            let mut coeffs: Vec<Boolean> = vec![Boolean::default(); D];
+            for t in 0..n {
+                let mut packed_lsb: u64 = 0;
+                for (coeff, source) in &spec.terms {
+                    if coeff.unsigned_abs() % 2 == 1 {
+                        let src_u = source_u_at::<D>(
+                            source,
+                            t,
+                            self_witness_binary_poly,
+                            public_binary_poly,
+                            shifted_specs,
+                        );
+                        packed_lsb ^= src_u;
+                    }
+                }
+                for (i, slot) in coeffs.iter_mut().enumerate() {
+                    *slot = Boolean::new((packed_lsb >> i) & 1 == 1);
+                }
+                evaluations.push(BinaryPoly::<D>::new(coeffs.as_slice()));
+            }
+            DenseMultilinearExtension { evaluations, num_vars }
+        })
+        .collect()
+}
+
+/// Verifier-side per-bit closing overrides for virtual binary_poly cols.
+///
+/// Output layout: flat `spec * D + bit_idx`, i.e. `D` consecutive entries
+/// per spec. Each entry equals `Σ_j coeff_j · source_bit_eval_j[bit_idx]`
+/// (in `F`), reconstructed from already-bound per-bit eval slices.
+///
+/// Used as a *prefix* of `closing_overrides_tail` when calling
+/// `finalize_booleanity_verifier`: virtual binary_poly per-bit slices
+/// occupy positions `(K_genuine + virtual_idx) * D + bit_idx` of
+/// `bit_slice_evals`, immediately preceding the existing
+/// `extra_bit_cols` entries.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_virtual_binary_poly_closing_overrides<F, const D: usize>(
+    virtual_specs: &[VirtualBinaryPolySpec],
+    self_witness_bit_slice_evals: &[F],
+    shifted_bit_slice_evals: &[F],
+    public_bit_slice_evals: &[F],
+    field_cfg: &F::Config,
+) -> Vec<F>
+where
+    F: PrimeField,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut out = Vec::with_capacity(virtual_specs.len() * D);
+    for spec in virtual_specs {
+        for i in 0..D {
+            let mut acc = zero.clone();
+            for (coeff, source) in &spec.terms {
+                let v: &F = match source {
+                    VirtualBinaryPolySource::SelfWitnessCol { witness_col_idx } => {
+                        &self_witness_bit_slice_evals[*witness_col_idx * D + i]
+                    }
+                    VirtualBinaryPolySource::ShiftedWitnessCol { shifted_spec_idx } => {
+                        &shifted_bit_slice_evals[*shifted_spec_idx * D + i]
+                    }
+                    VirtualBinaryPolySource::PublicCol { public_col_idx } => {
+                        &public_bit_slice_evals[*public_col_idx * D + i]
+                    }
+                };
+                let abs = coeff.unsigned_abs();
+                let mut term = zero.clone();
+                for _ in 0..abs {
+                    term = term + v.clone();
+                }
+                if *coeff < 0 {
+                    acc = acc - term;
+                } else {
+                    acc = acc + term;
+                }
+            }
+            out.push(acc);
+        }
+    }
+    out
+}
 
 use crate::{
     CombFn,
@@ -118,7 +546,14 @@ pub struct BooleanityRound1FastPath<F: PrimeField, const D: usize> {
     /// Owned clones of the binary_poly trace columns. Read directly to
     /// avoid materializing F-valued bit-slice MLEs at full size.
     binary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
-    /// `[1, α, α², ..., α^{K·D − 1}]`.
+    /// Owned F::Inner-valued MLEs for additional "single-bit" columns
+    /// (e.g. int trace columns each holding a `{0, 1}` value per row).
+    /// Each element is treated as one extra bit slice — booleanity
+    /// asserts every entry lies in `{0, 1}`.
+    extra_bit_cols: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// `[1, α, α², ..., α^{K·D + E − 1}]` where E = `extra_bit_cols.len()`.
+    /// Layout: binary cols first (col-major-then-bit-major over D), then
+    /// extra bit cols in their input order.
     alpha_powers: Vec<F>,
     /// `eq(b', ic_evaluation_point[1..])` for `b' ∈ {0, 1}^(num_vars − 1)`.
     eq_other_table: Vec<F::Inner>,
@@ -134,10 +569,11 @@ where
     F::Inner: Send + Sync + Zero + Default,
 {
     fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
+        let extra_offset = self.binary_cols.len() * D;
         debug_assert_eq!(
             self.alpha_powers.len(),
-            self.binary_cols.len() * D,
-            "alpha_powers length must match K·D"
+            extra_offset + self.extra_bit_cols.len(),
+            "alpha_powers length must match K·D + E"
         );
         debug_assert_eq!(
             self.eq_other_table.len(),
@@ -152,7 +588,9 @@ where
         // T_1 = Σ_{b'} S(b') · E_other(b'). Compute S(b') row pair by row
         // pair: for each binary_poly column, a single XOR of the two adjacent
         // BinaryPoly rows yields all D bit differences in one shot; iterate
-        // the bits and conditionally fold α-powers in.
+        // the bits and conditionally fold α-powers in. For each extra bit
+        // column (one bit per row, F::Inner-valued and assumed `{0, 1}`),
+        // a single inequality test toggles its α power.
         let t1: F = cfg_into_iter!(0..half)
             .map(|b_prime| {
                 let mut s_b: F = zero.clone();
@@ -163,6 +601,16 @@ where
                         if a_bit.into_inner() != b_bit.into_inner() {
                             s_b = s_b + self.alpha_powers[k * D + i].clone();
                         }
+                    }
+                }
+                for (j, col) in self.extra_bit_cols.iter().enumerate() {
+                    let a = &col.evaluations[2 * b_prime];
+                    let b = &col.evaluations[2 * b_prime + 1];
+                    // `a` and `b` are in `{0, 1}` (F::Inner). XOR via
+                    // `is_zero` distinguishes the four cases without
+                    // needing F::Inner: PartialEq.
+                    if a.is_zero() != b.is_zero() {
+                        s_b = s_b + self.alpha_powers[extra_offset + j].clone();
                     }
                 }
                 let e_other =
@@ -222,8 +670,9 @@ where
         let r1_inner = r1.inner().clone();
         let one_minus_r1_inner = one_minus_r1.inner().clone();
 
-        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
-            Vec::with_capacity(1 + self.binary_cols.len() * D);
+        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> = Vec::with_capacity(
+            1 + self.binary_cols.len() * D + self.extra_bit_cols.len(),
+        );
         mles.push(eq_folded);
 
         // BinaryPoly<D> does not impl Index<usize> on every backend
@@ -252,6 +701,31 @@ where
                     evaluations: evals,
                 });
             }
+        }
+
+        // Extra bit columns: each contributes one folded MLE. Values are
+        // F::Inner already and assumed `{0, 1}`-valued; the (A,B) ∈
+        // {0,1}² → {0, r_1, 1−r_1, 1} lookup uses `is_zero()` to
+        // distinguish the cases.
+        for col in &self.extra_bit_cols {
+            let mut evals: Vec<F::Inner> = Vec::with_capacity(half);
+            for b_prime in 0..half {
+                let a = &col.evaluations[2 * b_prime];
+                let b = &col.evaluations[2 * b_prime + 1];
+                let a_is_one = !a.is_zero();
+                let b_is_one = !b.is_zero();
+                let v = match (a_is_one, b_is_one) {
+                    (false, false) => zero_inner.clone(),
+                    (true, true) => one_inner.clone(),
+                    (false, true) => r1_inner.clone(),
+                    (true, false) => one_minus_r1_inner.clone(),
+                };
+                evals.push(v);
+            }
+            mles.push(DenseMultilinearExtension {
+                num_vars: self.num_vars - 1,
+                evaluations: evals,
+            });
         }
 
         mles
@@ -309,20 +783,27 @@ pub struct BooleanityVerifierAncillary<F: PrimeField> {
 }
 
 /// Build a degree-3 multi-degree sumcheck group for the booleanity
-/// zerocheck. MLE layout (post round-1 fold): `[eq_r, v_0, v_1, ..., v_{B-1}]`
-/// where `B = K · D`.
+/// zerocheck. MLE layout (post round-1 fold):
+/// `[eq_r, v_0, ..., v_{K·D − 1}, e_0, ..., e_{E − 1}]`
+/// where `K · D` covers the binary_poly bit slices and `E =
+/// extra_bit_cols.len()` covers per-row scalar bit columns.
 ///
 /// Round 1 is supplied via [`BooleanityRound1FastPath`], which reads the
-/// `binary_cols` directly and never materializes F-valued bit-slice MLEs
-/// at full size. Rounds 2..n use the standard sumcheck path on the
-/// half-size folded MLEs the fast path emits.
+/// `binary_cols` and `extra_bit_cols` directly and never materializes
+/// F-valued full-size bit-slice MLEs. Rounds 2..n use the standard
+/// sumcheck path on the half-size folded MLEs the fast path emits.
 ///
-/// Returns `None` when `binary_cols` is empty (no binary_poly columns →
-/// no booleanity check needed; caller should skip pushing this group).
+/// Each entry of `extra_bit_cols` must be `{0, 1}`-valued in `F::Inner`;
+/// booleanity makes that a soundness condition.
+///
+/// Returns `None` when both `binary_cols` and `extra_bit_cols` are
+/// empty (no booleanity check needed; caller should skip pushing this
+/// group).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prepare_booleanity_group<F, const D: usize>(
     transcript: &mut impl Transcript,
     binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    extra_bit_cols: &[DenseMultilinearExtension<F::Inner>],
     ic_evaluation_point: &[F],
     field_cfg: &F::Config,
 ) -> Result<Option<(MultiDegreeSumcheckGroup<F>, BooleanityProverAncillary)>, BooleanityError<F>>
@@ -331,11 +812,11 @@ where
     F::Inner: ConstTranscribable + Send + Sync + Zero + Default + Clone,
     F::Modulus: ConstTranscribable,
 {
-    if binary_cols.is_empty() {
+    if binary_cols.is_empty() && extra_bit_cols.is_empty() {
         return Ok(None);
     }
 
-    let num_bit_slices = binary_cols.len() * D;
+    let num_bit_slices = binary_cols.len() * D + extra_bit_cols.len();
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
@@ -360,6 +841,7 @@ where
 
     let fast_path: Box<dyn Round1FastPath<F>> = Box::new(BooleanityRound1FastPath::<F, D> {
         binary_cols: binary_cols.to_vec(),
+        extra_bit_cols: extra_bit_cols.to_vec(),
         alpha_powers: folding_challenge_powers.clone(),
         eq_other_table,
         ic_ep_0: ic_evaluation_point[0].clone(),
@@ -476,10 +958,18 @@ where
 /// `expected_evaluation == Σ_k α^k · v_k · (v_k - 1) · eq_r(ic_eval_point, r*)`
 /// where `r*` is the multi-degree sumcheck's shared point. Absorbs
 /// `bit_slice_evals` into the transcript.
+///
+/// `closing_overrides_tail` replaces the trailing positions of
+/// `bit_slice_evals` for the closing computation only — used to
+/// substitute a column's CPR `up_eval` (or a virtual MLE's reconstructed
+/// linear-combo eval) for its bit-slice eval when both are bound to the
+/// same MLE at the shared point. Absorption is always over the original
+/// `bit_slice_evals`. Pass an empty slice to disable.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn finalize_booleanity_verifier<F>(
     transcript: &mut impl Transcript,
     bit_slice_evals: &[F],
+    closing_overrides_tail: &[F],
     shared_point: &[F],
     expected_evaluation: F,
     ancillary: BooleanityVerifierAncillary<F>,
@@ -496,14 +986,22 @@ where
             expected: ancillary.folding_challenge_powers.len(),
         });
     }
+    if closing_overrides_tail.len() > bit_slice_evals.len() {
+        return Err(BooleanityError::WrongBitSliceEvalCount {
+            got: closing_overrides_tail.len(),
+            expected: bit_slice_evals.len(),
+        });
+    }
 
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);
 
     let eq_r_value = eq_eval(shared_point, &ancillary.ic_evaluation_point, one.clone())?;
 
-    let bool_folded = bit_slice_evals
+    let n_proof = bit_slice_evals.len() - closing_overrides_tail.len();
+    let bool_folded = bit_slice_evals[..n_proof]
         .iter()
+        .chain(closing_overrides_tail.iter())
         .zip(ancillary.folding_challenge_powers.iter())
         .fold(zero, |acc, (v, coeff)| {
             let v_sq = v.clone() * v.clone();
@@ -770,6 +1268,7 @@ mod tests {
         let eq_other_table = build_eq_x_r_inner(&ic_ep[1..], &cfg).unwrap().evaluations;
         let fast_path = BooleanityRound1FastPath::<F, D> {
             binary_cols: binary_cols.clone(),
+            extra_bit_cols: Vec::new(),
             alpha_powers: alpha_powers.clone(),
             eq_other_table,
             ic_ep_0: ic_ep[0].clone(),
@@ -853,6 +1352,7 @@ mod tests {
         let eq_other_table = build_eq_x_r_inner(&ic_ep[1..], &cfg).unwrap().evaluations;
         let fast_path = Box::new(BooleanityRound1FastPath::<F, D> {
             binary_cols: binary_cols.clone(),
+            extra_bit_cols: Vec::new(),
             alpha_powers,
             eq_other_table,
             ic_ep_0: ic_ep[0].clone(),

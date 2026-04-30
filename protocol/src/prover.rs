@@ -6,6 +6,8 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{
+        build_shifted_bit_slice_mles, build_virtual_binary_poly_mles,
+        build_virtual_booleanity_mles, compute_bit_slices_flat,
         finalize_booleanity_prover, prepare_booleanity_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
@@ -16,7 +18,10 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
-use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+use zinc_poly::{
+    mle::MultilinearExtensionWithConfig,
+    univariate::dynamic::over_field::DynamicPolynomialF,
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
@@ -30,6 +35,28 @@ use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     pcs_transcript::PcsProverTranscript,
 };
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+
+/// Drop the witness binary_poly columns the UAIR opted out of (sorted,
+/// dedup'd `skip_indices` relative to `witness_cols`) and return the
+/// remaining columns as an owned `Vec`. The booleanity prep then runs
+/// only on the kept columns. The verifier mirrors this filter on
+/// `up_evals[num_pub_bin..]` so the bit-decomposition consistency
+/// check pairs the right column eval with the right bit-slice block.
+fn filter_booleanity_witness<const D: usize>(
+    witness_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    skip_indices: &[usize],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<D>>> {
+    if skip_indices.is_empty() {
+        return witness_cols.to_vec();
+    }
+    witness_cols
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !skip_indices.contains(i))
+        .map(|(_, col)| col.clone())
+        .collect()
+}
 
 //
 // Shared base
@@ -529,18 +556,91 @@ impl_with_type_bounds!(ProverEvalProjected
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
-        // Only witness binary_poly columns need this check — public ones
-        // are already known to the verifier (see step 6, where public
-        // lifted_evals are recomputed locally), so booleanity on them
-        // would be redundant work for both sides.
+        // Covers witness binary_poly columns (minus those the UAIR opts
+        // out of via `booleanity_skip_indices`), packed virtual
+        // binary_poly columns (`virtual_binary_poly_cols`), declared int
+        // bit cols (`int_witness_bit_cols`), and virtual booleanity
+        // linear-combo cols (`virtual_booleanity_cols`) — every entry
+        // must lie in `{0, 1}`.
         let num_pub_bin = self
             .base
             .uair_signature
             .public_cols()
             .num_binary_poly_cols();
+        let num_pub_int = self
+            .base
+            .uair_signature
+            .public_cols()
+            .num_int_cols();
+        let num_wit_int = self
+            .base
+            .uair_signature
+            .witness_cols()
+            .num_int_cols();
+        let int_offset = self.base.trace.binary_poly.len()
+            + self.base.trace.arbitrary_poly.len();
+        let int_bit_cols: Vec<_> = self
+            .base
+            .uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| self.projected_trace_f[int_offset + idx].clone())
+            .collect();
+        let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
+            &self.base.trace.binary_poly[num_pub_bin..],
+            self.base.uair_signature.shifted_bit_slice_specs(),
+            &self.field_cfg,
+        );
+        let virtual_specs = self.base.uair_signature.virtual_booleanity_cols();
+        let virtual_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            let self_bit_slices = compute_bit_slices_flat::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                &self.field_cfg,
+            );
+            let public_bit_slices = compute_bit_slices_flat::<F, D>(
+                &self.base.trace.binary_poly[..num_pub_bin],
+                &self.field_cfg,
+            );
+            let int_witness_cols: Vec<_> = (0..num_wit_int)
+                .map(|i| self.projected_trace_f[int_offset + num_pub_int + i].clone())
+                .collect();
+            build_virtual_booleanity_mles::<F, D>(
+                &self_bit_slices,
+                &shifted_bit_slice_mles,
+                &public_bit_slices,
+                &int_witness_cols,
+                virtual_specs,
+                &self.field_cfg,
+            )
+        };
+        let mut extra_bit_cols = int_bit_cols;
+        extra_bit_cols.extend(virtual_mles);
+        // Materialize packed virtual binary_poly cols (e.g. SHA's B_1/
+        // B_2/B_3 affine combinations). They go through the booleanity
+        // batch as ordinary binary_cols, appended to the genuine witness
+        // binary_polys (after applying booleanity_skip_indices).
+        let virtual_bp_specs = self.base.uair_signature.virtual_binary_poly_cols();
+        let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+            &self.base.trace.binary_poly[num_pub_bin..],
+            &self.base.trace.binary_poly[..num_pub_bin],
+            self.base.uair_signature.shifted_bit_slice_specs(),
+            virtual_bp_specs,
+        );
+        let kept_witness_binary = filter_booleanity_witness(
+            &self.base.trace.binary_poly[num_pub_bin..],
+            self.base.uair_signature.booleanity_skip_indices(),
+        );
+        let booleanity_binary_cols: Vec<_> = kept_witness_binary
+            .iter()
+            .chain(virtual_binary_mles.iter())
+            .cloned()
+            .collect();
         let bool_prep = prepare_booleanity_group::<F, D>(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.base.trace.binary_poly[num_pub_bin..],
+            &booleanity_binary_cols,
+            &extra_bit_cols,
             &self.ic_eval_point,
             &self.field_cfg,
         )
@@ -569,6 +669,21 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_ancillary,
             &self.field_cfg,
         )?;
+
+        // Evaluate shifted bit-slice MLEs at the shared sumcheck point —
+        // bound on the verifier via the projection-element consistency
+        // check against the corresponding `down_evals`.
+        let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| {
+                mle.evaluate_with_config(
+                    &cpr_prover_state.evaluation_point,
+                    &self.field_cfg,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?;
+        cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
 
         // 4e: Finalize booleanity (bit_slice_evals).
         if let Some(ba) = bool_ancillary_opt {
@@ -1059,13 +1174,71 @@ where
         &projecting_element_f,
     )?;
 
-    // Witness binary_poly columns only — public ones are known to the
-    // verifier (recomputed locally in step 6) so booleanity on them is
-    // redundant.
+    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
+    // packed virtual binary_poly cols + declared int bit cols + virtual
+    // booleanity linear-combo cols. Public binary_poly cols are known
+    // to the verifier (recomputed locally in step 6) so booleanity on
+    // them is redundant.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
+    let int_bit_cols: Vec<_> = uair_signature
+        .int_witness_bit_cols()
+        .iter()
+        .map(|&idx| projected_trace_f[int_offset + idx].clone())
+        .collect();
+    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.shifted_bit_slice_specs(),
+        &field_cfg,
+    );
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let virtual_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        let self_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            &field_cfg,
+        );
+        let public_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[..num_pub_bin],
+            &field_cfg,
+        );
+        let int_witness_cols: Vec<_> = (0..num_wit_int)
+            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+            .collect();
+        build_virtual_booleanity_mles::<F, D>(
+            &self_bit_slices,
+            &shifted_bit_slice_mles,
+            &public_bit_slices,
+            &int_witness_cols,
+            virtual_specs,
+            &field_cfg,
+        )
+    };
+    let mut extra_bit_cols = int_bit_cols;
+    extra_bit_cols.extend(virtual_mles);
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+        &trace.binary_poly[num_pub_bin..],
+        &trace.binary_poly[..num_pub_bin],
+        uair_signature.shifted_bit_slice_specs(),
+        virtual_bp_specs,
+    );
+    let kept_witness_binary = filter_booleanity_witness(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.booleanity_skip_indices(),
+    );
+    let booleanity_binary_cols: Vec<_> = kept_witness_binary
+        .iter()
+        .chain(virtual_binary_mles.iter())
+        .cloned()
+        .collect();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly[num_pub_bin..],
+        &booleanity_binary_cols,
+        &extra_bit_cols,
         &ic_eval_point,
         &field_cfg,
     )
@@ -1091,6 +1264,12 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
+    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
+        .into_iter()
+        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(
@@ -1356,13 +1535,69 @@ where
         &projecting_element_f,
     )?;
 
-    // Witness binary_poly columns only — public ones are known to the
-    // verifier (recomputed locally in step 6) so booleanity on them is
-    // redundant.
+    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
+    // packed virtual binary_poly cols + declared int bit cols + virtual
+    // booleanity linear-combo cols.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
+    let int_bit_cols: Vec<_> = uair_signature
+        .int_witness_bit_cols()
+        .iter()
+        .map(|&idx| projected_trace_f[int_offset + idx].clone())
+        .collect();
+    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.shifted_bit_slice_specs(),
+        &field_cfg,
+    );
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let virtual_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        let self_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            &field_cfg,
+        );
+        let public_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[..num_pub_bin],
+            &field_cfg,
+        );
+        let int_witness_cols: Vec<_> = (0..num_wit_int)
+            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+            .collect();
+        build_virtual_booleanity_mles::<F, D>(
+            &self_bit_slices,
+            &shifted_bit_slice_mles,
+            &public_bit_slices,
+            &int_witness_cols,
+            virtual_specs,
+            &field_cfg,
+        )
+    };
+    let mut extra_bit_cols = int_bit_cols;
+    extra_bit_cols.extend(virtual_mles);
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+        &trace.binary_poly[num_pub_bin..],
+        &trace.binary_poly[..num_pub_bin],
+        uair_signature.shifted_bit_slice_specs(),
+        virtual_bp_specs,
+    );
+    let kept_witness_binary = filter_booleanity_witness(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.booleanity_skip_indices(),
+    );
+    let booleanity_binary_cols: Vec<_> = kept_witness_binary
+        .iter()
+        .chain(virtual_binary_mles.iter())
+        .cloned()
+        .collect();
     let bool_prep = prepare_booleanity_group::<F, D>(
         &mut pcs_transcript.fs_transcript,
-        &trace.binary_poly[num_pub_bin..],
+        &booleanity_binary_cols,
+        &extra_bit_cols,
         &ic_eval_point,
         &field_cfg,
     )
@@ -1388,6 +1623,12 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
+    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
+        .into_iter()
+        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(

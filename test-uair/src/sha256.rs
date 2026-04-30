@@ -119,7 +119,7 @@
 //! protocol no longer wires logup-GKR, so no lookup is enforced
 //! today and `signature()` returns an empty `lookup_specs`.
 //!
-//! ## Ch / Maj enforcement (Table 9 affine-combination lookups)
+//! ## Ch / Maj enforcement (Table 9 virtual binary_poly residuals)
 //!
 //! `Ch(e, f, g) = (e ∧ f) ⊕ (¬e ∧ g)` is split into two operand bit-polys
 //! `u_ef = e ∧ f` and `u_{¬e,g} = ¬e ∧ g`. Since the two AND terms can never
@@ -128,21 +128,33 @@
 //! replace the old `Ch[t]` reference with `u_ef[t] + u_{¬e,g}[t]`.
 //!
 //! Per Table 9 of the spec, three affine combinations must lie in
-//! `{0, 1}^32` (lookup-checked): the two Ch operand witnesses and the
-//! `Maj` witness. Direct affine-combination lookups aren't supported, so
-//! we materialize each combination in a dedicated bit-poly column
-//! (`B_1`, `B_2`, `B_3`) and lookup-check each column against the
-//! `BitPoly { width: 32 }` table:
+//! `{0, 1}^32` per coefficient. We declare these as **virtual binary_poly
+//! columns** anchored at `k = t − 2` (so all references are forward shifts
+//! of `e, a, u_ef, u_{¬e,g}, Maj`), and pin them by the same booleanity
+//! sumcheck that handles genuine witness binary_poly cols. No committed
+//! `B_i` columns, no materialization identity — the virtual MLE
+//! definition is itself the affine combination, and booleanity on its
+//! per-bit slices forces it into `{0, 1}^32` per coefficient:
 //!
-//! - `B_1[t] = e[t]      + e[t-1] − 2 · u_ef[t]`           (Ch eq 62)
-//! - `B_2[t] = (1₃₂ − e[t]) + e[t-2] − 2 · u_{¬e,g}[t]`     (Ch eq 63)
-//! - `B_3[t] = a[t] + a[t-1] + a[t-2] − 2 · Maj[t]`        (Maj eq 64)
+//! - `r_ch1[k] = e[k+2] + e[k+1] − 2·u_ef[k+2]`                   (Ch eq 62)
+//! - `r_ch2[k] = e[k+2] − e[k]   + 2·u_{¬e,g}[k+2] + 2·corr_ch2[k]`
+//!     — alt complement form of `(1₃₂ − e[t]) + e[t−2] − 2·u_{¬e,g}[t]`;
+//!     per coefficient `r_orig + r_alt = 1`, so both are bit-valid
+//!     simultaneously and the `1₃₂` constant is dropped from the
+//!     virtual-source enum                                        (Ch eq 63)
+//! - `r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·corr_maj[k]`
+//!                                                                (Maj eq 64)
 //!
-//! Each materialization constraint is gated by the public selector
-//! `S_B_ACTIVE`, which is 1 on rows where the constraint window stays in
-//! trace and 0 on the last two rows (where the forward shifts of length
-//! 2 land in zero-padded territory). The active rows cover the entire
-//! range required by C8/C9.
+//! With `u_ef`, `u_{¬e,g}`, `Maj` set on every row by their truth tables
+//! (the trace builder does this unconditionally), per-row residuals
+//! collapse to `XOR` / `MAJ-XOR` patterns that lie in `{0, 1}` per
+//! coefficient — including across compression-junction boundaries where
+//! the length-2 forward shifts read into the next compression. The only
+//! rows that fall outside `{0, 1}` are the last two rows of the trace
+//! (`k ∈ {n−2, n−1}`), where the forward shifts pull zero-padded values
+//! and `−e[k] / a[k]+a[k+1]` slip negative or to 2; the public
+//! correctors `PA_R_CH2_CORR` / `PA_R_MAJ_CORR` carry the bit pattern
+//! that absorbs the off-trace zero-padding (zero on every other row).
 //! - **K column** is populated with random integers rather than the
 //!   SHA-256-specified round constants. Both prover and verifier see the
 //!   same values (it's a public column), so the round-trip succeeds; a
@@ -165,7 +177,8 @@ use zinc_poly::{
 };
 use zinc_uair::{
     BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
-    ShiftSpec, TotalColumnLayout, TraceRow, Uair, UairSignature, UairTrace,
+    ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair, UairSignature,
+    UairTrace, VirtualBinaryPolySource, VirtualBinaryPolySpec,
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -241,53 +254,60 @@ pub struct Sha256CompressionSliceUair<R>(PhantomData<R>);
 /// All polynomial columns are bit-polynomials (stored as `binary_poly`);
 /// the int slot carries 0/1-valued selectors.
 pub mod cols {
-    // binary_poly, public prefix of length 6.
+    // binary_poly, public prefix of length 8.
     //
     // The 4 PA_OV_* columns are the per-coefficient mod-2 overflow
     // witnesses for the rotation-ideal constraints (C1, C2, C4, C6).
     // They're "quotient witnesses" for the F_2[X] → Q[X] lift —
     // verifier-supplied, since the verifier can derive them from the
     // bit-poly values when shadow-running the SHA computation.
+    //
+    // The two PA_R_*_CORR columns are public correctors for the Ch (63)
+    // and Maj (64) virtual binary_poly residuals (see module doc): zero
+    // on all rows except the last two (`k ∈ {n−2, n−1}`), where the
+    // length-2 forward shifts pull zero-padding and the residual
+    // arithmetic would otherwise leave `{0,1}` per coefficient. The
+    // verifier can derive both correctors from the public e/a values
+    // when shadow-running.
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
     pub const PA_OV_SIG0: usize = 2;
     pub const PA_OV_SIG1: usize = 3;
     pub const PA_OV_LSIG0: usize = 4;
     pub const PA_OV_LSIG1: usize = 5;
+    pub const PA_R_CH2_CORR: usize = 6;
+    pub const PA_R_MAJ_CORR: usize = 7;
     // binary_poly, witness suffix. Grouped by constraint family for clarity.
     // Sigma_0:
-    pub const W_A: usize = 6;
-    pub const W_SIG0: usize = 7;
+    pub const W_A: usize = 8;
+    pub const W_SIG0: usize = 9;
     // Sigma_1:
-    pub const W_E: usize = 8;
-    pub const W_SIG1: usize = 9;
+    pub const W_E: usize = 10;
+    pub const W_SIG1: usize = 11;
     // sigma_0 / sigma_1 — shares W_W. The σ_0/σ_1 right-shift
     // decomposition columns (S_0/T_0/S_1/T_1) are gone: ROT^c(W) and
     // SHIFTR^c(W) are now CPR bit-op virtual columns over W (declared in
     // signature()'s `bit_op_specs`), so σ_0/σ_1 reduce to row-local
     // Q[X] equalities with the `pa_ov_lsig{0,1}` XOR-overflow witnesses
     // retained.
-    pub const W_W: usize = 10;
-    pub const W_LSIG0: usize = 11;
-    pub const W_LSIG1: usize = 12;
+    pub const W_W: usize = 12;
+    pub const W_LSIG0: usize = 13;
+    pub const W_LSIG1: usize = 14;
     // Register update — Ch is replaced by two AND-operand bit-polys
     // (`u_ef = e ∧ f` and `u_{¬e,g} = ¬e ∧ g`). Maj is still a free
     // witness on this column. See the module doc for the Table 9 split.
-    pub const W_U_EF: usize = 13;
-    pub const W_U_NEG_E_G: usize = 14;
-    pub const W_MAJ: usize = 15;
-    // Affine-combination materializations for the Table 9 lookups.
-    // Each is constrained to equal the corresponding affine expression
-    // (gated by S_B_ACTIVE) and is lookup-checked against the
-    // `BitPoly { width: 32 }` table.
-    pub const W_B1: usize = 16;
-    pub const W_B2: usize = 17;
-    pub const W_B3: usize = 18;
+    pub const W_U_EF: usize = 15;
+    pub const W_U_NEG_E_G: usize = 16;
+    pub const W_MAJ: usize = 17;
+    // The Table 9 affine combinations B_1 / B_2 / B_3 are no longer
+    // committed — they're declared as packed virtual binary_poly
+    // columns in signature() via `with_virtual_binary_poly_cols`,
+    // pinned by the booleanity sumcheck (per-bit closing override).
 
     /// Total number of binary_poly columns.
-    pub const NUM_BIN: usize = 19;
+    pub const NUM_BIN: usize = 18;
     /// Number of public binary_poly columns (prefix).
-    pub const NUM_BIN_PUB: usize = 6;
+    pub const NUM_BIN_PUB: usize = 8;
 
     // int columns. Public selectors come first (required by PublicColumnLayout
     // prefix convention), witness columns last.
@@ -332,25 +352,20 @@ pub mod cols {
     // `count_effective_max_degree::<U>() <= 1` in the bench gate).
     pub const PA_C_FF_A: usize = 6; // compensator for C12 (feed-forward a-half)
     pub const PA_C_FF_E: usize = 7; // compensator for C13 (feed-forward e-half)
-    // Selector gating the three Table 9 materialization constraints
-    // (B_1/B_2/B_3). 1 on per-compression anchor rows k where the
-    // length-2 forward shifts stay within the same compression's
-    // 68-row window; 0 elsewhere.
-    pub const S_B_ACTIVE: usize = 8;
-    pub const W_MU_W: usize = 9; // witness: integer carry for the modular-sum constraint
-    pub const W_MU_A: usize = 10; // witness: integer carry for the a-update
-    pub const W_MU_E: usize = 11; // witness: integer carry for the e-update
+    pub const W_MU_W: usize = 8; // witness: integer carry for the modular-sum constraint
+    pub const W_MU_A: usize = 9; // witness: integer carry for the a-update
+    pub const W_MU_E: usize = 10; // witness: integer carry for the e-update
     // Witnesses for the SHA-256 feed-forward addition at each junction
     // between consecutive compressions: `H_{i+1} = internal_final_i + H_i
     // mod 2^32` componentwise. Each carry is in {0, 1} since both
     // summands are < 2^32. Range check is NYI (same status as
     // mu_W/mu_a/mu_e). Nonzero only on the junction-window rows.
-    pub const W_MU_JUNCTION_A: usize = 12; // witness: feed-forward carry for a-half
-    pub const W_MU_JUNCTION_E: usize = 13; // witness: feed-forward carry for e-half
+    pub const W_MU_JUNCTION_A: usize = 11; // witness: feed-forward carry for a-half
+    pub const W_MU_JUNCTION_E: usize = 12; // witness: feed-forward carry for e-half
     /// Total number of int columns.
-    pub const NUM_INT: usize = 14;
+    pub const NUM_INT: usize = 13;
     /// Number of public int columns (prefix).
-    pub const NUM_INT_PUB: usize = 9;
+    pub const NUM_INT_PUB: usize = 8;
 
     // ---------------------------------------------------------------------
     // Chained-compression layout constants.
@@ -379,9 +394,6 @@ pub mod cols {
     pub const FLAT_W_U_EF: usize = W_U_EF;
     pub const FLAT_W_U_NEG_E_G: usize = W_U_NEG_E_G;
     pub const FLAT_W_MAJ: usize = W_MAJ;
-    pub const FLAT_W_B1: usize = W_B1;
-    pub const FLAT_W_B2: usize = W_B2;
-    pub const FLAT_W_B3: usize = W_B3;
     pub const FLAT_PA_K: usize = NUM_BIN + PA_K;
     pub const FLAT_W_MU_W: usize = NUM_BIN + W_MU_W;
     pub const FLAT_W_MU_A: usize = NUM_BIN + W_MU_A;
@@ -406,15 +418,15 @@ where
         let shifts: Vec<ShiftSpec> = vec![
             // === binary_poly shifts (in source_col ascending order;
             //     within the same source_col, in shift_amount order) ===
-            // w_a: shifts 1, 2 for the Maj affine combination (B_3
-            // anchored at t-2); shift 4 for target a[t+1] in C8.
+            // w_a: shifts 1, 2 for the Maj virtual residual (r_maj
+            // anchored at k = t-2); shift 4 for target a[t+1] in C8.
             ShiftSpec::new(cols::FLAT_W_A, 1),
             ShiftSpec::new(cols::FLAT_W_A, 2),
             ShiftSpec::new(cols::FLAT_W_A, 4),
             // w_sig0: Sigma_0(a[t]) at C8 anchor t-3.
             ShiftSpec::new(cols::FLAT_W_SIG0, 3),
-            // w_e: shifts 1, 2 for the Ch affine combinations (B_1/B_2
-            // anchored at t-2); shift 4 for target e[t+1] in C9.
+            // w_e: shifts 1, 2 for the Ch virtual residuals (r_ch1 /
+            // r_ch2 anchored at k = t-2); shift 4 for target e[t+1] in C9.
             ShiftSpec::new(cols::FLAT_W_E, 1),
             ShiftSpec::new(cols::FLAT_W_E, 2),
             ShiftSpec::new(cols::FLAT_W_E, 4),
@@ -428,22 +440,17 @@ where
             ShiftSpec::new(cols::FLAT_W_LSIG0, 1),
             // w_lsig1: message-schedule sigma_1(W[t-2]).
             ShiftSpec::new(cols::FLAT_W_LSIG1, 14),
-            // w_u_ef: shift 2 for B_1 (anchor t-2); shift 3 for the
-            // Ch[t] reference in C8/C9 (anchor t-3), where Ch is the
-            // sum u_ef + u_{¬e,g} coefficient-wise.
+            // w_u_ef: shift 2 for r_ch1 (anchor k = t-2); shift 3 for
+            // the Ch[t] reference in C8/C9 (anchor t-3), where Ch is
+            // the sum u_ef + u_{¬e,g} coefficient-wise.
             ShiftSpec::new(cols::FLAT_W_U_EF, 2),
             ShiftSpec::new(cols::FLAT_W_U_EF, 3),
-            // w_u_neg_e_g: shift 2 for B_2; shift 3 for C8/C9.
+            // w_u_neg_e_g: shift 2 for r_ch2; shift 3 for C8/C9.
             ShiftSpec::new(cols::FLAT_W_U_NEG_E_G, 2),
             ShiftSpec::new(cols::FLAT_W_U_NEG_E_G, 3),
-            // w_maj: shift 2 for B_3; shift 3 for Maj[t] in C8.
+            // w_maj: shift 2 for r_maj; shift 3 for Maj[t] in C8.
             ShiftSpec::new(cols::FLAT_W_MAJ, 2),
             ShiftSpec::new(cols::FLAT_W_MAJ, 3),
-            // w_b1/w_b2/w_b3: shift 2 for the materialization
-            // constraints anchored at t-2.
-            ShiftSpec::new(cols::FLAT_W_B1, 2),
-            ShiftSpec::new(cols::FLAT_W_B2, 2),
-            ShiftSpec::new(cols::FLAT_W_B3, 2),
             // === int shifts (in source_col ascending order) ===
             ShiftSpec::new(cols::FLAT_PA_K, 3),
             ShiftSpec::new(cols::FLAT_W_MU_W, 16),
@@ -476,14 +483,134 @@ where
             BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
             BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
         ];
+        // Witness-relative col indices (post-public) for virtual specs.
+        const W_A_WIT_IDX: usize = cols::W_A - cols::NUM_BIN_PUB; // 0
+        const W_E_WIT_IDX: usize = cols::W_E - cols::NUM_BIN_PUB; // 2
+        const W_U_EF_WIT_IDX: usize = cols::W_U_EF - cols::NUM_BIN_PUB; // 7
+        const W_U_NEG_E_G_WIT_IDX: usize = cols::W_U_NEG_E_G - cols::NUM_BIN_PUB; // 8
+        const W_MAJ_WIT_IDX: usize = cols::W_MAJ - cols::NUM_BIN_PUB; // 9
+        // Order here is the spec_idx that
+        // `VirtualBinaryPolySource::ShiftedWitnessCol` references — must
+        // match the corresponding `ShiftSpec` ordering above (sorted by
+        // (source_col, shift_amount) inside `UairSignature::new`).
+        const SBS_W_A_SH1: usize = 0;
+        const SBS_W_A_SH2: usize = 1;
+        const SBS_W_E_SH1: usize = 2;
+        const SBS_W_E_SH2: usize = 3;
+        const SBS_W_U_EF_SH2: usize = 4;
+        const SBS_W_U_NEG_E_G_SH2: usize = 5;
+        const SBS_W_MAJ_SH2: usize = 6;
+        let shifted_bit_slice_specs = vec![
+            ShiftedBitSliceSpec::new(W_A_WIT_IDX, 1),
+            ShiftedBitSliceSpec::new(W_A_WIT_IDX, 2),
+            ShiftedBitSliceSpec::new(W_E_WIT_IDX, 1),
+            ShiftedBitSliceSpec::new(W_E_WIT_IDX, 2),
+            ShiftedBitSliceSpec::new(W_U_EF_WIT_IDX, 2),
+            ShiftedBitSliceSpec::new(W_U_NEG_E_G_WIT_IDX, 2),
+            ShiftedBitSliceSpec::new(W_MAJ_WIT_IDX, 2),
+        ];
+        // Virtual binary_poly cols — Table 9 (62)/(63)/(64) anchored at
+        // k = t-2. See module doc for the residual definitions and the
+        // alt-complement form for r_ch2 (drops the `1₃₂` constant).
+        let virtual_binary_poly_cols = vec![
+            // r_ch1[k] = e[k+2] + e[k+1] − 2·u_ef[k+2]   (Ch eq 62)
+            VirtualBinaryPolySpec {
+                terms: vec![
+                    (
+                        1,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_E_SH2,
+                        },
+                    ),
+                    (
+                        1,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_E_SH1,
+                        },
+                    ),
+                    (
+                        -2,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_U_EF_SH2,
+                        },
+                    ),
+                ],
+            },
+            // r_ch2[k] (alt) = e[k+2] − e[k] + 2·u_{¬e,g}[k+2] + 2·corr_ch2[k]
+            VirtualBinaryPolySpec {
+                terms: vec![
+                    (
+                        1,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_E_SH2,
+                        },
+                    ),
+                    (
+                        -1,
+                        VirtualBinaryPolySource::SelfWitnessCol {
+                            witness_col_idx: W_E_WIT_IDX,
+                        },
+                    ),
+                    (
+                        2,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_U_NEG_E_G_SH2,
+                        },
+                    ),
+                    (
+                        2,
+                        VirtualBinaryPolySource::PublicCol {
+                            public_col_idx: cols::PA_R_CH2_CORR,
+                        },
+                    ),
+                ],
+            },
+            // r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·corr_maj[k]
+            VirtualBinaryPolySpec {
+                terms: vec![
+                    (
+                        1,
+                        VirtualBinaryPolySource::SelfWitnessCol {
+                            witness_col_idx: W_A_WIT_IDX,
+                        },
+                    ),
+                    (
+                        1,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_A_SH1,
+                        },
+                    ),
+                    (
+                        1,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_A_SH2,
+                        },
+                    ),
+                    (
+                        -2,
+                        VirtualBinaryPolySource::ShiftedWitnessCol {
+                            shifted_spec_idx: SBS_W_MAJ_SH2,
+                        },
+                    ),
+                    (
+                        -2,
+                        VirtualBinaryPolySource::PublicCol {
+                            public_col_idx: cols::PA_R_MAJ_CORR,
+                        },
+                    ),
+                ],
+            },
+        ];
         UairSignature::new(total, public, shifts, lookup_specs, bit_op_specs)
+            .with_shifted_bit_slice_specs(shifted_bit_slice_specs)
+            .with_virtual_binary_poly_cols(virtual_binary_poly_cols)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
-        from_ref: FromR,
+        _from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
     ) where
@@ -521,18 +648,22 @@ where
         let pa_c_c9 = &sel[cols::PA_C_C9];
         let pa_c_ff_a = &sel[cols::PA_C_FF_A];
         let pa_c_ff_e = &sel[cols::PA_C_FF_E];
-        let s_b_active = &sel[cols::S_B_ACTIVE];
         let w_mu_junction_a = &sel[cols::W_MU_JUNCTION_A];
         let w_mu_junction_e = &sel[cols::W_MU_JUNCTION_E];
 
         // `down` slot layout (mirrors the ShiftSpec order in signature()).
         // bin slots:
-        let down_w_a_sh1 = &down.binary_poly[0];
-        let down_w_a_sh2 = &down.binary_poly[1];
+        // sh1 / sh2 entries are kept in `signature()`'s shift list for
+        // the virtual binary_poly residuals (declared via
+        // `with_shifted_bit_slice_specs`); they're consumed by the
+        // booleanity batch's shifted bit-slice consistency check, not
+        // by `constrain_general` directly. Hence the `_` prefix.
+        let _down_w_a_sh1 = &down.binary_poly[0];
+        let _down_w_a_sh2 = &down.binary_poly[1];
         let down_w_a_sh4 = &down.binary_poly[2];
         let down_w_sig0_sh3 = &down.binary_poly[3];
-        let down_w_e_sh1 = &down.binary_poly[4];
-        let down_w_e_sh2 = &down.binary_poly[5];
+        let _down_w_e_sh1 = &down.binary_poly[4];
+        let _down_w_e_sh2 = &down.binary_poly[5];
         let down_w_e_sh4 = &down.binary_poly[6];
         let down_w_sig1_sh3 = &down.binary_poly[7];
         let down_w_w_sh3 = &down.binary_poly[8];
@@ -540,15 +671,12 @@ where
         let down_w_w_sh16 = &down.binary_poly[10];
         let down_w_lsig0_sh1 = &down.binary_poly[11];
         let down_w_lsig1_sh14 = &down.binary_poly[12];
-        let down_w_u_ef_sh2 = &down.binary_poly[13];
+        let _down_w_u_ef_sh2 = &down.binary_poly[13];
         let down_w_u_ef_sh3 = &down.binary_poly[14];
-        let down_w_u_neg_e_g_sh2 = &down.binary_poly[15];
+        let _down_w_u_neg_e_g_sh2 = &down.binary_poly[15];
         let down_w_u_neg_e_g_sh3 = &down.binary_poly[16];
-        let down_w_maj_sh2 = &down.binary_poly[17];
+        let _down_w_maj_sh2 = &down.binary_poly[17];
         let down_w_maj_sh3 = &down.binary_poly[18];
-        let down_w_b1_sh2 = &down.binary_poly[19];
-        let down_w_b2_sh2 = &down.binary_poly[20];
-        let down_w_b3_sh2 = &down.binary_poly[21];
         // int slots:
         let down_pa_k_sh3 = &down.int[0];
         let down_w_mu_w_sh16 = &down.int[1];
@@ -697,62 +825,14 @@ where
             + &two_x31_mu_e;
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
-        // Constraints 13–15: Table 9 affine-combination materializations,
-        // each anchored at k = t − 2 and gated by `s_b_active` (1 on
-        // rows where the length-2 forward shifts stay in trace). Each
-        // B_i is independently lookup-checked to lie in {0,1}^32, so the
-        // materialization equality forces the operand witnesses (u_ef,
-        // u_{¬e,g}, Maj) to match the spec's bit-wise definitions.
-        let two_scalar_poly = const_scalar::<R>(R::ONE + R::ONE);
-        let one_32_poly = {
-            let mut coeffs = [R::ZERO; 32];
-            for c in coeffs.iter_mut() {
-                *c = R::ONE;
-            }
-            DensePolynomial::<R, 32>::new(coeffs)
-        };
-
-        // C13: B_1[t] = e[t] + e[t-1] − 2 · u_ef[t]   (Ch eq 62)
-        // At anchor k = t − 2:
-        //   B_1[t]       = down.w_b1^↓2
-        //   e[t]         = down.w_e^↓2     e[t-1] = down.w_e^↓1
-        //   u_ef[t]      = down.w_u_ef^↓2
-        let two_u_ef_sh2 = mbs(down_w_u_ef_sh2, &two_scalar_poly)
-            .expect("2 · u_ef overflow");
-        let b1_inner = down_w_b1_sh2.clone()
-            - down_w_e_sh2
-            - down_w_e_sh1
-            + &two_u_ef_sh2;
-        b.assert_zero(s_b_active.clone() * &b1_inner);
-
-        // C14: B_2[t] = (1₃₂ − e[t]) + e[t-2] − 2 · u_{¬e,g}[t]   (Ch eq 63)
-        // At anchor k = t − 2:
-        //   B_2[t]         = down.w_b2^↓2
-        //   e[t]           = down.w_e^↓2  e[t-2] = up.w_e
-        //   u_{¬e,g}[t]    = down.w_u_neg_e_g^↓2
-        // Inner = B_2 − 1₃₂ + e[t] − e[t-2] + 2 · u_{¬e,g}[t].
-        let two_u_neg_e_g_sh2 = mbs(down_w_u_neg_e_g_sh2, &two_scalar_poly)
-            .expect("2 · u_{¬e,g} overflow");
-        let b2_inner = down_w_b2_sh2.clone()
-            - &from_ref(&one_32_poly)
-            + down_w_e_sh2
-            - w_e
-            + &two_u_neg_e_g_sh2;
-        b.assert_zero(s_b_active.clone() * &b2_inner);
-
-        // C15: B_3[t] = a[t] + a[t-1] + a[t-2] − 2 · Maj[t]   (Maj eq 64)
-        // At anchor k = t − 2:
-        //   B_3[t] = down.w_b3^↓2
-        //   a[t]   = down.w_a^↓2  a[t-1] = down.w_a^↓1  a[t-2] = up.w_a
-        //   Maj[t] = down.w_maj^↓2
-        let two_maj_sh2 = mbs(down_w_maj_sh2, &two_scalar_poly)
-            .expect("2 · Maj overflow");
-        let b3_inner = down_w_b3_sh2.clone()
-            - down_w_a_sh2
-            - down_w_a_sh1
-            - w_a
-            + &two_maj_sh2;
-        b.assert_zero(s_b_active.clone() * &b3_inner);
+        // C13–C15 (B_1/B_2/B_3 materialization identities) are gone:
+        // the residuals are now packed virtual binary_poly columns
+        // declared in `signature()` via `with_virtual_binary_poly_cols`.
+        // The booleanity sumcheck pins each per-bit residual MLE into
+        // `{0,1}` per coefficient via the closing-override mechanism —
+        // jointly with the `u_ef` / `u_{¬e,g}` / `Maj` truth-table
+        // values populated on every row by the trace builder, this
+        // forces the spec's AND/MAJ semantics on every active row.
 
         // Constraint 10 (init-prefix pinning, a-family). For each
         // compression `i ∈ [0, NUM_COMPRESSIONS)`, pin the 4 init-prefix
@@ -1179,12 +1259,16 @@ where
             pa_e_vals[h_out_start + j] = h_e[j];
         }
 
-        // ===== Per-row Ch / Maj operand witnesses & B_i materializations =====
+        // ===== Per-row Ch / Maj operand witnesses =====
         //
         // Computed honestly on every row from a_vals / e_vals contents.
-        // At rows where C13–C15 are gated off (s_b_active = 0, including
-        // junction windows and slack), the values still need to be valid
-        // bit-polynomials (booleanity), which `& / | / ^` on u32 ensures.
+        // The truth-table values must hold on every row (not only
+        // SHA-active ones) to keep the Ch/Maj virtual residuals
+        // (`r_ch1` / `r_ch2` / `r_maj`, declared in `signature()`'s
+        // `with_virtual_binary_poly_cols`) bit-valid per coefficient
+        // across compression-junction boundaries: the booleanity
+        // sumcheck checks every row, including ones the spec doesn't
+        // care about.
         let u_ef_vals: Vec<u32> = (0..n)
             .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
             .collect();
@@ -1195,15 +1279,34 @@ where
             .map(|t| if t >= 2 { maj(a_vals[t], a_vals[t - 1], a_vals[t - 2]) } else { 0 })
             .collect();
 
-        let b1_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 1 { e_vals[t] ^ e_vals[t - 1] } else { 0 })
-            .collect();
-        let b2_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 2 { (!e_vals[t]) ^ e_vals[t - 2] } else { 0 })
-            .collect();
-        let b3_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 2 { a_vals[t] ^ a_vals[t - 1] ^ a_vals[t - 2] } else { 0 })
-            .collect();
+        // ===== Tail correctors for the Ch (63) / Maj (64) virtual residuals =====
+        //
+        // Zero on every row except `k ∈ {n−2, n−1}` where the length-2
+        // forward shifts in r_ch2 / r_maj read into off-trace zero-
+        // padding and the residual would slip outside `{0,1}` per
+        // coefficient. Match the corrector logic in option-a-virtual-
+        // residuals (8787cbd):
+        //   r_ch2 (alt complement form) at boundary k = n-2 / n-1:
+        //     u_{¬e,g}[k+2] = 0 (off-trace), e[k+2] = 0, e[k] real.
+        //     residual = -e[k] + 2·corr_ch2 ∈ {0,1} ⇒ corr_ch2[k] = e[k].
+        //   r_maj at boundary k = n-2:
+        //     a[k+2] = Maj[k+2] = 0 (off-trace), a[k+1] real.
+        //     residual = a[k] + a[k+1] − 2·corr_maj ∈ {0,1}
+        //     ⇒ corr_maj[k] = AND(a[k], a[k+1]).
+        //   r_maj at k = n-1: a[k+1] = a[k+2] = 0, residual = a[k] ∈
+        //     {0,1} already; corr_maj = 0.
+        let mut pa_r_ch2_corr_vals: Vec<u32> = vec![0; n];
+        let mut pa_r_maj_corr_vals: Vec<u32> = vec![0; n];
+        for k in 0..n {
+            let off_kp1 = k + 1 >= n;
+            let off_kp2 = k + 2 >= n;
+            if off_kp2 {
+                pa_r_ch2_corr_vals[k] = e_vals[k];
+            }
+            if off_kp2 && !off_kp1 {
+                pa_r_maj_corr_vals[k] = a_vals[k] & a_vals[k + 1];
+            }
+        }
 
         // Derived values.
         let sig0_vals: Vec<u32> = a_vals.iter().copied().map(big_sigma0).collect();
@@ -1247,11 +1350,13 @@ where
             BinaryPoly<32>,
         > { col.into_iter().collect() };
 
-        // Layout: 6 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
-        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1) + 13 witness cols.
-        // pa_a / pa_e were populated above with H_i values at init-prefix
-        // rows (for compression i and the H_N output block) AND at junction
-        // rows (where the feed-forward constraint reads the prior H_i).
+        // Layout: 8 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
+        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_CORR,
+        // PA_R_MAJ_CORR) + 10 witness cols. pa_a / pa_e were populated
+        // above with H_i values at init-prefix rows (for compression i
+        // and the H_N output block) AND at junction rows (where the
+        // feed-forward constraint reads the prior H_i). The two
+        // PA_R_*_CORR columns are zero except on the trace tail.
         let binary_poly = vec![
             to_bin_mle(to_bits(&pa_a_vals)),
             to_bin_mle(to_bits(&pa_e_vals)),
@@ -1259,6 +1364,8 @@ where
             to_bin_mle(to_bits(&ov_sig1_vals)),
             to_bin_mle(to_bits(&ov_lsig0_vals)),
             to_bin_mle(to_bits(&ov_lsig1_vals)),
+            to_bin_mle(to_bits(&pa_r_ch2_corr_vals)),
+            to_bin_mle(to_bits(&pa_r_maj_corr_vals)),
             to_bin_mle(to_bits(&a_vals)),
             to_bin_mle(to_bits(&sig0_vals)),
             to_bin_mle(to_bits(&e_vals)),
@@ -1269,9 +1376,6 @@ where
             to_bin_mle(to_bits(&u_ef_vals)),
             to_bin_mle(to_bits(&u_neg_e_g_vals)),
             to_bin_mle(to_bits(&maj_vals)),
-            to_bin_mle(to_bits(&b1_vals)),
-            to_bin_mle(to_bits(&b2_vals)),
-            to_bin_mle(to_bits(&b3_vals)),
         ];
 
         // ===== Selectors =====
@@ -1425,24 +1529,12 @@ where
             })
             .collect();
 
-        // s_b_active: 1 on per-compression anchor rows k where the
-        // length-2 forward shifts of C13–C15 stay within the same
-        // compression's 68-row window: k ∈ [start, start + 66) for each
-        // compression i (so reads at rows k+1, k+2 ≤ start + 67 land
-        // inside compression i). 0 elsewhere — the last two rows of
-        // every compression, the H_N output prefix, and slack.
-        let mut s_b_active_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            let start = i * rpc;
-            for k in start..(start + rpc - 2) {
-                s_b_active_col[k] = R::ONE;
-            }
-        }
-
         let to_int_mle = |col: Vec<R>| -> DenseMultilinearExtension<R> {
             col.into_iter().collect()
         };
-        // Layout matches cols::S_INIT_PREFIX..NUM_INT order.
+        // Layout matches cols::S_INIT_PREFIX..NUM_INT order. S_B_ACTIVE
+        // is gone alongside the dropped C13–C15 materialization
+        // constraints (residuals are now virtual binary_poly cols).
         let int = vec![
             to_int_mle(s_init_prefix_col),
             to_int_mle(s_feedforward_col),
@@ -1452,7 +1544,6 @@ where
             to_int_mle(pa_c_c9_col),
             to_int_mle(pa_c_ff_a_col),
             to_int_mle(pa_c_ff_e_col),
-            to_int_mle(s_b_active_col),
             to_int_mle(mu_w_col),
             to_int_mle(mu_a_col),
             to_int_mle(mu_e_col),
