@@ -962,9 +962,13 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1 (combined): Prime projection ─────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path (see
+    // `ProverCommitted::project_common`) and use the secp256k1 base
+    // prime as the projecting prime instead of drawing one from the
+    // transcript. UAIRs whose constraints are secp256k1-specific
+    // algebraic identities (e.g. `EcdsaUair`) only hold under this
+    // prime, so a random prime here would break verification.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
         project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
@@ -1240,9 +1244,13 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1 (combined): Prime projection ─────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path (see
+    // `ProverCommitted::project_common`) and use the secp256k1 base
+    // prime as the projecting prime instead of drawing one from the
+    // transcript. UAIRs whose constraints are secp256k1-specific
+    // algebraic identities (e.g. `EcdsaUair`) only hold under this
+    // prime, so a random prime here would break verification.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     let (projected_trace_rm, projected_scalars_fx) = cfg_join!(
         project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),

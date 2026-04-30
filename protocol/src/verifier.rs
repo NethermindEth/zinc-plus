@@ -935,9 +935,11 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1: Prime projection ────────────────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path and use the
+    // secp256k1 base prime as the projecting prime. See the prover-side
+    // comment in `prove_folded` for why UAIRs with EC arithmetic need
+    // the fixed prime here.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     // ── Step 2: Ideal check ─────────────────────────────────────────────
     let num_constraints = count_constraints::<U>();
@@ -1350,9 +1352,11 @@ where
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
     // ── Step 1: Prime projection ────────────────────────────────────────
-    let field_cfg = pcs_transcript
-        .fs_transcript
-        .get_random_field_cfg::<F, ZtF::Fmod, ZtF::PrimeTest>();
+    // `fixed-prime` branch: match the non-folded path and use the
+    // secp256k1 base prime as the projecting prime. See the prover-side
+    // comment in `prove_folded` for why UAIRs with EC arithmetic need
+    // the fixed prime here.
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
     // ── Step 2: Ideal check ─────────────────────────────────────────────
     let num_constraints = count_constraints::<U>();
