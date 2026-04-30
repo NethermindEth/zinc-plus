@@ -305,13 +305,35 @@ pub mod cols {
     pub const W_U_EF: usize = 16;
     pub const W_U_NEG_E_G: usize = 17;
     pub const W_MAJ: usize = 18;
+    // Packed integer-carry witness column. Replaces the five prior int
+    // carry columns (W_MU_W/A/E/JUNCTION_A/E) with a single
+    // booleanity-checked binary_poly column. Bit layout per row k
+    // (= constraint anchor row):
+    //
+    //     bits 0-1: mu_W   (carry from C7's message-schedule recurrence
+    //                       at spec round t = k+16; honest in [0, 3])
+    //     bits 2-4: mu_a   (carry from C8's a-update at spec round
+    //                       t = k+3; honest in [0, 6])
+    //     bits 5-7: mu_e   (carry from C9's e-update at spec round
+    //                       t = k+3; honest in [0, 5])
+    //     bit 8:    mu_ff_a (junction-window carry; honest in {0, 1})
+    //     bit 9:    mu_ff_e (junction-window carry; honest in {0, 1})
+    //     bits 10-31: must be 0 (pinned by C22)
+    //
+    // Range-check soundness: booleanity gives each bit ∈ {0, 1} for
+    // free. For non-power-of-2 honest ranges (mu_a ≤ 6, mu_e ≤ 5),
+    // booleanity allows mu_a = 7 / mu_e ∈ {6, 7}, but those would
+    // force a[k+4]/e[k+4] = honest_sum − k·2^32 < 0, wrapping in F_p
+    // to a non-32-bit value — caught by w_a/w_e booleanity. Pure
+    // bit-width is sufficient soundness.
+    pub const W_MU_PACKED: usize = 19;
     // The Table 9 affine combinations B_1 / B_2 / B_3 are no longer
     // committed — they're declared as packed virtual binary_poly
     // columns in signature() via `with_virtual_binary_poly_cols`,
     // pinned by the booleanity sumcheck (per-bit closing override).
 
     /// Total number of binary_poly columns.
-    pub const NUM_BIN: usize = 19;
+    pub const NUM_BIN: usize = 20;
     /// Number of public binary_poly columns (prefix).
     pub const NUM_BIN_PUB: usize = 9;
 
@@ -381,19 +403,14 @@ pub mod cols {
     //                     round-update anchors per compression.
     pub const S_ACTIVE_SCHED: usize = 9;
     pub const S_ACTIVE_UPD: usize = 10;
-    pub const W_MU_W: usize = 11; // witness: integer carry for the modular-sum constraint
-    pub const W_MU_A: usize = 12; // witness: integer carry for the a-update
-    pub const W_MU_E: usize = 13; // witness: integer carry for the e-update
-    // Witnesses for the SHA-256 feed-forward addition at each junction
-    // between consecutive compressions: `H_{i+1} = internal_final_i + H_i
-    // mod 2^32` componentwise. Each carry is in {0, 1} since both
-    // summands are < 2^32. Range check is NYI (same status as
-    // mu_W/mu_a/mu_e). Nonzero only on the junction-window rows.
-    pub const W_MU_JUNCTION_A: usize = 14; // witness: feed-forward carry for a-half
-    pub const W_MU_JUNCTION_E: usize = 15; // witness: feed-forward carry for e-half
     /// Total number of int columns.
-    pub const NUM_INT: usize = 16;
-    /// Number of public int columns (prefix).
+    ///
+    /// The 5 prior witness int carry columns (W_MU_W/A/E/JUNCTION_A/E)
+    /// are gone — replaced by the W_MU_PACKED binary_poly column at
+    /// index 19 in the binary_poly section. Booleanity provides the
+    /// range checks for free (see W_MU_PACKED's doc).
+    pub const NUM_INT: usize = 11;
+    /// Number of public int columns (prefix). All ints are now public.
     pub const NUM_INT_PUB: usize = 11;
 
     // ---------------------------------------------------------------------
@@ -424,9 +441,7 @@ pub mod cols {
     pub const FLAT_W_U_NEG_E_G: usize = W_U_NEG_E_G;
     pub const FLAT_W_MAJ: usize = W_MAJ;
     pub const FLAT_PA_K: usize = NUM_BIN + PA_K;
-    pub const FLAT_W_MU_W: usize = NUM_BIN + W_MU_W;
-    pub const FLAT_W_MU_A: usize = NUM_BIN + W_MU_A;
-    pub const FLAT_W_MU_E: usize = NUM_BIN + W_MU_E;
+    pub const FLAT_W_MU_PACKED: usize = W_MU_PACKED;
 }
 
 impl<R> Uair for Sha256CompressionSliceUair<R>
@@ -482,9 +497,10 @@ where
             ShiftSpec::new(cols::FLAT_W_MAJ, 3),
             // === int shifts (in source_col ascending order) ===
             ShiftSpec::new(cols::FLAT_PA_K, 3),
-            ShiftSpec::new(cols::FLAT_W_MU_W, 16),
-            ShiftSpec::new(cols::FLAT_W_MU_A, 3),
-            ShiftSpec::new(cols::FLAT_W_MU_E, 3),
+            // The 3 prior int shifts on W_MU_W/A/E are gone alongside
+            // the dropped int carry columns — C7/C8/C9 read all 5
+            // carries from W_MU_PACKED at the up row via the
+            // BitOp::ShiftR virtuals declared below.
         ];
         // No explicit `LookupColumnSpec`s. Booleanity already enforces
         // the bit-poly property on every witness binary_poly column for
@@ -511,6 +527,17 @@ where
             BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
             BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
             BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
+            // Bit-op virtuals over W_MU_PACKED for extracting each
+            // carry from its bit slice. The C7/C8/C9/C12/C13
+            // contributions of `2^32 · mu_X` are reconstructed via
+            // `2^32 · ShiftR(k_low) − 2^{32+w} · ShiftR(k_low+w)`.
+            // ShiftR(10) is also assert_zero'd by C22 to pin
+            // positions 10..31 to 0.
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(2)),  // skips mu_W
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(5)),  // skips mu_W + mu_a
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(8)),  // skips through mu_e
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(9)),  // keeps mu_ff_e + (high)
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(10)), // (high) — must be 0
         ];
         // Witness-relative col indices (post-public) for virtual specs.
         const W_A_WIT_IDX: usize = cols::W_A - cols::NUM_BIN_PUB; // 0
@@ -666,6 +693,12 @@ where
         let w_big_w = &bp[cols::W_W];
         let w_lsig0 = &bp[cols::W_LSIG0];
         let w_lsig1 = &bp[cols::W_LSIG1];
+        // Packed-carry binary_poly column. Bit layout per row:
+        //   0-1: mu_W,  2-4: mu_a,  5-7: mu_e,  8: mu_ff_a,  9: mu_ff_e,
+        //   10-31: must be zero (pinned by C22). Each carry contribution
+        //   `2^32 · mu_X` to C7/C8/C9/C12/C13 is reconstructed from the
+        //   ShiftR virtuals on this column.
+        let w_mu_packed = &bp[cols::W_MU_PACKED];
 
         let s_init_prefix = &sel[cols::S_INIT_PREFIX];
         let s_feedforward = &sel[cols::S_FEEDFORWARD];
@@ -677,8 +710,10 @@ where
         let pa_c_ff_e = &sel[cols::PA_C_FF_E];
         let s_active_sched = &sel[cols::S_ACTIVE_SCHED];
         let s_active_upd = &sel[cols::S_ACTIVE_UPD];
-        let w_mu_junction_a = &sel[cols::W_MU_JUNCTION_A];
-        let w_mu_junction_e = &sel[cols::W_MU_JUNCTION_E];
+        // The 5 prior int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
+        // gone — replaced by W_MU_PACKED (binary_poly) read above. The
+        // `mu_*_contrib` polynomial expressions below extract each
+        // carry's `2^32 · mu_X` contribution from the packed bits.
 
         // `down` slot layout (mirrors the ShiftSpec order in signature()).
         // bin slots:
@@ -706,21 +741,26 @@ where
         let down_w_u_neg_e_g_sh3 = &down.binary_poly[16];
         let _down_w_maj_sh2 = &down.binary_poly[17];
         let down_w_maj_sh3 = &down.binary_poly[18];
-        // int slots:
+        // int slots: only PA_K survives (the 3 mu_* int shift specs
+        // are gone alongside the dropped int carry columns).
         let down_pa_k_sh3 = &down.int[0];
-        let down_w_mu_w_sh16 = &down.int[1];
-        let down_w_mu_a_sh3 = &down.int[2];
-        let down_w_mu_e_sh3 = &down.int[3];
 
-        // Bit-op virtual columns over W (sorted by `(source_col,
-        // op_kind, c)` inside `UairSignature::new` — Rot < ShiftR, then
-        // by amount ascending). Six slots, all with `source_col = W_W`.
+        // Bit-op virtual columns sorted by (source_col, op_kind, c)
+        // inside `UairSignature::new`. With FLAT_W_W < FLAT_W_MU_PACKED,
+        // W's 6 bit-ops occupy slots 0-5, then W_MU_PACKED's 5
+        // bit-ops occupy slots 6-10.
         let down_w_rot13 = &down.bit_op[0]; // σ_1: ROTR^19
         let down_w_rot14 = &down.bit_op[1]; // σ_0: ROTR^18
         let down_w_rot15 = &down.bit_op[2]; // σ_1: ROTR^17
         let down_w_rot25 = &down.bit_op[3]; // σ_0: ROTR^7
         let down_w_shr3 = &down.bit_op[4]; //  σ_0: SHR^3
         let down_w_shr10 = &down.bit_op[5]; // σ_1: SHR^10
+        // Bit-extraction shifts on W_MU_PACKED.
+        let down_w_mu_packed_shr2 = &down.bit_op[6];   // skips mu_W
+        let down_w_mu_packed_shr5 = &down.bit_op[7];   // skips mu_W + mu_a
+        let down_w_mu_packed_shr8 = &down.bit_op[8];   // skips through mu_e
+        let down_w_mu_packed_shr9 = &down.bit_op[9];   // keeps only mu_ff_e + (high)
+        let down_w_mu_packed_shr10 = &down.bit_op[10]; // (high) — must be 0
 
         // Ideals.
         let ideal_rot_xw1 = ideal_from_ref(&Sha256Ideal::<R>::RotXw1);
@@ -732,13 +772,39 @@ where
         let rho_sig0 = rho_poly::<R>(&[10, 19, 30]); // X^30 + X^19 + X^10
         let rho_sig1 = rho_poly::<R>(&[7, 21, 26]); //  X^26 + X^21 + X^7
         let two_scalar = const_scalar::<R>(R::ONE + R::ONE);
-        // `two_times_x31` evaluates to 2 · 2^31 = 2^32 at X = 2 — a
-        // representable proxy for the `X^32 · mu_W` carry term from the spec.
-        let two_times_x31 = {
-            let mut coeffs = [R::ZERO; 32];
-            coeffs[31] = R::ONE + R::ONE;
-            DensePolynomial::<R, 32>::new(coeffs)
-        };
+        // Carry-extraction multipliers (constant scalars, degree 0).
+        // For mu_X packed at bits [k_low, k_low+w) of w_mu_packed, the
+        // contribution `2^32 · mu_X` to C7/C8/C9/C12/C13 is built as:
+        //
+        //     2^32 · ShiftR(k_low)(w)  −  2^{32+w} · ShiftR(k_low+w)(w)
+        //
+        // Each term: `binary_poly × scalar` (degree 31 + 0 = 31).
+        let const_2_to_32 = const_scalar::<R>(pow_two::<R>(32));
+        let const_2_to_33 = const_scalar::<R>(pow_two::<R>(33));
+        let const_2_to_34 = const_scalar::<R>(pow_two::<R>(34));
+        let const_2_to_35 = const_scalar::<R>(pow_two::<R>(35));
+
+        // mu_X contributions (each evaluates to `2^32 · mu_X` at X=2).
+        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32)
+            .expect("2^32 · w_mu_packed overflow")
+            - &mbs(down_w_mu_packed_shr2, &const_2_to_34)
+                .expect("2^34 · ShiftR(2)(w_mu_packed) overflow");
+        let mu_a_contrib = mbs(down_w_mu_packed_shr2, &const_2_to_32)
+            .expect("2^32 · ShiftR(2)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr5, &const_2_to_35)
+                .expect("2^35 · ShiftR(5)(w_mu_packed) overflow");
+        let mu_e_contrib = mbs(down_w_mu_packed_shr5, &const_2_to_32)
+            .expect("2^32 · ShiftR(5)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr8, &const_2_to_35)
+                .expect("2^35 · ShiftR(8)(w_mu_packed) overflow");
+        let mu_ff_a_contrib = mbs(down_w_mu_packed_shr8, &const_2_to_32)
+            .expect("2^32 · ShiftR(8)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr9, &const_2_to_33)
+                .expect("2^33 · ShiftR(9)(w_mu_packed) overflow");
+        let mu_ff_e_contrib = mbs(down_w_mu_packed_shr9, &const_2_to_32)
+            .expect("2^32 · ShiftR(9)(w_mu_packed) overflow")
+            - &mbs(down_w_mu_packed_shr10, &const_2_to_33)
+                .expect("2^33 · ShiftR(10)(w_mu_packed) overflow");
 
         // C1–C6 apply on every row unconditionally — no selector needed, the
         // rotation identities are row-local and honest values satisfy them on
@@ -795,14 +861,15 @@ where
         //   range (rows 0..=n−17), and equal to `−inner(2)` mod p on inactive
         //   rows so the sum lies in (X − 2) everywhere. See the
         //   `cols::PA_C_C7` doc for the verifier-side TODO.
-        let two_x31_mu_w = mbs(down_w_mu_w_sh16, &two_times_x31)
-            .expect("2·X^31 · mu_W overflow");
+        // mu_W is now read from the up row (chained-comp re-anchoring
+        // stores each carry at its constraint's anchor row, not at
+        // spec-row t). `mu_w_contrib` evaluates to `2^32 · mu_W` at X=2.
         let sched_inner = down_w_w_sh16.clone()
             - w_big_w
             - down_w_lsig0_sh1
             - down_w_w_sh9
             - down_w_lsig1_sh14
-            + &two_x31_mu_w;
+            + &mu_w_contrib;
         b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
 
         // Constraint 8: Register-update for `a`, anchored at k = t − 3.
@@ -821,8 +888,6 @@ where
         //   Maj[t]       = down.w_maj^↓3   W[t]         = down.w_W^↓3
         //   K[t]         = down.pa_K^↓3   mu_a[t]       = down.w_mu_a^↓3
         // pa_c_c8 is the public compensator (see C7 note).
-        let two_x31_mu_a = mbs(down_w_mu_a_sh3, &two_times_x31)
-            .expect("2·X^31 · mu_a overflow");
         let a_update_inner = down_w_a_sh4.clone()
             - w_e                         // h[t] = e[t-3]
             - down_w_sig1_sh3             // Sigma_1(e[t])
@@ -832,7 +897,7 @@ where
             - down_w_w_sh3                // W[t]
             - down_w_sig0_sh3             // Sigma_0(a[t])
             - down_w_maj_sh3              // Maj[t]
-            + &two_x31_mu_a;
+            + &mu_a_contrib;              // = 2^32 · mu_a (bits 2-4 of W_MU_PACKED)
         b.assert_in_ideal(a_update_inner + pa_c_c8, &ideal_rot_x2);
 
         // Constraint 9: Register-update for `e`, anchored at k = t − 3.
@@ -841,8 +906,6 @@ where
         //
         // With d[t] = a[t-3] = up.w_a and h[t] = e[t-3] = up.w_e, and
         // Ch[t] = u_ef[t] + u_{¬e,g}[t] as in C8.
-        let two_x31_mu_e = mbs(down_w_mu_e_sh3, &two_times_x31)
-            .expect("2·X^31 · mu_e overflow");
         let e_update_inner = down_w_e_sh4.clone()
             - w_a                         // d[t] = a[t-3]
             - w_e                         // h[t] = e[t-3]
@@ -851,7 +914,7 @@ where
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
             - down_w_w_sh3
-            + &two_x31_mu_e;
+            + &mu_e_contrib;              // = 2^32 · mu_e (bits 5-7 of W_MU_PACKED)
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
         // C13–C15 (B_1/B_2/B_3 materialization identities) are gone:
@@ -900,22 +963,18 @@ where
         // degree 1 in the trace MLEs (preserving MLE-first eligibility)
         // and avoids a multiplicative selector that would push the
         // effective max degree to 2.
-        let two_x31_mu_ff_a = mbs(w_mu_junction_a, &two_times_x31)
-            .expect("2·X^31 · mu_junction_a overflow");
         let ff_a_inner = down_w_a_sh4.clone()
             - w_a
             - pa_a
-            + &two_x31_mu_ff_a;
+            + &mu_ff_a_contrib;           // = 2^32 · mu_ff_a (bit 8 of W_MU_PACKED)
         b.assert_in_ideal(ff_a_inner + pa_c_ff_a, &ideal_rot_x2);
 
         // Constraint 13 (feed-forward, e-family). Mirrors C12 on the
-        // e-half via `pa_c_ff_e`.
-        let two_x31_mu_ff_e = mbs(w_mu_junction_e, &two_times_x31)
-            .expect("2·X^31 · mu_junction_e overflow");
+        // e-half via `pa_c_ff_e`. mu_ff_e from bit 9 of W_MU_PACKED.
         let ff_e_inner = down_w_e_sh4.clone()
             - w_e
             - pa_e
-            + &two_x31_mu_ff_e;
+            + &mu_ff_e_contrib;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
 
         // Constraint 16: message init (Table 9 row 77). For each
@@ -974,6 +1033,20 @@ fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
     let mut coeffs = [R::ZERO; 32];
     coeffs[0] = c;
     DensePolynomial::<R, 32>::new(coeffs)
+}
+
+/// Compute `2^k` as an `R` value via repeated doubling. Used by the
+/// carry-extraction multipliers in C7/C8/C9/C12/C13 (see
+/// `constrain_general` for how `2^32` / `2^33` / `2^34` / `2^35`
+/// scalars combine `BitOp::ShiftR` virtuals on `W_MU_PACKED` to
+/// reconstruct each carry's `2^32 · mu_X` contribution).
+fn pow_two<R: ConstSemiring>(k: u32) -> R {
+    let mut result = R::ONE;
+    for _ in 0..k {
+        let copy = result.clone();
+        result += &copy;
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,7 +1321,10 @@ where
                 w_vals[t] = sum_u64 as u32;
                 let carry = (sum_u64 >> 32) as u32;
                 debug_assert!(carry <= 3, "message-schedule carry out of [0,3]: {carry}");
-                mu_w_vals[t] = carry;
+                // Store mu_W at the C7 anchor row k = t − 16 (not at
+                // spec row t) so C7 reads it via `up.w_mu_packed` bits
+                // 0-1 with no shift.
+                mu_w_vals[t - 16] = carry;
             }
 
             // 3) Per-compression round constants. Cycle the canonical
@@ -1306,10 +1382,11 @@ where
                 let mu_e_t = (e_sum >> 32) as u32;
                 debug_assert!(mu_a_t <= 6, "mu_a out of [0,6]: {mu_a_t}");
                 debug_assert!(mu_e_t <= 5, "mu_e out of [0,5]: {mu_e_t}");
-                // Convention: mu_a/mu_e at "spec row t = k+3" (not t+1),
-                // matching the existing C8/C9 read pattern down.w_mu^↓3.
-                mu_a_vals[t] = mu_a_t;
-                mu_e_vals[t] = mu_e_t;
+                // Store mu_a/mu_e at the C8/C9 anchor row k (not at
+                // spec row t = k+3) so C8/C9 read via `up.w_mu_packed`
+                // bits 2-4 / 5-7 with no shift.
+                mu_a_vals[k] = mu_a_t;
+                mu_e_vals[k] = mu_e_t;
             }
 
             // 5) Feed-forward: H_{i+1} = internal_final_i + H_i mod 2^32
@@ -1438,6 +1515,23 @@ where
         // matching `pa_ov_lsig{0,1}` per-bit values for the new
         // constraint (the algebraic identity is unchanged).
 
+        // Pack all 5 carries per row into the W_MU_PACKED binary_poly
+        // column. Each carry was stored at its constraint's anchor row
+        // (mu_W at C7-anchor k = t-16, mu_a/mu_e at C8/C9-anchor k =
+        // t-3, mu_ff_a/e at junction-anchor k). Bit layout:
+        //   bits 0-1: mu_W,  2-4: mu_a,  5-7: mu_e,  8: mu_ff_a,  9: mu_ff_e.
+        // Positions 10..31 stay 0 (pinned by C22's high-bits-zero
+        // assert_zero on ShiftR(10)(W_MU_PACKED)).
+        let w_mu_packed_vals: Vec<u32> = (0..n)
+            .map(|k| {
+                (mu_w_vals[k] & 0b11)
+                    | ((mu_a_vals[k] & 0b111) << 2)
+                    | ((mu_e_vals[k] & 0b111) << 5)
+                    | ((mu_junction_a_vals[k] & 0b1) << 8)
+                    | ((mu_junction_e_vals[k] & 0b1) << 9)
+            })
+            .collect();
+
         let to_bits = |v: &[u32]| -> Vec<BinaryPoly<32>> {
             v.iter().copied().map(BinaryPoly::<32>::from).collect()
         };
@@ -1473,6 +1567,7 @@ where
             to_bin_mle(to_bits(&u_ef_vals)),
             to_bin_mle(to_bits(&u_neg_e_g_vals)),
             to_bin_mle(to_bits(&maj_vals)),
+            to_bin_mle(to_bits(&w_mu_packed_vals)),
         ];
 
         // ===== Selectors =====
@@ -1527,13 +1622,9 @@ where
         }
 
         let k_col: Vec<R> = k_vals.iter().copied().map(R::from).collect();
-        let mu_w_col: Vec<R> = mu_w_vals.iter().copied().map(R::from).collect();
-        let mu_a_col: Vec<R> = mu_a_vals.iter().copied().map(R::from).collect();
-        let mu_e_col: Vec<R> = mu_e_vals.iter().copied().map(R::from).collect();
-        let mu_junction_a_col: Vec<R> =
-            mu_junction_a_vals.iter().copied().map(R::from).collect();
-        let mu_junction_e_col: Vec<R> =
-            mu_junction_e_vals.iter().copied().map(R::from).collect();
+        // mu_w_vals / mu_a_vals / mu_e_vals / mu_junction_{a,e}_vals
+        // are no longer materialized as separate int columns — they're
+        // packed into the W_MU_PACKED binary_poly column above.
 
         // ----- Compensator columns (replace s_sched_anch / s_upd_anch). -----
         //
@@ -1562,8 +1653,11 @@ where
                 let lsig0_k1 = load(&lsig0_vals, k + 1);
                 let w_k9 = load(&w_vals, k + 9);
                 let lsig1_k14 = load(&lsig1_vals, k + 14);
-                let mu_k16 = load(&mu_w_vals, k + 16);
-                let two32_mu = two_to_32.clone() * &mu_k16;
+                // mu_W stored at C7-anchor row k (= round t = k+16 was
+                // formerly stored at k+16; with chained-comp re-anchoring
+                // it's now at row k).
+                let mu_k = load(&mu_w_vals, k);
+                let two32_mu = two_to_32.clone() * &mu_k;
                 // comp = −inner(2) = w_k + lsig0_k1 + w_k9 + lsig1_k14
                 //                    − 2^32·mu_k16 − w_k16
                 w_k + &lsig0_k1 + &w_k9 + &lsig1_k14 - &two32_mu - &w_k16
@@ -1584,8 +1678,10 @@ where
                 let w_k3 = load(&w_vals, k + 3);
                 let sig0_k3 = load(&sig0_vals, k + 3);
                 let maj_k3 = load(&maj_vals, k + 3);
-                let mu_a_k3 = load(&mu_a_vals, k + 3);
-                let two32_mu = two_to_32.clone() * &mu_a_k3;
+                // mu_a stored at C8-anchor row k (= round t = k+3 was
+                // formerly stored at k+3; now at row k).
+                let mu_a_k = load(&mu_a_vals, k);
+                let two32_mu = two_to_32.clone() * &mu_a_k;
                 w_e_k
                     + &sig1_k3
                     + &u_ef_k3
@@ -1612,8 +1708,9 @@ where
                 let u_neg_e_g_k3 = load(&u_neg_e_g_vals, k + 3);
                 let k_k3 = load(&k_vals, k + 3);
                 let w_k3 = load(&w_vals, k + 3);
-                let mu_e_k3 = load(&mu_e_vals, k + 3);
-                let two32_mu = two_to_32.clone() * &mu_e_k3;
+                // mu_e stored at C9-anchor row k (analogous to mu_a).
+                let mu_e_k = load(&mu_e_vals, k);
+                let two32_mu = two_to_32.clone() * &mu_e_k;
                 w_a_k
                     + &w_e_k
                     + &sig1_k3
@@ -1673,11 +1770,9 @@ where
             to_int_mle(pa_c_ff_e_col),
             to_int_mle(s_active_sched_col),
             to_int_mle(s_active_upd_col),
-            to_int_mle(mu_w_col),
-            to_int_mle(mu_a_col),
-            to_int_mle(mu_e_col),
-            to_int_mle(mu_junction_a_col),
-            to_int_mle(mu_junction_e_col),
+            // The 5 prior int carry columns (mu_W/a/e/junction_a/e)
+            // are gone — their values are packed into the
+            // W_MU_PACKED binary_poly column above.
         ];
 
         UairTrace {
