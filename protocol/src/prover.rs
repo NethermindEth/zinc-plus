@@ -1595,7 +1595,6 @@ where
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_HALF_LIMBS>>
-        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_uint::Uint<INT_HALF_LIMBS>>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>

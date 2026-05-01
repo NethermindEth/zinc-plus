@@ -110,41 +110,60 @@ pub fn split_columns<const D: usize, const HALF_D: usize>(
 }
 
 /// Split a column of `Int<H>` entries into a concatenated column of
-/// `Int<HALF_H>` entries via 2^k base decomposition (k = HALF_H * 64).
+/// `Int<HALF_H>` entries.
 ///
-/// Each entry `v[i] : Int<H>` is split into:
-/// - `lo[i] = v[i] mod 2^k`  (low HALF_H limbs)
-/// - `hi[i] = v[i] >> k`     (upper limbs, truncated to HALF_H)
+/// Decomposition (uses two `LO_LIMBS = 2`-limb halves, irrespective of
+/// the storage width `HALF_H`):
+/// - `lo[i] = v[i] mod 2^128`  (always non-negative, in `[0, 2^128)`)
+/// - `hi[i] = floor(v[i] / 2^128)` (signed; arithmetic shift right)
 ///
-/// so that `v[i] = lo[i] + 2^k · hi[i]`. The split is correct for
-/// **non-negative** values whose magnitude fits in `2 * HALF_H * 64` bits.
-/// For ECDSA witnesses (mod-p values with p < 2^256), `H = 5, HALF_H = 2`
-/// satisfies this since values are < 2^256 = 2^(2 * HALF_H * 64).
+/// so that `v[i] = lo[i] + 2^128 · hi[i]` in signed integer arithmetic
+/// (for any `v` representable as `Int<H>`).
+///
+/// `HALF_H` must be `>= 3` to give `hi` enough range: ECDSA mod-p values
+/// in `[0, p) ⊂ [0, 2^256)` push `hi` up to `2^128 - 1`, and small
+/// negative carries push `hi` to `-1..-2^128`. Signed `Int<2>` (range
+/// `[-2^127, 2^127)`) cannot represent both extremes — `Int<3>` (range
+/// `[-2^191, 2^191)`) is the minimum safe width.
 ///
 /// Returns a column of length `2n` laid out as
-/// `v' = lo[0..n] || hi[0..n]`. The MLE has `num_vars + 1` variables, with
-/// the last variable selecting low (0) or high (1).
+/// `v' = lo[0..n] || hi[0..n]`. The MLE has `num_vars + 1` variables,
+/// with the last variable selecting low (0) or high (1).
 ///
 /// # Panics
-/// Panics if `H < 2 * HALF_H` (the high limbs would not be representable).
+/// Panics if `HALF_H < 2` (lower 128 bits don't fit) or `H < HALF_H`.
 pub fn split_int_column<const H: usize, const HALF_H: usize>(
     column: &DenseMultilinearExtension<Int<H>>,
 ) -> DenseMultilinearExtension<Int<HALF_H>> {
     assert!(
-        H >= 2 * HALF_H,
-        "split_int_column: H ({H}) must be >= 2 * HALF_H ({HALF_H})"
+        HALF_H >= 2,
+        "split_int_column: HALF_H ({HALF_H}) must be >= 2 to hold the lower 128 bits"
     );
-    let shift = (HALF_H * 64) as u32;
+    assert!(
+        H >= HALF_H,
+        "split_int_column: H ({H}) must be >= HALF_H ({HALF_H})"
+    );
+    const LO_LIMBS: usize = 2;
+    let shift: u32 = (LO_LIMBS * 64) as u32;
 
     let n = column.evaluations.len();
     let mut lo_evals: Vec<Int<HALF_H>> = Vec::with_capacity(n);
     let mut hi_evals: Vec<Int<HALF_H>> = Vec::with_capacity(n);
 
     for entry in &column.evaluations {
-        // For non-negative values < 2^(2 * HALF_H * 64), `resize` truncates
-        // and `>> shift` extracts the upper half.
-        let lo: Int<HALF_H> = entry.resize();
+        // `lo`: zero-extend the lower 2 limbs (128 bits) to HALF_H limbs.
+        // Always non-negative since the high limbs are zero.
+        let v_words = entry.as_uint().to_words();
+        let mut lo_words = [0u64; HALF_H];
+        lo_words[0] = v_words[0];
+        lo_words[1] = v_words[1];
+        let lo: Int<HALF_H> = Int::from_words(lo_words);
+
+        // `hi`: arithmetic shift right by 128, then truncate to HALF_H
+        // limbs. For non-negative v this gives v >> 128; for negative v
+        // it gives floor(v / 2^128) (signed).
         let hi: Int<HALF_H> = (*entry >> shift).resize();
+
         lo_evals.push(lo);
         hi_evals.push(hi);
     }

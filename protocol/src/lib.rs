@@ -538,20 +538,33 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
 ///
 /// For each int witness column j with cells `v[i] : Int<H>`, produces
 /// a `DynamicPolynomialF<F>` whose two coefficients are the MLE
-/// evaluations at `point` of the *low* and *high* `HALF_H * 64`-bit
-/// halves of `v` (lifted to `F`, treated as **unsigned**):
+/// evaluations at `point` of the *low* and *high* halves of `v` under
+/// the **signed** decomposition `v = lo + 2^128 · hi`:
 ///
 /// ```text
-/// bar_u_j.coeffs[0] = sum_b eq(b, point) * U(v[b] mod 2^k)            in F
-/// bar_u_j.coeffs[1] = sum_b eq(b, point) * U(v[b] >> k)               in F
+/// bar_u_j.coeffs[0] = sum_b eq(b, point) * lift_F(lo[b])              in F
+/// bar_u_j.coeffs[1] = sum_b eq(b, point) * lift_F(hi[b])              in F
 /// ```
 ///
-/// where `k = HALF_H * 64` and `U(·)` lifts unsigned bit patterns to F
-/// (i.e. `Uint<HALF_H>` not `Int<HALF_H>`). Lifting via `Uint` is
-/// essential — `F::from_with_cfg(&Int<HALF_H>)` applies sign-bit
-/// negation, which corrupts halves with the top bit set (common for
-/// ECDSA witnesses near `p ≈ 2^256`). The original column's lifted
-/// eval at `point` is recoverable as `coeffs[0] + 2^k * coeffs[1]` in F.
+/// where:
+/// - `lo[b] = v[b] mod 2^128`         (unsigned, in `[0, 2^128)`,
+///   stored as `Int<HALF_H>` with high limbs zeroed → always non-negative).
+/// - `hi[b] = floor(v[b] / 2^128)`    (signed; arithmetic shift right of
+///   `Int<H>` then truncated to `Int<HALF_H>`).
+/// - `lift_F` is `F::from_with_cfg(&Int<HALF_H>)`, which negates for
+///   `is_negative()` values — correctly mapping a signed `Int` into F.
+///
+/// For any `v_b ∈ Int<H>`, the original column's lifted eval at `point`
+/// is recoverable as `coeffs[0] + 2^128 · coeffs[1]` in F. This works
+/// for both non-negative and negative `v_b` because `lift_F` is a ring
+/// homomorphism on signed integers.
+///
+/// # Panics
+/// Panics if `HALF_H < 2` (lower 128 bits won't fit). For ECDSA mod-p
+/// witnesses (values in `[0, p)` and small negative carries), `HALF_H = 3`
+/// is the minimum safe width — `Int<2>` (range `[-2^127, 2^127)`)
+/// overflows on values ≥ 2^255 (about half the Jacobian coordinates) and
+/// on negatives with `|hi| ≥ 2^128`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_int_fold_lifted_evals<F, const H: usize, const HALF_H: usize>(
     point: &[F],
@@ -560,37 +573,40 @@ pub fn compute_int_fold_lifted_evals<F, const H: usize, const HALF_H: usize>(
 ) -> Vec<DynamicPolynomialF<F>>
 where
     F: PrimeField
-        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_uint::Uint<HALF_H>>,
+        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<HALF_H>>,
 {
-    use crypto_primitives::crypto_bigint_uint::Uint;
+    use crypto_primitives::crypto_bigint_int::Int;
     assert!(
-        H >= 2 * HALF_H,
-        "compute_int_fold_lifted_evals: H ({H}) must be >= 2 * HALF_H ({HALF_H})"
+        HALF_H >= 2,
+        "compute_int_fold_lifted_evals: HALF_H ({HALF_H}) must be >= 2"
     );
+    assert!(
+        H >= HALF_H,
+        "compute_int_fold_lifted_evals: H ({H}) must be >= HALF_H ({HALF_H})"
+    );
+    const LO_LIMBS: usize = 2;
+    let shift: u32 = (LO_LIMBS * 64) as u32;
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_int_fold_lifted_evals: eq table build failed");
     let zero = F::zero_with_cfg(field_cfg);
-    let shift = (HALF_H * 64) as u32;
 
     cfg_iter!(int_trace)
         .map(|col| {
             let mut lo_eval = zero.clone();
             let mut hi_eval = zero.clone();
             for (b, entry) in col.iter().enumerate() {
-                // Treat the bit pattern of v as unsigned (witnesses are
-                // non-negative; the `Int<H>` type is signed only for
-                // encoder-arithmetic purposes). Extract limbs via
-                // as_uint() to bypass `Int`'s sign-bit interpretation.
+                // `lo`: zero-extend lower 2 limbs (128 bits) to HALF_H
+                // limbs → always non-negative as Int<HALF_H>.
                 let v_words = entry.as_uint().to_words();
-                let lo_words: [u64; HALF_H] = std::array::from_fn(|i| v_words[i]);
-                let lo: Uint<HALF_H> = Uint::from_words(lo_words);
+                let mut lo_words = [0u64; HALF_H];
+                lo_words[0] = v_words[0];
+                lo_words[1] = v_words[1];
+                let lo: Int<HALF_H> = Int::from_words(lo_words);
 
-                // Right-shift the signed Int<H>; for non-negative v this
-                // matches an unsigned shift. Then re-extract limbs as Uint.
-                let shifted = *entry >> shift;
-                let s_words = shifted.as_uint().to_words();
-                let hi_words: [u64; HALF_H] = std::array::from_fn(|i| s_words[i]);
-                let hi: Uint<HALF_H> = Uint::from_words(hi_words);
+                // `hi`: arithmetic shift then truncate. For v >= 0 this
+                // is unsigned hi; for v < 0 it sign-extends giving the
+                // signed floor-divide.
+                let hi: Int<HALF_H> = (*entry >> shift).resize();
 
                 let mut term_lo = F::from_with_cfg(&lo, field_cfg);
                 term_lo *= &eq_table[b];
@@ -1434,7 +1450,12 @@ mod tests {
     // int commitment is over Int<2> (1× int fold via 2^128
     // decomposition). Arbitrary is unchanged (no arb cols in ShaEcdsa).
 
-    const INT_HALF_LIMBS: usize = 2;
+    // 192-bit (`Int<3>`) halves: 128 bits of magnitude + headroom for
+    // sign + the resize-from-Int<H> arithmetic. `Int<2>` is too tight —
+    // ECDSA mod-p witnesses with v ≥ 2^255 push hi to 2^127, and signed
+    // negative carries push hi to -1..-2^128, both overflowing
+    // [-2^127, 2^127).
+    const INT_HALF_LIMBS: usize = 3;
 
     /// Half-degree binary Zip+ for ShaEcdsa: Eval = BinaryPoly<16>,
     /// CombR is the same width as the unfolded ShaEcdsa binary CombR.

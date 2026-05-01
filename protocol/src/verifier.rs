@@ -1715,7 +1715,6 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_HALF_LIMBS>>
-        + for<'b> FromWithConfig<&'b crypto_primitives::crypto_bigint_uint::Uint<INT_HALF_LIMBS>>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
@@ -2000,10 +1999,13 @@ where
     // For non-int columns this is the standard `evaluate_at_point(projecting_element_f)`.
     let mut open_evals: Vec<F> = Vec::with_capacity(all_lifted_evals.len());
     let two_pow_k: F = {
-        // Compute 2^(INT_HALF_LIMBS * 64) in F by repeated doubling.
+        // Compute 2^128 in F by repeated doubling. The fold's
+        // decomposition is v = lo + 2^128 * hi regardless of the
+        // half-storage width INT_HALF_LIMBS (lo holds the lower 128
+        // bits in [0, 2^128), zero-extended into Int<INT_HALF_LIMBS>).
         let one = F::one_with_cfg(&field_cfg);
         let mut acc = one.clone();
-        for _ in 0..(INT_HALF_LIMBS * 64) {
+        for _ in 0..128 {
             let prev = acc.clone();
             acc += &prev;
         }
