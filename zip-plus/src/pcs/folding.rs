@@ -25,7 +25,7 @@
 //! point is implemented by the protocol prover/verifier (Zinc+ PIOP), which
 //! samples a Fiat-Shamir challenge `γ` and opens `v'` at `(r₀ ‖ γ)`.
 
-use crypto_primitives::semiring::boolean::Boolean;
+use crypto_primitives::{crypto_bigint_int::Int, semiring::boolean::Boolean};
 use num_traits::Zero;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 
@@ -105,6 +105,79 @@ pub fn split_columns<const D: usize, const HALF_D: usize>(
         columns
             .iter()
             .map(|col| split_column::<D, HALF_D>(col))
+            .collect()
+    }
+}
+
+/// Split a column of `Int<H>` entries into a concatenated column of
+/// `Int<HALF_H>` entries via 2^k base decomposition (k = HALF_H * 64).
+///
+/// Each entry `v[i] : Int<H>` is split into:
+/// - `lo[i] = v[i] mod 2^k`  (low HALF_H limbs)
+/// - `hi[i] = v[i] >> k`     (upper limbs, truncated to HALF_H)
+///
+/// so that `v[i] = lo[i] + 2^k · hi[i]`. The split is correct for
+/// **non-negative** values whose magnitude fits in `2 * HALF_H * 64` bits.
+/// For ECDSA witnesses (mod-p values with p < 2^256), `H = 5, HALF_H = 2`
+/// satisfies this since values are < 2^256 = 2^(2 * HALF_H * 64).
+///
+/// Returns a column of length `2n` laid out as
+/// `v' = lo[0..n] || hi[0..n]`. The MLE has `num_vars + 1` variables, with
+/// the last variable selecting low (0) or high (1).
+///
+/// # Panics
+/// Panics if `H < 2 * HALF_H` (the high limbs would not be representable).
+pub fn split_int_column<const H: usize, const HALF_H: usize>(
+    column: &DenseMultilinearExtension<Int<H>>,
+) -> DenseMultilinearExtension<Int<HALF_H>> {
+    assert!(
+        H >= 2 * HALF_H,
+        "split_int_column: H ({H}) must be >= 2 * HALF_H ({HALF_H})"
+    );
+    let shift = (HALF_H * 64) as u32;
+
+    let n = column.evaluations.len();
+    let mut lo_evals: Vec<Int<HALF_H>> = Vec::with_capacity(n);
+    let mut hi_evals: Vec<Int<HALF_H>> = Vec::with_capacity(n);
+
+    for entry in &column.evaluations {
+        // For non-negative values < 2^(2 * HALF_H * 64), `resize` truncates
+        // and `>> shift` extracts the upper half.
+        let lo: Int<HALF_H> = entry.resize();
+        let hi: Int<HALF_H> = (*entry >> shift).resize();
+        lo_evals.push(lo);
+        hi_evals.push(hi);
+    }
+
+    lo_evals.extend(hi_evals);
+
+    DenseMultilinearExtension::from_evaluations_vec(
+        column
+            .num_vars
+            .checked_add(1)
+            .expect("split_int_column: num_vars overflow"),
+        lo_evals,
+        Int::<HALF_H>::zero(),
+    )
+}
+
+/// Batch counterpart of [`split_int_column`]. Parallel across columns
+/// when the `parallel` feature is enabled.
+pub fn split_int_columns<const H: usize, const HALF_H: usize>(
+    columns: &[DenseMultilinearExtension<Int<H>>],
+) -> Vec<DenseMultilinearExtension<Int<HALF_H>>> {
+    #[cfg(feature = "parallel")]
+    {
+        return columns
+            .par_iter()
+            .map(|col| split_int_column::<H, HALF_H>(col))
+            .collect();
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        columns
+            .iter()
+            .map(|col| split_int_column::<H, HALF_H>(col))
             .collect()
     }
 }

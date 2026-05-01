@@ -474,6 +474,64 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     result
 }
 
+/// Compute 2-coefficient `bar_u` polynomials for the int-fold path.
+///
+/// For each int witness column j with cells `v[i] : Int<H>`, produces
+/// a `DynamicPolynomialF<F>` whose two coefficients are the MLE
+/// evaluations at `point` of the *low* and *high* 128-bit halves of
+/// `v` (lifted to `F`):
+///
+/// ```text
+/// bar_u_j.coeffs[0] = sum_b eq(b, point) * (v[b] mod 2^k)            in F
+/// bar_u_j.coeffs[1] = sum_b eq(b, point) * (v[b] >> k)               in F
+/// ```
+///
+/// where `k = HALF_H * 64`. The original column's lifted eval at `point`
+/// is recoverable as `coeffs[0] + 2^k * coeffs[1]`.
+///
+/// Used by the int-fold variants of `prove_folded`/`verify_folded` to
+/// reconstruct the PCS-expected `eval_f` via the same fold algebra as
+/// the binary path: `(1-γ) c1 + γ c2`, with `c1`/`c2` being `α · coeffs[0]`
+/// and `α · coeffs[1]` respectively.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_int_fold_lifted_evals<F, const H: usize, const HALF_H: usize>(
+    point: &[F],
+    int_trace: &[DenseMultilinearExtension<crypto_primitives::crypto_bigint_int::Int<H>>],
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<HALF_H>>,
+{
+    use crypto_primitives::crypto_bigint_int::Int;
+    assert!(
+        H >= 2 * HALF_H,
+        "compute_int_fold_lifted_evals: H ({H}) must be >= 2 * HALF_H ({HALF_H})"
+    );
+    let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
+        .expect("compute_int_fold_lifted_evals: eq table build failed");
+    let zero = F::zero_with_cfg(field_cfg);
+    let shift = (HALF_H * 64) as u32;
+
+    cfg_iter!(int_trace)
+        .map(|col| {
+            let mut lo_eval = zero.clone();
+            let mut hi_eval = zero.clone();
+            for (b, entry) in col.iter().enumerate() {
+                let lo: Int<HALF_H> = entry.resize();
+                let hi: Int<HALF_H> = (*entry >> shift).resize();
+                let mut term_lo = F::from_with_cfg(&lo, field_cfg);
+                term_lo *= &eq_table[b];
+                lo_eval += &term_lo;
+                let mut term_hi = F::from_with_cfg(&hi, field_cfg);
+                term_hi *= &eq_table[b];
+                hi_eval += &term_hi;
+            }
+            DynamicPolynomialF::new_trimmed(vec![lo_eval, hi_eval])
+        })
+        .collect()
+}
+
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
 /// coefficient via \phi_q.
 pub fn project_scalar_fn<R, F, const D: usize>(
