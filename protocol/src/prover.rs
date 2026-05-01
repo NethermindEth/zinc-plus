@@ -8,7 +8,8 @@ use zinc_piop::{
     lookup::booleanity::{
         build_shifted_bit_slice_mles, build_virtual_binary_poly_mles,
         build_virtual_booleanity_mles, compute_bit_slices_flat,
-        finalize_booleanity_prover, prepare_booleanity_group,
+        compute_shifted_bit_slice_evals_streaming, finalize_booleanity_prover,
+        prepare_booleanity_group,
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
@@ -601,12 +602,23 @@ impl_with_type_bounds!(ProverEvalProjected
             .iter()
             .map(|&idx| self.projected_trace_f[int_offset + idx].clone())
             .collect();
-        let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
-            &self.base.trace.binary_poly[num_pub_bin..],
-            self.base.uair_signature.shifted_bit_slice_specs(),
-            &self.field_cfg,
-        );
         let virtual_specs = self.base.uair_signature.virtual_booleanity_cols();
+        // The F::Inner-valued shifted bit-slice MLEs are only needed
+        // when per-bit `VirtualBoolSpec` entries are registered; the
+        // packed `VirtualBinaryPolySpec` path reads source binary_polys
+        // directly. When no per-bit specs are present, we skip the
+        // O(num_shifted · D · n) materialization and compute the
+        // verifier's `shifted_bit_slice_evals` via streaming eq-table
+        // dot products after the sumcheck point is fixed.
+        let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            build_shifted_bit_slice_mles::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                self.base.uair_signature.shifted_bit_slice_specs(),
+                &self.field_cfg,
+            )
+        };
         let virtual_mles = if virtual_specs.is_empty() {
             Vec::new()
         } else {
@@ -687,17 +699,29 @@ impl_with_type_bounds!(ProverEvalProjected
 
         // Evaluate shifted bit-slice MLEs at the shared sumcheck point —
         // bound on the verifier via the projection-element consistency
-        // check against the corresponding `down_evals`.
-        let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
-            .into_iter()
-            .map(|mle| {
-                mle.evaluate_with_config(
-                    &cpr_prover_state.evaluation_point,
-                    &self.field_cfg,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::ShiftedBitSliceEval)?;
+        // check against the corresponding `down_evals`. Streaming when
+        // we didn't materialize the F::Inner MLEs above; otherwise eval
+        // each one directly to reuse the existing buffers.
+        let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+            compute_shifted_bit_slice_evals_streaming::<F, D>(
+                &self.base.trace.binary_poly[num_pub_bin..],
+                self.base.uair_signature.shifted_bit_slice_specs(),
+                &cpr_prover_state.evaluation_point,
+                &self.field_cfg,
+            )
+            .map_err(|e| ProtocolError::Booleanity(e.into()))?
+        } else {
+            shifted_bit_slice_mles
+                .into_iter()
+                .map(|mle| {
+                    mle.evaluate_with_config(
+                        &cpr_prover_state.evaluation_point,
+                        &self.field_cfg,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        };
         cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
 
         // 4e: Finalize booleanity (bit_slice_evals).
@@ -1269,12 +1293,16 @@ where
         .iter()
         .map(|&idx| projected_trace_f[int_offset + idx].clone())
         .collect();
-    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.shifted_bit_slice_specs(),
-        &field_cfg,
-    );
     let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
@@ -1345,11 +1373,21 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
-        .into_iter()
-        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
     cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
@@ -2040,12 +2078,16 @@ where
         .iter()
         .map(|&idx| projected_trace_f[int_offset + idx].clone())
         .collect();
-    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.shifted_bit_slice_specs(),
-        &field_cfg,
-    );
     let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
@@ -2116,11 +2158,21 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
-        .into_iter()
-        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
     cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
