@@ -6,22 +6,33 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[lib]
+bench = false
+
+[features]
+parallel = [
+    "dep:rayon",
+    "zinc-piop/parallel",
+    "zinc-poly/parallel",
+    "zinc-uair/parallel",
+    "zinc-utils/parallel",
+]
+simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
+unchecked = []
+
 [dependencies]
 crypto-primitives = { workspace = true }
-rayon = { workspace = true, optional = true }
 itertools = { workspace = true }
 num-traits = { workspace = true }
+rayon = { workspace = true, optional = true }
 thiserror = { workspace = true }
-zip-plus = { workspace = true }
 zinc-piop = { workspace = true }
 zinc-poly = { workspace = true }
 zinc-primality = { workspace = true }
 zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
-
-[lib]
-bench = false
+zip-plus = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -31,12 +42,6 @@ zinc-test-uair = { workspace = true }
 
 [lints]
 workspace = true
-
-
-[features]
-parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
-simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
-unchecked = []
 
 [[bench]]
 name = "e2e"

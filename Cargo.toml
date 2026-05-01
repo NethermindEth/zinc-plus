@@ -1,5 +1,15 @@
 [workspace]
-members = ["piop", "poly", "primality", "protocol", "test-uair", "transcript", "uair", "utils", "zip-plus"]
+members = [
+    "piop",
+    "poly",
+    "primality",
+    "protocol",
+    "test-uair",
+    "transcript",
+    "uair",
+    "utils",
+    "zip-plus",
+]
 resolver = "2"
 default-members = ["piop", "poly", "primality", "protocol", "transcript", "utils", "zip-plus"]
 
@@ -11,11 +21,11 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand"] }
 
 blake3 = "1.8"
-crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
 criterion = "0.7.0"
+crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand"] }
 derive_more = { version = "2.1.1", features = ["full"] }
 itertools = "0.14"
 num-traits = "0.2"
@@ -24,13 +34,13 @@ rand = "0.9"
 rand_core = "0.9"
 rayon = { version = "1.10" }
 thiserror = "2.0"
+zinc-piop = { path = "piop/" }
+zinc-poly = { path = "poly/" }
 zinc-primality = { path = "primality/" }
 zinc-test-uair = { path = "test-uair/" }
 zinc-transcript = { path = "transcript/" }
 zinc-uair = { path = "uair/" }
 zinc-utils = { path = "utils/" }
-zinc-poly = { path = "poly/" }
-zinc-piop = { path = "piop/" }
 zip-plus = { path = "zip-plus/" }
 
 [workspace.lints.rust]

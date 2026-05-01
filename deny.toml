@@ -72,8 +72,7 @@ multiple-versions = "warn"
 highlight = "all"
 
 [bans.workspace-dependencies]
-duplicates = "allow" # This is to keep crypto-primitives relatively separated, should be changed once it becomes a separate repo
-# TODO(template) you should provide an example with the lib usage
+duplicates = "allow"
 unused = 'deny'
 
 [sources]

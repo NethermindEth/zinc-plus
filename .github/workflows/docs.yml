@@ -27,9 +27,6 @@ jobs:
         run: cargo clean --doc
 
       # Documentation with Latex support
-      # TODO(template) if Latex is not needed
-      # just remove katex-header.html at the root and RUSTDOCFLAGS here
-      # TODO(template) update the crate name
       - name: Build documentation
         run: RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps -p template_crate
 
