@@ -15,7 +15,6 @@ jobs:
   docs:
     permissions:
       contents: read
-      pages: write
     name: Documentation
     runs-on: ubuntu-latest
     steps:
@@ -26,7 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        uses: dtolnay/rust-toolchain@stable@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
 
       - name: Setup pages
         id: pages
@@ -38,6 +37,12 @@ jobs:
       # Documentation with Latex support
       - name: Build documentation
         run: RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --workspace --all-features --no-deps
+
+      - name: Generate landing page
+        run: python3 docs/gen_rustdoc_index.py --out target/doc/index.html
+
+      - name: Disable Jekyll
+        run: touch target/doc/.nojekyll
 
       - name: Remove lock file
         run: rm target/doc/.lock
