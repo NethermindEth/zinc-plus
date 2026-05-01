@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           rustup +nightly component add miri
           cargo +nightly miri setup

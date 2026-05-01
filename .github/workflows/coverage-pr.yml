@@ -15,13 +15,13 @@ jobs:
     outputs:
       pct: ${{ steps.cov.outputs.coverage }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Cache llvm-cov build
         id: cache-llvm-cov
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         continue-on-error: false
         with:
           path: |
@@ -38,7 +38,7 @@ jobs:
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex '^examples/'
 
       - name: Upload head coverage artifact (for stacked PRs)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
@@ -81,14 +81,14 @@ jobs:
       # 2) Fallback: if no artifact, checkout base commit and compute base coverage here
       - name: Checkout base
         if: ${{ steps.base_art.outputs.found == 'false' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Cache llvm-cov build
         id: cache-llvm-cov
         if: ${{ steps.base_art.outputs.found == 'false' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         continue-on-error: false
         with:
           path: |
