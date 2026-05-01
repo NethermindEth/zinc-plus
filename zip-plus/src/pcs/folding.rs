@@ -201,6 +201,101 @@ pub fn split_int_columns<const H: usize, const HALF_H: usize>(
     }
 }
 
+/// 4× int fold counterpart of [`split_int_column`]: decompose each
+/// `Int<H>` cell into four `Int<Q>` quarters via
+/// `v = q_0 + 2^64 · q_1 + 2^128 · q_2 + 2^192 · q_3` (signed
+/// integer arithmetic), and lay them out as a length-`4n` column
+/// matching the binary 4× chained-split layout
+/// (`bot_lo || bot_hi || top_lo || top_hi`):
+///
+/// - `bot_lo[i] = q_0(v[i]) = v[i] mod 2^64`             (positions 0..n)
+/// - `bot_hi[i] = q_2(v[i]) = (v[i] >> 128) mod 2^64`    (positions n..2n)
+/// - `top_lo[i] = q_1(v[i]) = (v[i] >> 64) mod 2^64`     (positions 2n..3n)
+/// - `top_hi[i] = q_3(v[i]) = floor(v[i] / 2^192)`       (positions 3n..4n)
+///
+/// Quarters `q_0, q_1, q_2` are zero-extended single limbs (always
+/// non-negative when stored as `Int<Q>`); `q_3` is the signed
+/// arithmetic shift, preserving the sign of `v` for negatives.
+///
+/// `Q` must be `>= 2`: `Int<1>` (signed 64-bit, range
+/// `[-2^63, 2^63)`) overflows on quarters ≥ 2^63 (common for ECDSA
+/// witnesses) and on negative `q_3`. `Int<2>` gives one limb of
+/// headroom.
+pub fn split_int_column_4x<const H: usize, const Q: usize>(
+    column: &DenseMultilinearExtension<Int<H>>,
+) -> DenseMultilinearExtension<Int<Q>> {
+    assert!(
+        Q >= 2,
+        "split_int_column_4x: Q ({Q}) must be >= 2 to hold each 64-bit \
+         quarter with a sign-bit headroom"
+    );
+    assert!(
+        H >= 4,
+        "split_int_column_4x: H ({H}) must be >= 4 to expose 4 source limbs"
+    );
+
+    let n = column.evaluations.len();
+    let mut bot_lo: Vec<Int<Q>> = Vec::with_capacity(n);
+    let mut bot_hi: Vec<Int<Q>> = Vec::with_capacity(n);
+    let mut top_lo: Vec<Int<Q>> = Vec::with_capacity(n);
+    let mut top_hi: Vec<Int<Q>> = Vec::with_capacity(n);
+
+    for entry in &column.evaluations {
+        let words = entry.as_uint().to_words();
+        // q_0, q_1, q_2: zero-extend single limbs into Int<Q>.
+        let mut w0 = [0u64; Q];
+        w0[0] = words[0];
+        let mut w1 = [0u64; Q];
+        w1[0] = words[1];
+        let mut w2 = [0u64; Q];
+        w2[0] = words[2];
+        bot_lo.push(Int::from_words(w0));
+        top_lo.push(Int::from_words(w1));
+        bot_hi.push(Int::from_words(w2));
+        // q_3: signed arithmetic shift of the source Int<H>, then
+        // truncate to Int<Q>. Sign-extension preserves the sign for
+        // negative v.
+        let q3: Int<Q> = (*entry >> 192_u32).resize();
+        top_hi.push(q3);
+    }
+
+    // Layout: bot_lo || bot_hi || top_lo || top_hi (matching the
+    // chained-split layout of binary's split_columns ∘ split_columns).
+    let mut result = bot_lo;
+    result.extend(bot_hi);
+    result.extend(top_lo);
+    result.extend(top_hi);
+
+    DenseMultilinearExtension::from_evaluations_vec(
+        column
+            .num_vars
+            .checked_add(2)
+            .expect("split_int_column_4x: num_vars overflow"),
+        result,
+        Int::<Q>::zero(),
+    )
+}
+
+/// Batch counterpart of [`split_int_column_4x`].
+pub fn split_int_columns_4x<const H: usize, const Q: usize>(
+    columns: &[DenseMultilinearExtension<Int<H>>],
+) -> Vec<DenseMultilinearExtension<Int<Q>>> {
+    #[cfg(feature = "parallel")]
+    {
+        return columns
+            .par_iter()
+            .map(|col| split_int_column_4x::<H, Q>(col))
+            .collect();
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        columns
+            .iter()
+            .map(|col| split_int_column_4x::<H, Q>(col))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
