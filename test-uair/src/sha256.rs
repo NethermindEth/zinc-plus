@@ -177,8 +177,8 @@ use zinc_poly::{
 };
 use zinc_uair::{
     BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
-    ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair, UairSignature,
-    UairTrace, VirtualBinaryPolySource, VirtualBinaryPolySpec,
+    PublicStructureError, ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair,
+    UairSignature, UairTrace, VirtualBinaryPolySource, VirtualBinaryPolySpec,
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -360,39 +360,19 @@ pub mod cols {
     pub const S_MSG_INIT: usize = 2;
     pub const PA_K: usize = 3; // public: round constants column (free for this slice)
     // Public compensator columns: zero on rows where the corresponding
-    // constraint is honestly satisfied (the "active" range, now a union
-    // of NUM_COMPRESSIONS disjoint per-compression windows), non-zero on
+    // constraint is honestly satisfied (the "active" range, a union of
+    // NUM_COMPRESSIONS disjoint per-compression windows), non-zero on
     // inactive rows so that `inner + compensator ∈ (X − 2)` everywhere.
     // Keeps C7-C9 at degree 1 in the trace MLEs.
     //
-    // Compensator-zero on active rows is enforced in-circuit by the
-    // S_ACTIVE_SCHED / S_ACTIVE_UPD selectors below (and S_FEEDFORWARD
-    // for pa_c_ff_{a,e}). Without that, a malicious prover could put a
-    // nonzero compensator on active rows and absorb arbitrary `inner`.
-    pub const PA_C_C7: usize = 4; // compensator for C7 (sched_anch)
-    pub const PA_C_C8: usize = 5; // compensator for C8 (upd_anch a)
-    pub const PA_C_C9: usize = 6; // compensator for C9 (upd_anch e)
-    // Compensators for the per-junction feed-forward addition
-    // constraints (a-half and e-half). Same compensator pattern as
-    // pa_c_c7/c8/c9: zero on the junction-window rows where the
-    // SHA-256 feed-forward holds honestly, nonzero elsewhere to keep
-    // `(ff_inner + pa_c_ff) ∈ (X − 2)` everywhere. Lets us drop the
-    // `s_feedforward` selector multiplier and keep C12/C13 at degree 1
-    // in the trace MLEs (so the UAIR remains MLE-first eligible —
-    // `count_effective_max_degree::<U>() <= 1` in the bench gate).
-    pub const PA_C_FF_A: usize = 7; // compensator for C12 (feed-forward a-half)
-    pub const PA_C_FF_E: usize = 8; // compensator for C13 (feed-forward e-half)
-    // Compensator-zero check selectors. The pa_c_c{7,8,9} and
-    // pa_c_ff_{a,e} compensators absorb `inner(2)` on inactive rows
-    // and must be zero on each constraint's *active* range — without
-    // that pin, a malicious prover could write a nonzero compensator
-    // on active rows and absorb arbitrary `inner`, breaking the SHA
-    // round binding. We discharge this in-circuit via two zero-asserting
-    // constraint families: `s_active_sched · pa_c_c7 == 0` (for C7),
-    // `s_active_upd · pa_c_c{8,9} == 0` (for C8/C9), and
-    // `s_feedforward · pa_c_ff_{a,e} == 0` (reusing the existing
-    // S_FEEDFORWARD selector). All are zero-ideal, so they don't bump
-    // `count_effective_max_degree` — MLE-first eligibility intact.
+    // Compensator-zero on active rows is enforced by **direct
+    // verifier inspection** of public_trace via
+    // `Uair::verify_public_structure`, not by an in-circuit
+    // selector-multiplied constraint. The compensators are public
+    // columns — the verifier holds every cell value before the proof
+    // begins, so a row-wise check costs no additional column and no
+    // algebraic constraint. See the SHA UAIR document for the full
+    // list of structural checks.
     //
     // Per-compression active windows (relative to start = ROWS_PER_COMP·i):
     //   - SCHED (C7):     k ∈ [start, start + 48), i.e., the 48 anchors
@@ -401,17 +381,26 @@ pub mod cols {
     //                     16..=63 derived range.
     //   - UPD (C8/C9):    k ∈ [start, start + 64), i.e., the 64
     //                     round-update anchors per compression.
-    pub const S_ACTIVE_SCHED: usize = 9;
-    pub const S_ACTIVE_UPD: usize = 10;
+    //   - JUNCTION (C12/C13): k ∈ [start + 64, start + 68), the 4
+    //                     junction-window rows.
+    pub const PA_C_C7: usize = 4; // compensator for C7 (sched_anch)
+    pub const PA_C_C8: usize = 5; // compensator for C8 (upd_anch a)
+    pub const PA_C_C9: usize = 6; // compensator for C9 (upd_anch e)
+    pub const PA_C_FF_A: usize = 7; // compensator for C12 (feed-forward a-half)
+    pub const PA_C_FF_E: usize = 8; // compensator for C13 (feed-forward e-half)
     /// Total number of int columns.
     ///
     /// The 5 prior witness int carry columns (W_MU_W/A/E/JUNCTION_A/E)
     /// are gone — replaced by the W_MU_PACKED binary_poly column at
     /// index 19 in the binary_poly section. Booleanity provides the
     /// range checks for free (see W_MU_PACKED's doc).
-    pub const NUM_INT: usize = 11;
-    /// Number of public int columns (prefix). All ints are now public.
-    pub const NUM_INT_PUB: usize = 11;
+    ///
+    /// The 2 prior compensator-zero selector columns
+    /// (S_ACTIVE_SCHED, S_ACTIVE_UPD) are gone — compensator-zero is
+    /// enforced by direct verifier inspection of public_trace.
+    pub const NUM_INT: usize = 9;
+    /// Number of public int columns (prefix). All ints are public.
+    pub const NUM_INT_PUB: usize = 9;
 
     // ---------------------------------------------------------------------
     // Chained-compression layout constants.
@@ -701,15 +690,18 @@ where
         let w_mu_packed = &bp[cols::W_MU_PACKED];
 
         let s_init_prefix = &sel[cols::S_INIT_PREFIX];
-        let s_feedforward = &sel[cols::S_FEEDFORWARD];
+        // S_FEEDFORWARD remains as a public selector documenting the
+        // junction-window row pattern (1 on junction windows, 0
+        // elsewhere); it is no longer multiplied into any in-circuit
+        // constraint since the FF compensator-zero pins (formerly
+        // C20/C21) moved to verifier-side `verify_public_structure`.
+        let _s_feedforward = &sel[cols::S_FEEDFORWARD];
         let s_msg_init = &sel[cols::S_MSG_INIT];
         let pa_c_c7 = &sel[cols::PA_C_C7];
         let pa_c_c8 = &sel[cols::PA_C_C8];
         let pa_c_c9 = &sel[cols::PA_C_C9];
         let pa_c_ff_a = &sel[cols::PA_C_FF_A];
         let pa_c_ff_e = &sel[cols::PA_C_FF_E];
-        let s_active_sched = &sel[cols::S_ACTIVE_SCHED];
-        let s_active_upd = &sel[cols::S_ACTIVE_UPD];
         // The 5 prior int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
         // gone — replaced by W_MU_PACKED (binary_poly) read above. The
         // `mu_*_contrib` polynomial expressions below extract each
@@ -991,26 +983,122 @@ where
         // `count_effective_max_degree` — MLE-first eligibility intact.
         b.assert_zero(s_msg_init.clone() * &(w_big_w.clone() - pa_m));
 
-        // Constraints 17–21: compensator-zero pins.
+        // Compensator-zero pinning (formerly C17–C21) is now enforced
+        // by direct verifier inspection of public_trace via
+        // `verify_public_structure`, not as in-circuit constraints —
+        // see this UAIR's `verify_public_structure` impl below.
         //
-        // The compensator pattern (`inner + pa_c ∈ (X − 2)` on every
-        // row) only enforces the SHA recurrence if the verifier can
-        // trust pa_c = 0 on the constraint's active range. A malicious
-        // prover could otherwise put any value in pa_c on active rows
-        // and have it absorb a non-honest `inner`. We pin pa_c = 0
-        // in-circuit via per-active-row selectors:
-        //   C17  s_active_sched · pa_c_c7  == 0   (msg-schedule active)
-        //   C18  s_active_upd   · pa_c_c8  == 0   (round-update active, a)
-        //   C19  s_active_upd   · pa_c_c9  == 0   (round-update active, e)
-        //   C20  s_feedforward  · pa_c_ff_a == 0  (junction window, a-half)
-        //   C21  s_feedforward  · pa_c_ff_e == 0  (junction window, e-half)
-        // All five are assert_zero (zero-ideal), so they don't bump
-        // `count_effective_max_degree` — MLE-first stays eligible.
-        b.assert_zero(s_active_sched.clone() * pa_c_c7);
-        b.assert_zero(s_active_upd.clone() * pa_c_c8);
-        b.assert_zero(s_active_upd.clone() * pa_c_c9);
-        b.assert_zero(s_feedforward.clone() * pa_c_ff_a);
-        b.assert_zero(s_feedforward.clone() * pa_c_ff_e);
+        // Suppress unused-variable warnings on the compensator binders;
+        // they appear in C7/C8/C9 (W) and C12/C13 (FF), already used
+        // earlier in this function.
+        let _ = (pa_c_c7, pa_c_c8, pa_c_c9, pa_c_ff_a, pa_c_ff_e);
+    }
+
+    /// Verify the public-column structural properties that the
+    /// in-circuit constraints do not capture (formerly C17–C21).
+    ///
+    /// The five compensator columns must be zero on each constraint's
+    /// active row range; the two tail-corrector columns must be zero
+    /// on every inner row. The verifier discharges these by direct
+    /// inspection of `public_trace`.
+    fn verify_public_structure<RT, IntT, const D: usize>(
+        public_trace: &UairTrace<'_, RT, IntT, D>,
+        num_vars: usize,
+    ) -> Result<(), PublicStructureError>
+    where
+        RT: Clone,
+        IntT: Clone + num_traits::Zero,
+    {
+        let n = 1usize << num_vars;
+        debug_assert_eq!(public_trace.int.len(), cols::NUM_INT_PUB);
+        debug_assert!(public_trace.binary_poly.len() >= cols::NUM_BIN_PUB);
+
+        let pa_c_c7 = &public_trace.int[cols::PA_C_C7].evaluations;
+        let pa_c_c8 = &public_trace.int[cols::PA_C_C8].evaluations;
+        let pa_c_c9 = &public_trace.int[cols::PA_C_C9].evaluations;
+        let pa_c_ff_a = &public_trace.int[cols::PA_C_FF_A].evaluations;
+        let pa_c_ff_e = &public_trace.int[cols::PA_C_FF_E].evaluations;
+        let pa_r_ch2_corr = &public_trace.binary_poly[cols::PA_R_CH2_CORR].evaluations;
+        let pa_r_maj_corr = &public_trace.binary_poly[cols::PA_R_MAJ_CORR].evaluations;
+
+        // Per-compression active windows. start = ROWS_PER_COMP·i.
+        for i in 0..cols::NUM_COMPRESSIONS {
+            let start = i * cols::ROWS_PER_COMP;
+
+            // Schedule-active anchors: k ∈ [start, start + ROUNDS_PER_COMP - 16),
+            // i.e. the 48 anchors where C7 produces W[k+16] inside the
+            // 16..=63 derived range.
+            let sched_end = start + (cols::ROUNDS_PER_COMP - 16);
+            for k in start..sched_end.min(n) {
+                if !pa_c_c7[k].is_zero() {
+                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                        column: "PA_C_C7",
+                        row: k,
+                    });
+                }
+            }
+
+            // Update-active anchors: k ∈ [start, start + ROUNDS_PER_COMP),
+            // i.e. the 64 round-update anchors per compression.
+            let upd_end = start + cols::ROUNDS_PER_COMP;
+            for k in start..upd_end.min(n) {
+                if !pa_c_c8[k].is_zero() {
+                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                        column: "PA_C_C8",
+                        row: k,
+                    });
+                }
+                if !pa_c_c9[k].is_zero() {
+                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                        column: "PA_C_C9",
+                        row: k,
+                    });
+                }
+            }
+
+            // Junction-window rows: [start + ROUNDS_PER_COMP, start + ROWS_PER_COMP)
+            // i.e. the 4 rows per compression where the SHA-256
+            // feed-forward H_{i+1} = H_i + (...) is checked.
+            let junc_start = start + cols::ROUNDS_PER_COMP;
+            let junc_end = start + cols::ROWS_PER_COMP;
+            for k in junc_start.min(n)..junc_end.min(n) {
+                if !pa_c_ff_a[k].is_zero() {
+                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                        column: "PA_C_FF_A",
+                        row: k,
+                    });
+                }
+                if !pa_c_ff_e[k].is_zero() {
+                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                        column: "PA_C_FF_E",
+                        row: k,
+                    });
+                }
+            }
+        }
+
+        // Tail correctors: zero on every inner row k with k+2 < n.
+        // (At k ∈ {n-2, n-1} the corrector takes the closed-form
+        // boundary value; we don't re-derive that here, since the
+        // residuals C19/C20 booleanity already captures any cell
+        // value at those rows that violates {0,1} per coefficient.)
+        let inner_end = n.saturating_sub(2);
+        for k in 0..inner_end {
+            if !pa_r_ch2_corr[k].iter().all(|c| !c.into_inner()) {
+                return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                    column: "PA_R_CH2_CORR",
+                    row: k,
+                });
+            }
+            if !pa_r_maj_corr[k].iter().all(|c| !c.into_inner()) {
+                return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
+                    column: "PA_R_MAJ_CORR",
+                    row: k,
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1599,27 +1687,9 @@ where
                 s_msg_init_col[i * rpc + j] = R::ONE;
             }
         }
-        // s_active_sched: 1 on the 48 message-schedule-active anchors
-        // per compression (k ∈ [start, start + 48)), 0 elsewhere.
-        // Gates C17 (`pa_c_c7 == 0` on the C7-active range).
-        let mut s_active_sched_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            let start = i * rpc;
-            for k in start..(start + rpc - 16) {
-                s_active_sched_col[k] = R::ONE;
-            }
-        }
-        // s_active_upd: 1 on the 64 round-update-active anchors per
-        // compression (k ∈ [start, start + 64)), 0 elsewhere. Gates
-        // C18/C19 (`pa_c_c{8,9} == 0` on the round-update-active
-        // range).
-        let mut s_active_upd_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            let start = i * rpc;
-            for k in start..(start + cols::ROUNDS_PER_COMP) {
-                s_active_upd_col[k] = R::ONE;
-            }
-        }
+        // The s_active_sched / s_active_upd selectors are gone — the
+        // verifier enforces the compensator-zero pinning by direct
+        // public_trace inspection, see `verify_public_structure`.
 
         let k_col: Vec<R> = k_vals.iter().copied().map(R::from).collect();
         // mu_w_vals / mu_a_vals / mu_e_vals / mu_junction_{a,e}_vals
@@ -1768,11 +1838,11 @@ where
             to_int_mle(pa_c_c9_col),
             to_int_mle(pa_c_ff_a_col),
             to_int_mle(pa_c_ff_e_col),
-            to_int_mle(s_active_sched_col),
-            to_int_mle(s_active_upd_col),
+            // The 2 prior compensator-zero selectors
+            // (s_active_sched/upd) are gone — compensator-zero is
+            // enforced by direct verifier inspection of public_trace.
             // The 5 prior int carry columns (mu_W/a/e/junction_a/e)
-            // are gone — their values are packed into the
-            // W_MU_PACKED binary_poly column above.
+            // are gone — packed into W_MU_PACKED above.
         ];
 
         UairTrace {

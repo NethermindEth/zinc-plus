@@ -363,6 +363,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Booleanity(zinc_piop::lookup::booleanity::BooleanityError<F>),
     #[error("public-trace consistency check failed: {0}")]
     PublicConsistency(String),
+    #[error("public-column structural check failed: {0}")]
+    PublicStructure(zinc_uair::PublicStructureError),
     #[error("shifted bit-slice evaluation failed: {0}")]
     ShiftedBitSliceEval(zinc_poly::EvaluationError),
     #[error("PCS error: {0}")]
@@ -753,6 +755,7 @@ mod tests {
         check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
     ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
+        Zt::Int: num_traits::Zero,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1431,22 +1434,19 @@ mod tests {
         type Zt = TestShaEcdsaZincTypes;
         type U = ShaEcdsaUair<ShaEcdsaInt>;
 
-        // SHA standalone signature pins (post-virtualization of B_1/
-        // B_2/B_3 and after adding PA_M for Table 9 row-77 message-init
-        // pinning): NUM_BIN = 19 (3 committed B_i cols dropped, 2 public
-        // correctors PA_R_*_CORR added, 1 public PA_M added — net 0
-        // from the earlier 18 baseline, then +1 from PA_M), bit_op_specs
-        // = 6, virtual_binary_poly_cols = 3.
+        // SHA standalone signature pins: NUM_BIN = 20 (9 public + 11
+        // witness — 9 = PA_A, PA_E, 4× PA_OV_*, 2× PA_R_*_CORR, PA_M).
+        // bit_op_specs = 6, virtual_binary_poly_cols = 3.
         let sha_sig = <Sha256CompressionSliceUair<ShaEcdsaInt> as Uair>::signature();
         assert_eq!(
             sha_sig.total_cols().num_binary_poly_cols(),
-            19,
-            "SHA-256 NUM_BIN drifted: expected 19 binary_poly columns post-virtualization + PA_M",
+            20,
+            "SHA-256 NUM_BIN drifted: expected 20 binary_poly columns",
         );
         assert_eq!(
             sha_sig.bit_op_specs().len(),
-            6,
-            "SHA-256 bit_op_specs.len() drifted: expected 6",
+            11,
+            "SHA-256 bit_op_specs.len() drifted: expected 11 (6 σ_0/σ_1 + 5 W_MU_PACKED ShiftRs)",
         );
         assert_eq!(
             sha_sig.virtual_binary_poly_cols().len(),
@@ -1459,12 +1459,12 @@ mod tests {
         let num_bit_op = sig.bit_op_specs().len();
         assert_eq!(
             sig.total_cols().num_binary_poly_cols(),
-            19,
-            "SHA-ECDSA NUM_BIN drifted: expected 19 binary_poly columns",
+            20,
+            "SHA-ECDSA NUM_BIN drifted: expected 20 binary_poly columns",
         );
         assert_eq!(
-            num_bit_op, 6,
-            "SHA-ECDSA bit_op_specs.len() drifted: expected 6",
+            num_bit_op, 11,
+            "SHA-ECDSA bit_op_specs.len() drifted: expected 11",
         );
         assert_eq!(
             sig.virtual_binary_poly_cols().len(),

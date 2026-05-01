@@ -444,7 +444,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     Zt: ZincTypes<DEGREE_PLUS_ONE>,
-    Zt::Int: ProjectableToField<F>,
+    Zt::Int: ProjectableToField<F> + num_traits::Zero,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -543,7 +543,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     Zt: ZincTypes<DEGREE_PLUS_ONE>,
-    Zt::Int: ProjectableToField<F>,
+    Zt::Int: ProjectableToField<F> + num_traits::Zero,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1107,7 +1107,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE>,
-    ZtF::Int: ProjectableToField<F>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1251,7 +1251,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
     ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>,
-    ZtF::Int: ProjectableToField<F>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1361,7 +1361,7 @@ fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
     project_scalar: S,
 ) where
     ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>,
-    ZtF::Int: ProjectableToField<F>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,

@@ -984,7 +984,7 @@ impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
     Zt: ZincTypes<D>,
-    Zt::Int: ProjectableToField<F>,
+    Zt::Int: ProjectableToField<F> + num_traits::Zero,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1027,6 +1027,16 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
+        // Verifier-side public-column structural checks. UAIRs that
+        // need to enforce structural properties of public columns
+        // (compensator-zero on active rows, tail-corrector-zero on
+        // inner rows, etc.) discharge them here, by direct row-wise
+        // inspection of public_trace, before any algebraic check
+        // begins. Default impl is a no-op for UAIRs that don't need
+        // such checks.
+        U::verify_public_structure(public_trace, num_vars)
+            .map_err(ProtocolError::PublicStructure)?;
+
         ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
@@ -1079,7 +1089,7 @@ pub fn verify_folded<
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
     ZtF: crate::FoldedZincTypes<D, HALF_D>,
-    ZtF::Int: ProjectableToField<F>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1101,6 +1111,12 @@ where
     F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
+    // Verifier-side public-column structural checks (compensator/
+    // corrector zero-pinning, etc.). UAIRs that don't need extra
+    // structural checks fall through this with a no-op default impl.
+    U::verify_public_structure(public_trace, num_vars)
+        .map_err(ProtocolError::PublicStructure)?;
+
     // ── Step 0: Reconstruct transcript ──────────────────────────────────
     let zip_proof = std::mem::take(&mut proof.zip);
     let (vp_bin_split, vp_arb, vp_int) = vp;
@@ -1592,7 +1608,7 @@ pub fn verify_folded_4x<
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
     ZtF: crate::FoldedZincTypes<D, QUARTER_D>,
-    ZtF::Int: ProjectableToField<F>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -1621,6 +1637,11 @@ where
         2 * QUARTER_D,
         "verify_folded_4x: HALF_D must equal 2 * QUARTER_D",
     );
+
+    // Verifier-side public-column structural checks (compensator/
+    // corrector zero-pinning, etc.). Default impl is a no-op.
+    U::verify_public_structure(public_trace, num_vars)
+        .map_err(ProtocolError::PublicStructure)?;
 
     // ── Step 0: Reconstruct transcript ──────────────────────────────────
     let zip_proof = std::mem::take(&mut proof.zip);

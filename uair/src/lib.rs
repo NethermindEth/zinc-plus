@@ -954,4 +954,56 @@ pub trait Uair: Clone {
             B::Ideal::from_ref,
         )
     }
+
+    /// Verify additional structural properties of the public columns
+    /// (i.e., the publicly-known cells of the trace) that the
+    /// in-circuit constraints do not — and need not — capture.
+    ///
+    /// The verifier holds the full `public_trace` before the proof
+    /// runs. Some structural properties of public columns (e.g., a
+    /// public compensator column is zero on a designated subset of
+    /// rows, or a public corrector column is zero everywhere except
+    /// on two boundary rows) are most cheaply enforced by direct
+    /// row-wise inspection rather than by an in-circuit selector
+    /// column and a quadratic constraint. UAIRs override this method
+    /// to perform such checks on `public_trace`.
+    ///
+    /// `num_vars` is the trace-length log; `n = 1 << num_vars` is the
+    /// number of trace rows, including any padding at the tail.
+    ///
+    /// Default implementation: no extra checks.
+    fn verify_public_structure<R, IntT, const D: usize>(
+        _public_trace: &UairTrace<'_, R, IntT, D>,
+        _num_vars: usize,
+    ) -> Result<(), PublicStructureError>
+    where
+        R: Clone,
+        IntT: Clone + num_traits::Zero,
+    {
+        Ok(())
+    }
+}
+
+/// Error returned by [`Uair::verify_public_structure`] when an
+/// expected structural property of one of the public columns is
+/// violated.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PublicStructureError {
+    /// A public column expected to be zero on a particular row was
+    /// non-zero. Carries enough context to localise the failure.
+    #[error("public column '{column}' must be zero at row {row}, but is non-zero")]
+    NonZeroOnRequiredZeroRow {
+        /// Human-readable column identifier (e.g. "PA_C_C7").
+        column: &'static str,
+        /// Row index at which the violation was detected.
+        row: usize,
+    },
+    /// A public column's value at a specific row did not match the
+    /// expected closed-form value (e.g. the tail-corrector boundary
+    /// formula).
+    #[error("public column '{column}' at row {row} has wrong value")]
+    WrongValue {
+        column: &'static str,
+        row: usize,
+    },
 }
