@@ -1,15 +1,21 @@
 name: Docs
 
-# TODO(template)
-# GH pages seems to work properly for public repos
 on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 jobs:
-  # TODO(template) remove docs publishing, when the crate is published to crates.io
   docs:
     permissions:
-        contents: write
+      contents: read
+      pages: write
     name: Documentation
     runs-on: ubuntu-latest
     steps:
@@ -18,6 +24,9 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup pages
         id: pages
@@ -28,7 +37,7 @@ jobs:
 
       # Documentation with Latex support
       - name: Build documentation
-        run: RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --no-deps -p template_crate
+        run: RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --workspace --all-features --no-deps
 
       - name: Remove lock file
         run: rm target/doc/.lock
@@ -47,6 +56,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: docs
+    if: github.event_name != 'pull_request'
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

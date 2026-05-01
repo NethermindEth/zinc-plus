@@ -10,7 +10,7 @@ members = [
     "utils",
     "zip-plus",
 ]
-resolver = "2"
+resolver = "3"
 default-members = ["piop", "poly", "primality", "protocol", "transcript", "utils", "zip-plus"]
 
 [workspace.package]
