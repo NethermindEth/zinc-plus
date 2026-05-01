@@ -88,6 +88,45 @@ impl MerkleTree {
         build_merkle_tree_from_leaves(leaves)
     }
 
+    /// Build a Merkle tree over leaves derived from three groups of rows
+    /// with potentially different element types. Any group may be empty,
+    /// but at least one must be non-empty (and m_cols is taken from the
+    /// first non-empty group).
+    ///
+    /// Each leaf is `H(row0_0[j] || ... || row0_n0[j] || row1_0[j] || ... ||
+    /// row2_n2[j])`, i.e. the concatenation of column j across all rows
+    /// from all three groups in fixed order (0, 1, 2). Used by
+    /// [`crate::pcs::multi_zip::MultiZip3`] to commit two or three
+    /// heterogeneous Zip+ instances under a single tree.
+    pub fn new_combined_3<S0, S1, S2>(
+        rows0: &[&[S0]],
+        rows1: &[&[S1]],
+        rows2: &[&[S2]],
+    ) -> Self
+    where
+        S0: ConstTranscribable + Send + Sync,
+        S1: ConstTranscribable + Send + Sync,
+        S2: ConstTranscribable + Send + Sync,
+    {
+        let m_cols = rows0
+            .first()
+            .map(|r| r.len())
+            .or_else(|| rows1.first().map(|r| r.len()))
+            .or_else(|| rows2.first().map(|r| r.len()))
+            .expect("new_combined_3 requires at least one non-empty group");
+        assert!(m_cols > 0);
+        assert!(
+            rows0.iter().all(|r| r.len() == m_cols)
+                && rows1.iter().all(|r| r.len() == m_cols)
+                && rows2.iter().all(|r| r.len() == m_cols),
+            "All rows across all three groups must have the same width"
+        );
+        assert!(m_cols.is_power_of_two());
+
+        let leaves = hash_combined_leaves_3(rows0, rows1, rows2, m_cols);
+        build_merkle_tree_from_leaves(leaves)
+    }
+
     pub fn height(&self) -> usize {
         self.layers.len()
     }
@@ -165,6 +204,88 @@ where
             hasher.finalize().into()
         })
         .collect()
+}
+
+/// Construct Merkle leaves over three groups of heterogeneous rows.
+///
+/// `leaf_j = H( bytes(rows0_*[j]) || bytes(rows1_*[j]) || bytes(rows2_*[j]) )`.
+/// Group order is fixed (0, 1, 2) and within a group rows are concatenated in
+/// the order given. Both prover (commit) and verifier (path verification) must
+/// use the same convention.
+#[allow(clippy::arithmetic_side_effects)]
+fn hash_combined_leaves_3<S0, S1, S2>(
+    rows0: &[&[S0]],
+    rows1: &[&[S1]],
+    rows2: &[&[S2]],
+    m_cols: usize,
+) -> Vec<MtHash>
+where
+    S0: ConstTranscribable + Send + Sync,
+    S1: ConstTranscribable + Send + Sync,
+    S2: ConstTranscribable + Send + Sync,
+{
+    let elem_bytes_0 = S0::NUM_BYTES;
+    let elem_bytes_1 = S1::NUM_BYTES;
+    let elem_bytes_2 = S2::NUM_BYTES;
+    let col_bytes_0 = rows0.len() * elem_bytes_0;
+    let col_bytes_1 = rows1.len() * elem_bytes_1;
+    let col_bytes_2 = rows2.len() * elem_bytes_2;
+    let col_bytes_total = col_bytes_0 + col_bytes_1 + col_bytes_2;
+
+    cfg_into_iter!(0..m_cols)
+        .map(|i| {
+            let mut buf = vec![0_u8; col_bytes_total];
+            let mut offset = 0;
+            for row in rows0 {
+                row[i].write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes_0]);
+                offset += elem_bytes_0;
+            }
+            for row in rows1 {
+                row[i].write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes_1]);
+                offset += elem_bytes_1;
+            }
+            for row in rows2 {
+                row[i].write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes_2]);
+                offset += elem_bytes_2;
+            }
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&buf);
+            hasher.finalize().into()
+        })
+        .collect()
+}
+
+/// Hash a single combined column (the verifier-side counterpart to
+/// `hash_combined_leaves_3`). Layout must match: bytes from group 0, then 1,
+/// then 2.
+#[allow(clippy::arithmetic_side_effects)]
+fn hash_combined_column_3<S0, S1, S2>(col0: &[S0], col1: &[S1], col2: &[S2]) -> MtHash
+where
+    S0: ConstTranscribable,
+    S1: ConstTranscribable,
+    S2: ConstTranscribable,
+{
+    let eb0 = S0::NUM_BYTES;
+    let eb1 = S1::NUM_BYTES;
+    let eb2 = S2::NUM_BYTES;
+    let total = col0.len() * eb0 + col1.len() * eb1 + col2.len() * eb2;
+    let mut buf = vec![0_u8; total];
+    let mut offset = 0;
+    for v in col0 {
+        v.write_transcription_bytes_exact(&mut buf[offset..offset + eb0]);
+        offset += eb0;
+    }
+    for v in col1 {
+        v.write_transcription_bytes_exact(&mut buf[offset..offset + eb1]);
+        offset += eb1;
+    }
+    for v in col2 {
+        v.write_transcription_bytes_exact(&mut buf[offset..offset + eb2]);
+        offset += eb2;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&buf);
+    hasher.finalize().into()
 }
 
 /// Builds a Merkle tree from the given leaves, abusing blake3::hazmat module
@@ -288,11 +409,38 @@ impl MerkleProof {
     where
         S: ConstTranscribable,
     {
+        self.verify_with_leaf(root, hash_column(column_values), leaf_index)
+    }
+
+    /// Verifies the proof for a leaf produced by hashing three heterogeneous
+    /// column slices (matching `MerkleTree::new_combined_3`'s leaf layout).
+    pub fn verify_combined_3<S0, S1, S2>(
+        &self,
+        root: &MtHash,
+        col0: &[S0],
+        col1: &[S1],
+        col2: &[S2],
+        leaf_index: usize,
+    ) -> Result<(), MerkleError>
+    where
+        S0: ConstTranscribable,
+        S1: ConstTranscribable,
+        S2: ConstTranscribable,
+    {
+        self.verify_with_leaf(root, hash_combined_column_3(col0, col1, col2), leaf_index)
+    }
+
+    fn verify_with_leaf(
+        &self,
+        root: &MtHash,
+        leaf_hash: MtHash,
+        leaf_index: usize,
+    ) -> Result<(), MerkleError> {
         if leaf_index != self.leaf_index {
             return Err(MerkleError::InvalidLeafIndex(leaf_index));
         }
 
-        let mut current_cv: MtHash = hash_column(column_values);
+        let mut current_cv: MtHash = leaf_hash;
 
         if self.leaf_count == 1 {
             if self.leaf_index == 0 && self.siblings.is_empty() {

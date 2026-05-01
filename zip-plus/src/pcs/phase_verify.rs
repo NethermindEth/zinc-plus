@@ -7,6 +7,14 @@ use crate::{
     },
     pcs_transcript::PcsVerifierTranscript,
 };
+
+/// State produced by [`ZipPlus::verify_pre_open`] for use by the column
+/// opening phase. Caller-opaque — only [`ZipPlus::verify_with_alphas`] and
+/// the multi-instance helpers consume the inner fields.
+pub struct VerifyPreOpen<Zt: ZipTypes> {
+    pub coeffs: Vec<Zt::Chal>,
+    pub encoded_combined_row: Vec<Zt::CombR>,
+}
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
@@ -152,6 +160,73 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: Transcribable,
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
+        let pre = Self::verify_pre_open::<F, CHECK_FOR_OVERFLOW>(
+            transcript, vp, comm, field_cfg, point_f, eval_f,
+        )?;
+
+        let batch_size = comm.batch_size;
+        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| -> Result<_, ZipError> {
+                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
+                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
+                let proof = transcript.read_merkle_proof().map_err(|e| {
+                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
+                })?;
+
+                Ok((column_idx, column_values, proof))
+            })
+            .try_collect()?;
+
+        cfg_into_iter!(columns_and_proofs).try_for_each(
+            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
+                Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
+                    per_poly_alphas,
+                    &pre.coeffs,
+                    &pre.encoded_combined_row,
+                    &column_values,
+                    column_idx,
+                    vp.num_rows,
+                    batch_size,
+                )?;
+
+                proof
+                    .verify(&comm.root, &column_values, column_idx)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
+                    })?;
+
+                Ok(())
+            },
+        )?;
+
+        Ok(())
+    }
+
+    /// Phase 1 of [`Self::verify_with_alphas`]: reads `b` and `combined_row`
+    /// from the transcript, runs evaluation-consistency and coherence checks,
+    /// and returns the state needed for the column-opening checks.
+    ///
+    /// Used by [`crate::pcs::multi_zip::MultiZip3`] to interleave per-instance
+    /// pre-open work with a shared column-opening loop. Sealed behind
+    /// [`VerifyPreOpen`] so callers can't accidentally skip the column phase.
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_pre_open<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        point_f: &[F],
+        eval_f: &F,
+    ) -> Result<VerifyPreOpen<Zt>, ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>(
             "verify",
@@ -201,41 +276,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
         }
 
-        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
-            .map(|_| -> Result<_, ZipError> {
-                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
-                let proof = transcript.read_merkle_proof().map_err(|e| {
-                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
-                })?;
-
-                Ok((column_idx, column_values, proof))
-            })
-            .try_collect()?;
-
-        cfg_into_iter!(columns_and_proofs).try_for_each(
-            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
-                Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
-                    per_poly_alphas,
-                    &coeffs,
-                    &encoded_combined_row,
-                    &column_values,
-                    column_idx,
-                    vp.num_rows,
-                    batch_size,
-                )?;
-
-                proof
-                    .verify(&comm.root, &column_values, column_idx)
-                    .map_err(|e| {
-                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
-                    })?;
-
-                Ok(())
-            },
-        )?;
-
-        Ok(())
+        Ok(VerifyPreOpen {
+            coeffs,
+            encoded_combined_row,
+        })
     }
 
     /// Samples per-polynomial alpha challenges from the transcript.

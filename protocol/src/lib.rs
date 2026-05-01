@@ -1514,6 +1514,86 @@ mod tests {
         .expect("Verifier rejected an honest SHA-ECDSA proof");
     }
 
+    /// Untampered ShaEcdsa round-trip without the structural column-count
+    /// pins of [`test_e2e_sha_ecdsa_proof_shape`]. Specifically validates
+    /// that the shared-Merkle PCS path (used when binary/arbitrary/int
+    /// witness batches are all non-empty) survives the full prover →
+    /// serialise → deserialise → verifier loop.
+    #[test]
+    fn test_e2e_sha_ecdsa_shared_merkle_round_trip() {
+        type Zt = TestShaEcdsaZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+
+        let mut rng = rng();
+        let pp = setup_pp::<Zt>(
+            SHA_ECDSA_NUM_VARS,
+            (
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+            ),
+        );
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let sig = <U as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<false, CHECKED>(
+            &pp,
+            &trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+        )
+        .expect("Prover failed");
+
+        // Round-trip via (de)serialisation. Measure the serialized
+        // size — the shared-Merkle path emits one Merkle path per
+        // opening instead of two (bin + int), so this should be
+        // strictly smaller than the per-instance baseline.
+        let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
+        transcript.write(&proof).expect("Failed to serialize proof");
+        let serialized_len = transcript.stream.get_ref().len();
+        println!(
+            "shared-Merkle ShaEcdsa proof size: {} bytes ({} KiB)",
+            serialized_len,
+            serialized_len.div_ceil(1024),
+        );
+
+        // Sanity: ShaEcdsa's witness has bin + int non-empty (arbitrary
+        // is empty), so the shared-Merkle commit should have triggered
+        // and the two non-empty commitment roots should match.
+        let nonempty: Vec<_> = [
+            (proof.commitments.0.batch_size > 0).then_some(&proof.commitments.0.root),
+            (proof.commitments.1.batch_size > 0).then_some(&proof.commitments.1.root),
+            (proof.commitments.2.batch_size > 0).then_some(&proof.commitments.2.root),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        assert!(
+            nonempty.len() >= 2,
+            "expected at least two non-empty witness batches for ShaEcdsa, got {}",
+            nonempty.len()
+        );
+        for r in &nonempty[1..] {
+            assert_eq!(*r, nonempty[0], "non-empty commitment roots must match");
+        }
+        let mut transcript = transcript.into_verification_transcript();
+        let proof_2 = transcript
+            .read()
+            .expect("Failed to deserialize proof");
+        assert_eq!(proof, proof_2);
+
+        ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest shared-Merkle SHA-ECDSA proof");
+    }
+
     #[test]
     fn test_big_linear_tamper_ideal_check() {
         let num_vars = 8;

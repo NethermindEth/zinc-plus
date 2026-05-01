@@ -390,22 +390,50 @@ type RealEcdsaBenchZincTypes = GenericBenchZincTypes<
     DEGREE_PLUS_ONE,
 >;
 
+// `new_with_optimal_depth` adds extra recursion layers on top of the base
+// depth (1 at REP=8, 2 at REP=16) to shrink the Vandermonde base matrix.
+// Each extra butterfly layer multiplies the encoder accumulator's
+// magnitude by ~2^18; on the bench's binary witness path
+// (`Cw = DensePolynomial<i64, D>`) the SHA+ECDSA cells push the
+// accumulator past i64 once `depth ≥ 3` (≈2^70 per coef vs 2^63 capacity).
+// Cap depth at 2 — the largest depth that still fits i64 — but otherwise
+// follow the heuristic. This yields:
+//   • REP=4: depth = 1 (1×/4×) or 2 (8×). Same as heuristic.
+//   • REP=8: depth = 2 (1×/4×) or capped 2 (8× would heuristic-want 3).
+//   • REP=16: depth capped at 2 across all folds (heuristic wants 3–4).
+// The cap shrinks the base matrix at REP=16 vs the prior `extra=0`
+// behavior — depth=2 at row_len=2048 gives base_dim=512 instead of 4096.
+// `unchecked` no longer hides a soundness hole at REP=8 + 8× either.
+macro_rules! iprs_code_for_bench {
+    ($row_len:expr) => {{
+        let row_len: usize = $row_len;
+        const MAX_BASE_COLS_LOG2: u32 = 8;
+        const MAX_SAFE_DEPTH: usize = 2;
+        let target_base_len: usize = 1 << MAX_BASE_COLS_LOG2;
+        let base_depth: usize = 1usize
+            .max(((1usize.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+        let heuristic_extra: usize = if cfg!(feature = "iprs-rate-1-16") {
+            2
+        } else if cfg!(feature = "iprs-rate-1-8") {
+            1
+        } else {
+            0
+        };
+        let depth = base_depth
+            .saturating_add(heuristic_extra)
+            .min(MAX_SAFE_DEPTH)
+            .max(base_depth);
+        IprsCode::new(row_len, depth).unwrap()
+    }};
+}
+
 #[allow(clippy::unwrap_used)]
 fn setup_pp_real_ecdsa(num_vars: usize) -> Pp<RealEcdsaBenchZincTypes> {
     let poly_size = 1 << num_vars;
     (
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
-        ),
+        ZipPlus::setup(poly_size, iprs_code_for_bench!(poly_size)),
+        ZipPlus::setup(poly_size, iprs_code_for_bench!(poly_size)),
+        ZipPlus::setup(poly_size, iprs_code_for_bench!(poly_size)),
     )
 }
 
@@ -524,7 +552,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
+    eprint_proof_size(&format!("Unfolded/{params}"), &proof);
 }
 
 //
@@ -1079,18 +1107,9 @@ fn setup_folded_pp_real_ecdsa(num_vars: usize) -> FoldedPp1x<BenchFoldedRealEcds
     let split_size = 1 << (num_vars + 1);
     let normal_size = 1 << num_vars;
     (
-        ZipPlus::setup(
-            split_size,
-            IprsCode::new_with_optimal_depth(split_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-        ),
+        ZipPlus::setup(split_size, iprs_code_for_bench!(split_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
     )
 }
 
@@ -1189,7 +1208,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
+    eprint_proof_size(&format!("Folded 1×/{params}"), &proof);
 }
 
 //
@@ -1223,18 +1242,9 @@ fn setup_folded_4x_pp_real_ecdsa(num_vars: usize) -> FoldedPp4x<BenchFoldedRealE
     let split2_size = 1 << (num_vars + 2);
     let normal_size = 1 << num_vars;
     (
-        ZipPlus::setup(
-            split2_size,
-            IprsCode::new_with_optimal_depth(split2_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-        ),
-        ZipPlus::setup(
-            normal_size,
-            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-        ),
+        ZipPlus::setup(split2_size, iprs_code_for_bench!(split2_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
     )
 }
 
@@ -1334,7 +1344,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
+    eprint_proof_size(&format!("Folded 4×/{params}"), &proof);
     if count_effective_max_degree::<U>() <= 1 {
         eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
             &params,
@@ -1470,10 +1480,280 @@ fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
 }
 
 //
-// Real-UAIR folded benches (1× and 4×). These reuse the generic
-// `do_bench_e2e_folded` / `do_bench_e2e_folded_4x` helpers above with
-// folded Zinc-types instances that pin `Int = RealEcdsaInt` (Int<5>) and
-// reuse the arbitrary/int Zip-types from `RealEcdsaBenchZincTypes`.
+// Folded Zip+ (8× fold) — total prove/verify benchmark.
+//
+// Mirrors the 4× fold bench but commits binary witness columns as
+// thrice-split BinaryPoly<EIGHTH_DEGREE_PLUS_ONE> entries of length 8n
+// and verifies the binary PCS opening at the triply-extended point
+// (r_0 ‖ γ₁ ‖ γ₂ ‖ γ₃).
+//
+
+const EIGHTH_DEGREE_PLUS_ONE: usize = DEGREE_PLUS_ONE / 8;
+
+type FoldedPp8x<ZtF> = (
+    ZipPlusParams<
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::BinaryZt,
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::ArbitraryZt,
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::ArbitraryLc,
+    >,
+    ZipPlusParams<
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::IntZt,
+        <ZtF as FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>>::IntLc,
+    >,
+);
+
+#[allow(clippy::unwrap_used)]
+fn setup_folded_8x_pp_real_ecdsa(num_vars: usize) -> FoldedPp8x<BenchFoldedRealEcdsaZincTypes8x> {
+    let split3_size = 1 << (num_vars + 3);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(split3_size, iprs_code_for_bench!(split3_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
+        ZipPlus::setup(normal_size, iprs_code_for_bench!(normal_size)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_bench_e2e_folded_8x<ZtF, U, IdealOverF>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &FoldedPp8x<ZtF>,
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, DEGREE_PLUS_ONE>,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    macro_rules! bench_prove_folded_8x {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(zinc_protocol::prover::prove_folded_8x::<
+                        ZtF,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        QUARTER_DEGREE_PLUS_ONE,
+                        EIGHTH_DEGREE_PLUS_ONE,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(pp, trace, num_vars, project_scalar))
+                    .expect("Folded 8× prover failed");
+                });
+            });
+        };
+    }
+
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove_folded_8x!("Prove (folded 8× MLE-first)", true);
+    }
+
+    let proof: Proof<F> = zinc_protocol::prover::prove_folded_8x::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        EIGHTH_DEGREE_PLUS_ONE,
+        false,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("proof generation for folded 8× verifier bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(BenchmarkId::new("Verify (folded 8×)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded_8x::<
+                    ZtF,
+                    U,
+                    F,
+                    IdealOverF,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    QUARTER_DEGREE_PLUS_ONE,
+                    EIGHTH_DEGREE_PLUS_ONE,
+                    PERFORM_CHECKS,
+                >(
+                    pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    project_scalar,
+                    project_ideal,
+                ))
+                .expect("Folded 8× verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_proof_size(&format!("Folded 8×/{params}"), &proof);
+    if count_effective_max_degree::<U>() <= 1 {
+        eprint_folded_8x_per_region_timings::<ZtF, U, _, true>(
+            &params,
+            "MLE-first",
+            pp,
+            trace,
+            num_vars,
+            project_scalar,
+        );
+    }
+}
+
+/// Print per-region wall-time breakdown for `prove_folded_8x` over `N`
+/// runs (with one warmup, discarded). See `eprint_folded_4x_per_region_timings`
+/// for rationale.
+fn eprint_folded_8x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
+    params: &str,
+    lane: &str,
+    pp: &FoldedPp8x<ZtF>,
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, DEGREE_PLUS_ONE>,
+    num_vars: usize,
+    project_scalar: S,
+) where
+    ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair + 'static,
+    S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
+{
+    use zinc_protocol::prover::{prove_folded_8x_with_timings, FoldedProveTimings};
+
+    const N: u32 = 100;
+
+    let _ = prove_folded_8x_with_timings::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        EIGHTH_DEGREE_PLUS_ONE,
+        MLE_FIRST,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("warmup folded 8× prove failed");
+
+    let mut sum = FoldedProveTimings::default();
+    for _ in 0..N {
+        let (_proof, t) = prove_folded_8x_with_timings::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EIGHTH_DEGREE_PLUS_ONE,
+            MLE_FIRST,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("timed folded 8× prove failed");
+        sum.add_assign(&t);
+    }
+    sum.divide_by(N);
+
+    let total = sum.total();
+    let pct =
+        |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
+    eprintln!(
+        "    Folded 8× per-region timings, {} lane ({}, mean of N={} runs):",
+        lane, params, N
+    );
+    eprintln!(
+        "      step 0  commit            {:>9.3} ms ({:>4.1}%)",
+        sum.step0_commit.as_secs_f64() * 1e3,
+        pct(sum.step0_commit)
+    );
+    eprintln!(
+        "      step 1  prime projection  {:>9.3} ms ({:>4.1}%)",
+        sum.step1_prime_projection.as_secs_f64() * 1e3,
+        pct(sum.step1_prime_projection)
+    );
+    eprintln!(
+        "      step 2  ideal check       {:>9.3} ms ({:>4.1}%)",
+        sum.step2_ideal_check.as_secs_f64() * 1e3,
+        pct(sum.step2_ideal_check)
+    );
+    eprintln!(
+        "      step 3  eval projection   {:>9.3} ms ({:>4.1}%)",
+        sum.step3_eval_projection.as_secs_f64() * 1e3,
+        pct(sum.step3_eval_projection)
+    );
+    eprintln!(
+        "      step 4  sumcheck          {:>9.3} ms ({:>4.1}%)",
+        sum.step4_sumcheck.as_secs_f64() * 1e3,
+        pct(sum.step4_sumcheck)
+    );
+    eprintln!(
+        "      step 5  multipoint eval   {:>9.3} ms ({:>4.1}%)",
+        sum.step5_multipoint_eval.as_secs_f64() * 1e3,
+        pct(sum.step5_multipoint_eval)
+    );
+    eprintln!(
+        "      step 6  lift-and-project  {:>9.3} ms ({:>4.1}%)",
+        sum.step6_lift_and_project.as_secs_f64() * 1e3,
+        pct(sum.step6_lift_and_project)
+    );
+    eprintln!(
+        "      step 7  pcs open          {:>9.3} ms ({:>4.1}%)",
+        sum.step7_pcs_open.as_secs_f64() * 1e3,
+        pct(sum.step7_pcs_open)
+    );
+    eprintln!(
+        "      assembly                  {:>9.3} ms ({:>4.1}%)",
+        sum.assembly.as_secs_f64() * 1e3,
+        pct(sum.assembly)
+    );
+    eprintln!(
+        "      total                     {:>9.3} ms",
+        total.as_secs_f64() * 1e3
+    );
+}
+
+//
+// Real-UAIR folded benches (1×, 4×, and 8×). These reuse the generic
+// `do_bench_e2e_folded` / `do_bench_e2e_folded_4x` / `do_bench_e2e_folded_8x`
+// helpers above with folded Zinc-types instances that pin
+// `Int = RealEcdsaInt` (Int<5>) and reuse the arbitrary/int Zip-types from
+// `RealEcdsaBenchZincTypes`.
 //
 
 #[derive(Clone, Debug)]
@@ -1540,6 +1820,44 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for BenchFoldedRe
             Int<5>,
             MBSInnerProduct,
             QUARTER_DEGREE_PLUS_ONE,
+        >,
+        MBSInnerProduct,
+    >;
+
+    type ArbitraryZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
+
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
+}
+
+#[derive(Clone, Debug)]
+struct BenchFoldedRealEcdsaZincTypes8x;
+
+impl FoldedZincTypes<DEGREE_PLUS_ONE, EIGHTH_DEGREE_PLUS_ONE> for BenchFoldedRealEcdsaZincTypes8x {
+    type Int = RealEcdsaInt;
+    type Chal = i128;
+    type Pt = i128;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = GenericBenchZipTypes<
+        BinaryPoly<EIGHTH_DEGREE_PLUS_ONE>,
+        DensePolynomial<i64, EIGHTH_DEGREE_PLUS_ONE>,
+        Self::Fmod,
+        Self::PrimeTest,
+        Self::Chal,
+        Self::Pt,
+        Int<5>,
+        DensePolynomial<Int<5>, EIGHTH_DEGREE_PLUS_ONE>,
+        BinaryPolyInnerProduct<Self::Chal, EIGHTH_DEGREE_PLUS_ONE>,
+        DensePolyInnerProduct<
+            Int<5>,
+            Self::Chal,
+            Int<5>,
+            MBSInnerProduct,
+            EIGHTH_DEGREE_PLUS_ONE,
         >,
         MBSInnerProduct,
     >;
@@ -1672,6 +1990,66 @@ fn bench_real_sha_ecdsa_e2e_folded_4x(group: &mut BenchmarkGroup<WallTime>, num_
     );
 }
 
+fn bench_real_ecdsa_e2e_folded_8x(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = EcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_8x_pp_real_ecdsa(num_vars);
+
+    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
+                      _: &<F as PrimeField>::Config|
+     -> ImpossibleIdeal {
+        unreachable!("EcdsaUair has only assert_zero constraints")
+    };
+
+    do_bench_e2e_folded_8x::<BenchFoldedRealEcdsaZincTypes8x, U, _>(
+        group,
+        "RealEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        proj_ideal,
+    );
+}
+
+fn bench_real_sha256_e2e_folded_8x(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_8x_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e_folded_8x::<BenchFoldedRealEcdsaZincTypes8x, U, _>(
+        group,
+        "RealSha256",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha_ecdsa_e2e_folded_8x(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_8x_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e_folded_8x::<BenchFoldedRealEcdsaZincTypes8x, U, _>(
+        group,
+        "ShaEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
 fn e2e_folded_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded");
 
@@ -1692,6 +2070,16 @@ fn e2e_folded_4x_benches(c: &mut Criterion) {
     // bench_real_ecdsa_e2e_folded_4x(&mut group, 9);
     // bench_real_sha256_e2e_folded_4x(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_4x(&mut group, 9);
+
+    group.finish();
+}
+
+fn e2e_folded_8x_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ E2E Folded 8x");
+
+    // bench_real_ecdsa_e2e_folded_8x(&mut group, 9);
+    // bench_real_sha256_e2e_folded_8x(&mut group, 9);
+    bench_real_sha_ecdsa_e2e_folded_8x(&mut group, 9);
 
     group.finish();
 }
@@ -1717,4 +2105,9 @@ criterion_group! {
     config = Criterion::default().sample_size(500);
     targets = e2e_folded_4x_benches
 }
-criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x);
+criterion_group! {
+    name = e2e_folded_8x;
+    config = Criterion::default().sample_size(500);
+    targets = e2e_folded_8x_benches
+}
+criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x, e2e_folded_8x);

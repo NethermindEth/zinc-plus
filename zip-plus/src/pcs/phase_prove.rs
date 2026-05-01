@@ -115,13 +115,52 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     /// See [`Self::prove`] for details.
     /// This version takes the evaluation point already mapped to the field
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_f<F, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
         point: &[F],
         commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let eval = Self::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            point,
+            field_cfg,
+        )?;
+
+        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
+            let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
+            Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
+        }
+
+        Ok(eval)
+    }
+
+    /// Phase 1 of [`Self::prove_f`]: writes `b` and `combined_row` to the
+    /// transcript and returns the combined evaluation. Does *not* perform
+    /// the column-opening loop, so no Merkle data is touched.
+    ///
+    /// Used by [`crate::pcs::multi_zip::MultiZip3`] to share a single
+    /// column-opening loop (and a single Merkle tree) across three Zip+
+    /// instances. The standalone [`Self::prove_f`] composes this with the
+    /// per-instance opening loop.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_pre_open_f<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
         field_cfg: &F::Config,
     ) -> Result<F, ZipError>
     where
@@ -244,10 +283,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_const_many(&combined_row)?;
-        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
-        }
 
         Ok(eval)
     }
@@ -282,7 +317,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )
     }
 
-    pub(super) fn open_merkle_trees_for_column(
+    pub fn open_merkle_trees_for_column(
         transcript: &mut PcsProverTranscript,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column_idx: usize,
