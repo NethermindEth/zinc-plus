@@ -1620,14 +1620,63 @@ where
     let split_int_witness: Vec<DenseMultilinearExtension<Int<INT_HALF_LIMBS>>> =
         zip_plus::pcs::folding::split_int_columns::<INT_LIMBS, INT_HALF_LIMBS>(&witness_trace.int);
 
-    let (res_bin, (res_arb, res_int)) = cfg_join!(
-        commit_optionally(pp_bin_split, &split_binary_witness),
-        commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
-        commit_optionally(pp_int_split, &split_int_witness),
-    );
-    let (hint_bin_split, commitment_bin) = res_bin?;
-    let (hint_arb, commitment_arb) = res_arb?;
-    let (hint_int_split, commitment_int) = res_int?;
+    // Shared-Merkle dispatch: binary-split and int-split codewords are
+    // both at split_size = 2n, so they CAN share a Merkle tree. Arb at
+    // normal_size has a different codeword length — we only fold via
+    // MultiZip3 when arb is empty (or its codeword happens to match).
+    // For ShaEcdsa specifically, arb is always empty.
+    let arb_compatible = witness_trace.arbitrary_poly.is_empty()
+        || pp_arb.linear_code.codeword_len() == pp_bin_split.linear_code.codeword_len();
+    let bin_nonempty = !split_binary_witness.is_empty();
+    let int_nonempty = !split_int_witness.is_empty();
+    let arb_nonempty = !witness_trace.arbitrary_poly.is_empty();
+    let nonempty_count = (bin_nonempty as u8) + (arb_nonempty as u8) + (int_nonempty as u8);
+    let use_multi = nonempty_count >= 2 && arb_compatible;
+
+    let (
+        hint_bin_split,
+        hint_arb,
+        hint_int_split,
+        multi_hint,
+        commitment_bin,
+        commitment_arb,
+        commitment_int,
+    ) = if use_multi {
+        let (multi, comm_bin, comm_arb, comm_int) = MultiZip3::<
+            ZtF::BinaryZt,
+            ZtF::ArbitraryZt,
+            ZtF::IntZt,
+            ZtF::BinaryLc,
+            ZtF::ArbitraryLc,
+            ZtF::IntLc,
+        >::commit(
+            pp_bin_split,
+            pp_arb,
+            pp_int_split,
+            &split_binary_witness,
+            &witness_trace.arbitrary_poly,
+            &split_int_witness,
+        )?;
+        (None, None, None, Some(multi), comm_bin, comm_arb, comm_int)
+    } else {
+        let (res_bin, (res_arb, res_int)) = cfg_join!(
+            commit_optionally(pp_bin_split, &split_binary_witness),
+            commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
+            commit_optionally(pp_int_split, &split_int_witness),
+        );
+        let (hint_bin_split, commitment_bin) = res_bin?;
+        let (hint_arb, commitment_arb) = res_arb?;
+        let (hint_int_split, commitment_int) = res_int?;
+        (
+            hint_bin_split,
+            hint_arb,
+            hint_int_split,
+            None,
+            commitment_bin,
+            commitment_arb,
+            commitment_int,
+        )
+    };
 
     let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
         [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
@@ -1906,36 +1955,65 @@ where
     let mut r0_ext = r_0.clone();
     r0_ext.push(gamma);
 
-    if let Some(hint_bin) = &hint_bin_split {
-        let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+    if let Some(multi) = &multi_hint {
+        // Shared-Merkle path: one column-opening loop and one Merkle path
+        // per opening across binary + arb + int. The single point r0_ext
+        // is correct here only because (a) binary+int both open at
+        // r0_ext and (b) arb is empty (or has matching codeword length,
+        // which means it would also share the extended structure). For
+        // ShaEcdsa specifically, arb is empty so the point is unused on
+        // the arb sub-instance.
+        let _ = MultiZip3::<
+            ZtF::BinaryZt,
+            ZtF::ArbitraryZt,
+            ZtF::IntZt,
+            ZtF::BinaryLc,
+            ZtF::ArbitraryLc,
+            ZtF::IntLc,
+        >::prove_f::<F, CHECK_FOR_OVERFLOW>(
             &mut pcs_transcript,
             pp_bin_split,
-            &split_binary_witness,
-            &r0_ext,
-            hint_bin,
-            &field_cfg,
-        )?;
-    }
-    if let Some(hint_arb) = &hint_arb {
-        let _ =
-            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
-                pp_arb,
-                &witness_trace.arbitrary_poly,
-                &r_0,
-                hint_arb,
-                &field_cfg,
-            )?;
-    }
-    if let Some(hint_int) = &hint_int_split {
-        let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
+            pp_arb,
             pp_int_split,
+            &split_binary_witness,
+            &witness_trace.arbitrary_poly,
             &split_int_witness,
             &r0_ext,
-            hint_int,
+            multi,
             &field_cfg,
         )?;
+    } else {
+        if let Some(hint_bin) = &hint_bin_split {
+            let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_bin_split,
+                &split_binary_witness,
+                &r0_ext,
+                hint_bin,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_arb) = &hint_arb {
+            let _ =
+                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut pcs_transcript,
+                    pp_arb,
+                    &witness_trace.arbitrary_poly,
+                    &r_0,
+                    hint_arb,
+                    &field_cfg,
+                )?;
+        }
+        if let Some(hint_int) = &hint_int_split {
+            let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_int_split,
+                &split_int_witness,
+                &r0_ext,
+                hint_int,
+                &field_cfg,
+            )?;
+        }
     }
 
     // ── Assemble the proof ──────────────────────────────────────────────

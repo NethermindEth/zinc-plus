@@ -99,17 +99,27 @@ where
             "MultiZip3::commit requires at least two non-empty batches \
              (otherwise there is nothing to share); got {nonempty}"
         );
-        let codeword_len = pp0.linear_code.codeword_len();
-        assert_eq!(
-            pp1.linear_code.codeword_len(),
-            codeword_len,
-            "MultiZip3 requires equal codeword lengths"
-        );
-        assert_eq!(
-            pp2.linear_code.codeword_len(),
-            codeword_len,
-            "MultiZip3 requires equal codeword lengths"
-        );
+        // Codeword lengths only need to match across NON-EMPTY instances —
+        // an empty instance contributes no rows to the shared Merkle tree,
+        // so its `pp` codeword length is irrelevant.
+        let mut codeword_len: Option<usize> = None;
+        let mut check_or_set = |c: usize| match codeword_len {
+            None => codeword_len = Some(c),
+            Some(prev) => assert_eq!(
+                prev, c,
+                "MultiZip3: non-empty instances must agree on codeword length"
+            ),
+        };
+        if !polys0.is_empty() {
+            check_or_set(pp0.linear_code.codeword_len());
+        }
+        if !polys1.is_empty() {
+            check_or_set(pp1.linear_code.codeword_len());
+        }
+        if !polys2.is_empty() {
+            check_or_set(pp2.linear_code.codeword_len());
+        }
+        let _codeword_len = codeword_len.expect("at least one non-empty instance");
 
         let cw0: Vec<DenseRowMatrix<Zt0::Cw>> = cfg_iter!(polys0)
             .map(|p| ZipPlus::<Zt0, Lc0>::encode_rows(pp0, p))
@@ -203,9 +213,15 @@ where
             Zt2::NUM_COLUMN_OPENINGS,
             "MultiZip3 requires equal NUM_COLUMN_OPENINGS"
         );
-        let codeword_len = pp0.linear_code.codeword_len();
-        assert_eq!(pp1.linear_code.codeword_len(), codeword_len);
-        assert_eq!(pp2.linear_code.codeword_len(), codeword_len);
+        // Codeword length used for the shared column-index squeeze.
+        // Only non-empty instances constrain it (see commit() comment).
+        let codeword_len = if !polys0.is_empty() {
+            pp0.linear_code.codeword_len()
+        } else if !polys1.is_empty() {
+            pp1.linear_code.codeword_len()
+        } else {
+            pp2.linear_code.codeword_len()
+        };
 
         let eval0 = if polys0.is_empty() {
             None
@@ -320,9 +336,15 @@ where
             Zt2::NUM_COLUMN_OPENINGS,
             "MultiZip3 requires equal NUM_COLUMN_OPENINGS"
         );
-        let codeword_len = vp0.linear_code.codeword_len();
-        assert_eq!(vp1.linear_code.codeword_len(), codeword_len);
-        assert_eq!(vp2.linear_code.codeword_len(), codeword_len);
+        // Same codeword-length convention as `commit` and `prove_f`:
+        // empty instances are skipped.
+        let codeword_len = if comm0.batch_size > 0 {
+            vp0.linear_code.codeword_len()
+        } else if comm1.batch_size > 0 {
+            vp1.linear_code.codeword_len()
+        } else {
+            vp2.linear_code.codeword_len()
+        };
 
         let bs0 = comm0.batch_size;
         let bs1 = comm1.batch_size;

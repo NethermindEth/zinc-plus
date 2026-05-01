@@ -2068,39 +2068,68 @@ where
     let num_total_bin = total.num_binary_poly_cols();
     let num_total_arb = total.num_arbitrary_poly_cols();
 
-    // Binary: same as verify_folded.
-    {
-        let comm = &proof.commitments.0;
-        if comm.batch_size > 0 {
-            let per_poly_alphas =
+    // Shared-Merkle dispatch (folded variant): the prover used MultiZip3
+    // iff ≥2 batches are non-empty AND the non-empty instances carry the
+    // same Merkle root. Mirrors the unfolded verify_folded_with_int_fold
+    // criterion.
+    let bin_range = num_pub_bin..num_total_bin;
+    let arb_range = add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb);
+    let int_range = add!(add!(num_total_bin, num_total_arb), num_pub_int)..all_lifted_evals.len();
+
+    let nonempty_count = (proof.commitments.0.batch_size > 0) as u8
+        + (proof.commitments.1.batch_size > 0) as u8
+        + (proof.commitments.2.batch_size > 0) as u8;
+    let nonempty_roots_match = {
+        let mut roots = [
+            (proof.commitments.0.batch_size > 0).then_some(&proof.commitments.0.root),
+            (proof.commitments.1.batch_size > 0).then_some(&proof.commitments.1.root),
+            (proof.commitments.2.batch_size > 0).then_some(&proof.commitments.2.root),
+        ]
+        .into_iter()
+        .flatten();
+        let first = roots.next();
+        first.is_some_and(|r| roots.all(|other| other == r))
+    };
+    let shared_merkle = nonempty_count >= 2 && nonempty_roots_match;
+
+    if shared_merkle {
+        // Compute eval_f for each non-empty instance (binary at r0_ext via
+        // the (1−γ) c1 + γ c2 algebra over HALF_D stride; arbitrary at
+        // r_0 via the standard <a, coeffs>; int at r0_ext via the
+        // (1−γ) c1 + γ c2 algebra over stride 1), running verify_pre_open
+        // in order so the FS state matches the prover's interleaved
+        // alpha sampling. Then dispatch to MultiZip3::verify_columns_shared
+        // with the collected pre-open states.
+        let one = F::one_with_cfg(&field_cfg);
+        let one_minus_gamma = one - gamma.clone();
+        let zero = F::zero_with_cfg(&field_cfg);
+
+        // Binary
+        let (alphas_bin, pre_bin) = if proof.commitments.0.batch_size > 0 {
+            let alphas =
                 ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
                     &mut pcs_transcript.fs_transcript,
-                    comm.batch_size,
+                    proof.commitments.0.batch_size,
                 );
-
-            let one = F::one_with_cfg(&field_cfg);
-            let one_minus_gamma = one - gamma.clone();
-            let zero = F::zero_with_cfg(&field_cfg);
             let mut eval_f = zero.clone();
-
-            for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
+            for (bar_u, a) in all_lifted_evals[bin_range.clone()]
                 .iter()
-                .zip(per_poly_alphas.iter())
+                .zip(alphas.iter())
             {
-                debug_assert_eq!(alphas.len(), HALF_D);
+                debug_assert_eq!(a.len(), HALF_D);
                 let mut c1 = zero.clone();
                 let mut c2 = zero.clone();
                 for l in 0..HALF_D {
-                    let a_l: F = F::from_with_cfg(&alphas[l], &field_cfg);
+                    let a_l: F = F::from_with_cfg(&a[l], &field_cfg);
                     if let Some(coeff_lo) = bar_u.coeffs.get(l) {
-                        let mut term = a_l.clone();
-                        term *= coeff_lo;
-                        c1 += &term;
+                        let mut t = a_l.clone();
+                        t *= coeff_lo;
+                        c1 += &t;
                     }
                     if let Some(coeff_hi) = bar_u.coeffs.get(l + HALF_D) {
-                        let mut term = a_l;
-                        term *= coeff_hi;
-                        c2 += &term;
+                        let mut t = a_l;
+                        t *= coeff_hi;
+                        c2 += &t;
                     }
                 }
                 let mut folded = one_minus_gamma.clone();
@@ -2110,81 +2139,71 @@ where
                 folded += &g_c2;
                 eval_f += &folded;
             }
-
-            ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+            let pre = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_pre_open::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(
                 &mut pcs_transcript,
                 vp_bin_split,
-                comm,
+                &proof.commitments.0,
                 &field_cfg,
                 &r0_ext,
                 &eval_f,
-                &per_poly_alphas,
             )
             .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-        }
-    }
+            (alphas, Some(pre))
+        } else {
+            (Vec::new(), None)
+        };
 
-    // Arbitrary: standard verify at r_0 (unchanged).
-    {
-        let comm = &proof.commitments.1;
-        if comm.batch_size > 0 {
-            let per_poly_alphas =
+        // Arbitrary (still at r_0; eval_f via standard <a, coeffs>)
+        let (alphas_arb, pre_arb) = if proof.commitments.1.batch_size > 0 {
+            let alphas =
                 ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
                     &mut pcs_transcript.fs_transcript,
-                    comm.batch_size,
+                    proof.commitments.1.batch_size,
                 );
-            let mut eval_f = F::zero_with_cfg(&field_cfg);
-            for (bar_u, alphas) in all_lifted_evals
-                [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
+            let mut eval_f = zero.clone();
+            for (bar_u, a) in all_lifted_evals[arb_range.clone()]
                 .iter()
-                .zip(per_poly_alphas.iter())
+                .zip(alphas.iter())
             {
-                for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                for (coeff, alpha) in bar_u.coeffs.iter().zip(a.iter()) {
                     let mut term = F::from_with_cfg(alpha, &field_cfg);
                     term *= coeff;
                     eval_f += &term;
                 }
             }
-            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_with_alphas::<
+            let pre = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_pre_open::<
                 F,
                 CHECK_FOR_OVERFLOW,
             >(
                 &mut pcs_transcript,
                 vp_arb,
-                comm,
+                &proof.commitments.1,
                 &field_cfg,
                 &r_0,
                 &eval_f,
-                &per_poly_alphas,
             )
             .map_err(|e| ProtocolError::PcsVerification(1, e))?;
-        }
-    }
+            (alphas, Some(pre))
+        } else {
+            (Vec::new(), None)
+        };
 
-    // Int: split commitment, opening at extended point. eval_f =
-    // sum_j [(1−γ) · a · bar_u_j.coeffs[0] + γ · a · bar_u_j.coeffs[1]],
-    // where `a` is the single per-poly alpha (alphas.len() == 1 since
-    // `IntZt::Cw` is scalar) and bar_u_j has 2 coeffs (lo, hi).
-    {
-        let comm = &proof.commitments.2;
-        if comm.batch_size > 0 {
-            let per_poly_alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
+        // Int (at r0_ext; eval_f via (1−γ) c1 + γ c2 with stride 1)
+        let (alphas_int, pre_int) = if proof.commitments.2.batch_size > 0 {
+            let alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
                 &mut pcs_transcript.fs_transcript,
-                comm.batch_size,
+                proof.commitments.2.batch_size,
             );
-
-            let one = F::one_with_cfg(&field_cfg);
-            let one_minus_gamma = one - gamma.clone();
-            let zero = F::zero_with_cfg(&field_cfg);
             let mut eval_f = zero.clone();
-
-            for (bar_u, alphas) in all_lifted_evals
-                [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
+            for (bar_u, a) in all_lifted_evals[int_range.clone()]
                 .iter()
-                .zip(per_poly_alphas.iter())
+                .zip(alphas.iter())
             {
-                debug_assert_eq!(alphas.len(), 1, "IntZt::Cw is scalar; alphas.len() must be 1");
-                let a_0: F = F::from_with_cfg(&alphas[0], &field_cfg);
+                debug_assert_eq!(a.len(), 1);
+                let a_0: F = F::from_with_cfg(&a[0], &field_cfg);
                 let mut c1 = zero.clone();
                 let mut c2 = zero.clone();
                 if let Some(coeff_lo) = bar_u.coeffs.first() {
@@ -2202,17 +2221,189 @@ where
                 folded += &g_c2;
                 eval_f += &folded;
             }
-
-            ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+            let pre = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_pre_open::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(
                 &mut pcs_transcript,
                 vp_int_split,
-                comm,
+                &proof.commitments.2,
                 &field_cfg,
                 &r0_ext,
                 &eval_f,
-                &per_poly_alphas,
             )
             .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+            (alphas, Some(pre))
+        } else {
+            (Vec::new(), None)
+        };
+
+        zip_plus::pcs::multi_zip::MultiZip3::<
+            ZtF::BinaryZt,
+            ZtF::ArbitraryZt,
+            ZtF::IntZt,
+            ZtF::BinaryLc,
+            ZtF::ArbitraryLc,
+            ZtF::IntLc,
+        >::verify_columns_shared::<F, CHECK_FOR_OVERFLOW>(
+            &mut pcs_transcript,
+            vp_bin_split,
+            vp_arb,
+            vp_int_split,
+            &proof.commitments.0,
+            &proof.commitments.1,
+            &proof.commitments.2,
+            &alphas_bin,
+            &alphas_arb,
+            &alphas_int,
+            pre_bin.as_ref(),
+            pre_arb.as_ref(),
+            pre_int.as_ref(),
+        )
+        .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+    } else {
+        // Per-instance fallback (current behavior).
+        // Binary: same as verify_folded.
+        {
+            let comm = &proof.commitments.0;
+            if comm.batch_size > 0 {
+                let per_poly_alphas =
+                    ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        comm.batch_size,
+                    );
+
+                let one = F::one_with_cfg(&field_cfg);
+                let one_minus_gamma = one - gamma.clone();
+                let zero = F::zero_with_cfg(&field_cfg);
+                let mut eval_f = zero.clone();
+
+                for (bar_u, alphas) in all_lifted_evals[bin_range.clone()]
+                    .iter()
+                    .zip(per_poly_alphas.iter())
+                {
+                    debug_assert_eq!(alphas.len(), HALF_D);
+                    let mut c1 = zero.clone();
+                    let mut c2 = zero.clone();
+                    for l in 0..HALF_D {
+                        let a_l: F = F::from_with_cfg(&alphas[l], &field_cfg);
+                        if let Some(coeff_lo) = bar_u.coeffs.get(l) {
+                            let mut term = a_l.clone();
+                            term *= coeff_lo;
+                            c1 += &term;
+                        }
+                        if let Some(coeff_hi) = bar_u.coeffs.get(l + HALF_D) {
+                            let mut term = a_l;
+                            term *= coeff_hi;
+                            c2 += &term;
+                        }
+                    }
+                    let mut folded = one_minus_gamma.clone();
+                    folded *= c1;
+                    let mut g_c2 = gamma.clone();
+                    g_c2 *= c2;
+                    folded += &g_c2;
+                    eval_f += &folded;
+                }
+
+                ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                    &mut pcs_transcript,
+                    vp_bin_split,
+                    comm,
+                    &field_cfg,
+                    &r0_ext,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+            }
+        }
+
+        // Arbitrary: standard verify at r_0.
+        {
+            let comm = &proof.commitments.1;
+            if comm.batch_size > 0 {
+                let per_poly_alphas =
+                    ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
+                        &mut pcs_transcript.fs_transcript,
+                        comm.batch_size,
+                    );
+                let mut eval_f = F::zero_with_cfg(&field_cfg);
+                for (bar_u, alphas) in all_lifted_evals[arb_range.clone()]
+                    .iter()
+                    .zip(per_poly_alphas.iter())
+                {
+                    for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                        let mut term = F::from_with_cfg(alpha, &field_cfg);
+                        term *= coeff;
+                        eval_f += &term;
+                    }
+                }
+                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_with_alphas::<
+                    F,
+                    CHECK_FOR_OVERFLOW,
+                >(
+                    &mut pcs_transcript,
+                    vp_arb,
+                    comm,
+                    &field_cfg,
+                    &r_0,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(1, e))?;
+            }
+        }
+
+        // Int: split commitment, opening at extended point.
+        {
+            let comm = &proof.commitments.2;
+            if comm.batch_size > 0 {
+                let per_poly_alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
+                    &mut pcs_transcript.fs_transcript,
+                    comm.batch_size,
+                );
+
+                let one = F::one_with_cfg(&field_cfg);
+                let one_minus_gamma = one - gamma.clone();
+                let zero = F::zero_with_cfg(&field_cfg);
+                let mut eval_f = zero.clone();
+
+                for (bar_u, alphas) in all_lifted_evals[int_range.clone()]
+                    .iter()
+                    .zip(per_poly_alphas.iter())
+                {
+                    debug_assert_eq!(alphas.len(), 1);
+                    let a_0: F = F::from_with_cfg(&alphas[0], &field_cfg);
+                    let mut c1 = zero.clone();
+                    let mut c2 = zero.clone();
+                    if let Some(coeff_lo) = bar_u.coeffs.first() {
+                        c1 = a_0.clone();
+                        c1 *= coeff_lo;
+                    }
+                    if let Some(coeff_hi) = bar_u.coeffs.get(1) {
+                        c2 = a_0;
+                        c2 *= coeff_hi;
+                    }
+                    let mut folded = one_minus_gamma.clone();
+                    folded *= c1;
+                    let mut g_c2 = gamma.clone();
+                    g_c2 *= c2;
+                    folded += &g_c2;
+                    eval_f += &folded;
+                }
+
+                ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                    &mut pcs_transcript,
+                    vp_int_split,
+                    comm,
+                    &field_cfg,
+                    &r0_ext,
+                    &eval_f,
+                    &per_poly_alphas,
+                )
+                .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+            }
         }
     }
 
