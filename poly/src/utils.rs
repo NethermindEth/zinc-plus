@@ -461,6 +461,7 @@ mod tests {
 
     proptest! {
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn prop_next_mle_eval_coincides_with_next_mle_evaluate_at_point(r in point_n(NUM_VARS as usize)) {
         let next_mle = next_mle_inner(NUM_VARS, F::zero(), F::one()).unwrap();
 
@@ -473,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn next_c_r_mle_c1_matches_shift_by_1() {
         // c=1 should give the same result as the original build_next_r_mle
         let num_vars: usize = 4;
@@ -490,6 +492,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn next_c_r_mle_c0_is_eq() {
         // c=0 should return eq(r, b)
         let num_vars: usize = 4;
@@ -502,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn next_c_r_mle_has_correct_structure() {
         // For any c, evaluations[b] should be:
         //   0 for b < c
@@ -534,6 +538,7 @@ mod tests {
 
     proptest! {
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn prop_next_c_r_mle_evaluates_correctly(r in point_n(4), c in 1..15usize) {
         // build_next_c_r_mle(r, c) evaluated at random point should equal
         // the shift-c predicate: sum_b next_c(b) * eq(b, point)

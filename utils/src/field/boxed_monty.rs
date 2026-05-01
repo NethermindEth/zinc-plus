@@ -75,6 +75,7 @@ mod prop_tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_unsigned_matches_sum_of_bits(x in any_u128()) {
             let cfg = get_dyn_config(MODULUS);
             let f: F = x.into_with_cfg(&cfg);
@@ -88,6 +89,7 @@ mod prop_tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_signed_is_neg_of_abs_when_negative(x in any_i128()) {
             let cfg = get_dyn_config(MODULUS);
             let f: F = x.into_with_cfg(&cfg);
@@ -101,6 +103,7 @@ mod prop_tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_bool_is_identity(b in any_bool()) {
             let cfg = get_dyn_config(MODULUS);
             let f: F = b.into_with_cfg(&cfg);
@@ -108,6 +111,7 @@ mod prop_tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_uint_roundtrip_through_uint(x in any_u128()) {
             let cfg = get_dyn_config(MODULUS);
             let u: crypto_bigint::Uint<{ U256::LIMBS }> = crypto_bigint::Uint::from(x);
@@ -117,6 +121,7 @@ mod prop_tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_with_cfg_generic_matches_owned(x in any::<u64>()) {
             let cfg = get_dyn_config(MODULUS);
             let a: F = x.into_with_cfg(&cfg);

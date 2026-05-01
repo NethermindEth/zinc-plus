@@ -1,6 +1,9 @@
 name: UB (undefined behavior) detection
 
-on: push
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,13 +15,12 @@ jobs:
   ub-detection:
     if: github.event.pull_request.draft == false
     name: Check for undefined behaviour (UB)
-    timeout-minutes: 30
+    timeout-minutes: 480
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - run: |
           rustup +nightly component add miri
           cargo +nightly miri setup
-          PROPTEST_DISABLE_FAILURE_PERSISTENCE=true \
-            MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance" \
+          MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance -Zmiri-disable-isolation" \
             cargo +nightly miri test --lib

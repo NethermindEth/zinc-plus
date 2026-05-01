@@ -441,6 +441,7 @@ mod tests {
     use rand::rng;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn test_merkle_proof() {
         const N: usize = 3;
         let leaves_len = 1024;

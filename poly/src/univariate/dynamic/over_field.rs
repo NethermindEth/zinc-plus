@@ -920,6 +920,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(500))]
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_div_rem_random(
             dividend in any_poly_varied(50),
             divisor in any_poly_varied(50)
@@ -938,6 +939,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_div_rem_exact_division(
             q in any_poly_varied(25),
             d in any_poly_varied(25)

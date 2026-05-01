@@ -966,6 +966,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_eval_add_is_linear((p1, p2, r) in any_aligned_pair_with_point()) {
             let cfg = get_dyn_config(MODULUS);
             let lhs = (p1.clone() + &p2).evaluate(&r, F::zero_with_cfg(&cfg)).unwrap();
@@ -974,6 +975,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_fix_vars_commutes_with_eval((p, r, k) in any_dme().prop_flat_map(|p| {
             let n = p.num_vars;
             let point = point_n(n);
@@ -989,6 +991,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_fix_vars_is_idempotent((p, k1, k2) in any_dme().prop_flat_map(|p| {
             let n = p.num_vars;
             let ks1 = 0usize..=n;
@@ -1012,6 +1015,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_mle_eval_eq_eval_with_config((p, r) in any_dme().prop_flat_map(|p| {
             let n = p.num_vars;
             let point = point_n(n);

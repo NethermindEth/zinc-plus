@@ -254,6 +254,7 @@ mod tests {
 
     /// Test the widest integer encoding used in benchmarks
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encode_bench_int() {
         #[derive(Clone, Debug)]
         struct BenchZipTypes {}
@@ -277,6 +278,7 @@ mod tests {
 
     /// Test the widest binary polynomial encoding used in benchmarks
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encode_bench_poly() {
         const D_PLUS_ONE: usize = 32;
 

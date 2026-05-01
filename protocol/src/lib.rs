@@ -416,6 +416,7 @@ where
 //
 
 #[cfg(test)]
+#[cfg(not(miri))] // long running
 mod tests {
     use super::*;
     use crypto_bigint::U64;

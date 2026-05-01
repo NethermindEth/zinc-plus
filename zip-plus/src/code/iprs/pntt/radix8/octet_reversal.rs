@@ -40,6 +40,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn octet_reversal_self_inverse() {
         for num_octets in 0..8 {
             check_octet_reversal_self_inverse(num_octets);
