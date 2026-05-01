@@ -137,12 +137,12 @@
 //! per-bit slices forces it into `{0, 1}^32` per coefficient:
 //!
 //! - `r_ch1[k] = e[k+2] + e[k+1] − 2·u_ef[k+2]`                   (Ch eq 62)
-//! - `r_ch2[k] = e[k+2] − e[k]   + 2·u_{¬e,g}[k+2] + 2·corr_ch2[k]`
+//! - `r_ch2[k] = e[k+2] − e[k]   + 2·u_{¬e,g}[k+2] + 2·comp_ch2[k]`
 //!     — alt complement form of `(1₃₂ − e[t]) + e[t−2] − 2·u_{¬e,g}[t]`;
 //!     per coefficient `r_orig + r_alt = 1`, so both are bit-valid
 //!     simultaneously and the `1₃₂` constant is dropped from the
 //!     virtual-source enum                                        (Ch eq 63)
-//! - `r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·corr_maj[k]`
+//! - `r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·comp_maj[k]`
 //!                                                                (Maj eq 64)
 //!
 //! With `u_ef`, `u_{¬e,g}`, `Maj` set on every row by their truth tables
@@ -153,7 +153,7 @@
 //! rows that fall outside `{0, 1}` are the last two rows of the trace
 //! (`k ∈ {n−2, n−1}`), where the forward shifts pull zero-padded values
 //! and `−e[k] / a[k]+a[k+1]` slip negative or to 2; the public
-//! correctors `PA_R_CH2_CORR` / `PA_R_MAJ_CORR` carry the bit pattern
+//! compensators `PA_R_CH2_COMP` / `PA_R_MAJ_COMP` carry the bit pattern
 //! that absorbs the off-trace zero-padding (zero on every other row).
 //! - **K column** is populated with random integers rather than the
 //!   SHA-256-specified round constants. Both prover and verifier see the
@@ -262,12 +262,12 @@ pub mod cols {
     // verifier-supplied, since the verifier can derive them from the
     // bit-poly values when shadow-running the SHA computation.
     //
-    // The two PA_R_*_CORR columns are public correctors for the Ch (63)
+    // The two PA_R_*_COMP columns are public compensators for the Ch (63)
     // and Maj (64) virtual binary_poly residuals (see module doc): zero
     // on all rows except the last two (`k ∈ {n−2, n−1}`), where the
     // length-2 forward shifts pull zero-padding and the residual
     // arithmetic would otherwise leave `{0,1}` per coefficient. The
-    // verifier can derive both correctors from the public e/a values
+    // verifier can derive both compensators from the public e/a values
     // when shadow-running.
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
@@ -275,8 +275,8 @@ pub mod cols {
     pub const PA_OV_SIG1: usize = 3;
     pub const PA_OV_LSIG0: usize = 4;
     pub const PA_OV_LSIG1: usize = 5;
-    pub const PA_R_CH2_CORR: usize = 6;
-    pub const PA_R_MAJ_CORR: usize = 7;
+    pub const PA_R_CH2_COMP: usize = 6;
+    pub const PA_R_MAJ_COMP: usize = 7;
     // Public message-block words. Holds the 16 message words M_i[0..16]
     // of compression i ∈ [0, NUM_COMPRESSIONS) at rows
     // [ROWS_PER_COMP·i, ROWS_PER_COMP·i + 16); zero elsewhere. Pinned
@@ -581,7 +581,7 @@ where
                     ),
                 ],
             },
-            // r_ch2[k] (alt) = e[k+2] − e[k] + 2·u_{¬e,g}[k+2] + 2·corr_ch2[k]
+            // r_ch2[k] (alt) = e[k+2] − e[k] + 2·u_{¬e,g}[k+2] + 2·comp_ch2[k]
             VirtualBinaryPolySpec {
                 terms: vec![
                     (
@@ -605,12 +605,12 @@ where
                     (
                         2,
                         VirtualBinaryPolySource::PublicCol {
-                            public_col_idx: cols::PA_R_CH2_CORR,
+                            public_col_idx: cols::PA_R_CH2_COMP,
                         },
                     ),
                 ],
             },
-            // r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·corr_maj[k]
+            // r_maj[k] = a[k] + a[k+1] + a[k+2] − 2·Maj[k+2] − 2·comp_maj[k]
             VirtualBinaryPolySpec {
                 terms: vec![
                     (
@@ -640,7 +640,7 @@ where
                     (
                         -2,
                         VirtualBinaryPolySource::PublicCol {
-                            public_col_idx: cols::PA_R_MAJ_CORR,
+                            public_col_idx: cols::PA_R_MAJ_COMP,
                         },
                     ),
                 ],
@@ -998,7 +998,7 @@ where
     /// in-circuit constraints do not capture (formerly C17–C21).
     ///
     /// The five compensator columns must be zero on each constraint's
-    /// active row range; the two tail-corrector columns must be zero
+    /// active row range; the two tail-compensator columns must be zero
     /// on every inner row. The verifier discharges these by direct
     /// inspection of `public_trace`.
     fn verify_public_structure<RT, IntT, const D: usize>(
@@ -1018,8 +1018,8 @@ where
         let pa_c_c9 = &public_trace.int[cols::PA_C_C9].evaluations;
         let pa_c_ff_a = &public_trace.int[cols::PA_C_FF_A].evaluations;
         let pa_c_ff_e = &public_trace.int[cols::PA_C_FF_E].evaluations;
-        let pa_r_ch2_corr = &public_trace.binary_poly[cols::PA_R_CH2_CORR].evaluations;
-        let pa_r_maj_corr = &public_trace.binary_poly[cols::PA_R_MAJ_CORR].evaluations;
+        let pa_r_ch2_comp = &public_trace.binary_poly[cols::PA_R_CH2_COMP].evaluations;
+        let pa_r_maj_comp = &public_trace.binary_poly[cols::PA_R_MAJ_COMP].evaluations;
 
         // Per-compression active windows. start = ROWS_PER_COMP·i.
         for i in 0..cols::NUM_COMPRESSIONS {
@@ -1077,22 +1077,22 @@ where
             }
         }
 
-        // Tail correctors: zero on every inner row k with k+2 < n.
-        // (At k ∈ {n-2, n-1} the corrector takes the closed-form
+        // Tail compensators: zero on every inner row k with k+2 < n.
+        // (At k ∈ {n-2, n-1} the compensator takes the closed-form
         // boundary value; we don't re-derive that here, since the
         // residuals C19/C20 booleanity already captures any cell
         // value at those rows that violates {0,1} per coefficient.)
         let inner_end = n.saturating_sub(2);
         for k in 0..inner_end {
-            if !pa_r_ch2_corr[k].iter().all(|c| !c.into_inner()) {
+            if !pa_r_ch2_comp[k].iter().all(|c| !c.into_inner()) {
                 return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                    column: "PA_R_CH2_CORR",
+                    column: "PA_R_CH2_COMP",
                     row: k,
                 });
             }
-            if !pa_r_maj_corr[k].iter().all(|c| !c.into_inner()) {
+            if !pa_r_maj_comp[k].iter().all(|c| !c.into_inner()) {
                 return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                    column: "PA_R_MAJ_CORR",
+                    column: "PA_R_MAJ_COMP",
                     row: k,
                 });
             }
@@ -1540,32 +1540,32 @@ where
             .map(|t| if t >= 2 { maj(a_vals[t], a_vals[t - 1], a_vals[t - 2]) } else { 0 })
             .collect();
 
-        // ===== Tail correctors for the Ch (63) / Maj (64) virtual residuals =====
+        // ===== Tail compensators for the Ch (63) / Maj (64) virtual residuals =====
         //
         // Zero on every row except `k ∈ {n−2, n−1}` where the length-2
         // forward shifts in r_ch2 / r_maj read into off-trace zero-
         // padding and the residual would slip outside `{0,1}` per
-        // coefficient. Match the corrector logic in option-a-virtual-
+        // coefficient. Match the compensator logic in option-a-virtual-
         // residuals (8787cbd):
         //   r_ch2 (alt complement form) at boundary k = n-2 / n-1:
         //     u_{¬e,g}[k+2] = 0 (off-trace), e[k+2] = 0, e[k] real.
-        //     residual = -e[k] + 2·corr_ch2 ∈ {0,1} ⇒ corr_ch2[k] = e[k].
+        //     residual = -e[k] + 2·comp_ch2 ∈ {0,1} ⇒ comp_ch2[k] = e[k].
         //   r_maj at boundary k = n-2:
         //     a[k+2] = Maj[k+2] = 0 (off-trace), a[k+1] real.
-        //     residual = a[k] + a[k+1] − 2·corr_maj ∈ {0,1}
-        //     ⇒ corr_maj[k] = AND(a[k], a[k+1]).
+        //     residual = a[k] + a[k+1] − 2·comp_maj ∈ {0,1}
+        //     ⇒ comp_maj[k] = AND(a[k], a[k+1]).
         //   r_maj at k = n-1: a[k+1] = a[k+2] = 0, residual = a[k] ∈
-        //     {0,1} already; corr_maj = 0.
-        let mut pa_r_ch2_corr_vals: Vec<u32> = vec![0; n];
-        let mut pa_r_maj_corr_vals: Vec<u32> = vec![0; n];
+        //     {0,1} already; comp_maj = 0.
+        let mut pa_r_ch2_comp_vals: Vec<u32> = vec![0; n];
+        let mut pa_r_maj_comp_vals: Vec<u32> = vec![0; n];
         for k in 0..n {
             let off_kp1 = k + 1 >= n;
             let off_kp2 = k + 2 >= n;
             if off_kp2 {
-                pa_r_ch2_corr_vals[k] = e_vals[k];
+                pa_r_ch2_comp_vals[k] = e_vals[k];
             }
             if off_kp2 && !off_kp1 {
-                pa_r_maj_corr_vals[k] = a_vals[k] & a_vals[k + 1];
+                pa_r_maj_comp_vals[k] = a_vals[k] & a_vals[k + 1];
             }
         }
 
@@ -1629,12 +1629,12 @@ where
         > { col.into_iter().collect() };
 
         // Layout: 8 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
-        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_CORR,
-        // PA_R_MAJ_CORR) + 10 witness cols. pa_a / pa_e were populated
+        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_COMP,
+        // PA_R_MAJ_COMP) + 10 witness cols. pa_a / pa_e were populated
         // above with H_i values at init-prefix rows (for compression i
         // and the H_N output block) AND at junction rows (where the
         // feed-forward constraint reads the prior H_i). The two
-        // PA_R_*_CORR columns are zero except on the trace tail.
+        // PA_R_*_COMP columns are zero except on the trace tail.
         let binary_poly = vec![
             to_bin_mle(to_bits(&pa_a_vals)),
             to_bin_mle(to_bits(&pa_e_vals)),
@@ -1642,8 +1642,8 @@ where
             to_bin_mle(to_bits(&ov_sig1_vals)),
             to_bin_mle(to_bits(&ov_lsig0_vals)),
             to_bin_mle(to_bits(&ov_lsig1_vals)),
-            to_bin_mle(to_bits(&pa_r_ch2_corr_vals)),
-            to_bin_mle(to_bits(&pa_r_maj_corr_vals)),
+            to_bin_mle(to_bits(&pa_r_ch2_comp_vals)),
+            to_bin_mle(to_bits(&pa_r_maj_comp_vals)),
             to_bin_mle(to_bits(&pa_m_vals)),
             to_bin_mle(to_bits(&a_vals)),
             to_bin_mle(to_bits(&sig0_vals)),

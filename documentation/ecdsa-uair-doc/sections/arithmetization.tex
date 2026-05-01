@@ -49,11 +49,51 @@ implementation has the verifier write the chosen affine addend
 directly into $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$ for each
 row, rather than committing four selector polynomials and adding
 in-circuit constraints to compute the addend from the bits. The
-saving is large: the alternative would require four
-multiplicative selectors per row and would push the
-addition-formula degrees up further. The cost is that the
-verifier must do this $256$-row table lookup itself before
-committing to the public input.
+cost is that the verifier must do this $256$-row table lookup
+itself before committing to the public input.
+\end{remark}
+
+\begin{remark}[Cost of in-circuit addend selection]\label{rem:addend-cost}
+The alternative — having the prover (or the constraints) compute the
+addend from $(b_1[t], b_2[t])$ in-circuit — incurs the following
+cost relative to the deployed design:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Two extra public selector columns} carrying the
+    bit pair $(b_1, b_2)$ row-wise (each in $\{0,1\}$); each takes
+    one $\F_p$-typed integer column under the
+    storage convention of \Cref{sec:cols}, so $+2$ public columns.
+    These columns must be range-pinned to $\{0,1\}$ —
+    either via two booleanity-style ideal constraints
+    $b_i (b_i - 1) \in (p)$ ($+2$ degree-$2$ constraints) or via a
+    direct verifier inspection of \texttt{public\_trace} (per the
+    SHA UAIR's verifier-side public-column structural-check
+    pattern).
+  \item \textbf{Two new addend-selection constraints,
+    $T_X$ and $T_Y$.} Using
+    $T = (1-b_1)(1-b_2) \OOO + b_1 (1-b_2) G + (1-b_1) b_2 Q + b_1 b_2 (G+Q)$
+    coefficient-wise, each coordinate is a degree-$2$
+    polynomial in $(b_1, b_2)$ with publicly-known $\F_p$ scalars,
+    pinned in $(p)$. With $T_X, T_Y$ then \emph{also} entering the
+    mixed-addition formulas $H = T_X P_{\mathrm{pa},Z}^2 - P_{\mathrm{pa},X}$
+    and $R_a = T_Y P_{\mathrm{pa},Z}^3 - P_{\mathrm{pa},Y}$ as
+    full degree-$2$ expressions in $(b_1, b_2)$, the
+    \emph{effective constraint degree} of \eqref{eq:H},
+    \eqref{eq:Ra} (and hence of every downstream addition
+    constraint that consumes $H, R_a$) rises from $\le 4$ to
+    $\le 6$.
+  \item \textbf{Booleanity for $\col{S\_ADD}$.} The
+    non-identity selector $\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$
+    is also a degree-$2$ public polynomial in the bits.
+\end{itemize}
+The deployed design absorbs all of the above into one
+verifier-side $256$-row table lookup, paying instead two precomputed
+$\F_p$-valued public columns $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$.
+Net savings: $0$ added witness columns (vs.\ $2$); no constraint-degree
+elevation (the deployed UAIR's effective degree stays at the value
+set by the doubling/addition formulas alone); no extra ideal
+constraints. The verifier's added work is $4 \cdot 256 = 1024$
+$\F_p$ multiplications/additions to materialise the addend column —
+trivially below mp\_eval-side costs.
 \end{remark}
 
 \subsection{Jacobian doubling}\label{sec:doubling}
@@ -143,14 +183,66 @@ $\col{S\_INIT}$ (see \Cref{con:init-x}--\Cref{con:init-z}).
 At the final row $t = \mathrm{FINAL\_ROW} := \mathrm{NUM\_SHAMIR\_ROUNDS} = 256$,
 the witness Jacobian state $\jac{P}[256]$ holds the result
 $R = u_1 G + u_2 Q$ (modulo the $R_{\mathrm{init}}$ offset of
-\Cref{rem:r-init}). The affine $x$-coordinate
-$R_x = P_X[256] \cdot P_Z[256]^{-2} \bmod p$ is computed
-\emph{off-protocol} by the verifier, who opens the three witness cells
-at row $256$, performs a single field inversion, and checks
-$R_x \neq \OOO$ (i.e.\ $P_Z[256] \neq 0$) and
-$\mathrm{int}(R_x) \equiv r \pmod n$. Consequently, the UAIR has
-\emph{no $Z_{\mathrm{inv}}$ column, no in-circuit affine
-conversion, and no signature check $R_x \equiv r$}.
-The selector column $\col{S\_FINAL}$ is retained in the layout for
-downstream UAIRs that compose with this one and want to gate
-additional final-row constraints.
+\Cref{rem:r-init}). In the deployed UAIR, the affine $x$-coordinate
+$R_x = P_X[256] \cdot P_Z[256]^{-2} \bmod p$ is \emph{not} extracted
+in-circuit, and the signature-defining identity
+$R_x \equiv r \pmod n$ is \emph{not} enforced. The intent is that
+the verifier opens the three witness cells at row $256$, performs a
+single field inversion, and checks the conditions off-protocol; the
+selector column $\col{S\_FINAL}$ is retained in the layout for a
+downstream UAIR that wants to add the missing final-row constraints.
+
+\begin{remark}[The final affine-readout constraint is missing]\label{rem:final-readout}
+The above design is, strictly speaking, \emph{incomplete} as an
+arithmetization of ECDSA verification: a sound ECDSA proof must
+bind the in-circuit Jacobian computation to the signature scalar
+$r$ via $R_x \equiv r \pmod n$. The deployed UAIR proves only that
+the witness Jacobian state at row $256$ is \emph{some} point of
+the form $u_1 G + u_2 Q$ (with $u_1, u_2$ supplied as public
+input); it does \emph{not} prove that the affine $x$-coordinate of
+that point matches the signature's $r$. A complete UAIR therefore
+needs:
+\begin{itemize}[leftmargin=2em]
+  \item One witness column $Z_{\mathrm{inv}}$ (or a single cell
+    pinned at row $256$) carrying $P_Z[256]^{-1} \bmod p$, plus the
+    in-circuit non-infinity check
+    \[
+      S_{\mathrm{FINAL}} \cdot \bigl(P_Z[256] \cdot Z_{\mathrm{inv}}[256] - 1\bigr) \in (p).
+    \]
+  \item One witness column $R_x$ (or a final-row cell) plus the
+    affine-derivation constraint
+    \[
+      S_{\mathrm{FINAL}} \cdot \bigl(P_X[256] \cdot Z_{\mathrm{inv}}[256]^2 - R_x[256]\bigr) \in (p).
+    \]
+  \item A constraint binding $R_x \equiv r \pmod n$, where $r$
+    enters as a public column. This step takes place in the order
+    field $\F_n$, which is distinct from the base field $\F_p$ used
+    everywhere else, so it requires either:
+    \begin{itemize}
+      \item adding $n$ to the index $\mathbf{q}$, i.e.\
+        $\mathbf{q} = (p, n)$, with the matching $(n)$-ideal
+        constraint $S_{\mathrm{FINAL}} \cdot (R_x[256] - r) \in (n)$;
+        \emph{or}
+      \item proving $R_x[256] \in [0, n)$ via a range argument and
+        then checking equality directly. Because $p_\secp$ and
+        $n_\secp$ are extremely close (they differ in the bottom
+        bits only), the typical $R_x$ value lies in $[0, n)$ already
+        and the range-check has effective probability $\approx 1$.
+    \end{itemize}
+\end{itemize}
+The first route adds one $\F_n$-branch column plus one $(n)$-ideal
+constraint. The second route adds one bit-decomposition of $R_x$
+plus a sub-$n$ comparison.
+
+The deployed UAIR omits these for two reasons: \emph{(i)}~the
+implementation is targeted at composition (the $\col{S\_FINAL}$
+selector is reserved precisely so a downstream UAIR can attach the
+final-row constraints without disturbing the present layout), and
+\emph{(ii)}~adding the $\F_n$ branch turns the index from a
+single-prime $\mathbf{q} = (p)$ into the multi-prime
+$\mathbf{q} = (p, n)$, which exercises code paths beyond the scope
+of this report. The final-row affine readout is therefore left
+out-of-band; this report should be read as describing the
+\emph{Jacobian-loop sub-arithmetization} of ECDSA, not a complete
+end-to-end ECDSA verification UAIR.
+\end{remark}

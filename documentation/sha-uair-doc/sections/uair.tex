@@ -71,8 +71,8 @@ $\col{PA\_OV\_SIG0}$    & Per-coefficient overflow witness for the $\Sigma_0$ ro
 $\col{PA\_OV\_SIG1}$    & Same, for $\Sigma_1$ & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_OV\_LSIG0}$   & Same, for $\sigma_0$ \eqref{eq:lsig0-Q} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_OV\_LSIG1}$   & Same, for $\sigma_1$ & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
-$\col{PA\_R\_CH2\_CORR}$ & Tail corrector $c_{\mathrm{ch}_2}$ for $r_{\mathrm{ch}_2}$ \eqref{eq:correctors} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
-$\col{PA\_R\_MAJ\_CORR}$ & Tail corrector $c_{\mathrm{maj}}$ for $r_{\mathrm{maj}}$ \eqref{eq:correctors} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
+$\col{PA\_R\_CH2\_COMP}$ & Tail compensator $c_{\mathrm{ch}_2}$ for $r_{\mathrm{ch}_2}$ \eqref{eq:compensators} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
+$\col{PA\_R\_MAJ\_COMP}$ & Tail compensator $c_{\mathrm{maj}}$ for $r_{\mathrm{maj}}$ \eqref{eq:compensators} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_M}$           & Public message-block words (Table~9 row 77) & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 \midrule
 \multicolumn{3}{l}{\textit{Witness binary-polynomial columns ($11$)}} \\[1pt]
@@ -89,7 +89,7 @@ $\bp{W_{\Maj}}$         & $\Maj(a[t],b[t],c[t])$ & $\bitpoly{32} \subseteq \Q^{<
 $\bp{W_{\mu\text{-packed}}}$ & Packed integer-carry column (Remark~\ref{rem:mu-budget}) & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 \bottomrule
 \end{tabular}
-\caption{Binary-polynomial columns ($20$ total: $9$ public, $11$ witness). The $11$ \emph{witness} columns are range-confined to $\bitpoly{32}$ in-circuit by the booleanity sumcheck. The $9$ \emph{public} columns are not committed and are not part of the booleanity sumcheck; the verifier instead inspects each row of \texttt{public\_trace} directly to confirm the column-specific structural properties (e.g.\ \Cref{cons:public-checks}: $\bitpoly{32}$ membership at every cell, plus zero-on-non-tail-rows for $\col{PA\_R\_CH2\_CORR}/\col{PA\_R\_MAJ\_CORR}$).}
+\caption{Binary-polynomial columns ($20$ total: $9$ public, $11$ witness). The $11$ \emph{witness} columns are range-confined to $\bitpoly{32}$ in-circuit by the booleanity sumcheck. The $9$ \emph{public} columns are not committed and are not part of the booleanity sumcheck; the verifier instead inspects each row of \texttt{public\_trace} directly to confirm the column-specific structural properties (e.g.\ \Cref{cons:public-checks}: $\bitpoly{32}$ membership at every cell, plus zero-on-non-tail-rows for $\col{PA\_R\_CH2\_COMP}/\col{PA\_R\_MAJ\_COMP}$).}
 \label{tab:bin-cols}
 \end{table}
 
@@ -115,23 +115,6 @@ $\col{PA\_C\_FF\_E}$        & Compensator for C\ref{con:ff-e}; zero on junction-
 \label{tab:int-cols}
 \end{table}
 
-\begin{remark}[Why the compensators are integer columns and not bit-poly]
-\label{rem:why-int}
-The compensator columns $\col{PA\_C\_*}$ participate in constraints of
-the form $(\mathrm{inner} + \col{pa\_c}) \in (X-2)$, i.e.\ they must
-satisfy $\col{pa\_c}(2) \equiv -\mathrm{inner}(2) \pmod{p}$ on every
-row, where $p$ is the proving-field characteristic. On the schedule
-or update \emph{inactive} rows, $\mathrm{inner}(2)$ is an arbitrary
-element of $\F_p$ (no honest meaning attaches to it), so the
-compensator must range over the entire field — incompatible with the
-bit-budget of $\bitpoly{32}$. The arithmetization therefore types
-the compensator columns as integer (rather than bit-poly) so they
-can absorb arbitrary $\Q$-values on inactive rows. Their
-zero-on-active-rows pinning is then enforced by direct verifier
-inspection of \texttt{public\_trace} (\Cref{cons:public-checks}),
-which costs no additional column and no algebraic constraint and
-keeps every constraint at degree $1$ in the trace MLEs.
-\end{remark}
 
 \begin{remark}[Public boundaries: all init-prefix blocks live on $\col{PA\_A}/\col{PA\_E}$]
 \label{rem:boundaries}
@@ -159,7 +142,7 @@ The constraint family is supplemented by a small set of
 \emph{verifier-side public-column structural checks}
 (\Cref{cons:public-checks} below) that the verifier discharges by
 direct inspection of \texttt{public\_trace} before the algebraic
-checks begin. These structural checks pin the public correctors
+checks begin. These structural checks pin the public compensators
 and compensators row-wise without consuming any selector column or
 any algebraic constraint.
 
@@ -189,14 +172,14 @@ following hold (with $n = 2^{\nu}$ the trace length):
     The schedule-active, update-active, and junction-window row sets
     are the per-compression windows defined at the top of this
     section.
-  \item Tail-corrector zero-on-inner-rows and boundary closed form:
+  \item Tail-compensator zero-on-inner-rows and boundary closed form:
     for every $k$ with $k+2 < n$,
     \[
-      \col{PA\_R\_CH2\_CORR}\rowidx{k} = 0,
+      \col{PA\_R\_CH2\_COMP}\rowidx{k} = 0,
       \qquad
-      \col{PA\_R\_MAJ\_CORR}\rowidx{k} = 0,
+      \col{PA\_R\_MAJ\_COMP}\rowidx{k} = 0,
     \]
-    and on $k \in \{n-2, n-1\}$ the closed-form values \eqref{eq:correctors}.
+    and on $k \in \{n-2, n-1\}$ the closed-form values \eqref{eq:compensators}.
   \item Round-constant pinning: $\col{PA\_K}\rowidx{k}$ equals the
     SHA-256 round constant $K_t$ on update-active anchors.
   \item Selector value pattern: each of $S_{\mathrm{INIT-PREFIX}},
@@ -334,41 +317,6 @@ Equivalently, the high $22$ bits of $\bp{W_{\mu\text{-packed}}}$ are
 zero; the low $10$ bits are read by the five $\mathrm{ShiftR}$ virtuals
 of \Cref{rem:mu-budget}.
 
-\paragraph{Virtual binary-polynomial residuals (Table~9 row 62/63/64).}
-
-The residuals \eqref{eq:rch1}--\eqref{eq:rmaj} are declared as
-\emph{virtual binary-polynomial columns} via the
-$\mathsf{with\_virtual\_binary\_poly\_cols}$ extension to the UAIR
-signature. They are not committed; their per-bit slices are pinned
-into $\{0,1\}$ by the booleanity sumcheck, which is equivalent to the
-constraint family
-\begin{align}
-r_{\mathrm{ch}_1}\rowidx{k} &\in \bitpoly{32}, \tag{C18}\label{con:c-rch1}\\
-r_{\mathrm{ch}_2}\rowidx{k} &\in \bitpoly{32}, \tag{C19}\label{con:c-rch2}\\
-r_{\mathrm{maj}}\rowidx{k}  &\in \bitpoly{32}, \tag{C20}\label{con:c-rmaj}
-\end{align}
-imposed on every row $k$, where the right-hand virtual cells are the
-affine combinations \eqref{eq:rch1}, \eqref{eq:rch2}, \eqref{eq:rmaj}
-of the trace cells of $\bp{W_e}, \bp{W_a}, \bp{W_{u_{ef}}},
-\bp{W_{u_{\neg e,g}}}, \bp{W_{\Maj}}$, and (in C\ref{con:c-rch2}/C\ref{con:c-rmaj})
-the public tail correctors $\col{PA\_R\_CH2\_CORR}$ and
-$\col{PA\_R\_MAJ\_CORR}$. The booleanity sumcheck forces every
-coefficient of every residual into $\{0,1\}$ and thereby imposes the
-spec's Table~9 row 62/63/64 constraints without any materialization
-equation. C\ref{con:c-rch1}--C\ref{con:c-rmaj} are the only algebraic
-constraints in which the public correctors $\col{PA\_R\_CH2\_CORR}$
-and $\col{PA\_R\_MAJ\_CORR}$ appear; their tail-row values
-\eqref{eq:correctors} are precisely what makes the residuals
-$\{0,1\}^{32}$-valid on rows $k \in \{n-2, n-1\}$ where the
-length-$2$ forward shifts pull off-trace zero-padding. On every
-inner row $k$ with $k+2 < n$ the verifier has separately checked
-$\col{PA\_R\_CH2\_CORR}\rowidx{k} = 0$ and
-$\col{PA\_R\_MAJ\_CORR}\rowidx{k} = 0$ by direct inspection of
-\texttt{public\_trace} (\Cref{cons:public-checks}), so the residuals
-\eqref{eq:rch2}/\eqref{eq:rmaj} reduce to their honest XOR/MAJ-XOR
-forms there and the booleanity check pins $\bp{W_{u_{\neg e,g}}}$
-and $\bp{W_{\Maj}}$ to their honest values without further machinery.
-
 \paragraph{Affine-combination lookups for $\Ch$ / $\Maj$.}
 
 In addition to the per-column lookups of \Cref{tab:bin-cols}, we
@@ -386,25 +334,12 @@ substitutions for $t \in \{1,2\}$ that replace back-references to
 $b_1,c_1,f_1,g_1$ by the public boundary values from \col{PA\_A} and
 \col{PA\_E}.
 
-\begin{remark}[Tail correctors are forced to zero on inner rows]
-\label{rem:corr-zero-inner}
-The tail correctors $\col{PA\_R\_CH2\_CORR}, \col{PA\_R\_MAJ\_CORR}$
+\begin{remark}[Tail compensators are forced to zero on inner rows]
+\label{rem:comp-zero-inner}
+The tail compensators $\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$
 are \emph{public} columns; the verifier holds every cell value of
 \texttt{public\_trace} before running the proof. The verifier
-therefore enforces the inner-row zero-pinning by direct row-wise
+therefore checks the inner-row zero-pinning by direct row-wise
 inspection, as part of the public-column structural checks
-(\Cref{cons:public-checks}): for every $k$ with $k+2 < n$, both
-correctors must equal $0$. At the two boundary rows $k \in \{n-2, n-1\}$
-the verifier instead checks the closed-form values \eqref{eq:correctors},
-which are determined by the public boundary cells $\bp{a}[n-2,n-1]$
-and $\bp{e}[n-2,n-1]$ exposed by the digest pinning (\Cref{rem:boundaries}).
-
-Combined with the $\bitpoly{32}$ check on every public binary-poly
-column (\Cref{cons:public-checks} again), this fixes the corrector
-columns entirely: their values on every row are pinned to either
-$0$ (inner rows) or the closed-form boundary value (tail rows). The
-booleanity of the residuals C\ref{con:c-rch2}/C\ref{con:c-rmaj} then
-acts on the residual after substituting these known corrector values,
-and pins $\bp{W_{u_{\neg e,g}}}$ and $\bp{W_{\Maj}}$ to their honest
-$\Ch_{\neg e,g}$ and $\Maj$ values on every inner row.
+(\Cref{cons:public-checks}).
 \end{remark}

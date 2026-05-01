@@ -73,11 +73,11 @@ chained digest the relation pins as a public boundary.
 We arithmetize the chained-compression relation
 \begin{equation}\label{eq:rel-sha}
 \mathrm{REL}_{\textsc{sha}_N} \;:=\;
-\left\{(\mathbb{i},\mathbb{x};\mathbb{w}) \;\middle|\;
+\left\{(\mathbf{i},\mathbf{x};\mathbf{w}) \;\middle|\;
 \begin{aligned}
-&\mathbb{i} = (K_t)_{t\in[64]}, \\
-&\mathbb{x} = \bigl(H_0,\;(M^{(i)})_{i \in [0,N)},\;H_N\bigr), \\
-&\mathbb{w} = \bigl((W_t^{(i)})_{i,t},\;(a_t^{(i)},\dots,h_t^{(i)})_{i,t}\bigr), \\
+&\mathbf{i} = (K_t)_{t\in[64]}, \\
+&\mathbf{x} = \bigl(H_0,\;(M^{(i)})_{i \in [0,N)},\;H_N\bigr), \\
+&\mathbf{w} = \bigl((W_t^{(i)})_{i,t},\;(a_t^{(i)},\dots,h_t^{(i)})_{i,t}\bigr), \\
 &\text{each } (W_t^{(i)})_t \text{ satisfies \eqref{eq:msched}}, \\
 &\text{each round update satisfies \eqref{eq:a-update}, \eqref{eq:e-update}}, \\
 &H_{i+1} \equiv H_i + (a_{65}^{(i)},\dots,h_{65}^{(i)}) \pmod{2^{32}} \forall i \in [0,N).
@@ -85,6 +85,6 @@ We arithmetize the chained-compression relation
 \end{equation}
 
 The remainder of this document constructs a UAIR$^+$ instance
-$(\mathbb{i}_{\text{uair}},\mathbb{x}_{\text{uair}};\mathbb{w}_{\text{uair}})$
+$(\mathbf{i}_{\text{uair}},\mathbf{x}_{\text{uair}};\mathbf{w}_{\text{uair}})$
 that lies in $\mathrm{REL}_{\textsc{uair}^+}$ if and only if the input
 witness lies in $\mathrm{REL}_{\textsc{sha}_N}$.

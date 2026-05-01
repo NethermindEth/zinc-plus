@@ -105,6 +105,12 @@ $\bp{u_{ef}} := e \AND f$ and $\bp{u_{\neg e,g}} := (\NOT e) \AND g$; since
 $e$ and $\NOT e$ have disjoint bit-support, $\Ch(e,f,g) = u_{ef} + u_{\neg e,g}$
 coefficient-wise in $\Z$.
 
+An \emph{anchor} is the row index $k$ at which a row-local
+constraint is centred: every cell access in the expression is written
+as a forward shift $\bp{x}^{\downarrow\Delta}\rowidx{k} = \bp{x}\rowidx{k+\Delta}$
+of $k$.\footnote{Forward-only because the protocol's row-shift virtual
+columns are forward shifts; choosing the anchor at the smallest row
+the constraint reads keeps every access on a real \texttt{ShiftSpec}.}
 Anchoring at $k = t-2$ so all references are forward shifts, the three
 virtual residuals are
 \begin{align}
@@ -118,7 +124,7 @@ r_{\mathrm{maj}}[k]
         \label{eq:rmaj}
 \end{align}
 where $c_{\mathrm{ch}_2}, c_{\mathrm{maj}} \in \bitpoly{32}$ are
-\emph{tail correctors} discussed below. The booleanity sumcheck pins
+\emph{tail compensators} discussed below. The booleanity sumcheck pins
 each per-bit slice of these residuals into $\{0,1\}$, which forces every
 coefficient of every residual into $\{0,1\}$ for free.
 
@@ -134,26 +140,26 @@ $r_{\mathrm{orig}} + r_{\mathrm{alt}} = 1$, so they are bit-valid
 simultaneously. Substituting the alt form lets us drop the
 $\mathbf{1}_{32}$ constant from the virtual-source enum entirely.
 
-\paragraph{Tail correctors.}
+\paragraph{Tail compensators.}
 On every row $k$ with $k+2 < n$ the residuals collapse to clean
 $\XOR$/$\Maj$-$\XOR$ patterns and lie in $\{0,1\}$ per coefficient. The
 exceptions are the last two rows $k \in \{n-2, n-1\}$, where the
 length-$2$ forward shifts pull off-trace zero-padding. Without
-correctors:
+compensators:
 \begin{itemize}
 \item $r_{\mathrm{ch}_2}$ at $k \in \{n-2,n-1\}$ reduces to $-e[k]$,
 which is in $\{0,-1\}$ — bit-invalid.
 \item $r_{\mathrm{maj}}$ at $k = n-2$ reduces to $a[k]+a[k+1]$, which
 is in $\{0,1,2\}$ — also bit-invalid.
 \end{itemize}
-The public correctors are therefore non-zero only on those two tail
+The public compensators are therefore non-zero only on those two tail
 rows, with values
-\begin{equation}\label{eq:correctors}
+\begin{equation}\label{eq:compensators}
 c_{\mathrm{ch}_2}[k] := \begin{cases} e[k] & k+2 \ge n \\ 0 & \text{else}\end{cases}, \quad
 c_{\mathrm{maj}}[k]  := \begin{cases} a[k] \AND a[k+1] & k+2 \ge n,\, k+1 < n \\ 0 & \text{else}.\end{cases}
 \end{equation}
-Plugging \eqref{eq:correctors} into \eqref{eq:rch2} and \eqref{eq:rmaj}
-recovers $\{0,1\}$-valued residuals on every row. Both correctors are
+Plugging \eqref{eq:compensators} into \eqref{eq:rch2} and \eqref{eq:rmaj}
+recovers $\{0,1\}$-valued residuals on every row. Both compensators are
 deterministic functions of the public boundary cells $\bp{a}[n-2,n-1]$
 and $\bp{e}[n-2,n-1]$ exposed by the digest pinning (see
 \Cref{sec:cols}), so they are placed in the public input rather than

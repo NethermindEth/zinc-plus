@@ -29,8 +29,24 @@ Following Definition~8.1 of the main paper, our index has
 $\mathbf{q} = (p)$ where $p$ is the $\secp$ base prime, so we have a
 single $\F_p$ branch. \emph{All} witness and constraint columns live
 in this branch; there is no $\Q[X]$ branch and no binary-polynomial
-section. Each trace cell is an $\F_p$ field element (i.e.\
-$d_p = 1$, treating $\F_p[X]$ at degree $0$).
+section. The branch index $d_p = 1$ (treating $\F_p[X]$ at degree $0$)
+makes every cell semantically an $\F_p$ element.
+
+\emph{Storage vs.\ semantics.} The implementation does not — and
+cannot — store $\F_p$ cells natively: in the framework, all branches
+of the $\mathbf{q}$-tuple are realised as \emph{integer} columns
+(\texttt{Int<5>}, i.e.\ $320$-bit fixed-precision integers; see
+\texttt{EC\_FP\_INT\_LIMBS}~$=5$). Each cell holds the canonical
+representative of its $\F_p$ value in $[0, p) \subset \Z$, and every
+constraint of \Cref{sec:constraints} is an integer expression that
+must lie in the principal ideal $(p) \subset \Z$ — discharged by the
+randomized ideal check on a quotient witness derived by Zinc+'s
+projection. The phrase ``arithmetic in $\F_p$'' below is shorthand
+for ``integer arithmetic followed by reduction mod $p$, verified
+through the $(p)$-ideal check''; the $\F_p$ field itself is
+\emph{not} the proving field. The proving field $F$ is a separate
+small random prime field chosen for soundness, projected from the
+integer columns at runtime.
 
 Tables \ref{tab:pub-cols} and~\ref{tab:wit-cols} list the $9$ public
 and $8$ witness columns, respectively. We write
@@ -81,11 +97,20 @@ $R_a$  & Mixed-addition scratch $R_a = T_Y \cdot P_{\mathrm{pa},Z}^3 - P_{\mathr
 \end{table}
 
 \begin{remark}[No range checks]\label{rem:no-range}
-Because every column is a native $\F_p$ field element and the
-proving field equals the $\secp$ base prime, no range-check or
-lookup constraint is required. This is the principal reason the
-ECDSA UAIR has no lookup PIOP attached and no $\bitpoly{32}$
-columns: arithmetic over $\F_p$ is direct.
+Although every cell is stored as an \texttt{Int<5>} integer
+(\Cref{sec:cols}), no range-check or lookup constraint over the
+trace columns is required. The reason is twofold:
+\emph{(i)}~constraints encode $\F_p$ equalities as
+$(p)$-ideal-membership identities over $\Z$, so non-canonical
+integer representatives ($x = x' + kp$ for any $k$) satisfy
+the constraints exactly when their canonical reductions do — the
+prover gains no leverage from picking non-canonical representatives;
+\emph{(ii)}~the integer cell width ($320$ bits, well above the
+$256$-bit ambient of $p_\secp$) suffices for every intermediate
+quantity that appears inside the doubling/addition formulas after
+$\bmod\,p$ reduction. The principal consequence is that the ECDSA
+UAIR carries \emph{no} lookup PIOP and \emph{no} $\bitpoly{32}$
+columns: arithmetic via $(p)$-ideal-discharge is direct.
 \end{remark}
 
 \begin{remark}[Inlined intermediates]\label{rem:inlined}

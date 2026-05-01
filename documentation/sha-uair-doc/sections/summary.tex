@@ -27,7 +27,7 @@ Total public-input columns        & $\mathbf{18}$ \quad ($9$ binary-poly $+\ 9$ 
 \midrule
 Constraint families (excluding lookups) & $12$ \quad (C\ref{con:c1}, C\ref{con:c2}, C\ref{con:c4}, C\ref{con:c6}, C\ref{con:c7}--C\ref{con:c9}, \\
                                   & \phantom{$12$ \quad } C\ref{con:c10}, C\ref{con:c11}, C\ref{con:ff-a}, C\ref{con:ff-e}, C\ref{con:msg-init}, C\ref{con:mu-zero}) \\
-Verifier-side public-column structural checks & \Cref{cons:public-checks}: bitpoly\{32\}, compensator-zero, corrector-zero, etc. \\
+Verifier-side public-column structural checks & \Cref{cons:public-checks}: bitpoly\{32\}, compensator-zero, compensator-zero, etc. \\
 Virtual binary-polynomial residuals & $3$ \quad ($r_{\mathrm{ch}_1},\,r_{\mathrm{ch}_2},\,r_{\mathrm{maj}}$) \\
 Affine-combination lookups        & $3$ families ($\Ch_{ef}$, $\Ch_{\neg e,g}$, $\Maj$) \\
 \midrule
@@ -75,7 +75,7 @@ public-column structural property by direct row-wise inspection
 (\Cref{cons:public-checks}): bitpoly\{32\}-membership for every
 public binary-poly column, zero-on-active-rows for the five
 compensators $\col{PA\_C\_*}$, zero-on-inner-rows plus boundary
-closed form for the two tail correctors $\col{PA\_R\_*\_CORR}$,
+closed form for the two tail compensators $\col{PA\_R\_*\_COMP}$,
 and the $\{0,1\}$ / round-constant / message structure of the
 remaining public columns. This costs no algebraic constraint, no
 selector column, and no additional commitment; the marginal cost is
@@ -87,9 +87,9 @@ functions of other public data and could be supplied by the verifier
 through shadow-running the SHA computation:
 $\col{PA\_OV\_SIG0/SIG1/LSIG0/LSIG1}$ are determined by
 $\col{PA\_A}, \col{PA\_E}$ and the rotation arithmetic; the tail
-correctors $\col{PA\_R\_CH2\_CORR}$ and $\col{PA\_R\_MAJ\_CORR}$ are
+compensators $\col{PA\_R\_CH2\_COMP}$ and $\col{PA\_R\_MAJ\_COMP}$ are
 determined by the last two rows of $\col{PA\_A}$ and $\col{PA\_E}$
-through \eqref{eq:correctors}. The arithmetization treats them as
+through \eqref{eq:compensators}. The arithmetization treats them as
 public input rather than recomputed in-circuit; the verifier
 enforces the algebraic constraints, while the public values are
 computed offline by either the prover or a precompute step.

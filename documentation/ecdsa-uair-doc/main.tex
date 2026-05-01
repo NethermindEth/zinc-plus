@@ -23,10 +23,18 @@ curve, as deployed in the Zinc+ reference implementation. We follow
 the conventions and notation of the main Zinc+ paper, and focus on
 the design choices made by the implementation: namely,
 \emph{(i)}~native arithmetization in the $\F_p$ branch (no $\F_2[X]$
-or bit-polynomial columns); \emph{(ii)}~Shamir's trick to merge the
-two scalar multiplications into a single $256$-row double-and-add
-loop; \emph{(iii)}~Jacobian coordinates throughout the loop, with the
-field inversion required for the affine readout deferred off-protocol;
+or bit-polynomial columns), where every cell is \emph{stored} as a
+$320$-bit integer (\texttt{Int<5>}) carrying the canonical
+representative of an $\F_p$ value, and constraints are checked as
+$(p)$-ideal-membership identities over $\Z$ — the proving field $F$
+is a separate small random prime field, not $\F_p$ itself
+(\Cref{sec:cols});
+\emph{(ii)}~Shamir's trick to merge the two scalar multiplications
+into a single $256$-row double-and-add loop;
+\emph{(iii)}~Jacobian coordinates throughout the loop, with the
+field inversion required for the affine readout deferred off-protocol
+and, in the deployed UAIR, \emph{no in-circuit binding of
+$R_x \equiv r \pmod n$} (\Cref{rem:final-readout});
 \emph{(iv)}~per-row addend coordinates supplied by the verifier
 (rather than committed and bound in-circuit), reducing the witness to
 $8$ field-element columns and the constraint count to $11$.

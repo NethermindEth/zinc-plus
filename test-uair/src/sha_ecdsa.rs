@@ -97,8 +97,8 @@ pub use crate::ecdsa::FINAL_ROW;
 pub mod cols {
     // ===== binary_poly (mirrors sha256.rs: 8 pub + 10 witness) =====
     // OV cols are public — overflow witnesses for the rotation-ideal
-    // constraints (C1, C2, C4, C6) are verifier-derivable. PA_R_*_CORR
-    // are public boundary correctors for the Ch (63) / Maj (64) virtual
+    // constraints (C1, C2, C4, C6) are verifier-derivable. PA_R_*_COMP
+    // are public boundary compensators for the Ch (63) / Maj (64) virtual
     // binary_poly residuals (see sha256.rs doc).
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
@@ -106,8 +106,8 @@ pub mod cols {
     pub const PA_OV_SIG1: usize = 3;
     pub const PA_OV_LSIG0: usize = 4;
     pub const PA_OV_LSIG1: usize = 5;
-    pub const PA_R_CH2_CORR: usize = 6;
-    pub const PA_R_MAJ_CORR: usize = 7;
+    pub const PA_R_CH2_COMP: usize = 6;
+    pub const PA_R_MAJ_COMP: usize = 7;
     // Public message-block words (Table 9 row 77). See sha256.rs cols
     // doc for the layout.
     pub const PA_M: usize = 8;
@@ -353,7 +353,7 @@ where
                     (
                         2,
                         VirtualBinaryPolySource::PublicCol {
-                            public_col_idx: cols::PA_R_CH2_CORR,
+                            public_col_idx: cols::PA_R_CH2_COMP,
                         },
                     ),
                 ],
@@ -387,7 +387,7 @@ where
                     (
                         -2,
                         VirtualBinaryPolySource::PublicCol {
-                            public_col_idx: cols::PA_R_MAJ_CORR,
+                            public_col_idx: cols::PA_R_MAJ_COMP,
                         },
                     ),
                 ],
@@ -770,10 +770,10 @@ where
     }
 
     /// Verify the SHA-side public-column structural properties
-    /// (compensator-zero on active rows, tail-corrector-zero on
+    /// (compensator-zero on active rows, tail-compensator-zero on
     /// inner rows). Mirrors `Sha256CompressionSliceUair::verify_public_structure`
     /// with merged-layout column indices. The ECDSA half has no
-    /// compensator/corrector pattern that needs verifier-side
+    /// compensator pattern that needs verifier-side
     /// inspection.
     fn verify_public_structure<RT, IntT, const D: usize>(
         public_trace: &UairTrace<'_, RT, IntT, D>,
@@ -792,8 +792,8 @@ where
         let pa_c_c9 = &public_trace.int[cols::SHA_PA_C_C9].evaluations;
         let pa_c_ff_a = &public_trace.int[cols::SHA_PA_C_FF_A].evaluations;
         let pa_c_ff_e = &public_trace.int[cols::SHA_PA_C_FF_E].evaluations;
-        let pa_r_ch2_corr = &public_trace.binary_poly[cols::PA_R_CH2_CORR].evaluations;
-        let pa_r_maj_corr = &public_trace.binary_poly[cols::PA_R_MAJ_CORR].evaluations;
+        let pa_r_ch2_comp = &public_trace.binary_poly[cols::PA_R_CH2_COMP].evaluations;
+        let pa_r_maj_comp = &public_trace.binary_poly[cols::PA_R_MAJ_COMP].evaluations;
 
         for i in 0..sha256::cols::NUM_COMPRESSIONS {
             let start = i * sha256::cols::ROWS_PER_COMP;
@@ -844,15 +844,15 @@ where
 
         let inner_end = n.saturating_sub(2);
         for k in 0..inner_end {
-            if !pa_r_ch2_corr[k].iter().all(|c| !c.into_inner()) {
+            if !pa_r_ch2_comp[k].iter().all(|c| !c.into_inner()) {
                 return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                    column: "PA_R_CH2_CORR",
+                    column: "PA_R_CH2_COMP",
                     row: k,
                 });
             }
-            if !pa_r_maj_corr[k].iter().all(|c| !c.into_inner()) {
+            if !pa_r_maj_comp[k].iter().all(|c| !c.into_inner()) {
                 return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                    column: "PA_R_MAJ_CORR",
+                    column: "PA_R_MAJ_COMP",
                     row: k,
                 });
             }
