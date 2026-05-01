@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 > [!WARNING]
-> This project hasn't undergone an audit. It is intended for research and educational purposes only. The code is provided "AS IS" basis without any representation or warranty.
+> This project hasn't undergone an audit. It is intended for research and educational purposes only. The code is provided "AS IS" without any representation or warranty.
 
 Zinc+ is a performance-oriented SNARK framework designed to handle computations across multiple mathematical domains without the "witness inflation" overhead typical of traditional arithmetization.  
 
