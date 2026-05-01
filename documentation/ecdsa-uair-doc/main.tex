@@ -19,32 +19,26 @@
 \begin{abstract}
 We describe the Universal AIR with lookups (UAIR$^+$) instance that
 arithmetizes ECDSA signature verification on the $\secp$ elliptic
-curve, as deployed in the Zinc+ reference implementation. We follow
-the conventions and notation of the main Zinc+ paper, and focus on
-the design choices made by the implementation: namely,
-\emph{(i)}~native arithmetization in the $\F_p$ branch (no $\F_2[X]$
-or bit-polynomial columns), where every cell is \emph{stored} as a
-$320$-bit integer (\texttt{Int<5>}) carrying the canonical
-representative of an $\F_p$ value, and constraints are checked as
-$(p)$-ideal-membership identities over $\Z$ — the proving field $F$
-is a separate small random prime field, not $\F_p$ itself
-(\Cref{sec:cols});
+curve, as deployed in the Zinc+ reference implementation. We focus
+on the design choices made by the implementation:
+\emph{(i)}~native arithmetization in the $\F_p$ branch with $p$ the
+$\secp$ base prime (no $\F_2[X]$ or bit-polynomial columns; cells
+are stored as $320$-bit integer columns carrying canonical
+representatives of $\F_p$ elements);
 \emph{(ii)}~Shamir's trick to merge the two scalar multiplications
 into a single $256$-row double-and-add loop;
-\emph{(iii)}~Jacobian coordinates throughout the loop, with the
-field inversion required for the affine readout deferred off-protocol
-and, in the deployed UAIR, \emph{no in-circuit binding of
-$R_x \equiv r \pmod n$} (\Cref{rem:final-readout});
-\emph{(iv)}~the per-row affine addend $T \in \{\OOO, G, Q, G+Q\}$ is
-selected \emph{in-circuit} from the public bit pair $(b_1, b_2)$ via
-the linear formula $T = b_1 G + b_2 Q + b_1 b_2 ((G+Q) - G - Q)$,
-inlined directly inside the addition-scratch constraints C-A1, C-A2;
-no separate $T_x, T_y$ witness columns are committed. Q and $G+Q$
-enter as public columns, $G$ as a UAIR scalar; the bit pair as two
-public columns (\Cref{rem:addend-cost}). The witness is $8$ field
-columns and the in-circuit constraint count is $11$ — the addend
-selection adds no constraints, only an in-line degree-3 expression
-that lifts the maximum constraint degree from $6$ to $7$.
+\emph{(iii)}~Jacobian coordinates throughout, with the affine
+$x$-readout enforced in-circuit via two $\col{S\_FINAL}$-gated
+constraints over public columns $\col{PA\_Z\_INV}$ and $\col{PA\_R\_X}$
+(\ref{con:f1}, \ref{con:f2}); only the order-field equality
+$R_x \equiv r \pmod n$ is left to the verifier off-protocol
+(\Cref{rem:final-readout});
+\emph{(iv)}~in-circuit addend selection from the public bit pair
+$(b_1, b_2)$ via the linear formula
+$T = b_1 G + b_2 Q + b_1 b_2 ((G + Q) - G - Q)$, inlined in the
+addition-scratch constraints (\Cref{rem:addend-cost}).
+The witness is $8$ field-element columns; the in-circuit constraint
+count is $13$.
 \end{abstract}
 
 \tableofcontents

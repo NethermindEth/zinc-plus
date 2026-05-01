@@ -172,25 +172,31 @@ pub mod cols {
     pub const ECDSA_PA_R_INIT_X: usize = 19;
     pub const ECDSA_PA_R_INIT_Y: usize = 20;
     pub const ECDSA_PA_R_INIT_Z: usize = 21;
-    pub const NUM_INT_PUB: usize = 22;
+    /// Inverse of P_Z[FINAL_ROW] mod p; only the final-row cell matters
+    /// (gated by ECDSA_S_FINAL). See [ecdsa.rs::cols::PA_Z_INV].
+    pub const ECDSA_PA_Z_INV: usize = 22;
+    /// Affine x-coordinate of P[FINAL_ROW]; the verifier is expected to
+    /// check `R_x ≡ r (mod n)` off-protocol against the signature
+    /// scalar r. See [ecdsa.rs::cols::PA_R_X].
+    pub const ECDSA_PA_R_X: usize = 23;
+    pub const NUM_INT_PUB: usize = 24;
 
     // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
     // gone — replaced by W_MU_PACKED (binary_poly index 19), with
     // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (22..30): chained Jacobian state + doubled
-    // point + addition scratch. 8 cols; `S = Y²` and `Z_inv` are
-    // inlined / off-protocol respectively.
-    pub const ECDSA_W_X: usize = 22;
-    pub const ECDSA_W_Y: usize = 23;
-    pub const ECDSA_W_Z: usize = 24;
-    pub const ECDSA_W_X_PA: usize = 25;
-    pub const ECDSA_W_Y_PA: usize = 26;
-    pub const ECDSA_W_Z_PA: usize = 27;
-    pub const ECDSA_W_C: usize = 28;
-    pub const ECDSA_W_D: usize = 29;
+    // ECDSA witnesses (24..32): chained Jacobian state + doubled
+    // point + addition scratch. 8 cols; `S = Y²` is inlined.
+    pub const ECDSA_W_X: usize = 24;
+    pub const ECDSA_W_Y: usize = 25;
+    pub const ECDSA_W_Z: usize = 26;
+    pub const ECDSA_W_X_PA: usize = 27;
+    pub const ECDSA_W_Y_PA: usize = 28;
+    pub const ECDSA_W_Z_PA: usize = 29;
+    pub const ECDSA_W_C: usize = 30;
+    pub const ECDSA_W_D: usize = 31;
 
-    pub const NUM_INT: usize = 30;
+    pub const NUM_INT: usize = 32;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -680,6 +686,8 @@ where
         let e_pa_r_init_x = &int[cols::ECDSA_PA_R_INIT_X];
         let e_pa_r_init_y = &int[cols::ECDSA_PA_R_INIT_Y];
         let e_pa_r_init_z = &int[cols::ECDSA_PA_R_INIT_Z];
+        let e_pa_z_inv = &int[cols::ECDSA_PA_Z_INV];
+        let e_pa_r_x = &int[cols::ECDSA_PA_R_X];
         let e_x = &int[cols::ECDSA_W_X];
         let e_y = &int[cols::ECDSA_W_Y];
         let e_z = &int[cols::ECDSA_W_Z];
@@ -792,12 +800,19 @@ where
         b.assert_zero(e_s_init.clone() * &(e_y.clone() - e_pa_r_init_y));
         b.assert_zero(e_s_init.clone() * &(e_z.clone() - e_pa_r_init_z));
 
-        // No final-row affine conversion in-circuit. Z_inv / X_aff /
-        // Y_aff are reconstructed off-protocol from the opened
-        // Z[FINAL_ROW]. `e_s_final` is no longer used on the ECDSA
-        // side but is kept in the public layout for downstream gluing
-        // UAIRs that compose with this one.
-        let _ = e_s_final;
+        // === Final-row affine readout (2 constraints, gated by S_FINAL) ===
+        // Mirrors [ecdsa.rs::constrain_general]'s F1, F2.  Pins
+        //   F1: P_Z · Z_inv = 1     (so Z_inv = P_Z^{-1} mod p)
+        //   F2: P_X · Z_inv² = R_x  (the affine x-coordinate of P[256]).
+        // The order-field check `R_x ≡ r (mod n)` is left off-protocol —
+        // both R_x and r are public, so the verifier can equate them
+        // directly outside the circuit.
+        let e_f1_lhs = e_s_final.clone() * &(e_z.clone() * e_pa_z_inv);
+        b.assert_zero(e_f1_lhs - e_s_final);
+
+        let e_zinv_sq = e_pa_z_inv.clone() * e_pa_z_inv;
+        let e_f2_inner = e_x.clone() * &e_zinv_sq - e_pa_r_x;
+        b.assert_zero(e_s_final.clone() * &e_f2_inner);
     }
 
     /// Verify the SHA-side public-column structural properties
@@ -962,20 +977,22 @@ where
 
         // Int section: merge per the layout in `cols`.
         // SHA standalone int layout (9 cols, all public).
-        // ECDSA standalone int layout (21 cols after in-circuit addend):
-        //   0..13  pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
-        //                PA_QX, PA_QY, PA_QGX, PA_QGY, PA_R_INIT_X/Y/Z)
-        //   13..21 witnesses (8 EC cols)
+        // ECDSA standalone int layout (23 cols after in-circuit addend
+        // and final-row affine readout):
+        //   0..15   pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
+        //                 PA_QX, PA_QY, PA_QGX, PA_QGY,
+        //                 PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X)
+        //   15..23  witnesses (8 EC cols)
         let mut int: Vec<DenseMultilinearExtension<R>> = Vec::with_capacity(cols::NUM_INT);
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
 
         // [0..9] SHA pubs (sha[0..9])
         int.extend(sha_ints[0..9].iter().cloned());
-        // [9..22] ECDSA pubs (ecdsa[0..13])
-        int.extend(ecdsa_ints[0..13].iter().cloned());
-        // [22..30] ECDSA witnesses (ecdsa[13..21], 8 cols)
-        int.extend(ecdsa_ints[13..21].iter().cloned());
+        // [9..24] ECDSA pubs (ecdsa[0..15])
+        int.extend(ecdsa_ints[0..15].iter().cloned());
+        // [24..32] ECDSA witnesses (ecdsa[15..23], 8 cols)
+        int.extend(ecdsa_ints[15..23].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -1000,16 +1017,18 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 13 SHA + 11 ECDSA = 24 constraints. The 5 SHA
-    /// compensator-zero pins (formerly C17–C21) moved to verifier-side
-    /// `verify_public_structure`, dropping the in-circuit count from
-    /// 29 to 24. Max degree 7 from the ECDSA C-A2 constraint after the
-    /// in-circuit affine addend went live (T_y is degree 3 in trace
-    /// cells; multiplied by Z_pa^3 (deg 3) and S_ACTIVE (deg 1)).
+    /// Sanity: 13 SHA + 13 ECDSA = 26 constraints. ECDSA contributes
+    /// the 11 doubling/addition/output/init constraints plus 2 final-row
+    /// affine-readout constraints (F1, F2). The 5 SHA compensator-zero
+    /// pins (formerly C17–C21) moved to verifier-side
+    /// `verify_public_structure`. Max degree 7 from the ECDSA C-A2
+    /// constraint after the in-circuit affine addend went live
+    /// (T_y is degree 3 in trace cells; multiplied by Z_pa^3 (deg 3)
+    /// and S_ACTIVE (deg 1)).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 24);
+        assert_eq!(count_constraints::<U>(), 26);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-7 (ECDSA C-A2 with in-circuit T_y),

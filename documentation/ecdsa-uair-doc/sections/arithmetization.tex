@@ -198,70 +198,40 @@ $$
 This is enforced by three zero-ideal constraints gated by
 $\col{S\_INIT}$ (see \Cref{con:init-x}--\Cref{con:init-z}).
 
-\paragraph{Final state and off-protocol affine readout.}
+\paragraph{Final-row affine readout (in-circuit).}
 At the final row $t = \mathrm{FINAL\_ROW} := \mathrm{NUM\_SHAMIR\_ROUNDS} = 256$,
 the witness Jacobian state $\jac{P}[256]$ holds the result
 $R = u_1 G + u_2 Q$ (modulo the $R_{\mathrm{init}}$ offset of
-\Cref{rem:r-init}). In the deployed UAIR, the affine $x$-coordinate
-$R_x = P_X[256] \cdot P_Z[256]^{-2} \bmod p$ is \emph{not} extracted
-in-circuit, and the signature-defining identity
-$R_x \equiv r \pmod n$ is \emph{not} enforced. The intent is that
-the verifier opens the three witness cells at row $256$, performs a
-single field inversion, and checks the conditions off-protocol; the
-selector column $\col{S\_FINAL}$ is retained in the layout for a
-downstream UAIR that wants to add the missing final-row constraints.
+\Cref{rem:r-init}). The deployed UAIR extracts the affine
+$x$-coordinate of $R$ in-circuit using two public columns and two
+$\col{S\_FINAL}$-gated $(p)$-ideal constraints:
+\begin{align}
+\col{S\_FINAL}[t] \cdot \bigl(P_Z[t] \cdot \col{PA\_Z\_INV}[t] - 1\bigr) &\in (p), \tag{F1}\label{con:f1}\\
+\col{S\_FINAL}[t] \cdot \bigl(P_X[t] \cdot \col{PA\_Z\_INV}[t]^2 - \col{PA\_R\_X}[t]\bigr) &\in (p). \tag{F2}\label{con:f2}
+\end{align}
+Constraint \ref{con:f1} forces $P_Z[256] \neq 0$ (otherwise the equation
+is unsatisfiable, ruling out the point at infinity) and pins
+$\col{PA\_Z\_INV}[256]$ to the multiplicative inverse of $P_Z[256]$
+modulo $p$. Constraint \ref{con:f2} then pins $\col{PA\_R\_X}[256]$
+to the affine $x$-coordinate $P_X[256] \cdot \col{PA\_Z\_INV}[256]^2$.
+Both columns are public; their cells at rows $t \neq 256$ are
+unconstrained (the gating selector zeroes the constraint there) and
+are populated with $0$ by the trace builder.
 
-\begin{remark}[The final affine-readout constraint is missing]\label{rem:final-readout}
-The above design is, strictly speaking, \emph{incomplete} as an
-arithmetization of ECDSA verification: a sound ECDSA proof must
-bind the in-circuit Jacobian computation to the signature scalar
-$r$ via $R_x \equiv r \pmod n$. The deployed UAIR proves only that
-the witness Jacobian state at row $256$ is \emph{some} point of
-the form $u_1 G + u_2 Q$ (with $u_1, u_2$ supplied as public
-input); it does \emph{not} prove that the affine $x$-coordinate of
-that point matches the signature's $r$. A complete UAIR therefore
-needs:
-\begin{itemize}[leftmargin=2em]
-  \item One witness column $Z_{\mathrm{inv}}$ (or a single cell
-    pinned at row $256$) carrying $P_Z[256]^{-1} \bmod p$, plus the
-    in-circuit non-infinity check
-    \[
-      S_{\mathrm{FINAL}} \cdot \bigl(P_Z[256] \cdot Z_{\mathrm{inv}}[256] - 1\bigr) \in (p).
-    \]
-  \item One witness column $R_x$ (or a final-row cell) plus the
-    affine-derivation constraint
-    \[
-      S_{\mathrm{FINAL}} \cdot \bigl(P_X[256] \cdot Z_{\mathrm{inv}}[256]^2 - R_x[256]\bigr) \in (p).
-    \]
-  \item A constraint binding $R_x \equiv r \pmod n$, where $r$
-    enters as a public column. This step takes place in the order
-    field $\F_n$, which is distinct from the base field $\F_p$ used
-    everywhere else, so it requires either:
-    \begin{itemize}
-      \item adding $n$ to the index $\mathbf{q}$, i.e.\
-        $\mathbf{q} = (p, n)$, with the matching $(n)$-ideal
-        constraint $S_{\mathrm{FINAL}} \cdot (R_x[256] - r) \in (n)$;
-        \emph{or}
-      \item proving $R_x[256] \in [0, n)$ via a range argument and
-        then checking equality directly. Because $p_\secp$ and
-        $n_\secp$ are extremely close (they differ in the bottom
-        bits only), the typical $R_x$ value lies in $[0, n)$ already
-        and the range-check has effective probability $\approx 1$.
-    \end{itemize}
-\end{itemize}
-The first route adds one $\F_n$-branch column plus one $(n)$-ideal
-constraint. The second route adds one bit-decomposition of $R_x$
-plus a sub-$n$ comparison.
-
-The deployed UAIR omits these for two reasons: \emph{(i)}~the
-implementation is targeted at composition (the $\col{S\_FINAL}$
-selector is reserved precisely so a downstream UAIR can attach the
-final-row constraints without disturbing the present layout), and
-\emph{(ii)}~adding the $\F_n$ branch turns the index from a
-single-prime $\mathbf{q} = (p)$ into the multi-prime
-$\mathbf{q} = (p, n)$, which exercises code paths beyond the scope
-of this report. The final-row affine readout is therefore left
-out-of-band; this report should be read as describing the
-\emph{Jacobian-loop sub-arithmetization} of ECDSA, not a complete
-end-to-end ECDSA verification UAIR.
+\begin{remark}[The order-field check is left off-protocol]\label{rem:final-readout}
+The signature-defining identity $R_x \equiv r \pmod n$ — where $n$ is
+the curve order, distinct from the base prime $p$ — is \emph{not}
+enforced in-circuit. Because both $\col{PA\_R\_X}$ and $r$ are
+public ($\col{PA\_R\_X}$ is part of \texttt{public\_trace}, $r$ is
+part of the verifier's input alongside the message and signature),
+the verifier checks the equality directly off-protocol as a single
+$\F_n$-arithmetic comparison after \texttt{verify} returns; no
+in-circuit constraint or extra column is required for this step.
+The alternative would be to add $n$ to the index, turning
+$\mathbf{q} = (p)$ into $\mathbf{q} = (p, n)$, with an $(n)$-ideal
+constraint $\col{S\_FINAL} \cdot (\col{PA\_R\_X}[t] - r[t]) \in (n)$.
+The current single-prime design avoids the multi-prime branch and
+relies on the fact that the order-field check is a public-public
+equality, which the protocol layer above the UAIR can discharge
+directly.
 \end{remark}

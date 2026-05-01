@@ -54,14 +54,19 @@ and the next-row chaining into one operation
 (\Cref{rem:no-add-witness}). This removes three committed columns
 that an explicit \emph{compute $P_{\mathrm{add}}$, then gate} approach
 would need.
-\item \textbf{Off-protocol affine readout.}\
-The final-row Jacobian-to-affine conversion is performed by the
-verifier off-protocol (\Cref{sec:boundary}). This removes the
-$Z_{\mathrm{inv}}$ column and the affine output cells $(R_x, R_y)$,
-saving up to three committed columns, and also removes the
-non-infinity check $P_Z[256] \cdot Z_{\mathrm{inv}}[256] = 1$ and the
-$x$-binding $P_X[256] \cdot Z_{\mathrm{inv}}[256]^2 = R_x$ from the
-constraint set.
+\item \textbf{In-circuit affine $x$-readout via public columns.}\
+The final-row Jacobian-to-affine conversion is performed in-circuit
+through two public columns $\col{PA\_Z\_INV}$, $\col{PA\_R\_X}$
+(only their row-$256$ cells matter; the rest are zero) and two
+$\col{S\_FINAL}$-gated $(p)$-ideal constraints
+$P_Z \cdot \col{PA\_Z\_INV} = 1$ (\ref{con:f1}, also serving as the
+non-infinity check) and $P_X \cdot \col{PA\_Z\_INV}^2 = \col{PA\_R\_X}$
+(\ref{con:f2}). Public, not witness, because the entire affine
+readout is verifier-checkable from the loop's input data and the
+verifier ultimately equates $\col{PA\_R\_X}[256]$ to the signature's
+$r$ off-protocol — the order-field equality lives outside the
+$\F_p$-arithmetic UAIR (\Cref{rem:final-readout}). The affine
+$y$-coordinate is not needed by ECDSA verification and is omitted.
 \end{itemize}
 The retained witness columns
 $(P_X, P_Y, P_Z, P_{\mathrm{pa},X}, P_{\mathrm{pa},Y}, P_{\mathrm{pa},Z}, H, R_a)$

@@ -58,7 +58,7 @@
 
 use core::marker::PhantomData;
 
-use crypto_bigint::{NonZero, Uint as CbUint};
+use crypto_bigint::{NonZero, Odd, Uint as CbUint};
 use crypto_primitives::{ConstSemiring, crypto_bigint_int::Int};
 use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
@@ -119,33 +119,45 @@ pub mod cols {
     pub const PA_R_INIT_X: usize = 10;
     pub const PA_R_INIT_Y: usize = 11;
     pub const PA_R_INIT_Z: usize = 12;
-    pub const NUM_INT_PUB: usize = 13;
+    /// Inverse of $P_Z[\mathrm{FINAL\_ROW}]$ in $\F_p$. Only the
+    /// row-$\mathrm{FINAL\_ROW}$ cell is consumed (gated by
+    /// $\col{S\_FINAL}$); all other rows can be zero.
+    pub const PA_Z_INV: usize = 13;
+    /// Affine $x$-coordinate of the loop's final point
+    /// $R = (X[\mathrm{FINAL\_ROW}], Y[\mathrm{FINAL\_ROW}], Z[\mathrm{FINAL\_ROW}])$.
+    /// Only the row-$\mathrm{FINAL\_ROW}$ cell is consumed; the verifier
+    /// is expected to check $R_x \equiv r \pmod n$ off-protocol against
+    /// the signature scalar $r$.
+    pub const PA_R_X: usize = 14;
+    pub const NUM_INT_PUB: usize = 15;
 
     // === Witness columns ===
 
     // Chained Jacobian state. up.X[t] = R_t (input), down.X[t] =
     // R_{t+1} (output, written by the output-selection constraint at
     // row t).
-    pub const W_X: usize = 13;
-    pub const W_Y: usize = 14;
-    pub const W_Z: usize = 15;
+    pub const W_X: usize = 15;
+    pub const W_Y: usize = 16;
+    pub const W_Z: usize = 17;
 
     // Doubled-point columns (X_pa/Y_pa/Z_pa). `S = Y²` is inlined into
     // the doubling constraints — no dedicated column.
-    pub const W_X_PA: usize = 16;
-    pub const W_Y_PA: usize = 17;
-    pub const W_Z_PA: usize = 18;
+    pub const W_X_PA: usize = 18;
+    pub const W_Y_PA: usize = 19;
+    pub const W_Z_PA: usize = 20;
 
     // Addition scratch: C = T_X·Z_pa² − X_pa (= H from the spec)
     // and D = T_Y·Z_pa³ − Y_pa (= R_a from the spec), where
     // (T_X, T_Y) is the per-row affine addend computed in-circuit
     // from (b_1, b_2, Q, G+Q) via the addend selector. Z_pa²,
     // Z_pa³, C², C³, X_pa·C² are inlined. The final-row affine
-    // conversion is fully off-protocol — no `Z_inv` column either.
-    pub const W_C: usize = 19;
-    pub const W_D: usize = 20;
+    // x-readout is now in-circuit via `PA_Z_INV` and `PA_R_X`
+    // (constraints F1/F2); the order-field check
+    // $R_x \equiv r \pmod n$ remains off-protocol.
+    pub const W_C: usize = 21;
+    pub const W_D: usize = 22;
 
-    pub const NUM_INT: usize = 21;
+    pub const NUM_INT: usize = 23;
 
     // Flat indices for shift specs (no bin/poly columns; flat = int).
     pub const FLAT_W_X: usize = W_X;
@@ -206,6 +218,8 @@ where
         let pa_r_init_x = &int[cols::PA_R_INIT_X];
         let pa_r_init_y = &int[cols::PA_R_INIT_Y];
         let pa_r_init_z = &int[cols::PA_R_INIT_Z];
+        let pa_z_inv = &int[cols::PA_Z_INV];
+        let pa_r_x = &int[cols::PA_R_X];
         let x = &int[cols::W_X];
         let y = &int[cols::W_Y];
         let z = &int[cols::W_Z];
@@ -385,13 +399,38 @@ where
         b.assert_zero(s_init.clone() * &(y.clone() - pa_r_init_y));
         b.assert_zero(s_init.clone() * &(z.clone() - pa_r_init_z));
 
-        // No final-row affine conversion is enforced in-circuit. The
-        // verifier (or a downstream gluing UAIR) opens Z[FINAL_ROW] and
-        // computes Z_inv / X_aff / Y_aff off-protocol. `S_FINAL`
-        // remains in the column layout so downstream UAIRs that
-        // compose with this one can still gate boundary constraints
-        // they add.
-        let _ = s_final;
+        // ===================================================================
+        // Final-row affine readout (2 constraints, gated by S_FINAL).
+        //
+        // Pins the loop's final Jacobian point P[FINAL_ROW] to its affine
+        // x-coordinate via two public columns Z_inv and R_x:
+        //
+        //   F1: P_Z · Z_inv − 1 ≡ 0       (non-infinity + Z_inv = P_Z⁻¹)
+        //   F2: P_X · Z_inv²   − R_x ≡ 0  (R_x is the affine x of P)
+        //
+        // Both at the up row, gated by S_FINAL = 1 (only at row
+        // FINAL_ROW). F1 forces P_Z[FINAL_ROW] ≠ 0 (else the equation
+        // can't be satisfied) and pins Z_inv to be its inverse mod p;
+        // F2 then derives R_x from P_X and Z_inv. The order-field check
+        //   R_x ≡ r  (mod n)
+        // is NOT enforced in-circuit — the verifier is expected to check
+        // it off-protocol against the signature scalar r, using the
+        // public column R_x. Since R_x and r are both public, this is a
+        // verifier-side equality check that does not need an in-circuit
+        // ideal constraint.
+        // ===================================================================
+
+        // F1: S_FINAL · (P_Z · Z_inv − 1) ∈ (p)    (deg 3 with s_final)
+        // Encoded as `S_FINAL · P_Z · Z_inv − S_FINAL = 0`, i.e.
+        // factoring out S_FINAL and subtracting it itself in place of
+        // `S_FINAL · 1` (avoids constructing a literal-1 expression).
+        let f1_lhs = s_final.clone() * &(z.clone() * pa_z_inv);
+        b.assert_zero(f1_lhs - s_final);
+
+        // F2: S_FINAL · (P_X · Z_inv² − R_x) ∈ (p)    (deg 4 with s_final)
+        let zinv_sq = pa_z_inv.clone() * pa_z_inv;
+        let f2_inner = x.clone() * &zinv_sq - pa_r_x;
+        b.assert_zero(s_final.clone() * &f2_inner);
 
         // ===================================================================
         // SOUNDNESS OBLIGATION (not yet enforced; deferred to follow-up):
@@ -450,6 +489,11 @@ fn rand_nonzero_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIM
             return candidate;
         }
     }
+}
+
+fn inv_mod_p(a: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
+    let p_odd = Odd::new(SECP256K1_P_UINT).expect("p is odd");
+    a.invert_odd_mod(&p_odd).expect("a has no inverse mod p (a == 0?)")
 }
 
 fn mul_mod_p(
@@ -677,6 +721,8 @@ where
         let mut pa_r_init_x_col: Vec<R> = mk_col();
         let mut pa_r_init_y_col: Vec<R> = mk_col();
         let mut pa_r_init_z_col: Vec<R> = mk_col();
+        let mut pa_z_inv_col: Vec<R> = mk_col();
+        let mut pa_r_x_col: Vec<R> = mk_col();
         let mut x_col: Vec<R> = mk_col();
         let mut y_col: Vec<R> = mk_col();
         let mut z_col: Vec<R> = mk_col();
@@ -706,6 +752,20 @@ where
         pa_r_init_x_col[0] = R::from(uint_to_int(r_init_x));
         pa_r_init_y_col[0] = R::from(uint_to_int(r_init_y));
         pa_r_init_z_col[0] = R::from(uint_to_int(r_init_z));
+
+        // PA_Z_INV / PA_R_X only matter at FINAL_ROW (gated by
+        // S_FINAL): they encode the affine x-readout
+        //   Z_inv := P_Z[FINAL_ROW]^{-1} mod p,
+        //   R_x   := P_X[FINAL_ROW] · Z_inv^2 mod p.
+        // Constraints F1, F2 then pin (P_Z · Z_inv = 1) and
+        // (P_X · Z_inv^2 = R_x) at the final row.
+        let final_z = z_seq[FINAL_ROW].clone();
+        let final_x = x_seq[FINAL_ROW].clone();
+        let z_inv = inv_mod_p(&final_z);
+        let z_inv_sq = mul_mod_p(&z_inv, &z_inv);
+        let r_x = mul_mod_p(&final_x, &z_inv_sq);
+        pa_z_inv_col[FINAL_ROW] = R::from(uint_to_int(z_inv));
+        pa_r_x_col[FINAL_ROW] = R::from(uint_to_int(r_x));
 
         // Chained state: X[t] = R_t.
         for t in 0..n_rows {
@@ -739,6 +799,8 @@ where
             to_mle(pa_r_init_x_col),
             to_mle(pa_r_init_y_col),
             to_mle(pa_r_init_z_col),
+            to_mle(pa_z_inv_col),
+            to_mle(pa_r_x_col),
             to_mle(x_col),
             to_mle(y_col),
             to_mle(z_col),
@@ -770,17 +832,16 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 11 constraints; max degree 7 — `S = Y²` is inlined and
-    /// the F1 affine constraint is dropped (Z_inv handled off-protocol).
-    /// The max degree rose from 6 to 7 versus the verifier-supplied
-    /// addend design: the in-circuit affine addend `T` (formed from
-    /// the bit pair `(b_1, b_2)` and the public columns Q, G+Q) is
-    /// itself degree 3 in trace cells, and C-A2 multiplies it by
-    /// `Z_pa³` (deg 3) and `S_ACTIVE` (deg 1).
+    /// Sanity: 13 constraints; max degree 7 — `S = Y²` is inlined.
+    /// Final-row affine readout is in-circuit via F1 (P_Z · Z_inv = 1)
+    /// and F2 (P_X · Z_inv² = R_x), gated by S_FINAL; the
+    /// `R_x ≡ r (mod n)` order-field check remains off-protocol.
+    /// Max degree 7 from C-A2 (the in-circuit affine addend `T_y` is
+    /// degree 3, multiplied by Z_pa³ deg 3 and S_ACTIVE deg 1).
     #[test]
     fn shamir_constraint_shape() {
         type U = EcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 11);
+        assert_eq!(count_constraints::<U>(), 13);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot-checks: at least one deg-7 (Y addend constraint); 3 init deg-2.

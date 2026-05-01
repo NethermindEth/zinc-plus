@@ -43,12 +43,18 @@ must lie in the principal ideal $(p) \subset \Z$ — discharged by the
 randomized ideal check on a quotient witness derived by Zinc+'s
 projection. The phrase ``arithmetic in $\F_p$'' below is shorthand
 for ``integer arithmetic followed by reduction mod $p$, verified
-through the $(p)$-ideal check''; the $\F_p$ field itself is
-\emph{not} the proving field. The proving field $F$ is a separate
-small random prime field chosen for soundness, projected from the
-integer columns at runtime.
+through the $(p)$-ideal check''.
 
-Tables \ref{tab:pub-cols} and~\ref{tab:wit-cols} list the $13$ public
+\emph{Proving field.} The Zinc+ protocol sumchecks and lifted
+evaluations live in the proving field $F$, which for this UAIR is
+$\F_p$ itself: the deployment uses Zinc+'s \emph{fixed-prime}
+branch, which sets the projecting prime $q := p_\secp$ rather than
+sampling it from the Fiat--Shamir transcript (see
+\texttt{protocol/src/fixed\_prime.rs}). The integer columns are
+reduced mod $p$ at the projection step and all subsequent verifier
+arithmetic is in $\F_p$.
+
+Tables \ref{tab:pub-cols} and~\ref{tab:wit-cols} list the $15$ public
 and $8$ witness columns, respectively. We write
 $P[t]$ for the entry at row $t$ of column $P$ and
 $P^{\downarrow}[t] := P[t+1]$ for shifted access.
@@ -59,7 +65,7 @@ $P^{\downarrow}[t] := P[t+1]$ for shifted access.
 \toprule
 \textbf{Column} & \textbf{Role} & \textbf{Lookup set $\subseteq$ Domain} \\
 \midrule
-\multicolumn{3}{l}{\textit{Public columns ($13$ — entire ECDSA UAIR is public-input--gated)}} \\[1pt]
+\multicolumn{3}{l}{\textit{Public columns ($15$ — entire ECDSA UAIR is public-input--gated)}} \\[1pt]
 $\col{S\_INIT}$        & Selector: $1$ at row $0$, else $0$                                & $\{0, 1\} \subseteq \F_p$ \\
 $\col{S\_ACTIVE}$      & Selector: $1$ for $t \in [0, 256)$, else $0$                       & $\{0, 1\} \subseteq \F_p$ \\
 $\col{S\_FINAL}$       & Selector: $1$ at $\mathrm{FINAL\_ROW} = 256$, else $0$ \quad (retained for composition; unused in-circuit) & $\{0, 1\} \subseteq \F_p$ \\
@@ -73,9 +79,11 @@ $\col{PA\_QGY}$        & Affine $y$-coordinate of $G + Q$                       
 $\col{PA\_R\_INIT\_X}$ & Initial Jacobian $X$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
 $\col{PA\_R\_INIT\_Y}$ & Initial Jacobian $Y$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
 $\col{PA\_R\_INIT\_Z}$ & Initial Jacobian $Z$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
+$\col{PA\_Z\_INV}$     & $P_Z[256]^{-1} \bmod p$ at row $256$ (\Cref{con:f1}; cells at $t \neq 256$ are $0$) & $\F_p$ \\
+$\col{PA\_R\_X}$       & Affine $x$-coordinate of $R$ at row $256$ (\Cref{con:f2}); verifier checks $\col{PA\_R\_X}[256] \equiv r \pmod n$ off-protocol & $\F_p$ \\
 \bottomrule
 \end{tabular}
-\caption{Public columns ($13$ total). All are $\F_p$-typed (i.e.\ \texttt{Int<5>}-stored, see \Cref{sec:cols}); the four selectors plus the bit pair are boolean. The boolean / constant-across-rows structural properties are intended to be discharged by verifier-side direct inspection of \texttt{public\_trace} (see soundness obligation in \Cref{rem:addend-cost}).}
+\caption{Public columns ($15$ total). All are $\F_p$-typed (i.e.\ \texttt{Int<5>}-stored, see \Cref{sec:cols}); the four selectors plus the bit pair are boolean. The boolean / constant-across-rows structural properties are intended to be discharged by verifier-side direct inspection of \texttt{public\_trace} (see soundness obligation in \Cref{rem:addend-cost}).}
 \label{tab:pub-cols}
 \end{table}
 
@@ -208,12 +216,22 @@ seed $R_{\mathrm{init}}$:
 \end{align}
 Algebraic degrees (after gating): all three are deg~$2$.
 
-\paragraph{No final-row constraints.}
-There are no final-row constraints in this UAIR. As discussed in
-\Cref{sec:boundary}, the off-protocol affine readout
-($R_x \neq \OOO$ and $R_x \equiv r \pmod n$) is performed by the
-verifier directly on the witness cells $(P_X[256], P_Y[256], P_Z[256])$,
-without any in-circuit enforcement.
+\paragraph{Final-row affine-readout constraints (anchored at row $\mathrm{FINAL\_ROW} = 256$).}
+
+The two $\col{S\_FINAL}$-gated $(p)$-ideal constraints
+\ref{con:f1}, \ref{con:f2} of \Cref{sec:boundary} pin the
+public columns $\col{PA\_Z\_INV}$ and $\col{PA\_R\_X}$ to the affine
+$x$-readout of the final-row Jacobian state:
+\begin{align}
+\col{S\_FINAL}[t] \cdot \bigl(P_Z[t] \cdot \col{PA\_Z\_INV}[t] - 1\bigr) &\in (p), \tag{F1}\\
+\col{S\_FINAL}[t] \cdot \bigl(P_X[t] \cdot \col{PA\_Z\_INV}[t]^2 - \col{PA\_R\_X}[t]\bigr) &\in (p). \tag{F2}
+\end{align}
+Algebraic degrees (after gating): \ref{con:f1}~deg~$3$
+($\col{S\_FINAL} \cdot P_Z \cdot \col{PA\_Z\_INV}$),
+\ref{con:f2}~deg~$4$ ($\col{S\_FINAL} \cdot P_X \cdot \col{PA\_Z\_INV}^2$).
+The order-field equality $\col{PA\_R\_X}[256] \equiv r \pmod n$ is
+checked off-protocol by the verifier (\Cref{rem:final-readout}); no
+in-circuit constraint is needed for it.
 
 \subsection{Algebraic-degree summary}\label{sec:degree}
 
@@ -232,6 +250,8 @@ without any in-circuit enforcement.
 \ref{con:o2}     & $6$ & $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot R_a \cdot P_{\mathrm{pa},X} \cdot H^2$ \\
 \ref{con:o3}     & $4$ & $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot P_{\mathrm{pa},Z} \cdot H$ \\
 \ref{con:init-x}--\ref{con:init-z} & $2$ & $\col{S\_INIT} \cdot P_{X/Y/Z}$ \\
+\ref{con:f1}     & $3$ & $\col{S\_FINAL} \cdot P_Z \cdot \col{PA\_Z\_INV}$ \\
+\ref{con:f2}     & $4$ & $\col{S\_FINAL} \cdot P_X \cdot \col{PA\_Z\_INV}^2$ \\
 \midrule
 \textbf{Global maximum} & \textbf{$7$} & attained by \ref{con:a2} (in-circuit $T_y$ is degree $3$, multiplied by $P_{\mathrm{pa},Z}^3$ deg $3$ and $\col{S\_ACTIVE}$) \\
 \bottomrule
