@@ -42,11 +42,11 @@ by the verifier off-protocol against the witness final-row state.
 Concretely, the relation is
 \begin{equation}\label{eq:rel-ecdsa}
 \mathrm{REL}_{\textsc{ecdsa-msm}} \;:=\;
-\left\{(\mathbb{i},\mathbb{x};\mathbb{w}) \;\middle|\;
+\left\{(\mathbf{i},\mathbf{x};\mathbf{w}) \;\middle|\;
 \begin{aligned}
-&\mathbb{i} = (G), \\
-&\mathbb{x} = (Q,\;G+Q,\;b_1,\;b_2,\;R_{\mathrm{init}}), \\
-&\mathbb{w} = (R), \\
+&\mathbf{i} = (G), \\
+&\mathbf{x} = (Q,\;G+Q,\;b_1,\;b_2,\;R_{\mathrm{init}}), \\
+&\mathbf{w} = (R), \\
 &Q \in \langle G \rangle,\; b_1, b_2 \in \{0,1\}^{256}, \\
 &R_{\mathrm{init}} \in E(\F_p) \setminus \{\OOO\}, \\
 &R \;=\; R_{\mathrm{init}}^{(2^{256})} \;+\; \sum_{t=1}^{256} 2^{256-t}\bigl(b_1[t] G + b_2[t] Q\bigr).

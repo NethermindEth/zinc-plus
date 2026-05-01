@@ -48,7 +48,7 @@ through the $(p)$-ideal check''; the $\F_p$ field itself is
 small random prime field chosen for soundness, projected from the
 integer columns at runtime.
 
-Tables \ref{tab:pub-cols} and~\ref{tab:wit-cols} list the $9$ public
+Tables \ref{tab:pub-cols} and~\ref{tab:wit-cols} list the $13$ public
 and $8$ witness columns, respectively. We write
 $P[t]$ for the entry at row $t$ of column $P$ and
 $P^{\downarrow}[t] := P[t+1]$ for shifted access.
@@ -59,19 +59,23 @@ $P^{\downarrow}[t] := P[t+1]$ for shifted access.
 \toprule
 \textbf{Column} & \textbf{Role} & \textbf{Lookup set $\subseteq$ Domain} \\
 \midrule
-\multicolumn{3}{l}{\textit{Public columns ($9$ — entire ECDSA UAIR is public-input--gated)}} \\[1pt]
+\multicolumn{3}{l}{\textit{Public columns ($13$ — entire ECDSA UAIR is public-input--gated)}} \\[1pt]
 $\col{S\_INIT}$        & Selector: $1$ at row $0$, else $0$                                & $\{0, 1\} \subseteq \F_p$ \\
 $\col{S\_ACTIVE}$      & Selector: $1$ for $t \in [0, 256)$, else $0$                       & $\{0, 1\} \subseteq \F_p$ \\
 $\col{S\_FINAL}$       & Selector: $1$ at $\mathrm{FINAL\_ROW} = 256$, else $0$ \quad (retained for composition; unused in-circuit) & $\{0, 1\} \subseteq \F_p$ \\
-$\col{S\_ADD}$         & Selector: $1$ iff $(b_1[t], b_2[t]) \neq (0, 0)$, else $0$         & $\{0, 1\} \subseteq \F_p$ \\
-$\col{PA\_X\_ADDEND}$  & Affine $x$-coordinate of the per-row addend $T[t] \in \{G, Q, G+Q\}$ (\Cref{rem:addend}) & $\F_p$ \\
-$\col{PA\_Y\_ADDEND}$  & Affine $y$-coordinate of the per-row addend                        & $\F_p$ \\
+$\col{S\_ADD}$         & $\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$                & $\{0, 1\} \subseteq \F_p$ \\
+$\col{PA\_B1}$         & First scalar bit $b_1[t]$ of the row's Shamir bit pair (\Cref{rem:addend-cost}) & $\{0, 1\} \subseteq \F_p$ \\
+$\col{PA\_B2}$         & Second scalar bit $b_2[t]$ of the row's Shamir bit pair            & $\{0, 1\} \subseteq \F_p$ \\
+$\col{PA\_QX}$         & Affine $x$-coordinate of the public-key point $Q$ (constant across rows) & $\F_p$ \\
+$\col{PA\_QY}$         & Affine $y$-coordinate of $Q$                                       & $\F_p$ \\
+$\col{PA\_QGX}$        & Affine $x$-coordinate of $G + Q$ (constant across rows; verifier-derivable from $Q$) & $\F_p$ \\
+$\col{PA\_QGY}$        & Affine $y$-coordinate of $G + Q$                                   & $\F_p$ \\
 $\col{PA\_R\_INIT\_X}$ & Initial Jacobian $X$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
 $\col{PA\_R\_INIT\_Y}$ & Initial Jacobian $Y$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
 $\col{PA\_R\_INIT\_Z}$ & Initial Jacobian $Z$-coordinate of $R_{\mathrm{init}}$ at row $0$  & $\F_p$ \\
 \bottomrule
 \end{tabular}
-\caption{Public columns ($9$ total). All are $\F_p$-valued; the four selectors are boolean and verifier-derivable from the public bits $b_1, b_2$.}
+\caption{Public columns ($13$ total). All are $\F_p$-typed (i.e.\ \texttt{Int<5>}-stored, see \Cref{sec:cols}); the four selectors plus the bit pair are boolean. The boolean / constant-across-rows structural properties are intended to be discharged by verifier-side direct inspection of \texttt{public\_trace} (see soundness obligation in \Cref{rem:addend-cost}).}
 \label{tab:pub-cols}
 \end{table}
 
@@ -155,12 +159,26 @@ Algebraic degrees in the trace MLEs (after gating): \ref{con:d2}~deg~$3$, \ref{c
 
 \paragraph{Addition-scratch constraints.}
 
-For every $t \in [0, 256)$:
+For every $t \in [0, 256)$, with the in-circuit affine addend
+$T_x, T_y$ from \eqref{eq:addend-formula-expanded} substituted
+inline:
 \begin{align}
-\col{S\_ACTIVE}[t] \cdot \bigl(H[t] \;-\; \col{PA\_X\_ADDEND}[t] \cdot P_{\mathrm{pa},Z}[t]^2 \;+\; P_{\mathrm{pa},X}[t]\bigr) &= 0,\tag{A1}\label{con:a1}\\
-\col{S\_ACTIVE}[t] \cdot \bigl(R_a[t] \;-\; \col{PA\_Y\_ADDEND}[t] \cdot P_{\mathrm{pa},Z}[t]^3 \;+\; P_{\mathrm{pa},Y}[t]\bigr) &= 0.\tag{A2}\label{con:a2}
+\col{S\_ACTIVE}[t] \cdot \bigl(H[t] \;-\; T_x[t] \cdot P_{\mathrm{pa},Z}[t]^2 \;+\; P_{\mathrm{pa},X}[t]\bigr) &= 0,\tag{A1}\label{con:a1}\\
+\col{S\_ACTIVE}[t] \cdot \bigl(R_a[t] \;-\; T_y[t] \cdot P_{\mathrm{pa},Z}[t]^3 \;+\; P_{\mathrm{pa},Y}[t]\bigr) &= 0,\tag{A2}\label{con:a2}
 \end{align}
-Algebraic degrees (after gating): \ref{con:a1}~deg~$4$, \ref{con:a2}~deg~$5$.
+where
+\[
+  T_\square[t] \;=\; b_1[t]\, G_\square \;+\; b_2[t]\, Q_\square[t]
+                  \;+\; b_1[t]\, b_2[t]\,\bigl((G+Q)_\square[t] - G_\square - Q_\square[t]\bigr)
+\]
+for $\square \in \{x, y\}$, with $b_1[t] = \col{PA\_B1}[t]$,
+$b_2[t] = \col{PA\_B2}[t]$, and the column / scalar substitutions
+$Q_x = \col{PA\_QX}, Q_y = \col{PA\_QY}, (G+Q)_x = \col{PA\_QGX},
+(G+Q)_y = \col{PA\_QGY}$, with $G_x, G_y$ as UAIR scalars.
+Algebraic degrees (after gating): $T_\square$ alone is degree $3$
+in trace cells (the $b_1 b_2 \cdot Q_\square$ term reaches three
+columns); together with $P_{\mathrm{pa},Z}^k$ and $\col{S\_ACTIVE}$,
+\ref{con:a1}~deg~$6$, \ref{con:a2}~deg~$7$.
 
 \paragraph{Output-selection-and-chaining constraints.}
 
@@ -208,14 +226,14 @@ without any in-circuit enforcement.
 \ref{con:d2}     & $3$ & $\col{S\_ACTIVE} \cdot P_Y \cdot P_Z$ \\
 \ref{con:d3}     & $5$ & $\col{S\_ACTIVE} \cdot P_X^4$ \\
 \ref{con:d4}     & $6$ & $\col{S\_ACTIVE} \cdot P_X^3 \cdot P_Y^2$ \\
-\ref{con:a1}     & $4$ & $\col{S\_ACTIVE} \cdot \col{PA\_X\_ADDEND} \cdot P_{\mathrm{pa},Z}^2$ \\
-\ref{con:a2}     & $5$ & $\col{S\_ACTIVE} \cdot \col{PA\_Y\_ADDEND} \cdot P_{\mathrm{pa},Z}^3$ \\
+\ref{con:a1}     & $6$ & $\col{S\_ACTIVE} \cdot \col{PA\_B1} \cdot \col{PA\_B2} \cdot \col{PA\_QGX} \cdot P_{\mathrm{pa},Z}^2$ \\
+\ref{con:a2}     & $7$ & $\col{S\_ACTIVE} \cdot \col{PA\_B1} \cdot \col{PA\_B2} \cdot \col{PA\_QGY} \cdot P_{\mathrm{pa},Z}^3$ \\
 \ref{con:o1}     & $5$ & $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot P_{\mathrm{pa},X} \cdot H^2$ \\
 \ref{con:o2}     & $6$ & $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot R_a \cdot P_{\mathrm{pa},X} \cdot H^2$ \\
 \ref{con:o3}     & $4$ & $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot P_{\mathrm{pa},Z} \cdot H$ \\
 \ref{con:init-x}--\ref{con:init-z} & $2$ & $\col{S\_INIT} \cdot P_{X/Y/Z}$ \\
 \midrule
-\textbf{Global maximum} & \textbf{$6$} & attained by \ref{con:d4} and \ref{con:o2} \\
+\textbf{Global maximum} & \textbf{$7$} & attained by \ref{con:a2} (in-circuit $T_y$ is degree $3$, multiplied by $P_{\mathrm{pa},Z}^3$ deg $3$ and $\col{S\_ACTIVE}$) \\
 \bottomrule
 \end{tabular}
 \end{center}

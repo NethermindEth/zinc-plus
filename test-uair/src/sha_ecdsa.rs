@@ -153,38 +153,44 @@ pub mod cols {
     pub const SHA_PA_C_C9: usize = 6;
     pub const SHA_PA_C_FF_A: usize = 7;
     pub const SHA_PA_C_FF_E: usize = 8;
-    // ECDSA publics (9..18)
+    // ECDSA publics (9..22): the addend columns (PA_X_ADDEND, PA_Y_ADDEND
+    // of the verifier-supplied design) are replaced by the bit pair
+    // (PA_B1, PA_B2) plus the `Q` and `G + Q` affine coordinates, so the
+    // affine addend selection happens entirely in-circuit via the linear
+    // formula T = b_1·G + b_2·Q + b_1·b_2·((G+Q) − G − Q). See
+    // [ecdsa.rs] for the standalone version this mirrors.
     pub const ECDSA_S_INIT: usize = 9;
     pub const ECDSA_S_ACTIVE: usize = 10;
     pub const ECDSA_S_FINAL: usize = 11;
     pub const ECDSA_S_ADD: usize = 12;
-    pub const ECDSA_PA_X_ADDEND: usize = 13;
-    pub const ECDSA_PA_Y_ADDEND: usize = 14;
-    pub const ECDSA_PA_R_INIT_X: usize = 15;
-    pub const ECDSA_PA_R_INIT_Y: usize = 16;
-    pub const ECDSA_PA_R_INIT_Z: usize = 17;
-    // SHA_S_B_ACTIVE is gone — the Table 9 materialization constraints
-    // (C13–C15) are dropped, replaced by virtual binary_poly residuals
-    // pinned via the booleanity sumcheck (see sha256.rs doc).
-    pub const NUM_INT_PUB: usize = 18;
+    pub const ECDSA_PA_B1: usize = 13;
+    pub const ECDSA_PA_B2: usize = 14;
+    pub const ECDSA_PA_QX: usize = 15;
+    pub const ECDSA_PA_QY: usize = 16;
+    pub const ECDSA_PA_QGX: usize = 17;
+    pub const ECDSA_PA_QGY: usize = 18;
+    pub const ECDSA_PA_R_INIT_X: usize = 19;
+    pub const ECDSA_PA_R_INIT_Y: usize = 20;
+    pub const ECDSA_PA_R_INIT_Z: usize = 21;
+    pub const NUM_INT_PUB: usize = 22;
 
     // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
     // gone — replaced by W_MU_PACKED (binary_poly index 19), with
     // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (18..26): chained Jacobian state + doubled
+    // ECDSA witnesses (22..30): chained Jacobian state + doubled
     // point + addition scratch. 8 cols; `S = Y²` and `Z_inv` are
     // inlined / off-protocol respectively.
-    pub const ECDSA_W_X: usize = 18;
-    pub const ECDSA_W_Y: usize = 19;
-    pub const ECDSA_W_Z: usize = 20;
-    pub const ECDSA_W_X_PA: usize = 21;
-    pub const ECDSA_W_Y_PA: usize = 22;
-    pub const ECDSA_W_Z_PA: usize = 23;
-    pub const ECDSA_W_C: usize = 24;
-    pub const ECDSA_W_D: usize = 25;
+    pub const ECDSA_W_X: usize = 22;
+    pub const ECDSA_W_Y: usize = 23;
+    pub const ECDSA_W_Z: usize = 24;
+    pub const ECDSA_W_X_PA: usize = 25;
+    pub const ECDSA_W_Y_PA: usize = 26;
+    pub const ECDSA_W_Z_PA: usize = 27;
+    pub const ECDSA_W_C: usize = 28;
+    pub const ECDSA_W_D: usize = 29;
 
-    pub const NUM_INT: usize = 26;
+    pub const NUM_INT: usize = 30;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -665,8 +671,12 @@ where
         let e_s_active = &int[cols::ECDSA_S_ACTIVE];
         let e_s_final = &int[cols::ECDSA_S_FINAL];
         let e_s_add = &int[cols::ECDSA_S_ADD];
-        let e_pa_x_addend = &int[cols::ECDSA_PA_X_ADDEND];
-        let e_pa_y_addend = &int[cols::ECDSA_PA_Y_ADDEND];
+        let e_pa_b1 = &int[cols::ECDSA_PA_B1];
+        let e_pa_b2 = &int[cols::ECDSA_PA_B2];
+        let e_pa_qx = &int[cols::ECDSA_PA_QX];
+        let e_pa_qy = &int[cols::ECDSA_PA_QY];
+        let e_pa_qgx = &int[cols::ECDSA_PA_QGX];
+        let e_pa_qgy = &int[cols::ECDSA_PA_QGY];
         let e_pa_r_init_x = &int[cols::ECDSA_PA_R_INIT_X];
         let e_pa_r_init_y = &int[cols::ECDSA_PA_R_INIT_Y];
         let e_pa_r_init_z = &int[cols::ECDSA_PA_R_INIT_Z];
@@ -713,13 +723,34 @@ where
             e_y_pa.clone() - &twelve_x3_y_sq + &three_x2_xpa + &eight_y_pow4;
         b.assert_zero(e_s_active.clone() * &d4_inner);
 
-        // === Addition scratch (2 constraints; Z_pa², Z_pa³ inlined) ===
+        // === In-circuit affine addend selection ===
+        // T_coord = b_1·G_coord + b_2·Q_coord + b_1·b_2·((G+Q)_coord − G_coord − Q_coord).
+        // Mirrors [ecdsa.rs::constrain_general]; G is a UAIR scalar
+        // (placeholder zero in this synthetic test), Q and G+Q are
+        // public columns.
+        let e_g_x_scalar = const_scalar::<R>(R::from(0_u32));
+        let e_g_y_scalar = const_scalar::<R>(R::from(0_u32));
+        let e_b1b2 = e_pa_b1.clone() * e_pa_b2;
+        let e_make_addend =
+            |q_col: &B::Expr, qg_col: &B::Expr, g_scalar: &Self::Scalar| -> B::Expr {
+                let b1_g = mbs(e_pa_b1, g_scalar).expect("b_1 · G overflow");
+                let b2_q = e_pa_b2.clone() * q_col;
+                let bb_qg = e_b1b2.clone() * qg_col;
+                let bb_g = mbs(&e_b1b2, g_scalar).expect("b_1·b_2·G overflow");
+                let bb_q = e_b1b2.clone() * q_col;
+                b1_g + &b2_q + &bb_qg - &bb_g - &bb_q
+            };
+        let e_t_x = e_make_addend(e_pa_qx, e_pa_qgx, &e_g_x_scalar);
+        let e_t_y = e_make_addend(e_pa_qy, e_pa_qgy, &e_g_y_scalar);
+
+        // === Addition scratch (2 constraints; Z_pa², Z_pa³ inlined;
+        //    addend selection inlined) ===
         let e_z_pa_sq = e_z_pa.clone() * e_z_pa;
-        let a1_inner = e_c.clone() + e_x_pa - &(e_pa_x_addend.clone() * &e_z_pa_sq);
+        let a1_inner = e_c.clone() + e_x_pa - &(e_t_x * &e_z_pa_sq);
         b.assert_zero(e_s_active.clone() * &a1_inner);
 
         let e_z_pa_cube = e_z_pa.clone() * &e_z_pa_sq;
-        let a2_inner = e_d.clone() + e_y_pa - &(e_pa_y_addend.clone() * &e_z_pa_cube);
+        let a2_inner = e_d.clone() + e_y_pa - &(e_t_y * &e_z_pa_cube);
         b.assert_zero(e_s_active.clone() * &a2_inner);
 
         // === Output-selection-and-chaining (3 constraints, with
@@ -930,25 +961,21 @@ where
             sha_trace.binary_poly.into_owned();
 
         // Int section: merge per the layout in `cols`.
-        // SHA standalone int layout (9 cols, all public — the 5 prior
-        // witness int carry columns are gone, packed into W_MU_PACKED;
-        // the 2 prior compensator-zero selector columns are gone,
-        // replaced by direct verifier inspection of public_trace):
-        //   0..9   pubs (S_INIT_PREFIX, S_FEEDFORWARD, S_MSG_INIT, PA_K,
-        //                PA_C_C7/8/9, PA_C_FF_A/E)
-        // ECDSA standalone int layout (17 cols):
-        //   0..9   pubs
-        //   9..17  witnesses (8 EC cols)
+        // SHA standalone int layout (9 cols, all public).
+        // ECDSA standalone int layout (21 cols after in-circuit addend):
+        //   0..13  pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
+        //                PA_QX, PA_QY, PA_QGX, PA_QGY, PA_R_INIT_X/Y/Z)
+        //   13..21 witnesses (8 EC cols)
         let mut int: Vec<DenseMultilinearExtension<R>> = Vec::with_capacity(cols::NUM_INT);
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
 
         // [0..9] SHA pubs (sha[0..9])
         int.extend(sha_ints[0..9].iter().cloned());
-        // [9..18] ECDSA pubs (ecdsa[0..9])
-        int.extend(ecdsa_ints[0..9].iter().cloned());
-        // [18..26] ECDSA witnesses (ecdsa[9..17], 8 cols)
-        int.extend(ecdsa_ints[9..17].iter().cloned());
+        // [9..22] ECDSA pubs (ecdsa[0..13])
+        int.extend(ecdsa_ints[0..13].iter().cloned());
+        // [22..30] ECDSA witnesses (ecdsa[13..21], 8 cols)
+        int.extend(ecdsa_ints[13..21].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -976,18 +1003,19 @@ mod tests {
     /// Sanity: 13 SHA + 11 ECDSA = 24 constraints. The 5 SHA
     /// compensator-zero pins (formerly C17–C21) moved to verifier-side
     /// `verify_public_structure`, dropping the in-circuit count from
-    /// 29 to 24. Max degree 6 from the ECDSA Y output-selection (and
-    /// D4's `12·X³·Y²` term).
+    /// 29 to 24. Max degree 7 from the ECDSA C-A2 constraint after the
+    /// in-circuit affine addend went live (T_y is degree 3 in trace
+    /// cells; multiplied by Z_pa^3 (deg 3) and S_ACTIVE (deg 1)).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
         assert_eq!(count_constraints::<U>(), 24);
-        assert_eq!(count_max_degree::<U>(), 6);
+        assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
-        // Spot checks: at least one deg-6 (ECDSA Y output sel / D4),
+        // Spot checks: at least one deg-7 (ECDSA C-A2 with in-circuit T_y),
         // some deg-2 (boundaries + chaining), some deg-1 (SHA C1, C2,
         // C4, C6 — including the new row-local σ_0/σ_1 equalities).
-        assert!(degrees.iter().any(|&d| d == 6), "expected deg-6 from ECDSA");
+        assert!(degrees.iter().any(|&d| d == 7), "expected deg-7 from ECDSA C-A2");
         assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
     }
 

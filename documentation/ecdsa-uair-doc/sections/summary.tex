@@ -44,8 +44,8 @@ $S = P_Y^2$, $P_Y^4$, $P_{\mathrm{pa},Z}^2$, $P_{\mathrm{pa},Z}^3$,
 $H^2$, $H^3$, and $P_{\mathrm{pa},X} H^2$ are all expanded inside the
 constraint expressions rather than committed
 (\Cref{rem:inlined}). Cost: max constraint degree rises from~$5$
-to~$6$, but the global max is anyway~$6$ (from D4), so the bound is
-unchanged.
+to~$6$ on the addition side (and to~$7$ via the in-circuit affine
+addend, see below).
 \item \textbf{Conditional add via output-selection.}\
 The addition output $P_{\mathrm{add}}$ is not committed; it is inlined
 into the three output-selection constraints
@@ -85,15 +85,19 @@ $\sum_t b_i[t] \cdot 2^{256-t} = u_i$ in $\F_n$
 the bit-decomposition accumulator constraints; the loop reads the
 bits directly via $\col{S\_ADD}$ and the per-row addend.
 
-\item \textbf{Per-row addend coordinates absorbed as public input.}\
-The verifier writes $T[t] = T_{b_1[t]\,b_2[t]} \in \{\OOO, G, Q, G+Q\}$
-into the columns $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$ for each
-row, with $\col{S\_ADD}[t] = \mathbf{1}\{T[t] \neq \OOO\}$
-(\Cref{rem:addend}). This eliminates the four-way selector
-constraints that an in-circuit \emph{compute the addend from the bits}
-approach would need, and keeps the addition-formula constraints at
-their stated degrees rather than pushing them up by the addend
-selector.
+\item \textbf{In-circuit addend selection from public bits.}\
+The deployed UAIR does \emph{not} have the verifier precompute and
+write the chosen addend $T[t] \in \{\OOO, G, Q, G+Q\}$ into a public
+column. Instead, the bit pair $(\col{PA\_B1}, \col{PA\_B2})$ together
+with public columns $(\col{PA\_QX}, \col{PA\_QY})$ for $Q$ and
+$(\col{PA\_QGX}, \col{PA\_QGY})$ for $G + Q$, and a UAIR scalar for
+$G$, are inlined into the addition-scratch constraints
+\ref{con:a1}, \ref{con:a2} via the linear formula
+$T = b_1 G + b_2 Q + b_1 b_2 ((G+Q) - G - Q)$ (\Cref{rem:addend-cost}).
+This keeps the proof self-contained — there is no
+verifier-precomputed table-lookup column — at the cost of $+4$
+public columns relative to the verifier-supplied alternative and a
+constraint-degree elevation $6 \to 7$.
 \end{itemize}
 
 \subsection{Composition with downstream UAIRs}

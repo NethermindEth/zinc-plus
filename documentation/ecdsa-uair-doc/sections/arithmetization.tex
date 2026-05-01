@@ -33,67 +33,86 @@ After $k = 256$ steps, $P = u_1 G + u_2 Q$. The total cost is $k$
 doublings and at most $k$ mixed additions.
 
 In the UAIR, the per-row affine addend
-$T_{b_1[t]\,b_2[t]} \in \{\OOO, G, Q, G+Q\}$ is supplied by the
-verifier in two public columns $\col{PA\_X\_ADDEND}$ and
-$\col{PA\_Y\_ADDEND}$, with a separate boolean public selector
-$\col{S\_ADD}$ flagging whether the addend is non-identity (i.e.\
-$\col{S\_ADD}[t] = 1 \iff (b_1[t], b_2[t]) \neq (0, 0)$). When
-$\col{S\_ADD}[t] = 0$ the addition step at row $t$ collapses to
-$P \leftarrow 2P$.
+$T_{b_1[t]\,b_2[t]} \in \{\OOO, G, Q, G+Q\}$ is selected
+\emph{in-circuit} from the bit pair via the linear formula
+\begin{equation}\label{eq:addend-formula}
+  T \;=\; b_1\,(1 - b_2)\,G \;+\; (1 - b_1)\,b_2\,Q \;+\; b_1 b_2\,(G + Q),
+\end{equation}
+applied coefficient-wise. Equivalently, expanded into the canonical
+``affine + $b_1 b_2$ correction'' form,
+\begin{equation}\label{eq:addend-formula-expanded}
+  T \;=\; b_1 G \;+\; b_2 Q \;+\; b_1 b_2 \bigl((G+Q) - G - Q\bigr).
+\end{equation}
+Five public columns carry the inputs to \eqref{eq:addend-formula-expanded}:
+$(\col{PA\_B1}, \col{PA\_B2})$ for the bit pair $(b_1, b_2)$;
+$(\col{PA\_QX}, \col{PA\_QY})$ for the affine coordinates of the
+public-key point $Q$; and $(\col{PA\_QGX}, \col{PA\_QGY})$ for the
+verifier-derivable affine coordinates of $G + Q$. The generator $G$
+enters as a UAIR scalar (constant across all proofs of this UAIR).
+The boolean $\col{S\_ADD}$ remains a public column with the relation
+$\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$ (i.e.\ the
+non-identity flag); when $\col{S\_ADD}[t] = 0$ the addition step at
+row $t$ collapses to $P \leftarrow 2P$.
 
-\begin{remark}[Verifier-supplied addend]\label{rem:addend}
-$Q$ and $G+Q$ are public (\Cref{rem:public-u}), so the four-point
-precompute $\{\OOO, G, Q, G+Q\}$ is public, and the per-row addend
-choice is determined by the public bits $(b_1[t], b_2[t])$. The
-implementation has the verifier write the chosen affine addend
-directly into $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$ for each
-row, rather than committing four selector polynomials and adding
-in-circuit constraints to compute the addend from the bits. The
-cost is that the verifier must do this $256$-row table lookup
-itself before committing to the public input.
-\end{remark}
+The expression \eqref{eq:addend-formula-expanded} is \emph{inlined}
+directly inside the addition-scratch constraints \eqref{eq:H} and
+\eqref{eq:Ra} of \Cref{sec:add} below — there is no separate
+$T_X$ or $T_Y$ witness column, and no separate ``addend
+selection'' constraint family.
 
-\begin{remark}[Cost of in-circuit addend selection]\label{rem:addend-cost}
-The alternative — having the prover (or the constraints) compute the
-addend from $(b_1[t], b_2[t])$ in-circuit — incurs the following
-cost relative to the deployed design:
+\begin{remark}[Why in-circuit, and what it costs]\label{rem:addend-cost}
+A natural alternative is to have the verifier write the chosen
+affine addend directly into $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$
+for each row, exactly as in a precomputed $256$-row table lookup
+performed off-protocol from the bits. The deployed design
+deliberately rejects that route to keep the proof self-contained —
+i.e., to avoid a hidden ``verifier oracle'' that materialises a
+non-trivial computation step (the $4$-way table lookup driven by
+public bits) outside the in-circuit checks.
+
+The cost of the chosen in-circuit design relative to the
+verifier-supplied alternative:
 \begin{itemize}[leftmargin=2em]
-  \item \textbf{Two extra public selector columns} carrying the
-    bit pair $(b_1, b_2)$ row-wise (each in $\{0,1\}$); each takes
-    one $\F_p$-typed integer column under the
-    storage convention of \Cref{sec:cols}, so $+2$ public columns.
-    These columns must be range-pinned to $\{0,1\}$ —
-    either via two booleanity-style ideal constraints
-    $b_i (b_i - 1) \in (p)$ ($+2$ degree-$2$ constraints) or via a
-    direct verifier inspection of \texttt{public\_trace} (per the
-    SHA UAIR's verifier-side public-column structural-check
-    pattern).
-  \item \textbf{Two new addend-selection constraints,
-    $T_X$ and $T_Y$.} Using
-    $T = (1-b_1)(1-b_2) \OOO + b_1 (1-b_2) G + (1-b_1) b_2 Q + b_1 b_2 (G+Q)$
-    coefficient-wise, each coordinate is a degree-$2$
-    polynomial in $(b_1, b_2)$ with publicly-known $\F_p$ scalars,
-    pinned in $(p)$. With $T_X, T_Y$ then \emph{also} entering the
-    mixed-addition formulas $H = T_X P_{\mathrm{pa},Z}^2 - P_{\mathrm{pa},X}$
-    and $R_a = T_Y P_{\mathrm{pa},Z}^3 - P_{\mathrm{pa},Y}$ as
-    full degree-$2$ expressions in $(b_1, b_2)$, the
-    \emph{effective constraint degree} of \eqref{eq:H},
-    \eqref{eq:Ra} (and hence of every downstream addition
-    constraint that consumes $H, R_a$) rises from $\le 4$ to
-    $\le 6$.
-  \item \textbf{Booleanity for $\col{S\_ADD}$.} The
-    non-identity selector $\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$
-    is also a degree-$2$ public polynomial in the bits.
+  \item \textbf{$+4$ public columns.} The deployed layout drops
+    $\col{PA\_X\_ADDEND}$ and $\col{PA\_Y\_ADDEND}$ ($-2$) and adds
+    $\col{PA\_B1}, \col{PA\_B2}, \col{PA\_QX}, \col{PA\_QY},
+    \col{PA\_QGX}, \col{PA\_QGY}$ ($+6$). The two $Q$- and
+    $(G+Q)$-coordinate pairs are constant across rows of a single
+    proof.
+  \item \textbf{Constraint-degree elevation, $6 \to 7$.} The expression
+    \eqref{eq:addend-formula-expanded} is degree~$3$ in trace cells
+    (the $b_1 b_2 \cdot (G+Q)$ term reaches three columns). Inlined
+    into $H = T_x P_{\mathrm{pa},Z}^2 - P_{\mathrm{pa},X}$ multiplied
+    against $\col{S\_ACTIVE}$, the C-A1 constraint reaches degree~$6$
+    (was~$4$); the C-A2 constraint with $Z_{\mathrm{pa}}^3$ reaches
+    degree~$7$ (was~$5$). The previous design's max constraint
+    degree was~$6$ from O2 (the Y output-selection); the deployed
+    UAIR's max is~$7$, set by C-A2.
+  \item \textbf{$0$ extra in-circuit constraints.} The selection
+    formula is inlined; no separate ``$T_X = \cdots$'' equation is
+    posted, and no booleanity constraints are emitted.
 \end{itemize}
-The deployed design absorbs all of the above into one
-verifier-side $256$-row table lookup, paying instead two precomputed
-$\F_p$-valued public columns $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$.
-Net savings: $0$ added witness columns (vs.\ $2$); no constraint-degree
-elevation (the deployed UAIR's effective degree stays at the value
-set by the doubling/addition formulas alone); no extra ideal
-constraints. The verifier's added work is $4 \cdot 256 = 1024$
-$\F_p$ multiplications/additions to materialise the addend column —
-trivially below mp\_eval-side costs.
+
+\paragraph{Soundness obligation (verifier-side, not yet enforced).}
+The $\F_p$-typed public columns $\col{PA\_B1}, \col{PA\_B2}$ are
+\emph{not} natively constrained to $\{0,1\}$ by the framework
+(integer columns admit any $320$-bit canonical representative). A
+malicious prover could place arbitrary values in them and compose any
+addend it likes via \eqref{eq:addend-formula-expanded}. The intended
+discharge is the verifier-side \texttt{verify\_public\_structure}
+trait method, following the same row-wise inspection pattern the
+SHA UAIR uses for compensator-zero checks; concretely, the verifier
+must check
+$\col{PA\_B1}[t], \col{PA\_B2}[t] \in \{0, 1\}$ at every active row,
+$\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$, and
+$(\col{PA\_QX}, \col{PA\_QY}, \col{PA\_QGX}, \col{PA\_QGY})$ constant
+across rows of a single proof. The first two checks are not
+expressible under the current
+\texttt{Uair::verify\_public\_structure} bound
+($\mathtt{IntT}: \mathtt{Clone} + \mathtt{num\_traits::Zero}$) — they
+need a $\mathtt{PartialEq} + \mathtt{One}$ widening of the bound.
+The implementation defers this to a follow-up; the synthetic
+end-to-end test populates the bit columns honestly.
 \end{remark}
 
 \subsection{Jacobian doubling}\label{sec:doubling}
@@ -142,7 +161,7 @@ Rather than gating the addition step with a multiplicative selector
 that would inflate the constraint degree, the implementation folds
 the conditional add into the row-chaining itself. Let
 $\col{S\_ADD}[t] \in \{0, 1\}$ be the per-row addition selector
-(\Cref{rem:addend}). The next-row Jacobian state is then defined as
+(\Cref{rem:addend-cost}). The next-row Jacobian state is then defined as
 \begin{align}
 P_{\mathrm{next},X} &= P_{\mathrm{pa},X} + \col{S\_ADD}\bigl(P_{\mathrm{add},X} - P_{\mathrm{pa},X}\bigr), \label{eq:next-x}\\
 P_{\mathrm{next},Y} &= P_{\mathrm{pa},Y} + \col{S\_ADD}\bigl(P_{\mathrm{add},Y} - P_{\mathrm{pa},Y}\bigr), \label{eq:next-y}\\

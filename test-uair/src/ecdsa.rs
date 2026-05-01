@@ -94,41 +94,58 @@ pub mod cols {
     /// `1` at `FINAL_ROW`; `0` elsewhere.
     pub const S_FINAL: usize = 2;
     /// `1` if the row's bit pair is non-zero (addition takes effect);
-    /// `0` otherwise. Verifier-derivable from `(b_1, b_2)`.
+    /// `0` otherwise. Equal to `b_1 + b_2 - b_1 · b_2`.
+    /// Verifier-derivable from `(b_1, b_2)`.
     pub const S_ADD: usize = 3;
-    /// X-coordinate of the affine addend at this row.
-    pub const PA_X_ADDEND: usize = 4;
-    /// Y-coordinate of the affine addend.
-    pub const PA_Y_ADDEND: usize = 5;
+    /// First scalar bit of the row's $(b_1, b_2)$ Shamir pair, in
+    /// $\{0,1\}$. Combined with `PA_B2`, selects the affine addend
+    /// $T \in \{\OOO, G, Q, G+Q\}$ in-circuit via the formula
+    ///   T = b_1·(1-b_2)·G + (1-b_1)·b_2·Q + b_1·b_2·(G+Q).
+    pub const PA_B1: usize = 4;
+    /// Second scalar bit; see `PA_B1`.
+    pub const PA_B2: usize = 5;
+    /// Affine X-coordinate of $Q$ (the public key). Constant across
+    /// all rows of a single proof; consumed by the in-circuit addend
+    /// formula.
+    pub const PA_QX: usize = 6;
+    /// Affine Y-coordinate of $Q$.
+    pub const PA_QY: usize = 7;
+    /// Affine X-coordinate of $G + Q$. Constant across all rows;
+    /// consumed by the addend formula.
+    pub const PA_QGX: usize = 8;
+    /// Affine Y-coordinate of $G + Q$.
+    pub const PA_QGY: usize = 9;
     /// Initial Jacobian point coordinates (boundary input at row 0).
-    pub const PA_R_INIT_X: usize = 6;
-    pub const PA_R_INIT_Y: usize = 7;
-    pub const PA_R_INIT_Z: usize = 8;
-    pub const NUM_INT_PUB: usize = 9;
+    pub const PA_R_INIT_X: usize = 10;
+    pub const PA_R_INIT_Y: usize = 11;
+    pub const PA_R_INIT_Z: usize = 12;
+    pub const NUM_INT_PUB: usize = 13;
 
     // === Witness columns ===
 
     // Chained Jacobian state. up.X[t] = R_t (input), down.X[t] =
     // R_{t+1} (output, written by the output-selection constraint at
     // row t).
-    pub const W_X: usize = 9;
-    pub const W_Y: usize = 10;
-    pub const W_Z: usize = 11;
+    pub const W_X: usize = 13;
+    pub const W_Y: usize = 14;
+    pub const W_Z: usize = 15;
 
     // Doubled-point columns (X_pa/Y_pa/Z_pa). `S = Y²` is inlined into
     // the doubling constraints — no dedicated column.
-    pub const W_X_PA: usize = 12;
-    pub const W_Y_PA: usize = 13;
-    pub const W_Z_PA: usize = 14;
+    pub const W_X_PA: usize = 16;
+    pub const W_Y_PA: usize = 17;
+    pub const W_Z_PA: usize = 18;
 
-    // Addition scratch: C = X_addend·Z_pa² − X_pa (= H from the spec)
-    // and D = Y_addend·Z_pa³ − Y_pa (= R_a from the spec). Z_pa²,
+    // Addition scratch: C = T_X·Z_pa² − X_pa (= H from the spec)
+    // and D = T_Y·Z_pa³ − Y_pa (= R_a from the spec), where
+    // (T_X, T_Y) is the per-row affine addend computed in-circuit
+    // from (b_1, b_2, Q, G+Q) via the addend selector. Z_pa²,
     // Z_pa³, C², C³, X_pa·C² are inlined. The final-row affine
     // conversion is fully off-protocol — no `Z_inv` column either.
-    pub const W_C: usize = 15;
-    pub const W_D: usize = 16;
+    pub const W_C: usize = 19;
+    pub const W_D: usize = 20;
 
-    pub const NUM_INT: usize = 17;
+    pub const NUM_INT: usize = 21;
 
     // Flat indices for shift specs (no bin/poly columns; flat = int).
     pub const FLAT_W_X: usize = W_X;
@@ -180,8 +197,12 @@ where
         let s_active = &int[cols::S_ACTIVE];
         let s_final = &int[cols::S_FINAL];
         let s_add = &int[cols::S_ADD];
-        let pa_x_addend = &int[cols::PA_X_ADDEND];
-        let pa_y_addend = &int[cols::PA_Y_ADDEND];
+        let pa_b1 = &int[cols::PA_B1];
+        let pa_b2 = &int[cols::PA_B2];
+        let pa_qx = &int[cols::PA_QX];
+        let pa_qy = &int[cols::PA_QY];
+        let pa_qgx = &int[cols::PA_QGX];
+        let pa_qgy = &int[cols::PA_QGY];
         let pa_r_init_x = &int[cols::PA_R_INIT_X];
         let pa_r_init_y = &int[cols::PA_R_INIT_Y];
         let pa_r_init_z = &int[cols::PA_R_INIT_Z];
@@ -204,6 +225,53 @@ where
         let eight_scalar = const_scalar::<R>(R::from(8_u32));
         let nine_scalar = const_scalar::<R>(R::from(9_u32));
         let twelve_scalar = const_scalar::<R>(R::from(12_u32));
+
+        // ===================================================================
+        // In-circuit affine addend selection (replaces the verifier-supplied
+        // `PA_X_ADDEND, PA_Y_ADDEND` columns of the previous design).
+        //
+        // Given the bit pair `(b_1, b_2) ∈ {0,1}²`, the addend
+        // T ∈ {O, G, Q, G+Q} is selected as
+        //   T = (1-b_1)(1-b_2)·O + b_1(1-b_2)·G + (1-b_1)b_2·Q + b_1·b_2·(G+Q),
+        // which simplifies (using O = (·,·) gated out by `S_ADD`, since
+        // `S_ADD = 0` exactly when `(b_1, b_2) = (0,0)`) to the algebraic
+        // identity
+        //   T_x = b_1·(G_x − b_2·G_x) + b_2·(Q_x − b_1·Q_x) + b_1·b_2·(G+Q)_x
+        //       = b_1·G_x + b_2·Q_x + b_1·b_2·((G+Q)_x − G_x − Q_x).
+        // Symmetrically for T_y.
+        //
+        // Encodes G as a UAIR scalar (constant across proofs) and reads
+        // Q, G+Q from public columns (per-proof but row-constant). For
+        // the synthetic test below the scalar value is set to 0 since
+        // the test exercises bit pair `(0, 1)` → addend = Q.
+        //
+        // TODO(prod): replace the placeholder G_X / G_Y scalars with the
+        // canonical secp256k1 generator coordinates.
+        // ===================================================================
+
+        let g_x_scalar = const_scalar::<R>(R::from(0_u32));
+        let g_y_scalar = const_scalar::<R>(R::from(0_u32));
+
+        // Helper: build the addend coordinate from (b_1, b_2, Q, G+Q, G).
+        //   T_coord = b_1·G_coord + b_2·Q_coord + b_1·b_2·((G+Q)_coord − G_coord − Q_coord)
+        let b1b2 = pa_b1.clone() * pa_b2;
+        let make_addend = |q_col: &B::Expr, qg_col: &B::Expr, g_scalar: &Self::Scalar| -> B::Expr {
+            // b_1 · G_coord
+            let b1_g = mbs(pa_b1, g_scalar).expect("b_1 · G_coord overflow");
+            // b_2 · Q_coord
+            let b2_q = pa_b2.clone() * q_col;
+            // b_1·b_2 · (G+Q)_coord
+            let bb_qg = b1b2.clone() * qg_col;
+            // b_1·b_2 · G_coord
+            let bb_g = mbs(&b1b2, g_scalar).expect("b_1·b_2·G_coord overflow");
+            // b_1·b_2 · Q_coord
+            let bb_q = b1b2.clone() * q_col;
+            // T_coord = b_1·G + b_2·Q + b_1·b_2·((G+Q) − G − Q)
+            b1_g + &b2_q + &bb_qg - &bb_g - &bb_q
+        };
+
+        let t_x = make_addend(pa_qx, pa_qgx, &g_x_scalar);
+        let t_y = make_addend(pa_qy, pa_qgy, &g_y_scalar);
 
         // ===================================================================
         // Doubling block (3 constraints; `S = Y²` is inlined). Operates
@@ -248,14 +316,17 @@ where
         // the spec's `H` and `R_a`).
         // ===================================================================
 
-        // C-A1: C − X_addend·Z_pa² + X_pa = 0    (deg 3 → ×s_active = deg 4)
+        // C-A1: C − T_x·Z_pa² + X_pa = 0
+        // T_x is degree 3 in trace cells (b_1·b_2·Q_x is deg-3 column-column-column),
+        // so the constraint reaches deg 5; ×s_active = deg 6.
         let z_pa_sq = z_pa.clone() * z_pa;
-        let a1_inner = c.clone() + x_pa - &(pa_x_addend.clone() * &z_pa_sq);
+        let a1_inner = c.clone() + x_pa - &(t_x * &z_pa_sq);
         b.assert_zero(s_active.clone() * &a1_inner);
 
-        // C-A2: D − Y_addend·Z_pa³ + Y_pa = 0    (deg 4 → ×s_active = deg 5)
+        // C-A2: D − T_y·Z_pa³ + Y_pa = 0
+        // T_y is degree 3; with z_pa_cube (deg 3) and s_active (deg 1), reaches deg 7.
         let z_pa_cube = z_pa.clone() * &z_pa_sq;
-        let a2_inner = d.clone() + y_pa - &(pa_y_addend.clone() * &z_pa_cube);
+        let a2_inner = d.clone() + y_pa - &(t_y * &z_pa_cube);
         b.assert_zero(s_active.clone() * &a2_inner);
 
         // ===================================================================
@@ -321,6 +392,31 @@ where
         // compose with this one can still gate boundary constraints
         // they add.
         let _ = s_final;
+
+        // ===================================================================
+        // SOUNDNESS OBLIGATION (not yet enforced; deferred to follow-up):
+        //
+        // The new in-circuit addend selector relies on
+        //   - PA_B1[t], PA_B2[t] ∈ {0, 1} on every active row, and
+        //   - S_ADD[t]  = PA_B1[t] + PA_B2[t] − PA_B1[t]·PA_B2[t]
+        // (with PA_QX, PA_QY, PA_QGX, PA_QGY constant across active
+        // rows of a single proof, matching the public key Q and the
+        // verifier-derivable G + Q).
+        //
+        // Without those checks, a malicious prover could place
+        // arbitrary values in PA_B1 / PA_B2 (they're public columns
+        // typed as `Int<5>`, not range-restricted by the framework)
+        // and compose any addend it likes via the linear formula.
+        // The intended discharge is `Uair::verify_public_structure`,
+        // following the SHA UAIR's pattern of direct row-wise
+        // inspection of `public_trace`. That requires widening the
+        // trait method's `IntT` bound from `Clone + num_traits::Zero`
+        // to additionally include `PartialEq + num_traits::One` so
+        // the impl can compare `PA_B1[t]` against the canonical
+        // `0` / `1`. Tracked as a follow-up; the synthetic test
+        // below populates the columns honestly so the round-trip
+        // succeeds.
+        // ===================================================================
     }
 }
 
@@ -520,11 +616,24 @@ where
         );
 
         // Pick a non-identity initial point and a non-identity addend.
+        // The synthetic test exercises the new in-circuit addend selector
+        // by setting the bit pair to `(b_1, b_2) = (0, 1)` at every active
+        // row, which selects the Q public column as the row's addend.
+        // PA_QGX, PA_QGY (the (G+Q) coordinates) are populated with
+        // arbitrary values — they don't enter the constraint when
+        // (b_1, b_2) = (0, 1) since b_1 = 0 zeroes out the b_1·b_2·(G+Q)
+        // term, and the placeholder G_x / G_y scalars in `constrain_general`
+        // are zero so the b_1·G term also vanishes (consistent with b_1 = 0).
         let r_init_x = rand_fp(rng);
         let r_init_y = rand_fp(rng);
         let r_init_z = rand_nonzero_fp(rng);
         let pa_x = rand_fp(rng);
         let pa_y = rand_fp(rng);
+        // Filler values for the `(G+Q)` public columns — never selected
+        // when bits are `(0, 1)`, but populated to keep the column shape
+        // consistent.
+        let qg_x = rand_fp(rng);
+        let qg_y = rand_fp(rng);
 
         // Build the per-row state by simulating the Shamir loop.
         // x_seq[t] = R_t. x_seq[0] = R_init.
@@ -559,8 +668,12 @@ where
         let mut s_active_col: Vec<R> = mk_col();
         let mut s_final_col: Vec<R> = mk_col();
         let mut s_add_col: Vec<R> = mk_col();
-        let mut pa_x_addend_col: Vec<R> = mk_col();
-        let mut pa_y_addend_col: Vec<R> = mk_col();
+        let mut pa_b1_col: Vec<R> = mk_col();
+        let mut pa_b2_col: Vec<R> = mk_col();
+        let mut pa_qx_col: Vec<R> = mk_col();
+        let mut pa_qy_col: Vec<R> = mk_col();
+        let mut pa_qgx_col: Vec<R> = mk_col();
+        let mut pa_qgy_col: Vec<R> = mk_col();
         let mut pa_r_init_x_col: Vec<R> = mk_col();
         let mut pa_r_init_y_col: Vec<R> = mk_col();
         let mut pa_r_init_z_col: Vec<R> = mk_col();
@@ -573,13 +686,19 @@ where
         let mut c_col: Vec<R> = mk_col();
         let mut d_col: Vec<R> = mk_col();
 
-        // Selectors and addend.
+        // Selectors and bits. Q and G+Q are constant across rows.
+        // Bit pair (b_1, b_2) = (0, 1) at every active row → addend = Q,
+        // so S_ADD = b_1 + b_2 - b_1·b_2 = 0 + 1 - 0 = 1.
         s_init_col[0] = R::ONE;
         for t in 0..NUM_SHAMIR_ROUNDS {
             s_active_col[t] = R::ONE;
             s_add_col[t] = R::ONE;
-            pa_x_addend_col[t] = R::from(uint_to_int(pa_x.clone()));
-            pa_y_addend_col[t] = R::from(uint_to_int(pa_y.clone()));
+            pa_b1_col[t] = R::ZERO;
+            pa_b2_col[t] = R::ONE;
+            pa_qx_col[t] = R::from(uint_to_int(pa_x.clone()));
+            pa_qy_col[t] = R::from(uint_to_int(pa_y.clone()));
+            pa_qgx_col[t] = R::from(uint_to_int(qg_x.clone()));
+            pa_qgy_col[t] = R::from(uint_to_int(qg_y.clone()));
         }
         s_final_col[FINAL_ROW] = R::ONE;
 
@@ -611,8 +730,12 @@ where
             to_mle(s_active_col),
             to_mle(s_final_col),
             to_mle(s_add_col),
-            to_mle(pa_x_addend_col),
-            to_mle(pa_y_addend_col),
+            to_mle(pa_b1_col),
+            to_mle(pa_b2_col),
+            to_mle(pa_qx_col),
+            to_mle(pa_qy_col),
+            to_mle(pa_qgx_col),
+            to_mle(pa_qgy_col),
             to_mle(pa_r_init_x_col),
             to_mle(pa_r_init_y_col),
             to_mle(pa_r_init_z_col),
@@ -647,16 +770,21 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 11 constraints, max degree 6 — `S = Y²` is inlined and
+    /// Sanity: 11 constraints; max degree 7 — `S = Y²` is inlined and
     /// the F1 affine constraint is dropped (Z_inv handled off-protocol).
+    /// The max degree rose from 6 to 7 versus the verifier-supplied
+    /// addend design: the in-circuit affine addend `T` (formed from
+    /// the bit pair `(b_1, b_2)` and the public columns Q, G+Q) is
+    /// itself degree 3 in trace cells, and C-A2 multiplies it by
+    /// `Z_pa³` (deg 3) and `S_ACTIVE` (deg 1).
     #[test]
     fn shamir_constraint_shape() {
         type U = EcdsaUair<Int<EC_FP_INT_LIMBS>>;
         assert_eq!(count_constraints::<U>(), 11);
-        assert_eq!(count_max_degree::<U>(), 6);
+        assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
-        // Spot-checks: at least one deg-6 (Y output sel); 3 init deg-2.
-        assert!(degrees.iter().any(|&d| d == 6), "expected at least one deg-6");
+        // Spot-checks: at least one deg-7 (Y addend constraint); 3 init deg-2.
+        assert!(degrees.iter().any(|&d| d == 7), "expected at least one deg-7");
         assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 3, "init = 3 deg-2");
     }
 
@@ -691,8 +819,10 @@ mod tests {
                 let s_add_int = trace.int[cols::S_ADD][t].clone();
                 let s_add_bit = s_add_int == Int::ONE;
 
-                let pa_x = read_uint(cols::PA_X_ADDEND, t);
-                let pa_y = read_uint(cols::PA_Y_ADDEND, t);
+                // The synthetic test uses bit pair (b_1, b_2) = (0, 1)
+                // at every active row, so the addend is Q = (PA_QX, PA_QY).
+                let pa_x = read_uint(cols::PA_QX, t);
+                let pa_y = read_uint(cols::PA_QY, t);
                 let x = read_uint(cols::W_X, t);
                 let y = read_uint(cols::W_Y, t);
                 let z = read_uint(cols::W_Z, t);

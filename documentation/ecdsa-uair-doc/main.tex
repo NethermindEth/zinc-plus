@@ -35,9 +35,16 @@ into a single $256$-row double-and-add loop;
 field inversion required for the affine readout deferred off-protocol
 and, in the deployed UAIR, \emph{no in-circuit binding of
 $R_x \equiv r \pmod n$} (\Cref{rem:final-readout});
-\emph{(iv)}~per-row addend coordinates supplied by the verifier
-(rather than committed and bound in-circuit), reducing the witness to
-$8$ field-element columns and the constraint count to $11$.
+\emph{(iv)}~the per-row affine addend $T \in \{\OOO, G, Q, G+Q\}$ is
+selected \emph{in-circuit} from the public bit pair $(b_1, b_2)$ via
+the linear formula $T = b_1 G + b_2 Q + b_1 b_2 ((G+Q) - G - Q)$,
+inlined directly inside the addition-scratch constraints C-A1, C-A2;
+no separate $T_x, T_y$ witness columns are committed. Q and $G+Q$
+enter as public columns, $G$ as a UAIR scalar; the bit pair as two
+public columns (\Cref{rem:addend-cost}). The witness is $8$ field
+columns and the in-circuit constraint count is $11$ — the addend
+selection adds no constraints, only an in-line degree-3 expression
+that lifts the maximum constraint degree from $6$ to $7$.
 \end{abstract}
 
 \tableofcontents
