@@ -1,6 +1,9 @@
 # Zinc+
 
-WIP implementation and playground on Nethermind's improvement to Zinc SNARK .
+WIP implementation and playground on Nethermind's improvement to Zinc SNARK.
+
+> [!IMPORTANT]
+> For benchmark results of Sha256 and ECDSA, see [README](https://github.com/NethermindEth/zinc-plus/blob/main-beta/README.md) in [main-beta](https://github.com/NethermindEth/zinc-plus/tree/main-beta) branch.
 
 ## Benchmarks
 
