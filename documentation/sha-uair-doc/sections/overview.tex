@@ -1,0 +1,90 @@
+% ===========================================================================
+\section{SHA-256 overview and target relation}\label{sec:overview}
+% ===========================================================================
+
+We briefly recall SHA-256 to fix notation, then state the relation our
+UAIR$^+$ arithmetizes.
+
+\paragraph{Words and bit operations.}
+A \emph{word} is an integer $x \in [0\mathbin{..}2^{32}-1]$ with bit
+decomposition $x = \sum_{i=0}^{31} x_i\, 2^i$, $x_i \in \{0,1\}$.
+For $x,y,z \in [0\mathbin{..}2^{32}-1]$ and $r \in \{1,\dots,31\}$ the
+operations $\XOR$, $\AND$, $\ROTR^r$, $\SHR^r$ are defined coefficient-wise
+on bits in the standard way; bitwise negation is
+$\NOT x := (2^{32}-1) - x$. We write $\bitpoly{32}$ for the set of
+\emph{bit-polynomials}
+$\bp{x}(X) := \sum_{i=0}^{31} x_i X^i \in \Z[X]$.
+The map $\psi_{2}: \bitpoly{32} \to [0\mathbin{..}2^{32}-1]$ defined by
+$\psi_{2}(\bp{x}) := \bp{x}(2)$ is a bijection, and we write
+$\proj{2}: \Z[X] \to \F_2[X]$ for coefficient-wise reduction modulo~$2$.
+
+\paragraph{SHA-256 auxiliary functions.}
+SHA-256 employs six auxiliary functions; for $x,y,z \in [0\mathbin{..}2^{32}-1]$,
+\begin{align*}
+\Sigma_0(x) &:= \ROTR^{2}(x)\, \XOR\, \ROTR^{13}(x)\, \XOR\, \ROTR^{22}(x), \\
+\Sigma_1(x) &:= \ROTR^{6}(x)\, \XOR\, \ROTR^{11}(x)\, \XOR\, \ROTR^{25}(x), \\
+\Ch(x,y,z) &:= (x \AND y)\, \XOR\, ((\NOT x) \AND z), \\
+\Maj(x,y,z) &:= (x \AND y)\, \XOR\, (x \AND z)\, \XOR\, (y \AND z), \\
+\sigma_0(x) &:= \ROTR^{7}(x)\, \XOR\, \ROTR^{18}(x)\, \XOR\, \SHR^{3}(x), \\
+\sigma_1(x) &:= \ROTR^{17}(x)\, \XOR\, \ROTR^{19}(x)\, \XOR\, \SHR^{10}(x).
+\end{align*}
+
+\paragraph{Compression function.}
+Given a $512$-bit message block $(M_t)_{t \in [16]}$, an initial state
+$(a_1,\dots,h_1) \in [0\mathbin{..}2^{32}-1]^8$, and the
+$64$ public round constants $(K_t)_{t\in[64]}$, SHA-256 first expands
+the message schedule $(W_t)_{t\in[64]}$ via
+\begin{equation}\label{eq:msched}
+W_t \;=\; \begin{cases} M_t & t \in [16], \\
+W_{t-16} + \sigma_0(W_{t-15}) + W_{t-7} + \sigma_1(W_{t-2}) \pmod{2^{32}} & t \in \{17,\dots,64\},
+\end{cases}
+\end{equation}
+and then runs $64$ round updates. At round $t$, the state
+$(a_t,\dots,h_t)$ is updated according to
+\begin{align}
+a_{t+1} &\equiv h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
+                + \Sigma_0(a_t) + \Maj(a_t,b_t,c_t) \pmod{2^{32}}, \label{eq:a-update}\\
+e_{t+1} &\equiv d_t + h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
+                \pmod{2^{32}}, \label{eq:e-update}\\
+(b_{t+1},c_{t+1},d_{t+1},f_{t+1},g_{t+1},h_{t+1}) &= (a_t,b_t,c_t,e_t,f_t,g_t).\notag
+\end{align}
+The compression's output is the feed-forward sum
+$H_{i+1} \equiv H_i + (a_{65},\dots,h_{65}) \pmod{2^{32}}$ component-wise.
+
+\begin{remark}[Shift-register layout]\label{rem:shift-register}
+The registers $b,c,d,f,g,h$ are shifted copies of earlier values
+of $a$ and $e$: $b_{t+1}=a_t$, $c_{t+1}=a_{t-1}$, $d_{t+1}=a_{t-2}$,
+and analogously $f_{t+1}=e_t$, $g_{t+1}=e_{t-1}$, $h_{t+1}=e_{t-2}$.
+This will let us store only the $a$- and $e$-registers in our trace
+and recover the rest via shifted row accesses
+(cf.\ Remark~2.2 of the main paper).
+\end{remark}
+
+\paragraph{Chained compressions.}
+The implementation arithmetizes $N := \mathrm{NUM\_COMPRESSIONS}$
+chained compressions in a single trace. Concretely, given a sequence of
+message blocks $(M^{(i)})_{i \in [0,N)}$ and an initial digest
+$H_0 \in [0\mathbin{..}2^{32}-1]^8$, define
+$H_{i+1}$ as the output of the $i$-th compression on input
+$(H_i, M^{(i)})$ for $i \in [0,N)$. The terminal value $H_N$ is the
+chained digest the relation pins as a public boundary.
+
+\paragraph{Target relation.}
+We arithmetize the chained-compression relation
+\begin{equation}\label{eq:rel-sha}
+\mathrm{REL}_{\textsc{sha}_N} \;:=\;
+\left\{(\mathbb{i},\mathbb{x};\mathbb{w}) \;\middle|\;
+\begin{aligned}
+&\mathbb{i} = (K_t)_{t\in[64]}, \\
+&\mathbb{x} = \bigl(H_0,\;(M^{(i)})_{i \in [0,N)},\;H_N\bigr), \\
+&\mathbb{w} = \bigl((W_t^{(i)})_{i,t},\;(a_t^{(i)},\dots,h_t^{(i)})_{i,t}\bigr), \\
+&\text{each } (W_t^{(i)})_t \text{ satisfies \eqref{eq:msched}}, \\
+&\text{each round update satisfies \eqref{eq:a-update}, \eqref{eq:e-update}}, \\
+&H_{i+1} \equiv H_i + (a_{65}^{(i)},\dots,h_{65}^{(i)}) \pmod{2^{32}} \forall i \in [0,N).
+\end{aligned}\right\}.
+\end{equation}
+
+The remainder of this document constructs a UAIR$^+$ instance
+$(\mathbb{i}_{\text{uair}},\mathbb{x}_{\text{uair}};\mathbb{w}_{\text{uair}})$
+that lies in $\mathrm{REL}_{\textsc{uair}^+}$ if and only if the input
+witness lies in $\mathrm{REL}_{\textsc{sha}_N}$.

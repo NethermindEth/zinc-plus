@@ -1,0 +1,42 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{The ECDSA UAIR$^+$ \\
+       \large As implemented in the Zinc+ reference codebase}
+\author{Alex Abdugafarov \\[2pt] \normalsize Nethermind Research \and Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Albert: AI generated report from our codebase.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe the Universal AIR with lookups (UAIR$^+$) instance that
+arithmetizes ECDSA signature verification on the $\secp$ elliptic
+curve, as deployed in the Zinc+ reference implementation. We follow
+the conventions and notation of the main Zinc+ paper, and focus on
+the design choices made by the implementation: namely,
+\emph{(i)}~native arithmetization in the $\F_p$ branch (no $\F_2[X]$
+or bit-polynomial columns); \emph{(ii)}~Shamir's trick to merge the
+two scalar multiplications into a single $256$-row double-and-add
+loop; \emph{(iii)}~Jacobian coordinates throughout the loop, with the
+field inversion required for the affine readout deferred off-protocol;
+\emph{(iv)}~per-row addend coordinates supplied by the verifier
+(rather than committed and bound in-circuit), reducing the witness to
+$8$ field-element columns and the constraint count to $11$.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/arithmetization}
+\input{sections/uair}
+\input{sections/summary}
+
+\end{document}

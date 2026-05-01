@@ -1,0 +1,57 @@
+\section{Introduction}
+\label{sec:intro}
+
+A common pattern in zk-friendly arithmetizations of bit-oriented
+computations such as SHA-256 is the appearance, inside a single
+constraint, of bit-wise rotations and right-shifts of one of the trace
+columns. Two examples from SHA-256:
+\begin{align*}
+\sigma_0(x) &= \Rot_7(x) \oplus \Rot_{18}(x) \oplus \ShR_3(x), \\
+\sigma_1(x) &= \Rot_{17}(x) \oplus \Rot_{19}(x) \oplus \ShR_{10}(x).
+\end{align*}
+
+\paragraph{The naive arithmetization.} Treat each rotated/shifted
+operand as a fresh trace column $w := \bitop_*(v)$, commit to it
+alongside $v$, and prove $w_i = \bitop(v_i)$ row-wise via additional
+constraints. This costs:
+\begin{itemize}[leftmargin=2em]
+  \item one extra committed column per occurrence of $\bitop$;
+  \item one extra equality constraint per occurrence;
+  \item the corresponding extra opening, MLE evaluation, and proof bytes
+    in every step downstream.
+\end{itemize}
+For SHA-256, where $\sigma_0$ and $\sigma_1$ are evaluated on every
+message-schedule row and contribute six rotation/shift instances per
+compression step, this overhead dominates the per-row witness budget
+and obscures the algebraic structure of the underlying computation.
+
+\paragraph{Our observation.} A binary-polynomial cell is an element of
+$\cellring := \F_2[X]/(X^{32})$. The bit-wise operations
+$\Rot_c$ and $\ShR_c$ act on cells as $\F_2$-linear endomorphisms, and
+they act \emph{only on coefficient positions}: they do not depend on
+the row index. The multilinear extension that lifts a column $v \in
+\cellring^n$ to a polynomial $\mle{v}$ over the row hypercube is
+$\F_2$-linear in the cell values. Because the cell coordinate and the
+row coordinate are independent, $\bitop$ and the MLE-evaluation
+operator commute:
+\[
+  \mle{\bitop_* v}(r) \;=\; \bitop\!\left(\mle{v}(r)\right)
+  \qquad \text{for all } r \in \F_q^{\nu}.
+\]
+
+\paragraph{Implication.} A virtual column $w := \bitop_* v$ does not
+need a commitment, an opening, or a fresh challenge. Its value at the
+final evaluation point of the protocol is determined by the source
+column's lifted opening, which the verifier already receives. The
+prover sends a single field element per occurrence (the value at the
+constraint-aggregation challenge $r^*$) so that the constraint
+polynomial can be evaluated at $r^*$; soundness of that single field
+element is bound to the source column through the existing
+multi-point evaluation argument and the closed-form reconstruction at
+the final point.
+
+The construction is described in
+\Cref{sec:setting,sec:equivariance,sec:construction}, its soundness
+sketched in \Cref{sec:soundness}, its communication cost compared to
+the naive arithmetization in \Cref{sec:cost}, and its $\F_2$-linear
+generalisation in \Cref{sec:generalisation}.

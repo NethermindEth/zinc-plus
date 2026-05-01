@@ -1,0 +1,11 @@
+# LaTeX build artifacts
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+*.synctex.gz
+
+# Compiled output of main.tex (rebuild from source)
+main.pdf

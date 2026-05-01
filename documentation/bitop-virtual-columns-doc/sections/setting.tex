@@ -1,0 +1,73 @@
+\section{Setting and Notation}
+\label{sec:setting}
+
+\paragraph{Field, cell ring, and trace.} Fix a prime $q$ with $q \gg 2^{32}$
+and write $\F_q$ for the field of size $q$. Fix a row count
+$n = 2^{\nu}$. The \emph{cell ring} is
+\[
+  \cellring \;:=\; \F_2[X]\big/(X^{32}),
+\]
+a free $\F_2$-module of rank $32$ and an $\F_2$-algebra. Its
+$\F_q$-lift is
+\[
+  \liftring \;:=\; \cellring \otimes_{\F_2} \F_q \;\cong\;
+  \F_q[X]\big/(X^{32}),
+\]
+again a free $\F_q$-module of rank $32$. A \emph{trace column} is an
+element $v \in \cellring^n$, indexed by row $i \in \{0,1\}^{\nu}$.
+
+\paragraph{Multilinear extension.} For $v \in \cellring^n$, the
+\emph{multilinear extension} of $v$ is the unique polynomial
+$\mle{v} \in \liftring[X_1,\ldots,X_{\nu}]$ that is multilinear in
+$(X_1,\ldots,X_{\nu})$ and agrees with $v$ on $\{0,1\}^{\nu}$:
+\[
+  \mle{v}(r) \;=\; \sum_{i \in \{0,1\}^{\nu}} \eq_i(r) \cdot v_i,
+  \qquad \eq_i(r) := \prod_{k=1}^{\nu} \bigl(i_k r_k + (1-i_k)(1-r_k)\bigr).
+\]
+The coefficients $\eq_i(r) \in \F_q$ depend only on $r$ and the row
+index $i$; the cell value $v_i \in \cellring$ is $\F_2$-embedded in
+$\liftring$. We use the same notation $\mle{v}(r)$ for the value at a
+challenge $r \in \F_q^{\nu}$, which is an element of $\liftring$.
+
+\paragraph{$\psia$-projection.} Fix a transcript-bound element
+$\alpha \in \F_q$. Define the $\F_q$-linear projection
+\[
+  \psia : \liftring \;\longrightarrow\; \F_q,
+  \qquad
+  \psia\!\Big(\textstyle\sum_{j=0}^{31} c_j X^j\Big) \;=\; \sum_{j=0}^{31} c_j \alpha^j.
+\]
+Composed with $\F_2 \hookrightarrow \F_q$, it descends to a map
+$\cellring \to \F_q$ which we still denote $\psia$. The PIOP commits
+the multilinear extension of $\psia(v)$, not of $v$ itself.
+
+\paragraph{Lifted evaluation.} For $v \in \cellring^n$ and
+$r \in \F_q^{\nu}$, define the \emph{lifted evaluation}
+\[
+  \lmle{v}(r) \;:=\; \mle{v}(r) \;\in\; \liftring.
+\]
+At the end of the PIOP, the prover opens $\lmle{v}(r_0)$ for each base
+column $v$ at a final point $r_0 \in \F_q^{\nu}$, providing all $32$
+$\F_q$-coefficients of the lifted evaluation. The verifier checks that
+$\psia(\lmle{v}(r_0))$ equals the value committed by the multi-point
+evaluation argument.
+
+\paragraph{Constraints and trace rows.} A UAIR specifies a constraint
+polynomial $C(\mathrm{up}, \mathrm{down})$ where $\mathrm{up}$ and
+$\mathrm{down}$ are abstract trace rows. The $\mathrm{up}$ row exposes
+the cells of trace columns at row $i$; the $\mathrm{down}$ row exposes
+\emph{virtual} cells, namely:
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Row-shift virtual columns:} $\rowsh{\delta} v$ at row
+    $i$ is $v_{i+\delta}$. These are already part of the protocol.
+  \item \emph{Bit-op virtual columns:} the construction of this paper.
+\end{itemize}
+
+\paragraph{Index sets.} Let
+$\Sup = \{1,\ldots,K\}$ be the set of base trace column indices.
+Let $\Ssh = \{(j,\delta_\ell)\}$ be the set of row-shift specs. We
+introduce a third index set
+\[
+  \Sbit \;=\; \{ \bitspec{j_\ell}{\bitop_\ell} \}_{\ell=1}^{m}
+\]
+of \emph{bit-op specs}, where $j_\ell \in \Sup$ is a base column index
+and $\bitop_\ell$ is a bit-op (defined next).

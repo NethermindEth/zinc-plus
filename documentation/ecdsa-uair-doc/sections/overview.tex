@@ -1,0 +1,113 @@
+% ===========================================================================
+\section{ECDSA on $\secp$ and the target relation}\label{sec:overview}
+% ===========================================================================
+
+We briefly recall the ECDSA signature verification procedure on the
+$\secp$ curve, then state the relation our UAIR$^+$ arithmetizes.
+
+\paragraph{The $\secp$ curve.}
+Let $p$ be the $256$-bit $\secp$ base prime and let $E/\F_p$ denote
+the short Weierstrass curve $y^2 = x^3 + 7$. Let $G \in E(\F_p)$ be
+the standard base point and let $n$ be its prime order (also $256$-bit,
+with $p < 2n$). The cyclic subgroup $\langle G \rangle$ is the order-$n$
+subgroup in which all signatures live.
+
+\paragraph{ECDSA verification.}
+A signature on a message $e \in \F_n$ under public key $Q \in \langle G \rangle$
+is a pair $(r, s) \in \F_n \times \F_n^\ast$. The verifier computes
+$$
+u_1 := e \cdot s^{-1} \bmod n, \qquad u_2 := r \cdot s^{-1} \bmod n,
+$$
+forms the point
+$$
+R := u_1 G \;+\; u_2 Q \;\in\; E(\F_p),
+$$
+and accepts iff $R \neq \OOO$ and the affine $x$-coordinate $R_x$
+satisfies $\mathrm{int}(R_x) \equiv r \pmod n$.
+
+\paragraph{Jacobian coordinates.}
+Throughout the arithmetization we work in Jacobian coordinates: a triple
+$\jac{P}$ with $P_Z \neq 0$ represents the affine point
+$(P_X / P_Z^2,\, P_Y / P_Z^3)$, and any triple with $P_Z = 0$
+represents $\OOO$. Jacobian doubling and mixed addition reduce to a
+small number of $\F_p$-multiplications and squarings without field
+inversions, deferring the single inversion to a final affine readout.
+
+\paragraph{Target relation.}
+We arithmetize the multi-scalar elliptic-curve multiplication
+underlying ECDSA verification. The remaining checks
+($u_1 \cdot s = e$ and $u_2 \cdot s = r$ in $\F_n$, and the final
+$R_x \equiv r \pmod n$ test) are negligible in cost and are performed
+by the verifier off-protocol against the witness final-row state.
+Concretely, the relation is
+\begin{equation}\label{eq:rel-ecdsa}
+\mathrm{REL}_{\textsc{ecdsa-msm}} \;:=\;
+\left\{(\mathbb{i},\mathbb{x};\mathbb{w}) \;\middle|\;
+\begin{aligned}
+&\mathbb{i} = (G), \\
+&\mathbb{x} = (Q,\;G+Q,\;b_1,\;b_2,\;R_{\mathrm{init}}), \\
+&\mathbb{w} = (R), \\
+&Q \in \langle G \rangle,\; b_1, b_2 \in \{0,1\}^{256}, \\
+&R_{\mathrm{init}} \in E(\F_p) \setminus \{\OOO\}, \\
+&R \;=\; R_{\mathrm{init}}^{(2^{256})} \;+\; \sum_{t=1}^{256} 2^{256-t}\bigl(b_1[t] G + b_2[t] Q\bigr).
+\end{aligned}\right\}.
+\end{equation}
+Here $b_1, b_2$ are the bit-decompositions of $u_1, u_2$ supplied as
+public input by the verifier (after the verifier computes
+$u_1, u_2$ from $(e, r, s)$ off-protocol), and the
+$R_{\mathrm{init}}$ is a non-identity Jacobian seed point that
+side-steps the identity-aware initial step problem discussed below.
+
+\begin{remark}[$u_1, u_2$ and $R_{\mathrm{init}}$ supplied by the verifier]
+\label{rem:public-u}
+We place $u_1, u_2$ — and hence their bit-decompositions $b_1, b_2$ — in
+the public input rather than the witness. The verifier is responsible
+for checking $u_1 \cdot s \equiv e \pmod n$, $u_2 \cdot s \equiv r \pmod n$,
+and for verifying the bit decompositions
+$\sum_{t=1}^{256} b_i[t] \cdot 2^{256-t} = u_i$ in $\F_n$, all
+off-protocol. This shifts the two $\F_n$ multiplications and the two
+bit-decomposition checks out of the arithmetization, removing the
+need for an $\F_n$-trace and any $\bitpoly{32}$ columns. The cost
+saving is significant; the privacy cost is that $u_1, u_2$ are
+not hidden from the proof. In scenarios where any of $e, r, s$ must
+remain private, $u_1, u_2$ would have to be moved back into the
+witness and the corresponding well-formedness constraints reinstated.
+The same applies to other components currently in the public input
+(notably $Q$ and $G+Q$).
+\end{remark}
+
+\begin{remark}[Why a non-identity $R_{\mathrm{init}}$]\label{rem:r-init}
+The honest scalar-multiplication algorithm starts from the Jacobian
+identity $\OOO = (1 : 1 : 0)$. The mixed-addition formulas used in our
+double-and-add loop (\Cref{sec:add}) become singular when their
+left summand is $\OOO$ (specifically, $Z = 0$ collapses both $H = X_{\mathrm{add}} Z^2 - X$
+and $R_a = Y_{\mathrm{add}} Z^3 - Y$ to zero), so the loop cannot be
+initialized at $\OOO$. The implementation side-steps this by having
+the verifier supply a non-identity Jacobian seed
+$R_{\mathrm{init}}$ at row~$0$ and offsetting the final result by the
+appropriately doubled seed, expressed in
+$\mathrm{REL}_{\textsc{ecdsa-msm}}$ via the $R_{\mathrm{init}}^{(2^{256})}$
+term. Replacing the seed by unified addition formulas (which handle the
+identity input cleanly) is left as a follow-up.
+\end{remark}
+
+\paragraph{Off-protocol checks.}
+The remaining ECDSA verification checks are performed by the verifier
+off-protocol against the witness final-row Jacobian state
+$R = \jac{R} \in \F_p^3$:
+\begin{itemize}
+\item $R \neq \OOO$, equivalently $R_Z \neq 0$;
+\item $R_x := R_X \cdot R_Z^{-2} \bmod p$ (single field inversion);
+\item $\mathrm{int}(R_x) \equiv r \pmod n$.
+\end{itemize}
+None of these are enforced in-circuit. The implementation retains the
+$\col{S\_FINAL}$ selector in the column layout so that downstream
+UAIRs composing with this one (e.g.\ a gluing UAIR that does enforce
+the affine readout in-circuit, or one that connects the digest of a
+SHA-256 UAIR to $e$) can still gate boundary constraints on the same
+row.
+
+The remainder of this document constructs a UAIR$^+$ instance
+$(\mathbb{i}_{\text{uair}},\mathbb{x}_{\text{uair}};\mathbb{w}_{\text{uair}})$
+that lies in $\mathrm{REL}_{\textsc{uair}^+}$ if and only if the
+input witness lies in $\mathrm{REL}_{\textsc{ecdsa-msm}}$.

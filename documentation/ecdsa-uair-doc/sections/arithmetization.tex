@@ -1,0 +1,156 @@
+% ===========================================================================
+\section{Arithmetizing the ECDSA building blocks}\label{sec:arith}
+% ===========================================================================
+
+We collect the arithmetic identities that translate each step of the
+double-and-add loop into a constraint over $\F_p$. Throughout this
+section, all arithmetic is in $\F_p$ unless noted otherwise; we
+suppress reductions $\bmod\,p$.
+
+\subsection{Shamir's trick}\label{sec:shamir}
+
+The standard binary double-and-add algorithm computes a single
+scalar multiplication $u A$ (for a $k$-bit scalar $u$ and a point $A$)
+by initializing an accumulator $P \leftarrow \OOO$ and, for
+$j = k-1, \dots, 0$, performing
+$$
+P \;\leftarrow\; 2P, \qquad
+P \;\leftarrow\; P + A \quad \text{whenever bit $j$ of $u$ is $1$.}
+$$
+Naively, computing the two-term sum $u_1 G + u_2 Q$ would run two
+such loops for a total of $2k$ doublings and up to $2k$ additions.
+Shamir's trick merges them into a single loop. Precompute the four
+points
+$$
+T_{00} = \OOO,\quad T_{10} = G,\quad T_{01} = Q,\quad T_{11} = G + Q,
+$$
+initialize $P \leftarrow \OOO$, and run, for $j = k-1, \dots, 0$,
+$$
+P \;\leftarrow\; 2P, \qquad
+P \;\leftarrow\; P + T_{b_1[j]\,b_2[j]}.
+$$
+After $k = 256$ steps, $P = u_1 G + u_2 Q$. The total cost is $k$
+doublings and at most $k$ mixed additions.
+
+In the UAIR, the per-row affine addend
+$T_{b_1[t]\,b_2[t]} \in \{\OOO, G, Q, G+Q\}$ is supplied by the
+verifier in two public columns $\col{PA\_X\_ADDEND}$ and
+$\col{PA\_Y\_ADDEND}$, with a separate boolean public selector
+$\col{S\_ADD}$ flagging whether the addend is non-identity (i.e.\
+$\col{S\_ADD}[t] = 1 \iff (b_1[t], b_2[t]) \neq (0, 0)$). When
+$\col{S\_ADD}[t] = 0$ the addition step at row $t$ collapses to
+$P \leftarrow 2P$.
+
+\begin{remark}[Verifier-supplied addend]\label{rem:addend}
+$Q$ and $G+Q$ are public (\Cref{rem:public-u}), so the four-point
+precompute $\{\OOO, G, Q, G+Q\}$ is public, and the per-row addend
+choice is determined by the public bits $(b_1[t], b_2[t])$. The
+implementation has the verifier write the chosen affine addend
+directly into $(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$ for each
+row, rather than committing four selector polynomials and adding
+in-circuit constraints to compute the addend from the bits. The
+saving is large: the alternative would require four
+multiplicative selectors per row and would push the
+addition-formula degrees up further. The cost is that the
+verifier must do this $256$-row table lookup itself before
+committing to the public input.
+\end{remark}
+
+\subsection{Jacobian doubling}\label{sec:doubling}
+
+Given an input Jacobian point $\jac{P}$, the Jacobian doubling
+$2P = (P_{\mathrm{pa},X} : P_{\mathrm{pa},Y} : P_{\mathrm{pa},Z})$ is
+computed in $\F_p$ by
+\begin{align}
+P_{\mathrm{pa},Z} &= 2 P_Y P_Z, \label{eq:dbl-z}\\
+P_{\mathrm{pa},X} &= 9 P_X^4 - 8 P_X P_Y^2, \label{eq:dbl-x}\\
+P_{\mathrm{pa},Y} &= 12 P_X^3 P_Y^2 - 3 P_X^2 P_{\mathrm{pa},X} - 8 P_Y^4. \label{eq:dbl-y}
+\end{align}
+These are the standard short-Weierstrass $a = 0$ doubling formulas.
+The intermediate $S = P_Y^2$ is computed inline (the implementation
+inlines it rather than committing it as a separate column).
+
+\subsection{Mixed Jacobian-affine addition}\label{sec:add}
+
+Given $(P_{\mathrm{pa},X} : P_{\mathrm{pa},Y} : P_{\mathrm{pa},Z})$
+(the doubled point) and an affine addend $(T_X, T_Y)$ from the
+precomputed $\{G, Q, G+Q\}$, the mixed addition
+$P_{\mathrm{pa}} + T = (P_{\mathrm{add},X} : P_{\mathrm{add},Y} : P_{\mathrm{add},Z})$
+proceeds via the scratch
+quantities
+\begin{align}
+H   &:= T_X \cdot P_{\mathrm{pa},Z}^2 \;-\; P_{\mathrm{pa},X}, \label{eq:H}\\
+R_a &:= T_Y \cdot P_{\mathrm{pa},Z}^3 \;-\; P_{\mathrm{pa},Y}, \label{eq:Ra}
+\end{align}
+followed by the addition outputs
+\begin{align}
+P_{\mathrm{add},Z} &= P_{\mathrm{pa},Z} \cdot H, \label{eq:add-z}\\
+P_{\mathrm{add},X} &= R_a^2 - H^3 - 2 P_{\mathrm{pa},X} H^2, \label{eq:add-x}\\
+P_{\mathrm{add},Y} &= R_a \bigl(P_{\mathrm{pa},X} H^2 - P_{\mathrm{add},X}\bigr) - P_{\mathrm{pa},Y} H^3. \label{eq:add-y}
+\end{align}
+The implementation commits only $H$ (named $\col{W\_C}$) and $R_a$
+(named $\col{W\_D}$), inlining $P_{\mathrm{pa},Z}^2$, $P_{\mathrm{pa},Z}^3$,
+$H^2$, $H^3$, and $P_{\mathrm{pa},X} H^2$ into the surrounding
+constraint expressions. This trades higher per-constraint algebraic
+degree for fewer committed columns; with the inlined form the maximum
+constraint degree is~$6$ (attained in \eqref{eq:add-y} after
+selector gating, see \Cref{sec:constraints}).
+
+\subsection{Conditional addition via output-selection}\label{sec:cond-add}
+
+Rather than gating the addition step with a multiplicative selector
+that would inflate the constraint degree, the implementation folds
+the conditional add into the row-chaining itself. Let
+$\col{S\_ADD}[t] \in \{0, 1\}$ be the per-row addition selector
+(\Cref{rem:addend}). The next-row Jacobian state is then defined as
+\begin{align}
+P_{\mathrm{next},X} &= P_{\mathrm{pa},X} + \col{S\_ADD}\bigl(P_{\mathrm{add},X} - P_{\mathrm{pa},X}\bigr), \label{eq:next-x}\\
+P_{\mathrm{next},Y} &= P_{\mathrm{pa},Y} + \col{S\_ADD}\bigl(P_{\mathrm{add},Y} - P_{\mathrm{pa},Y}\bigr), \label{eq:next-y}\\
+P_{\mathrm{next},Z} &= P_{\mathrm{pa},Z} + \col{S\_ADD}\bigl(P_{\mathrm{add},Z} - P_{\mathrm{pa},Z}\bigr), \label{eq:next-z}
+\end{align}
+so that $\col{S\_ADD} = 1$ selects $P_{\mathrm{add}}$ and
+$\col{S\_ADD} = 0$ selects $P_{\mathrm{pa}}$ (the pure doubling result).
+
+Because $\col{S\_ADD}$ is a public boolean, $\col{S\_ADD} (1 - \col{S\_ADD}) = 0$
+need not be enforced in-circuit; the verifier supplies the column with
+$0/1$ values directly.
+
+\begin{remark}[Inlined addition collapses to a single output-selection constraint]
+\label{rem:inlined-add}
+Substituting $P_{\mathrm{add}, X/Y/Z}$ from
+\eqref{eq:add-z}--\eqref{eq:add-y} into \eqref{eq:next-x}--\eqref{eq:next-z}
+and inlining all of $P_{\mathrm{pa},Z}^2, H^2, H^3, P_{\mathrm{pa},X} H^2$
+yields three constraints whose maximum algebraic degree (in committed
+columns) is~$6$. The deg-$6$ monomial in the $Y$ output-selection
+constraint is exactly $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot D \cdot X_{\mathrm{pa}} \cdot C^2$,
+matching the spec's $s_{\mathrm{reg}} \cdot R_a \cdot X_{\mathrm{mid}} \cdot H^2$
+term.
+\end{remark}
+
+\subsection{Initial step and final state}\label{sec:boundary}
+
+\paragraph{Init boundary.}
+At row~$0$ the Jacobian state is pinned to the verifier-supplied
+non-identity seed $R_{\mathrm{init}} = (R_{\mathrm{init},X} : R_{\mathrm{init},Y} : R_{\mathrm{init},Z})$
+(\Cref{rem:r-init}):
+$$
+\bigl(P_X[0], P_Y[0], P_Z[0]\bigr) \;=\; \bigl(\col{PA\_R\_INIT\_X}, \col{PA\_R\_INIT\_Y}, \col{PA\_R\_INIT\_Z}\bigr).
+$$
+This is enforced by three zero-ideal constraints gated by
+$\col{S\_INIT}$ (see \Cref{con:init-x}--\Cref{con:init-z}).
+
+\paragraph{Final state and off-protocol affine readout.}
+At the final row $t = \mathrm{FINAL\_ROW} := \mathrm{NUM\_SHAMIR\_ROUNDS} = 256$,
+the witness Jacobian state $\jac{P}[256]$ holds the result
+$R = u_1 G + u_2 Q$ (modulo the $R_{\mathrm{init}}$ offset of
+\Cref{rem:r-init}). The affine $x$-coordinate
+$R_x = P_X[256] \cdot P_Z[256]^{-2} \bmod p$ is computed
+\emph{off-protocol} by the verifier, who opens the three witness cells
+at row $256$, performs a single field inversion, and checks
+$R_x \neq \OOO$ (i.e.\ $P_Z[256] \neq 0$) and
+$\mathrm{int}(R_x) \equiv r \pmod n$. Consequently, the UAIR has
+\emph{no $Z_{\mathrm{inv}}$ column, no in-circuit affine
+conversion, and no signature check $R_x \equiv r$}.
+The selector column $\col{S\_FINAL}$ is retained in the layout for
+downstream UAIRs that compose with this one and want to gate
+additional final-row constraints.

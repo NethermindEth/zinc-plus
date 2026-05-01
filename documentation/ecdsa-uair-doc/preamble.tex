@@ -1,0 +1,86 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper.
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{cleveref}
+
+% --- Theorem environments (paper style: shared counter, italic body) -------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}[theorem]{Claim}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Operators, macros -----------------------------------------------------
+\DeclareMathOperator{\ROTR}{ROTR}
+\DeclareMathOperator{\SHR}{SHR}
+\DeclareMathOperator{\XOR}{XOR}
+\DeclareMathOperator{\AND}{AND}
+\DeclareMathOperator{\NOT}{NOT}
+\DeclareMathOperator{\Maj}{Maj}
+\DeclareMathOperator{\Ch}{Ch}
+\DeclareMathOperator{\bitlen}{bitlen}
+\DeclareMathOperator{\set}{set}
+\DeclareMathOperator{\supp}{supp}
+\DeclareMathOperator{\img}{img}
+
+% ECDSA-specific
+\newcommand{\secp}{\mathsf{secp256k1}}
+\newcommand{\OOO}{\mathcal{O}}     % point at infinity
+\newcommand{\jac}[1]{(#1_X : #1_Y : #1_Z)}
+
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\bP}{\mathbb{P}}
+
+% Bit-polynomial set
+\newcommand{\bitpoly}[1]{\{0,1\}^{<#1}[X]}
+
+% Idealized projection
+\newcommand{\proj}[1]{\phi_{#1}}
+
+% MLE tilde
+\newcommand{\mle}[1]{\widetilde{#1}}
+
+% Trace cell access
+\newcommand{\rowidx}[1]{[#1]}
+
+% Ideals
+\newcommand{\ideal}[1]{\langle #1 \rangle}
+
+% Bit-poly representative
+\newcommand{\bp}[1]{\widehat{#1}}
+
+% Branding for column names; usable in both text and math mode.
+\newcommand{\col}[1]{\ensuremath{\mathsf{#1}}}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}

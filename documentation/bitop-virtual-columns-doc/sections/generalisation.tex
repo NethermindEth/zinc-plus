@@ -1,0 +1,103 @@
+\section{Generalisation to $\F_2$-Linear Cell Operators}
+\label{sec:generalisation}
+
+The proof of \Cref{lem:equivariance} uses only two facts about the
+operator $\bitop$:
+\begin{itemize}[leftmargin=2em]
+  \item $\bitop$ is $\F_2$-linear in the cell coordinate;
+  \item $\bitop$ acts trivially on the row coordinate (i.e., the same
+    map at every row).
+\end{itemize}
+The coefficient-permutation structure of \Cref{def:bitop} was nowhere
+used. Hence the construction extends, verbatim, to any operator in the
+$\F_2$-linear envelope of bit-ops.
+
+\subsection{The $\F_2$-linear envelope}
+
+\begin{definition}[$\F_2$-linear cell operator]
+\label{def:f2-linear-op}
+An $\F_2$-linear cell operator is any element of $\End_{\F_2}(\cellring)$.
+\end{definition}
+
+The space $\End_{\F_2}(\cellring) \cong \cellring \otimes_{\F_2}
+\cellring^{\vee}$ has $\F_2$-dimension $32 \times 32 = 1024$, and is
+spanned by the elementary maps $E_{j,k} : X^k \mapsto X^j$. In
+particular it contains $\F_2$-linear combinations of bit-ops:
+
+\begin{example}[SHA-256 $\sigma_0$]
+\label{ex:sigma-0}
+The SHA-256 small-sigma operator
+\[
+  \sigma_0(x) \;=\; \Rot_7(x) \,\oplus\, \Rot_{18}(x) \,\oplus\, \ShR_3(x)
+\]
+is the $\F_2$-linear combination $\Rot_7 + \Rot_{18} + \ShR_3$
+in $\End_{\F_2}(\cellring)$. By linearity it lifts to a virtual column
+\[
+  \sigma_{0\,*} v \;=\; \Rot_{7\,*} v \,+\, \Rot_{18\,*} v \,+\, \ShR_{3\,*} v
+\]
+on cell-wise $\F_2$-arithmetic, and
+\Cref{lem:equivariance} applies.
+\end{example}
+
+\subsection{Linearity of the construction}
+
+\begin{lemma}[Linearity]
+\label{lem:linearity}
+Let $\bitop_1,\bitop_2 \in \End_{\F_2}(\cellring)$ and let $a_1, a_2
+\in \F_2$. Define $\bitop := a_1 \bitop_1 + a_2 \bitop_2$. Then
+\[
+  \mle{\bitop_* v}(r) \;=\; a_1 \mle{\bitop_{1\,*} v}(r) \,+\, a_2 \mle{\bitop_{2\,*} v}(r),
+\]
+and consequently
+\[
+  \psia\!\big(\bitop(\lmle{v}(r))\big) \;=\; a_1\, \psia\!\big(\bitop_1(\lmle{v}(r))\big) \,+\, a_2\, \psia\!\big(\bitop_2(\lmle{v}(r))\big).
+\]
+\end{lemma}
+
+\begin{proof}
+Both equalities are immediate from $\F_2$-linearity of the MLE
+evaluation map and of $\psia$.
+\end{proof}
+
+\Cref{lem:linearity} has a practical consequence: a UAIR that needs
+the virtual column $\sigma_{0\,*} v$ does \emph{not} need to declare
+three separate bit-op specs and combine them downstream. It can
+instead declare a single \emph{compound} spec
+$(j, \sigma_0)$ once $\End_{\F_2}(\cellring)$ is admitted as the
+domain of \Cref{def:bitop}, with the verifier-side reconstruction
+\[
+  e \;=\; \psia\!\big(\sigma_0(\lmle{v_j}(r_0))\big)
+        \;=\; \psia\!\big((\Rot_7 + \Rot_{18} + \ShR_3)(\lmle{v_j}(r_0))\big),
+\]
+still costing $O(32)$ $\F_q$-operations.
+
+\subsection{Beyond $\F_2$-linearity}
+
+The lemma fails for cell operators that are not $\F_2$-linear in the
+cell coordinate. A bit-mask $x \mapsto x \wedge \chi$ for a fixed mask
+$\chi \in \cellring$ is $\F_2$-linear and therefore covered by
+\Cref{lem:linearity}. By contrast, a multiplicative operator such as
+$x \mapsto x \cdot y$ in $\cellring$ for a witness-dependent
+$y \in \cellring$ is bilinear, not $\F_2$-linear in $x$ alone, and
+does not fit the construction directly.
+
+The construction in this paper covers the $\F_2$-linear case, which
+includes \emph{all} bit-permuting and bit-masking operators of
+SHA-256 and SHA-3.
+
+\section*{Conclusion}
+
+We have described a virtual-column construction that exploits the
+commutation between coefficient-position $\F_2$-linear endomorphisms
+of $\cellring = \F_2[X]/(X^{32})$ and the multilinear-extension
+operator over the row coordinate. The construction adds
+\emph{(i)}~ one MLE source to the constraint-aggregation sumcheck and
+to mp\_eval; \emph{(ii)}~ one field element of proof per spec;
+\emph{(iii)}~ a closed-form verifier-side reconstruction at the final
+evaluation point. It introduces no fresh commitment, no fresh
+challenge, no extra protocol round, and no new soundness loss beyond
+the standard per-source mp\_eval term. By
+\Cref{lem:linearity}, it covers arbitrary $\F_2$-linear functions of
+the $32$ coefficient bits of a cell, which encompasses all
+bit-rotations, bit-shifts, bit-masks, and their XOR-combinations as
+they appear in SHA-256 and related primitives.

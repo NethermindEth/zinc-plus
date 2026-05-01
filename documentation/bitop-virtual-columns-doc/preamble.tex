@@ -1,0 +1,81 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper.
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{cleveref}
+
+% --- Theorem environments --------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}[theorem]{Claim}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{construction}[theorem]{Construction}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Operators, macros -----------------------------------------------------
+\DeclareMathOperator{\Rot}{Rot}
+\DeclareMathOperator{\ShR}{Sh^{R}}
+\DeclareMathOperator{\Sh}{Sh}
+\DeclareMathOperator{\End}{End}
+\DeclareMathOperator{\MLE}{MLE}
+\DeclareMathOperator{\negl}{negl}
+\DeclareMathOperator{\eq}{eq}
+\DeclareMathOperator{\View}{View}
+\DeclareMathOperator{\img}{img}
+
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+
+% Cell ring R = F_2[X]/(X^32)
+\newcommand{\cellring}{R}
+% Lifted cell ring R \otimes F_q
+\newcommand{\liftring}{R_q}
+% MLE tilde
+\newcommand{\mle}[1]{\widetilde{#1}}
+% Lifted MLE
+\newcommand{\lmle}[1]{\overline{#1}}
+% psi_alpha projection
+\newcommand{\psia}{\psi_{\alpha}}
+% Bit-op symbol
+\newcommand{\bitop}{\sigma}
+% Row-shift
+\newcommand{\rowsh}[1]{\mathrm{sh}_{#1}}
+% Source column index sets
+\newcommand{\Sup}{\mathcal{S}_{\mathrm{up}}}
+\newcommand{\Ssh}{\mathcal{S}_{\mathrm{sh}}}
+\newcommand{\Sbit}{\mathcal{S}_{\mathrm{bit}}}
+% Bit-op spec
+\newcommand{\bitspec}[2]{(#1,#2)}
+% Negligible function
+\newcommand{\negligible}{\negl}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}

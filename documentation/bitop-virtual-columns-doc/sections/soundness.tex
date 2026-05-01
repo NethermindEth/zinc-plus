@@ -1,0 +1,105 @@
+\section{Soundness}
+\label{sec:soundness}
+
+We argue informally that \Cref{cons:bitop} preserves the
+knowledge-soundness error of the host PIOP up to a negligible additive
+term linear in the size of $\Sbit$. The argument is structural: every
+new claim added by the construction is bound to existing claims either
+algebraically (sumcheck claim-value reconstruction) or by closed-form
+substitution (\Cref{eq:bitop-open}).
+
+\subsection{Threat model}
+
+We assume the host PIOP is knowledge-sound when restricted to the
+existing classes of trace claims (base columns and row-shift virtual
+columns). Let $\epsilon_{\mathrm{host}}$ denote its soundness error.
+We argue that the augmented PIOP has soundness error
+\[
+  \epsilon_{\mathrm{host}} \;+\; m \cdot \epsilon_{\mathrm{mp}} \;+\; \negligible(\lambda),
+\]
+where $\epsilon_{\mathrm{mp}}$ is the per-source soundness loss of the
+multi-point evaluation argument (typically $\nu / q$), and
+$m = |\Sbit|$.
+
+\subsection{Failure modes}
+
+A malicious prover $\mathcal{P}^*$ can attempt to cheat in at most
+three places:
+
+\paragraph{(F1) The base column's lifted opening
+$\lmle{v_{j_\ell}}(r_0)$ is wrong.} The verifier reads the lifted
+opening to form the open evals \cref{eq:base-open} and substitutes
+them into the mp\_eval subclaim \cref{eq:final-subclaim}. If
+$\lmle{v_{j_\ell}}(r_0) \ne \mle{v_{j_\ell}}(r_0)$, then with
+probability $\ge 1 - \negligible(\lambda)$ over $\alpha$ and $r_0$,
+$\psia(\lmle{v_{j_\ell}}(r_0)) \ne \mle{\psia(v_{j_\ell})}(r_0)$, and
+\cref{eq:final-subclaim} fails. This is a Schwartz–Zippel argument on
+the polynomial that interpolates the committed projected MLE,
+identical to the host PIOP and unchanged by our construction.
+
+\paragraph{(F2) The bit-op claim at $r^{**}$ is wrong.} Suppose
+$b_{\ell}^{**}$ disagrees with $M_{\ell}(r^{**})$ for some $\ell$.
+Conditioned on the sumcheck claim-value equation passing, this implies
+the constraint polynomial $C$ evaluates to a value at $(r^*, r^{**})$
+that is consistent with the prover's answers but not with any honest
+trace; standard sumcheck soundness pins this event to probability
+$\le \nu \deg(C)/q$. If instead the prover compensates by tampering
+$\mathrm{down}_{\mathrm{bit, eval}}$ in mp\_eval consistently with
+$b_{\ell}^{**}$, the residual claim $e_{\ell}$ at $r_0$ will be
+inconsistent with the equivariance identity, caught by (F3).
+
+\paragraph{(F3) The bit-op residual claim at $r_0$ is wrong.}
+Conditioned on (F1) not occurring, the verifier holds the correct
+$\lmle{v_{j_\ell}}(r_0)$, and \cref{eq:bitop-open} yields the correct
+\[
+  M_{\ell}(r_0) \;=\; \psia\!\big(\bitop_{\ell}(\lmle{v_{j_\ell}}(r_0))\big)
+\]
+deterministically — \emph{the prover has no freedom over $\tilde e_\ell$.}
+The mp\_eval subclaim \cref{eq:final-subclaim} therefore reduces to a
+single algebraic identity whose left- and right-hand sides match if
+and only if every $b_{\ell'}^{**}$ was consistent with
+$M_{\ell'}(r^{**})$ (and likewise for the base sources and their
+row-shifts). By multi-point-evaluation soundness, an incorrect
+$b_{\ell}^{**}$ propagates to a violation of \cref{eq:final-subclaim}
+with probability at least $1 - \nu/q$ over $r_0$. We pay this loss
+once per extra source, hence $m \cdot \epsilon_{\mathrm{mp}}$ overall.
+
+\subsection{Why no fresh extractor is required}
+
+A standard concern when adding new prover messages is whether
+extraction of the witness needs new machinery. Here, the only new
+prover messages are the $m$ scalars $\{b_{\ell}^{**}\}$, and they are
+\emph{not} commitments — they are values of MLEs that the verifier
+can recompute (in the soundness analysis, by virtue of holding the
+extracted base columns).
+
+Concretely, a knowledge extractor $\mathcal{E}$ for the augmented
+PIOP runs the host extractor unchanged to recover the base columns
+$(v_j)_{j \in \Sup}$. It then defines the bit-op virtual columns by
+$\bitop_{\ell *}(v_{j_\ell})$ — these are deterministic functions of
+the base columns. Soundness of the host PIOP guarantees the base
+columns satisfy the host's constraints. By
+\Cref{lem:equivariance}, $\mle{\bitop_{\ell *} v_{j_\ell}}$ agrees
+with $M_{\ell}$ on the boolean cube, hence as multilinear polynomials.
+Therefore the augmented constraint $C$ — which by hypothesis was
+satisfied at the sumcheck endpoint — is satisfied row-wise by the
+extracted columns. The extractor needs no new randomness, no new
+oracle queries, and no new rewinding beyond what the host PIOP
+already does.
+
+\subsection{Quantitative summary}
+
+\begin{proposition}[Soundness, informal]
+\label{prop:soundness}
+Let $\Pi$ denote the host multilinear PIOP and $\Pi^+$ its
+augmentation by \Cref{cons:bitop} with bit-op set $\Sbit$ of size $m$.
+If $\Pi$ has knowledge-soundness error $\epsilon_{\mathrm{host}}$, then
+$\Pi^+$ has knowledge-soundness error
+\[
+  \epsilon_{\mathrm{host}} \;+\; m \cdot \epsilon_{\mathrm{mp}}.
+\]
+\end{proposition}
+
+The $m \cdot \epsilon_{\mathrm{mp}}$ term is identical in form to the
+soundness loss the host PIOP already pays per row-shift virtual
+column.

@@ -1,0 +1,222 @@
+\section{Bit-Ops and the Equivariance Lemma}
+\label{sec:equivariance}
+
+\subsection{Bit-ops}
+
+\begin{definition}[Bit-op]
+\label{def:bitop}
+A \emph{bit-op} is an $\F_2$-linear endomorphism
+$\bitop \in \End_{\F_2}(\cellring)$ that acts as a permutation
+\[
+  p_{\bitop} : \{0,\ldots,31\} \;\longrightarrow\; \{0,\ldots,31\}\,\cup\,\{\bot\}
+\]
+on coefficient positions, in the sense that
+\[
+  \bitop\!\Big(\sum_{j=0}^{31} c_j X^j\Big) \;=\; \sum_{j\,:\,p_{\bitop}(j)\ne\bot} c_j\, X^{p_{\bitop}(j)}.
+\]
+The two specific bit-ops considered in the implementation are, for $c \in \{0,\ldots,31\}$:
+\begin{align*}
+  \Rot_c &: \quad p_{\Rot_c}(j) = (j+c) \bmod 32, \\
+  \ShR_c &: \quad p_{\ShR_c}(j) = j-c \text{ if } j \ge c, \text{ else } \bot.
+\end{align*}
+\end{definition}
+
+\begin{remark}
+\label{rem:lift}
+A bit-op extends $\F_q$-linearly to $\liftring \to \liftring$ by acting
+on coefficient positions in $\liftring$ exactly as on $\cellring$. We
+denote the extension by the same symbol $\bitop$.
+\end{remark}
+
+\begin{definition}[Cell-wise action on columns]
+For a bit-op $\bitop$ and a column $v \in \cellring^n$, define
+$\bitop_*(v) \in \cellring^n$ by $(\bitop_*(v))_i := \bitop(v_i)$.
+\end{definition}
+
+\subsection{The equivariance lemma}
+
+\begin{lemma}[Equivariance of MLE under bit-ops]
+\label{lem:equivariance}
+For any bit-op $\bitop \in \End_{\F_2}(\cellring)$, any column
+$v \in \cellring^n$, and any $r \in \F_q^{\nu}$,
+\begin{equation}
+\label{eq:equivariance}
+  \mle{\bitop_* v}(r) \;=\; \bitop\!\big(\mle{v}(r)\big) \qquad \text{in } \liftring.
+\end{equation}
+Equivalently, the diagram
+\[
+\begin{array}{ccc}
+  \cellring^n & \xrightarrow{\;\bitop_*\;} & \cellring^n \\
+  \downarrow{\scriptstyle \mle{(\,\cdot\,)}(r)} & & \downarrow{\scriptstyle \mle{(\,\cdot\,)}(r)} \\
+  \liftring & \xrightarrow{\;\bitop\;} & \liftring
+\end{array}
+\]
+commutes.
+\end{lemma}
+
+\begin{proof}
+The MLE-evaluation map at a fixed point $r \in \F_q^{\nu}$ is
+\[
+  T_r : \cellring^n \;\longrightarrow\; \liftring,
+  \qquad
+  T_r(v) \;=\; \sum_{i \in \{0,1\}^{\nu}} \eq_i(r) \cdot v_i,
+\]
+with scalar coefficients $\eq_i(r) \in \F_q$. The map is
+$\F_q$-linear in the $\liftring$-valued vector $(v_i)_i$, hence in
+particular $\F_2$-linear in the cell coordinate $v_i \in \cellring$.
+
+The bit-op $\bitop \in \End_{\F_2}(\cellring)$ acts trivially on the
+row coordinate (it is the same map at every row $i$) and is
+$\F_2$-linear in the cell coordinate. Since the row coordinate and
+the cell coordinate of $\cellring^n = \cellring \otimes_{\F_2} \F_2^n$
+are independent and the action of $\bitop$ commutes with scalar
+multiplication by $\eq_i(r) \in \F_q$ (which lives in the row
+coordinate after extension of scalars), we have
+\begin{align*}
+  T_r(\bitop_* v)
+  &= \sum_{i} \eq_i(r) \cdot \bitop(v_i) \\
+  &= \sum_{i} \bitop\!\big(\eq_i(r) \cdot v_i\big)
+     \qquad \text{($\bitop$ is $\F_q$-linear after extension)} \\
+  &= \bitop\!\Big(\sum_{i} \eq_i(r) \cdot v_i\Big)
+     \qquad \text{($\bitop$ is additive)} \\
+  &= \bitop\!\big(T_r(v)\big).
+\end{align*}
+\end{proof}
+
+\subsection{Equivariance under projection}
+
+\begin{corollary}[Projected equivariance]
+\label{cor:projected-equivariance}
+For any bit-op $\bitop$, any column $v \in \cellring^n$, any
+$\alpha \in \F_q$, and any $r \in \F_q^{\nu}$,
+\[
+  \mle{\psia(\bitop_* v)}(r) \;=\; \psia\!\big(\bitop(\lmle{v}(r))\big).
+\]
+\end{corollary}
+
+\begin{proof}
+Both $\psia$ and $\bitop$ are $\F_q$-linear maps on $\liftring$, and
+$\psia$ is also linear in the row coordinate (it acts on the cell
+coordinate). By \Cref{lem:equivariance} applied to the column
+$\psia(\bitop_* v) \in \F_q^n$, viewed cell-wise, and by linearity of
+$\psia$,
+\[
+  \mle{\psia(\bitop_* v)}(r)
+  \;=\; \psia\!\big(\mle{\bitop_* v}(r)\big)
+  \;=\; \psia\!\big(\bitop(\mle{v}(r))\big)
+  \;=\; \psia\!\big(\bitop(\lmle{v}(r))\big).
+\]
+\end{proof}
+
+\Cref{cor:projected-equivariance} is the operative form: it tells the
+verifier that the value of a virtual bit-op MLE at the final point
+$r_0$ can be reconstructed from the lifted opening of the source
+column by applying $\bitop$ to a polynomial in $\liftring$ and then
+$\psia$, both of which are local field-arithmetic operations of cost
+$O(32)$.
+
+\begin{remark}[Geometric reading]
+Under the identification $\cellring^n \cong \cellring \otimes_{\F_2}
+\F_2^n$, $\bitop_*$ acts on the left tensor factor only and the MLE
+evaluation $T_r$ is induced from a map on the right tensor factor
+only. \Cref{lem:equivariance} is the assertion that the actions on
+disjoint tensor factors commute, i.e. that a tensor product of
+operators is well-defined.
+\end{remark}
+
+\subsection{Commutation with row-shifts}
+\label{subsec:row-shift-commute}
+
+Row-shifts act on the row coordinate. Fix $\delta \in \{0,\ldots,n-1\}$
+and define $\rowsh{\delta} : \cellring^n \to \cellring^n$ by
+\[
+  (\rowsh{\delta} v)_i \;=\;
+  \begin{cases} v_{i+\delta} & \text{if } i + \delta < n, \\ 0 & \text{otherwise,} \end{cases}
+\]
+where $i \in \{0,1\}^{\nu}$ is identified with its base-2 encoded
+integer in $\{0,\ldots,n-1\}$ and arithmetic is over $\Z$.
+
+\paragraph{Why row-shift is not a point shift.} It is tempting to seek
+a transformation $\mathrm{shift}_\delta : \F_q^{\nu} \to \F_q^{\nu}$
+satisfying $\mle{\rowsh{\delta} v}(r) = \mle{v}\big(\mathrm{shift}_\delta(r)\big)$
+for all $v$. No such map exists in general: the integer-shift
+permutation on $\{0,\ldots,n-1\}$ does not extend to an
+$\F_q$-affine multilinear-shift compatible map on $\F_q^{\nu}$ (the
+truncation at the top of the cube is the obstruction). The host PIOP
+expresses the row-shift identity in \emph{kernel form} instead.
+
+\begin{lemma}[Row-shift kernel identity]
+\label{lem:row-shift-kernel}
+There exists a bivariate polynomial
+$\mathrm{next}_\delta(r, b)$, multilinear in $r \in \F_q^{\nu}$ for
+each fixed $b \in \{0,1\}^{\nu}$, depending only on $\delta$ and not on
+$v$, such that for every $v \in \cellring^n$ and every
+$r \in \F_q^{\nu}$,
+\begin{equation}
+\label{eq:row-shift-mle}
+  \mle{\rowsh{\delta} v}(r) \;=\; \sum_{b \in \{0,1\}^{\nu}} \mathrm{next}_\delta(r, b) \cdot v_b.
+\end{equation}
+A closed form on the boolean indexing $b \in \{0,1\}^{\nu}$ is
+\[
+  \mathrm{next}_\delta(r, b) \;=\;
+  \begin{cases}
+    \eq(r,\, b - \delta) & \text{if } b \ge \delta, \\
+    0 & \text{if } b < \delta,
+  \end{cases}
+\]
+extended multilinearly in $r$ to all of $\F_q^{\nu}$.
+\end{lemma}
+
+\begin{proof}
+By definition of multilinear extension,
+$\mle{\rowsh{\delta} v}(r) = \sum_{i \in \{0,1\}^{\nu}} \eq(r, i) \cdot (\rowsh{\delta} v)_i$.
+Re-indexing $b := i + \delta$ and using
+$(\rowsh{\delta} v)_i = 0$ for $i + \delta \ge n$,
+\[
+  \mle{\rowsh{\delta} v}(r) \;=\; \sum_{b \ge \delta} \eq(r, b - \delta) \cdot v_b
+  \;=\; \sum_{b \in \{0,1\}^{\nu}} \mathrm{next}_\delta(r, b) \cdot v_b. \qedhere
+\]
+\end{proof}
+
+\Cref{eq:row-shift-mle} expresses the row-shifted MLE as a fixed
+$\F_q$-linear functional of the base column $v$, with weights
+$\mathrm{next}_\delta(r, b)$ that depend on $\delta$ and $r$ but not on
+$v$. The host PIOP's multi-point evaluation argument is built around
+this kernel: it pairs the kernel as a selector MLE with the base
+column MLE inside a single sumcheck (see \Cref{sec:mpeval}).
+
+\begin{corollary}[Bit-op and row-shift commute]
+\label{cor:bitop-shift-commute}
+For any bit-op $\bitop$, any row-shift $\delta$, and any column
+$v \in \cellring^n$,
+\begin{equation}
+\label{eq:bitop-shift-commute}
+  \bitop_*\!\big(\rowsh{\delta} v\big) \;=\; \rowsh{\delta}\!\big(\bitop_*\, v\big) \quad\text{in } \cellring^n,
+\end{equation}
+and consequently
+\begin{equation}
+\label{eq:bitop-shift-mle}
+  \mle{\bitop_*\!\big(\rowsh{\delta} v\big)}(r)
+  \;=\;
+  \sum_{b \in \{0,1\}^{\nu}} \mathrm{next}_\delta(r, b)\cdot \bitop(v_b).
+\end{equation}
+\end{corollary}
+
+\begin{proof}
+For every row $i$, both columns in \cref{eq:bitop-shift-commute} take
+value $\bitop(v_{i+\delta})$ when $i + \delta < n$ and $0$ otherwise
+(using $\bitop(0) = 0$ since $\bitop$ is $\F_2$-linear). For
+\cref{eq:bitop-shift-mle}, apply \Cref{lem:equivariance} to
+$\rowsh{\delta} v$:
+\[
+  \mle{\bitop_*(\rowsh{\delta} v)}(r) \;=\; \bitop\!\big(\mle{\rowsh{\delta} v}(r)\big)
+  \;=\; \bitop\!\Big(\sum_b \mathrm{next}_\delta(r, b) \cdot v_b\Big),
+\]
+then use $\F_q$-linearity of $\bitop$ on $\liftring$ (\Cref{rem:lift})
+to push $\bitop$ inside the sum.
+\end{proof}
+
+\Cref{cor:bitop-shift-commute} is the structural reason the
+construction of \Cref{sec:construction} extends to row-shifted bit-op
+virtual columns at no additional protocol cost: see
+\Cref{sec:composition}.

@@ -1,0 +1,93 @@
+\section{Communication and Computation Cost}
+\label{sec:cost}
+
+We compare \Cref{cons:bitop} against the naive arithmetization that
+materialises a fresh trace column $w := \bitop_*(v)$, commits to it,
+and proves $w_i = \bitop(v_i)$ for every row $i$.
+
+\subsection{Per-spec accounting}
+
+Per declared spec $(j_\ell,\bitop_\ell) \in \Sbit$:
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l c c c c}
+\toprule
+& Commitment & Sumcheck rounds & Field elements (proof) & New challenges \\
+\midrule
+Naive (commit-and-equate)
+  & $1$ column
+  & $\Theta(\log n)$ extra
+  & $\Theta(\log n)$ + opening
+  & $\ge 1$ \\
+This construction
+  & $0$
+  & $0$
+  & $1$
+  & $0$ \\
+\bottomrule
+\end{tabular}
+\caption{Per-spec cost. The naive count assumes the equality $w_i =
+\bitop(v_i)$ is proven by a separate sumcheck or batched into the
+existing aggregation.}
+\end{table}
+
+\subsection{Verifier-side computation}
+
+Verifier-side, per spec, the construction adds:
+\begin{itemize}[leftmargin=2em]
+  \item One $\F_q$-linear permutation of $32$ coefficients
+    ($\bitop_\ell$ on $\liftring$): $O(32)$ assignments;
+  \item One $\psia$-projection of a degree-$<32$ polynomial in
+    $\liftring$: $32$ multiplications and $31$ additions in $\F_q$
+    (or $O(32)$ multiplications if $\alpha$-powers are precomputed);
+  \item One substitution into the mp\_eval subclaim equation: $O(1)$
+    field operations.
+\end{itemize}
+Total: $O(32)$ $\F_q$-operations per spec, independent of $n$.
+
+\subsection{Prover-side computation}
+
+Prover-side, per spec, the construction adds:
+\begin{itemize}[leftmargin=2em]
+  \item Materialisation of $M_\ell$: $n$ rows, each $O(32)$
+    $\F_q$-operations to apply $\psia \circ \bitop_\ell$;
+  \item Inclusion of $M_\ell$ in the constraint-aggregation sumcheck:
+    one extra MLE in the sumcheck working set, contributing $O(n)$
+    additional folding work per round (i.e., $O(n \nu)$ total over
+    the $\nu$ rounds), comparable to one extra row-shift virtual
+    column;
+  \item Inclusion of $M_\ell$ as a source in mp\_eval: one extra
+    source claim, contributing the standard mp\_eval per-source
+    overhead.
+\end{itemize}
+
+\subsection{Asymptotic comparison}
+
+For an arithmetization with $\sigma$ instances of bit-ops over a
+common source column (e.g., SHA-256 with three instances each in
+$\sigma_0$ and $\sigma_1$, repeated across $48$ message-schedule
+rounds), the construction reduces:
+\begin{itemize}[leftmargin=2em]
+  \item committed column count by $\Theta(\sigma)$;
+  \item proof-byte overhead from $\Theta(\sigma \log n)$ to
+    $\Theta(\sigma)$ field elements;
+  \item the equality-constraint count by exactly $\sigma$.
+\end{itemize}
+Because the witness commitment dominates honest-prover proof size in
+typical instantiations of the host PIOP, this cost reduction is
+proportional to the bit-op density of the arithmetization, not to its
+total constraint count.
+
+\subsection{Concrete numbers in the implementation}
+
+In the deployed Zinc+ SHA-256 UAIR (see the SHA UAIR
+specification), the use of the construction yields:
+\[
+  m \;=\; 6, \qquad
+  |\Sup\!\restriction_{\mathrm{binary}}|\;=\;19,
+\]
+i.e., the SHA UAIR declares six bit-op virtual columns over a
+$19$-column binary-poly section of the trace. The bit-op virtual
+columns add exactly $6$ field elements to the proof and $0$ rounds.

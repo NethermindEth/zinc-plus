@@ -1,0 +1,49 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{Virtual Columns from Coefficient-Position Symmetries \\
+       of Binary-Polynomial Cells \\
+       \large As deployed in the Zinc+ reference codebase}
+\author{Alex Abdugafarov \\[2pt] \normalsize Nethermind Research \and Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Albert: AI generated report from our codebase.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe a virtual-column construction in the Zinc+ multilinear PIOP
+that allows constraints to reference bit-wise rotations and right-shifts
+of binary-polynomial trace columns at zero marginal cost: no fresh
+commitment, no additional protocol round, no extra challenge, and only
+a single field element of communication per declared virtual column.
+The construction rests on a structural commutation lemma: the
+multilinear extension functor over the row coordinate commutes with
+any $\F_2$-linear endomorphism of the cell ring acting on the
+coefficient coordinate. This commutation is exploited as a
+\emph{verifier-side reconstruction}: at the final challenge point, the
+verifier reproduces the value of the virtual MLE locally from the
+opened lifted evaluation of its source column. We formalise the
+construction, sketch its soundness, exhibit its communication-cost
+profile against the naive commit-and-equate approach, and observe that
+the same template lifts verbatim to any $\F_2$-linear function of the
+$32$ coefficient bits of a cell.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/introduction}
+\input{sections/setting}
+\input{sections/equivariance}
+\input{sections/construction}
+\input{sections/soundness}
+\input{sections/cost}
+\input{sections/generalisation}
+
+\end{document}

@@ -1,0 +1,213 @@
+% ===========================================================================
+\section{Arithmetizing the SHA-256 building blocks}\label{sec:arith}
+% ===========================================================================
+
+We collect the lemmas that translate each SHA-256 building block into
+either a $\Q[X]$- or an $\F_2[X]$-constraint. The lemmas are stated in
+slight variations from the main Zinc+ paper to fit the all-$\Q[X]$
+instantiation actually deployed in the implementation: we lift the
+$\F_2[X]$ identities back to $\Q[X]$ using extra slack witnesses
+whenever a column is not yet bit-poly-typed.
+
+\subsection{Rotations}
+
+We start from the rotation-as-ideal-membership lemma of the main paper
+(Lemma~8.7 there), which we reproduce for self-containment.
+
+\begin{lemma}[Rotation as ideal membership]\label{lem:rot}
+Let $R$ be a commutative ring and $0 \le r < 32$. For any
+$u,v \in R^{<32}[X]$,
+$$
+v - X^{32-r} \cdot u \;\in\; (X^{32}-1)
+\quad \Longleftrightarrow \quad
+v \;=\; \ROTR^{r}(u).
+$$
+\end{lemma}
+
+\subsection{The functions $\Sigma_0$ and $\Sigma_1$}\label{sec:big-sigma}
+
+Define the rotation-encoding polynomials
+\begin{equation}\label{eq:rho}
+\rho_{0}(X) := X^{30} + X^{19} + X^{10}, \qquad
+\rho_{1}(X) := X^{26} + X^{21} + X^{7}, \qquad \text{in } \F_2[X].
+\end{equation}
+
+\begin{lemma}[{$\Q[X]$ lift of $\Sigma_0/\Sigma_1$}]\label{lem:big-sigma}
+Let $a \in [0\mathbin{..}2^{32}-1]$ with bit-polynomial representative
+$\bp{a} \in \bitpoly{32}$, and let $\bp{y} \in \bitpoly{32}$. Then
+$\bp{y} = \widehat{\Sigma_0(a)}$ if and only if there exists
+$\bp{o} \in \bitpoly{32}$ such that
+\begin{equation}\label{eq:sig0-Q}
+\bp{a} \cdot \rho_0(X) \;-\; \bp{y} \;-\; 2\,\bp{o} \;\in\; (X^{32}-1)
+\qquad \text{in } \Q[X],
+\end{equation}
+and analogously for $\Sigma_1$ with $\rho_1(X)$.
+\end{lemma}
+
+The slack witness $\bp{o}$ absorbs the integer overflow incurred by
+lifting the $\F_2[X]$ identity to $\Q[X]$: each coefficient of
+$\bp{a}\cdot\rho_0(X) \bmod (X^{32}-1)$ is the sum of three bits, so the
+$\Q[X]$-residue $\bp{a}\cdot\rho_0 - \widehat{\Sigma_0(a)}$ has
+per-coefficient entries in $\{0,2\}$ and admits a unique bit-poly slack
+$\bp{o}$ as in \eqref{eq:sig0-Q}.
+
+\subsection{The functions $\sigma_0$ and $\sigma_1$}\label{sec:small-sigma}
+
+For $\sigma_i$ the right-shift terms are not pure rotations; we model
+them with a virtual coordinate-wise map.
+
+\begin{lemma}[Right shift as a virtual column]\label{lem:shr-virtual}
+For any commutative ring~$R$ and $r \in \{1,\dots,31\}$, the map
+$\SHR^r: \bitpoly{32} \to \bitpoly{32}$ extends $R$-linearly to
+$R^{<32}[X]$ and commutes with multilinear extension.
+\end{lemma}
+
+This is an instance of Lemma~2.3 of the main paper: any $R$-linear
+coordinate-wise map admits a virtual-column realization.
+Concretely, a witness column $\bp{v}$ of bit-polynomials gives free
+oracle access to $\SHR^r(\bp{v})$ via the same multilinear extension.
+The implementation registers these as bit-op specs of type
+$\mathsf{ShiftR}(r)$ on the underlying committed column.
+
+Define
+\begin{equation}\label{eq:rho-sigma}
+\rho_{\sigma_0}(X) := X^{25} + X^{14}, \qquad
+\rho_{\sigma_1}(X) := X^{15} + X^{13}, \qquad \text{in } \F_2[X].
+\end{equation}
+
+\begin{lemma}[{$\Q[X]$ lift of $\sigma_0/\sigma_1$}]\label{lem:small-sigma}
+Let $W \in [0\mathbin{..}2^{32}-1]$ and $\bp{y} \in \bitpoly{32}$.
+Then $\bp{y} = \widehat{\sigma_0(W)}$ if and only if there exists
+$\bp{o} \in \bitpoly{32}$ such that
+\begin{equation}\label{eq:lsig0-Q}
+\bp{W} \cdot \rho_{\sigma_0}(X) \;+\; \SHR^{3}(\bp{W}) \;-\; \bp{y} \;-\; 2\,\bp{o}
+\;\in\; (X^{32}-1) \qquad \text{in } \Q[X],
+\end{equation}
+and analogously for $\sigma_1$ via $\rho_{\sigma_1}$ and $\SHR^{10}$.
+\end{lemma}
+
+In the trace, $\SHR^{r}(\bp{W})$ is realized by a bit-op virtual column
+over $\bp{W}$ (Lemma~\ref{lem:shr-virtual}), so it is not a committed
+column. The slack $\bp{o}$ is a public bit-polynomial overflow witness
+of bit-budget $1$ per coefficient.
+
+\subsection{The functions $\Ch$ and $\Maj$ via Table~9 virtual residuals}
+\label{sec:ch-maj}
+
+Rather than committing the materialization columns
+$B_1,B_2,B_3$ of the spec's Table~9 (each storing one $\Q[X]$ affine
+combination meant to lie in $\bitpoly{32}$ per coefficient), we declare
+those affine combinations as \emph{virtual binary-polynomial columns}
+and pin them coefficient-wise via the booleanity sumcheck.
+
+The $\Ch$ function is split into two AND-operand bit-polys
+$\bp{u_{ef}} := e \AND f$ and $\bp{u_{\neg e,g}} := (\NOT e) \AND g$; since
+$e$ and $\NOT e$ have disjoint bit-support, $\Ch(e,f,g) = u_{ef} + u_{\neg e,g}$
+coefficient-wise in $\Z$.
+
+Anchoring at $k = t-2$ so all references are forward shifts, the three
+virtual residuals are
+\begin{align}
+r_{\mathrm{ch}_1}[k]
+  &:= e[k+2] + e[k+1] - 2\,u_{ef}[k+2], \label{eq:rch1}\\
+r_{\mathrm{ch}_2}[k]
+  &:= e[k+2] - e[k] + 2\,u_{\neg e,g}[k+2] + 2\,c_{\mathrm{ch}_2}[k],
+        \label{eq:rch2}\\
+r_{\mathrm{maj}}[k]
+  &:= a[k] + a[k+1] + a[k+2] - 2\,\Maj[k+2] - 2\,c_{\mathrm{maj}}[k],
+        \label{eq:rmaj}
+\end{align}
+where $c_{\mathrm{ch}_2}, c_{\mathrm{maj}} \in \bitpoly{32}$ are
+\emph{tail correctors} discussed below. The booleanity sumcheck pins
+each per-bit slice of these residuals into $\{0,1\}$, which forces every
+coefficient of every residual into $\{0,1\}$ for free.
+
+\paragraph{Why $r_{\mathrm{ch}_2}$ uses the alt-complement form.}
+The natural Table~9 row 63 expression
+$(\mathbf{1}_{32} - e[t]) + e[t-2] - 2\, u_{\neg e,g}[t]$ contains a
+$\mathbf{1}_{32}$ constant; storing or accessing it virtually in the
+sumcheck framework would require materializing a $32$-bit constant
+column. The implementation observes that, per coefficient, the original
+residue $r_{\mathrm{orig}}$ and the alt-complement residue
+$r_{\mathrm{alt}}$ used in \eqref{eq:rch2} satisfy
+$r_{\mathrm{orig}} + r_{\mathrm{alt}} = 1$, so they are bit-valid
+simultaneously. Substituting the alt form lets us drop the
+$\mathbf{1}_{32}$ constant from the virtual-source enum entirely.
+
+\paragraph{Tail correctors.}
+On every row $k$ with $k+2 < n$ the residuals collapse to clean
+$\XOR$/$\Maj$-$\XOR$ patterns and lie in $\{0,1\}$ per coefficient. The
+exceptions are the last two rows $k \in \{n-2, n-1\}$, where the
+length-$2$ forward shifts pull off-trace zero-padding. Without
+correctors:
+\begin{itemize}
+\item $r_{\mathrm{ch}_2}$ at $k \in \{n-2,n-1\}$ reduces to $-e[k]$,
+which is in $\{0,-1\}$ — bit-invalid.
+\item $r_{\mathrm{maj}}$ at $k = n-2$ reduces to $a[k]+a[k+1]$, which
+is in $\{0,1,2\}$ — also bit-invalid.
+\end{itemize}
+The public correctors are therefore non-zero only on those two tail
+rows, with values
+\begin{equation}\label{eq:correctors}
+c_{\mathrm{ch}_2}[k] := \begin{cases} e[k] & k+2 \ge n \\ 0 & \text{else}\end{cases}, \quad
+c_{\mathrm{maj}}[k]  := \begin{cases} a[k] \AND a[k+1] & k+2 \ge n,\, k+1 < n \\ 0 & \text{else}.\end{cases}
+\end{equation}
+Plugging \eqref{eq:correctors} into \eqref{eq:rch2} and \eqref{eq:rmaj}
+recovers $\{0,1\}$-valued residuals on every row. Both correctors are
+deterministic functions of the public boundary cells $\bp{a}[n-2,n-1]$
+and $\bp{e}[n-2,n-1]$ exposed by the digest pinning (see
+\Cref{sec:cols}), so they are placed in the public input rather than
+committed.
+
+\subsection{Modular addition via the $(X-2)$ bridge}\label{sec:mod-add}
+
+Recall from the main paper that, for a polynomial $f \in \Q[X]$,
+membership $f \in (X-2)$ is equivalent to $f(2)=0$. We use this to
+glue together $\bitpoly{32}$ values (whose integer image is $\bp{x}(2)$)
+with $\Q$-valued accumulators.
+
+\begin{lemma}[Modular addition lemma]\label{lem:mod-add}
+Let $\bp{y}, \bp{z}_1,\dots,\bp{z}_M \in \bitpoly{32}$,
+$\bp{x}_1,\dots,\bp{x}_L \in \bitpoly{32}$, and $\mu \in \Z_{\ge 0}$.
+Suppose
+\begin{equation}\label{eq:mod-add}
+\bp{y} \;-\; \sum_{j=1}^{L} \bp{x}_j \;-\; \sum_{j=1}^{M} \bp{z}_j \;+\; 2 X^{31} \cdot \mu \;\in\; (X-2).
+\end{equation}
+Then
+$\psi_2(\bp{y}) \equiv \sum_{j=1}^{L} \psi_2(\bp{x}_j) + \sum_{j=1}^{M} \psi_2(\bp{z}_j) \pmod{2^{32}}$.
+The converse holds with $\mu \in [0\mathbin{..}L+M-1]$.
+\end{lemma}
+
+The substitution $2 X^{31}$ in place of $X^{32}$ lets us stay inside
+the $\Q[X]$-ring of polynomials of degree~$<32$ used throughout the
+implementation; the two coincide when evaluated at $X = 2$.
+
+\begin{remark}[Bit-budget for $\mu$]\label{rem:mu-budget}
+For each modular sum, the integer carry $\mu$ is bounded by the number
+of summands. The implementation packs the five carries arising in the
+SHA round (the message-schedule recurrence, the $a$- and $e$-updates,
+and the two feed-forward additions) into disjoint bit-fields of a single
+binary-polynomial column $\bp{W}_{\mu\text{-packed}}$, with the bit
+layout
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Bit range} & \textbf{Quantity} \\
+\midrule
+$0$--$1$  & $\mu_W$ \quad (msg-schedule carry, range $[0,3]$)\\
+$2$--$4$  & $\mu_a$ \quad ($a$-update carry, range $[0,6]$)\\
+$5$--$7$  & $\mu_e$ \quad ($e$-update carry, range $[0,5]$)\\
+$8$       & $\mu_{ff,a}$ \quad (junction carry, range $\{0,1\}$)\\
+$9$       & $\mu_{ff,e}$ \quad (junction carry, range $\{0,1\}$)\\
+$10$--$31$ & must be $0$ (range-pinned by C\ref{con:mu-zero}). \\
+\bottomrule
+\end{tabular}
+\end{center}
+Each carry is read by a $\mathsf{ShiftR}$-virtual column on
+$\bp{W}_{\mu\text{-packed}}$. Booleanity gives every bit of the packed
+column the constraint $b \in \{0,1\}$ for free; for non-power-of-$2$
+honest ranges (e.g.\ $\mu_a \le 6$, encoded in $3$ bits which would also
+admit $\mu_a = 7$), violations are caught by the booleanity of the
+$\bp{W}_{a}$ / $\bp{W}_{e}$ columns at the next row, since they would
+force $a[k+4]$ or $e[k+4]$ to wrap negative.
+\end{remark}

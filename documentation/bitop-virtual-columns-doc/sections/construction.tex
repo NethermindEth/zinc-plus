@@ -1,0 +1,337 @@
+\section{The Construction}
+\label{sec:construction}
+
+We describe how the index set $\Sbit$ is folded into the multilinear
+PIOP. The presentation tracks the four protocol stages relevant to
+trace-column claims: \emph{(i)}~ ideal check setup; \emph{(ii)}~
+constraint-aggregation sumcheck; \emph{(iii)}~ multi-point evaluation
+sumcheck; \emph{(iv)}~ lifted-evaluation final check.
+
+\subsection{What is committed and what is not}
+
+The construction does \emph{not} alter the commitment phase. The
+prover commits exactly to the multilinear extensions of $\psia(v_j)$
+for $j \in \Sup$. No bit-op virtual column is committed. The set
+$\Sbit$ is fixed by the UAIR signature and is part of the
+verifier's public parameters; it is not chosen interactively.
+
+\subsection{Constraint formulation}
+
+A UAIR with $|\Sbit| = m$ admits constraint polynomials of the form
+\[
+  C\!\left(\, \mathrm{up},\ \mathrm{down}_{\mathrm{sh}},\ \mathrm{down}_{\mathrm{bit}} \,\right) \;=\; 0
+\]
+where the $\mathrm{down}_{\mathrm{bit}}$ slots correspond to virtual
+cells $\bitop_{\ell}(v_{j_\ell})$ for $\ell = 1,\ldots,m$, in the
+order fixed by the signature.
+
+\subsection{Constraint-aggregation sumcheck}
+
+The multilinear PIOP runs, at random point
+$r^* \in \F_q^{\nu}$, a sumcheck on the constraint-aggregation
+polynomial. The prover materialises, in addition to the existing MLE
+inputs (last-row selector, $\eq_{r^*}$, base trace MLEs, row-shift
+MLEs), the following \emph{virtual MLEs}:
+\[
+  M_{\ell}(\,\cdot\,) \;:=\; \mle{\psia(\bitop_{\ell}\,_* v_{j_\ell})}, \qquad \ell = 1,\ldots,m.
+\]
+By \Cref{cor:projected-equivariance}, $M_{\ell}$ is the multilinear
+extension of the column $\psia \circ \bitop_{\ell}$ applied cell-wise
+to $v_{j_\ell}$. Operationally, $M_{\ell}$ is computed in $O(n)$ cell
+evaluations: for each row $i$, the bit-op acts on the $32$
+coefficients of $v_{j_\ell,i}$ as a permutation, and the resulting
+cell is projected by $\psia$ to a scalar in $\F_q$.
+
+The sumcheck is run on the polynomial
+\[
+  \mathrm{Sel}(r^*)\cdot \eq_{r^*} \cdot
+  C\!\big(\mathrm{up}_{\mathrm{eval}},\ \mathrm{down}_{\mathrm{sh, eval}},\ \mathrm{down}_{\mathrm{bit, eval}}\big)
+\]
+where $\mathrm{down}_{\mathrm{bit, eval}}$ at row $i$ is read from
+$M_{\ell}$. At the end of the sumcheck, after $\nu$ rounds, the
+verifier obtains:
+\begin{itemize}[leftmargin=2em]
+  \item base evaluations $\big(\,\mle{\psia(v_j)}(r^{**})\,\big)_{j \in \Sup}$,
+  \item row-shift evaluations $\big(\,\mle{\psia(\rowsh{\delta}\,v_j)}(r^{**})\,\big)_{(j,\delta) \in \Ssh}$,
+  \item bit-op evaluations $\big(\,b_{\ell}^{**} := M_{\ell}(r^{**})\,\big)_{\ell = 1,\ldots,m}$,
+\end{itemize}
+where $r^{**} \in \F_q^{\nu}$ is the sumcheck challenge.\footnote{The
+implementation reuses the symbol $r^*$ for this final sumcheck point.
+We use $r^{**}$ here to keep the prior $r^*$ available if needed.}
+
+The vector $(b_1^{**},\ldots,b_m^{**})$ is sent by the prover and
+absorbed into the transcript, contributing exactly $m$ field elements
+to the proof size. It enters the verifier's claim-value reconstruction
+of $C$ at the sumcheck endpoint via the $\mathrm{down}_{\mathrm{bit}}$
+slots; tampering any $b_{\ell}^{**}$ violates the sumcheck claim with
+overwhelming probability.
+
+\subsection{Multi-point evaluation sumcheck}
+\label{sec:mpeval}
+
+The multi-point evaluation sub-protocol (mp\_eval) reduces a list of
+MLE evaluation claims at $r^{**}$ — including row-shifted variants of
+those MLEs — to a \emph{single residual claim per source MLE} at a
+common final point $r_0 \in \F_q^{\nu}$. The reduction uses the
+row-shift kernel identity \cref{eq:row-shift-mle}: a row-shift of
+$v_j$ by $\delta$ at the point $r^{**}$ is a fixed $\F_q$-linear
+functional of the same source's cell values, with weights given by
+$\mathrm{next}_\delta(r^{**}, \cdot)$. mp\_eval pairs this kernel
+with the base source MLE inside a single sumcheck whose endpoint is
+$r_0$.
+
+\paragraph{Sumcheck body.} Concretely, mp\_eval runs a sumcheck on
+\begin{equation}
+\label{eq:mpeval-sumcheck}
+  \sum_{b \in \{0,1\}^{\nu}} \Big[\,
+    \eq(r^{**}, b)\cdot \!\sum_{j \in \Sup} \gamma_j\, \mle{\psia(v_j)}(b)
+    \;+\;
+    \!\sum_{(j,\delta)\in\Ssh}\!\!\alpha_{(j,\delta)}\, \mathrm{next}_\delta(r^{**}, b)\cdot \mle{\psia(v_j)}(b)
+  \,\Big],
+\end{equation}
+where the $\gamma_j$ batch the up-claims across base sources and the
+$\alpha_{(j,\delta)}$ batch the row-shift down-claims; both are
+transcript challenges. The expected sum equals $\sum_j \gamma_j
+\,\text{up\_eval}_j + \sum_{(j,\delta)} \alpha_{(j,\delta)}
+\,\text{down\_eval}_{(j,\delta)}$, the random combination of the
+prover's claims at $r^{**}$.
+
+The construction extends \cref{eq:mpeval-sumcheck} to include the
+bit-op virtual sources. Define
+\[
+  \mathcal{F} \;:=\;
+  \underbrace{\big\{\,\mle{\psia(v_j)} \,:\, j \in \Sup\,\big\}}_{\text{base sources}}
+  \;\cup\;
+  \underbrace{\big\{\, M_{\ell} \,:\, \ell = 1,\ldots,m\,\big\}}_{\text{bit-op virtual sources}}.
+\]
+The shift list $\Ssh$ is unchanged: it continues to reference base
+sources (extending it to bit-op virtual sources is a free operation,
+discussed in \Cref{sec:composition}). The bit-op virtual sources
+enter mp\_eval as additional up-claims at $r^{**}$ with values
+$b_1^{**},\ldots,b_m^{**}$, contributing fresh batching coefficients
+$\gamma_\ell$ and adding the term
+$\eq(r^{**}, b)\cdot \gamma_\ell M_\ell(b)$ inside the bracket of
+\cref{eq:mpeval-sumcheck}.
+
+\paragraph{Residual structure at $r_0$.} After $\nu$ sumcheck rounds,
+the prover has been pinned to a single value of the bracketed
+combination at $b = r_0$:
+\[
+  \eq(r^{**}, r_0)\!\sum_j \gamma_j\, \mle{\psia(v_j)}(r_0)
+  \;+\!\!\sum_{(j,\delta)\in\Ssh}\!\!\alpha_{(j,\delta)}\, \mathrm{next}_\delta(r^{**}, r_0)\cdot \mle{\psia(v_j)}(r_0)
+  \;+\!\sum_{\ell}\eq(r^{**}, r_0)\,\gamma_\ell\, M_\ell(r_0).
+\]
+The selector values $\eq(r^{**}, r_0)$ and $\mathrm{next}_\delta(r^{**}, r_0)$
+are \emph{scalars} the verifier computes locally from the transcript.
+The expression is therefore an $\F_q$-linear combination of one
+residual per source $f \in \mathcal{F}$, all evaluated at the common
+point $r_0$:
+\begin{itemize}[leftmargin=2em]
+  \item For each base source $j \in \Sup$: $e_j := \mle{\psia(v_j)}(r_0)$.
+  \item For each bit-op virtual source $\ell$: $e_{\ell} := M_{\ell}(r_0)$.
+\end{itemize}
+\textbf{No row-shift residual survives at $r_0$:} a row-shift claim
+$(j,\delta)$ contributes $\alpha_{(j,\delta)} \cdot
+\mathrm{next}_\delta(r^{**}, r_0) \cdot e_j$, i.e. it is absorbed into
+$e_j$ as a coefficient. The output of mp\_eval is one residual per
+element of $\mathcal{F}$, indexed by sources only.
+
+\subsection{Lifted-evaluation final check}
+\label{sec:final-check}
+
+The prover opens, per base column $j \in \Sup$, the lifted evaluation
+$\lmle{v_j}(r_0) \in \liftring$ (i.e., all $32$ $\F_q$-coefficients).
+The verifier produces \emph{open evals} — one per source in
+$\mathcal{F}$ — by:
+\begin{itemize}[leftmargin=2em]
+  \item For each base source $j \in \Sup$:
+  \begin{equation}
+  \label{eq:base-open}
+    \tilde e_j \;:=\; \psia\!\big(\lmle{v_j}(r_0)\big).
+  \end{equation}
+  \item For each bit-op virtual source $\ell = 1,\ldots,m$, by
+    \Cref{cor:projected-equivariance}:
+  \begin{equation}
+  \label{eq:bitop-open}
+    \tilde e_{\ell} \;:=\; \psia\!\big(\bitop_{\ell}(\lmle{v_{j_\ell}}(r_0))\big).
+  \end{equation}
+\end{itemize}
+The verifier passes $(\tilde e_*)$ to mp\_eval's subclaim verifier,
+which checks a single combined identity:
+\begin{equation}
+\label{eq:final-subclaim}
+  \mathrm{Subclaim}_{\mathrm{mp\_eval}}\!\big(r_0;\, (\tilde e_*),\, \Ssh,\, \mathrm{transcript}\big) \;\stackrel{?}{=}\; 0.
+\end{equation}
+There is no separate ``base check'' or ``row-shift check'' at the
+final stage: \Cref{eq:final-subclaim} is the unique closing identity
+of the protocol.
+
+\paragraph{Why this discharges all three failure modes.} Honest data
+satisfies \cref{eq:final-subclaim}. Conversely, any of:
+\emph{(i)}~ a tampered base lifted opening $\lmle{v_j}(r_0)$,
+\emph{(ii)}~ a tampered bit-op claim $b_{\ell}^{**}$ at $r^{**}$, or
+\emph{(iii)}~ an inconsistent reconstruction of $\tilde e_{\ell}$ via
+\cref{eq:bitop-open} — breaks \cref{eq:final-subclaim} with
+overwhelming probability over $r^{**}$, $r_0$, and $\alpha$. The
+formal soundness argument is in \Cref{sec:soundness}.
+
+\subsection{Composition with row-shifts}
+\label{sec:composition}
+
+A natural question is how bit-op virtual columns interact with the
+row-shift virtual columns the host PIOP already supports. There are
+three statements to make.
+
+\paragraph{Coexistence.} A UAIR may freely declare both
+$(j,\delta) \in \Ssh$ and $(j,\bitop) \in \Sbit$ on the same base
+column $v_j$. The two virtual columns
+\[
+  \rowsh{\delta} v_j \quad\text{and}\quad \bitop_*(v_j)
+\]
+are independent objects: each is materialised separately during the
+constraint-aggregation sumcheck, each contributes its own claim-at-$r^{**}$,
+and each enters mp\_eval through its own slot — a row-shift slot for
+the former, an additional source for the latter. They do not interact.
+
+\paragraph{Commutation.} If a UAIR's constraints reference the
+\emph{composition} $\bitop(v_j[t+\delta])$ — i.e., the bit-op applied
+to a row-shifted cell — \Cref{cor:bitop-shift-commute} applies. The
+column-level identity
+\[
+  \bitop_*\!\big(\rowsh{\delta} v_j\big) \;=\; \rowsh{\delta}\!\big(\bitop_*\, v_j\big)
+\]
+implies that the bit-op-of-row-shift and the row-shift-of-bit-op are
+the same column. The MLE-level identity
+\cref{eq:bitop-shift-mle} expresses evaluation of the composed virtual
+MLE at $r$ as the row-shift kernel applied to the bit-op-acted base
+column:
+\[
+  \mle{\bitop_*(\rowsh{\delta} v_j)}(r) \;=\; \sum_{b \in \{0,1\}^\nu} \mathrm{next}_\delta(r, b) \cdot \bitop(v_{j,b}).
+\]
+
+\paragraph{Deployed pattern: commit-and-pin.} The current Zinc+ SHA-256
+arithmetization needs $\sigma_0(W[t-15])$ and $\sigma_1(W[t-2])$ on
+the message-schedule equation. Rather than introduce a primitive for
+the composed virtual column, the deployed UAIR uses a
+\emph{commit-and-pin} pattern:
+\begin{enumerate}[leftmargin=2em]
+  \item Commit a fresh row-local intermediate column $W_{\sigma_0}$
+    with $W_{\sigma_0}[t] := \sigma_0(W[t])$.
+  \item Declare the bit-op specs
+    $(j_W, \mathrm{Rot}_{25}), (j_W, \mathrm{Rot}_{14}), (j_W, \mathrm{ShR}_3) \in \Sbit$
+    on the base column $W$ — all row-local, no row-shift.
+  \item Add a row-local algebraic constraint that pins $W_{\sigma_0}[t]$
+    to the bit-op virtuals:
+    \[
+      \mathrm{Rot}_{25}(W[t]) + \mathrm{Rot}_{14}(W[t]) + \mathrm{ShR}_3(W[t])
+      \;-\; W_{\sigma_0}[t] \;-\; 2\cdot\mathrm{ov}_{\sigma_0}[t] \;\equiv\; 0
+      \pmod{X-2},
+    \]
+    where the $\mathrm{ov}_{\sigma_0}$ overflow column absorbs the
+    F$_2[X] \to \Q[X]$ lift carry.
+  \item Access $\sigma_0(W[t-15])$ in the schedule equation as a
+    standard \emph{row-shift of $W_{\sigma_0}$}, declared by an
+    ordinary $(W_{\sigma_0}, \delta) \in \Ssh$ — handled by the host
+    PIOP's existing row-shift machinery, no new primitive.
+\end{enumerate}
+The cost is one extra committed column per composed bit-op operand
+(plus a row-local pinning constraint and a small $\mathrm{ov}$
+column), but the bit-op specs and the row-shift specs both stay
+within their existing primitive types.
+
+\paragraph{Extensibility (not currently deployed).} As a forward-looking
+design point: the construction admits, with no new soundness loss
+and no new round, a third virtual-column primitive
+\[
+  \Sbit^{\rowsh{}} \;=\; \big\{ (j_\ell, \delta_\ell, \bitop_\ell) \big\}_{\ell=1}^{m'}
+\]
+of \emph{row-shifted bit-op virtual columns}, encoding the cell
+$\bitop_\ell(v_{j_\ell}[t + \delta_\ell])$ as a single virtual column
+\emph{with no committed intermediate}. The protocol bookkeeping for
+each spec $(j_\ell, \delta_\ell, \bitop_\ell)$ would be:
+\begin{enumerate}[leftmargin=2em]
+  \item In the constraint-aggregation sumcheck, the prover materialises
+    \[
+      M_{\ell}^{\rowsh{}} \;:=\; \mle{\psia\big(\bitop_\ell\,_*\!\big(\rowsh{\delta_\ell} v_{j_\ell}\big)\big)}
+    \]
+    (cell-wise, $O(n)$ work per spec).
+  \item One field element $b_{\ell}^{\rowsh{}, **} := M_{\ell}^{\rowsh{}}(r^{**})$ is
+    sent at the end of the sumcheck, absorbed into the transcript, and
+    contributes to the constraint-evaluation reconstruction at $r^{**}$.
+  \item mp\_eval admits the spec equivalently as either:
+    \begin{itemize}[leftmargin=2em]
+      \item an additional \emph{source} (with up-claim $b_{\ell}^{\rowsh{}, **}$
+        at $r^{**}$, no row-shift), or
+      \item a row-shift on the bit-op virtual source $M_{(j_\ell,\bitop_\ell)}$
+        (with down-claim $b_{\ell}^{\rowsh{}, **}$ at $r^{**}$, shift $\delta_\ell$).
+    \end{itemize}
+    By \cref{eq:bitop-shift-mle}, both routes produce the same residual
+    at $r_0$.
+  \item In either route, the row-shift contribution at $r_0$ is the
+    \emph{scalar} $\mathrm{next}_{\delta_\ell}(r^{**}, r_0)$ (computed
+    by the verifier locally from the transcript) multiplied by a
+    residual reconstructed from the same lifted opening
+    $\lmle{v_{j_\ell}}(r_0)$ as in the unshifted case:
+    \[
+      \psia\!\big(\bitop_\ell(\lmle{v_{j_\ell}}(r_0))\big).
+    \]
+    No additional lifted opening, no separate residual, and no
+    shifted-point evaluation is required.
+\end{enumerate}
+
+The extension would cost one additional MLE materialisation and one
+additional field element per declared $(j,\delta,\bitop)$ spec, and
+add no new round, no new commitment, and no new lifted opening — but
+it requires (i) extending \texttt{BitOpSpec} or \texttt{ShiftSpec}
+with a composite-spec variant, (ii) wiring the new spec into CPR's
+\texttt{build\_bit\_op\_mles} and into mp\_eval's source/shift lists,
+and (iii) extending the verifier's $r_0$ reconstruction. The current
+codebase does not implement this primitive; it uses the commit-and-pin
+pattern above instead.
+
+\paragraph{Trade-off summary.} Per composed bit-op operand
+$\sigma(v[t+\delta])$ in a constraint:
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Deployed (commit-and-pin)}: $+1$ committed column,
+    $+1$ row-local pinning constraint, $+1$ overflow column, plus
+    standard row-shift of the committed intermediate.
+  \item \emph{Extensibility}: $+1$ field element in the proof, plus
+    the prover-side MLE materialisation; $0$ commitments, $0$ extra
+    constraints.
+\end{itemize}
+The deployed pattern was chosen for implementation simplicity and
+because the per-row constraint cost is amortised against the
+bit-op-virtual savings within the same UAIR.
+
+\subsection{Summary of the construction}
+
+\begin{construction}[Bit-op virtual columns]
+\label{cons:bitop}
+Given a UAIR signature with bit-op specs
+$\Sbit = \{(j_\ell,\bitop_\ell)\}_{\ell=1}^{m}$:
+\begin{enumerate}[leftmargin=2em]
+  \item No commitment is performed for any $\Sbit$ entry.
+  \item In the constraint-aggregation sumcheck, the prover materialises
+    $M_{\ell} := \mle{\psia(\bitop_{\ell}\,_* v_{j_\ell})}$
+    using the source column committed for $v_{j_\ell}$, evaluated
+    cell-wise.
+  \item At the end of that sumcheck, the prover sends one field element
+    $b_{\ell}^{**} := M_{\ell}(r^{**})$ per spec, which is absorbed into
+    the transcript and used in the claim-value reconstruction.
+  \item In the multi-point evaluation sumcheck, the source list is
+    extended by $\{M_{\ell}\}_{\ell=1}^{m}$, with up-claim values
+    $\{b_{\ell}^{**}\}$ at $r^{**}$. mp\_eval reduces all claims —
+    base up, base row-shifts, and bit-op up — to one residual per
+    source at the common final point $r_0$.
+  \item At the final-check stage, the verifier supplies open evals
+    \cref{eq:base-open}, \cref{eq:bitop-open} to mp\_eval's subclaim
+    verifier; the protocol accepts iff the single subclaim equation
+    \cref{eq:final-subclaim} holds.
+\end{enumerate}
+Composed access $\bitop(v_{j_\ell}[t+\delta])$ is supported in the
+deployed implementation via a commit-and-pin pattern (one extra
+row-local committed column with a pinning constraint), and admits a
+free protocol-level extension via a $(j,\delta,\bitop)$ primitive
+that the current codebase does not yet implement; see
+\Cref{sec:composition}.
+\end{construction}

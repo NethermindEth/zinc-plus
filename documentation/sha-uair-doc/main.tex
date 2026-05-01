@@ -1,0 +1,42 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{The SHA-256 UAIR$^+$ \\
+       \large As implemented in the Zinc+ reference codebase}
+\author{Alex Abdugafarov \\[2pt] \normalsize Nethermind Research \and Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Albert: AI generated report from our codebase.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe the Universal AIR with lookups (UAIR$^+$) instance that
+arithmetizes $N$ chained SHA-256 compression invocations, as deployed
+in the Zinc+ reference implementation. We follow the conventions and
+notation of the main Zinc+ paper, and focus on the design choices
+that depart from the idealized arithmetization presented there:
+namely, \emph{(i)}~ chained-compression packing into a single
+$2^{\nu}$-row trace; \emph{(ii)}~ replacement of the Table~9
+materialization columns by virtual binary-polynomial residuals pinned
+through booleanity; \emph{(iii)}~ packing of the five integer-carry
+columns into a single binary-polynomial column;
+\emph{(iv)}~ an all-$\Q[X]$ instantiation that uses public
+\emph{compensator} columns to keep the SHA recurrence constraints at
+algebraic degree~$1$ in the trace MLEs.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/arithmetization}
+\input{sections/uair}
+\input{sections/summary}
+
+\end{document}
