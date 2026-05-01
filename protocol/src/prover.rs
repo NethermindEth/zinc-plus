@@ -12,9 +12,9 @@ use zinc_piop::{
     },
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
-        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap, evaluate_trace_to_column_mles,
-        project_scalars, project_scalars_to_field, project_trace_coeffs_column_major,
-        project_trace_coeffs_row_major,
+        ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
+        evaluate_trace_to_column_mles_fast, project_scalars, project_scalars_to_field,
+        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -513,8 +513,11 @@ impl_with_type_bounds!(ProverIdealChecked
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
-        let projected_trace_f =
-            evaluate_trace_to_column_mles(&self.projected_trace, &projecting_element_f);
+        let projected_trace_f = evaluate_trace_to_column_mles_fast(
+            self.base.trace,
+            &projecting_element_f,
+            &self.field_cfg,
+        );
 
         let projected_scalars_f =
             project_scalars_to_field(self.projected_scalars_fx, &projecting_element_f)
@@ -1232,7 +1235,7 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
@@ -2001,7 +2004,7 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles(&projected_trace, &projecting_element_f);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
