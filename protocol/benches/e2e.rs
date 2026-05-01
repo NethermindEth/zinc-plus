@@ -59,18 +59,24 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 /// Repetition factor for linear code, an inverse rate. Defaults to 4 (rate
 /// 1/4); enabling the `iprs-rate-1-8` cargo feature switches every IPRS
 /// instance in this file to inverse-rate 8 (rate 1/8), and
-const REP: usize = if cfg!(feature = "iprs-rate-1-8") {
+/// `iprs-rate-1-16` switches to inverse-rate 16 (rate 1/16).
+/// `iprs-rate-1-16` takes precedence if both are enabled.
+const REP: usize = if cfg!(feature = "iprs-rate-1-16") {
+    16
+} else if cfg!(feature = "iprs-rate-1-8") {
     8
 } else {
     4
 };
 
 /// Number of column openings the PCS performs. Tied to `REP`: rate 1/4
-/// uses 147 openings, rate 1/8 uses 96.
-const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-8") {
-    96
+/// uses 150 openings, rate 1/8 uses 100, rate 1/16 uses 75.
+const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-16") {
+    75
+} else if cfg!(feature = "iprs-rate-1-8") {
+    100
 } else {
-    147
+    150
 };
 
 #[allow(clippy::type_complexity)]
@@ -916,7 +922,7 @@ fn bench_real_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usiz
 
     do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
         group,
-        "RealShaEcdsa",
+        "ShaEcdsa",
         num_vars,
         &pp,
         &trace,
@@ -934,7 +940,7 @@ fn bench_real_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: us
 
     do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
         group,
-        "RealShaEcdsa",
+        "ShaEcdsa",
         num_vars,
         &pp,
         &trace,
@@ -1282,8 +1288,6 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         };
     }
 
-    bench_prove_folded_4x!("Prove (folded 4×)", false);
-
     if count_effective_max_degree::<U>() <= 1 {
         bench_prove_folded_4x!("Prove (folded 4× MLE-first)", true);
     }
@@ -1331,8 +1335,139 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     });
 
     eprint_proof_size(&params, &proof);
+    if count_effective_max_degree::<U>() <= 1 {
+        eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
+            &params,
+            "MLE-first",
+            pp,
+            trace,
+            num_vars,
+            project_scalar,
+        );
+    }
 }
 
+/// Print per-region wall-time breakdown for `prove_folded_4x` over `N`
+/// runs (with one warmup, discarded). Bypasses criterion — each region
+/// is timed inside a single uninstrumented prover run, so it executes
+/// in its natural cache state. Σ regions matches the e2e wall time
+/// (modulo ~9× `Instant::now` overhead, sub-microsecond).
+fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
+    params: &str,
+    lane: &str,
+    pp: &FoldedPp4x<ZtF>,
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, DEGREE_PLUS_ONE>,
+    num_vars: usize,
+    project_scalar: S,
+) where
+    ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair + 'static,
+    S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
+{
+    use zinc_protocol::prover::{prove_folded_4x_with_timings, FoldedProveTimings};
+
+    const N: u32 = 100;
+
+    // Warmup (discarded — primes caches and amortizes any one-shot
+    // codegen the first call triggers).
+    let _ = prove_folded_4x_with_timings::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        MLE_FIRST,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("warmup folded 4× prove failed");
+
+    let mut sum = FoldedProveTimings::default();
+    for _ in 0..N {
+        let (_proof, t) = prove_folded_4x_with_timings::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            MLE_FIRST,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("timed folded 4× prove failed");
+        sum.add_assign(&t);
+    }
+    sum.divide_by(N);
+
+    let total = sum.total();
+    let pct =
+        |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
+    eprintln!(
+        "    Folded 4× per-region timings, {} lane ({}, mean of N={} runs):",
+        lane, params, N
+    );
+    eprintln!(
+        "      step 0  commit            {:>9.3} ms ({:>4.1}%)",
+        sum.step0_commit.as_secs_f64() * 1e3,
+        pct(sum.step0_commit)
+    );
+    eprintln!(
+        "      step 1  prime projection  {:>9.3} ms ({:>4.1}%)",
+        sum.step1_prime_projection.as_secs_f64() * 1e3,
+        pct(sum.step1_prime_projection)
+    );
+    eprintln!(
+        "      step 2  ideal check       {:>9.3} ms ({:>4.1}%)",
+        sum.step2_ideal_check.as_secs_f64() * 1e3,
+        pct(sum.step2_ideal_check)
+    );
+    eprintln!(
+        "      step 3  eval projection   {:>9.3} ms ({:>4.1}%)",
+        sum.step3_eval_projection.as_secs_f64() * 1e3,
+        pct(sum.step3_eval_projection)
+    );
+    eprintln!(
+        "      step 4  sumcheck          {:>9.3} ms ({:>4.1}%)",
+        sum.step4_sumcheck.as_secs_f64() * 1e3,
+        pct(sum.step4_sumcheck)
+    );
+    eprintln!(
+        "      step 5  multipoint eval   {:>9.3} ms ({:>4.1}%)",
+        sum.step5_multipoint_eval.as_secs_f64() * 1e3,
+        pct(sum.step5_multipoint_eval)
+    );
+    eprintln!(
+        "      step 6  lift-and-project  {:>9.3} ms ({:>4.1}%)",
+        sum.step6_lift_and_project.as_secs_f64() * 1e3,
+        pct(sum.step6_lift_and_project)
+    );
+    eprintln!(
+        "      step 7  pcs open          {:>9.3} ms ({:>4.1}%)",
+        sum.step7_pcs_open.as_secs_f64() * 1e3,
+        pct(sum.step7_pcs_open)
+    );
+    eprintln!(
+        "      assembly                  {:>9.3} ms ({:>4.1}%)",
+        sum.assembly.as_secs_f64() * 1e3,
+        pct(sum.assembly)
+    );
+    eprintln!(
+        "      total                     {:>9.3} ms",
+        total.as_secs_f64() * 1e3
+    );
+}
 
 //
 // Real-UAIR folded benches (1× and 4×). These reuse the generic
@@ -1468,7 +1603,7 @@ fn bench_real_sha_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_var
 
     do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
         group,
-        "RealShaEcdsa",
+        "ShaEcdsa",
         num_vars,
         &pp,
         &trace,
@@ -1528,7 +1663,7 @@ fn bench_real_sha_ecdsa_e2e_folded_4x(group: &mut BenchmarkGroup<WallTime>, num_
 
     do_bench_e2e_folded_4x::<BenchFoldedRealEcdsaZincTypes4x, U, _>(
         group,
-        "RealShaEcdsa",
+        "ShaEcdsa",
         num_vars,
         &pp,
         &trace,
@@ -1554,12 +1689,13 @@ fn e2e_folded_benches(c: &mut Criterion) {
 fn e2e_folded_4x_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded 4x");
 
-    bench_real_ecdsa_e2e_folded_4x(&mut group, 9);
-    bench_real_sha256_e2e_folded_4x(&mut group, 9);
+    // bench_real_ecdsa_e2e_folded_4x(&mut group, 9);
+    // bench_real_sha256_e2e_folded_4x(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_4x(&mut group, 9);
 
     group.finish();
 }
+
 
 criterion_group! {
     name = e2e;

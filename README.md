@@ -1,10 +1,19 @@
 # Zinc+
 
-WIP implementation and playground on Nethermind's improvement to Zinc SNARK .
+WIP implementation of the Zinc+ framework and a SNARK instantiated with it.
 
 ## Benchmarks
 
-Available benchmarks:
+### Paper benchmarks:
+
+To quickly reproduce the paper's benchmarks, use
+```bash
+RUSTFLAGS="-C target-cpu=native" \ 
+  cargo bench --features "parallel simd unchecked iprs-rate-1-8" \ 
+  --bench e2e -- "Folded 4x"
+```
+
+### Available benchmarks:
 
 | Benchmark          | What it measures                                                                                                                       |
 |--------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -27,6 +36,7 @@ RUSTFLAGS="-C target-cpu=native" cargo bench \
 | `simd`                 | Bit-packs binary polynomials into `u64`s and uses hand-written NEON / AVX-512 intrinsics for key operations (widening, inner products).                          |
 | `parallel`             | Enables [rayon](https://docs.rs/rayon)-based multi-threaded execution across the whole stack (sumcheck, encoding, commitment, etc.).                             |
 | `unchecked`            | Replaces `checked_add` / `checked_mul` with plain arithmetic, removing overflow guards. Only affects integer-typed computations; field arithmetic is unaffected. |
+|iprs-rate-1-8| Uses IPRS codes of rate 1/8, and 100 spot proximity checks. Without this feature, the rate is 1/4 and uses 150 spot proximity checks. |
 
 ## License
 
@@ -35,3 +45,4 @@ Apache 2.0
 ## Would like to contribute?
 
 see [Contributing](./CONTRIBUTING.md).
+

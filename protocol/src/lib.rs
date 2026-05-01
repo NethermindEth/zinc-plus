@@ -557,15 +557,15 @@ mod tests {
     };
 
     /// Number of column openings the PCS performs. Tied to `REP`: rate 1/4
-    /// uses 147 openings, rate 1/8 uses 96, rate 1/16 uses 72 (lower opening
+    /// uses 150 openings, rate 1/8 uses 100, rate 1/16 uses 75 (lower opening
     /// count is sound at the higher inverse rate because each column reveals
     /// more information about the codeword).
     const NUM_COL_OPENINGS_FOR_REP: usize = if cfg!(feature = "iprs-rate-1-16") {
-        72
+        75
     } else if cfg!(feature = "iprs-rate-1-8") {
-        96
+        100
     } else {
-        147
+        150
     };
 
     type F = MontyField<FIELD_LIMBS>;

@@ -6,7 +6,7 @@ use crate::{
     scalar_proj_cache::ScalarProjCache,
 };
 use crypto_primitives::PrimeField;
-use num_traits::Zero;
+use num_traits::{ConstZero, Zero};
 use std::cell::RefCell;
 use zinc_poly::{
     EvaluationError,
@@ -409,8 +409,15 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
         self.combined_evaluations.push(expr);
     }
 
-    fn assert_zero(&mut self, expr: Self::Expr) {
-        self.combined_evaluations.push(expr);
+    // For an honest prover the per-row value of an `assert_zero`
+    // constraint is the zero polynomial; for the MLE-first path it can
+    // be a meaningless polynomial that the caller would replace with
+    // zero anyway. Either way, the value the verifier gets is zero, so
+    // we substitute here and drop the input expression. (This does NOT
+    // skip the upstream poly-mult work inside `U::constrain_general`,
+    // which has already happened by the time this method runs.)
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.combined_evaluations.push(DynamicPolynomialF::ZERO);
     }
 }
 

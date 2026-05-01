@@ -186,38 +186,23 @@ where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,
     {
-        // Zero-ideal constraints (assert_zero) are identically zero on the
-        // hypercube for an honest prover. They are allowed to have degree
-        // > 1 even in the MLE-first path because we discard their evaluated
-        // values below and substitute `ZERO`: the MLE-first evaluation of a
-        // nonlinear constraint produces a meaningless value, but it is only
-        // meaningless for assert_zero constraints whose "true" MLE value is
-        // known to be zero anyway.
-        let is_zero_ideal: Vec<bool> = collect_ideals::<U>(num_constraints)
-            .ideals
-            .iter()
-            .map(|i| i.is_zero_ideal())
-            .collect();
-
+        // Zero-ideal (`assert_zero`) constraints are identically zero on the
+        // hypercube for an honest prover, and the MLE-first evaluation of a
+        // nonlinear constraint produces a meaningless value. Both cases are
+        // handled inside `CombinedPolyRowBuilder::assert_zero`, which writes
+        // `ZERO` into the corresponding slot regardless of the input
+        // expression — so no post-hoc overwrite is needed here.
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         // Evaluate combined polynomials using MLE-first approach:
         // evaluate trace columns at the point, then apply constraints.
-        let mut combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
             trace_matrix,
             projected_scalars,
             num_constraints,
             &evaluation_point,
             field_cfg,
         )?;
-
-        // Overwrite the (possibly garbage) values for zero-ideal
-        // constraints with zero before they hit the transcript.
-        for (i, v) in combined_mle_values.iter_mut().enumerate() {
-            if is_zero_ideal[i] {
-                *v = DynamicPolynomialF::ZERO;
-            }
-        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
