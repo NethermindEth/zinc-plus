@@ -42,11 +42,10 @@ W_{t-16} + \sigma_0(W_{t-15}) + W_{t-7} + \sigma_1(W_{t-2}) \pmod{2^{32}} & t \i
 and then runs $64$ round updates. At round $t$, the state
 $(a_t,\dots,h_t)$ is updated according to
 \begin{align}
-a_{t+1} &\equiv h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
-                + \Sigma_0(a_t) + \Maj(a_t,b_t,c_t) \pmod{2^{32}}, \label{eq:a-update}\\
-e_{t+1} &\equiv d_t + h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
+&a_{t+1} \equiv h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t + \Sigma_0(a_t) + \Maj(a_t,b_t,c_t) \pmod{2^{32}}, \label{eq:a-update}\\
+&e_{t+1} \equiv d_t + h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
                 \pmod{2^{32}}, \label{eq:e-update}\\
-(b_{t+1},c_{t+1},d_{t+1},f_{t+1},g_{t+1},h_{t+1}) &= (a_t,b_t,c_t,e_t,f_t,g_t).\notag
+&(b_{t+1},c_{t+1},d_{t+1},f_{t+1},g_{t+1},h_{t+1}) = (a_t,b_t,c_t,e_t,f_t,g_t).\notag
 \end{align}
 The compression's output is the feed-forward sum
 $H_{i+1} \equiv H_i + (a_{65},\dots,h_{65}) \pmod{2^{32}}$ component-wise.
@@ -57,7 +56,7 @@ of $a$ and $e$: $b_{t+1}=a_t$, $c_{t+1}=a_{t-1}$, $d_{t+1}=a_{t-2}$,
 and analogously $f_{t+1}=e_t$, $g_{t+1}=e_{t-1}$, $h_{t+1}=e_{t-2}$.
 This will let us store only the $a$- and $e$-registers in our trace
 and recover the rest via shifted row accesses
-(cf.\ Remark~2.2 of the main paper).
+(cf.\ Remark~8.2 of the main paper).
 \end{remark}
 
 \paragraph{Chained compressions.}

@@ -4,8 +4,8 @@
 
 We assemble the building blocks of \Cref{sec:arith} into a single
 UAIR$^+$ instance. We use the \emph{shift-access} extension of the main
-paper (Remark~2.2 of the Zinc+ paper), and the
-\emph{affine-combination lookup} extension (Remark~2.3).
+paper (Remark~8.2 of the Zinc+ paper), and the
+\emph{affine-combination lookup} extension (Remark~8.3).
 
 \subsection{Trace shape and the chained-compression layout}\label{sec:trace-shape}
 
@@ -31,10 +31,10 @@ relevant:
 \toprule
 \textbf{Window} & \textbf{Range} & \textbf{Purpose} \\
 \midrule
-Init prefix     & $[\mathrm{start},\,\mathrm{start}+4)$  & Pinned to $H_i$ via $S_{\mathrm{INIT-PREFIX}}$ \\
-Schedule active & $[\mathrm{start},\,\mathrm{start}+48)$ & Anchors of C\ref{con:c7} producing $W[k+16]$ for $k+16 \in [16,64)$ \\
+Init prefix     & $[0, 4)$  & Pinned to $H_i$ via $S_{\mathrm{INIT-PREFIX}}$ \\
+Schedule active & $[\mathrm{start},\,\mathrm{start}+48)$ & Anchors of C\ref{con:c7}\\ & & \quad producing $W[k+16]$ for $k+16 \in [16,64)$ \\
 Update active   & $[\mathrm{start},\,\mathrm{start}+64)$ & Anchors of C\ref{con:c8}, C\ref{con:c9} \\
-Junction window & $[\mathrm{start}+64,\,\mathrm{start}+68)$ & Read by $S_{\mathrm{FF}}$ for the $H_{i+1} = H_i + (\dots)$ feed-forward \\
+Junction window & $[\mathrm{start}+64,\,\mathrm{start}+68)$ & Read by $S_{\mathrm{FF}}$\\ & & \quad for the $H_{i+1} = H_i + (\dots)$ feed-forward \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -55,17 +55,17 @@ binary-polynomial columns and $9$ integer columns of our trace,
 respectively, separated into their public and witness portions. We
 write $\bp{x}\rowidx{t}$ for the entry of column $\bp{x}$ at row $t$,
 and $\bp{x}^{\downarrow\Delta}\rowidx{t} := \bp{x}\rowidx{t+\Delta}$
-for shifted access (Remark~2.2 of the main paper), with the convention
+for shifted access (Remark~8.2 of the main paper), with the convention
 $\bp{x}^{\downarrow\Delta}\rowidx{t} = 0$ if $t+\Delta > n$.
 
 \begin{table}[h]
 \centering\small
-\begin{tabular}{lll}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}p{0.30\linewidth}}
 \toprule
 \textbf{Column} & \textbf{Role} & \textbf{Lookup set $\subseteq$ Domain} \\
 \midrule
 \multicolumn{3}{l}{\textit{Public binary-polynomial columns ($9$)}} \\[1pt]
-$\col{PA\_A}$           & Boundary column for the $a$-register; carries $H_i$ at init prefixes, $H_N$ at the output prefix & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
+$\col{PA\_A}$           & Boundary column for the $a$-register; carries $H_i$ at init prefixes, $H_N$ at output prefix & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_E}$           & Boundary column for the $e$-register & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_OV\_SIG0}$    & Per-coefficient overflow witness for the $\Sigma_0$ rotation lift \eqref{eq:sig0-Q} & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\col{PA\_OV\_SIG1}$    & Same, for $\Sigma_1$ & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
@@ -88,14 +88,14 @@ $\bp{W_{u_{\neg e,g}}}$ & $\Ch$ operand split $u_{\neg e,g} = (\NOT e) \AND g$ &
 $\bp{W_{\Maj}}$         & $\Maj(a[t],b[t],c[t])$ & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 $\bp{W_{\mu\text{-packed}}}$ & Packed integer-carry column (Remark~\ref{rem:mu-budget}) & $\bitpoly{32} \subseteq \Q^{<32}[X]$ \\
 \bottomrule
-\end{tabular}
-\caption{Binary-polynomial columns ($20$ total: $9$ public, $11$ witness). The $11$ \emph{witness} columns are range-confined to $\bitpoly{32}$ in-circuit by the booleanity sumcheck. The $9$ \emph{public} columns are not committed and are not part of the booleanity sumcheck; the verifier instead inspects each row of \texttt{public\_trace} directly to confirm the column-specific structural properties (e.g.\ \Cref{cons:public-checks}: $\bitpoly{32}$ membership at every cell, plus zero-on-non-tail-rows for $\col{PA\_R\_CH2\_COMP}/\col{PA\_R\_MAJ\_COMP}$).}
+\end{tabularx}
+\caption{Binary-polynomial columns ($20$ total: $9$ public, $11$ witness). The $11$ \emph{witness} columns are range-confined to $\bitpoly{32}$ in-circuit by the booleanity sumcheck. The $9$ \emph{public} columns are not committed and are not part of the booleanity sumcheck.}
 \label{tab:bin-cols}
 \end{table}
 
 \begin{table}[h]
 \centering\small
-\begin{tabular}{lll}
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}p{0.30\linewidth}}
 \toprule
 \textbf{Column} & \textbf{Role} & \textbf{Lookup set $\subseteq$ Domain} \\
 \midrule
@@ -110,11 +110,63 @@ $\col{PA\_C\_C9}$           & Compensator for C\ref{con:c9}; zero on update-acti
 $\col{PA\_C\_FF\_A}$        & Compensator for C\ref{con:ff-a}; zero on junction-window rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
 $\col{PA\_C\_FF\_E}$        & Compensator for C\ref{con:ff-e}; zero on junction-window rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
 \bottomrule
-\end{tabular}
-\caption{Integer columns ($9$ total, all public). Compensator columns ($\col{PA\_C\_*}$) take \emph{arbitrary $\Q$-values} on inactive rows (see \Cref{rem:why-int} below); they cannot be bit-poly-typed. Their zero-on-active-rows pinning is enforced by direct verifier inspection of \texttt{public\_trace} (\Cref{cons:public-checks}), not by an in-circuit selector-multiplied constraint.}
+\end{tabularx}
+\caption{Integer columns ($9$ total, all public). Compensator columns ($\col{PA\_C\_*}$) are inspected by the verifier and checked to be zero on the appropriate entries (see below).}
 \label{tab:int-cols}
 \end{table}
 
+
+\begin{remark}[What is a compensator column?]\label{rem:what-is-comp}
+A \emph{compensator column} is a public column whose sole purpose
+is to absorb whatever value the rest of an algebraic constraint
+takes on \emph{rows where the constraint does not, in general, hold}. Their goal is to avoid using multiplicative selector polynomials, which would turn linear constraints into non-linear constraints. Compensator columns hinder zero-knowledge, and for this reason in a future iteration of the implementation, we plan to use a Whirlaway-like approach (\url{https://github.com/leanEthereum/leanMultisig/blob/main/minimal_zkVM.pdf}) to forward column shifts, which provides a a (potentially) more zero-knowledge friendly alternative to using multiplicative selector polynomials.
+
+
+Two distinct families of compensators appear in the SHA UAIR$^+$;
+both follow the same pattern but have different types and different
+``out-of-scope'' regions.
+
+\paragraph{Active-row compensators
+$\col{PA\_C\_C7}, \col{PA\_C\_C8}, \col{PA\_C\_C9}, \col{PA\_C\_FF\_A}, \col{PA\_C\_FF\_E}$
+($\Q$-valued).}
+Each of constraints \ref{con:c7}--\ref{con:c9} (the SHA recurrence)
+and \ref{con:ff-a}--\ref{con:ff-e} (the feed-forward) is of the form
+$\mathrm{inner}(t) + \col{pa\_c}(t) \in (X-2)$, where
+$\mathrm{inner}(t)$ is the SHA-256 algebraic expression that
+\emph{must} vanish modulo $X-2$ on the constraint's active row range
+(schedule-active anchors, update-active anchors, junction-window rows)
+and is \emph{arbitrary} elsewhere. The compensator $\col{pa\_c}(t)$
+takes value $0$ on the active rows and absorbs $-\mathrm{inner}(t)$
+on the inactive rows so that the overall expression lies in $(X-2)$
+\emph{everywhere}, sidestepping a multiplicative selector that would
+inflate the constraint degree. Why $\Q$-valued: on inactive rows,
+$\mathrm{inner}(2)$ can be any rational, so the compensator must
+range over all of $\Q$. The active-row zero-pinning is enforced by
+the verifier directly on \texttt{public\_trace} (\Cref{cons:public-checks}).
+
+\paragraph{Tail compensators
+$\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$ (bit-polynomial-typed).}
+The virtual residuals
+$r_{\mathrm{ch}_2}, r_{\mathrm{maj}}$ of \Cref{sec:ch-maj} are
+booleanity-pinned to $\{0,1\}^{32}$ per coefficient. On every
+\emph{interior} row they collapse to clean
+$\XOR$/$\Maj$-$\XOR$ patterns and lie in $\bitpoly{32}$
+automatically; on the last two rows the length-$2$ forward shifts
+read off-trace zero-padding and the bit pattern \emph{slips outside}
+$\{0,1\}^{32}$ unless corrected. The tail compensators
+$c_{\mathrm{ch}_2}, c_{\mathrm{maj}}$ carry the exact boundary
+bit-pattern that restores the residual to $\bitpoly{32}$ on those
+two tail rows (and are zero everywhere else; see \eqref{eq:compensators}).
+
+
+In both families, the compensator is \emph{public}: the verifier
+either supplies the values directly (active-row case, with the
+zero-on-active rows discharged by direct row-wise inspection) or
+reads them from \texttt{public\_trace} (tail case, with the
+$\bitpoly{32}$ structural property type-enforced). No in-circuit
+constraint pins compensator values explicitly; their structure is
+discharged outside the algebraic part of the protocol.
+\end{remark}
 
 \begin{remark}[Public boundaries: all init-prefix blocks live on $\col{PA\_A}/\col{PA\_E}$]
 \label{rem:boundaries}
@@ -147,11 +199,9 @@ and compensators row-wise without consuming any selector column or
 any algebraic constraint.
 
 \phantomsection\label{cons:public-checks}
-\paragraph{Public-column structural checks.}
+\paragraph{Public-column properties.}
 
-Before running any of C1--C\ref{con:lkup-maj}, the verifier inspects
-every cell of every public column and rejects unless all of the
-following hold (with $n = 2^{\nu}$ the trace length):
+We assume that the public input is well formed, in the following sense (i.e.\ we do not enforce the properties below in our constraints). 
 \begin{itemize}[leftmargin=2em]
   \item Every public binary-polynomial column lies in $\bitpoly{32}$
     coefficient-wise. Concretely: for each row $t$ of every
@@ -161,27 +211,28 @@ following hold (with $n = 2^{\nu}$ the trace length):
     declared lookup set of \Cref{tab:int-cols}, namely
     $\{0,1\}$ for the $S$-selectors, $[0..2^{32}-1]$ for $\col{PA\_K}$,
     and any $\Q$-value for the compensators.
-  \item Compensator zero-on-active-rows:
+  \item Checked by the verifier: Compensator columns are zero on
+    their constraint's row set $\mathcal{T}$ (defined in the row-set
+    table just below):
     \begin{align*}
-      \col{PA\_C\_C7}\rowidx{k}    &= 0 \quad\text{for every schedule-active anchor } k, \\
-      \col{PA\_C\_C8}\rowidx{k}    &= 0 \quad\text{for every update-active anchor } k, \\
-      \col{PA\_C\_C9}\rowidx{k}    &= 0 \quad\text{for every update-active anchor } k, \\
-      \col{PA\_C\_FF\_A}\rowidx{k} &= 0 \quad\text{for every junction-window row } k, \\
-      \col{PA\_C\_FF\_E}\rowidx{k} &= 0 \quad\text{for every junction-window row } k.
+      \col{PA\_C\_C7}\rowidx{t}    &= 0 \quad\text{for every schedule-active row } t, \\
+      \col{PA\_C\_C8}\rowidx{t}    &= 0 \quad\text{for every update-active row } t, \\
+      \col{PA\_C\_C9}\rowidx{t}    &= 0 \quad\text{for every update-active row } t, \\
+      \col{PA\_C\_FF\_A}\rowidx{t} &= 0 \quad\text{for every junction-window row } t, \\
+      \col{PA\_C\_FF\_E}\rowidx{t} &= 0 \quad\text{for every junction-window row } t.
     \end{align*}
-    The schedule-active, update-active, and junction-window row sets
-    are the per-compression windows defined at the top of this
-    section.
-  \item Tail-compensator zero-on-inner-rows and boundary closed form:
-    for every $k$ with $k+2 < n$,
+  \item Checked by the verifier: Tail-compensator zero-on-inner-rows and boundary closed form:
+    for every $t$ with $t+2 < n$,
     \[
-      \col{PA\_R\_CH2\_COMP}\rowidx{k} = 0,
+      \col{PA\_R\_CH2\_COMP}\rowidx{t} = 0,
       \qquad
-      \col{PA\_R\_MAJ\_COMP}\rowidx{k} = 0,
+      \col{PA\_R\_MAJ\_COMP}\rowidx{t} = 0,
     \]
-    and on $k \in \{n-2, n-1\}$ the closed-form values \eqref{eq:compensators}.
-  \item Round-constant pinning: $\col{PA\_K}\rowidx{k}$ equals the
-    SHA-256 round constant $K_t$ on update-active anchors.
+    and on $t \in \{n-2, n-1\}$ the closed-form values \eqref{eq:compensators}.
+  \item Round-constant pinning: $\col{PA\_K}\rowidx{t}$ equals the
+    SHA-256 round constant $K_{t'}$ for $t' = t + 3$ on every
+    update-active row $t$ (i.e.\ on the C\ref{con:c8}, C\ref{con:c9}
+    re-anchored row variable).
   \item Selector value pattern: each of $S_{\mathrm{INIT-PREFIX}},
     S_{\mathrm{FF}}, S_{\mathrm{MSG-INIT}}$ takes the value $1$ on
     its declared support set (\Cref{tab:int-cols}) and $0$ elsewhere.
@@ -190,75 +241,143 @@ These are $O(n)$ row-wise inspections of \texttt{public\_trace} that
 the verifier already iterates through to derive public lifted
 evaluations; the marginal cost is negligible.
 
+\paragraph{Row-variable convention.}\label{sec:row-conv}
+
+Every algebraic constraint below is a row-local expression in the
+trace cells, instantiated at every row in a specified subset
+$\mathcal{T} \subseteq [\,0, n\,)$. We use a single row variable
+$t$ throughout. Within an expression, every cell access is either
+unshifted ($\bp{x}\rowidx{t}$) or a forward shift
+$\bp{x}^{\downarrow\Delta}\rowidx{t} = \bp{x}\rowidx{t+\Delta}$
+for $\Delta > 0$, with the off-trace convention
+$\bp{x}\rowidx{t+\Delta} = 0$ when $t + \Delta \ge n$. Backward
+shifts never appear: where the natural SHA-spec form reads
+``$W[t'-16]$'' or ``$a[t'-3]$'', we re-index by setting $t := t'-16$
+(or $t := t'-3$) so all reads land at $t + \Delta$ with
+$\Delta \ge 0$. The re-indexed $t$ then ranges over a window
+shifted by the corresponding offset relative to the SHA round
+index $t'$.
+
+\smallskip
+
+The row sets $\mathcal{T}$ are reused across constraint families:
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Name} & \textbf{Row set $\mathcal{T}$} & \textbf{Used by} \\
+\midrule
+Active rows           & $[0, \mathrm{ACTIVE\_ROWS})$ & C\ref{con:c1}, C\ref{con:c2} \\
+Schedule-active rows  & $\bigcup_{i=0}^{N-1} [\,68i,\,68i + 48\,)$ & C\ref{con:c4}, C\ref{con:c6}, C\ref{con:c7} \\
+Update-active rows    & $\bigcup_{i=0}^{N-1} [\,68i,\,68i + 64\,)$ & C\ref{con:c8}, C\ref{con:c9} \\
+Init-prefix rows      & $\bigcup_{i=0}^{N}   [\,68i,\,68i + 4\,)$  & C\ref{con:c10}, C\ref{con:c11} \\
+Junction-window rows  & $\bigcup_{i=0}^{N-1} [\,68i + 64,\,68(i{+}1)\,)$ & C\ref{con:ff-a}, C\ref{con:ff-e} \\
+Message-seed rows     & $\bigcup_{i=0}^{N-1} [\,68i,\,68i + 16\,)$ & C\ref{con:msg-init} \\
+Every row             & $[0, n)$                                  & C\ref{con:mu-zero}, C\ref{con:lkup-uef}, C\ref{con:lkup-uneg}, C\ref{con:lkup-maj} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A $(X-2)$-ideal constraint listed for ``schedule-active rows''
+(say) holds on those rows by virtue of the SHA recurrence; on
+\emph{inactive} rows a public $\Q$-valued compensator
+$\col{PA\_C\_*}$ absorbs whatever value the inner expression takes
+so that the $(X-2)$-ideal membership holds on every row of the
+trace, not just on $\mathcal{T}$ — see \Cref{rem:what-is-comp}.
+The compensator is required to be zero on $\mathcal{T}$ itself
+(verifier-checked, \Cref{cons:public-checks}), which is what makes
+the constraint genuinely enforce the SHA recurrence on $\mathcal{T}$.
+
 \paragraph{Rotation constraints.}
 
-Following \Cref{lem:big-sigma}, for every active row~$t$:
+Following \Cref{lem:big-sigma}, for every \emph{active row} $t$:
 \begin{align}
 \bp{W_a}\rowidx{t} \cdot \rho_{0}(X) - \bp{W_{\Sigma_0}}\rowidx{t} - 2\,\col{PA\_OV\_SIG0}\rowidx{t} &\in (X^{32}-1), \tag{C1}\label{con:c1}\\
 \bp{W_e}\rowidx{t} \cdot \rho_{1}(X) - \bp{W_{\Sigma_1}}\rowidx{t} - 2\,\col{PA\_OV\_SIG1}\rowidx{t} &\in (X^{32}-1). \tag{C2}\label{con:c2}
 \end{align}
 
 Following \Cref{lem:small-sigma}, with $\SHR^{r}(\bp{W_W})$ realized
-as a virtual column over $\bp{W_W}$, for every schedule-active row~$t$:
+as a virtual column over $\bp{W_W}$, for every \emph{schedule-active row}
+$t$ (i.e.\ $t \in \bigcup_i [\,68i,\,68i+48\,)$; equivalently, the
+re-indexed input row corresponding to SHA round $t' = t + 16$):
 \begin{align}
 \bp{W_W}^{\downarrow 1}\rowidx{t} \cdot \rho_{\sigma_0}(X) + \SHR^{3}(\bp{W_W}^{\downarrow 1})\rowidx{t}
    - \bp{W_{\sigma_0}}^{\downarrow 1}\rowidx{t} - 2\,\col{PA\_OV\_LSIG0}^{\downarrow 1}\rowidx{t} &\in (X^{32}-1), \tag{C4}\label{con:c4}\\
 \bp{W_W}^{\downarrow 14}\rowidx{t} \cdot \rho_{\sigma_1}(X) + \SHR^{10}(\bp{W_W}^{\downarrow 14})\rowidx{t}
    - \bp{W_{\sigma_1}}^{\downarrow 14}\rowidx{t} - 2\,\col{PA\_OV\_LSIG1}^{\downarrow 14}\rowidx{t} &\in (X^{32}-1). \tag{C6}\label{con:c6}
 \end{align}
-The shifted accesses align $\sigma_0(W[t-15])$ to its anchor $k=t-16$
-in C\ref{con:c4} and $\sigma_1(W[t-2])$ to anchor $k=t-16$ in C\ref{con:c6}.
+The forward-shift offsets ($1$ and $14$) align the SHA-spec
+$\sigma_0(W[t'-15])$ and $\sigma_1(W[t'-2])$ reads (with
+$t' = t + 16$ the SHA round index) onto cells of the
+$\bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$ columns at $t + 1$, $t + 14$
+respectively.
 
-\paragraph{Message-schedule modular sum (anchored at $k = t-16$).}
+\paragraph{Message-schedule modular sum.}
 
-For every schedule-active anchor $k$:
+The SHA spec's message-schedule recurrence
+$W[t'] = W[t'-16] + \sigma_0(W[t'-15]) + W[t'-7] + \sigma_1(W[t'-2])$
+(SHA round index $t'$) is re-indexed by $t := t' - 16$ so all reads
+become forward shifts of $t$. The constraint is then enforced on
+every \emph{schedule-active row} $t$:
 \begin{equation}\tag{C7}\label{con:c7}
 \begin{aligned}
-\bp{W_W}^{\downarrow 16}\rowidx{k}
-  - \bp{W_W}\rowidx{k}
-  - \bp{W_{\sigma_0}}^{\downarrow 1}\rowidx{k}
-  - \bp{W_W}^{\downarrow 9}\rowidx{k}
-  &- \bp{W_{\sigma_1}}^{\downarrow 14}\rowidx{k} \\
-  + 2X^{31} \cdot \mu_W[k] + \col{PA\_C\_C7}\rowidx{k} &\in (X-2),
+\bp{W_W}^{\downarrow 16}\rowidx{t}
+  - \bp{W_W}\rowidx{t}
+  - \bp{W_{\sigma_0}}^{\downarrow 1}\rowidx{t}
+  - \bp{W_W}^{\downarrow 9}\rowidx{t}
+  &- \bp{W_{\sigma_1}}^{\downarrow 14}\rowidx{t} \\
+  + 2X^{31} \cdot \mu_W[t] + \col{PA\_C\_C7}\rowidx{t} &\in (X-2),
 \end{aligned}
 \end{equation}
-where $\mu_W[k] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 0, 2)\rowidx{k}$
-extracts bits $0$--$1$ of the packed carry column.
+where $\mu_W[t] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 0, 2)\rowidx{t}$
+extracts bits $0$--$1$ of the packed carry column. Off
+schedule-active rows the compensator $\col{PA\_C\_C7}$ absorbs the
+inner expression so the $(X-2)$-membership holds vacuously
+(\Cref{rem:what-is-comp}).
 
-\paragraph{Register update for $a$ (anchored at $k = t-3$).}
+\paragraph{Register update for $a$.}
 
-For every update-active anchor $k$, using
-$h[t] = e[t-3]$ from \Cref{rem:shift-register}:
+The SHA round-update for register $a$ at SHA round index $t'$ reads
+from registers $a[t'-1], \ldots, a[t'-4]$ and $e[t'-1], \ldots, e[t'-4]$
+(via the shift-register convention $h[t'] = e[t'-3]$, etc.; see
+\Cref{rem:shift-register}). Re-indexing by $t := t' - 3$ shifts the
+deepest backward reads onto the row variable $t$ itself; the output
+row $t' = t + 3$ becomes a $\downarrow 4$ access. The constraint is
+enforced on every \emph{update-active row} $t$:
 \begin{equation}\tag{C8}\label{con:c8}
 \begin{aligned}
-&\bp{W_a}^{\downarrow 4}\rowidx{k}
-  - \bp{W_e}\rowidx{k}
-  - \bp{W_{\Sigma_1}}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{u_{ef}}}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{u_{\neg e,g}}}^{\downarrow 3}\rowidx{k} \\
-&\quad - \col{PA\_K}^{\downarrow 3}\rowidx{k}
-  - \bp{W_W}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{\Sigma_0}}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{\Maj}}^{\downarrow 3}\rowidx{k} \\
-&\qquad + 2X^{31} \cdot \mu_a[k] + \col{PA\_C\_C8}\rowidx{k} \in (X-2),
+&\bp{W_a}^{\downarrow 4}\rowidx{t}
+  - \bp{W_e}\rowidx{t}
+  - \bp{W_{\Sigma_1}}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{u_{ef}}}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{u_{\neg e,g}}}^{\downarrow 3}\rowidx{t} \\
+&\quad - \col{PA\_K}^{\downarrow 3}\rowidx{t}
+  - \bp{W_W}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{\Sigma_0}}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{\Maj}}^{\downarrow 3}\rowidx{t} \\
+&\qquad + 2X^{31} \cdot \mu_a[t] + \col{PA\_C\_C8}\rowidx{t} \in (X-2),
 \end{aligned}
 \end{equation}
-where $\mu_a[k] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 2, 3)\rowidx{k}$.
+where $\mu_a[t] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 2, 3)\rowidx{t}$.
+$\col{PA\_C\_C8}$ absorbs the inner expression off update-active
+rows.
 
-\paragraph{Register update for $e$ (anchored at $k = t-3$).}
+\paragraph{Register update for $e$.}
 
-Using $d[t] = a[t-3]$ and $h[t] = e[t-3]$:
+Same re-indexing as C\ref{con:c8}: the constraint is enforced on
+every update-active row $t$ (with $t' = t + 3$ the SHA round
+index):
 \begin{equation}\tag{C9}\label{con:c9}
 \begin{aligned}
-&\bp{W_e}^{\downarrow 4}\rowidx{k}
-  - \bp{W_a}\rowidx{k}
-  - \bp{W_e}\rowidx{k}
-  - \bp{W_{\Sigma_1}}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{u_{ef}}}^{\downarrow 3}\rowidx{k}
-  - \bp{W_{u_{\neg e,g}}}^{\downarrow 3}\rowidx{k} \\
-&\quad - \col{PA\_K}^{\downarrow 3}\rowidx{k}
-  - \bp{W_W}^{\downarrow 3}\rowidx{k}
-  + 2X^{31} \cdot \mu_e[k] + \col{PA\_C\_C9}\rowidx{k} \in (X-2).
+&\bp{W_e}^{\downarrow 4}\rowidx{t}
+  - \bp{W_a}\rowidx{t}
+  - \bp{W_e}\rowidx{t}
+  - \bp{W_{\Sigma_1}}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{u_{ef}}}^{\downarrow 3}\rowidx{t}
+  - \bp{W_{u_{\neg e,g}}}^{\downarrow 3}\rowidx{t} \\
+&\quad - \col{PA\_K}^{\downarrow 3}\rowidx{t}
+  - \bp{W_W}^{\downarrow 3}\rowidx{t}
+  + 2X^{31} \cdot \mu_e[t] + \col{PA\_C\_C9}\rowidx{t} \in (X-2).
 \end{aligned}
 \end{equation}
 
@@ -277,22 +396,24 @@ the trace MLEs only on a per-row basis; the constraint is degree-$2$
 overall, but it carries the zero ideal so it does not enter the
 projected sum-check's effective degree count.
 
-\paragraph{Feed-forward to the next compression (anchored at junction rows).}
+\paragraph{Feed-forward to the next compression.}
 
-For every junction-window row $k \in [\,68i+64,\,68(i+1)\,)$ across
-$i \in [0,N)$:
+For every \emph{junction-window row} $t$ (i.e.\
+$t \in \bigcup_i [\,68i + 64,\,68(i + 1)\,)$):
 \begin{align}
-\bp{W_a}^{\downarrow 4}\rowidx{k} - \bp{W_a}\rowidx{k} - \col{PA\_A}\rowidx{k}
-   + 2X^{31} \cdot \mu_{ff,a}[k] + \col{PA\_C\_FF\_A}\rowidx{k}
+\bp{W_a}^{\downarrow 4}\rowidx{t} - \bp{W_a}\rowidx{t} - \col{PA\_A}\rowidx{t}
+   + 2X^{31} \cdot \mu_{ff,a}[t] + \col{PA\_C\_FF\_A}\rowidx{t}
    &\in (X-2), \tag{C12}\label{con:ff-a}\\
-\bp{W_e}^{\downarrow 4}\rowidx{k} - \bp{W_e}\rowidx{k} - \col{PA\_E}\rowidx{k}
-   + 2X^{31} \cdot \mu_{ff,e}[k] + \col{PA\_C\_FF\_E}\rowidx{k}
+\bp{W_e}^{\downarrow 4}\rowidx{t} - \bp{W_e}\rowidx{t} - \col{PA\_E}\rowidx{t}
+   + 2X^{31} \cdot \mu_{ff,e}[t] + \col{PA\_C\_FF\_E}\rowidx{t}
    &\in (X-2), \tag{C13}\label{con:ff-e}
 \end{align}
-with $\mu_{ff,a}[k] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 8, 1)\rowidx{k}$
-and $\mu_{ff,e}[k] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 9, 1)\rowidx{k}$.
+with $\mu_{ff,a}[t] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 8, 1)\rowidx{t}$
+and $\mu_{ff,e}[t] := \mathrm{ShiftR}(\bp{W_{\mu\text{-packed}}}, 9, 1)\rowidx{t}$.
+The compensators $\col{PA\_C\_FF\_A}, \col{PA\_C\_FF\_E}$ absorb
+the inner expressions off the junction window.
 
-The Table~9 materialization constraints C13--C15 of the spec are
+The Table~9 (from the Zinc+ main paper) materialization constraints C13--C15 of the spec are
 \emph{absent} from this UAIR; their role is taken by the virtual
 binary-polynomial residuals \eqref{eq:rch1}--\eqref{eq:rmaj},
 pinned by the booleanity sumcheck via the closing-override mechanism.
@@ -320,26 +441,32 @@ of \Cref{rem:mu-budget}.
 \paragraph{Affine-combination lookups for $\Ch$ / $\Maj$.}
 
 In addition to the per-column lookups of \Cref{tab:bin-cols}, we
-impose the following $\bitpoly{32}$-membership constraints on the
-specified affine combinations of trace cells (cf.\ Lemmas~8.9 and~8.11
-of the main paper, in the Zinc+ paper's
-\emph{linear-combination lookup} variant):
+impose the following $\bitpoly{32}$-membership constraints on
+specified affine combinations of trace cells (cf.\ Lemmas~8.9
+and~8.11 of the Zinc+ paper, in the \emph{linear-combination lookup}
+variant). These are exactly the residuals
+$r_{\mathrm{ch}_1}, r_{\mathrm{ch}_2}, r_{\mathrm{maj}}$ defined in
+\Cref{sec:ch-maj}, restated here in the $\downarrow$-notation of the
+constraint section. With $\bp{x}^{\downarrow\Delta}\rowidx{t} = \bp{x}\rowidx{t+\Delta}$
+(zero past the trace tail) and the public bit-poly tail compensators
+of \eqref{eq:compensators}:
 \begin{align}
-\bp{W_e}\rowidx{t} + \bp{W_e}\rowidx{t-1} - 2\,\bp{W_{u_{ef}}}\rowidx{t} &\in \bitpoly{32}, \tag{C21}\label{con:lkup-uef}\\
-(\mathbf{1}_{32} - \bp{W_e}\rowidx{t}) + \bp{W_e}\rowidx{t-2} - 2\,\bp{W_{u_{\neg e,g}}}\rowidx{t} &\in \bitpoly{32}, \tag{C22}\label{con:lkup-uneg}\\
-\bp{W_a}\rowidx{t} + \bp{W_a}\rowidx{t-1} + \bp{W_a}\rowidx{t-2} - 2\,\bp{W_{\Maj}}\rowidx{t} &\in \bitpoly{32}, \tag{C23}\label{con:lkup-maj}
+\bp{W_e}^{\downarrow 2}\rowidx{t} + \bp{W_e}^{\downarrow 1}\rowidx{t} - 2\,\bp{W_{u_{ef}}}^{\downarrow 2}\rowidx{t} &\in \bitpoly{32}, \tag{C21}\label{con:lkup-uef}\\
+\bp{W_e}^{\downarrow 2}\rowidx{t} - \bp{W_e}\rowidx{t} + 2\,\bp{W_{u_{\neg e,g}}}^{\downarrow 2}\rowidx{t} + 2\,\col{PA\_R\_CH2\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C22}\label{con:lkup-uneg}\\
+\bp{W_a}\rowidx{t} + \bp{W_a}^{\downarrow 1}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t} - 2\,\bp{W_{\Maj}}^{\downarrow 2}\rowidx{t} - 2\,\col{PA\_R\_MAJ\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C23}\label{con:lkup-maj}
 \end{align}
-on every update-active row $t$, with the standard base-case
-substitutions for $t \in \{1,2\}$ that replace back-references to
-$b_1,c_1,f_1,g_1$ by the public boundary values from \col{PA\_A} and
-\col{PA\_E}.
+on every row $t$. The implementation registers the three left-hand
+sides as virtual binary-polynomial columns (no commit), and the
+booleanity sumcheck enforces \ref{con:lkup-uef}--\ref{con:lkup-maj}
+coefficient-wise on every row simultaneously.
 
-\begin{remark}[Tail compensators are forced to zero on inner rows]
-\label{rem:comp-zero-inner}
-The tail compensators $\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$
-are \emph{public} columns; the verifier holds every cell value of
-\texttt{public\_trace} before running the proof. The verifier
-therefore checks the inner-row zero-pinning by direct row-wise
-inspection, as part of the public-column structural checks
-(\Cref{cons:public-checks}).
-\end{remark}
+\ref{con:lkup-uef} needs no compensator: at the tail rows
+$t \in \{n-2, n-1\}$ the off-trace shift values reduce the residual
+to $\bp{W_e}^{\downarrow 1}\rowidx{n-2} = \bp{W_e}\rowidx{n-1}$ (resp.\ $0$),
+already in $\{0,1\}$ per coefficient. \ref{con:lkup-uneg} and
+\ref{con:lkup-maj} \emph{do} need their compensators
+$\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$ on those two tail
+rows; without them the residuals slip to $\{-1, 0\}$
+(\ref{con:lkup-uneg}) or $\{0, 1, 2\}$ (\ref{con:lkup-maj}) per
+coefficient — see the discussion preceding \eqref{eq:compensators}.
+

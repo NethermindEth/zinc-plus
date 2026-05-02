@@ -18,7 +18,7 @@ Trace length $n = 2^{\nu}$        & $2^{9} = 512$ \quad (smallest power of $2$ $
 Prime tuple $\mathbf{q}$          & $()$ \quad (single $\Q[X]$ branch) \\
 \midrule
 Binary-polynomial columns         & $20$ \quad ($9$ public $+\ 11$ witness) \\
-\quad of which booleanity-confined to $\bitpoly{32}$ & all $20$ (free) \\
+\quad of which booleanity-confined to $\bitpoly{32}$ & all $20$  \\
 \quad of which committed witness  & $11$ \\
 Integer columns                   & $9$ \quad ($9$ public $+\ 0$ witness) \\
 \midrule
@@ -27,72 +27,15 @@ Total public-input columns        & $\mathbf{18}$ \quad ($9$ binary-poly $+\ 9$ 
 \midrule
 Constraint families (excluding lookups) & $12$ \quad (C\ref{con:c1}, C\ref{con:c2}, C\ref{con:c4}, C\ref{con:c6}, C\ref{con:c7}--C\ref{con:c9}, \\
                                   & \phantom{$12$ \quad } C\ref{con:c10}, C\ref{con:c11}, C\ref{con:ff-a}, C\ref{con:ff-e}, C\ref{con:msg-init}, C\ref{con:mu-zero}) \\
-Verifier-side public-column structural checks & \Cref{cons:public-checks}: bitpoly\{32\}, compensator-zero, compensator-zero, etc. \\
+Verifier-side public-column structural checks &  Compensator columns are $0$ on active rows \\
 Virtual binary-polynomial residuals & $3$ \quad ($r_{\mathrm{ch}_1},\,r_{\mathrm{ch}_2},\,r_{\mathrm{maj}}$) \\
 Affine-combination lookups        & $3$ families ($\Ch_{ef}$, $\Ch_{\neg e,g}$, $\Maj$) \\
 \midrule
-Maximum constraint degree (in trace MLEs) & $1$ \quad (excluding selector-gated zero-ideal pins) \\
+Maximum constraint degree (in trace MLEs) & $1$ \quad (excluding selector-gated\\ &\quad zero-ideal pins for public inputs) \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Why $11$ committed witness columns suffice}\label{sec:why-11}
-
-The Zinc+ paper's idealized arithmetization (Section~8.2.3 there) uses
-a witness layout with separate columns for each of the spec's Table~9
-materialization rows ($B_1, B_2, B_3$) and a separate integer-typed
-carry column for each modular sum. Our deployed arithmetization removes
-all of these:
-\begin{itemize}
-\item The Table~9 materialization columns $B_1, B_2, B_3$ are not
-committed; instead, the affine combinations of \eqref{eq:rch1}--\eqref{eq:rmaj}
-are declared as virtual binary-polynomial columns and pinned into
-$\bitpoly{32}$ per coefficient by the booleanity sumcheck. This saves
-$3$ committed columns and removes the corresponding $3$ materialization
-identities.
-\item The five integer-typed carry columns
-$\mu_W,\mu_a,\mu_e,\mu_{ff,a},\mu_{ff,e}$ are packed into a single
-binary-polynomial column $\bp{W_{\mu\text{-packed}}}$ via
-$\mathrm{ShiftR}$ virtuals (\Cref{rem:mu-budget}). This saves
-$5$ committed columns and gives the carry range-checks for free
-through booleanity.
-\end{itemize}
-The cost is a single extra range-pin (C\ref{con:mu-zero}) and a
-modestly more involved bit-budget accounting. We retain the
-multi-byte $\bp{W_a}, \bp{W_e}, \bp{W_W}, \bp{W_{\Sigma_0}},
-\bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}}, \bp{W_{\sigma_1}},
-\bp{W_{u_{ef}}}, \bp{W_{u_{\neg e,g}}}, \bp{W_{\Maj}}$ as committed
-columns because they participate non-trivially in the rotation,
-register-update, and Ch/Maj lookups; they cannot be virtualized
-without inflating the constraint degree.
-
-\subsection{Verifier-side public-column inspection}
-
-All $9$ binary-polynomial public columns and all $9$ integer public
-columns are part of \texttt{public\_trace}, which the verifier
-holds before the IOPP runs. The verifier discharges every
-public-column structural property by direct row-wise inspection
-(\Cref{cons:public-checks}): bitpoly\{32\}-membership for every
-public binary-poly column, zero-on-active-rows for the five
-compensators $\col{PA\_C\_*}$, zero-on-inner-rows plus boundary
-closed form for the two tail compensators $\col{PA\_R\_*\_COMP}$,
-and the $\{0,1\}$ / round-constant / message structure of the
-remaining public columns. This costs no algebraic constraint, no
-selector column, and no additional commitment; the marginal cost is
-$O(n)$ verifier work folded into the existing public-MLE
-construction loop.
-
-Several of the public binary-polynomial columns are themselves
-functions of other public data and could be supplied by the verifier
-through shadow-running the SHA computation:
-$\col{PA\_OV\_SIG0/SIG1/LSIG0/LSIG1}$ are determined by
-$\col{PA\_A}, \col{PA\_E}$ and the rotation arithmetic; the tail
-compensators $\col{PA\_R\_CH2\_COMP}$ and $\col{PA\_R\_MAJ\_COMP}$ are
-determined by the last two rows of $\col{PA\_A}$ and $\col{PA\_E}$
-through \eqref{eq:compensators}. The arithmetization treats them as
-public input rather than recomputed in-circuit; the verifier
-enforces the algebraic constraints, while the public values are
-computed offline by either the prover or a precompute step.
 
 \subsection{Composition with downstream UAIRs}
 

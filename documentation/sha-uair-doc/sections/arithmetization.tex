@@ -95,7 +95,7 @@ of bit-budget $1$ per coefficient.
 \label{sec:ch-maj}
 
 Rather than committing the materialization columns
-$B_1,B_2,B_3$ of the spec's Table~9 (each storing one $\Q[X]$ affine
+$B_1,B_2,B_3$ of the Zinc+ main paper Table~9 (each storing one $\Q[X]$ affine
 combination meant to lie in $\bitpoly{32}$ per coefficient), we declare
 those affine combinations as \emph{virtual binary-polynomial columns}
 and pin them coefficient-wise via the booleanity sumcheck.
@@ -125,8 +125,7 @@ r_{\mathrm{maj}}[k]
 \end{align}
 where $c_{\mathrm{ch}_2}, c_{\mathrm{maj}} \in \bitpoly{32}$ are
 \emph{tail compensators} discussed below. The booleanity sumcheck pins
-each per-bit slice of these residuals into $\{0,1\}$, which forces every
-coefficient of every residual into $\{0,1\}$ for free.
+each per-bit slice of these residuals into $\{0,1\}$.
 
 \paragraph{Why $r_{\mathrm{ch}_2}$ uses the alt-complement form.}
 The natural Table~9 row 63 expression
@@ -148,9 +147,9 @@ length-$2$ forward shifts pull off-trace zero-padding. Without
 compensators:
 \begin{itemize}
 \item $r_{\mathrm{ch}_2}$ at $k \in \{n-2,n-1\}$ reduces to $-e[k]$,
-which is in $\{0,-1\}$ — bit-invalid.
+which is in $\{0,-1\}$ per coefficient — bit-invalid.
 \item $r_{\mathrm{maj}}$ at $k = n-2$ reduces to $a[k]+a[k+1]$, which
-is in $\{0,1,2\}$ — also bit-invalid.
+is in $\{0,1,2\}$ per coefficient — also bit-invalid.
 \end{itemize}
 The public compensators are therefore non-zero only on those two tail
 rows, with values
@@ -162,8 +161,11 @@ Plugging \eqref{eq:compensators} into \eqref{eq:rch2} and \eqref{eq:rmaj}
 recovers $\{0,1\}$-valued residuals on every row. Both compensators are
 deterministic functions of the public boundary cells $\bp{a}[n-2,n-1]$
 and $\bp{e}[n-2,n-1]$ exposed by the digest pinning (see
-\Cref{sec:cols}), so they are placed in the public input rather than
-committed.
+\Cref{sec:cols}). 
+
+We place the compensator columns as public columns, with the verifier checking that their entries are zero for all $k<n-2$. 
+
+In a future iteration of the implementation, we will use a Whirlaway-like (\url{https://github.com/leanEthereum/leanMultisig/blob/main/minimal_zkVM.pdf}) approach to forward shifts of col
 
 \subsection{Modular addition via the $(X-2)$ bridge}\label{sec:mod-add}
 

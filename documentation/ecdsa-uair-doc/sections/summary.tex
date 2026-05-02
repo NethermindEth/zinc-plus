@@ -17,110 +17,33 @@ Active rows                        & $257$ \\
 Trace length $n = 2^{\nu}$         & $2^{9} = 512$ \quad (smallest power of $2$ $\ge 257$) \\
 Prime tuple $\mathbf{q}$           & $(p)$ \quad (single $\F_p$ branch; $p$ = $\secp$ base prime) \\
 \midrule
-Witness columns                    & $\mathbf{8}$ \quad (all native $\F_p$, no range checks) \\
-Public-input columns               & $\mathbf{9}$ \\
-Total trace columns                & $17$ \\
+Witness columns                    & $\mathbf{8}$ \quad (all $\F_p$-typed, no range checks) \\
+Public-input columns               & $\mathbf{15}$ \quad ($4$ selectors, $2$ bits, $4$ for $Q$/$G+Q$, $3$ for $R_{\mathrm{init}}$, $2$ for affine readout) \\
+Total trace columns                & $23$ \\
 Lookup constraints                 & $0$ \\
 Affine-combination lookups         & $0$ \\
 \midrule
-Constraint count                   & $\mathbf{11}$ \quad ($3$ doubling, $2$ add-scratch, $3$ output-selection, $3$ init-boundary) \\
-Maximum constraint degree          & $\mathbf{6}$ \quad (after $\col{S\_ACTIVE}$ gating; \Cref{sec:degree}) \\
+Constraint count                   & $\mathbf{13}$ \quad ($3$ doubling, $2$ add-scratch, $3$ output-selection, $3$ init-boundary, $2$ final-row affine readout) \\
+Maximum constraint degree          & $\mathbf{7}$ \quad (after $\col{S\_ACTIVE}$ gating; attained by C-A2 with the in-circuit affine addend, see \Cref{sec:degree}) \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Why $8$ committed witness columns suffice}\label{sec:why-8}
-
-A more direct arithmetization of the spec's Jacobian double-and-add
-loop would commit, per row, separate columns for the doubled point
-$P_{\mathrm{pa}}$, the addition output $P_{\mathrm{add}}$, the squared
-intermediate $S = P_Y^2$, and the inversion-witness $Z_{\mathrm{inv}}$
-for the final affine readout — totalling roughly $11$--$13$ committed
-columns. The deployed UAIR shrinks this to $8$ via three deliberate
-moves:
-\begin{itemize}
-\item \textbf{Inlined intermediates.}\
-$S = P_Y^2$, $P_Y^4$, $P_{\mathrm{pa},Z}^2$, $P_{\mathrm{pa},Z}^3$,
-$H^2$, $H^3$, and $P_{\mathrm{pa},X} H^2$ are all expanded inside the
-constraint expressions rather than committed
-(\Cref{rem:inlined}). Cost: max constraint degree rises from~$5$
-to~$6$ on the addition side (and to~$7$ via the in-circuit affine
-addend, see below).
-\item \textbf{Conditional add via output-selection.}\
-The addition output $P_{\mathrm{add}}$ is not committed; it is inlined
-into the three output-selection constraints
-\eqref{eq:next-x}--\eqref{eq:next-z}, which fold the conditional add
-and the next-row chaining into one operation
-(\Cref{rem:no-add-witness}). This removes three committed columns
-that an explicit \emph{compute $P_{\mathrm{add}}$, then gate} approach
-would need.
-\item \textbf{In-circuit affine $x$-readout via public columns.}\
-The final-row Jacobian-to-affine conversion is performed in-circuit
-through two public columns $\col{PA\_Z\_INV}$, $\col{PA\_R\_X}$
-(only their row-$256$ cells matter; the rest are zero) and two
-$\col{S\_FINAL}$-gated $(p)$-ideal constraints
-$P_Z \cdot \col{PA\_Z\_INV} = 1$ (\ref{con:f1}, also serving as the
-non-infinity check) and $P_X \cdot \col{PA\_Z\_INV}^2 = \col{PA\_R\_X}$
-(\ref{con:f2}). Public, not witness, because the entire affine
-readout is verifier-checkable from the loop's input data and the
-verifier ultimately equates $\col{PA\_R\_X}[256]$ to the signature's
-$r$ off-protocol — the order-field equality lives outside the
-$\F_p$-arithmetic UAIR (\Cref{rem:final-readout}). The affine
-$y$-coordinate is not needed by ECDSA verification and is omitted.
-\end{itemize}
-The retained witness columns
-$(P_X, P_Y, P_Z, P_{\mathrm{pa},X}, P_{\mathrm{pa},Y}, P_{\mathrm{pa},Z}, H, R_a)$
-are precisely those whose multiplicities in the constraint
-expressions make inlining infeasible (each appears in at least two
-constraint families).
-
-\subsection{What the public input absorbs}\label{sec:public-absorbed}
-
-Two further design moves push work out of the witness and into the
-verifier's public-input construction. Both are noted earlier but
-worth collecting:
-\begin{itemize}
-\item \textbf{$u_1, u_2$ and their bit-decompositions $b_1, b_2$
-absorbed as public input.} The verifier computes
-$u_1 = e \cdot s^{-1} \bmod n$ and $u_2 = r \cdot s^{-1} \bmod n$
-off-protocol from the signature $(r, s)$ and message $e$, then
-publishes $b_1, b_2$ along with off-protocol checks
-$\sum_t b_i[t] \cdot 2^{256-t} = u_i$ in $\F_n$
-(\Cref{rem:public-u}). This eliminates the entire $\F_n$-trace and
-the bit-decomposition accumulator constraints; the loop reads the
-bits directly via $\col{S\_ADD}$ and the per-row addend.
-
-\item \textbf{In-circuit addend selection from public bits.}\
-The deployed UAIR does \emph{not} have the verifier precompute and
-write the chosen addend $T[t] \in \{\OOO, G, Q, G+Q\}$ into a public
-column. Instead, the bit pair $(\col{PA\_B1}, \col{PA\_B2})$ together
-with public columns $(\col{PA\_QX}, \col{PA\_QY})$ for $Q$ and
-$(\col{PA\_QGX}, \col{PA\_QGY})$ for $G + Q$, and a UAIR scalar for
-$G$, are inlined into the addition-scratch constraints
-\ref{con:a1}, \ref{con:a2} via the linear formula
-$T = b_1 G + b_2 Q + b_1 b_2 ((G+Q) - G - Q)$ (\Cref{rem:addend-cost}).
-This keeps the proof self-contained — there is no
-verifier-precomputed table-lookup column — at the cost of $+4$
-public columns relative to the verifier-supplied alternative and a
-constraint-degree elevation $6 \to 7$.
-\end{itemize}
 
 \subsection{Composition with downstream UAIRs}
 
-The retained $\col{S\_FINAL}$ selector (which is otherwise unused in
-this UAIR) lets a downstream UAIR compose with the ECDSA UAIR by
-adding final-row constraints — for example, an affine-conversion UAIR
-that commits to $Z_{\mathrm{inv}}[256]$ and enforces
-$P_Z[256] \cdot Z_{\mathrm{inv}}[256] = 1$ in-circuit, or a
-gluing UAIR that binds the digest of an upstream SHA-256 UAIR to the
-ECDSA message $e$ used to derive $u_1$. The implementation's
+The $\col{S\_FINAL}$ selector also lets a downstream UAIR add
+further final-row constraints — for example, a gluing UAIR that
+binds the digest of an upstream SHA-256 UAIR to the ECDSA message
+$e$ used to derive $u_1$. The implementation's
 \texttt{EcdsaUair} + \texttt{Sha256CompressionSliceUair} side-by-side
 merge follows exactly this pattern: the digest column
 $\col{PA\_E}$ of the SHA half is read out-of-band by the verifier,
 $u_1$ is computed off-protocol, and the resulting per-row
-$(\col{PA\_X\_ADDEND}, \col{PA\_Y\_ADDEND})$ are written into the
-ECDSA half's public input. The cross-binding is therefore
-\emph{implicit}, enforced by the verifier supplying coherent public
-inputs rather than by an in-circuit constraint, which is the same
-composition pattern used by the SHA UAIR for its
-$\col{PA\_A}/\col{PA\_E}$ digest exposure.
+bit pair $(\col{PA\_B1}, \col{PA\_B2})$ together with the
+$Q$ / $G+Q$ public columns are written into the ECDSA half's
+public input. The cross-binding is therefore \emph{implicit},
+enforced by the verifier supplying coherent public inputs rather
+than by an in-circuit constraint, which is the same composition
+pattern used by the SHA UAIR for its $\col{PA\_A}/\col{PA\_E}$
+digest exposure.

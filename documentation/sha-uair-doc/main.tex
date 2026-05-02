@@ -12,7 +12,7 @@
 \maketitle
 
 \begin{center}
-\textcolor{blue}{\textit{Albert: AI generated report from our codebase.}}
+\textcolor{blue}{\textit{Albert: AI generated report from our codebase. Reviewed and edited by authors}}
 \end{center}
 \vspace{0.5em}
 
@@ -21,15 +21,15 @@ We describe the Universal AIR with lookups (UAIR$^+$) instance that
 arithmetizes $N$ chained SHA-256 compression invocations, as deployed
 in the Zinc+ reference implementation. We follow the conventions and
 notation of the main Zinc+ paper, and focus on the design choices
-that depart from the idealized arithmetization presented there:
+that depart from the  arithmetization presented there:
 namely, \emph{(i)}~ chained-compression packing into a single
-$2^{\nu}$-row trace; \emph{(ii)}~ replacement of the Table~9
+$2^{\nu}$-row trace; \emph{(ii)}~ replacement of the  Zinc+ paper's Table~9
 materialization columns by virtual binary-polynomial residuals pinned
 through booleanity; \emph{(iii)}~ packing of the five integer-carry
 columns into a single binary-polynomial column;
 \emph{(iv)}~ an all-$\Q[X]$ instantiation that uses public
 \emph{compensator} columns to keep the SHA recurrence constraints at
-algebraic degree~$1$ in the trace MLEs.
+algebraic degree~$1$ in the trace MLEs, together with quotient or \emph{overflow} columns resulting from liftinig the constraints over $\mathbb{F}_2[X]$ from the Zinc+ paper arithmetization, to constraints over $\mathbb{Q}[X]$.
 \end{abstract}
 
 \tableofcontents
