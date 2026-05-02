@@ -26,7 +26,8 @@ use zinc_test_uair::{
     EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
     ShaProxy, TestUairNoMultiplication,
 };
-use zinc_transcript::traits::ConstTranscribable;
+use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
+use zinc_transcript::traits::{ConstTranscribable, Transcribable};
 use zinc_uair::{
     Uair, UairTrace,
     degree_counter::count_effective_max_degree,
@@ -42,8 +43,8 @@ use zinc_utils::{
 };
 use zip_plus::{
     code::iprs::{IprsCode, PnttConfigF65537},
-    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
-    utils::eprint_proof_size,
+    pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
+    utils::{eprint_bytes_size_breakdown, eprint_proof_size},
 };
 
 //
@@ -1335,6 +1336,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     });
 
     eprint_proof_size(&params, &proof);
+    eprint_folded_4x_proof_size_breakdown(&params, &proof);
     if count_effective_max_degree::<U>() <= 1 {
         eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
             &params,
@@ -1345,6 +1347,51 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
             project_scalar,
         );
     }
+}
+
+/// Serialize each `Proof<F>` component into its own byte buffer and report
+/// per-part raw + zstd-compressed sizes, so we can see how much each part
+/// of the proof contributes to the total size. Sizes match the per-field
+/// encoding used in `Proof::write_transcription_bytes_exact` (no extra
+/// length prefixes).
+fn eprint_folded_4x_proof_size_breakdown<F>(label: &str, proof: &Proof<F>)
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn to_bytes<T: Transcribable>(t: &T) -> Vec<u8> {
+        let n = t.get_num_bytes();
+        let mut buf = vec![0_u8; n];
+        t.write_transcription_bytes_exact(&mut buf);
+        buf
+    }
+
+    // 3 commitments concatenated (each ConstTranscribable, no length prefix).
+    let mut commits =
+        Vec::with_capacity(3_usize.saturating_mul(<ZipPlusCommitment as ConstTranscribable>::NUM_BYTES));
+    commits.extend_from_slice(&to_bytes(&proof.commitments.0));
+    commits.extend_from_slice(&to_bytes(&proof.commitments.1));
+    commits.extend_from_slice(&to_bytes(&proof.commitments.2));
+
+    let ideal = to_bytes(&proof.ideal_check);
+    let resolver = to_bytes(&proof.resolver);
+    let combined_sumcheck = to_bytes(&proof.combined_sumcheck);
+    let multipoint_eval = to_bytes(&proof.multipoint_eval);
+    let witness_evals = to_bytes(DynamicPolyVecF::reinterpret(&proof.witness_lifted_evals));
+
+    eprint_bytes_size_breakdown(
+        label,
+        &[
+            ("commitments (3x)", &commits),
+            ("zip (PCS bytes)", &proof.zip),
+            ("ideal_check", &ideal),
+            ("resolver", &resolver),
+            ("combined_sumcheck", &combined_sumcheck),
+            ("multipoint_eval", &multipoint_eval),
+            ("witness_lifted_evals", &witness_evals),
+        ],
+    );
 }
 
 /// Print per-region wall-time breakdown for `prove_folded_4x` over `N`
@@ -1457,6 +1504,12 @@ fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
         "      step 7  pcs open          {:>9.3} ms ({:>4.1}%)",
         sum.step7_pcs_open.as_secs_f64() * 1e3,
         pct(sum.step7_pcs_open)
+    );
+    eprintln!(
+        "      step 8  compress (zstd-{}){:>9.3} ms ({:>4.1}%)",
+        zip_plus::utils::ZSTD_LEVEL,
+        sum.step8_compress.as_secs_f64() * 1e3,
+        pct(sum.step8_compress)
     );
     eprintln!(
         "      assembly                  {:>9.3} ms ({:>4.1}%)",

@@ -1692,6 +1692,10 @@ where
 /// criterion-bypassing diagnostic — each step's `Duration` is measured
 /// in the natural cache state of an in-place prover run, so summing
 /// them matches the e2e (modulo `Instant::now` overhead).
+///
+/// `step8_compress` is the time spent zstd-compressing the serialized
+/// proof at [`zip_plus::utils::ZSTD_LEVEL`]. The prover does not return
+/// compressed bytes — this is measured for accounting only.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct FoldedProveTimings {
     pub step0_commit: std::time::Duration,
@@ -1702,6 +1706,7 @@ pub struct FoldedProveTimings {
     pub step5_multipoint_eval: std::time::Duration,
     pub step6_lift_and_project: std::time::Duration,
     pub step7_pcs_open: std::time::Duration,
+    pub step8_compress: std::time::Duration,
     pub assembly: std::time::Duration,
 }
 
@@ -1715,6 +1720,7 @@ impl FoldedProveTimings {
         self.step5_multipoint_eval += other.step5_multipoint_eval;
         self.step6_lift_and_project += other.step6_lift_and_project;
         self.step7_pcs_open += other.step7_pcs_open;
+        self.step8_compress += other.step8_compress;
         self.assembly += other.assembly;
     }
 
@@ -1727,6 +1733,7 @@ impl FoldedProveTimings {
         self.step5_multipoint_eval /= n;
         self.step6_lift_and_project /= n;
         self.step7_pcs_open /= n;
+        self.step8_compress /= n;
         self.assembly /= n;
     }
 
@@ -1739,6 +1746,7 @@ impl FoldedProveTimings {
             + self.step5_multipoint_eval
             + self.step6_lift_and_project
             + self.step7_pcs_open
+            + self.step8_compress
             + self.assembly
     }
 }
@@ -1860,6 +1868,12 @@ where
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
     >(pp, trace, num_vars, project_scalar, Some(&mut timings))?;
+
+    // Step 8: serialize + zstd-compress the proof. Bytes are discarded;
+    // we measure for accounting only.
+    let (_compressed, dt) = zip_plus::utils::serialize_and_compress(&proof);
+    timings.step8_compress = dt;
+
     Ok((proof, timings))
 }
 
