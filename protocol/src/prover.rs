@@ -2874,21 +2874,28 @@ where
     let r_0 = mp_prover_state.eval_point;
 
     // ── Step 6: Lift-and-project + sample γ_1, γ_2 ──────────────────────
-    let mut lifted_evals =
-        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, &field_cfg);
+    // Compute the binary + arbitrary sections of `lifted_evals` only —
+    // the int section is replaced below with 4-coeff bar_us, so the
+    // standard 1-coeff int compute would be wasted work.
     let total_cols = uair_signature.total_cols();
     let num_total_bin = total_cols.num_binary_poly_cols();
     let num_total_arb = total_cols.num_arbitrary_poly_cols();
+    let mut lifted_evals = crate::compute_lifted_evals_capped::<F, D>(
+        &r_0,
+        &trace.binary_poly,
+        &projected_trace,
+        &field_cfg,
+        Some(num_total_arb),
+    );
     let int_lifted_evals_4coeff: Vec<DynamicPolynomialF<F>> =
         crate::compute_int_fold_4x_lifted_evals::<F, INT_LIMBS, INT_QUARTER_LIMBS>(
             &r_0,
             &trace.int,
             &field_cfg,
         );
-    let int_section_offset = num_total_bin + num_total_arb;
-    for (i, bar_u) in int_lifted_evals_4coeff.into_iter().enumerate() {
-        lifted_evals[int_section_offset + i] = bar_u;
-    }
+    // Append the 4-coeff int section.
+    lifted_evals.extend(int_lifted_evals_4coeff);
+    let _int_section_offset = num_total_bin + num_total_arb;
 
     let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
     for bar_u in &lifted_evals {

@@ -7,7 +7,7 @@ use crate::{
     },
     pcs_transcript::PcsVerifierTranscript,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -30,6 +30,17 @@ use zinc_utils::{
 pub struct VerifyPreOpen<Zt: ZipTypes> {
     pub coeffs: Vec<Zt::Chal>,
     pub encoded_combined_row: Vec<Zt::CombR>,
+}
+
+/// Intermediate output of [`ZipPlus::verify_pre_open_read`]: the values
+/// read from the transcript before any F-arithmetic / encode is run.
+/// Consumed by [`ZipPlus::verify_pre_open_finalize`] (which can be
+/// invoked in parallel for distinct instances).
+pub struct VerifyPreOpenReads<Zt: ZipTypes, F> {
+    pub b: Vec<F>,
+    pub coeffs: Vec<Zt::Chal>,
+    pub combined_row: Vec<Zt::CombR>,
+    pub batch_size: usize,
 }
 
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
@@ -252,7 +263,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ///
     /// Used by [`crate::pcs::multi_zip::MultiZip3`] to interleave per-instance
     /// pre-open work with a shared column-opening loop.
-    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
     pub fn verify_pre_open<F, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsVerifierTranscript,
         vp: &ZipPlusParams<Zt, Lc>,
@@ -270,9 +280,90 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Inner: Transcribable,
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {
-        let batch_size = comm.batch_size;
+        let reads = Self::verify_pre_open_read::<F>(transcript, vp, comm)?;
+        Self::verify_pre_open_finalize::<F, CHECK_FOR_OVERFLOW>(
+            vp, field_cfg, point_f, eval_f, reads,
+        )
+    }
+
+    /// Sequential phase of `verify_pre_open`: reads `b`, samples `coeffs`,
+    /// reads `combined_row` from the transcript. Pure I/O — no F arithmetic
+    /// beyond `read_field_elements`. Returns the read data so the
+    /// (parallelizable) `verify_pre_open_finalize` can run the
+    /// `encode_wide` and the two algebraic checks off the transcript
+    /// critical path.
+    ///
+    /// Splitting this out lets `MultiZip3::verify_columns_shared` issue
+    /// the binary/arb/int reads sequentially (FS state requires it), then
+    /// run the three encodings in parallel via `cfg_join!`. For ShaEcdsa
+    /// at 4× int fold the int's `encode_wide` over the length-`4n`
+    /// combined_row is the dominant verifier cost; running it in parallel
+    /// with binary's same-length encode roughly halves that step.
+    #[allow(clippy::type_complexity)]
+    pub fn verify_pre_open_read<F>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+    ) -> Result<VerifyPreOpenReads<Zt, F>, ZipError>
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        // Note: structural validation (point length, etc.) is deferred to
+        // `verify_pre_open_finalize`, where `point_f` is in scope.
+        let num_rows = vp.num_rows;
+        let row_len = vp.linear_code.row_len();
+
+        let b: Vec<F> = transcript.read_field_elements(num_rows)?;
+        let coeffs: Vec<Zt::Chal> = if num_rows == 1 {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript.fs_transcript.get_challenges(num_rows)
+        };
+        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+
+        Ok(VerifyPreOpenReads {
+            b,
+            coeffs,
+            combined_row,
+            batch_size: comm.batch_size,
+        })
+    }
+
+    /// Compute-only phase of `verify_pre_open`: takes the values read by
+    /// `verify_pre_open_read`, runs the eval-consistency check, encodes
+    /// `combined_row` via `linear_code.encode_wide` (the heavy
+    /// `O(row_len log row_len)` step), and runs the coherence check.
+    ///
+    /// No transcript access — safe to invoke in parallel for distinct
+    /// instances.
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_pre_open_finalize<F, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &ZipPlusParams<Zt, Lc>,
+        field_cfg: &F::Config,
+        point_f: &[F],
+        eval_f: &F,
+        reads: VerifyPreOpenReads<Zt, F>,
+    ) -> Result<VerifyPreOpen<Zt>, ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        let VerifyPreOpenReads {
+            b,
+            coeffs,
+            combined_row,
+            batch_size,
+        } = reads;
+
         validate_input::<Zt, Lc, _>(
-            "verify_pre_open",
+            "verify_pre_open_finalize",
             vp.num_vars,
             vp.linear_code.row_len(),
             batch_size,
@@ -280,25 +371,16 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             &[point_f],
         )?;
 
-        let num_rows = vp.num_rows;
-        let row_len = vp.linear_code.row_len();
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
         let zero_f = F::zero_with_cfg(field_cfg);
 
-        let b: Vec<F> = transcript.read_field_elements(num_rows)?;
         if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
         }
 
-        let coeffs: Vec<Zt::Chal> = if num_rows == 1 {
-            vec![Zt::Chal::ONE]
-        } else {
-            transcript.fs_transcript.get_challenges(num_rows)
-        };
-
-        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        // The heavy O(row_len log row_len) IPRS encode.
         let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
 
         let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;

@@ -2051,8 +2051,16 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for BenchFoldedRe
 
 const INT_QUARTER_LIMBS_BENCH: usize = 2;
 
-/// Quarter-int Zip+ types: `Eval = Int<2>`, `Cw = Int<3>`, `CombR`
-/// matches the unfolded bench width.
+/// Quarter-int Zip+ types: `Eval = Int<2>`, `Cw = Int<3>`. `CombR` is
+/// sized to match the regular (unfolded) int section's `CombR = Int<8>`
+/// — Eval=Int<2> means each entry has only ~128 magnitude bits so the
+/// linear-combination domain doesn't need the full 1024-bit `Int<16>`
+/// the unfolded ECDSA Eval=Int<4> path uses. Picking `Int<8>` keeps
+/// `validate_input`'s bit-width check satisfied while halving NTT cost
+/// in `linear_code.encode_wide`, which dominates the int-fold-4x
+/// verifier (the 4× row-len already makes the int instance the
+/// long pole; doubling per-element cost is what made it 5× slower
+/// than the regular folded-4× verifier).
 type RealEcdsaIntQuarterZt = GenericBenchZipTypes<
     Int<INT_QUARTER_LIMBS_BENCH>,
     Int<{ INT_QUARTER_LIMBS_BENCH + 1 }>,
@@ -2060,8 +2068,8 @@ type RealEcdsaIntQuarterZt = GenericBenchZipTypes<
     MillerRabin,
     i128,
     i128,
-    Int<{ EC_FP_INT_LIMBS * 4 }>,
-    Int<{ EC_FP_INT_LIMBS * 4 }>,
+    Int<{ EC_FP_INT_LIMBS * 2 }>,
+    Int<{ EC_FP_INT_LIMBS * 2 }>,
     ScalarProduct,
     ScalarProduct,
     MBSInnerProduct,

@@ -511,6 +511,26 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     projected_trace: &ProjectedTrace<F>,
     field_cfg: &F::Config,
 ) -> Vec<DynamicPolynomialF<F>> {
+    compute_lifted_evals_capped::<F, D>(point, trace_bin_poly, projected_trace, field_cfg, None)
+}
+
+/// Like [`compute_lifted_evals`] but the non-binary section is capped at
+/// `non_binary_cap` entries (counted from the start of the non-binary
+/// region). Use `None` for full compute (matches `compute_lifted_evals`).
+///
+/// Use case: int-fold provers compute the int section separately via
+/// [`compute_int_fold_lifted_evals`] / [`compute_int_fold_4x_lifted_evals`]
+/// (returning 2/4-coeff bar_us), so computing the standard 1-coeff int
+/// section here is wasted work. Pass `Some(num_total_arb_cols)` to stop
+/// the non-binary iter right after arbitrary cols.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_lifted_evals_capped<F: PrimeField, const D: usize>(
+    point: &[F],
+    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    projected_trace: &ProjectedTrace<F>,
+    field_cfg: &F::Config,
+    non_binary_cap: Option<usize>,
+) -> Vec<DynamicPolynomialF<F>> {
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_lifted_evals: eq table build failed");
 
@@ -569,9 +589,13 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     match projected_trace {
         ProjectedTrace::RowMajor(t) => {
             let num_cols = t.first().map(|r| r.len()).unwrap_or(0);
+            let non_binary_end = match non_binary_cap {
+                Some(cap) => (n_bin + cap).min(num_cols),
+                None => num_cols,
+            };
             cfg_extend!(
                 result,
-                cfg_into_iter!(n_bin..num_cols).map(|col_idx| weighted_eq_sum(
+                cfg_into_iter!(n_bin..non_binary_end).map(|col_idx| weighted_eq_sum(
                     t.iter().map(|row| &row[col_idx]),
                     &eq_table,
                     &zero,
@@ -579,9 +603,13 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
             );
         }
         ProjectedTrace::ColumnMajor(t) => {
+            let non_binary_end = match non_binary_cap {
+                Some(cap) => (n_bin + cap).min(t.len()),
+                None => t.len(),
+            };
             cfg_extend!(
                 result,
-                cfg_iter!(t[n_bin..]).map(|col_mle| weighted_eq_sum(
+                cfg_iter!(t[n_bin..non_binary_end]).map(|col_mle| weighted_eq_sum(
                     col_mle.iter(),
                     &eq_table,
                     &zero,
@@ -652,6 +680,16 @@ where
 /// non-negative); `q_3` is `(v >> 192).resize()` (signed). The original
 /// column's lifted eval at `point` is recoverable as
 /// `c[0] + 2^64·c[1] + 2^128·c[2] + 2^192·c[3]` in F.
+///
+/// Two fast-paths shave most of the per-cell cost on traces with
+/// many small/zero int values (SHA carries):
+/// 1. **Zero-quarter skip**: if `words[i] == 0` (and `q_3` is zero),
+///    skip the `F::from_with_cfg + mul + add` for that quarter entirely.
+///    For typical SHA carry columns where `|v| < 2^64`, this elides
+///    3 of 4 monty-muls per row.
+/// 2. **u64 fast-lift**: lift `q_0..q_2` via `F::from_with_cfg(u64)`
+///    rather than building an `Int<Q>` and going through the signed
+///    `Int → F` path (which calls `is_negative`, `abs`, and `resize`).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_int_fold_4x_lifted_evals<F, const H: usize, const Q: usize>(
     point: &[F],
@@ -660,6 +698,7 @@ pub fn compute_int_fold_4x_lifted_evals<F, const H: usize, const Q: usize>(
 ) -> Vec<DynamicPolynomialF<F>>
 where
     F: PrimeField
+        + FromWithConfig<u64>
         + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<Q>>,
 {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -677,29 +716,39 @@ where
             let mut q3_eval = zero.clone();
             for (b, entry) in col.iter().enumerate() {
                 let words = entry.as_uint().to_words();
-                let mut w0 = [0u64; Q];
-                w0[0] = words[0];
-                let mut w1 = [0u64; Q];
-                w1[0] = words[1];
-                let mut w2 = [0u64; Q];
-                w2[0] = words[2];
-                let q0_v: Int<Q> = Int::from_words(w0);
-                let q1_v: Int<Q> = Int::from_words(w1);
-                let q2_v: Int<Q> = Int::from_words(w2);
-                let q3_v: Int<Q> = (*entry >> 192_u32).resize();
+                let eq_b = &eq_table[b];
 
-                let mut t = F::from_with_cfg(&q0_v, field_cfg);
-                t *= &eq_table[b];
-                q0_eval += &t;
-                let mut t = F::from_with_cfg(&q1_v, field_cfg);
-                t *= &eq_table[b];
-                q1_eval += &t;
-                let mut t = F::from_with_cfg(&q2_v, field_cfg);
-                t *= &eq_table[b];
-                q2_eval += &t;
-                let mut t = F::from_with_cfg(&q3_v, field_cfg);
-                t *= &eq_table[b];
-                q3_eval += &t;
+                // q_0..q_2: unsigned single-limb lift via u64 fast-path,
+                // skipping the multiply when the limb is zero.
+                if words[0] != 0 {
+                    let mut t = F::from_with_cfg(words[0], field_cfg);
+                    t *= eq_b;
+                    q0_eval += &t;
+                }
+                if words[1] != 0 {
+                    let mut t = F::from_with_cfg(words[1], field_cfg);
+                    t *= eq_b;
+                    q1_eval += &t;
+                }
+                if words[2] != 0 {
+                    let mut t = F::from_with_cfg(words[2], field_cfg);
+                    t *= eq_b;
+                    q2_eval += &t;
+                }
+
+                // q_3: signed arithmetic shift; check zero on both
+                // limbs of the resulting Int<2> bit pattern. For
+                // non-negative source values < 2^192, both limbs are
+                // zero and we skip the multiply entirely.
+                let q3_words = (*entry >> 192_u32).as_uint().to_words();
+                let q3_lo = q3_words[0];
+                let q3_hi = if Q >= 2 { q3_words[1] } else { 0 };
+                if q3_lo != 0 || q3_hi != 0 {
+                    let q3_v: Int<Q> = (*entry >> 192_u32).resize();
+                    let mut t = F::from_with_cfg(&q3_v, field_cfg);
+                    t *= eq_b;
+                    q3_eval += &t;
+                }
             }
             DynamicPolynomialF::new_trimmed(vec![q0_eval, q1_eval, q2_eval, q3_eval])
         })
@@ -1559,7 +1608,7 @@ mod tests {
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<{ EC_FP_INT_LIMBS * 4 }>;
+        type CombR = Int<{ EC_FP_INT_LIMBS * 2 }>;
         type Comb = Self::CombR;
         type EvalDotChal = ScalarProduct;
         type CombDotChal = ScalarProduct;

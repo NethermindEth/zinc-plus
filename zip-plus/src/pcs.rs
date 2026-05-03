@@ -3,7 +3,7 @@ mod phase_prove;
 mod phase_verify;
 
 pub use phase_prove::ZipPlusProveByteBreakdown;
-pub use phase_verify::VerifyPreOpen;
+pub use phase_verify::{VerifyPreOpen, VerifyPreOpenReads};
 pub mod folding;
 pub mod multi_zip;
 pub mod structs;

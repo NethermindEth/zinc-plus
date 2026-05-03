@@ -34,7 +34,7 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
@@ -2869,76 +2869,112 @@ where
     let shared_merkle = nonempty_count >= 2 && nonempty_roots_match;
 
     if shared_merkle {
-        let (alphas_bin, pre_bin) = if proof.commitments.0.batch_size > 0 {
-            let alphas =
-                ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    proof.commitments.0.batch_size,
-                );
+        // Sequential phase: alpha-sample + pre-open transcript reads for
+        // each instance. FS state requires this to be serial.
+        let (alphas_bin, reads_bin, eval_f_bin) = if proof.commitments.0.batch_size > 0 {
+            let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                proof.commitments.0.batch_size,
+            );
             let eval_f = bin_eval_f(&alphas);
-            let pre = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_pre_open::<
-                F,
-                CHECK_FOR_OVERFLOW,
-            >(
+            let reads = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_pre_open_read::<F>(
                 &mut pcs_transcript,
                 vp_bin_split2,
                 &proof.commitments.0,
-                &field_cfg,
-                &r0_ext,
-                &eval_f,
             )
             .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-            (alphas, Some(pre))
+            (alphas, Some(reads), Some(eval_f))
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         };
 
-        let (alphas_arb, pre_arb) = if proof.commitments.1.batch_size > 0 {
-            let alphas =
-                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    proof.commitments.1.batch_size,
-                );
+        let (alphas_arb, reads_arb, eval_f_arb) = if proof.commitments.1.batch_size > 0 {
+            let alphas = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                proof.commitments.1.batch_size,
+            );
             let eval_f = arb_eval_f(&alphas);
-            let pre = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_pre_open::<
-                F,
-                CHECK_FOR_OVERFLOW,
-            >(
+            let reads = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_pre_open_read::<F>(
                 &mut pcs_transcript,
                 vp_arb,
                 &proof.commitments.1,
-                &field_cfg,
-                &r_0,
-                &eval_f,
             )
             .map_err(|e| ProtocolError::PcsVerification(1, e))?;
-            (alphas, Some(pre))
+            (alphas, Some(reads), Some(eval_f))
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         };
 
-        let (alphas_int, pre_int) = if proof.commitments.2.batch_size > 0 {
+        let (alphas_int, reads_int, eval_f_int) = if proof.commitments.2.batch_size > 0 {
             let alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
                 &mut pcs_transcript.fs_transcript,
                 proof.commitments.2.batch_size,
             );
             let eval_f = int_eval_f(&alphas);
-            let pre = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_pre_open::<
-                F,
-                CHECK_FOR_OVERFLOW,
-            >(
+            let reads = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_pre_open_read::<F>(
                 &mut pcs_transcript,
                 vp_int_split4,
                 &proof.commitments.2,
-                &field_cfg,
-                &r0_ext,
-                &eval_f,
             )
             .map_err(|e| ProtocolError::PcsVerification(2, e))?;
-            (alphas, Some(pre))
+            (alphas, Some(reads), Some(eval_f))
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         };
+
+        // Parallel phase: each finalize runs the heavy `linear_code.encode_wide`
+        // off the transcript critical path. For ShaEcdsa-int-fold-4x the
+        // binary and int instances both encode length-`4n` combined rows;
+        // running them in parallel halves that step.
+        let (pre_bin_res, (pre_arb_res, pre_int_res)): (
+            Result<Option<_>, ProtocolError<F, IdealOverF>>,
+            (
+                Result<Option<_>, ProtocolError<F, IdealOverF>>,
+                Result<Option<_>, ProtocolError<F, IdealOverF>>,
+            ),
+        ) = cfg_join!(
+            (|| -> Result<_, ProtocolError<F, IdealOverF>> {
+                match (reads_bin, eval_f_bin) {
+                    (Some(reads), Some(eval_f)) => Ok(Some(
+                        ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_pre_open_finalize::<
+                            F,
+                            CHECK_FOR_OVERFLOW,
+                        >(vp_bin_split2, &field_cfg, &r0_ext, &eval_f, reads)
+                        .map_err(|e| ProtocolError::PcsVerification(0, e))?,
+                    )),
+                    _ => Ok(None),
+                }
+            })(),
+            cfg_join!(
+                (|| -> Result<_, ProtocolError<F, IdealOverF>> {
+                    match (reads_arb, eval_f_arb) {
+                        (Some(reads), Some(eval_f)) => Ok(Some(
+                            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_pre_open_finalize::<
+                                F,
+                                CHECK_FOR_OVERFLOW,
+                            >(vp_arb, &field_cfg, &r_0, &eval_f, reads)
+                            .map_err(|e| ProtocolError::PcsVerification(1, e))?,
+                        )),
+                        _ => Ok(None),
+                    }
+                })(),
+                (|| -> Result<_, ProtocolError<F, IdealOverF>> {
+                    match (reads_int, eval_f_int) {
+                        (Some(reads), Some(eval_f)) => Ok(Some(
+                            ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_pre_open_finalize::<
+                                F,
+                                CHECK_FOR_OVERFLOW,
+                            >(vp_int_split4, &field_cfg, &r0_ext, &eval_f, reads)
+                            .map_err(|e| ProtocolError::PcsVerification(2, e))?,
+                        )),
+                        _ => Ok(None),
+                    }
+                })(),
+            ),
+        );
+        let pre_bin = pre_bin_res?;
+        let pre_arb = pre_arb_res?;
+        let pre_int = pre_int_res?;
 
         zip_plus::pcs::multi_zip::MultiZip3::<
             ZtF::BinaryZt,
