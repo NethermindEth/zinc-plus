@@ -34,7 +34,9 @@ use rayon::prelude::*;
 use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::Transcribable;
-use zinc_utils::{cfg_into_iter, cfg_iter, from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{
+    cfg_into_iter, cfg_iter, cfg_join, from_ref::FromRef, mul_by_scalar::MulByScalar,
+};
 
 /// Full prover-side data for a [`MultiZip3`] commitment: per-instance
 /// encoded matrices plus the shared Merkle tree built over them.
@@ -121,15 +123,26 @@ where
         }
         let _codeword_len = codeword_len.expect("at least one non-empty instance");
 
-        let cw0: Vec<DenseRowMatrix<Zt0::Cw>> = cfg_iter!(polys0)
-            .map(|p| ZipPlus::<Zt0, Lc0>::encode_rows(pp0, p))
-            .collect();
-        let cw1: Vec<DenseRowMatrix<Zt1::Cw>> = cfg_iter!(polys1)
-            .map(|p| ZipPlus::<Zt1, Lc1>::encode_rows(pp1, p))
-            .collect();
-        let cw2: Vec<DenseRowMatrix<Zt2::Cw>> = cfg_iter!(polys2)
-            .map(|p| ZipPlus::<Zt2, Lc2>::encode_rows(pp2, p))
-            .collect();
+        // Encode the three matrices in parallel (matching the
+        // per-instance commit_optionally flow's `cfg_join!`). Without
+        // this, the cw0 → cw1 → cw2 chain is serialized and we lose
+        // the cross-instance parallelism the per-instance path had.
+        let (cw0, (cw1, cw2)): (
+            Vec<DenseRowMatrix<Zt0::Cw>>,
+            (Vec<DenseRowMatrix<Zt1::Cw>>, Vec<DenseRowMatrix<Zt2::Cw>>),
+        ) = cfg_join!(
+            cfg_iter!(polys0)
+                .map(|p| ZipPlus::<Zt0, Lc0>::encode_rows(pp0, p))
+                .collect(),
+            cfg_join!(
+                cfg_iter!(polys1)
+                    .map(|p| ZipPlus::<Zt1, Lc1>::encode_rows(pp1, p))
+                    .collect(),
+                cfg_iter!(polys2)
+                    .map(|p| ZipPlus::<Zt2, Lc2>::encode_rows(pp2, p))
+                    .collect(),
+            ),
+        );
 
         let rows0: Vec<&[Zt0::Cw]> = cw0.iter().flat_map(|m| m.as_rows()).collect();
         let rows1: Vec<&[Zt1::Cw]> = cw1.iter().flat_map(|m| m.as_rows()).collect();
