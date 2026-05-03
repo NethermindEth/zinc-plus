@@ -1608,7 +1608,7 @@ mod tests {
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
-        type CombR = Int<{ EC_FP_INT_LIMBS * 2 }>;
+        type CombR = Int<6>;
         type Comb = Self::CombR;
         type EvalDotChal = ScalarProduct;
         type CombDotChal = ScalarProduct;
