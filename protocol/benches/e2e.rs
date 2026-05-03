@@ -20,7 +20,9 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{FoldedZincTypes, Proof, ZincPlusPiop, ZincTypes};
+use zinc_protocol::{
+    FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
+};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
     EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
@@ -1239,6 +1241,138 @@ fn setup_folded_4x_pp_real_ecdsa(num_vars: usize) -> FoldedPp4x<BenchFoldedRealE
     )
 }
 
+/// 4× int-fold counterpart of [`do_bench_e2e_folded_4x`]. Calls
+/// [`prove_folded_4x_with_int_fold`] / [`verify_folded_4x_with_int_fold`]
+/// (which route binary AND int through `MultiZip3` for shared-Merkle
+/// collapse). Emits its own `Folded 4× +int fold/...` proof-size line
+/// so the saving versus the plain `Folded 4×/...` line is visible
+/// side-by-side.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn do_bench_e2e_folded_4x_with_int_fold<ZtF, U, IdealOverF>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<EC_FP_INT_LIMBS>, Int<EC_FP_INT_LIMBS>, DEGREE_PLUS_ONE>,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    ZtF: IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >,
+    Int<EC_FP_INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS_BENCH>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a Int<EC_FP_INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS_BENCH>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair<
+            Scalar = zinc_poly::univariate::dense::DensePolynomial<
+                Int<EC_FP_INT_LIMBS>,
+                DEGREE_PLUS_ONE,
+            >,
+        > + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    macro_rules! bench_prove_int_fold_4x {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(zinc_protocol::prover::prove_folded_4x_with_int_fold::<
+                        ZtF,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        QUARTER_DEGREE_PLUS_ONE,
+                        EC_FP_INT_LIMBS,
+                        INT_QUARTER_LIMBS_BENCH,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(pp, trace, num_vars, project_scalar))
+                    .expect("Folded-4x+int-fold prover failed");
+                });
+            });
+        };
+    }
+
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove_int_fold_4x!("Prove (folded 4× +int fold MLE-first)", true);
+    }
+
+    let proof: Proof<F> = zinc_protocol::prover::prove_folded_4x_with_int_fold::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        EC_FP_INT_LIMBS,
+        INT_QUARTER_LIMBS_BENCH,
+        false,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("proof generation for folded-4x+int-fold verifier bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(
+        BenchmarkId::new("Verify (folded 4× +int fold)", &params),
+        |bench| {
+            bench.iter_batched(
+                || proof.clone(),
+                |proof| {
+                    black_box(
+                        zinc_protocol::verifier::verify_folded_4x_with_int_fold::<
+                            ZtF,
+                            U,
+                            F,
+                            IdealOverF,
+                            DEGREE_PLUS_ONE,
+                            HALF_DEGREE_PLUS_ONE,
+                            QUARTER_DEGREE_PLUS_ONE,
+                            EC_FP_INT_LIMBS,
+                            INT_QUARTER_LIMBS_BENCH,
+                            PERFORM_CHECKS,
+                        >(
+                            pp,
+                            proof,
+                            &public_trace,
+                            num_vars,
+                            project_scalar,
+                            project_ideal,
+                        ),
+                    )
+                    .expect("Folded-4x+int-fold verifier failed");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    eprint_proof_size(&format!("Folded 4× +int fold/{params}"), &proof);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     group: &mut BenchmarkGroup<WallTime>,
@@ -1439,10 +1573,16 @@ fn eprint_folded_4x_zip_substep_breakdown<F>(
         ("int", &breakdown.int),
     ];
 
+    let zstd_len = |raw: &[u8]| -> usize {
+        zstd::encode_all(raw, zip_plus::utils::ZSTD_LEVEL)
+            .expect("zstd compression failed")
+            .len()
+    };
+
     eprintln!("    Zip+ PCS-byte substep breakdown ({label}):");
     eprintln!(
-        "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>7}",
-        "domain", "b", "combined_row", "column_values", "merkle_paths", "total", "of zip%",
+        "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>7}",
+        "domain (raw)", "b", "combined_row", "column_values", "merkle_paths", "total", "of zip%",
     );
     let mut sum_b = 0_usize;
     let mut sum_cr = 0_usize;
@@ -1450,17 +1590,17 @@ fn eprint_folded_4x_zip_substep_breakdown<F>(
     let mut sum_mp = 0_usize;
     for (name, bd) in &domains {
         let total = bd.total();
-        sum_b = sum_b.saturating_add(bd.b_bytes);
-        sum_cr = sum_cr.saturating_add(bd.combined_row_bytes);
-        sum_cv = sum_cv.saturating_add(bd.column_values_bytes);
-        sum_mp = sum_mp.saturating_add(bd.merkle_proof_bytes);
+        sum_b = sum_b.saturating_add(bd.b.len());
+        sum_cr = sum_cr.saturating_add(bd.combined_row.len());
+        sum_cv = sum_cv.saturating_add(bd.column_values.len());
+        sum_mp = sum_mp.saturating_add(bd.merkle_proofs.len());
         eprintln!(
-            "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+            "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
             name,
-            fmt_thousands(bd.b_bytes),
-            fmt_thousands(bd.combined_row_bytes),
-            fmt_thousands(bd.column_values_bytes),
-            fmt_thousands(bd.merkle_proof_bytes),
+            fmt_thousands(bd.b.len()),
+            fmt_thousands(bd.combined_row.len()),
+            fmt_thousands(bd.column_values.len()),
+            fmt_thousands(bd.merkle_proofs.len()),
             fmt_thousands(total),
             100.0 * (total as f64) / zip_total_f,
         );
@@ -1470,8 +1610,8 @@ fn eprint_folded_4x_zip_substep_breakdown<F>(
         .saturating_add(sum_cv)
         .saturating_add(sum_mp);
     eprintln!(
-        "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
-        "TOTAL",
+        "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+        "TOTAL (raw)",
         fmt_thousands(sum_b),
         fmt_thousands(sum_cr),
         fmt_thousands(sum_cv),
@@ -1479,9 +1619,72 @@ fn eprint_folded_4x_zip_substep_breakdown<F>(
         fmt_thousands(sum_total),
         100.0 * (sum_total as f64) / zip_total_f,
     );
+
+    // Per-substep zstd-compressed sizes. Each (domain, substep) cell is
+    // compressed independently, so per-row totals are the sum of the four
+    // independently-compressed substeps — they slightly overshoot the
+    // size of compressing the per-domain concatenation, and even more
+    // so vs. compressing the whole proof.zip (cross-section redundancy
+    // is lost when split). The trailing rows give those reference points.
+    let zstd_label = format!("zstd-{}", zip_plus::utils::ZSTD_LEVEL);
     eprintln!(
-        "      (proof.zip raw = {} bytes; substeps cover step-7 PCS writes only)",
+        "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>7}",
+        format!("domain ({zstd_label})"),
+        "b",
+        "combined_row",
+        "column_values",
+        "merkle_paths",
+        "total",
+        "of zip%",
+    );
+    let zip_zstd_total = zstd_len(&proof.zip);
+    let zip_zstd_total_f = (zip_zstd_total.max(1)) as f64;
+    let mut zstd_sum_b = 0_usize;
+    let mut zstd_sum_cr = 0_usize;
+    let mut zstd_sum_cv = 0_usize;
+    let mut zstd_sum_mp = 0_usize;
+    for (name, bd) in &domains {
+        let zb = zstd_len(&bd.b);
+        let zcr = zstd_len(&bd.combined_row);
+        let zcv = zstd_len(&bd.column_values);
+        let zmp = zstd_len(&bd.merkle_proofs);
+        let row_total = zb
+            .saturating_add(zcr)
+            .saturating_add(zcv)
+            .saturating_add(zmp);
+        zstd_sum_b = zstd_sum_b.saturating_add(zb);
+        zstd_sum_cr = zstd_sum_cr.saturating_add(zcr);
+        zstd_sum_cv = zstd_sum_cv.saturating_add(zcv);
+        zstd_sum_mp = zstd_sum_mp.saturating_add(zmp);
+        eprintln!(
+            "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+            name,
+            fmt_thousands(zb),
+            fmt_thousands(zcr),
+            fmt_thousands(zcv),
+            fmt_thousands(zmp),
+            fmt_thousands(row_total),
+            100.0 * (row_total as f64) / zip_zstd_total_f,
+        );
+    }
+    let zstd_sum_total = zstd_sum_b
+        .saturating_add(zstd_sum_cr)
+        .saturating_add(zstd_sum_cv)
+        .saturating_add(zstd_sum_mp);
+    eprintln!(
+        "      {:<22} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+        format!("TOTAL ({zstd_label})"),
+        fmt_thousands(zstd_sum_b),
+        fmt_thousands(zstd_sum_cr),
+        fmt_thousands(zstd_sum_cv),
+        fmt_thousands(zstd_sum_mp),
+        fmt_thousands(zstd_sum_total),
+        100.0 * (zstd_sum_total as f64) / zip_zstd_total_f,
+    );
+    eprintln!(
+        "      (proof.zip raw = {} bytes; {zstd_label} whole-blob = {} bytes; substeps cover step-7 PCS writes only)",
         fmt_thousands(zip_total),
+        fmt_thousands(zip_zstd_total),
     );
 }
 
@@ -1831,6 +2034,137 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for BenchFoldedRe
     type IntLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
 }
 
+//
+// 4× int-fold variant of the bench Zinc-types. Implements
+// `IntFoldedZincTypes4x` so that `prove_folded_4x_with_int_fold` /
+// `verify_folded_4x_with_int_fold` route the int Zip+ commitments
+// through Int<2> quarters (alongside the binary BinaryPoly<8>
+// quarters) — and the shared-Merkle dispatch then collapses the two
+// codeword-length-matching commitments into a single Merkle tree
+// (one path per opening instead of two).
+//
+// `INT_QUARTER_LIMBS_BENCH = 2`: the 64-bit quarter values
+// `q_0..q_3` from the decomposition `v = q_0 + 2^64·q_1 + 2^128·q_2
+// + 2^192·q_3` get stored in `Int<2>` (one limb of sign-bit
+// headroom over the 64 magnitude bits per quarter).
+//
+
+const INT_QUARTER_LIMBS_BENCH: usize = 2;
+
+/// Quarter-int Zip+ types: `Eval = Int<2>`, `Cw = Int<3>`, `CombR`
+/// matches the unfolded bench width.
+type RealEcdsaIntQuarterZt = GenericBenchZipTypes<
+    Int<INT_QUARTER_LIMBS_BENCH>,
+    Int<{ INT_QUARTER_LIMBS_BENCH + 1 }>,
+    Uint<FIELD_LIMBS>,
+    MillerRabin,
+    i128,
+    i128,
+    Int<{ EC_FP_INT_LIMBS * 4 }>,
+    Int<{ EC_FP_INT_LIMBS * 4 }>,
+    ScalarProduct,
+    ScalarProduct,
+    MBSInnerProduct,
+>;
+
+#[derive(Clone, Debug)]
+struct BenchFoldedRealEcdsaIntFold4xZincTypes;
+
+impl
+    IntFoldedZincTypes4x<
+        DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        EC_FP_INT_LIMBS,
+        INT_QUARTER_LIMBS_BENCH,
+    > for BenchFoldedRealEcdsaIntFold4xZincTypes
+{
+    type Chal = i128;
+    type Pt = i128;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = <BenchFoldedRealEcdsaZincTypes4x as FoldedZincTypes<
+        DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+    >>::BinaryZt;
+    type ArbitraryZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = RealEcdsaIntQuarterZt;
+
+    type BinaryLc = <BenchFoldedRealEcdsaZincTypes4x as FoldedZincTypes<
+        DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+    >>::BinaryLc;
+    type ArbitraryLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+}
+
+/// Setup PCS params for the 4× int-fold path: binary AND int both
+/// commit at split4_size = 4n; arb stays at normal_size.
+#[allow(clippy::type_complexity, clippy::unwrap_used)]
+fn setup_int_folded_4x_pp_real_ecdsa(
+    num_vars: usize,
+) -> (
+    ZipPlusParams<
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::BinaryZt,
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::ArbitraryZt,
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::ArbitraryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::IntZt,
+        <BenchFoldedRealEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >>::IntLc,
+    >,
+) {
+    let split4_size = 1 << (num_vars + 2);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            split4_size,
+            IprsCode::new_with_optimal_depth(split4_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            split4_size,
+            IprsCode::new_with_optimal_depth(split4_size).unwrap(),
+        ),
+    )
+}
+
 fn bench_real_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = EcdsaUair<RealEcdsaInt>;
 
@@ -1951,6 +2285,31 @@ fn bench_real_sha_ecdsa_e2e_folded_4x(group: &mut BenchmarkGroup<WallTime>, num_
     );
 }
 
+/// ShaEcdsa 4× folded with **int fold + shared Merkle**: binary
+/// AND int both quartered (BinaryPoly<8> / Int<2>) and committed
+/// under one Merkle tree via `MultiZip3`. One Merkle path per
+/// opening instead of two.
+fn bench_real_sha_ecdsa_e2e_folded_4x_with_int_fold(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_int_folded_4x_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e_folded_4x_with_int_fold::<BenchFoldedRealEcdsaIntFold4xZincTypes, U, _>(
+        group,
+        "ShaEcdsa",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
 fn e2e_folded_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded");
 
@@ -1971,6 +2330,10 @@ fn e2e_folded_4x_benches(c: &mut Criterion) {
     // bench_real_ecdsa_e2e_folded_4x(&mut group, 9);
     // bench_real_sha256_e2e_folded_4x(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_4x(&mut group, 9);
+    // 4× int-fold + shared-Merkle variant. Emits its own
+    // `Folded 4× +int fold/...` proof-size line for side-by-side
+    // comparison against the plain `Folded 4×/...` line above.
+    bench_real_sha_ecdsa_e2e_folded_4x_with_int_fold(&mut group, 9);
 
     group.finish();
 }

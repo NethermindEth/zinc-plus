@@ -12,28 +12,29 @@ use crate::{
 /// matching the four distinct writes the prover makes to the PCS
 /// transcript stream: the row-evaluation vector `b`, the combined row,
 /// per-column-opening matrix entries, and the Merkle authentication
-/// paths. Useful for attributing the size of the serialized
-/// `proof.zip` blob to its substeps.
-#[derive(Default, Debug, Clone, Copy)]
+/// paths. Holds the actual bytes written so callers can independently
+/// measure size and compressibility of each substep.
+#[derive(Default, Debug, Clone)]
 pub struct ZipPlusProveByteBreakdown {
-    /// Bytes for the row-evaluation vector `b` (field elements).
-    pub b_bytes: usize,
-    /// Bytes for the combined row (`Zt::CombR` entries).
-    pub combined_row_bytes: usize,
-    /// Bytes for the opened column values across all `cw_matrices`,
-    /// summed across `NUM_COLUMN_OPENINGS` queries.
-    pub column_values_bytes: usize,
-    /// Bytes for the Merkle authentication paths, summed across
-    /// `NUM_COLUMN_OPENINGS` queries.
-    pub merkle_proof_bytes: usize,
+    /// Bytes written for the row-evaluation vector `b` (field elements).
+    pub b: Vec<u8>,
+    /// Bytes written for the combined row (`Zt::CombR` entries).
+    pub combined_row: Vec<u8>,
+    /// Bytes written for the opened column values across all
+    /// `cw_matrices`, concatenated across `NUM_COLUMN_OPENINGS` queries.
+    pub column_values: Vec<u8>,
+    /// Bytes written for the Merkle authentication paths, concatenated
+    /// across `NUM_COLUMN_OPENINGS` queries.
+    pub merkle_proofs: Vec<u8>,
 }
 
 impl ZipPlusProveByteBreakdown {
     pub fn total(&self) -> usize {
-        self.b_bytes
-            .saturating_add(self.combined_row_bytes)
-            .saturating_add(self.column_values_bytes)
-            .saturating_add(self.merkle_proof_bytes)
+        self.b
+            .len()
+            .saturating_add(self.combined_row.len())
+            .saturating_add(self.column_values.len())
+            .saturating_add(self.merkle_proofs.len())
     }
 }
 
@@ -292,7 +293,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript.write_field_elements(&b)?;
         let pos_b_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
-            bd.b_bytes = bd.b_bytes.saturating_add(pos_b_end - pos_b_start);
+            bd.b.extend_from_slice(&transcript.stream.get_ref()[pos_b_start..pos_b_end]);
         }
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
@@ -348,8 +349,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript.write_const_many(&combined_row)?;
         let pos_cr_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
-            bd.combined_row_bytes =
-                bd.combined_row_bytes.saturating_add(pos_cr_end - pos_cr_start);
+            bd.combined_row
+                .extend_from_slice(&transcript.stream.get_ref()[pos_cr_start..pos_cr_end]);
         }
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
@@ -394,6 +395,138 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )
     }
 
+    /// Phase 1 of [`Self::prove_f`]: writes `b` and `combined_row` to the
+    /// transcript and returns the combined evaluation. Does *not* perform
+    /// the column-opening loop, so no Merkle data is touched.
+    ///
+    /// Used by [`crate::pcs::multi_zip::MultiZip3`] to share a single
+    /// column-opening loop (and a single Merkle tree) across multiple
+    /// Zip+ instances. The standalone [`Self::prove_f`] composes this
+    /// with the per-instance opening loop via [`Self::prove_f_inner`].
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_pre_open_f<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let batch_size = polys.len();
+        validate_input::<Zt, Lc, _>(
+            "prove_pre_open",
+            pp.num_vars,
+            pp.linear_code.row_len(),
+            batch_size,
+            polys,
+            &[point],
+        )?;
+
+        let num_rows = pp.num_rows;
+        let row_len = pp.linear_code.row_len();
+        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
+
+        let degree_bound = Zt::Comb::DEGREE_BOUND;
+        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
+            .iter()
+            .map(|poly| {
+                let alphas = if degree_bound.is_zero() {
+                    vec![Zt::Chal::ONE]
+                } else {
+                    transcript.fs_transcript.get_challenges(degree_bound + 1)
+                };
+                cfg_iter!(poly.evaluations)
+                    .map(|eval| {
+                        Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                            eval,
+                            &alphas,
+                            Zt::CombR::ZERO,
+                        )
+                        .map_err(ZipError::from)
+                    })
+                    .collect()
+            })
+            .try_collect()?;
+
+        let zero_f = F::zero_with_cfg(field_cfg);
+
+        let b = {
+            let per_poly_b: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
+                .map(|poly_comb_r| {
+                    cfg_chunks!(poly_comb_r, row_len)
+                        .map(|row| MBSInnerProduct::inner_product_field(row, &q_1, zero_f.clone()))
+                        .collect::<Result<Vec<F>, _>>()
+                })
+                .collect::<Result<_, _>>()?;
+            let mut b = vec![zero_f.clone(); num_rows];
+            for poly_b in &per_poly_b {
+                b.iter_mut().zip(poly_b).for_each(|(a, d)| *a += d);
+            }
+            b
+        };
+
+        transcript.write_field_elements(&b)?;
+        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
+
+        let coeffs = if pp.num_rows == 1 {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript.fs_transcript.get_challenges::<Zt::Chal>(num_rows)
+        };
+
+        let combined_row: Vec<Zt::CombR> = {
+            let mut combined = vec![Zt::CombR::ZERO; row_len];
+            cfg_iter_mut!(combined).enumerate().try_for_each(
+                |(col, acc)| -> Result<(), ZipError> {
+                    for poly_comb_r in &polys_as_comb_r {
+                        for (eval, coeff) in poly_comb_r
+                            .iter()
+                            .skip(col)
+                            .step_by(row_len)
+                            .zip(coeffs.iter())
+                        {
+                            let scaled: Zt::CombR = eval
+                                .mul_by_scalar::<CHECK_FOR_OVERFLOW>(coeff)
+                                .expect("Cannot multiply evaluation by coefficient");
+                            if CHECK_FOR_OVERFLOW {
+                                *acc = zinc_utils::add!(
+                                    *acc,
+                                    &scaled,
+                                    "Addition overflow while combining rows across polys"
+                                );
+                            } else {
+                                *acc += scaled;
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+            combined
+        };
+
+        transcript.write_const_many(&combined_row)?;
+
+        Ok(eval)
+    }
+
+    /// Public counterpart of `open_merkle_trees_for_column_inner`. Used
+    /// by [`crate::pcs::multi_zip::MultiZip3`].
+    pub fn open_merkle_trees_for_column(
+        transcript: &mut PcsProverTranscript,
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        column_idx: usize,
+    ) -> Result<(), ZipError> {
+        Self::open_merkle_trees_for_column_inner(transcript, commit_hint, column_idx, None)
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     fn open_merkle_trees_for_column_inner(
         transcript: &mut PcsProverTranscript,
@@ -408,8 +541,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         }
         let pos_v_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
-            bd.column_values_bytes =
-                bd.column_values_bytes.saturating_add(pos_v_end - pos_v_start);
+            bd.column_values
+                .extend_from_slice(&transcript.stream.get_ref()[pos_v_start..pos_v_end]);
         }
 
         let pos_m_start = stream_pos(transcript);
@@ -422,8 +555,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into()))?;
         let pos_m_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
-            bd.merkle_proof_bytes =
-                bd.merkle_proof_bytes.saturating_add(pos_m_end - pos_m_start);
+            bd.merkle_proofs
+                .extend_from_slice(&transcript.stream.get_ref()[pos_m_start..pos_m_end]);
         }
 
         Ok(())

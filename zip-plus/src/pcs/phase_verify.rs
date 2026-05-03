@@ -24,6 +24,14 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar,
 };
 
+/// State produced by [`ZipPlus::verify_pre_open`] for use by the column
+/// opening phase. Caller-opaque — only [`ZipPlus::verify_with_alphas`] and
+/// the multi-instance helpers consume the inner fields.
+pub struct VerifyPreOpen<Zt: ZipTypes> {
+    pub coeffs: Vec<Zt::Chal>,
+    pub encoded_combined_row: Vec<Zt::CombR>,
+}
+
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Verifies an opening proof for one or more committed multilinear
     /// polynomials at an evaluation point, using the Zip+ protocol.
@@ -236,6 +244,73 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )?;
 
         Ok(())
+    }
+
+    /// Phase 1 of [`Self::verify_with_alphas`]: reads `b` and `combined_row`
+    /// from the transcript, runs evaluation-consistency and coherence checks,
+    /// and returns the state needed for the column-opening checks.
+    ///
+    /// Used by [`crate::pcs::multi_zip::MultiZip3`] to interleave per-instance
+    /// pre-open work with a shared column-opening loop.
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_pre_open<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        point_f: &[F],
+        eval_f: &F,
+    ) -> Result<VerifyPreOpen<Zt>, ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        let batch_size = comm.batch_size;
+        validate_input::<Zt, Lc, _>(
+            "verify_pre_open",
+            vp.num_vars,
+            vp.linear_code.row_len(),
+            batch_size,
+            &[],
+            &[point_f],
+        )?;
+
+        let num_rows = vp.num_rows;
+        let row_len = vp.linear_code.row_len();
+        let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
+        let zero_f = F::zero_with_cfg(field_cfg);
+
+        let b: Vec<F> = transcript.read_field_elements(num_rows)?;
+        if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
+            return Err(ZipError::InvalidPcsOpen(
+                "Evaluation consistency failure".into(),
+            ));
+        }
+
+        let coeffs: Vec<Zt::Chal> = if num_rows == 1 {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript.fs_transcript.get_challenges(num_rows)
+        };
+
+        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
+
+        let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
+        if lhs != rhs {
+            return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
+        }
+
+        Ok(VerifyPreOpen {
+            coeffs,
+            encoded_combined_row,
+        })
     }
 
     /// Samples per-polynomial alpha challenges from the transcript.

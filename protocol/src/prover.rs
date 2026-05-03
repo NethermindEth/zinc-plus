@@ -1,5 +1,7 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{
+    ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, crypto_bigint_int::Int,
+};
 use num_traits::Zero;
 use std::fmt::Debug;
 use zinc_piop::{
@@ -35,6 +37,7 @@ use zinc_utils::{
 use zip_plus::{
     pcs::{
         ZipPlusProveByteBreakdown,
+        multi_zip::MultiZip3,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     },
     pcs_transcript::PcsProverTranscript,
@@ -1668,7 +1671,7 @@ where
 /// substeps inside `ZipPlus::prove_f`: `b`, combined row, opened
 /// column values, Merkle authentication paths). Unused domains
 /// (those with no committed witness) keep their default zero counts.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone)]
 pub struct FoldedProveZipBreakdown {
     pub bin: ZipPlusProveByteBreakdown,
     pub arb: ZipPlusProveByteBreakdown,
@@ -2517,4 +2520,477 @@ where
         t.assembly = _t_assembly.elapsed();
     }
     Ok(proof)
+}
+pub fn prove_folded_4x_with_int_fold<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const INT_LIMBS: usize,
+    const INT_QUARTER_LIMBS: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<Proof<F>, ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let (pp_bin_split2, pp_arb, pp_int_split4) = pp;
+    let uair_signature = U::signature();
+    let public_trace = trace.public(&uair_signature);
+    let witness_trace = trace.witness(&uair_signature);
+
+    // ── Step 0: Commit (twice-split binary, arb, quartered int) ─────────
+    let split1: Vec<DenseMultilinearExtension<BinaryPoly<HALF_D>>> =
+        zip_plus::pcs::folding::split_columns::<D, HALF_D>(&witness_trace.binary_poly);
+    let split_binary_witness: Vec<DenseMultilinearExtension<BinaryPoly<QUARTER_D>>> =
+        zip_plus::pcs::folding::split_columns::<HALF_D, QUARTER_D>(&split1);
+    drop(split1);
+    let split_int_witness: Vec<DenseMultilinearExtension<Int<INT_QUARTER_LIMBS>>> =
+        zip_plus::pcs::folding::split_int_columns_4x::<INT_LIMBS, INT_QUARTER_LIMBS>(
+            &witness_trace.int,
+        );
+
+    // Shared-Merkle dispatch (same criterion as the 1× int-fold path):
+    // ≥2 non-empty batches AND arb is empty / has matching codeword.
+    let arb_compatible = witness_trace.arbitrary_poly.is_empty()
+        || pp_arb.linear_code.codeword_len() == pp_bin_split2.linear_code.codeword_len();
+    let bin_nonempty = !split_binary_witness.is_empty();
+    let int_nonempty = !split_int_witness.is_empty();
+    let arb_nonempty = !witness_trace.arbitrary_poly.is_empty();
+    let nonempty_count = (bin_nonempty as u8) + (arb_nonempty as u8) + (int_nonempty as u8);
+    let use_multi = nonempty_count >= 2 && arb_compatible;
+
+    let (
+        hint_bin_split,
+        hint_arb,
+        hint_int_split,
+        multi_hint,
+        commitment_bin,
+        commitment_arb,
+        commitment_int,
+    ) = if use_multi {
+        let (multi, comm_bin, comm_arb, comm_int) = MultiZip3::<
+            ZtF::BinaryZt,
+            ZtF::ArbitraryZt,
+            ZtF::IntZt,
+            ZtF::BinaryLc,
+            ZtF::ArbitraryLc,
+            ZtF::IntLc,
+        >::commit(
+            pp_bin_split2,
+            pp_arb,
+            pp_int_split4,
+            &split_binary_witness,
+            &witness_trace.arbitrary_poly,
+            &split_int_witness,
+        )?;
+        (None, None, None, Some(multi), comm_bin, comm_arb, comm_int)
+    } else {
+        let (res_bin, (res_arb, res_int)) = cfg_join!(
+            commit_optionally(pp_bin_split2, &split_binary_witness),
+            commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
+            commit_optionally(pp_int_split4, &split_int_witness),
+        );
+        let (hb, cb) = res_bin?;
+        let (ha, ca) = res_arb?;
+        let (hi, ci) = res_int?;
+        (hb, ha, hi, None, cb, ca, ci)
+    };
+
+    let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
+        [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
+    );
+
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
+    absorb_public_columns(
+        &mut pcs_transcript.fs_transcript,
+        &public_trace.arbitrary_poly,
+    );
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+
+    // ── Step 1: Prime projection ────────────────────────────────────────
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+
+    // ── Step 2: Ideal check ─────────────────────────────────────────────
+    let num_constraints = count_constraints::<U>();
+    let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
+        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mut any_linear, mut any_nonlinear) = (false, false);
+        for (m, i) in mask.iter().zip(ideals.iter()) {
+            if i.is_zero_ideal() {
+                continue;
+            }
+            if *m {
+                any_linear = true
+            } else {
+                any_nonlinear = true
+            }
+        }
+        match (any_linear, any_nonlinear) {
+            (true, false) => {
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
+                let (p, s) = U::prove_linear(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
+            }
+            (true, true) => {
+                let (rm, cm) = cfg_join!(
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
+                    project_trace_coeffs_column_major(trace, &field_cfg),
+                );
+                let (p, s) = U::prove_hybrid(
+                    &mut pcs_transcript.fs_transcript,
+                    &rm,
+                    &cm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(rm))
+            }
+            (false, _) => {
+                let projected_trace_rm =
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+                let (p, s) = U::prove_combined(
+                    &mut pcs_transcript.fs_transcript,
+                    &projected_trace_rm,
+                    &projected_scalars_fx,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                )?;
+                (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+            }
+        }
+    } else {
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
+        let (p, s) = U::prove_combined(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_rm,
+            &projected_scalars_fx,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )?;
+        (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
+    };
+    let ic_eval_point = ic_prover_state.evaluation_point;
+
+    // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
+    let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+
+    let projected_trace_f =
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
+    let projected_scalars_f =
+        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+    // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
+    let max_degree = count_max_degree::<U>();
+    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
+        &mut pcs_transcript.fs_transcript,
+        projected_trace_f.clone(),
+        &ic_eval_point,
+        &projected_scalars_f,
+        num_constraints,
+        num_vars,
+        max_degree,
+        &field_cfg,
+        &trace.binary_poly,
+        &projecting_element_f,
+    )?;
+
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
+    let int_bit_cols: Vec<_> = uair_signature
+        .int_witness_bit_cols()
+        .iter()
+        .map(|&idx| projected_trace_f[int_offset + idx].clone())
+        .collect();
+    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.shifted_bit_slice_specs(),
+        &field_cfg,
+    );
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let virtual_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        let self_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            &field_cfg,
+        );
+        let public_bit_slices = compute_bit_slices_flat::<F, D>(
+            &trace.binary_poly[..num_pub_bin],
+            &field_cfg,
+        );
+        let int_witness_cols: Vec<_> = (0..num_wit_int)
+            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+            .collect();
+        build_virtual_booleanity_mles::<F, D>(
+            &self_bit_slices,
+            &shifted_bit_slice_mles,
+            &public_bit_slices,
+            &int_witness_cols,
+            virtual_specs,
+            &field_cfg,
+        )
+    };
+    let mut extra_bit_cols = int_bit_cols;
+    extra_bit_cols.extend(virtual_mles);
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+        &trace.binary_poly[num_pub_bin..],
+        &trace.binary_poly[..num_pub_bin],
+        uair_signature.shifted_bit_slice_specs(),
+        virtual_bp_specs,
+    );
+    let kept_witness_binary = filter_booleanity_witness(
+        &trace.binary_poly[num_pub_bin..],
+        uair_signature.booleanity_skip_indices(),
+    );
+    let booleanity_binary_cols: Vec<_> = kept_witness_binary
+        .iter()
+        .chain(virtual_binary_mles.iter())
+        .cloned()
+        .collect();
+    let bool_prep = prepare_booleanity_group::<F, D>(
+        &mut pcs_transcript.fs_transcript,
+        &booleanity_binary_cols,
+        &extra_bit_cols,
+        &ic_eval_point,
+        &field_cfg,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    let mut groups = vec![cpr_group];
+    let mut bool_ancillary_opt = None;
+    if let Some((bg, ba)) = bool_prep {
+        groups.push(bg);
+        bool_ancillary_opt = Some(ba);
+    }
+
+    let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        groups,
+        num_vars,
+        &field_cfg,
+    );
+    let cpr_state = md_states.remove(0);
+    let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+        &mut pcs_transcript.fs_transcript,
+        cpr_state,
+        cpr_ancillary,
+        &field_cfg,
+    )?;
+    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
+        .into_iter()
+        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+    if let Some(ba) = bool_ancillary_opt {
+        let bool_state = md_states.remove(0);
+        let bit_slice_evals = finalize_booleanity_prover(
+            &mut pcs_transcript.fs_transcript,
+            bool_state,
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+        cpr_proof.bit_slice_evals = bit_slice_evals;
+    }
+    let lookup_proof: Option<BatchedLookupProof<F>> = None;
+
+    // ── Step 5: Multi-point evaluation sumcheck ─────────────────────────
+    let cpr_eval_point = cpr_prover_state.evaluation_point.clone();
+    let bit_op_mles = zinc_piop::combined_poly_resolver::build_bit_op_mles::<F, D>(
+        &trace.binary_poly,
+        uair_signature.bit_op_specs(),
+        uair_signature.total_cols().num_binary_poly_cols(),
+        &projecting_element_f,
+        num_vars,
+        &field_cfg,
+    );
+    let mut sources = projected_trace_f.clone();
+    sources.extend(bit_op_mles);
+    let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
+    let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        &sources,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
+        &cpr_proof.down_evals,
+        uair_signature.shifts(),
+        &field_cfg,
+    )?;
+    let r_0 = mp_prover_state.eval_point;
+
+    // ── Step 6: Lift-and-project + sample γ_1, γ_2 ──────────────────────
+    let mut lifted_evals =
+        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, &field_cfg);
+    let total_cols = uair_signature.total_cols();
+    let num_total_bin = total_cols.num_binary_poly_cols();
+    let num_total_arb = total_cols.num_arbitrary_poly_cols();
+    let int_lifted_evals_4coeff: Vec<DynamicPolynomialF<F>> =
+        crate::compute_int_fold_4x_lifted_evals::<F, INT_LIMBS, INT_QUARTER_LIMBS>(
+            &r_0,
+            &trace.int,
+            &field_cfg,
+        );
+    let int_section_offset = num_total_bin + num_total_arb;
+    for (i, bar_u) in int_lifted_evals_4coeff.into_iter().enumerate() {
+        lifted_evals[int_section_offset + i] = bar_u;
+    }
+
+    let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+    for bar_u in &lifted_evals {
+        pcs_transcript
+            .fs_transcript
+            .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+    }
+    let gamma1: F = {
+        let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+        F::from_with_cfg(&g_chal, &field_cfg)
+    };
+    let gamma2: F = {
+        let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+        F::from_with_cfg(&g_chal, &field_cfg)
+    };
+
+    // ── Step 7: PCS open ────────────────────────────────────────────────
+    let mut r0_ext = r_0.clone();
+    r0_ext.push(gamma1);
+    r0_ext.push(gamma2);
+
+    if let Some(multi) = &multi_hint {
+        let _ = MultiZip3::<
+            ZtF::BinaryZt,
+            ZtF::ArbitraryZt,
+            ZtF::IntZt,
+            ZtF::BinaryLc,
+            ZtF::ArbitraryLc,
+            ZtF::IntLc,
+        >::prove_f::<F, CHECK_FOR_OVERFLOW>(
+            &mut pcs_transcript,
+            pp_bin_split2,
+            pp_arb,
+            pp_int_split4,
+            &split_binary_witness,
+            &witness_trace.arbitrary_poly,
+            &split_int_witness,
+            &r0_ext,
+            multi,
+            &field_cfg,
+        )?;
+    } else {
+        if let Some(hint_bin) = &hint_bin_split {
+            let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_bin_split2,
+                &split_binary_witness,
+                &r0_ext,
+                hint_bin,
+                &field_cfg,
+            )?;
+        }
+        if let Some(hint_arb) = &hint_arb {
+            let _ =
+                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    &mut pcs_transcript,
+                    pp_arb,
+                    &witness_trace.arbitrary_poly,
+                    &r_0,
+                    hint_arb,
+                    &field_cfg,
+                )?;
+        }
+        if let Some(hint_int) = &hint_int_split {
+            let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                pp_int_split4,
+                &split_int_witness,
+                &r0_ext,
+                hint_int,
+                &field_cfg,
+            )?;
+        }
+    }
+
+    // ── Assemble the proof ──────────────────────────────────────────────
+    let zip_proof = pcs_transcript.stream.into_inner();
+    let commitments = (commitment_bin, commitment_arb, commitment_int);
+
+    let pub_cols = uair_signature.public_cols();
+    let num_pub_bin = pub_cols.num_binary_poly_cols();
+    let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+    let num_pub_int = pub_cols.num_int_cols();
+    let witness = uair_signature.witness_cols();
+    let witness_arb_offset = add!(num_total_bin, num_pub_arb);
+    let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
+    let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
+    let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
+        .iter()
+        .chain(&lifted_evals[witness_arb_offset..witness_arb_end])
+        .chain(&lifted_evals[witness_int_offset..])
+        .cloned()
+        .collect();
+
+    Ok(Proof {
+        commitments,
+        ideal_check: ic_proof,
+        resolver: cpr_proof,
+        combined_sumcheck,
+        multipoint_eval: mp_proof,
+        zip: zip_proof,
+        witness_lifted_evals,
+        lookup_proof,
+    })
 }
