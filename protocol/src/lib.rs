@@ -1558,7 +1558,7 @@ mod tests {
 
     // ── 4× int-fold variant of the ShaEcdsa types ──────────────────────
     //
-    // For the `prove_folded_4x_with_int_fold` round-trip test below.
+    // For the `prove_folded_4x` round-trip test below.
     // Binary: `BinaryPoly<8>` quartered (matches existing
     // `BenchFoldedRealEcdsaZincTypes4x` from `protocol/benches/e2e.rs`).
     // Int: `Int<INT_QUARTER_LIMBS_TEST>` quartered.
@@ -1616,7 +1616,7 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct TestShaEcdsaIntFold4xZincTypes;
+    struct TestShaEcdsaFolded4xZincTypes;
 
     impl
         IntFoldedZincTypes4x<
@@ -1624,7 +1624,7 @@ mod tests {
             QUARTER_DEGREE_PLUS_ONE_TEST,
             EC_FP_INT_LIMBS,
             INT_QUARTER_LIMBS_TEST,
-        > for TestShaEcdsaIntFold4xZincTypes
+        > for TestShaEcdsaFolded4xZincTypes
     {
         type Chal = i128;
         type Pt = i128;
@@ -1641,17 +1641,17 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn setup_int_folded_4x_pp_sha_ecdsa(
+    fn setup_folded_4x_pp_sha_ecdsa(
         num_vars: usize,
     ) -> (
         ZipPlusParams<
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
                 INT_QUARTER_LIMBS_TEST,
             >>::BinaryZt,
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
@@ -1659,13 +1659,13 @@ mod tests {
             >>::BinaryLc,
         >,
         ZipPlusParams<
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
                 INT_QUARTER_LIMBS_TEST,
             >>::ArbitraryZt,
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
@@ -1673,13 +1673,13 @@ mod tests {
             >>::ArbitraryLc,
         >,
         ZipPlusParams<
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
                 INT_QUARTER_LIMBS_TEST,
             >>::IntZt,
-            <TestShaEcdsaIntFold4xZincTypes as IntFoldedZincTypes4x<
+            <TestShaEcdsaFolded4xZincTypes as IntFoldedZincTypes4x<
                 DEGREE_PLUS_ONE,
                 QUARTER_DEGREE_PLUS_ONE_TEST,
                 EC_FP_INT_LIMBS,
@@ -1854,26 +1854,24 @@ mod tests {
         );
     }
 
-    /// 4×-folded ShaEcdsa round-trip with int folding enabled —
-    /// binary AND int both quartered (BinaryPoly<8> / Int<2>) and
-    /// committed under one Merkle tree via `MultiZip3`. Prints the
-    /// serialized proof size for comparison against the plain
-    /// `prove_folded_4x` path.
+    /// 4×-folded ShaEcdsa round-trip — binary AND int both quartered
+    /// (BinaryPoly<8> / Int<2>) and committed under one Merkle tree
+    /// via `MultiZip3`. Prints the serialized proof size.
     #[test]
-    fn test_e2e_sha_ecdsa_int_fold_4x_round_trip() {
-        use crate::prover::prove_folded_4x_with_int_fold;
-        use crate::verifier::verify_folded_4x_with_int_fold;
+    fn test_e2e_sha_ecdsa_folded_4x_round_trip() {
+        use crate::prover::prove_folded_4x;
+        use crate::verifier::verify_folded_4x;
 
-        type ZtF = TestShaEcdsaIntFold4xZincTypes;
+        type ZtF = TestShaEcdsaFolded4xZincTypes;
         type U = ShaEcdsaUair<ShaEcdsaInt>;
 
         let mut rng = rng();
-        let pp = setup_int_folded_4x_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
+        let pp = setup_folded_4x_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
         let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
         let sig = <U as Uair>::signature();
         let public_trace = trace.public(&sig);
 
-        let proof = prove_folded_4x_with_int_fold::<
+        let proof = prove_folded_4x::<
             ZtF,
             U,
             F,
@@ -1891,7 +1889,7 @@ mod tests {
         transcript.write(&proof).expect("Failed to serialize proof");
         let serialized_len = transcript.stream.get_ref().len();
         println!(
-            "4× int-fold ShaEcdsa proof size: {} bytes ({} KiB)",
+            "4× folded ShaEcdsa proof size: {} bytes ({} KiB)",
             serialized_len,
             serialized_len.div_ceil(1024),
         );
@@ -1901,7 +1899,7 @@ mod tests {
             .expect("Failed to deserialize proof");
         assert_eq!(proof, proof_2);
 
-        verify_folded_4x_with_int_fold::<
+        verify_folded_4x::<
             ZtF,
             U,
             F,
@@ -1920,7 +1918,7 @@ mod tests {
             project_scalar_fn,
             sha256_test_project_ideal,
         )
-        .expect("Verifier rejected an honest 4× int-fold ShaEcdsa proof");
+        .expect("Verifier rejected an honest 4× folded ShaEcdsa proof");
     }
 
     /// No-tamper SHA-ECDSA round-trip + structural-shape pins. Prints
@@ -2216,128 +2214,4 @@ mod tests {
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
-    #[derive(Clone, Debug)]
-    struct TestFoldedZincTypesIprs4x;
-
-    impl FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for TestFoldedZincTypesIprs4x {
-        type Int = ZtInt;
-        type Chal = i128;
-        type Pt = i128;
-        type Fmod = Uint<FIELD_LIMBS>;
-        type PrimeTest = MillerRabin;
-
-        type BinaryZt = BinPolyZipTypesQuarter;
-        type ArbitraryZt = ArbitraryPolyZipTypesIprs;
-        type IntZt = IntZipTypes;
-
-        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
-        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
-        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
-    }
-
-    /// Set up Zip+ params for the 4× folded path. The binary commitment is
-    /// over the twice-split column (length `4n` with `BinaryPoly<8>`
-    /// entries), so its `num_vars` is `num_vars + 2`. Arbitrary and int
-    /// commitments are sized normally.
-    #[allow(clippy::type_complexity)]
-    fn setup_folded_4x_pp(
-        num_vars: usize,
-    ) -> (
-        ZipPlusParams<
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::BinaryZt,
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::BinaryLc,
-        >,
-        ZipPlusParams<
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::ArbitraryZt,
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::ArbitraryLc,
-        >,
-        ZipPlusParams<
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::IntZt,
-            <TestFoldedZincTypesIprs4x as FoldedZincTypes<
-                DEGREE_PLUS_ONE,
-                QUARTER_DEGREE_PLUS_ONE,
-            >>::IntLc,
-        >,
-    ) {
-        let split2_size = 1 << (num_vars + 2);
-        let normal_size = 1 << num_vars;
-        (
-            ZipPlus::setup(
-                split2_size,
-                IprsCode::new_with_optimal_depth(split2_size).unwrap(),
-            ),
-            ZipPlus::setup(
-                normal_size,
-                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-            ),
-            ZipPlus::setup(
-                normal_size,
-                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
-            ),
-        )
-    }
-
-    /// End-to-end test: BinaryDecompositionUair via the **4× folded**
-    /// prover/verifier. Same UAIR, same trace generator, same field — the
-    /// binary commitment is over `BinaryPoly<8>` columns of length `4n`,
-    /// opened at the doubly-extended point `(r_0 ‖ γ₁ ‖ γ₂)`.
-    #[test]
-    fn test_e2e_folded_4x_binary_decomposition() {
-        use crate::prover::prove_folded_4x;
-        use crate::verifier::verify_folded_4x;
-
-        let num_vars = 8;
-        let mut rng = rng();
-        let pp = setup_folded_4x_pp(num_vars);
-
-        let trace = BinaryDecompositionUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
-        let sig = <BinaryDecompositionUair<ZtInt> as Uair>::signature();
-        let public_trace = trace.public(&sig);
-
-        let proof = prove_folded_4x::<
-            TestFoldedZincTypesIprs4x,
-            BinaryDecompositionUair<ZtInt>,
-            F,
-            DEGREE_PLUS_ONE,
-            HALF_DEGREE_PLUS_ONE,
-            QUARTER_DEGREE_PLUS_ONE,
-            false,
-            CHECKED,
-        >(&pp, &trace, num_vars, project_scalar_fn)
-        .expect("Folded 4× prover failed");
-
-        verify_folded_4x::<
-            TestFoldedZincTypesIprs4x,
-            BinaryDecompositionUair<ZtInt>,
-            F,
-            IdealOrZero<DegreeOneIdeal<F>>,
-            DEGREE_PLUS_ONE,
-            HALF_DEGREE_PLUS_ONE,
-            QUARTER_DEGREE_PLUS_ONE,
-            CHECKED,
-        >(
-            &pp,
-            proof,
-            &public_trace,
-            num_vars,
-            project_scalar_fn,
-            default_project_ideal!(),
-        )
-        .expect("Folded 4× verifier rejected a valid proof");
-    }
 }

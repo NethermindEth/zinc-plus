@@ -22,7 +22,7 @@ use crate::{
     code::LinearCode,
     merkle::MerkleTree,
     pcs::{
-        VerifyPreOpen,
+        VerifyPreOpen, ZipPlusProveByteBreakdown,
         structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     },
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
@@ -281,6 +281,154 @@ where
             transcript.write_merkle_proof(&merkle_proof).map_err(|_| {
                 ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into())
             })?;
+        }
+
+        Ok((eval0, eval1, eval2))
+    }
+
+    /// Like [`Self::prove_f`], but additionally captures per-section byte
+    /// counts for each of the three domains. The shared Merkle path bytes
+    /// (one path per opening, common to all domains) are attributed in
+    /// full to the first non-empty domain (`bd0` if instance 0 is
+    /// non-empty, otherwise `bd1`, otherwise `bd2`) — they are not
+    /// double-counted across domains.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f_with_byte_breakdown<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp0: &ZipPlusParams<Zt0, Lc0>,
+        pp1: &ZipPlusParams<Zt1, Lc1>,
+        pp2: &ZipPlusParams<Zt2, Lc2>,
+        polys0: &[DenseMultilinearExtension<Zt0::Eval>],
+        polys1: &[DenseMultilinearExtension<Zt1::Eval>],
+        polys2: &[DenseMultilinearExtension<Zt2::Eval>],
+        point: &[F],
+        hint: &MultiZipHint3<Zt0::Cw, Zt1::Cw, Zt2::Cw>,
+        field_cfg: &F::Config,
+        bd0: &mut ZipPlusProveByteBreakdown,
+        bd1: &mut ZipPlusProveByteBreakdown,
+        bd2: &mut ZipPlusProveByteBreakdown,
+    ) -> Result<(Option<F>, Option<F>, Option<F>), ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt0::CombR>
+            + for<'a> FromWithConfig<&'a Zt1::CombR>
+            + for<'a> FromWithConfig<&'a Zt2::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let pos = |t: &PcsProverTranscript| -> usize { t.stream.position() as usize };
+        let snapshot = |t: &PcsProverTranscript, lo: usize, hi: usize| -> Vec<u8> {
+            t.stream.get_ref()[lo..hi].to_vec()
+        };
+
+        assert_eq!(
+            Zt0::NUM_COLUMN_OPENINGS,
+            Zt1::NUM_COLUMN_OPENINGS,
+            "MultiZip3 requires equal NUM_COLUMN_OPENINGS"
+        );
+        assert_eq!(
+            Zt0::NUM_COLUMN_OPENINGS,
+            Zt2::NUM_COLUMN_OPENINGS,
+            "MultiZip3 requires equal NUM_COLUMN_OPENINGS"
+        );
+        let codeword_len = if !polys0.is_empty() {
+            pp0.linear_code.codeword_len()
+        } else if !polys1.is_empty() {
+            pp1.linear_code.codeword_len()
+        } else {
+            pp2.linear_code.codeword_len()
+        };
+
+        // We attribute each domain's `prove_pre_open_f` write span (b +
+        // combined_row) to that domain's `combined_row` field — we
+        // don't split b vs combined_row here, since the byte boundary
+        // depends on transcript-internal length prefixes that aren't
+        // exposed. Field `b` keeps its default empty Vec for each
+        // domain; the bench helper sums `combined_row + b` for the
+        // displayed pre-open total per domain (and reports `b` as 0).
+
+        let p0 = pos(transcript);
+        let eval0 = if polys0.is_empty() {
+            None
+        } else {
+            Some(ZipPlus::<Zt0, Lc0>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
+                transcript, pp0, polys0, point, field_cfg,
+            )?)
+        };
+        let p1 = pos(transcript);
+        bd0.combined_row.extend(snapshot(transcript, p0, p1));
+
+        let eval1 = if polys1.is_empty() {
+            None
+        } else {
+            Some(ZipPlus::<Zt1, Lc1>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
+                transcript, pp1, polys1, point, field_cfg,
+            )?)
+        };
+        let p2 = pos(transcript);
+        bd1.combined_row.extend(snapshot(transcript, p1, p2));
+
+        let eval2 = if polys2.is_empty() {
+            None
+        } else {
+            Some(ZipPlus::<Zt2, Lc2>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
+                transcript, pp2, polys2, point, field_cfg,
+            )?)
+        };
+        let p3 = pos(transcript);
+        bd2.combined_row.extend(snapshot(transcript, p2, p3));
+
+        // Choose which domain absorbs the shared Merkle path bytes.
+        let shared_merkle_target: usize = if !polys0.is_empty() {
+            0
+        } else if !polys1.is_empty() {
+            1
+        } else {
+            2
+        };
+
+        for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
+            let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+
+            let q0 = pos(transcript);
+            for cw_matrix in &hint.cw_matrices_0 {
+                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
+                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+            }
+            let q1 = pos(transcript);
+            bd0.column_values.extend(snapshot(transcript, q0, q1));
+
+            for cw_matrix in &hint.cw_matrices_1 {
+                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
+                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+            }
+            let q2 = pos(transcript);
+            bd1.column_values.extend(snapshot(transcript, q1, q2));
+
+            for cw_matrix in &hint.cw_matrices_2 {
+                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
+                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+            }
+            let q3 = pos(transcript);
+            bd2.column_values.extend(snapshot(transcript, q2, q3));
+
+            let merkle_proof = hint
+                .merkle_tree
+                .prove(column_idx)
+                .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
+            let m0 = pos(transcript);
+            transcript.write_merkle_proof(&merkle_proof).map_err(|_| {
+                ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into())
+            })?;
+            let m1 = pos(transcript);
+            let bytes = snapshot(transcript, m0, m1);
+            match shared_merkle_target {
+                0 => bd0.merkle_proofs.extend(bytes),
+                1 => bd1.merkle_proofs.extend(bytes),
+                _ => bd2.merkle_proofs.extend(bytes),
+            }
         }
 
         Ok((eval0, eval1, eval2))
