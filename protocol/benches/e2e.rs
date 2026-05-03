@@ -1293,17 +1293,19 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         bench_prove_folded_4x!("Prove (folded 4× MLE-first)", true);
     }
 
-    let proof: Proof<F> = zinc_protocol::prover::prove_folded_4x::<
-        ZtF,
-        U,
-        F,
-        DEGREE_PLUS_ONE,
-        HALF_DEGREE_PLUS_ONE,
-        QUARTER_DEGREE_PLUS_ONE,
-        false,
-        PERFORM_CHECKS,
-    >(pp, trace, num_vars, project_scalar)
-    .expect("proof generation for folded 4× verifier bench");
+    let (proof, zip_breakdown) =
+        zinc_protocol::prover::prove_folded_4x_with_zip_breakdown::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            false,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("proof generation for folded 4× verifier bench");
+    let proof: Proof<F> = proof;
 
     let sig = U::signature();
     let public_trace = trace.public(&sig);
@@ -1337,6 +1339,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
 
     eprint_proof_size(&params, &proof);
     eprint_folded_4x_proof_size_breakdown(&params, &proof);
+    eprint_folded_4x_zip_substep_breakdown(&params, &proof, &zip_breakdown);
     if count_effective_max_degree::<U>() <= 1 {
         eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
             &params,
@@ -1347,6 +1350,15 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
             project_scalar,
         );
     }
+    eprint_folded_4x_per_region_verify_timings::<ZtF, U, IdealOverF, _, _>(
+        &params,
+        pp,
+        &proof,
+        &public_trace,
+        num_vars,
+        project_scalar,
+        project_ideal,
+    );
 }
 
 /// Serialize each `Proof<F>` component into its own byte buffer and report
@@ -1391,6 +1403,85 @@ where
             ("multipoint_eval", &multipoint_eval),
             ("witness_lifted_evals", &witness_evals),
         ],
+    );
+}
+
+/// Per-domain (binary / arbitrary / integer) × per-substep breakdown of
+/// the bytes inside `proof.zip`. Substeps mirror the four distinct
+/// writes inside `ZipPlus::prove_f`: row evaluation vector `b`, the
+/// combined row, opened column values across all `cw_matrices`, and
+/// the Merkle authentication paths. The trailing total should match
+/// the raw size of `proof.zip` exactly (the only u32 length prefix
+/// outside this block belongs to the outer `Proof` envelope).
+fn eprint_folded_4x_zip_substep_breakdown<F>(
+    label: &str,
+    proof: &Proof<F>,
+    breakdown: &zinc_protocol::prover::FoldedProveZipBreakdown,
+) where
+    F: PrimeField,
+{
+    fn fmt_thousands(n: usize) -> String {
+        let s = n.to_string();
+        s.as_bytes()
+            .rchunks(3)
+            .rev()
+            .map(|c| std::str::from_utf8(c).expect("ascii digits"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    let zip_total = proof.zip.len();
+    let zip_total_f = (zip_total.max(1)) as f64;
+
+    let domains: [(&str, &zip_plus::pcs::ZipPlusProveByteBreakdown); 3] = [
+        ("bin (split2)", &breakdown.bin),
+        ("arbitrary", &breakdown.arb),
+        ("int", &breakdown.int),
+    ];
+
+    eprintln!("    Zip+ PCS-byte substep breakdown ({label}):");
+    eprintln!(
+        "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>7}",
+        "domain", "b", "combined_row", "column_values", "merkle_paths", "total", "of zip%",
+    );
+    let mut sum_b = 0_usize;
+    let mut sum_cr = 0_usize;
+    let mut sum_cv = 0_usize;
+    let mut sum_mp = 0_usize;
+    for (name, bd) in &domains {
+        let total = bd.total();
+        sum_b = sum_b.saturating_add(bd.b_bytes);
+        sum_cr = sum_cr.saturating_add(bd.combined_row_bytes);
+        sum_cv = sum_cv.saturating_add(bd.column_values_bytes);
+        sum_mp = sum_mp.saturating_add(bd.merkle_proof_bytes);
+        eprintln!(
+            "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+            name,
+            fmt_thousands(bd.b_bytes),
+            fmt_thousands(bd.combined_row_bytes),
+            fmt_thousands(bd.column_values_bytes),
+            fmt_thousands(bd.merkle_proof_bytes),
+            fmt_thousands(total),
+            100.0 * (total as f64) / zip_total_f,
+        );
+    }
+    let sum_total = sum_b
+        .saturating_add(sum_cr)
+        .saturating_add(sum_cv)
+        .saturating_add(sum_mp);
+    eprintln!(
+        "      {:<14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>6.1}%",
+        "TOTAL",
+        fmt_thousands(sum_b),
+        fmt_thousands(sum_cr),
+        fmt_thousands(sum_cv),
+        fmt_thousands(sum_mp),
+        fmt_thousands(sum_total),
+        100.0 * (sum_total as f64) / zip_total_f,
+    );
+    eprintln!(
+        "      (proof.zip raw = {} bytes; substeps cover step-7 PCS writes only)",
+        fmt_thousands(zip_total),
     );
 }
 
@@ -1462,7 +1553,7 @@ fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
     let pct =
         |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
     eprintln!(
-        "    Folded 4× per-region timings, {} lane ({}, mean of N={} runs):",
+        "    Folded 4× per-region prove timings, {} lane ({}, mean of N={} runs):",
         lane, params, N
     );
     eprintln!(
@@ -1515,6 +1606,141 @@ fn eprint_folded_4x_per_region_timings<ZtF, U, S, const MLE_FIRST: bool>(
         "      assembly                  {:>9.3} ms ({:>4.1}%)",
         sum.assembly.as_secs_f64() * 1e3,
         pct(sum.assembly)
+    );
+    eprintln!(
+        "      total                     {:>9.3} ms",
+        total.as_secs_f64() * 1e3
+    );
+}
+
+/// Print per-region wall-time breakdown for `verify_folded_4x` over `N`
+/// runs (with one warmup, discarded). Mirrors
+/// [`eprint_folded_4x_per_region_timings`] but for the verifier — each
+/// region is timed inside a single uninstrumented verifier run, so it
+/// executes in its natural cache state. Σ regions matches the e2e wall
+/// time (modulo `Instant::now` overhead, sub-microsecond).
+#[allow(clippy::too_many_arguments)]
+fn eprint_folded_4x_per_region_verify_timings<ZtF, U, IdealOverF, S, I>(
+    params: &str,
+    pp: &FoldedPp4x<ZtF>,
+    proof: &Proof<F>,
+    public_trace: &UairTrace<'_, ZtF::Int, ZtF::Int, DEGREE_PLUS_ONE>,
+    num_vars: usize,
+    project_scalar: S,
+    project_ideal: I,
+) where
+    ZtF: FoldedZincTypes<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
+    I: Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+{
+    use zinc_protocol::verifier::{verify_folded_4x_with_timings, FoldedVerifyTimings};
+
+    const N: u32 = 100;
+
+    // Warmup (discarded — primes caches and amortizes any one-shot
+    // codegen the first call triggers).
+    let _ = verify_folded_4x_with_timings::<
+        ZtF,
+        U,
+        F,
+        IdealOverF,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        PERFORM_CHECKS,
+    >(
+        pp,
+        proof.clone(),
+        public_trace,
+        num_vars,
+        project_scalar,
+        project_ideal,
+    )
+    .expect("warmup folded 4× verify failed");
+
+    let mut sum = FoldedVerifyTimings::default();
+    for _ in 0..N {
+        let t = verify_folded_4x_with_timings::<
+            ZtF,
+            U,
+            F,
+            IdealOverF,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            PERFORM_CHECKS,
+        >(
+            pp,
+            proof.clone(),
+            public_trace,
+            num_vars,
+            project_scalar,
+            project_ideal,
+        )
+        .expect("timed folded 4× verify failed");
+        sum.add_assign(&t);
+    }
+    sum.divide_by(N);
+
+    let total = sum.total();
+    let pct =
+        |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
+    eprintln!(
+        "    Folded 4× per-region verify timings ({}, mean of N={} runs):",
+        params, N
+    );
+    eprintln!(
+        "      step 0  reconstruct trans {:>9.3} ms ({:>4.1}%)",
+        sum.step0_reconstruct_transcript.as_secs_f64() * 1e3,
+        pct(sum.step0_reconstruct_transcript)
+    );
+    eprintln!(
+        "      step 1  prime projection  {:>9.3} ms ({:>4.1}%)",
+        sum.step1_prime_projection.as_secs_f64() * 1e3,
+        pct(sum.step1_prime_projection)
+    );
+    eprintln!(
+        "      step 2  ideal check       {:>9.3} ms ({:>4.1}%)",
+        sum.step2_ideal_check.as_secs_f64() * 1e3,
+        pct(sum.step2_ideal_check)
+    );
+    eprintln!(
+        "      step 3  eval projection   {:>9.3} ms ({:>4.1}%)",
+        sum.step3_eval_projection.as_secs_f64() * 1e3,
+        pct(sum.step3_eval_projection)
+    );
+    eprintln!(
+        "      step 4  sumcheck verify   {:>9.3} ms ({:>4.1}%)",
+        sum.step4_sumcheck_verify.as_secs_f64() * 1e3,
+        pct(sum.step4_sumcheck_verify)
+    );
+    eprintln!(
+        "      step 5  multipoint eval   {:>9.3} ms ({:>4.1}%)",
+        sum.step5_multipoint_eval.as_secs_f64() * 1e3,
+        pct(sum.step5_multipoint_eval)
+    );
+    eprintln!(
+        "      step 6  lifted evals      {:>9.3} ms ({:>4.1}%)",
+        sum.step6_lifted_evals.as_secs_f64() * 1e3,
+        pct(sum.step6_lifted_evals)
+    );
+    eprintln!(
+        "      step 7  pcs verify        {:>9.3} ms ({:>4.1}%)",
+        sum.step7_pcs_verify.as_secs_f64() * 1e3,
+        pct(sum.step7_pcs_verify)
     );
     eprintln!(
         "      total                     {:>9.3} ms",

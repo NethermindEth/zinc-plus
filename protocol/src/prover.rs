@@ -33,7 +33,10 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
+    pcs::{
+        ZipPlusProveByteBreakdown,
+        structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
+    },
     pcs_transcript::PcsProverTranscript,
 };
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
@@ -1645,6 +1648,81 @@ where
         ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
 {
+    folded_4x_open_witness_with_breakdown::<ZtF, F, I, D, QUARTER_D, CHECK_FOR_OVERFLOW>(
+        pcs_transcript,
+        pp,
+        artifacts,
+        witness_arb,
+        witness_int,
+        r_0,
+        gamma1,
+        gamma2,
+        field_cfg,
+        None,
+    )
+}
+
+/// Per-domain (binary / arbitrary / integer) byte breakdown of the
+/// PCS bytes written during step 7 of [`prove_folded_4x`]. Each domain
+/// holds its own [`ZipPlusProveByteBreakdown`] (sums of the four
+/// substeps inside `ZipPlus::prove_f`: `b`, combined row, opened
+/// column values, Merkle authentication paths). Unused domains
+/// (those with no committed witness) keep their default zero counts.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct FoldedProveZipBreakdown {
+    pub bin: ZipPlusProveByteBreakdown,
+    pub arb: ZipPlusProveByteBreakdown,
+    pub int: ZipPlusProveByteBreakdown,
+}
+
+/// Like [`folded_4x_open_witness`], but optionally accumulates a
+/// per-domain byte breakdown of the PCS writes into `breakdown`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn folded_4x_open_witness_with_breakdown<
+    ZtF,
+    F,
+    I,
+    const D: usize,
+    const QUARTER_D: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pcs_transcript: &mut PcsProverTranscript,
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    artifacts: &Folded4xCommittedArtifacts<ZtF, D, QUARTER_D>,
+    witness_arb: &[DenseMultilinearExtension<<ZtF::ArbitraryZt as ZipTypes>::Eval>],
+    witness_int: &[DenseMultilinearExtension<<ZtF::IntZt as ZipTypes>::Eval>],
+    r_0: &[F],
+    gamma1: F,
+    gamma2: F,
+    field_cfg: &F::Config,
+    mut breakdown: Option<&mut FoldedProveZipBreakdown>,
+) -> Result<(), ProtocolError<F, I>>
+where
+    ZtF: crate::FoldedZincTypes<D, QUARTER_D>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    I: zinc_uair::ideal::Ideal,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
     let (pp_bin_split2, pp_arb, pp_int) = pp;
 
     // Binary opens the twice-split column at point (r_0 ‖ γ₁ ‖ γ₂).
@@ -1653,35 +1731,80 @@ where
     r0_ext.push(gamma2);
 
     if let Some(hint_bin) = &artifacts.hint_bin_split {
-        let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-            pcs_transcript,
-            pp_bin_split2,
-            &artifacts.split2,
-            &r0_ext,
-            hint_bin,
-            field_cfg,
-        )?;
+        if let Some(bd) = breakdown.as_deref_mut() {
+            let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f_with_byte_breakdown::<
+                _,
+                CHECK_FOR_OVERFLOW,
+            >(
+                pcs_transcript,
+                pp_bin_split2,
+                &artifacts.split2,
+                &r0_ext,
+                hint_bin,
+                field_cfg,
+                &mut bd.bin,
+            )?;
+        } else {
+            let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                pcs_transcript,
+                pp_bin_split2,
+                &artifacts.split2,
+                &r0_ext,
+                hint_bin,
+                field_cfg,
+            )?;
+        }
     }
     if let Some(hint_arb) = &artifacts.hint_arb {
-        let _ =
-            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+        if let Some(bd) = breakdown.as_deref_mut() {
+            let _ = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f_with_byte_breakdown::<
+                _,
+                CHECK_FOR_OVERFLOW,
+            >(
                 pcs_transcript,
                 pp_arb,
                 witness_arb,
                 r_0,
                 hint_arb,
                 field_cfg,
+                &mut bd.arb,
             )?;
+        } else {
+            let _ =
+                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    pcs_transcript,
+                    pp_arb,
+                    witness_arb,
+                    r_0,
+                    hint_arb,
+                    field_cfg,
+                )?;
+        }
     }
     if let Some(hint_int) = &artifacts.hint_int {
-        let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-            pcs_transcript,
-            pp_int,
-            witness_int,
-            r_0,
-            hint_int,
-            field_cfg,
-        )?;
+        if let Some(bd) = breakdown.as_deref_mut() {
+            let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f_with_byte_breakdown::<
+                _,
+                CHECK_FOR_OVERFLOW,
+            >(
+                pcs_transcript,
+                pp_int,
+                witness_int,
+                r_0,
+                hint_int,
+                field_cfg,
+                &mut bd.int,
+            )?;
+        } else {
+            let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                pcs_transcript,
+                pp_int,
+                witness_int,
+                r_0,
+                hint_int,
+                field_cfg,
+            )?;
+        }
     }
 
     Ok(())
@@ -1805,7 +1928,7 @@ where
         QUARTER_D,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, None)
+    >(pp, trace, num_vars, project_scalar, None, None)
 }
 
 /// Identical to [`prove_folded_4x`], but additionally returns a per-region
@@ -1867,7 +1990,7 @@ where
         QUARTER_D,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, Some(&mut timings))?;
+    >(pp, trace, num_vars, project_scalar, Some(&mut timings), None)?;
 
     // Step 8: serialize + zstd-compress the proof. Bytes are discarded;
     // we measure for accounting only.
@@ -1875,6 +1998,76 @@ where
     timings.step8_compress = dt;
 
     Ok((proof, timings))
+}
+
+/// Identical to [`prove_folded_4x`], but additionally returns a per-domain
+/// byte breakdown of the PCS bytes written during step 7. Useful for
+/// attributing the size of the serialized `proof.zip` blob to its
+/// substeps inside each of the binary, arbitrary, and integer Zip+
+/// opens.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn prove_folded_4x_with_zip_breakdown<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<(Proof<F>, FoldedProveZipBreakdown), ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::FoldedZincTypes<D, QUARTER_D>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let mut zip_breakdown = FoldedProveZipBreakdown::default();
+    let proof = prove_folded_4x_inner::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        None,
+        Some(&mut zip_breakdown),
+    )?;
+    Ok((proof, zip_breakdown))
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1897,6 +2090,7 @@ fn prove_folded_4x_inner<
     num_vars: usize,
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     mut timings: Option<&mut FoldedProveTimings>,
+    mut zip_breakdown: Option<&mut FoldedProveZipBreakdown>,
 ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>>
 where
     ZtF: crate::FoldedZincTypes<D, QUARTER_D>,
@@ -2259,7 +2453,14 @@ where
 
     // ── Step 7: PCS open ────────────────────────────────────────────────
     let _t_step7 = std::time::Instant::now();
-    folded_4x_open_witness::<ZtF, F, U::Ideal, D, QUARTER_D, CHECK_FOR_OVERFLOW>(
+    folded_4x_open_witness_with_breakdown::<
+        ZtF,
+        F,
+        U::Ideal,
+        D,
+        QUARTER_D,
+        CHECK_FOR_OVERFLOW,
+    >(
         &mut pcs_transcript,
         pp,
         &artifacts,
@@ -2269,6 +2470,7 @@ where
         gamma1,
         gamma2,
         &field_cfg,
+        zip_breakdown.as_deref_mut(),
     )?;
     if let Some(t) = timings.as_mut() {
         t.step7_pcs_open = _t_step7.elapsed();

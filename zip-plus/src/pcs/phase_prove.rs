@@ -7,6 +7,40 @@ use crate::{
     },
     pcs_transcript::PcsProverTranscript,
 };
+
+/// Per-section byte breakdown of a single `ZipPlus::prove_f` call,
+/// matching the four distinct writes the prover makes to the PCS
+/// transcript stream: the row-evaluation vector `b`, the combined row,
+/// per-column-opening matrix entries, and the Merkle authentication
+/// paths. Useful for attributing the size of the serialized
+/// `proof.zip` blob to its substeps.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ZipPlusProveByteBreakdown {
+    /// Bytes for the row-evaluation vector `b` (field elements).
+    pub b_bytes: usize,
+    /// Bytes for the combined row (`Zt::CombR` entries).
+    pub combined_row_bytes: usize,
+    /// Bytes for the opened column values across all `cw_matrices`,
+    /// summed across `NUM_COLUMN_OPENINGS` queries.
+    pub column_values_bytes: usize,
+    /// Bytes for the Merkle authentication paths, summed across
+    /// `NUM_COLUMN_OPENINGS` queries.
+    pub merkle_proof_bytes: usize,
+}
+
+impl ZipPlusProveByteBreakdown {
+    pub fn total(&self) -> usize {
+        self.b_bytes
+            .saturating_add(self.combined_row_bytes)
+            .saturating_add(self.column_values_bytes)
+            .saturating_add(self.merkle_proof_bytes)
+    }
+}
+
+#[inline]
+fn stream_pos(transcript: &PcsProverTranscript) -> usize {
+    transcript.stream.position() as usize
+}
 use crypto_primitives::{FromWithConfig, IntoWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
@@ -115,7 +149,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 
     /// See [`Self::prove`] for details.
     /// This version takes the evaluation point already mapped to the field
-    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn prove_f<F, const CHECK_FOR_OVERFLOW: bool>(
         transcript: &mut PcsProverTranscript,
         pp: &ZipPlusParams<Zt, Lc>,
@@ -123,6 +157,68 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         point: &[F],
         commit_hint: &ZipPlusHint<Zt::Cw>,
         field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        Self::prove_f_inner::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            point,
+            commit_hint,
+            field_cfg,
+            None,
+        )
+    }
+
+    /// Same as [`Self::prove_f`], but additionally accumulates a per-section
+    /// byte breakdown of the writes this call appends to the PCS transcript
+    /// stream. Counts are added to `breakdown` (so callers can sum across
+    /// multiple opens by reusing the same struct).
+    #[inline(always)]
+    pub fn prove_f_with_byte_breakdown<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+        breakdown: &mut ZipPlusProveByteBreakdown,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        Self::prove_f_inner::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            point,
+            commit_hint,
+            field_cfg,
+            Some(breakdown),
+        )
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn prove_f_inner<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        point: &[F],
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+        mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
     ) -> Result<F, ZipError>
     where
         F: PrimeField
@@ -192,7 +288,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             b
         };
 
+        let pos_b_start = stream_pos(transcript);
         transcript.write_field_elements(&b)?;
+        let pos_b_end = stream_pos(transcript);
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.b_bytes = bd.b_bytes.saturating_add(pos_b_end - pos_b_start);
+        }
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
         let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
@@ -243,10 +344,21 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             combined
         };
 
+        let pos_cr_start = stream_pos(transcript);
         transcript.write_const_many(&combined_row)?;
+        let pos_cr_end = stream_pos(transcript);
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.combined_row_bytes =
+                bd.combined_row_bytes.saturating_add(pos_cr_end - pos_cr_start);
+        }
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column(transcript, commit_hint, column_idx)?;
+            Self::open_merkle_trees_for_column_inner(
+                transcript,
+                commit_hint,
+                column_idx,
+                breakdown.as_deref_mut(),
+            )?;
         }
 
         Ok(eval)
@@ -282,16 +394,25 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )
     }
 
-    pub(super) fn open_merkle_trees_for_column(
+    #[allow(clippy::arithmetic_side_effects)]
+    fn open_merkle_trees_for_column_inner(
         transcript: &mut PcsProverTranscript,
         commit_hint: &ZipPlusHint<Zt::Cw>,
         column_idx: usize,
+        mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
     ) -> Result<(), ZipError> {
+        let pos_v_start = stream_pos(transcript);
         for cw_matrix in &commit_hint.cw_matrices {
             let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
             transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
         }
+        let pos_v_end = stream_pos(transcript);
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.column_values_bytes =
+                bd.column_values_bytes.saturating_add(pos_v_end - pos_v_start);
+        }
 
+        let pos_m_start = stream_pos(transcript);
         let merkle_proof = commit_hint
             .merkle_tree
             .prove(column_idx)
@@ -299,6 +420,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript
             .write_merkle_proof(&merkle_proof)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into()))?;
+        let pos_m_end = stream_pos(transcript);
+        if let Some(bd) = breakdown.as_deref_mut() {
+            bd.merkle_proof_bytes =
+                bd.merkle_proof_bytes.saturating_add(pos_m_end - pos_m_start);
+        }
 
         Ok(())
     }
