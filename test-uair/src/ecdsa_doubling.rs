@@ -78,26 +78,25 @@ use crate::GenerateRandomTrace;
 
 /// Number of 64-bit limbs used by the int columns of this slice.
 ///
-/// `Int<5>` = 320 bits, signed. Trace cells hold F_p elements (`< p < 2^256`)
-/// so 4 unsigned limbs would suffice for the *value*; we use 5 so that
-/// (a) the unsigned arithmetic helpers' `widening_mul → Uint<10>` pair
-/// works (`ConcatMixed` is impl'd for the (5, 10) widths), and (b) the
-/// top bit can serve as a sign for any signed intermediates.
-pub const EC_FP_INT_LIMBS: usize = 5;
+pub const EC_FP_INT_LIMBS: usize = 4;
 
-/// secp256k1 base-field prime `p = 2^256 − 2^32 − 977`, as a 5-limb
-/// `Uint` (top limb zero-padded).
 const SECP256K1_P_HEX: &str = concat!(
-    "0000000000000000",
     "FFFFFFFFFFFFFFFF",
     "FFFFFFFFFFFFFFFF",
     "FFFFFFFFFFFFFFFF",
     "FFFFFFFEFFFFFC2F",
 );
 
-/// `p` as a `crypto_bigint::Uint<5>`. Arithmetic helpers operate at this
-/// width.
 pub const SECP256K1_P_UINT: CbUint<EC_FP_INT_LIMBS> = CbUint::from_be_hex(SECP256K1_P_HEX);
+
+const SECP256K1_P_HALF_HEX: &str = concat!(
+    "7FFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFF",
+    "FFFFFFFF7FFFFE17",
+);
+pub const SECP256K1_P_HALF_UINT: CbUint<EC_FP_INT_LIMBS> =
+    CbUint::from_be_hex(SECP256K1_P_HALF_HEX);
 
 /// Trait knob: a `ConstSemiring` whose representation can hold a
 /// secp256k1 base-field element. The `From<u32>` bound lets the UAIR
@@ -322,7 +321,6 @@ fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIMBS> {
     for limb in &mut limbs {
         *limb = rng.next_u64();
     }
-    limbs[EC_FP_INT_LIMBS - 1] = 0;
     let raw = CbUint::<EC_FP_INT_LIMBS>::from_words(limbs);
     raw.rem_vartime(&p_nz)
 }
@@ -417,15 +415,20 @@ fn compute_doubling_witness(
 // Uint ↔ Int bridge for trace construction.
 // ---------------------------------------------------------------------------
 
-/// Reinterpret a non-negative `Uint<5>` as `Int<5>`. Honest values are
-/// always in `[0, p)` with `p < 2^256`, so the top bit is zero and the
-/// reinterpretation is the identity as an integer.
+/// Map a canonical `[0, p)` representative to its signed *centered*
+/// representative in `[−(p−1)/2, (p−1)/2]` and reinterpret as
+/// `Int<EC_FP_INT_LIMBS>`. With `EC_FP_INT_LIMBS = 4` the signed width
+/// has only 255 magnitude bits, so values above `(p−1)/2` (which can
+/// reach 256 unsigned bits) must be shifted down by `p`. `u − p` is
+/// computed via wrapping subtraction — the resulting bit pattern is the
+/// two's-complement encoding of the signed integer `u − p ∈ (−p/2, 0)`.
 fn uint_to_int(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
-    debug_assert!(
-        u.bits() <= 64 * EC_FP_INT_LIMBS as u32 - 1,
-        "uint top bit must be 0 to reinterpret as signed"
-    );
-    Int::new(*u.as_int())
+    if u <= SECP256K1_P_HALF_UINT {
+        Int::new(*u.as_int())
+    } else {
+        let wrapped = u.wrapping_sub(&SECP256K1_P_UINT);
+        Int::new(*wrapped.as_int())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +475,18 @@ mod tests {
 
         // Honest trace cells are non-negative (F_p elements in [0, p)),
         // so the Int → Uint reinterpret is the identity as an integer.
+        // Cells live in the centered representation. Recover the
+        // canonical `[0, p)` value: positive cells pass through;
+        // negative cells (top bit set in the two's-complement
+        // reinterpretation) come back via `raw + p`.
         let int_to_uint = |v: &Int<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
-            *v.inner().as_uint()
+            let raw = *v.inner().as_uint();
+            let is_neg = raw.as_words()[EC_FP_INT_LIMBS - 1] >> 63 != 0;
+            if is_neg {
+                raw.wrapping_add(&SECP256K1_P_UINT)
+            } else {
+                raw
+            }
         };
 
         for row in 0..n_rows {

@@ -233,14 +233,13 @@ where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,
     {
-        // Collect ideals to identify assert_zero constraints whose
-        // combined polynomial is zero by construction (for honest provers).
-        let ideal_collector = collect_ideals::<U>(num_constraints);
-        let is_zero_ideal: Vec<bool> = ideal_collector
-            .ideals
-            .iter()
-            .map(|i| i.is_zero_ideal())
-            .collect();
+        // Build per-coefficient MLEs for every constraint, including
+        // zero-ideal ones. The earlier short-circuit that replaced the
+        // F[X] expression with `ZERO` for zero-ideal constraints was
+        // only sound when the per-row F[X] expression was identically
+        // the zero polynomial — see `CombinedPolyRowBuilder::assert_zero`
+        // for the rationale.
+        let is_zero_ideal: Vec<bool> = vec![false; num_constraints];
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 

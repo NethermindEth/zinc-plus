@@ -60,7 +60,7 @@ use zinc_uair::{
 
 use crate::GenerateRandomTrace;
 use crate::ecdsa_doubling::{
-    EC_FP_INT_LIMBS, EcdsaFpRing, SECP256K1_P_UINT,
+    EC_FP_INT_LIMBS, EcdsaFpRing, SECP256K1_P_HALF_UINT, SECP256K1_P_UINT,
 };
 
 // ---------------------------------------------------------------------------
@@ -307,7 +307,6 @@ fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIMBS> {
     for limb in &mut limbs {
         *limb = rng.next_u64();
     }
-    limbs[EC_FP_INT_LIMBS - 1] = 0;
     let raw = CbUint::<EC_FP_INT_LIMBS>::from_words(limbs);
     raw.rem_vartime(&p_nz)
 }
@@ -353,12 +352,14 @@ fn sub_mod_p(
     }
 }
 
+/// Centered reduction — see twin in `ecdsa_doubling.rs`.
 fn uint_to_int(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
-    debug_assert!(
-        u.bits() <= 64 * EC_FP_INT_LIMBS as u32 - 1,
-        "uint top bit must be 0 to reinterpret as signed"
-    );
-    Int::new(*u.as_int())
+    if u <= SECP256K1_P_HALF_UINT {
+        Int::new(*u.as_int())
+    } else {
+        let wrapped = u.wrapping_sub(&SECP256K1_P_UINT);
+        Int::new(*wrapped.as_int())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,8 +459,15 @@ mod tests {
         let n_rows = 1 << num_vars;
         assert_eq!(trace.int.len(), cols::NUM_INT);
 
+        // Centered representation: see twin comment in `ecdsa.rs::tests`.
         let int_to_uint = |v: &Int<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
-            *v.inner().as_uint()
+            let raw = *v.inner().as_uint();
+            let is_neg = raw.as_words()[EC_FP_INT_LIMBS - 1] >> 63 != 0;
+            if is_neg {
+                raw.wrapping_add(&SECP256K1_P_UINT)
+            } else {
+                raw
+            }
         };
 
         for row in 0..n_rows {
