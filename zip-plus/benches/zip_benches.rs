@@ -22,10 +22,12 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 
 const INT_LIMBS: usize = U64::LIMBS;
 
+const REP_FACTOR: usize = 8;
+
 #[derive(Debug, Clone)]
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = i32;
     type Cw = i128;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -39,7 +41,7 @@ impl ZipTypes for BenchZipTypes {
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-type BenchIprsCode = IprsCode<BenchZipTypes, PnttConfigF65537, 4, PERFORM_CHECKS>;
+type BenchIprsCode = IprsCode<BenchZipTypes, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
 
 fn zip_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");

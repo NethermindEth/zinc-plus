@@ -28,7 +28,6 @@ use zinc_test_uair::{
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_uair::{
     Uair, UairTrace,
-    degree_counter::count_max_degree,
     ideal::{DegreeOneIdeal, Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
 };
@@ -56,7 +55,7 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 /// Repetition factor for linear code, an inverse rate.
-const REP: usize = 4;
+const REP_FACTOR: usize = 8;
 
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +121,7 @@ where
     CombDotChal: InnerProduct<Comb, Chal, CombR> + Clone + Debug + Send + Sync,
     ArrCombRDotChal: InnerProduct<[CombR], Chal, CombR> + Clone + Debug + Send + Sync,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    const NUM_COLUMN_OPENINGS: usize = 96;
     type Eval = Eval;
     type Cw = Cw;
     type Fmod = Fmod;
@@ -226,9 +225,9 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
-    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
 }
 
 //
@@ -345,10 +344,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     }
 
     bench_prove!("Prove (Combined)", false);
-
-    if count_max_degree::<U>() <= 1 {
-        bench_prove!("Prove (MLE-first)", true);
-    }
+    bench_prove!("Prove (MLE-first)", true);
 
     let proof: Proof<F> =
         <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
@@ -446,6 +442,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     let p_committed = <piop!()>::step0_commit(pp, trace, num_vars).unwrap();
     let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
+    let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
     let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
     let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
     let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
@@ -464,13 +461,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step1_combined(project_scalar),
     );
 
-    if count_max_degree::<U>() <= 1 {
-        step_bench!(
-            "Prove" / "1: Prime projection (MLE-first)",
-            setup = || p_committed.clone(),
-            run = |s| s.step1_mle_first(project_scalar),
-        );
-    }
+    step_bench!(
+        "Prove" / "1: Prime projection (MLE-first)",
+        setup = || p_committed.clone(),
+        run = |s| s.step1_mle_first(project_scalar),
+    );
 
     step_bench!(
         "Prove" / "2: Ideal check (Combined)",
@@ -478,14 +473,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step2_ideal_check(),
     );
 
-    if count_max_degree::<U>() <= 1 {
-        let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
-        step_bench!(
-            "Prove" / "2: Ideal check (MLE-first)",
-            setup = || p_projected_mle.clone(),
-            run = |s| s.step2_ideal_check(),
-        );
-    }
+    step_bench!(
+        "Prove" / "2: Ideal check (MLE-first)",
+        setup = || p_projected_mle.clone(),
+        run = |s| s.step2_ideal_check(),
+    );
 
     step_bench!(
         "Prove" / "3: Eval projection",

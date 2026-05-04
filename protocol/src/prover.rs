@@ -361,7 +361,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
-        let (ic_proof, ic_prover_state) = U::prove_linear(
+        let (ic_proof, ic_prover_state) = U::prove_mle_first(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,

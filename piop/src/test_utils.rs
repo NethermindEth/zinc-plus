@@ -70,7 +70,7 @@ where
 
     let trace = project_trace_coeffs_column_major::<F, _, _, DEGREE_PLUS_ONE>(trace, &field_cfg);
 
-    let (proof, state) = U::prove_linear(
+    let (proof, state) = U::prove_mle_first(
         transcript,
         &trace,
         &scalars,

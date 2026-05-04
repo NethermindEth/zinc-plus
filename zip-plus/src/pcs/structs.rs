@@ -13,6 +13,7 @@ use zinc_utils::{
 };
 
 pub trait ZipTypes: Clone + Debug + Send + Sync {
+    /// For IPRS codes, 2^{-security_parameter} = rate^{num_openings / 3}
     const NUM_COLUMN_OPENINGS: usize;
 
     /// Semiring of witness/polynomial evaluations on boolean hypercube

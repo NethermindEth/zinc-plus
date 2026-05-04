@@ -11,6 +11,7 @@ use zinc_poly::{
         DenseMultilinearExtension, MultilinearExtensionWithConfig, dense::CollectDenseMleWithZero,
     },
     univariate::dynamic::over_field::DynamicPolynomialF,
+    utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
 use zinc_uair::{
     ColumnLayout, ConstraintBuilder, TraceRow, Uair,
@@ -21,22 +22,28 @@ use zinc_utils::{
     cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
 };
 
-/// Given a UAIR `U` and a trace `trace` this function
-/// obtains the combined polynomials' MLE coefficients.
-/// Since each coefficient is also a univariate polynomial
-/// we split the resulting MLE into coefficient MLEs.
+/// Evaluate combined polynomial MLEs at `evaluation_point` for a selected
+/// subset of constraints.
+///
+/// Runs `constrain_general` row-by-row to produce all constraint values (since
+/// it is monolithic), then selects only the entries at `constraint_indices`,
+/// builds their coefficient MLEs, and evaluates them via the eq table.
+///
+/// Returns one `DynamicPolynomialF<F>` per requested constraint index, in the
+/// same order as `constraint_indices`.
 ///
 /// `trace_matrix` is row-indexed: `trace_matrix[row][col]`.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_combined_polynomials<F, U>(
+pub fn evaluate_for_constraints<F, U>(
     trace_matrix: &RowMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
     field_cfg: &F::Config,
-    skip_constraints: &[bool],
-) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+    constraint_indices: &[usize],
+    evaluation_point: &[F],
+) -> Result<Vec<DynamicPolynomialF<F>>, PolyArithErrors>
 where
-    F: PrimeField,
+    F: InnerTransparentField,
     U: Uair,
 {
     let field_zero = F::zero_with_cfg(field_cfg);
@@ -45,69 +52,120 @@ where
 
     let num_rows = trace_matrix.len();
 
-    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
-        cfg_into_iter!(0..num_rows - 1)
-            .map(|row_idx| {
-                let up = &trace_matrix[row_idx];
+    // Evaluate all constraints at every row of the trace.
+    //
+    // `constrain_general` is monolithic - it produces all `num_constraints`
+    // values per call.  We keep the full vectors and select only the
+    // requested `constraint_indices` further down.
+    //
+    // `all_rows[row_idx][constraint_idx]` is a `DynamicPolynomialF<F>`:
+    // the combined polynomial value of constraint `constraint_idx` at
+    // trace row `row_idx`.
+    let mut all_rows: Vec<Vec<DynamicPolynomialF<F>>> = cfg_into_iter!(0..num_rows - 1)
+        .map(|row_idx| {
+            let up = &trace_matrix[row_idx];
 
-                let down: Vec<DynamicPolynomialF<F>> = uair_sig
-                    .shifts()
-                    .iter()
-                    .map(|spec| {
-                        if row_idx + spec.shift_amount() < num_rows {
-                            trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
-                        } else {
-                            DynamicPolynomialF::zero() // zero padding
-                        }
+            let down: Vec<DynamicPolynomialF<F>> = uair_sig
+                .shifts()
+                .iter()
+                .map(|spec| {
+                    if row_idx + spec.shift_amount() < num_rows {
+                        trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
+                    } else {
+                        DynamicPolynomialF::zero() // zero padding
+                    }
+                })
+                .collect();
+
+            evaluate_constraints_for_row::<F, U>(
+                up,
+                &down,
+                num_constraints,
+                projected_scalars,
+                down_layout,
+            )
+        })
+        .collect();
+
+    // Zero-pad to 2^num_vars evaluations for the MLE.
+    // TODO(Ilia): reimplement using Albert's idea with selector polynomials.
+    all_rows.push(vec![DynamicPolynomialF::zero(); num_constraints]);
+
+    // Determine the maximum polynomial degree across the selected
+    // constraints and all rows.  This controls how many coefficient MLEs
+    // we build per constraint (one MLE per coefficient 0..=max_degree).
+    let max_degree = all_rows
+        .iter()
+        .flat_map(|row| {
+            constraint_indices
+                .iter()
+                .map(|&ci| row[ci].degree().unwrap_or(0))
+        })
+        .max()
+        .unwrap_or(0);
+
+    let zero_inner = field_zero.inner();
+
+    // For each selected constraint, build its coefficient MLEs.
+    //
+    // Each combined polynomial value at row `b` is a univariate in X:
+    //   c(b, X) = c_0(b) + c_1(b) X + ... + c_d(b) X^d.
+    //
+    // For a fixed coefficient index `coeff`, the MLE is the multilinear
+    // extension of the table  b -> c_coeff(b)  over the Boolean hypercube.
+    let coeff_mles: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+        cfg_into_iter!(0..constraint_indices.len())
+            .map(|sel_idx| {
+                let ci = constraint_indices[sel_idx];
+                (0..=max_degree)
+                    .map(|coeff| {
+                        all_rows
+                            .iter()
+                            .map(|row| {
+                                row[ci]
+                                    .coeffs
+                                    .get(coeff)
+                                    .map(|c| c.inner().clone())
+                                    .unwrap_or_else(|| zero_inner.clone())
+                            })
+                            .collect_dense_mle_with_zero(zero_inner)
                     })
-                    .collect();
-
-                combine_rows_and_get_max_degree::<F, U>(
-                    up,
-                    &down,
-                    num_constraints,
-                    projected_scalars,
-                    down_layout,
-                )
+                    .collect()
             })
             .collect();
 
-    let max_degree = *max_degrees_and_combined_poly_rows
-        .iter()
-        .map(|(max_degree, _)| max_degree)
-        .max()
-        .expect("We assume the number of constraints is not zero so this iterator is not empty");
+    // Step 4: Evaluate each coefficient MLE at the challenge point `r`.
+    //
+    // Uses the precomputed eq table eq(r, ·) so that evaluating one MLE
+    // is a single inner product.  Reassembling the per-coefficient results
+    // gives the univariate  sum_b eq(r, b) * c(b, X)  for each selected
+    // constraint.
+    let eq_table = build_eq_x_r_vec(evaluation_point, field_cfg)?;
 
-    // For the sake of padding we duplicate
-    // the last combined value
-    // to have N-sized mle at the end
-    // not N-1.
-    // This is essentially c^up and c^down
-    // thing from the whirlaway.
-    // TODO(Ilia): reimplement it using Albert's idea
-    //             with selector polynomials.
-    max_degrees_and_combined_poly_rows.push((0, vec![DynamicPolynomialF::zero(); num_constraints]));
+    let values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(coeff_mles)
+        .map(|mles| {
+            let coeffs: Vec<F> = mles
+                .into_iter()
+                .map(|mle| {
+                    zinc_poly::utils::mle_eval_with_eq_table(&mle.evaluations, &eq_table, field_cfg)
+                })
+                .collect();
+            DynamicPolynomialF::new_trimmed(coeffs)
+        })
+        .collect();
 
-    prepare_coefficient_mles(
-        num_constraints,
-        max_degree,
-        &max_degrees_and_combined_poly_rows,
-        field_zero.inner(),
-        skip_constraints,
-    )
+    Ok(values)
 }
 
-/// Apply combination polynomial to each row
-/// and compute the maximum degree of resulting polynomials
-/// to pad the resulting vector of MLEs accordingly.
+/// Evaluate all UAIR constraints for a single row and return trimmed results.
 #[allow(clippy::arithmetic_side_effects)]
-fn combine_rows_and_get_max_degree<F, U>(
+fn evaluate_constraints_for_row<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
     num_constraints: usize,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
-) -> (usize, Vec<DynamicPolynomialF<F>>)
+) -> Vec<DynamicPolynomialF<F>>
 where
     F: PrimeField,
     U: Uair,
@@ -131,51 +189,8 @@ where
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
-
     combined_evaluations.iter_mut().for_each(|eval| eval.trim());
-
-    let max_degree = combined_evaluations
-        .iter()
-        .map(|eval| eval.degree().unwrap_or(0))
-        .max()
-        .expect("We assume the number of constraints is not zero so this iterator is not empty");
-
-    (max_degree, combined_evaluations)
-}
-
-/// Turn the resulting slice of vectors of dynamic polynomials
-/// into a vector of vectors of coefficient MLEs.
-fn prepare_coefficient_mles<F: PrimeField>(
-    num_constraints: usize,
-    max_degree: usize,
-    max_degrees_and_combined_poly_rows: &[(usize, Vec<DynamicPolynomialF<F>>)],
-    zero_as_field_inner: &F::Inner,
-    skip_constraints: &[bool],
-) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>> {
-    cfg_into_iter!(0..num_constraints)
-        .map(|constraint| {
-            // Skip building coefficient MLEs for zero-ideal constraints.
-            // For an honest prover these MLEs are zero; the combined
-            // polynomial resolver handles the zero entries downstream.
-            if skip_constraints[constraint] {
-                return vec![];
-            }
-            (0..=max_degree)
-                .map(|coeff| {
-                    max_degrees_and_combined_poly_rows
-                        .iter()
-                        .map(|(_, row)| {
-                            if coeff >= row[constraint].coeffs.len() {
-                                zero_as_field_inner.clone()
-                            } else {
-                                row[constraint].coeffs[coeff].inner().clone()
-                            }
-                        })
-                        .collect_dense_mle_with_zero(zero_as_field_inner)
-                })
-                .collect()
-        })
-        .collect()
+    combined_evaluations
 }
 
 /// For linear UAIRs, evaluate combined polynomials directly

@@ -358,7 +358,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                         &mut transcript,
                         field_cfg,
                         project_trace_coeffs_column_major,
-                        prove_linear
+                        prove_mle_first
                     );
                     black_box(proof);
                 },
@@ -394,7 +394,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
         &mut transcript,
         &field_cfg,
         project_trace_coeffs_column_major,
-        prove_linear
+        prove_mle_first
     );
 
     group.bench_function(BenchmarkId::new("Ideal Check Verifier", &params), |bench| {
