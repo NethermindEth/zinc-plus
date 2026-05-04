@@ -212,6 +212,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn compare_to_arkworks_ntt_base_layer_multiply() {
         for depth in 1..=3 {
             let row_len = 32 * (1 << (3 * depth));
@@ -271,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn pntt_against_arkworks() {
         let base_len = 32;
         for depth in 1..=3 {

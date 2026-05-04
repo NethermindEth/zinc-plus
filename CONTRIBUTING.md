@@ -23,11 +23,14 @@ Install a pre-push git hook:
 git config core.hooksPath .githooks
 ```
 
-## Running the Rust Documentation Locally
+## Rust Documentation
+
+The docs are available at [the github page](https://nethermindeth.github.io/zinc-plus/).
+
 After cloning the repository, follow the instructions below to run the documentation locally:
 
 ```sh
-cargo doc
+RUSTDOCFLAGS="--html-in-header katex-header.html" cargo doc --workspace --all-features --no-deps
 ```
 
 Docs for `zip-plus`:

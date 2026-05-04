@@ -137,6 +137,7 @@ mod tests {
 
     proptest! {
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_unsigned_matches_sum_of_bits(x in any_u128()) {
             let f = F::from(x);
             let mut acc = F::zero();
@@ -149,6 +150,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_signed_is_neg_of_abs_when_negative(x in any_i128()) {
             let f = F::from(x);
             let abs = x.unsigned_abs();
@@ -161,12 +163,14 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_bool_is_identity(b in any_bool()) {
             let f = F::from(b);
             prop_assert_eq!(f, if b { F::one() } else { F::zero() });
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_uint_roundtrip_through_uint(x in any_u128()) {
             let u: Uint<{ U256::LIMBS }> = Uint::from(x);
             let g_from_uint: F = u.into();
@@ -175,6 +179,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_from_ref_generic_matches_owned(x in any::<u64>()) {
             let a: F = F::from(x);
             let b: F = F::from(&x);
@@ -182,6 +187,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore)] // long running
         fn prop_inner_ops_match_normal_ops((x, y) in any::<(u128, u128)>()) {
             let a: F = x.into();
             let b: F = y.into();

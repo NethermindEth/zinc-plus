@@ -9,25 +9,36 @@ license.workspace = true
 [lib]
 bench = false
 
+[features]
+parallel = [
+    "dep:rayon",
+    "zinc-utils/parallel",
+    "zinc-poly/parallel",
+    "ark-ff/parallel",
+    "ark-poly/parallel",
+]
+simd = ["zinc-poly/simd"]
+unchecked = []
+
 [dependencies]
-crypto-primitives = { workspace = true }
-zinc-poly = { workspace = true }
-zinc-primality = { workspace = true }
-zinc-transcript = { workspace = true }
-zinc-utils = { workspace = true }
 
 ark-ff = { version = "0.5.0", default-features = false }
 ark-poly = { version = "0.5.0", default-features = false }
+blake3 = { workspace = true }
+crypto-bigint = { workspace = true }
+crypto-primitives = { workspace = true }
 
 itertools = { workspace = true }
-thiserror = { workspace = true }
-crypto-bigint = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rayon = { workspace = true, optional = true }
-blake3 = { workspace = true }
+thiserror = { workspace = true }
 uninit = "0.6.2"
+zinc-poly = { workspace = true }
+zinc-primality = { workspace = true }
+zinc-transcript = { workspace = true }
+zinc-utils = { workspace = true }
 
 # Compression libraries, used only to estimate compressed proof sizes
 zstd = "0.13"
@@ -38,11 +49,6 @@ proptest = { workspace = true }
 
 [lints]
 workspace = true
-
-[features]
-parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
-simd = ["zinc-poly/simd"]
-unchecked = []
 
 [[bench]]
 name = "zip_benches"

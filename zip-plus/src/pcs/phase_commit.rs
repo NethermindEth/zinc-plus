@@ -307,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_produces_different_root_than_individual_commits() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
@@ -325,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_is_deterministic() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
@@ -341,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_batch_size_is_correct() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
@@ -703,6 +706,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_poly_different_polys_produce_different_roots() {
         let num_vars = 10;
         let (pp, _) = setup_poly_test_params::<K, M, DEGREE_PLUS_ONE>(num_vars);
@@ -717,6 +721,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_cw_matrices_are_distinct_per_poly() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
