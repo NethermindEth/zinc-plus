@@ -71,27 +71,11 @@ pub fn eprint_bytes_size(label: impl std::fmt::Display, raw: &[u8]) {
     }
     print_size!("raw", raw.len());
 
-    let raw_mib = (raw.len() as f64) / (1024.0 * 1024.0);
-
-    let t0 = std::time::Instant::now();
     let compressed = zstd::encode_all(raw, ZSTD_LEVEL).expect("zstd compression failed");
-    let dt_enc = t0.elapsed();
     print_size!(format_args!("zstd-{ZSTD_LEVEL}"), compressed.len());
-    eprintln!(
-        "    zstd-{ZSTD_LEVEL} compress   time ({label}): {:.2} ms ({:.2} MiB/s in)",
-        dt_enc.as_secs_f64() * 1e3,
-        raw_mib / dt_enc.as_secs_f64(),
-    );
 
-    let t0 = std::time::Instant::now();
     let decompressed = zstd::decode_all(&compressed[..]).expect("zstd decompression failed");
-    let dt_dec = t0.elapsed();
     assert_eq!(decompressed.len(), raw.len(), "zstd round-trip size mismatch");
-    eprintln!(
-        "    zstd-{ZSTD_LEVEL} decompress time ({label}): {:.2} ms ({:.2} MiB/s out)",
-        dt_dec.as_secs_f64() * 1e3,
-        raw_mib / dt_dec.as_secs_f64(),
-    );
 }
 
 /// Prints a per-part proof size breakdown (raw + zstd-compressed) to stderr.

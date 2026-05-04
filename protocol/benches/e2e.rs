@@ -467,6 +467,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
     let params = format!("{label}/nvars={num_vars}");
+    let mut any_ran = false;
 
     macro_rules! zinc_plus {
         () => {
@@ -477,6 +478,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     macro_rules! bench_prove {
         ($label:literal, $mle_first:expr) => {
             group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                any_ran = true;
                 bench.iter(|| {
                     black_box(<zinc_plus!()>::prove::<{ $mle_first }, PERFORM_CHECKS>(
                         pp,
@@ -508,6 +510,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     let public_trace = trace.public(&sig);
 
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
+        any_ran = true;
         bench.iter_batched(
             || proof.clone(),
             |proof| {
@@ -525,7 +528,9 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
+    if any_ran {
+        eprint_proof_size(&params, &proof);
+    }
 }
 
 //
@@ -1124,10 +1129,12 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
     let params = format!("{label}/nvars={num_vars}");
+    let mut any_ran = false;
 
     macro_rules! bench_prove_folded {
         ($label:literal, $mle_first:expr) => {
             group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                any_ran = true;
                 bench.iter(|| {
                     black_box(zinc_protocol::prover::prove_folded::<
                         ZtF,
@@ -1165,6 +1172,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
     let public_trace = trace.public(&sig);
 
     group.bench_function(BenchmarkId::new("Verify (folded)", &params), |bench| {
+        any_ran = true;
         bench.iter_batched(
             || proof.clone(),
             |proof| {
@@ -1190,7 +1198,9 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
+    if any_ran {
+        eprint_proof_size(&params, &proof);
+    }
 }
 
 //
@@ -1268,10 +1278,12 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
     let params = format!("{label}/nvars={num_vars}");
+    let mut any_ran = false;
 
     macro_rules! bench_prove_folded_4x {
         ($label:literal, $mle_first:expr) => {
             group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                any_ran = true;
                 bench.iter(|| {
                     black_box(zinc_protocol::prover::prove_folded_4x::<
                         ZtF,
@@ -1311,6 +1323,7 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     let public_trace = trace.public(&sig);
 
     group.bench_function(BenchmarkId::new("Verify (folded 4×)", &params), |bench| {
+        any_ran = true;
         bench.iter_batched(
             || proof.clone(),
             |proof| {
@@ -1337,28 +1350,30 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         );
     });
 
-    eprint_proof_size(&params, &proof);
-    eprint_folded_4x_proof_size_breakdown(&params, &proof);
-    eprint_folded_4x_zip_substep_breakdown(&params, &proof, &zip_breakdown);
-    if count_effective_max_degree::<U>() <= 1 {
-        eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
+    if any_ran {
+        eprint_proof_size(&params, &proof);
+        eprint_folded_4x_proof_size_breakdown(&params, &proof);
+        eprint_folded_4x_zip_substep_breakdown(&params, &proof, &zip_breakdown);
+        if count_effective_max_degree::<U>() <= 1 {
+            eprint_folded_4x_per_region_timings::<ZtF, U, _, true>(
+                &params,
+                "MLE-first",
+                pp,
+                trace,
+                num_vars,
+                project_scalar,
+            );
+        }
+        eprint_folded_4x_per_region_verify_timings::<ZtF, U, IdealOverF, _, _>(
             &params,
-            "MLE-first",
             pp,
-            trace,
+            &proof,
+            &public_trace,
             num_vars,
             project_scalar,
+            project_ideal,
         );
     }
-    eprint_folded_4x_per_region_verify_timings::<ZtF, U, IdealOverF, _, _>(
-        &params,
-        pp,
-        &proof,
-        &public_trace,
-        num_vars,
-        project_scalar,
-        project_ideal,
-    );
 }
 
 /// Serialize each `Proof<F>` component into its own byte buffer and report
