@@ -94,25 +94,8 @@ verifier-supplied alternative:
 \end{itemize}
 
 \paragraph{Soundness obligation (verifier-side, not yet enforced).}
-The $\F_p$-typed public columns $\col{PA\_B1}, \col{PA\_B2}$ are
-\emph{not} natively constrained to $\{0,1\}$ by the framework
-(integer columns admit any $320$-bit canonical representative). A
-malicious prover could place arbitrary values in them and compose any
-addend it likes via \eqref{eq:addend-formula-expanded}. The intended
-discharge is the verifier-side \texttt{verify\_public\_structure}
-trait method, following the same row-wise inspection pattern the
-SHA UAIR uses for compensator-zero checks; concretely, the verifier
-must check
-$\col{PA\_B1}[t], \col{PA\_B2}[t] \in \{0, 1\}$ at every active row,
-$\col{S\_ADD}[t] = b_1[t] + b_2[t] - b_1[t] b_2[t]$, and
-$(\col{PA\_QX}, \col{PA\_QY}, \col{PA\_QGX}, \col{PA\_QGY})$ constant
-across rows of a single proof. The first two checks are not
-expressible under the current
-\texttt{Uair::verify\_public\_structure} bound
-($\mathtt{IntT}: \mathtt{Clone} + \mathtt{num\_traits::Zero}$) — they
-need a $\mathtt{PartialEq} + \mathtt{One}$ widening of the bound.
-The implementation defers this to a follow-up; the synthetic
-end-to-end test populates the bit columns honestly.
+The  public columns $\col{PA\_B1}, \col{PA\_B2}$ are
+\emph{not} natively constrained to $\{0,1\}$ by the framework.  As with the rest of the input vectors, we assume they are correctly populated. 
 \end{remark}
 
 \subsection{Jacobian doubling}\label{sec:doubling}
@@ -132,8 +115,8 @@ inlines it rather than committing it as a separate column).
 \subsection{Mixed Jacobian-affine addition}\label{sec:add}
 
 Given $(P_{\mathrm{pa},X} : P_{\mathrm{pa},Y} : P_{\mathrm{pa},Z})$
-(the doubled point) and an affine addend $(T_X, T_Y)$ from the
-precomputed $\{G, Q, G+Q\}$, the mixed addition
+(the doubled point) and an affine addend $(T_X, T_Y)$ from 
+ $\{G, Q, G+Q\}$, the mixed addition
 $P_{\mathrm{pa}} + T = (P_{\mathrm{add},X} : P_{\mathrm{add},Y} : P_{\mathrm{add},Z})$
 proceeds via the scratch
 quantities
@@ -171,9 +154,7 @@ so that $\col{S\_ADD} = 1$ selects $P_{\mathrm{add}}$ and
 $\col{S\_ADD} = 0$ selects $P_{\mathrm{pa}}$ (the pure doubling result).
 
 Because $\col{S\_ADD}$ is a public boolean, $\col{S\_ADD} (1 - \col{S\_ADD}) = 0$
-need not be enforced in-circuit; the verifier supplies the column with
-$0/1$ values directly.
-
+need not be enforced in-circuit.
 \begin{remark}[Inlined addition collapses to a single output-selection constraint]
 \label{rem:inlined-add}
 Substituting $P_{\mathrm{add}, X/Y/Z}$ from
@@ -182,7 +163,7 @@ and inlining all of $P_{\mathrm{pa},Z}^2, H^2, H^3, P_{\mathrm{pa},X} H^2$
 yields three constraints whose maximum algebraic degree (in committed
 columns) is~$6$. The deg-$6$ monomial in the $Y$ output-selection
 constraint is exactly $\col{S\_ACTIVE} \cdot \col{S\_ADD} \cdot D \cdot X_{\mathrm{pa}} \cdot C^2$,
-matching the spec's $s_{\mathrm{reg}} \cdot R_a \cdot X_{\mathrm{mid}} \cdot H^2$
+matching the Zinc+ main paper $s_{\mathrm{reg}} \cdot R_a \cdot X_{\mathrm{mid}} \cdot H^2$
 term.
 \end{remark}
 
@@ -199,7 +180,7 @@ This is enforced by three zero-ideal constraints gated by
 $\col{S\_INIT}$ (see \Cref{con:init-x}--\Cref{con:init-z}).
 
 \paragraph{Final-row affine readout (in-circuit).}
-At the final row $t = \mathrm{FINAL\_ROW} := \mathrm{NUM\_SHAMIR\_ROUNDS} = 256$,
+At the final row $$t = \mathrm{FINAL\_ROW} := \mathrm{NUM\_SHAMIR\_ROUNDS} = 256,$$
 the witness Jacobian state $\jac{P}[256]$ holds the result
 $R = u_1 G + u_2 Q$ (modulo the $R_{\mathrm{init}}$ offset of
 \Cref{rem:r-init}). The deployed UAIR extracts the affine

@@ -1,6 +1,9 @@
 # Zinc+
 
-WIP implementation of the Zinc+ framework and a SNARK instantiated with it.
+WIP implementation of:
+- A SNARK obtained via the Zinc+ framework (https://eprint.iacr.org/2026/109175).
+- An arithmetization of a chain of 7xSHA-256 compressions followed by an ECDSA signature verification on the resulting hash.
+See Sections 2.5 and 9 from https://eprint.iacr.org/2026/109175, and the documentation folder, for further details.
 
 ## Benchmarks
 

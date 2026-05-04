@@ -19,7 +19,7 @@
 \begin{abstract}
 We describe the Universal AIR with lookups (UAIR$^+$) instance that
 arithmetizes ECDSA signature verification on the $\secp$ elliptic
-curve, as deployed in the Zinc+ reference implementation. We focus
+curve, as deployed in the Zinc+  implementation. We focus
 on the design choices made by the implementation:
 \emph{(i)}~native arithmetization in the $\F_p$ branch with $p$ the
 $\secp$ base prime (no $\F_2[X]$ or bit-polynomial columns; cells
@@ -37,7 +37,7 @@ $R_x \equiv r \pmod n$ is left to the verifier off-protocol
 $(b_1, b_2)$ via the linear formula
 $T = b_1 G + b_2 Q + b_1 b_2 ((G + Q) - G - Q)$, inlined in the
 addition-scratch constraints (\Cref{rem:addend-cost}).
-The witness is $8$ field-element columns; the in-circuit constraint
+The witness is $8$ integer columns; the in-circuit constraint
 count is $13$.
 \end{abstract}
 

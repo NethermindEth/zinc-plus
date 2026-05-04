@@ -100,8 +100,14 @@ $R_a$  & Mixed-addition scratch $R_a = T_Y \cdot P_{\mathrm{pa},Z}^3 - P_{\mathr
 \begin{remark}[No range checks]\label{rem:no-range}
 Although every cell is stored as an \texttt{Int<5>} integer
 (\Cref{sec:cols}), no range-check or lookup constraint over the
+<<<<<<< Updated upstream
 trace columns is required. The reason is that onstraints encode $\F_p$ equalities, so non-canonical
 rational representatives of the witness elements satisfy
+=======
+trace columns is required. The reason is twofold:
+\emph{(i)}~constraints encode $\F_p$ equalities, so non-canonical
+rational representatives of the wi ($x = x' + kp$ for any $k$) satisfy
+>>>>>>> Stashed changes
 the constraints exactly when their canonical reductions do — the
 prover gains no leverage from picking non-canonical representatives. Further, if the prover uses rationals not in the localization ring $\mathbb{Z}_{(p)}$ (i.e.\ not reducible modulo $p$) then the verifier detects it with high probability, as per Theorem 5.4 of the Zinc+ paper.
 \end{remark}
