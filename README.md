@@ -12,7 +12,7 @@
 > [!WARNING]
 > This project hasn't undergone an audit. It is intended for research and educational purposes only. The code is provided "AS IS" without any representation or warranty.
 
-Zinc+ is a performance-oriented SNARK framework designed to handle computations across multiple mathematical domains without the "witness inflation" overhead typical of traditional arithmetization.  
+[Zinc+](https://eprint.iacr.org/2026/855) is a performance-oriented SNARK framework designed to handle computations across multiple mathematical domains without the "witness inflation" overhead typical of traditional arithmetization.  
 
 Traditional SNARKs are restricted to a single finite field, forcing complex bitwise logic and non-native modular arithmetic to be emulated, which often bloats the witness by orders of magnitude. 
 Zinc+ resolves this by allowing constraints to be expressed directly and simultaneously over rational ($\mathbb{Q}[X]$), integer ($\mathbb{Z}[X]$), and multiple finite field ($\mathbb{F}_{q_i}[X]$) polynomial rings.
