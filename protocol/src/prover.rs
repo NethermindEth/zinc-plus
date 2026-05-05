@@ -1564,6 +1564,14 @@ pub struct FoldedProveTimings {
     pub step0_commit: std::time::Duration,
     pub step1_prime_projection: std::time::Duration,
     pub step2_ideal_check: std::time::Duration,
+    /// Dual-prime only: time spent in the Z-branch ideal check
+    /// (extra projection + `prove_combined_typed` against the secp256k1
+    /// fixed prime). Zero in single-prime mode. NOT included in
+    /// [`Self::step2_ideal_check`].
+    pub step2_z_branch_ic: std::time::Duration,
+    /// Dual-prime only: time spent computing the masked Z-branch trace
+    /// projection alone (subset of [`Self::step2_z_branch_ic`]).
+    pub step2_z_branch_projection: std::time::Duration,
     pub step3_eval_projection: std::time::Duration,
     pub step4_sumcheck: std::time::Duration,
     pub step5_multipoint_eval: std::time::Duration,
@@ -1578,6 +1586,8 @@ impl FoldedProveTimings {
         self.step0_commit += other.step0_commit;
         self.step1_prime_projection += other.step1_prime_projection;
         self.step2_ideal_check += other.step2_ideal_check;
+        self.step2_z_branch_ic += other.step2_z_branch_ic;
+        self.step2_z_branch_projection += other.step2_z_branch_projection;
         self.step3_eval_projection += other.step3_eval_projection;
         self.step4_sumcheck += other.step4_sumcheck;
         self.step5_multipoint_eval += other.step5_multipoint_eval;
@@ -1591,6 +1601,8 @@ impl FoldedProveTimings {
         self.step0_commit /= n;
         self.step1_prime_projection /= n;
         self.step2_ideal_check /= n;
+        self.step2_z_branch_ic /= n;
+        self.step2_z_branch_projection /= n;
         self.step3_eval_projection /= n;
         self.step4_sumcheck /= n;
         self.step5_multipoint_eval /= n;
@@ -1604,6 +1616,7 @@ impl FoldedProveTimings {
         self.step0_commit
             + self.step1_prime_projection
             + self.step2_ideal_check
+            + self.step2_z_branch_ic
             + self.step3_eval_projection
             + self.step4_sumcheck
             + self.step5_multipoint_eval
@@ -1906,6 +1919,93 @@ where
     })
 }
 
+/// Identical to [`prove_folded_4x_dual_prime`], but additionally
+/// returns a per-region wall-time breakdown. Mirrors
+/// [`prove_folded_4x_with_timings`] for the dual-prime path. The
+/// `step2_z_branch_ic` and `step2_z_branch_projection` fields of
+/// [`FoldedProveTimings`] are populated; the remaining fields cover
+/// the F_p-branch / shared-pipeline steps.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn prove_folded_4x_dual_prime_with_timings<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const INT_LIMBS: usize,
+    const INT_QUARTER_LIMBS: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<(crate::DualPrimeProof<F>, FoldedProveTimings), ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let mut extras = crate::DualPrimeExtras::<F>::new();
+    let mut timings = FoldedProveTimings::default();
+    let inner = prove_folded_4x_inner::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        INT_LIMBS,
+        INT_QUARTER_LIMBS,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        Some(&mut timings),
+        None,
+        Some(&mut extras),
+    )?;
+    let proof = crate::DualPrimeProof {
+        inner,
+        ideal_check_z: extras
+            .ideal_check_z
+            .expect("dual-prime hook must populate ideal_check_z"),
+    };
+    let (_compressed, dt) = zip_plus::utils::serialize_and_compress(&proof.inner);
+    timings.step8_compress = dt;
+    Ok((proof, timings))
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn prove_folded_4x_inner<
     ZtF,
@@ -2181,6 +2281,10 @@ where
     };
     let ic_eval_point = ic_prover_state.evaluation_point;
 
+    if let Some(t) = timings.as_mut() {
+        t.step2_ideal_check = _t_step2.elapsed();
+    }
+
     // Z-branch ideal check (dual-prime only). Uses the secp256k1 fixed
     // prime — the trace must therefore be re-projected through that
     // config since the F_p-branch projection above used `q`. Result is
@@ -2196,11 +2300,14 @@ where
     // skipped — this is fine because the Z-branch verifier filters by
     // tag and only checks Z-tagged ideals.
     if let Some(extras) = dual_prime_extras.as_mut() {
+        let _t_z_total = std::time::Instant::now();
         let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
         let projected_scalars_p = project_scalars::<F, U>(|s| project_scalar(s, &p_cfg));
         let z_mask = zinc_uair::column_tracker::compute_branch_column_masks::<U>().z_mask;
+        let _t_z_proj = std::time::Instant::now();
         let projected_trace_p_rm =
             project_trace_coeffs_row_major_with_mask::<F, _, _, D>(trace, &p_cfg, &z_mask);
+        let z_proj_dt = _t_z_proj.elapsed();
         let (ic_z, _) = U::prove_combined_typed(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_p_rm,
@@ -2211,10 +2318,10 @@ where
             ConstraintRing::Z,
         )?;
         extras.ideal_check_z = Some(ic_z);
-    }
-
-    if let Some(t) = timings.as_mut() {
-        t.step2_ideal_check = _t_step2.elapsed();
+        if let Some(t) = timings.as_mut() {
+            t.step2_z_branch_ic = _t_z_total.elapsed();
+            t.step2_z_branch_projection = z_proj_dt;
+        }
     }
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────

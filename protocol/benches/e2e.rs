@@ -2278,6 +2278,141 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
             );
         },
     );
+
+    let label_full = format!("Folded 4× dual-prime/{}", params);
+    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _>(
+        &label_full,
+        &pp,
+        &trace,
+        num_vars,
+        project_scalar,
+    );
+}
+
+/// Per-region prove timings for the dual-prime int-fold-4× variant.
+/// Uses [`prove_folded_4x_dual_prime_with_timings`] and reports the
+/// extra Z-branch IC cost on its own line.
+fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S>(
+    label: &str,
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<EC_FP_INT_LIMBS>, Int<EC_FP_INT_LIMBS>, DEGREE_PLUS_ONE>,
+    num_vars: usize,
+    project_scalar: S,
+) where
+    ZtF: IntFoldedZincTypes4x<
+            DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+        >,
+    Int<EC_FP_INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS_BENCH>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a Int<EC_FP_INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS_BENCH>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair<
+            Scalar = zinc_poly::univariate::dense::DensePolynomial<
+                Int<EC_FP_INT_LIMBS>,
+                DEGREE_PLUS_ONE,
+            >,
+        > + 'static,
+    S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
+{
+    const N_RUNS: u32 = 100;
+    let mut total = zinc_protocol::prover::FoldedProveTimings::default();
+    for _ in 0..N_RUNS {
+        let (_proof, t) = zinc_protocol::prover::prove_folded_4x_dual_prime_with_timings::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+            false,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("dual-prime prover with timings failed");
+        total.add_assign(&t);
+    }
+    total.divide_by(N_RUNS);
+    let total_dt = total.total();
+    let pct =
+        |dt: std::time::Duration| -> f64 { (dt.as_secs_f64() / total_dt.as_secs_f64()) * 100.0 };
+    let ms = |dt: std::time::Duration| -> f64 { dt.as_secs_f64() * 1_000.0 };
+    eprintln!(
+        "    {} per-region prove timings (mean of N={} runs):",
+        label, N_RUNS
+    );
+    eprintln!(
+        "      step 0  commit                 {:>8.3} ms ({:>4.1}%)",
+        ms(total.step0_commit),
+        pct(total.step0_commit),
+    );
+    eprintln!(
+        "      step 1  prime projection (q)   {:>8.3} ms ({:>4.1}%)",
+        ms(total.step1_prime_projection),
+        pct(total.step1_prime_projection),
+    );
+    eprintln!(
+        "      step 2  Fp-branch ideal check  {:>8.3} ms ({:>4.1}%)",
+        ms(total.step2_ideal_check),
+        pct(total.step2_ideal_check),
+    );
+    eprintln!(
+        "      step 2' Z-branch ideal check   {:>8.3} ms ({:>4.1}%)",
+        ms(total.step2_z_branch_ic),
+        pct(total.step2_z_branch_ic),
+    );
+    eprintln!(
+        "         └ of which projection (p)   {:>8.3} ms",
+        ms(total.step2_z_branch_projection),
+    );
+    eprintln!(
+        "      step 3  eval projection        {:>8.3} ms ({:>4.1}%)",
+        ms(total.step3_eval_projection),
+        pct(total.step3_eval_projection),
+    );
+    eprintln!(
+        "      step 4  CPR sumcheck           {:>8.3} ms ({:>4.1}%)",
+        ms(total.step4_sumcheck),
+        pct(total.step4_sumcheck),
+    );
+    eprintln!(
+        "      step 5  multipoint eval        {:>8.3} ms ({:>4.1}%)",
+        ms(total.step5_multipoint_eval),
+        pct(total.step5_multipoint_eval),
+    );
+    eprintln!(
+        "      step 6  lift and project       {:>8.3} ms ({:>4.1}%)",
+        ms(total.step6_lift_and_project),
+        pct(total.step6_lift_and_project),
+    );
+    eprintln!(
+        "      step 7  PCS open               {:>8.3} ms ({:>4.1}%)",
+        ms(total.step7_pcs_open),
+        pct(total.step7_pcs_open),
+    );
+    eprintln!(
+        "      assembly                       {:>8.3} ms ({:>4.1}%)",
+        ms(total.assembly),
+        pct(total.assembly),
+    );
+    eprintln!(
+        "      total                          {:>8.3} ms",
+        ms(total_dt),
+    );
 }
 
 fn e2e_folded_4x_dual_prime_benches(c: &mut Criterion) {
