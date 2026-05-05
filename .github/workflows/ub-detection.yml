@@ -13,14 +13,41 @@ env:
 
 jobs:
   ub-detection:
-    if: github.event.pull_request.draft == false
-    name: Check for undefined behaviour (UB)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Miri (${{ matrix.crate }})
     timeout-minutes: 480
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - zinc-piop
+          - zinc-poly
+          - zinc-primality
+          - zinc-protocol
+          - zinc-test-uair
+          - zinc-transcript
+          - zinc-uair
+          - zinc-utils
+          - zip-plus
     steps:
       - uses: actions/checkout@v6
+
+      - name: Cache cargo build
+        id: cache-cargo
+        uses: actions/cache@v5
+        continue-on-error: false
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-miri-${{ matrix.crate }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-miri-${{ matrix.crate }}
       - run: |
           rustup +nightly component add miri
           cargo +nightly miri setup
           MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance -Zmiri-disable-isolation" \
-            cargo +nightly miri test --lib
+            cargo +nightly miri test -p ${{ matrix.crate }} --lib
