@@ -60,7 +60,7 @@ pub struct ProverBase<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usi
 // Type-state structs
 //
 
-/// After step 1 via [`step1_combined`](ProverCommitted::step1_combined)
+/// After step 1 via [`step1_combined`](ProverBase::step1_combined)
 /// (row-major / "combined" projection). `project_scalar` has been consumed.
 #[derive(Clone, Debug)]
 pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
@@ -70,7 +70,7 @@ pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
     projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
-/// After step 1 via [`step1_mle_first`](ProverCommitted::step1_mle_first)
+/// After step 1 via [`step1_mle_first`](ProverBase::step1_mle_first)
 /// (column-major / MLE-first projection). `project_scalar` has been consumed.
 #[derive(Clone, Debug)]
 pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {

@@ -24,7 +24,7 @@
 //!
 //! This corresponds to the T=2 case of Pi_{BMLE} in the paper. Following
 //! the paper, the prover sends only the polynomial-valued lifted evaluations
-//! (alpha'_j in F_q[X]); the scalar open_evals are derived by the verifier
+//! (alpha'_j in F_q\[X\]); the scalar open_evals are derived by the verifier
 //! via \psi_a rather than being sent as a separate proof element.
 
 #[cfg(feature = "parallel")]

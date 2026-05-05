@@ -73,7 +73,7 @@ pub struct Proof<F: PrimeField> {
     /// Multi-point evaluation sumcheck proof (combines up_evals and
     /// down_evals at r' into a single evaluation point r_0).
     pub multipoint_eval: MultipointEvalProof<F>,
-    /// Witness-only polynomial MLE evaluations at r_0 in F_q[X]
+    /// Witness-only polynomial MLE evaluations at r_0 in F_q\[X\]
     /// (after \phi_q, before \psi_a), ordered as
     /// `[wit_bin..., wit_arb..., wit_int...]`.
     /// The verifier recomputes public lifted_evals from public data,

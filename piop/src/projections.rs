@@ -32,9 +32,9 @@ pub enum ProjectedTrace<F: PrimeField> {
     ColumnMajor(ColumnMajorTrace<F>),
 }
 
-/// Project a multi-typed trace onto F[X], returning a row-indexed (transposed)
-/// matrix. Result: `trace[row][col]` where columns are ordered as binary_poly,
-/// arbitrary_poly, int.
+/// Project a multi-typed trace onto F\[X\], returning a row-indexed
+/// (transposed) matrix. Result: `trace[row][col]` where columns are ordered as
+/// binary_poly, arbitrary_poly, int.
 ///
 /// Use this for the combined polynomial approach (non-linear constraints).
 #[allow(clippy::arithmetic_side_effects)]
@@ -294,7 +294,7 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
     }
 }
 
-/// Project scalars of a UAIR onto F[X].
+/// Project scalars of a UAIR onto F\[X\].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
 ) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
@@ -316,7 +316,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
         .collect()
 }
 
-/// Project scalars of a UAIR along F[X] -> F.
+/// Project scalars of a UAIR along F\[X\] -> F.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     scalars: HashMap<R, DynamicPolynomialF<F>>,

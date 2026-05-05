@@ -107,8 +107,8 @@ impl<T: ConstTranscribable> Transcribable for T {
     }
 }
 
-/// Should not be used directly — use [`delegate_transcribable!`] or
-/// [`delegate_const_transcribable!`] instead.
+/// Should not be used directly — use [`crate::delegate_transcribable!`] or
+/// [`crate::delegate_const_transcribable!`] instead.
 #[macro_export]
 macro_rules! delegate_gen_transcribable {
     ($wrapper:ident { $field:tt : $inner_ty:ty }) => {
@@ -172,8 +172,8 @@ macro_rules! delegate_gen_transcribable {
 }
 
 /// Delegates `Transcribable` to the single inner field of a newtype.
-/// Use this instead of [`delegate_const_transcribable!`] when the inner type
-/// only implements `Transcribable` (e.g. `BoxedUint`).
+/// Use this instead of [`crate::delegate_const_transcribable!`] when the
+/// inner type only implements `Transcribable` (e.g. `BoxedUint`).
 ///
 /// Supports non-generic and generic types with optional `where` clauses:
 /// ```ignore

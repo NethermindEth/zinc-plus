@@ -47,13 +47,15 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// polynomial identity:
     ///
     /// $$
-    /// \sum_{b \in H} (f_0(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
+    /// \sum_{b \in H} (f_0(b, x_0\[b\],...,x_n\[b\],
+    /// x_0ˆdown\[b\],...,x_nˆdown\[b\])
     ///                 + \alpha f_1(...) + ... + \alpha^k f_k(...)) = v_0 +
     ///                   \alpha * v_1 + ... + \alphaˆk * v_k,
     /// $$
-    /// where $f_i(b, x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])
+    /// where $f_i(b, x_0\[b\],...,x_n\[b\], x_0ˆdown\[b\],...,x_nˆdown\[b\])
     ///         = eq(r, b) * (1 - eq(r, 1,...1))
-    ///             * g_i(x_0[b],...,x_n[b], x_0ˆdown[b],...,x_nˆdown[b])$
+    ///             * g_i(x_0\[b\],...,x_n\[b\],
+    ///               x_0ˆdown\[b\],...,x_nˆdown\[b\])$
     /// and `g_i` is a constraint polynomial given by the UAIR `U`.
     /// `v_0,...,v_k` are the claimed evaluations of the combined polynomials.
     ///
@@ -191,8 +193,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `transcript`: FS-transcript (absorbs `up_evals` and `down_evals`).
     /// - `sumcheck_prover_state`: The CPR group's `ProverState` from
     ///   `MultiDegreeSumcheck::prove_as_subprotocol` (states\[0\]).
-    /// - `ancillary`: Produced by [`prepare_sumcheck_group`]; carries column
-    ///   counts and `num_vars` needed to split the flat eval vector.
+    /// - `ancillary`: Produced by [`Self::prepare_sumcheck_group`]; carries
+    ///   column counts and `num_vars` needed to split the flat eval vector.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn finalize_prover(
@@ -250,8 +252,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
     /// Pre-sumcheck half of the CPR verifier.
     ///
-    /// Must run before [`MultiDegreeSumcheck::verify_as_subprotocol`] to
-    /// maintain transcript ordering (samples folding challenge α here).
+    /// Must run before
+    /// [`crate::sumcheck::multi_degree::MultiDegreeSumcheck::verify_as_subprotocol`]
+    /// to maintain transcript ordering (samples folding challenge α here).
     ///
     /// # Parameters
     /// - `transcript`: FS-transcript.
@@ -338,8 +341,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
     /// Post-sumcheck half of the CPR verifier.
     ///
-    /// Runs after [`MultiDegreeSumcheck::verify_as_subprotocol`] produces the
-    /// shared evaluation point.
+    /// Runs after
+    /// [`crate::sumcheck::multi_degree::MultiDegreeSumcheck::verify_as_subprotocol`]
+    /// produces the shared evaluation point.
     ///
     /// # Parameters
     /// - `transcript`: FS-transcript (absorbs `up_evals` and `down_evals`).
@@ -348,7 +352,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   sumcheck.
     /// - `expected_evaluation`: `md_subclaims.expected_evaluations()[0]` — the
     ///   expected value of the CPR combination function at `r*`.
-    /// - `ancillary`: Produced by [`prepare_verifier`]; carries folding
+    /// - `ancillary`: Produced by [`Self::prepare_verifier`]; carries folding
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
     /// - `field_cfg`: Field configuration.

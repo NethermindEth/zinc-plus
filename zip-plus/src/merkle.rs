@@ -358,7 +358,7 @@ impl MerkleProof {
         Ok(())
     }
 
-    /// Estimate the number of bytes that would be written to [[PcsTranscript]]
+    /// Estimate the number of bytes that would be written to the PCS transcript
     /// when an instance of this type is transcribed.
     #[allow(clippy::arithmetic_side_effects)] // Overflow isn't possible
     pub fn estimate_transcribed_size(merkle_tree_height: usize) -> usize {

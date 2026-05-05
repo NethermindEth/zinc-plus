@@ -15,7 +15,7 @@ pub trait RaaConfig: Copy + Send + Sync {
 }
 
 /// Implementation of a repeat-accumulate-accumulate (RAA) codes over the binary
-/// field, as defined by the Blaze paper (https://eprint.iacr.org/2024/1609)
+/// field, as defined by the Blaze paper (<https://eprint.iacr.org/2024/1609>)
 #[derive(Clone)]
 pub struct RaaCode<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     pub(crate) row_len: usize,

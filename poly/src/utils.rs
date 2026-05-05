@@ -317,7 +317,7 @@ pub fn next_mle_inner<F: Field>(
 /// Evaluates the next MLE in O(n), by reusing suffix equality and prefix carry
 /// products across carry positions.
 ///
-/// Improved from O(n²) approach here: https://github.com/TomWambsgans/Whirlaway/blob/9e3592b/crates/air/src/utils.rs#L92
+/// Improved from O(n²) approach here: <https://github.com/TomWambsgans/Whirlaway/blob/9e3592b/crates/air/src/utils.rs#L92>
 ///
 /// `next_mle(u, v) = 1` iff `Val(v) = Val(u) + 1` and `Val(u) < 2^n - 1`.
 ///
