@@ -172,6 +172,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `max_degree`: The degree of the UAIR `U`.
     /// - `field_cfg`: The random field config.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    /// `is_n_branch`: which UAIR constraint set to dispatch in the
+    /// `comb_fn` closure — `false` calls `U::constrain_general`
+    /// (p-branch, mod-`p`); `true` calls `U::constrain_general_n`
+    /// (n-branch, mod-`n`).
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_sumcheck_group<U, const D: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
@@ -183,6 +188,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         field_cfg: &F::Config,
         trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
         projecting_element_f: &F,
+        is_n_branch: bool,
     ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
@@ -300,18 +306,33 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 v
             };
 
-            U::constrain_general(
-                &mut folder,
-                TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout),
-                TraceRow::from_slice_with_layout_and_bit_op(
-                    &mle_values[num_cols + 2..],
-                    down_layout,
-                    bit_op_count,
-                ),
-                project,
-                |x, y| Some(project(y) * x),
-                ImpossibleIdeal::from_ref,
+            let up_row =
+                TraceRow::from_slice_with_layout(&mle_values[2..num_cols + 2], up_layout);
+            let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+                &mle_values[num_cols + 2..],
+                down_layout,
+                bit_op_count,
             );
+
+            if is_n_branch {
+                U::constrain_general_n(
+                    &mut folder,
+                    up_row,
+                    down_row,
+                    project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
+                );
+            } else {
+                U::constrain_general(
+                    &mut folder,
+                    up_row,
+                    down_row,
+                    project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
+                );
+            }
 
             folder.folded_constraints * (one.clone() - selector) * eq_r
         });
@@ -511,6 +532,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
     /// - `field_cfg`: Field configuration.
+    /// `is_n_branch`: which UAIR constraint set to dispatch — `false`
+    /// calls `U::constrain_general` (p-branch); `true` calls
+    /// `U::constrain_general_n` (n-branch).
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_verifier<U>(
         transcript: &mut impl Transcript,
@@ -520,6 +544,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         ancillary: CprVerifierAncillary<F>,
         projected_scalars: &ScalarMap<U::Scalar, F>,
         field_cfg: &F::Config,
+        is_n_branch: bool,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
         F::Inner: ConstTranscribable,
@@ -567,21 +592,35 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         down_combined.extend(proof.down_evals.iter().cloned());
         down_combined.extend(proof.bit_op_down_evals.iter().cloned());
 
-        U::constrain_general(
-            &mut folder,
-            TraceRow::from_slice_with_layout(
-                &proof.up_evals,
-                uair_sig.total_cols().as_column_layout(),
-            ),
-            TraceRow::from_slice_with_layout_and_bit_op(
-                &down_combined,
-                down_layout,
-                bit_op_count,
-            ),
-            project,
-            |x, y| Some(project(y) * x),
-            ImpossibleIdeal::from_ref,
+        let up_row = TraceRow::from_slice_with_layout(
+            &proof.up_evals,
+            uair_sig.total_cols().as_column_layout(),
         );
+        let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+            &down_combined,
+            down_layout,
+            bit_op_count,
+        );
+
+        if is_n_branch {
+            U::constrain_general_n(
+                &mut folder,
+                up_row,
+                down_row,
+                project,
+                |x, y| Some(project(y) * x),
+                ImpossibleIdeal::from_ref,
+            );
+        } else {
+            U::constrain_general(
+                &mut folder,
+                up_row,
+                down_row,
+                project,
+                |x, y| Some(project(y) * x),
+                ImpossibleIdeal::from_ref,
+            );
+        }
 
         let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
 
@@ -749,6 +788,7 @@ mod tests {
             &test_config(),
             &trace.binary_poly,
             &projecting_element,
+            false,
         )
         .expect("CPR prepare failed");
 
@@ -802,6 +842,7 @@ mod tests {
                 cpr_verifier_ancillary,
                 &projected_scalars,
                 &test_config(),
+                false,
             )
             .is_ok()
         );

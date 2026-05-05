@@ -100,6 +100,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 field_cfg,
                 &trace.binary_poly,
                 &projecting_element,
+                false,
             )
             .expect("CPR prepare failed");
 
@@ -210,6 +211,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         ancillary,
                         &scalars_f,
                         &field_cfg,
+                        false,
                     )
                     .expect("CPR finalize_verifier failed"),
                 );
@@ -287,6 +289,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             field_cfg,
             &trace.binary_poly,
             &projecting_element,
+            false,
         )
         .expect("CPR prepare failed");
 
@@ -401,6 +404,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                             ancillary,
                             &scalars_f,
                             &field_cfg,
+                            false,
                         )
                         .expect("CPR finalize_verifier failed"),
                     );

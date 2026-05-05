@@ -21,9 +21,9 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
-    degree_counter::linear_constraint_mask,
+    degree_counter::{linear_constraint_mask, linear_constraint_mask_n},
     ideal::{Ideal, IdealCheck},
-    ideal_collector::{IdealOrZero, collect_ideals},
+    ideal_collector::{IdealOrZero, collect_ideals, collect_ideals_n},
 };
 use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 
@@ -153,6 +153,78 @@ pub trait IdealCheckProtocol: Uair {
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
     fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
+
+    // === N-branch siblings ===========================================
+    //
+    // Mirror the four methods above, but dispatch through
+    // `Uair::constrain_general_n` (the n-branch constraint set) and the
+    // `_n` counter / builder helpers. Used by the dual-pipeline
+    // orchestrator's n-branch run.
+    //
+    // For UAIRs whose `constrain_general_n` is empty (the default),
+    // `num_constraints` is zero and the methods short-circuit: no
+    // transcript challenges are sampled and an empty `Proof` /
+    // `VerifierSubclaim` is returned, keeping prover and verifier
+    // transcripts in sync without algebraic load.
+
+    #[allow(clippy::type_complexity)]
+    fn prove_linear_n<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    #[allow(clippy::type_complexity)]
+    fn prove_combined_n<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &RowMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prove_hybrid_n<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    #[allow(clippy::type_complexity)]
+    fn verify_as_subprotocol_n<F, IdealOverF, IdealOverFFromRef>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
         num_constraints: usize,
@@ -421,6 +493,309 @@ where
         // value is zero by construction; the sumcheck that follows
         // verifies consistency of the claimed evaluations with the
         // actual trace.
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
+            .ideals
+            .iter()
+            .zip(combined_mle_values.iter())
+            .filter(|(ideal, _)| !ideal.is_zero_ideal())
+            .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
+            .unzip();
+
+        batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
+
+        Ok(VerifierSubclaim {
+            evaluation_point,
+            values: combined_mle_values,
+        })
+    }
+
+    // === N-branch siblings ===========================================
+    //
+    // Bodies mirror the p-branch methods above except for:
+    //   - Counter helpers (`linear_constraint_mask_n`, `collect_ideals_n`).
+    //   - Builder helpers (`compute_combined_polynomials_n`,
+    //     `evaluate_combined_polynomials_n`,
+    //     `evaluate_combined_polynomials_unchecked_n`).
+    //   - Empty-constraint short-circuit so UAIRs whose
+    //     `constrain_general_n` is empty (the default) don't burn
+    //     transcript challenges or absorb anything.
+
+    #[allow(clippy::type_complexity)]
+    fn prove_linear_n<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        if num_constraints == 0 {
+            // Still consume the IC challenge so the verifier-side
+            // transcript stays in sync; downstream Step 4 needs a
+            // non-empty evaluation point even when there's nothing
+            // to combine.
+            let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+            return Ok((
+                Proof {
+                    combined_mle_values: Vec::new(),
+                },
+                ProverState { evaluation_point },
+            ));
+        }
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials_n::<_, U>(
+            trace_matrix,
+            projected_scalars,
+            num_constraints,
+            &evaluation_point,
+            field_cfg,
+        )?;
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn prove_combined_n<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &RowMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        if num_constraints == 0 {
+            // Still consume the IC challenge so the verifier-side
+            // transcript stays in sync; downstream Step 4 needs a
+            // non-empty evaluation point even when there's nothing
+            // to combine.
+            let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+            return Ok((
+                Proof {
+                    combined_mle_values: Vec::new(),
+                },
+                ProverState { evaluation_point },
+            ));
+        }
+
+        let ideal_collector = collect_ideals_n::<U>(num_constraints);
+        let is_zero_ideal: Vec<bool> = ideal_collector
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let combined_mles = combined_poly_builder::compute_combined_polynomials_n::<_, U>(
+            trace_matrix,
+            projected_scalars,
+            num_constraints,
+            field_cfg,
+            &is_zero_ideal,
+        );
+
+        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
+
+        let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
+            .enumerate()
+            .map(|(i, coeff_mles)| {
+                if is_zero_ideal[i] {
+                    return DynamicPolynomialF::ZERO;
+                }
+                let coeffs = coeff_mles
+                    .into_iter()
+                    .map(|coeff_mle| {
+                        zinc_poly::utils::mle_eval_with_eq_table(
+                            &coeff_mle.evaluations,
+                            &eq_table,
+                            field_cfg,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect::<Vec<_>>();
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prove_hybrid_n<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        if num_constraints == 0 {
+            // Still consume the IC challenge so the verifier-side
+            // transcript stays in sync; downstream Step 4 needs a
+            // non-empty evaluation point even when there's nothing
+            // to combine.
+            let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+            return Ok((
+                Proof {
+                    combined_mle_values: Vec::new(),
+                },
+                ProverState { evaluation_point },
+            ));
+        }
+
+        let linear_mask = linear_constraint_mask_n::<U>();
+        let is_zero_ideal: Vec<bool> = collect_ideals_n::<U>(num_constraints)
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+        debug_assert_eq!(linear_mask.len(), num_constraints);
+        debug_assert_eq!(is_zero_ideal.len(), num_constraints);
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        let linear_values = combined_poly_builder::evaluate_combined_polynomials_unchecked_n::<_, U>(
+            column_major_trace,
+            projected_scalars,
+            num_constraints,
+            &evaluation_point,
+            field_cfg,
+        )?;
+
+        let skip_combined: Vec<bool> = linear_mask
+            .iter()
+            .zip(is_zero_ideal.iter())
+            .map(|(&lin, &zero_ideal)| lin || zero_ideal)
+            .collect();
+        let combined_mles = combined_poly_builder::compute_combined_polynomials_n::<_, U>(
+            row_major_trace,
+            projected_scalars,
+            num_constraints,
+            field_cfg,
+            &skip_combined,
+        );
+
+        let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
+
+        let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(0..num_constraints)
+            .map(|i| {
+                if is_zero_ideal[i] {
+                    DynamicPolynomialF::ZERO
+                } else if linear_mask[i] {
+                    linear_values[i].clone()
+                } else {
+                    let coeffs = combined_mles[i]
+                        .iter()
+                        .map(|coeff_mle| {
+                            zinc_poly::utils::mle_eval_with_eq_table(
+                                &coeff_mle.evaluations,
+                                &eq_table,
+                                field_cfg,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    DynamicPolynomialF::new_trimmed(coeffs)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        combined_mle_values.iter().for_each(|combined_mle_value| {
+            transcript
+                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        });
+
+        Ok((
+            Proof {
+                combined_mle_values,
+            },
+            ProverState { evaluation_point },
+        ))
+    }
+
+    fn verify_as_subprotocol_n<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    {
+        if num_constraints == 0 {
+            // Mirror prover's short-circuit: still sample the IC
+            // challenge so transcripts stay in sync; no values are
+            // absorbed since there are no combined polynomials.
+            debug_assert!(
+                proof.combined_mle_values.is_empty(),
+                "n-branch proof carries values but UAIR has no n-branch constraints"
+            );
+            let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+            return Ok(VerifierSubclaim {
+                evaluation_point,
+                values: Vec::new(),
+            });
+        }
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = proof.combined_mle_values;
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        for mle_value in &combined_mle_values {
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
+        }
+
+        let ideal_collector = collect_ideals_n::<U>(num_constraints);
+
         let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
             .ideals
             .iter()

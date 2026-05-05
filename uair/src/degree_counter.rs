@@ -7,14 +7,24 @@ use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
 
 use crate::{
-    ConstraintBuilder, TraceRow, Uair, constraint_counter::count_constraints,
-    ideal::ImpossibleIdeal, ideal_collector::collect_ideals,
+    ConstraintBuilder, TraceRow, Uair,
+    constraint_counter::{count_constraints, count_constraints_n},
+    ideal::ImpossibleIdeal,
+    ideal_collector::{collect_ideals, collect_ideals_n},
 };
 
 /// Compute the maximum number of multiplicands
 /// in products of witness elements in the UAIR `U`.
 pub fn count_max_degree<U: Uair>() -> usize {
     count_constraint_degrees::<U>()
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+}
+
+/// N-branch counterpart of [`count_max_degree`].
+pub fn count_max_degree_n<U: Uair>() -> usize {
+    count_constraint_degrees_n::<U>()
         .into_iter()
         .max()
         .unwrap_or(0)
@@ -45,6 +55,23 @@ pub fn count_effective_max_degree<U: Uair>() -> usize {
         .unwrap_or(0)
 }
 
+/// N-branch counterpart of [`count_effective_max_degree`].
+pub fn count_effective_max_degree_n<U: Uair>() -> usize {
+    let degrees = count_constraint_degrees_n::<U>();
+    let ideals = collect_ideals_n::<U>(count_constraints_n::<U>()).ideals;
+    debug_assert_eq!(
+        degrees.len(),
+        ideals.len(),
+        "degree collector and ideal collector should visit constraints in the same order"
+    );
+    degrees
+        .into_iter()
+        .zip(ideals.iter())
+        .filter_map(|(deg, ideal)| (!ideal.is_zero_ideal()).then_some(deg))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Per-constraint mask of "linear" constraints — those with degree at most
 /// 1 in the trace MLEs. Used by the hybrid ideal-check dispatch in
 /// `protocol::prove` to route linear constraints through the MLE-first lane
@@ -55,6 +82,14 @@ pub fn count_effective_max_degree<U: Uair>() -> usize {
 /// UAIR's `constrain_general` in declaration order.
 pub fn linear_constraint_mask<U: Uair>() -> Vec<bool> {
     count_constraint_degrees::<U>()
+        .into_iter()
+        .map(|d| d <= 1)
+        .collect()
+}
+
+/// N-branch counterpart of [`linear_constraint_mask`].
+pub fn linear_constraint_mask_n<U: Uair>() -> Vec<bool> {
+    count_constraint_degrees_n::<U>()
         .into_iter()
         .map(|d| d <= 1)
         .collect()
@@ -76,6 +111,31 @@ pub fn count_constraint_degrees<U: Uair>() -> Vec<usize> {
     );
 
     U::constrain_general(
+        &mut dc,
+        up_row,
+        down_row,
+        |_| DegreeCountingSemiring::scalar(),
+        |x, _| Some(*x),
+        |_| ImpossibleIdeal,
+    );
+
+    dc.degrees
+}
+
+/// N-branch counterpart of [`count_constraint_degrees`].
+pub fn count_constraint_degrees_n<U: Uair>() -> Vec<usize> {
+    let mut dc = ConstraintDegreeCollector::default();
+
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DegreeCountingSemiring::var());
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+        &down_dummy,
+        sig.down_cols().as_column_layout(),
+        sig.bit_op_down_count(),
+    );
+
+    U::constrain_general_n(
         &mut dc,
         up_row,
         down_row,

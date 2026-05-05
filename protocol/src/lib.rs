@@ -58,13 +58,14 @@ use zip_plus::{
 // Data structures
 //
 
-/// Full proof produced by the Zinc+ PIOP for UCS.
+/// Per-branch proof artifacts. The Zinc+ dual-pipeline emits two of these
+/// per [`Proof`]: a "p-branch" (constraints honest mod prime `p`, e.g.
+/// secp256k1 base prime) and an "n-branch" (constraints honest mod prime
+/// `n`, e.g. secp256k1 curve order). Both branches share PCS commitments
+/// and the streaming PCS opening — they only differ in the algebraic
+/// chain (ideal-check, CPR sumcheck, multipoint-eval, lifted evals).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
-    /// Zip+ commitments to the witness columns.
-    pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    /// Serialized PCS proof data (Zip+ proving transcripts).
-    pub zip: Vec<u8>,
+pub struct BranchProof<F: PrimeField> {
     /// Randomized ideal check proof.
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof (up_evals + down_evals +
@@ -90,6 +91,94 @@ pub struct Proof<F: PrimeField> {
     pub lookup_proof: Option<BatchedLookupProof<F>>,
 }
 
+/// Full proof produced by the Zinc+ PIOP for UCS (dual-pipeline shape).
+///
+/// Carries one [`BranchProof`] for each algebraic branch (p-branch under
+/// the base prime `p`, n-branch under the curve order `n`). The PCS
+/// commitments are shared across both branches, and the `zip` byte stream
+/// is the single PCS proving transcript that both branches sequentially
+/// appended into.
+///
+/// Phase 2 stopgap: in the absence of a real n-branch UAIR, the
+/// `prove_folded*` paths populate `n_branch` by cloning `p_branch`
+/// (Phase 4 will replace this with a true n-branch run on its own
+/// pipeline).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proof<F: PrimeField> {
+    /// Zip+ commitments to the witness columns.
+    pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    /// Serialized PCS proof data (Zip+ proving transcripts) — single
+    /// stream shared by both branches.
+    pub zip: Vec<u8>,
+    /// Algebraic branch under the base prime `p` (constraints honest
+    /// mod `p`, dispatched via `Uair::constrain`).
+    pub p_branch: BranchProof<F>,
+    /// Algebraic branch under the curve-order prime `n` (constraints
+    /// honest mod `n`, dispatched via `Uair::constrain_n`). Empty
+    /// `constrain_n` (the default) means this branch carries no
+    /// algebraic load — but its proof artifacts still flow through
+    /// the same PIOP plumbing so transcripts stay aligned.
+    pub n_branch: BranchProof<F>,
+}
+
+impl<F> BranchProof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    /// Read a `BranchProof` from a byte slice prefix; return the parsed
+    /// branch and the remaining tail. Inverse of
+    /// [`Self::write_transcription_bytes_into`].
+    fn read_transcription_bytes_subset(bytes: &[u8]) -> (Self, &[u8]) {
+        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (resolver, bytes) =
+            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+        let (combined_sumcheck, bytes) =
+            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (multipoint_eval, bytes) =
+            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+        let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        (
+            Self {
+                ideal_check,
+                resolver,
+                combined_sumcheck,
+                multipoint_eval,
+                witness_lifted_evals: witness_vec.0,
+                lookup_proof: None,
+            },
+            bytes,
+        )
+    }
+
+    /// Write a `BranchProof` into the buffer; return the unconsumed tail.
+    fn write_transcription_bytes_into<'a>(&self, mut buf: &'a mut [u8]) -> &'a mut [u8] {
+        buf = self.ideal_check.write_transcription_bytes_subset(buf);
+        buf = self.resolver.write_transcription_bytes_subset(buf);
+        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
+        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
+        buf =
+            DynamicPolyVecF::reinterpret(&self.witness_lifted_evals).write_transcription_bytes_subset(buf);
+        buf
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn num_bytes(&self) -> usize {
+        let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        IdealCheckProof::<F>::LENGTH_NUM_BYTES
+            + self.ideal_check.get_num_bytes()
+            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
+            + self.resolver.get_num_bytes()
+            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
+            + self.combined_sumcheck.get_num_bytes()
+            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
+            + self.multipoint_eval.get_num_bytes()
+            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + witness_vec.get_num_bytes()
+    }
+}
+
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
@@ -106,16 +195,8 @@ where
         let (zip_bytes, bytes) = bytes.split_at(zip_len);
         let zip = zip_bytes.to_vec();
 
-        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
-        let (resolver, bytes) =
-            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
-        let (combined_sumcheck, bytes) =
-            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
-        let (multipoint_eval, bytes) =
-            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
-
-        let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
-        let witness_lifted_evals = witness_vec.0;
+        let (p_branch, bytes) = BranchProof::<F>::read_transcription_bytes_subset(bytes);
+        let (n_branch, bytes) = BranchProof::<F>::read_transcription_bytes_subset(bytes);
 
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
@@ -124,12 +205,8 @@ where
         Self {
             commitments: (commit0, commit1, commit2),
             zip,
-            ideal_check,
-            resolver,
-            combined_sumcheck,
-            multipoint_eval,
-            witness_lifted_evals,
-            lookup_proof: None,
+            p_branch,
+            n_branch,
         }
     }
 
@@ -146,23 +223,9 @@ where
         buf[..self.zip.len()].copy_from_slice(&self.zip);
         buf = &mut buf[self.zip.len()..];
 
-        // ideal_check: u32 length prefix + data
-        buf = self.ideal_check.write_transcription_bytes_subset(buf);
-
-        // resolver: u32 length prefix + data
-        buf = self.resolver.write_transcription_bytes_subset(buf);
-
-        // combined_sumcheck: u32 length prefix + data
-        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
-
-        // multipoint_eval: u32 length prefix + data
-        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
-
-        // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
-        // TODO: serialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
-        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
-            .write_transcription_bytes_subset(buf);
+        // p_branch followed by n_branch.
+        buf = self.p_branch.write_transcription_bytes_into(buf);
+        let _ = self.n_branch.write_transcription_bytes_into(buf);
     }
 }
 
@@ -174,22 +237,11 @@ where
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
-            + IdealCheckProof::<F>::LENGTH_NUM_BYTES
-            + self.ideal_check.get_num_bytes()
-            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
-            + self.resolver.get_num_bytes()
-            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
-            + self.combined_sumcheck.get_num_bytes()
-            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
-            + self.multipoint_eval.get_num_bytes()
-            // TODO: add lookup_proof size once BatchedLookupProof gets
-            // Transcribable impls (lookup is not yet implemented).
-            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-            + witness_vec.get_num_bytes()
+            + self.p_branch.num_bytes()
+            + self.n_branch.num_bytes()
     }
 }
 
@@ -526,9 +578,9 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BitOpRotUair,
-        EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal,
-        ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        DualBranchTestUair, EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair,
+        Sha256Ideal, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
@@ -930,6 +982,109 @@ mod tests {
         );
     }
 
+    /// End-to-end dual-pipeline test: `DualBranchTestUair` exercises
+    /// both the `p_branch` (witness mirrors public selector mod ⟨X−2⟩)
+    /// and the `n_branch` (booleanity of public selector: `s² − s = 0`).
+    /// Both branches actually run end-to-end on the same shared
+    /// `pcs_transcript`.
+    ///
+    /// Validates that:
+    /// - `count_constraints_n` and friends report the n-branch's
+    ///   single booleanity constraint.
+    /// - The dual-shape `Proof` round-trips through serialize /
+    ///   deserialize with the new [`BranchProof`] split layout.
+    /// - The unfolded `prove`/`verify` accept this UAIR end-to-end at
+    ///   small `num_vars` — both the p-branch CPR/sumcheck and the
+    ///   n-branch CPR/sumcheck must succeed.
+    #[test]
+    fn dual_branch_pipeline_e2e() {
+        // Sanity check the static analysis helpers see the n-branch.
+        assert_eq!(
+            zinc_uair::constraint_counter::count_constraints_n::<DualBranchTestUair<ZtInt>>(),
+            1,
+            "DualBranchTestUair should advertise exactly one n-branch constraint",
+        );
+        assert_eq!(
+            zinc_uair::constraint_counter::count_constraints::<DualBranchTestUair<ZtInt>>(),
+            1,
+            "DualBranchTestUair should advertise exactly one p-branch constraint",
+        );
+
+        let num_vars = 4;
+        do_test::<TestZincTypesIprs, DualBranchTestUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// Negative dual-pipeline test: drop one of the **n_branch** CPR
+    /// up_evals and confirm the verifier rejects. This is the
+    /// load-bearing test that proves the n-branch pipeline is actually
+    /// being verified end-to-end. Before Phase 2.5 wired the verifier
+    /// dual-pipeline, the n-branch was dropped at
+    /// `step0_reconstruct_transcript` and a tamper here would slip
+    /// through because the verifier never looked at `proof.n_branch`.
+    /// Now, the verifier runs the n-branch's full Steps 1–7 on the
+    /// shared transcript, and the CPR `prepare_verifier` catches the
+    /// size mismatch.
+    #[test]
+    fn dual_branch_pipeline_tamper_n_branch_up_evals_size() {
+        let num_vars = 4;
+        do_test::<TestZincTypesIprs, DualBranchTestUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                let _ = proof.n_branch.resolver.up_evals.pop();
+            },
+            |res| {
+                let err = res.unwrap_err();
+                assert!(
+                    matches!(&err, ProtocolError::Resolver(_)),
+                    "n-branch CPR up-evals size mismatch should be detected, got {err:?}",
+                );
+            },
+        );
+    }
+
+    /// Negative dual-pipeline test: drop one of the **n_branch**
+    /// witness lifted evals and confirm the verifier rejects.
+    /// Validates that the n-branch's Step 6 + Step 7 (lifted-evals +
+    /// PCS) actually run — a length mismatch trips PCS verification.
+    #[test]
+    fn dual_branch_pipeline_tamper_n_branch_lifted_evals_size() {
+        let num_vars = 4;
+        do_test::<TestZincTypesIprs, DualBranchTestUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                let _ = proof.n_branch.witness_lifted_evals.pop();
+            },
+            |res| {
+                assert!(
+                    res.is_err(),
+                    "n-branch lifted-evals size mismatch should be detected",
+                );
+            },
+        );
+    }
+
     /// End-to-end test: BinaryDecompositionUair.
     ///
     /// Uses binary_poly (1 col) and int (1 col) trace types.
@@ -1009,7 +1164,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.witness_lifted_evals.swap(0, 1),
+            |proof| proof.p_branch.witness_lifted_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1030,7 +1185,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.resolver.up_evals.swap(0, 1),
+            |proof| proof.p_branch.resolver.up_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1053,7 +1208,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.resolver.down_evals.swap(0, 1),
+            |proof| proof.p_branch.resolver.down_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1154,7 +1309,7 @@ mod tests {
                 // Mutate the only bit_op_down_eval — verifier must
                 // reject (CPR claim-value reconstruction will catch it
                 // first as a `ClaimValueDoesNotMatch`).
-                if let Some(ev) = proof.resolver.bit_op_down_evals.first_mut() {
+                if let Some(ev) = proof.p_branch.resolver.bit_op_down_evals.first_mut() {
                     *ev = ev.clone() + ev.clone();
                 }
             },
@@ -1165,7 +1320,7 @@ mod tests {
     }
 
     /// Tamper a coefficient of the source's witness lifted eval at
-    /// r_0 (W_W's slot in `proof.witness_lifted_evals`). The swap
+    /// r_0 (W_W's slot in `proof.p_branch.witness_lifted_evals`). The swap
     /// changes `rot_c(·)` (so the bit-op slot's derived `open_eval`
     /// no longer matches mp_eval's expectation) and at the same time
     /// changes the source's own `open_eval`. The verifier rejects via
@@ -1183,7 +1338,7 @@ mod tests {
             ),
             default_project_ideal!(),
             |proof| {
-                if let Some(p) = proof.witness_lifted_evals.first_mut() {
+                if let Some(p) = proof.p_branch.witness_lifted_evals.first_mut() {
                     if p.coeffs.len() >= 2 {
                         p.coeffs.swap(0, 1);
                     }
@@ -1407,7 +1562,7 @@ mod tests {
     const SHA_ECDSA_NUM_VARS: usize = 9;
 
     /// Tamper a coefficient of the SHA `W_W` slot in
-    /// `proof.witness_lifted_evals` (the source of all six bit-op
+    /// `proof.p_branch.witness_lifted_evals` (the source of all six bit-op
     /// virtual columns). The verifier rejects via mp_eval's
     /// consistency check or `LiftedEvalsBitOpMismatch` (whichever
     /// trips first). Replaces the four pre-existing Step-4.5-specific
@@ -1421,7 +1576,7 @@ mod tests {
                 // index as in `cols::W_W` minus `NUM_BIN_PUB`. Easier
                 // and equally diagnostic to tamper the first witness
                 // slot instead — any of them feeds mp_eval.
-                let p = &mut proof.witness_lifted_evals[0];
+                let p = &mut proof.p_branch.witness_lifted_evals[0];
                 assert!(
                     p.coeffs.len() >= 2,
                     "witness lifted eval polynomial has < 2 coefficients; cannot tamper",
@@ -1437,6 +1592,32 @@ mod tests {
                             | ProtocolError::LiftedEvalsBitOpMismatch { .. },
                     ),
                     "expected mp_eval ClaimMismatch or LiftedEvalsBitOpMismatch, got {err:?}",
+                );
+            },
+        );
+    }
+
+    /// Tamper test for the **n-branch ECDSA constraints**
+    /// (`u_1·s ≡ e` and `u_2·s ≡ r` mod n).
+    ///
+    /// Drops one of the n-branch CPR resolver's up_evals: this triggers
+    /// a length-mismatch in
+    /// `CombinedPolyResolver::prepare_verifier::<U>` since the n-branch
+    /// resolver is now actually being used to verify `F_N1`/`F_N2`.
+    /// Validates that the n-branch is genuinely wired into the
+    /// verifier for the SHA+ECDSA flow.
+    #[test]
+    fn test_e2e_sha_ecdsa_tamper_n_branch_up_evals() {
+        do_test_sha_ecdsa(
+            SHA_ECDSA_NUM_VARS,
+            |proof| {
+                let _ = proof.n_branch.resolver.up_evals.pop();
+            },
+            |res| {
+                let err = res.unwrap_err();
+                assert!(
+                    matches!(&err, ProtocolError::Resolver(_)),
+                    "n-branch CPR up-evals tamper should be detected, got {err:?}",
                 );
             },
         );
@@ -1510,7 +1691,7 @@ mod tests {
         .expect("Prover failed");
 
         assert_eq!(
-            proof.resolver.bit_op_down_evals.len(),
+            proof.p_branch.resolver.bit_op_down_evals.len(),
             num_bit_op,
             "Proof.resolver.bit_op_down_evals.len() must equal bit_op_specs.len()",
         );
@@ -1541,7 +1722,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
+            |proof| proof.p_branch.ideal_check.combined_mle_values.swap(0, 1),
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },

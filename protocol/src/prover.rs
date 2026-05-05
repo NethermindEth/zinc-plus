@@ -25,8 +25,9 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
-    degree_counter::count_max_degree,
+    Uair, UairSignature, UairTrace,
+    constraint_counter::{count_constraints, count_constraints_n},
+    degree_counter::{count_max_degree, count_max_degree_n},
 };
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -135,6 +136,11 @@ pub struct ProverIdealChecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    /// Which UAIR constraint set is active for this pipeline run:
+    /// `false` → p-branch (`U::constrain_general`, mod-`p`),
+    /// `true`  → n-branch (`U::constrain_general_n`, mod-`n`).
+    /// Set by `step2_ideal_check[_n]` and propagated to Step 4 (CPR).
+    is_n_branch: bool,
 
     // New
     ic_proof: IdealCheckProof<F>,
@@ -149,6 +155,8 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     ic_eval_point: Vec<F>,
+    /// Branch tag — see [`ProverIdealChecked::is_n_branch`].
+    is_n_branch: bool,
 
     // New
     /// ψ_α projection element (used by Step 4 CPR — including bit-op
@@ -166,6 +174,8 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
+    /// Branch tag — see [`ProverIdealChecked::is_n_branch`].
+    is_n_branch: bool,
 
     // New
     /// ψ_α projection element (used by Step 5 mp_eval — including
@@ -190,6 +200,8 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
+    /// Branch tag — see [`ProverIdealChecked::is_n_branch`].
+    is_n_branch: bool,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -207,6 +219,8 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     lookup_proof: Option<BatchedLookupProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
+    /// Branch tag — see [`ProverIdealChecked::is_n_branch`].
+    is_n_branch: bool,
 
     // New
     lifted_evals: Vec<DynamicPolynomialF<F>>,
@@ -235,6 +249,8 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
     lookup_proof: Option<BatchedLookupProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Branch tag — see [`ProverIdealChecked::is_n_branch`].
+    is_n_branch: bool,
 }
 
 //
@@ -340,27 +356,31 @@ impl_with_type_bounds!(ProverBase
     #[allow(clippy::type_complexity)]
     fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         &mut self,
+        field_cfg: F::Config,
         project_scalar: S,
     ) -> Result<(F::Config, ScalarMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
     {
-        // `fixed-prime` branch: use the secp256k1 base field prime as the
-        // projecting prime instead of drawing one from the transcript.
-        // See `crate::fixed_prime` for the soundness caveat.
-        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
-
+        // `fixed-prime` branch: the projecting prime is supplied by the
+        // caller (instead of being drawn from the transcript). See
+        // `crate::fixed_prime` for the soundness caveat.
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         Ok((field_cfg, projected_scalars_fx))
     }
 
     /// Step 1 (combined / row-major): Prime projection
-    /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
-    /// full trace and scalars using the row-major layout.
+    /// (`\phi_q`: `Z[X] -> F_q[X]`).
+    ///
+    /// `field_cfg` selects the projecting prime — pass
+    /// `secp256k1_base_field_cfg::<F, Zt::Fmod>()` for the p-branch or
+    /// `secp256k1_scalar_field_cfg::<F, Zt::Fmod>()` for the n-branch.
+    /// Projects the full trace and scalars using the row-major layout.
     /// Works for both linear and non-linear constraints.
     pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
+        field_cfg: F::Config,
         project_scalar: S,
     ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
-        let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+        let (field_cfg, projected_scalars_fx) = self.project_common(field_cfg, project_scalar)?;
 
         let projected_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
         Ok(ProverProjectedCombined {
@@ -372,14 +392,17 @@ impl_with_type_bounds!(ProverBase
     }
 
     /// Step 1 (MLE-first / column-major): Prime projection
-    /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
-    /// full trace and scalars using the column-major layout.
+    /// (`\phi_q`: `Z[X] -> F_q[X]`).
+    ///
+    /// `field_cfg` selects the projecting prime — see [`Self::step1_combined`].
+    /// Projects the full trace and scalars using the column-major layout.
     /// Only suitable for linear constraints.
     pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
+        field_cfg: F::Config,
         project_scalar: S,
     ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
-        let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+        let (field_cfg, projected_scalars_fx) = self.project_common(field_cfg, project_scalar)?;
 
         let projected_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
         Ok(ProverProjectedMleFirst {
@@ -395,11 +418,14 @@ impl_with_type_bounds!(ProverBase
     /// so the ideal-check can route them through their respective fast/slow
     /// lanes. Costs roughly the sum of `step1_combined` and
     /// `step1_mle_first` projection times.
+    ///
+    /// `field_cfg` selects the projecting prime — see [`Self::step1_combined`].
     pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
+        field_cfg: F::Config,
         project_scalar: S,
     ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
-        let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+        let (field_cfg, projected_scalars_fx) = self.project_common(field_cfg, project_scalar)?;
 
         let row_major_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
         let column_major_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
@@ -415,8 +441,8 @@ impl_with_type_bounds!(ProverBase
 
 impl_with_type_bounds!(ProverProjectedCombined
 {
-    /// Step 2 (combined): Ideal check via `prove_combined` on the row-major
-    /// trace. Works for both linear and non-linear constraints.
+    /// Step 2 (combined, p-branch): Ideal check via `prove_combined` on the
+    /// row-major trace. Works for both linear and non-linear constraints.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -436,6 +462,34 @@ impl_with_type_bounds!(ProverProjectedCombined
             field_cfg: self.field_cfg,
             projected_trace: ProjectedTrace::RowMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: false,
+            ic_proof,
+            ic_eval_point: ic_prover_state.evaluation_point,
+        })
+    }
+
+    /// Step 2 (combined, n-branch): Ideal check via `prove_combined_n` on
+    /// the row-major trace. Dispatches `U::constrain_general_n` (mod-`n`).
+    pub fn step2_ideal_check_n(
+        mut self,
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let num_constraints = count_constraints_n::<U>();
+
+        let (ic_proof, ic_prover_state) = U::prove_combined_n(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &self.projected_trace,
+            &self.projected_scalars_fx,
+            num_constraints,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
+
+        Ok(ProverIdealChecked {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: ProjectedTrace::RowMajor(self.projected_trace),
+            projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: true,
             ic_proof,
             ic_eval_point: ic_prover_state.evaluation_point,
         })
@@ -444,8 +498,8 @@ impl_with_type_bounds!(ProverProjectedCombined
 
 impl_with_type_bounds!(ProverProjectedMleFirst
 {
-    /// Step 2 (MLE-first): Ideal check via `prove_linear` on the column-major
-    /// trace. Only suitable for linear constraints.
+    /// Step 2 (MLE-first, p-branch): Ideal check via `prove_linear` on the
+    /// column-major trace. Only suitable for linear constraints.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -465,6 +519,33 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             field_cfg: self.field_cfg,
             projected_trace: ProjectedTrace::ColumnMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: false,
+            ic_proof,
+            ic_eval_point: ic_prover_state.evaluation_point,
+        })
+    }
+
+    /// Step 2 (MLE-first, n-branch): Ideal check via `prove_linear_n`.
+    pub fn step2_ideal_check_n(
+        mut self,
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let num_constraints = count_constraints_n::<U>();
+
+        let (ic_proof, ic_prover_state) = U::prove_linear_n(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &self.projected_trace,
+            &self.projected_scalars_fx,
+            num_constraints,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
+
+        Ok(ProverIdealChecked {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: ProjectedTrace::ColumnMajor(self.projected_trace),
+            projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: true,
             ic_proof,
             ic_eval_point: ic_prover_state.evaluation_point,
         })
@@ -473,11 +554,9 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 
 impl_with_type_bounds!(ProverProjectedHybrid
 {
-    /// Step 2 (hybrid): Ideal check via `prove_hybrid`, which routes linear
-    /// constraints through the MLE-first lane and non-linear constraints
-    /// through the combined-poly lane, merging into a single per-constraint
-    /// claim list. Works for any UAIR; useful when the UAIR has a mix of
-    /// linear and non-linear constraints.
+    /// Step 2 (hybrid, p-branch): Ideal check via `prove_hybrid`, which
+    /// routes linear constraints through the MLE-first lane and non-linear
+    /// constraints through the combined-poly lane.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
@@ -501,6 +580,34 @@ impl_with_type_bounds!(ProverProjectedHybrid
             field_cfg: self.field_cfg,
             projected_trace: ProjectedTrace::RowMajor(self.row_major_trace),
             projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: false,
+            ic_proof,
+            ic_eval_point: ic_prover_state.evaluation_point,
+        })
+    }
+
+    /// Step 2 (hybrid, n-branch): Ideal check via `prove_hybrid_n`.
+    pub fn step2_ideal_check_n(
+        mut self,
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+        let num_constraints = count_constraints_n::<U>();
+
+        let (ic_proof, ic_prover_state) = U::prove_hybrid_n(
+            &mut self.base.pcs_transcript.fs_transcript,
+            &self.row_major_trace,
+            &self.column_major_trace,
+            &self.projected_scalars_fx,
+            num_constraints,
+            self.base.num_vars,
+            &self.field_cfg,
+        )?;
+
+        Ok(ProverIdealChecked {
+            base: self.base,
+            field_cfg: self.field_cfg,
+            projected_trace: ProjectedTrace::RowMajor(self.row_major_trace),
+            projected_scalars_fx: self.projected_scalars_fx,
+            is_n_branch: true,
             ic_proof,
             ic_eval_point: ic_prover_state.evaluation_point,
         })
@@ -533,6 +640,7 @@ impl_with_type_bounds!(ProverIdealChecked
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_eval_point: self.ic_eval_point,
+            is_n_branch: self.is_n_branch,
             projecting_element_f,
             projected_trace_f,
             projected_scalars_f,
@@ -549,7 +657,21 @@ impl_with_type_bounds!(ProverEvalProjected
     pub fn step4_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
-        let num_constraints = count_constraints::<U>();
+        // Dispatch on the branch tag set by Step 2:
+        //   - p-branch (`is_n_branch = false`): the existing flow —
+        //     CPR on `U::constrain_general` + booleanity sumcheck on
+        //     binary witness columns + multi-degree sumcheck merge.
+        //   - n-branch (`is_n_branch = true`): CPR on
+        //     `U::constrain_general_n` only. Booleanity is skipped:
+        //     the witness binary_polys are committed once and validated
+        //     by the p-branch's booleanity sumcheck — no need to repeat
+        //     under the n-prime field config. The CPR group flows into
+        //     a single-group multi-degree sumcheck.
+        let num_constraints = if self.is_n_branch {
+            count_constraints_n::<U>()
+        } else {
+            count_constraints::<U>()
+        };
         // Sumcheck protocol degree must accommodate the actual fold
         // polynomial's per-variable degree, including `assert_zero`
         // constraints. Although their values are identically zero on the
@@ -559,7 +681,11 @@ impl_with_type_bounds!(ProverEvalProjected
         // `ConstraintFolder::assert_zero`. Their inclusion is what binds
         // the committed witness to the assert_zero claims (otherwise a
         // dishonest prover could violate them undetected).
-        let max_degree = count_max_degree::<U>();
+        let max_degree = if self.is_n_branch {
+            count_max_degree_n::<U>()
+        } else {
+            count_max_degree::<U>()
+        };
 
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -572,6 +698,7 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
             &self.base.trace.binary_poly,
             &self.projecting_element_f,
+            self.is_n_branch,
         )?;
 
         // 4b: Algebraic booleanity sumcheck (separate degree-3 group).
@@ -581,6 +708,12 @@ impl_with_type_bounds!(ProverEvalProjected
         // bit cols (`int_witness_bit_cols`), and virtual booleanity
         // linear-combo cols (`virtual_booleanity_cols`) — every entry
         // must lie in `{0, 1}`.
+        //
+        // Skipped in the n-branch: booleanity is a property of the
+        // committed witness (independent of the projecting prime), and
+        // it has already been discharged by the p-branch run. Repeating
+        // it under the n-prime field config would only burn transcript
+        // space.
         let num_pub_bin = self
             .base
             .uair_signature
@@ -667,14 +800,21 @@ impl_with_type_bounds!(ProverEvalProjected
             .chain(virtual_binary_mles.iter())
             .cloned()
             .collect();
-        let bool_prep = prepare_booleanity_group::<F, D>(
-            &mut self.base.pcs_transcript.fs_transcript,
-            &booleanity_binary_cols,
-            &extra_bit_cols,
-            &self.ic_eval_point,
-            &self.field_cfg,
-        )
-        .map_err(ProtocolError::Booleanity)?;
+        // n-branch: do not run a booleanity group at all (witness
+        // booleanity is bound by the p-branch's run on the same
+        // commitments).
+        let bool_prep = if self.is_n_branch {
+            None
+        } else {
+            prepare_booleanity_group::<F, D>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &booleanity_binary_cols,
+                &extra_bit_cols,
+                &self.ic_eval_point,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?
+        };
 
         let mut groups = vec![cpr_group];
         let mut bool_ancillary_opt = None;
@@ -705,7 +845,12 @@ impl_with_type_bounds!(ProverEvalProjected
         // check against the corresponding `down_evals`. Streaming when
         // we didn't materialize the F::Inner MLEs above; otherwise eval
         // each one directly to reuse the existing buffers.
-        let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        //
+        // Skipped in the n-branch: shifted-bit-slice consistency is a
+        // p-branch witness-binding artifact (already discharged).
+        let shifted_bit_slice_evals: Vec<F> = if self.is_n_branch {
+            Vec::new()
+        } else if shifted_bit_slice_mles.is_empty() {
             compute_shifted_bit_slice_evals_streaming::<F, D>(
                 &self.base.trace.binary_poly[num_pub_bin..],
                 self.base.uair_signature.shifted_bit_slice_specs(),
@@ -748,6 +893,7 @@ impl_with_type_bounds!(ProverEvalProjected
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
+            is_n_branch: self.is_n_branch,
             projecting_element_f: self.projecting_element_f,
             projected_trace_f: self.projected_trace_f,
             cpr_proof,
@@ -819,6 +965,7 @@ impl_with_type_bounds!(ProverSumchecked
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            is_n_branch: self.is_n_branch,
             mp_proof,
             r_0: mp_prover_state.eval_point,
         })
@@ -860,6 +1007,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             lookup_proof: self.lookup_proof,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
+            is_n_branch: self.is_n_branch,
             lifted_evals,
         })
     }
@@ -912,33 +1060,36 @@ impl_with_type_bounds!(ProverLifted
             lookup_proof: self.lookup_proof,
             mp_proof: self.mp_proof,
             lifted_evals: self.lifted_evals,
+            is_n_branch: self.is_n_branch,
         })
     }
 });
 
 impl_with_type_bounds!(ProverPcsOpened
 {
-    /// Assemble the final proof from accumulated state.
-    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
-        let sig = self.base.uair_signature;
-        let zip_proof = self.base.pcs_transcript.stream.into_inner();
-        let commitments = (
-            self.base.commitment_bin,
-            self.base.commitment_arb,
-            self.base.commitment_int,
-        );
-
+    /// Extract a [`BranchProof`] for this run AND return the still-live
+    /// [`ProverBase`] with the evolving `pcs_transcript`. Used by the
+    /// dual-pipeline orchestrator: after the p-branch finishes Step 7
+    /// the orchestrator calls this, gets the p-branch's `BranchProof`
+    /// + the live base, then re-enters Step 1 with the n-branch's
+    /// `field_cfg`. The same `pcs_transcript` flows through both
+    /// branches via sequential append.
+    #[allow(clippy::type_complexity)]
+    pub fn into_branch_and_base(
+        self,
+    ) -> (BranchProof<F>, ProverBase<'a, Zt, U, F, D>) {
+        let sig_ref = &self.base.uair_signature;
         let lifted_evals = self.lifted_evals;
 
         // Extract witness-only lifted evals (public columns come first in trace).
-        let pub_cols = sig.public_cols();
+        let pub_cols = sig_ref.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
         let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
         let num_pub_int = pub_cols.num_int_cols();
-        let total = sig.total_cols();
+        let total = sig_ref.total_cols();
         let num_total_bin = total.num_binary_poly_cols();
         let num_total_arb = total.num_arbitrary_poly_cols();
-        let witness = sig.witness_cols();
+        let witness = sig_ref.witness_cols();
         let witness_arb_offset = add!(num_total_bin, num_pub_arb);
         let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
         let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
@@ -949,15 +1100,45 @@ impl_with_type_bounds!(ProverPcsOpened
             .cloned()
             .collect();
 
-        Ok(Proof {
-            commitments,
+        let branch = BranchProof {
             ideal_check: self.ic_proof,
             resolver: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             multipoint_eval: self.mp_proof,
-            zip: zip_proof,
             witness_lifted_evals,
             lookup_proof: self.lookup_proof,
+        };
+
+        (branch, self.base)
+    }
+
+    /// Single-branch convenience: assemble the final proof by treating
+    /// this run as the **p-branch** and cloning into the n-branch slot.
+    /// Used by the folded paths and any test that runs only one
+    /// pipeline; the dual-pipeline `prove` orchestrator does not call
+    /// this, instead invoking [`Self::into_branch_and_base`] twice.
+    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+        let (p_branch, base) = self.into_branch_and_base();
+        let zip_proof = base.pcs_transcript.stream.into_inner();
+        let commitments = (
+            base.commitment_bin,
+            base.commitment_arb,
+            base.commitment_int,
+        );
+
+        // Single-branch stopgap: clone the p-branch artifacts into the
+        // n-branch slot. Sound for any UAIR with empty
+        // `constrain_general_n` (the default), where the n-branch
+        // verification check would have nothing to assert; the
+        // verifier currently still ignores n_branch in this path.
+        // The dual-pipeline `prove` orchestrator avoids this by
+        // running the n-branch through its own pipeline instead.
+        let n_branch = p_branch.clone();
+        Ok(Proof {
+            commitments,
+            zip: zip_proof,
+            p_branch,
+            n_branch,
         })
     }
 });
@@ -991,9 +1172,27 @@ where
 {
     /// Zinc+ full PIOP prover.
     ///
-    /// Runs all protocol steps in sequence and returns the assembled proof.
-    /// For per-step control, start with [`Self::step0_commit`] and chain the
-    /// individual `stepN_*` methods.
+    /// Runs all protocol steps in sequence and returns the assembled
+    /// dual-branch proof.
+    ///
+    /// # Dual-pipeline (Phase 2 stopgap)
+    ///
+    /// The proof shape carries one [`BranchProof`] per algebraic branch
+    /// (p-branch under base prime `p`, n-branch under curve order `n`).
+    /// Phase 2 only runs the **p-branch** pipeline end-to-end; the
+    /// n-branch is populated by cloning `p_branch` inside
+    /// [`ProverPcsOpened::finish`]. This is sound for any UAIR whose
+    /// `Uair::constrain_n` is empty (the default — every existing
+    /// UAIR), because the n-branch verifier (currently disabled —
+    /// `verify` only checks `p_branch`) would have nothing to assert.
+    ///
+    /// Phase 3 will introduce real `constrain_n` constraints for ECDSA
+    /// mod-`n` arithmetic; Phase 4 will run a second pipeline on the
+    /// shared `pcs_transcript` and have the verifier check both
+    /// branches.
+    ///
+    /// For per-step control, start with [`Self::step0_commit`] and chain
+    /// the individual `stepN_*` methods.
     ///
     /// # Path selection
     ///
@@ -1021,11 +1220,28 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+        // ── Dual-pipeline orchestrator ────────────────────────────
+        //
+        // Step 0 commits the trace once; Steps 1–7 then run twice on
+        // the same `pcs_transcript` via sequential append. The
+        // p-branch (`field_cfg = p`) runs first and dispatches
+        // `U::constrain_general`. The n-branch (`field_cfg = n`)
+        // runs second and dispatches `U::constrain_general_n`. Each
+        // branch produces its own `BranchProof`; both share the
+        // single PCS commitment triple and the single `zip` byte
+        // stream that both Step 7s appended into.
+        //
+        // Path classification (MLE-first vs Combined vs Hybrid) is
+        // computed independently per branch using the matching counter
+        // helpers (`linear_constraint_mask` / `_n`), so a UAIR with
+        // linear p-branch and non-linear n-branch (or vice versa)
+        // routes each through its appropriate fast lane.
+
         let committed = Self::step0_commit(pp, trace, num_vars)?;
 
-        let ideal_checked = if MLE_FIRST {
-            // Classify constraints by degree, ignoring zero-ideal (their
-            // value is substituted with ZERO regardless of lane).
+        // ── p-branch ──
+        let p_cfg = crate::fixed_prime::secp256k1_base_field_cfg::<F, Zt::Fmod>();
+        let p_ideal_checked = if MLE_FIRST {
             let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
             let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(
                 zinc_uair::constraint_counter::count_constraints::<U>(),
@@ -1040,28 +1256,78 @@ where
             }
             match (any_linear, any_nonlinear) {
                 (true, false) => committed
-                    .step1_mle_first(project_scalar)?
+                    .step1_mle_first(p_cfg.clone(), &project_scalar)?
                     .step2_ideal_check()?,
                 (false, _) => committed
-                    .step1_combined(project_scalar)?
+                    .step1_combined(p_cfg.clone(), &project_scalar)?
                     .step2_ideal_check()?,
                 (true, true) => committed
-                    .step1_hybrid(project_scalar)?
+                    .step1_hybrid(p_cfg.clone(), &project_scalar)?
                     .step2_ideal_check()?,
             }
         } else {
             committed
-                .step1_combined(project_scalar)?
+                .step1_combined(p_cfg.clone(), &project_scalar)?
                 .step2_ideal_check()?
         };
-
-        ideal_checked
+        let p_pcs_opened = p_ideal_checked
             .step3_eval_projection()?
             .step4_sumcheck()?
             .step5_multipoint_eval()?
             .step6_lift_and_project()?
-            .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?
-            .finish()
+            .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?;
+        let (p_branch, base) = p_pcs_opened.into_branch_and_base();
+
+        // ── n-branch ──
+        let n_cfg = crate::fixed_prime::secp256k1_scalar_field_cfg::<F, Zt::Fmod>();
+        let n_ideal_checked = if MLE_FIRST {
+            let mask = zinc_uair::degree_counter::linear_constraint_mask_n::<U>();
+            let n_num = zinc_uair::constraint_counter::count_constraints_n::<U>();
+            let ideals = zinc_uair::ideal_collector::collect_ideals_n::<U>(n_num).ideals;
+            let (mut any_linear, mut any_nonlinear) = (false, false);
+            for (m, i) in mask.iter().zip(ideals.iter()) {
+                if i.is_zero_ideal() {
+                    continue;
+                }
+                if *m { any_linear = true } else { any_nonlinear = true }
+            }
+            match (any_linear, any_nonlinear) {
+                (true, false) => base
+                    .step1_mle_first(n_cfg.clone(), &project_scalar)?
+                    .step2_ideal_check_n()?,
+                (false, _) => base
+                    .step1_combined(n_cfg.clone(), &project_scalar)?
+                    .step2_ideal_check_n()?,
+                (true, true) => base
+                    .step1_hybrid(n_cfg.clone(), &project_scalar)?
+                    .step2_ideal_check_n()?,
+            }
+        } else {
+            base
+                .step1_combined(n_cfg.clone(), &project_scalar)?
+                .step2_ideal_check_n()?
+        };
+        let n_pcs_opened = n_ideal_checked
+            .step3_eval_projection()?
+            .step4_sumcheck()?
+            .step5_multipoint_eval()?
+            .step6_lift_and_project()?
+            .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?;
+        let (n_branch, base) = n_pcs_opened.into_branch_and_base();
+
+        // ── Bundle ──
+        let zip_proof = base.pcs_transcript.stream.into_inner();
+        let commitments = (
+            base.commitment_bin,
+            base.commitment_arb,
+            base.commitment_int,
+        );
+        Ok(Proof {
+            commitments,
+            zip: zip_proof,
+            p_branch,
+            n_branch,
+        })
     }
 }
 
@@ -1169,26 +1435,153 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
+    // ── Dual-pipeline orchestrator (folded 1×) ──────────────────────────
+    // Steps 1–7 run twice on the shared `pcs_transcript`. The p-branch
+    // (`secp256k1_base_field_cfg`) runs first and dispatches
+    // `U::prove_*` / `count_constraints::<U>()` etc.; the n-branch
+    // (`secp256k1_scalar_field_cfg`) runs second and dispatches the
+    // `_n` variants. Booleanity (and shifted-bit-slice consistency) is
+    // a p-branch-only concern — the n-branch skips those groups
+    // entirely. Both branches' Step-7 PCS opens append into the same
+    // `pcs_transcript.stream`, which becomes `proof.zip` at the end.
+    let p_field_cfg = crate::fixed_prime::secp256k1_base_field_cfg::<F, ZtF::Fmod>();
+    let n_field_cfg = crate::fixed_prime::secp256k1_scalar_field_cfg::<F, ZtF::Fmod>();
+
+    // ── p-branch ────────────────────────────────────────────────────────
+    let p_branch = run_folded_steps_1_to_7::<ZtF, U, F, D, HALF_D, MLE_FIRST, CHECK_FOR_OVERFLOW>(
+        &mut pcs_transcript,
+        trace,
+        &uair_signature,
+        num_vars,
+        &project_scalar,
+        &p_field_cfg,
+        false,
+        pp_bin_split,
+        pp_arb,
+        pp_int,
+        &split_binary_witness,
+        &witness_trace.arbitrary_poly,
+        &witness_trace.int,
+        hint_bin_split.as_ref(),
+        hint_arb.as_ref(),
+        hint_int.as_ref(),
+    )?;
+
+    // ── n-branch ────────────────────────────────────────────────────────
+    let n_branch = run_folded_steps_1_to_7::<ZtF, U, F, D, HALF_D, MLE_FIRST, CHECK_FOR_OVERFLOW>(
+        &mut pcs_transcript,
+        trace,
+        &uair_signature,
+        num_vars,
+        &project_scalar,
+        &n_field_cfg,
+        true,
+        pp_bin_split,
+        pp_arb,
+        pp_int,
+        &split_binary_witness,
+        &witness_trace.arbitrary_poly,
+        &witness_trace.int,
+        hint_bin_split.as_ref(),
+        hint_arb.as_ref(),
+        hint_int.as_ref(),
+    )?;
+
+    // ── Assemble the proof ──────────────────────────────────────────────
+    let zip_proof = pcs_transcript.stream.into_inner();
+    let commitments = (commitment_bin, commitment_arb, commitment_int);
+
+    Ok(Proof {
+        commitments,
+        zip: zip_proof,
+        p_branch,
+        n_branch,
+    })
+}
+
+/// Inner per-branch runner for [`prove_folded`]. Runs Steps 1–7 of the
+/// folded-1× PIOP under a given branch (`field_cfg` + `is_n_branch`)
+/// against the shared `pcs_transcript`, and produces this branch's
+/// [`BranchProof`].
+///
+/// When `is_n_branch == true`, dispatches to the `_n` variants of
+/// `prove_combined` / `prove_linear` / `prove_hybrid` and uses
+/// `count_constraints_n` / `count_max_degree_n`. Booleanity (and the
+/// shifted-bit-slice consistency artifact) is skipped — those bind the
+/// committed witness once via the p-branch run and don't need to be
+/// repeated under the n-prime field config.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn run_folded_steps_1_to_7<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pcs_transcript: &mut PcsProverTranscript,
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, D>,
+    uair_signature: &UairSignature,
+    num_vars: usize,
+    project_scalar: &(impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync),
+    field_cfg: &F::Config,
+    is_n_branch: bool,
+    pp_bin_split: &ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+    pp_arb: &ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+    pp_int: &ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    split_binary_witness: &[DenseMultilinearExtension<BinaryPoly<HALF_D>>],
+    witness_arb: &[DenseMultilinearExtension<<ZtF::ArbitraryZt as ZipTypes>::Eval>],
+    witness_int: &[DenseMultilinearExtension<<ZtF::IntZt as ZipTypes>::Eval>],
+    hint_bin_split: Option<&ZipPlusHint<<ZtF::BinaryZt as ZipTypes>::Cw>>,
+    hint_arb: Option<&ZipPlusHint<<ZtF::ArbitraryZt as ZipTypes>::Cw>>,
+    hint_int: Option<&ZipPlusHint<<ZtF::IntZt as ZipTypes>::Cw>>,
+) -> Result<BranchProof<F>, ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::FoldedZincTypes<D, HALF_D>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
     // ── Step 1: Prime projection ────────────────────────────────────────
-    // `fixed-prime` branch: match the non-folded path (see
-    // `ProverCommitted::project_common`) and use the secp256k1 base
-    // prime as the projecting prime instead of drawing one from the
-    // transcript. UAIRs whose constraints are secp256k1-specific
-    // algebraic identities (e.g. `EcdsaUair`) only hold under this
-    // prime, so a random prime here would break verification.
-    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
-    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, field_cfg));
 
     // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
-    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
-    // - !MLE_FIRST                          → row-major + prove_combined
-    // - MLE_FIRST, all linear               → column-major + prove_linear
-    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
-    // - MLE_FIRST, all non-linear           → row-major + prove_combined
-    let num_constraints = count_constraints::<U>();
+    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch. The n-branch
+    // uses the `_n` variants of the lane functions and counts via
+    // `count_constraints_n` / `linear_constraint_mask_n`.
+    let num_constraints = if is_n_branch {
+        count_constraints_n::<U>()
+    } else {
+        count_constraints::<U>()
+    };
     let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
-        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
-        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mask, ideals): (Vec<bool>, Vec<_>) = if is_n_branch {
+            let m = zinc_uair::degree_counter::linear_constraint_mask_n::<U>().to_vec();
+            let i = zinc_uair::ideal_collector::collect_ideals_n::<U>(num_constraints).ideals;
+            (m, i)
+        } else {
+            let m = zinc_uair::degree_counter::linear_constraint_mask::<U>().to_vec();
+            let i = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+            (m, i)
+        };
         let (mut any_linear, mut any_nonlinear) = (false, false);
         for (m, i) in mask.iter().zip(ideals.iter()) {
             if i.is_zero_ideal() {
@@ -1202,73 +1595,122 @@ where
         }
         match (any_linear, any_nonlinear) {
             (true, false) => {
-                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
-                let (p, s) = U::prove_linear(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, field_cfg);
+                let (p, s) = if is_n_branch {
+                    U::prove_linear_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_linear(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
             }
             (true, true) => {
                 let (rm, cm) = cfg_join!(
-                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-                    project_trace_coeffs_column_major(trace, &field_cfg),
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg),
+                    project_trace_coeffs_column_major(trace, field_cfg),
                 );
-                let (p, s) = U::prove_hybrid(
-                    &mut pcs_transcript.fs_transcript,
-                    &rm,
-                    &cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let (p, s) = if is_n_branch {
+                    U::prove_hybrid_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_hybrid(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(rm))
             }
             (false, _) => {
                 let projected_trace_rm =
-                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-                let (p, s) = U::prove_combined(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_rm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg);
+                let (p, s) = if is_n_branch {
+                    U::prove_combined_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_combined(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
             }
         }
     } else {
-        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-        let (p, s) = U::prove_combined(
-            &mut pcs_transcript.fs_transcript,
-            &projected_trace_rm,
-            &projected_scalars_fx,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )?;
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg);
+        let (p, s) = if is_n_branch {
+            U::prove_combined_n(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )?
+        } else {
+            U::prove_combined(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )?
+        };
         (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
     };
     let ic_eval_point = ic_prover_state.evaluation_point;
 
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
-    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+    let projecting_element_f: F = F::from_with_cfg(&projecting_element, field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
-    let max_degree = count_max_degree::<U>();
+    let max_degree = if is_n_branch {
+        count_max_degree_n::<U>()
+    } else {
+        count_max_degree::<U>()
+    };
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
@@ -1277,84 +1719,88 @@ where
         num_constraints,
         num_vars,
         max_degree,
-        &field_cfg,
+        field_cfg,
         &trace.binary_poly,
         &projecting_element_f,
+        is_n_branch,
     )?;
 
-    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
-    // packed virtual binary_poly cols + declared int bit cols + virtual
-    // booleanity linear-combo cols. Public binary_poly cols are known
-    // to the verifier (recomputed locally in step 6) so booleanity on
-    // them is redundant.
+    // Booleanity is skipped in the n-branch — see the `step4_sumcheck`
+    // dispatch in the unfolded prover for rationale.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_pub_int = uair_signature.public_cols().num_int_cols();
     let num_wit_int = uair_signature.witness_cols().num_int_cols();
     let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
-    let int_bit_cols: Vec<_> = uair_signature
-        .int_witness_bit_cols()
-        .iter()
-        .map(|&idx| projected_trace_f[int_offset + idx].clone())
-        .collect();
-    let virtual_specs = uair_signature.virtual_booleanity_cols();
-    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
-        Vec::new()
+
+    let (bool_prep, shifted_bit_slice_mles) = if is_n_branch {
+        (None, Vec::new())
     } else {
-        build_shifted_bit_slice_mles::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            uair_signature.shifted_bit_slice_specs(),
-            &field_cfg,
-        )
-    };
-    let virtual_mles = if virtual_specs.is_empty() {
-        Vec::new()
-    } else {
-        let self_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            &field_cfg,
-        );
-        let public_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[..num_pub_bin],
-            &field_cfg,
-        );
-        let int_witness_cols: Vec<_> = (0..num_wit_int)
-            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+        let int_bit_cols: Vec<_> = uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| projected_trace_f[int_offset + idx].clone())
             .collect();
-        build_virtual_booleanity_mles::<F, D>(
-            &self_bit_slices,
-            &shifted_bit_slice_mles,
-            &public_bit_slices,
-            &int_witness_cols,
-            virtual_specs,
-            &field_cfg,
+        let virtual_specs = uair_signature.virtual_booleanity_cols();
+        let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            build_shifted_bit_slice_mles::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                uair_signature.shifted_bit_slice_specs(),
+                field_cfg,
+            )
+        };
+        let virtual_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            let self_bit_slices = compute_bit_slices_flat::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                field_cfg,
+            );
+            let public_bit_slices = compute_bit_slices_flat::<F, D>(
+                &trace.binary_poly[..num_pub_bin],
+                field_cfg,
+            );
+            let int_witness_cols: Vec<_> = (0..num_wit_int)
+                .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+                .collect();
+            build_virtual_booleanity_mles::<F, D>(
+                &self_bit_slices,
+                &shifted_bit_slice_mles,
+                &public_bit_slices,
+                &int_witness_cols,
+                virtual_specs,
+                field_cfg,
+            )
+        };
+        let mut extra_bit_cols = int_bit_cols;
+        extra_bit_cols.extend(virtual_mles);
+        let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+        let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+            &trace.binary_poly[num_pub_bin..],
+            &trace.binary_poly[..num_pub_bin],
+            uair_signature.shifted_bit_slice_specs(),
+            virtual_bp_specs,
+        );
+        let kept_witness_binary = filter_booleanity_witness(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.booleanity_skip_indices(),
+        );
+        let booleanity_binary_cols: Vec<_> = kept_witness_binary
+            .iter()
+            .chain(virtual_binary_mles.iter())
+            .cloned()
+            .collect();
+        let bp = prepare_booleanity_group::<F, D>(
+            &mut pcs_transcript.fs_transcript,
+            &booleanity_binary_cols,
+            &extra_bit_cols,
+            &ic_eval_point,
+            field_cfg,
         )
+        .map_err(ProtocolError::Booleanity)?;
+        (bp, shifted_bit_slice_mles)
     };
-    let mut extra_bit_cols = int_bit_cols;
-    extra_bit_cols.extend(virtual_mles);
-    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
-    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
-        &trace.binary_poly[num_pub_bin..],
-        &trace.binary_poly[..num_pub_bin],
-        uair_signature.shifted_bit_slice_specs(),
-        virtual_bp_specs,
-    );
-    let kept_witness_binary = filter_booleanity_witness(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.booleanity_skip_indices(),
-    );
-    let booleanity_binary_cols: Vec<_> = kept_witness_binary
-        .iter()
-        .chain(virtual_binary_mles.iter())
-        .cloned()
-        .collect();
-    let bool_prep = prepare_booleanity_group::<F, D>(
-        &mut pcs_transcript.fs_transcript,
-        &booleanity_binary_cols,
-        &extra_bit_cols,
-        &ic_eval_point,
-        &field_cfg,
-    )
-    .map_err(ProtocolError::Booleanity)?;
 
     let mut groups = vec![cpr_group];
     let mut bool_ancillary_opt = None;
@@ -1367,38 +1813,40 @@ where
         &mut pcs_transcript.fs_transcript,
         groups,
         num_vars,
-        &field_cfg,
+        field_cfg,
     );
     let cpr_state = md_states.remove(0);
     let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
         &mut pcs_transcript.fs_transcript,
         cpr_state,
         cpr_ancillary,
-        &field_cfg,
+        field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
-        compute_shifted_bit_slice_evals_streaming::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            uair_signature.shifted_bit_slice_specs(),
-            &cpr_prover_state.evaluation_point,
-            &field_cfg,
-        )
-        .map_err(|e| ProtocolError::Booleanity(e.into()))?
-    } else {
-        shifted_bit_slice_mles
-            .into_iter()
-            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::ShiftedBitSliceEval)?
-    };
-    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+    if !is_n_branch {
+        let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+            compute_shifted_bit_slice_evals_streaming::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                uair_signature.shifted_bit_slice_specs(),
+                &cpr_prover_state.evaluation_point,
+                field_cfg,
+            )
+            .map_err(|e| ProtocolError::Booleanity(e.into()))?
+        } else {
+            shifted_bit_slice_mles
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, field_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        };
+        cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+    }
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(
             &mut pcs_transcript.fs_transcript,
             bool_state,
             ba,
-            &field_cfg,
+            field_cfg,
         )
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
@@ -1413,7 +1861,7 @@ where
         uair_signature.total_cols().num_binary_poly_cols(),
         &projecting_element_f,
         num_vars,
-        &field_cfg,
+        field_cfg,
     );
     let mut sources = projected_trace_f.clone();
     sources.extend(bit_op_mles);
@@ -1426,66 +1874,61 @@ where
         &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
-        &field_cfg,
+        field_cfg,
     )?;
     let r_0 = mp_prover_state.eval_point;
 
     // ── Step 6: Lift-and-project + sample γ for folding ─────────────────
     let lifted_evals =
-        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, &field_cfg);
+        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, field_cfg);
     let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
     for bar_u in &lifted_evals {
         pcs_transcript
             .fs_transcript
             .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
     }
-    // After absorbing lifted_evals, sample the folding challenge γ. The
-    // verifier replays this exact step before any PCS verify.
     let gamma: F = {
         let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
-        F::from_with_cfg(&g_chal, &field_cfg)
+        F::from_with_cfg(&g_chal, field_cfg)
     };
 
     // ── Step 7: PCS open. Binary uses split columns at extended point ───
     let mut r0_ext = r_0.clone();
     r0_ext.push(gamma);
 
-    if let Some(hint_bin) = &hint_bin_split {
+    if let Some(hint_bin) = hint_bin_split {
         let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
+            pcs_transcript,
             pp_bin_split,
-            &split_binary_witness,
+            split_binary_witness,
             &r0_ext,
             hint_bin,
-            &field_cfg,
+            field_cfg,
         )?;
     }
-    if let Some(hint_arb) = &hint_arb {
+    if let Some(h) = hint_arb {
         let _ =
             ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
+                pcs_transcript,
                 pp_arb,
-                &witness_trace.arbitrary_poly,
+                witness_arb,
                 &r_0,
-                hint_arb,
-                &field_cfg,
+                h,
+                field_cfg,
             )?;
     }
-    if let Some(hint_int) = &hint_int {
+    if let Some(h) = hint_int {
         let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-            &mut pcs_transcript,
+            pcs_transcript,
             pp_int,
-            &witness_trace.int,
+            witness_int,
             &r_0,
-            hint_int,
-            &field_cfg,
+            h,
+            field_cfg,
         )?;
     }
 
-    // ── Assemble the proof ──────────────────────────────────────────────
-    let zip_proof = pcs_transcript.stream.into_inner();
-    let commitments = (commitment_bin, commitment_arb, commitment_int);
-
+    // ── Build branch proof ──────────────────────────────────────────────
     let pub_cols = uair_signature.public_cols();
     let num_pub_bin = pub_cols.num_binary_poly_cols();
     let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
@@ -1504,13 +1947,11 @@ where
         .cloned()
         .collect();
 
-    Ok(Proof {
-        commitments,
+    Ok(BranchProof {
         ideal_check: ic_proof,
         resolver: cpr_proof,
         combined_sumcheck,
         multipoint_eval: mp_proof,
-        zip: zip_proof,
         witness_lifted_evals,
         lookup_proof,
     })
@@ -2148,31 +2589,174 @@ where
         t.step0_commit = _t.elapsed();
     }
 
+    // ── Dual-pipeline orchestrator (folded 4×) ──────────────────────────
+    // Steps 1–7 run twice on the shared `pcs_transcript`. p-branch first
+    // (with optional timings + zip_breakdown instrumentation), then
+    // n-branch with no instrumentation (the timings API stays
+    // backward-compatible — its slots reflect the p-branch run only).
+    let p_field_cfg = crate::fixed_prime::secp256k1_base_field_cfg::<F, ZtF::Fmod>();
+    let n_field_cfg = crate::fixed_prime::secp256k1_scalar_field_cfg::<F, ZtF::Fmod>();
+
+    // ── p-branch ──
+    let p_branch = run_folded_4x_steps_1_to_7::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        &mut pcs_transcript,
+        trace,
+        &uair_signature,
+        num_vars,
+        &project_scalar,
+        &p_field_cfg,
+        false,
+        pp,
+        &artifacts,
+        &witness_trace.arbitrary_poly,
+        &witness_trace.int,
+        timings.as_deref_mut(),
+        zip_breakdown.as_deref_mut(),
+    )?;
+
+    // ── n-branch ──
+    let n_branch = run_folded_4x_steps_1_to_7::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        &mut pcs_transcript,
+        trace,
+        &uair_signature,
+        num_vars,
+        &project_scalar,
+        &n_field_cfg,
+        true,
+        pp,
+        &artifacts,
+        &witness_trace.arbitrary_poly,
+        &witness_trace.int,
+        None,
+        None,
+    )?;
+
+    // ── Assemble the proof ──────────────────────────────────────────────
+    let _t_assembly = std::time::Instant::now();
+    let zip_proof = pcs_transcript.stream.into_inner();
+    let commitments = (
+        artifacts.commitment_bin,
+        artifacts.commitment_arb,
+        artifacts.commitment_int,
+    );
+
+    let proof = Proof {
+        commitments,
+        zip: zip_proof,
+        p_branch,
+        n_branch,
+    };
+    if let Some(t) = timings.as_mut() {
+        t.assembly = _t_assembly.elapsed();
+    }
+    Ok(proof)
+}
+
+/// Inner per-branch runner for [`prove_folded_4x_inner`]. Runs Steps 1–7
+/// of the folded-4× PIOP under a given branch (`field_cfg` +
+/// `is_n_branch`) against the shared `pcs_transcript`, and produces this
+/// branch's [`BranchProof`].
+///
+/// Booleanity (and shifted-bit-slice consistency) is skipped on the
+/// n-branch — see [`run_folded_steps_1_to_7`] for the same pattern in
+/// the 1× variant.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn run_folded_4x_steps_1_to_7<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pcs_transcript: &mut PcsProverTranscript,
+    trace: &UairTrace<'static, ZtF::Int, ZtF::Int, D>,
+    uair_signature: &UairSignature,
+    num_vars: usize,
+    project_scalar: &(impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync),
+    field_cfg: &F::Config,
+    is_n_branch: bool,
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    artifacts: &Folded4xCommittedArtifacts<ZtF, D, QUARTER_D>,
+    witness_arb: &[DenseMultilinearExtension<<ZtF::ArbitraryZt as ZipTypes>::Eval>],
+    witness_int: &[DenseMultilinearExtension<<ZtF::IntZt as ZipTypes>::Eval>],
+    mut timings: Option<&mut FoldedProveTimings>,
+    mut zip_breakdown: Option<&mut FoldedProveZipBreakdown>,
+) -> Result<BranchProof<F>, ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::FoldedZincTypes<D, QUARTER_D>,
+    ZtF::Int: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a ZtF::Int>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
     // ── Step 1: Prime projection ────────────────────────────────────────
-    // `fixed-prime` branch: match the non-folded path (see
-    // `ProverCommitted::project_common`) and use the secp256k1 base
-    // prime as the projecting prime instead of drawing one from the
-    // transcript. UAIRs whose constraints are secp256k1-specific
-    // algebraic identities (e.g. `EcdsaUair`) only hold under this
-    // prime, so a random prime here would break verification.
     let _t = std::time::Instant::now();
-    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
-    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, field_cfg));
     if let Some(t) = timings.as_mut() {
         t.step1_prime_projection = _t.elapsed();
     }
 
     // ── Step 2: Ideal check (lane chosen by MLE_FIRST + UAIR shape) ─────
-    // Mirrors the unfolded `prove<MLE_FIRST, _>` dispatch:
-    // - !MLE_FIRST                          → row-major + prove_combined
-    // - MLE_FIRST, all linear               → column-major + prove_linear
-    // - MLE_FIRST, mixed linear/non-linear  → both layouts + prove_hybrid
-    // - MLE_FIRST, all non-linear           → row-major + prove_combined
+    // Uses the `_n` lane variants and the n-branch counters when
+    // `is_n_branch == true`.
     let _t_step2 = std::time::Instant::now();
-    let num_constraints = count_constraints::<U>();
+    let num_constraints = if is_n_branch {
+        count_constraints_n::<U>()
+    } else {
+        count_constraints::<U>()
+    };
     let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
-        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
-        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+        let (mask, ideals): (Vec<bool>, Vec<_>) = if is_n_branch {
+            let m = zinc_uair::degree_counter::linear_constraint_mask_n::<U>().to_vec();
+            let i = zinc_uair::ideal_collector::collect_ideals_n::<U>(num_constraints).ideals;
+            (m, i)
+        } else {
+            let m = zinc_uair::degree_counter::linear_constraint_mask::<U>().to_vec();
+            let i = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+            (m, i)
+        };
         let (mut any_linear, mut any_nonlinear) = (false, false);
         for (m, i) in mask.iter().zip(ideals.iter()) {
             if i.is_zero_ideal() {
@@ -2186,57 +2770,102 @@ where
         }
         match (any_linear, any_nonlinear) {
             (true, false) => {
-                let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
-                let (p, s) = U::prove_linear(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let projected_trace_cm = project_trace_coeffs_column_major(trace, field_cfg);
+                let (p, s) = if is_n_branch {
+                    U::prove_linear_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_linear(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
             }
             (true, true) => {
                 let (rm, cm) = cfg_join!(
-                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
-                    project_trace_coeffs_column_major(trace, &field_cfg),
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg),
+                    project_trace_coeffs_column_major(trace, field_cfg),
                 );
-                let (p, s) = U::prove_hybrid(
-                    &mut pcs_transcript.fs_transcript,
-                    &rm,
-                    &cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let (p, s) = if is_n_branch {
+                    U::prove_hybrid_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_hybrid(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(rm))
             }
             (false, _) => {
                 let projected_trace_rm =
-                    project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-                let (p, s) = U::prove_combined(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_rm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                    project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg);
+                let (p, s) = if is_n_branch {
+                    U::prove_combined_n(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                } else {
+                    U::prove_combined(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
             }
         }
     } else {
-        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-        let (p, s) = U::prove_combined(
-            &mut pcs_transcript.fs_transcript,
-            &projected_trace_rm,
-            &projected_scalars_fx,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )?;
+        let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, field_cfg);
+        let (p, s) = if is_n_branch {
+            U::prove_combined_n(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )?
+        } else {
+            U::prove_combined(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                field_cfg,
+            )?
+        };
         (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
     };
     let ic_eval_point = ic_prover_state.evaluation_point;
@@ -2247,10 +2876,10 @@ where
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────
     let _t_step3 = std::time::Instant::now();
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
-    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+    let projecting_element_f: F = F::from_with_cfg(&projecting_element, field_cfg);
 
     let projected_trace_f =
-        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
+        evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
@@ -2260,7 +2889,11 @@ where
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let _t_step4 = std::time::Instant::now();
-    let max_degree = count_max_degree::<U>();
+    let max_degree = if is_n_branch {
+        count_max_degree_n::<U>()
+    } else {
+        count_max_degree::<U>()
+    };
     let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
         &mut pcs_transcript.fs_transcript,
         projected_trace_f.clone(),
@@ -2269,82 +2902,86 @@ where
         num_constraints,
         num_vars,
         max_degree,
-        &field_cfg,
+        field_cfg,
         &trace.binary_poly,
         &projecting_element_f,
+        is_n_branch,
     )?;
 
-    // Witness binary_poly cols (minus `booleanity_skip_indices`) +
-    // packed virtual binary_poly cols + declared int bit cols + virtual
-    // booleanity linear-combo cols.
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_pub_int = uair_signature.public_cols().num_int_cols();
     let num_wit_int = uair_signature.witness_cols().num_int_cols();
     let int_offset = trace.binary_poly.len() + trace.arbitrary_poly.len();
-    let int_bit_cols: Vec<_> = uair_signature
-        .int_witness_bit_cols()
-        .iter()
-        .map(|&idx| projected_trace_f[int_offset + idx].clone())
-        .collect();
-    let virtual_specs = uair_signature.virtual_booleanity_cols();
-    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
-        Vec::new()
+
+    let (bool_prep, shifted_bit_slice_mles) = if is_n_branch {
+        (None, Vec::new())
     } else {
-        build_shifted_bit_slice_mles::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            uair_signature.shifted_bit_slice_specs(),
-            &field_cfg,
-        )
-    };
-    let virtual_mles = if virtual_specs.is_empty() {
-        Vec::new()
-    } else {
-        let self_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            &field_cfg,
-        );
-        let public_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[..num_pub_bin],
-            &field_cfg,
-        );
-        let int_witness_cols: Vec<_> = (0..num_wit_int)
-            .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+        let int_bit_cols: Vec<_> = uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| projected_trace_f[int_offset + idx].clone())
             .collect();
-        build_virtual_booleanity_mles::<F, D>(
-            &self_bit_slices,
-            &shifted_bit_slice_mles,
-            &public_bit_slices,
-            &int_witness_cols,
-            virtual_specs,
-            &field_cfg,
+        let virtual_specs = uair_signature.virtual_booleanity_cols();
+        let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            build_shifted_bit_slice_mles::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                uair_signature.shifted_bit_slice_specs(),
+                field_cfg,
+            )
+        };
+        let virtual_mles = if virtual_specs.is_empty() {
+            Vec::new()
+        } else {
+            let self_bit_slices = compute_bit_slices_flat::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                field_cfg,
+            );
+            let public_bit_slices = compute_bit_slices_flat::<F, D>(
+                &trace.binary_poly[..num_pub_bin],
+                field_cfg,
+            );
+            let int_witness_cols: Vec<_> = (0..num_wit_int)
+                .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
+                .collect();
+            build_virtual_booleanity_mles::<F, D>(
+                &self_bit_slices,
+                &shifted_bit_slice_mles,
+                &public_bit_slices,
+                &int_witness_cols,
+                virtual_specs,
+                field_cfg,
+            )
+        };
+        let mut extra_bit_cols = int_bit_cols;
+        extra_bit_cols.extend(virtual_mles);
+        let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+        let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
+            &trace.binary_poly[num_pub_bin..],
+            &trace.binary_poly[..num_pub_bin],
+            uair_signature.shifted_bit_slice_specs(),
+            virtual_bp_specs,
+        );
+        let kept_witness_binary = filter_booleanity_witness(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.booleanity_skip_indices(),
+        );
+        let booleanity_binary_cols: Vec<_> = kept_witness_binary
+            .iter()
+            .chain(virtual_binary_mles.iter())
+            .cloned()
+            .collect();
+        let bp = prepare_booleanity_group::<F, D>(
+            &mut pcs_transcript.fs_transcript,
+            &booleanity_binary_cols,
+            &extra_bit_cols,
+            &ic_eval_point,
+            field_cfg,
         )
+        .map_err(ProtocolError::Booleanity)?;
+        (bp, shifted_bit_slice_mles)
     };
-    let mut extra_bit_cols = int_bit_cols;
-    extra_bit_cols.extend(virtual_mles);
-    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
-    let virtual_binary_mles = build_virtual_binary_poly_mles::<D>(
-        &trace.binary_poly[num_pub_bin..],
-        &trace.binary_poly[..num_pub_bin],
-        uair_signature.shifted_bit_slice_specs(),
-        virtual_bp_specs,
-    );
-    let kept_witness_binary = filter_booleanity_witness(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.booleanity_skip_indices(),
-    );
-    let booleanity_binary_cols: Vec<_> = kept_witness_binary
-        .iter()
-        .chain(virtual_binary_mles.iter())
-        .cloned()
-        .collect();
-    let bool_prep = prepare_booleanity_group::<F, D>(
-        &mut pcs_transcript.fs_transcript,
-        &booleanity_binary_cols,
-        &extra_bit_cols,
-        &ic_eval_point,
-        &field_cfg,
-    )
-    .map_err(ProtocolError::Booleanity)?;
 
     let mut groups = vec![cpr_group];
     let mut bool_ancillary_opt = None;
@@ -2357,38 +2994,40 @@ where
         &mut pcs_transcript.fs_transcript,
         groups,
         num_vars,
-        &field_cfg,
+        field_cfg,
     );
     let cpr_state = md_states.remove(0);
     let (mut cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
         &mut pcs_transcript.fs_transcript,
         cpr_state,
         cpr_ancillary,
-        &field_cfg,
+        field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
-        compute_shifted_bit_slice_evals_streaming::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            uair_signature.shifted_bit_slice_specs(),
-            &cpr_prover_state.evaluation_point,
-            &field_cfg,
-        )
-        .map_err(|e| ProtocolError::Booleanity(e.into()))?
-    } else {
-        shifted_bit_slice_mles
-            .into_iter()
-            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::ShiftedBitSliceEval)?
-    };
-    cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+    if !is_n_branch {
+        let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+            compute_shifted_bit_slice_evals_streaming::<F, D>(
+                &trace.binary_poly[num_pub_bin..],
+                uair_signature.shifted_bit_slice_specs(),
+                &cpr_prover_state.evaluation_point,
+                field_cfg,
+            )
+            .map_err(|e| ProtocolError::Booleanity(e.into()))?
+        } else {
+            shifted_bit_slice_mles
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, field_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        };
+        cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
+    }
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
         let bit_slice_evals = finalize_booleanity_prover(
             &mut pcs_transcript.fs_transcript,
             bool_state,
             ba,
-            &field_cfg,
+            field_cfg,
         )
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
@@ -2407,7 +3046,7 @@ where
         uair_signature.total_cols().num_binary_poly_cols(),
         &projecting_element_f,
         num_vars,
-        &field_cfg,
+        field_cfg,
     );
     let mut sources = projected_trace_f.clone();
     sources.extend(bit_op_mles);
@@ -2420,7 +3059,7 @@ where
         &up_evals_with_bit_op,
         &cpr_proof.down_evals,
         uair_signature.shifts(),
-        &field_cfg,
+        field_cfg,
     )?;
     let r_0 = mp_prover_state.eval_point;
     if let Some(t) = timings.as_mut() {
@@ -2430,22 +3069,20 @@ where
     // ── Step 6: Lift-and-project + sample γ₁ and γ₂ ─────────────────────
     let _t_step6 = std::time::Instant::now();
     let lifted_evals =
-        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, &field_cfg);
+        compute_lifted_evals::<F, D>(&r_0, &trace.binary_poly, &projected_trace, field_cfg);
     let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
     for bar_u in &lifted_evals {
         pcs_transcript
             .fs_transcript
             .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
     }
-    // After absorbing lifted_evals, sample γ₁ then γ₂. Order matters — the
-    // verifier replays in the same order before any PCS verify.
     let gamma1: F = {
         let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
-        F::from_with_cfg(&g_chal, &field_cfg)
+        F::from_with_cfg(&g_chal, field_cfg)
     };
     let gamma2: F = {
         let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
-        F::from_with_cfg(&g_chal, &field_cfg)
+        F::from_with_cfg(&g_chal, field_cfg)
     };
     if let Some(t) = timings.as_mut() {
         t.step6_lift_and_project = _t_step6.elapsed();
@@ -2461,30 +3098,22 @@ where
         QUARTER_D,
         CHECK_FOR_OVERFLOW,
     >(
-        &mut pcs_transcript,
+        pcs_transcript,
         pp,
-        &artifacts,
-        &witness_trace.arbitrary_poly,
-        &witness_trace.int,
+        artifacts,
+        witness_arb,
+        witness_int,
         &r_0,
         gamma1,
         gamma2,
-        &field_cfg,
+        field_cfg,
         zip_breakdown.as_deref_mut(),
     )?;
     if let Some(t) = timings.as_mut() {
         t.step7_pcs_open = _t_step7.elapsed();
     }
 
-    // ── Assemble the proof ──────────────────────────────────────────────
-    let _t_assembly = std::time::Instant::now();
-    let zip_proof = pcs_transcript.stream.into_inner();
-    let commitments = (
-        artifacts.commitment_bin,
-        artifacts.commitment_arb,
-        artifacts.commitment_int,
-    );
-
+    // ── Build branch proof ──────────────────────────────────────────────
     let pub_cols = uair_signature.public_cols();
     let num_pub_bin = pub_cols.num_binary_poly_cols();
     let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
@@ -2503,18 +3132,12 @@ where
         .cloned()
         .collect();
 
-    let proof = Proof {
-        commitments,
+    Ok(BranchProof {
         ideal_check: ic_proof,
         resolver: cpr_proof,
         combined_sumcheck,
         multipoint_eval: mp_proof,
-        zip: zip_proof,
         witness_lifted_evals,
         lookup_proof,
-    };
-    if let Some(t) = timings.as_mut() {
-        t.assembly = _t_assembly.elapsed();
-    }
-    Ok(proof)
+    })
 }

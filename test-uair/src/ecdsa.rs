@@ -69,7 +69,7 @@ use zinc_uair::{
 };
 
 use crate::GenerateRandomTrace;
-use crate::ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, SECP256K1_P_UINT};
+use crate::ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, SECP256K1_N_UINT, SECP256K1_P_UINT};
 
 /// Number of Shamir doubling+add rounds. With `num_vars >= 9`,
 /// trace rows = 512, so 256 active rounds + 1 final row + 255 padding
@@ -125,44 +125,70 @@ pub mod cols {
     pub const PA_Z_INV: usize = 13;
     /// Affine $x$-coordinate of the loop's final point
     /// $R = (X[\mathrm{FINAL\_ROW}], Y[\mathrm{FINAL\_ROW}], Z[\mathrm{FINAL\_ROW}])$.
-    /// Only the row-$\mathrm{FINAL\_ROW}$ cell is consumed; the verifier
-    /// is expected to check $R_x \equiv r \pmod n$ off-protocol against
-    /// the signature scalar $r$.
+    /// Only the row-$\mathrm{FINAL\_ROW}$ cell is consumed.
     pub const PA_R_X: usize = 14;
-    pub const NUM_INT_PUB: usize = 15;
+    /// ECDSA signature scalar `r`. Constant across all rows; consumed
+    /// by the n-branch constraint `u_2 · s − r = 0 (mod n)` at
+    /// `FINAL_ROW`.
+    pub const PA_R: usize = 15;
+    /// ECDSA signature scalar `s`. Constant across all rows; consumed
+    /// by the n-branch constraints `u_1 · s − e = 0` and
+    /// `u_2 · s − r = 0` at `FINAL_ROW`.
+    pub const PA_S: usize = 16;
+    /// ECDSA message digest `e` (the SHA output, interpreted as an
+    /// `F_n` scalar). Constant across all rows; consumed by the
+    /// n-branch constraint `u_1 · s − e = 0 (mod n)` at `FINAL_ROW`.
+    pub const PA_E: usize = 17;
+    pub const NUM_INT_PUB: usize = 18;
 
     // === Witness columns ===
 
     // Chained Jacobian state. up.X[t] = R_t (input), down.X[t] =
     // R_{t+1} (output, written by the output-selection constraint at
     // row t).
-    pub const W_X: usize = 15;
-    pub const W_Y: usize = 16;
-    pub const W_Z: usize = 17;
+    pub const W_X: usize = 18;
+    pub const W_Y: usize = 19;
+    pub const W_Z: usize = 20;
 
     // Doubled-point columns (X_pa/Y_pa/Z_pa). `S = Y²` is inlined into
     // the doubling constraints — no dedicated column.
-    pub const W_X_PA: usize = 18;
-    pub const W_Y_PA: usize = 19;
-    pub const W_Z_PA: usize = 20;
+    pub const W_X_PA: usize = 21;
+    pub const W_Y_PA: usize = 22;
+    pub const W_Z_PA: usize = 23;
 
     // Addition scratch: C = T_X·Z_pa² − X_pa (= H from the spec)
     // and D = T_Y·Z_pa³ − Y_pa (= R_a from the spec), where
     // (T_X, T_Y) is the per-row affine addend computed in-circuit
     // from (b_1, b_2, Q, G+Q) via the addend selector. Z_pa²,
-    // Z_pa³, C², C³, X_pa·C² are inlined. The final-row affine
-    // x-readout is now in-circuit via `PA_Z_INV` and `PA_R_X`
-    // (constraints F1/F2); the order-field check
-    // $R_x \equiv r \pmod n$ remains off-protocol.
-    pub const W_C: usize = 21;
-    pub const W_D: usize = 22;
+    // Z_pa³, C², C³, X_pa·C² are inlined.
+    pub const W_C: usize = 24;
+    pub const W_D: usize = 25;
 
-    pub const NUM_INT: usize = 23;
+    /// Running-sum accumulator for the scalar `u_1`. Built from
+    /// `PA_B1` via `acc[0] = PA_B1[0]` and the chain
+    /// `acc[t+1] = 2·acc[t] + PA_B1[t+1]` (mod p). With the existing
+    /// MSB-first double-and-add indexing (`PA_B1[t]` = bit `255 − t`
+    /// of `u_1`), the final active row's accumulator equals `u_1`.
+    /// At `FINAL_ROW` (one past the last active row), the chain has
+    /// applied one extra doubling with the zero-padded bit, so
+    /// `W_U1_ACC[FINAL_ROW] = 2 · u_1` — the n-branch constraint
+    /// uses this directly via `2 · u_1 · s − 2 · e ≡ 0 (mod n)`.
+    pub const W_U1_ACC: usize = 26;
+    /// Running-sum accumulator for the scalar `u_2`; same recurrence
+    /// shape on `PA_B2`. Same off-by-one applies:
+    /// `W_U2_ACC[FINAL_ROW] = 2 · u_2`.
+    pub const W_U2_ACC: usize = 27;
+
+    pub const NUM_INT: usize = 28;
 
     // Flat indices for shift specs (no bin/poly columns; flat = int).
     pub const FLAT_W_X: usize = W_X;
     pub const FLAT_W_Y: usize = W_Y;
     pub const FLAT_W_Z: usize = W_Z;
+    pub const FLAT_W_U1_ACC: usize = W_U1_ACC;
+    pub const FLAT_W_U2_ACC: usize = W_U2_ACC;
+    pub const FLAT_PA_B1: usize = PA_B1;
+    pub const FLAT_PA_B2: usize = PA_B2;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,10 +209,18 @@ where
         let total = TotalColumnLayout::new(0, 0, cols::NUM_INT);
         let public = PublicColumnLayout::new(0, 0, cols::NUM_INT_PUB);
         // Shift X, Y, Z by 1 so down.X[t] = X[t+1] = R_{t+1}.
+        // Shift PA_B1, PA_B2 by 1 so the running-sum chain constraint
+        // can read down.PA_Bi[t] = PA_Bi[t+1].
+        // Shift W_U1_ACC, W_U2_ACC by 1 so the chain constraint can
+        // assert down.W_Ui_ACC[t] = 2·W_Ui_ACC[t] + down.PA_Bi[t].
         let shifts: Vec<ShiftSpec> = vec![
+            ShiftSpec::new(cols::FLAT_PA_B1, 1),
+            ShiftSpec::new(cols::FLAT_PA_B2, 1),
             ShiftSpec::new(cols::FLAT_W_X, 1),
             ShiftSpec::new(cols::FLAT_W_Y, 1),
             ShiftSpec::new(cols::FLAT_W_Z, 1),
+            ShiftSpec::new(cols::FLAT_W_U1_ACC, 1),
+            ShiftSpec::new(cols::FLAT_W_U2_ACC, 1),
         ];
         UairSignature::new(total, public, shifts, vec![], vec![])
     }
@@ -228,11 +262,18 @@ where
         let z_pa = &int[cols::W_Z_PA];
         let c = &int[cols::W_C];
         let d = &int[cols::W_D];
+        let u1_acc = &int[cols::W_U1_ACC];
+        let u2_acc = &int[cols::W_U2_ACC];
 
-        // down.int[i] in source-col-ascending order: X, Y, Z.
-        let down_x = &down.int[0];
-        let down_y = &down.int[1];
-        let down_z = &down.int[2];
+        // down.int[i] in source-col-ascending order:
+        // PA_B1, PA_B2, W_X, W_Y, W_Z, W_U1_ACC, W_U2_ACC.
+        let down_pa_b1 = &down.int[0];
+        let down_pa_b2 = &down.int[1];
+        let down_x = &down.int[2];
+        let down_y = &down.int[3];
+        let down_z = &down.int[4];
+        let down_u1_acc = &down.int[5];
+        let down_u2_acc = &down.int[6];
 
         let two_scalar = const_scalar::<R>(R::from(2_u32));
         let three_scalar = const_scalar::<R>(R::from(3_u32));
@@ -433,29 +474,142 @@ where
         b.assert_zero(s_final.clone() * &f2_inner);
 
         // ===================================================================
-        // SOUNDNESS OBLIGATION (not yet enforced; deferred to follow-up):
+        // Booleanity of PA_B1, PA_B2 and derivation of S_ADD
+        // (Augmentation A; 3 constraints, all degree 3).
         //
-        // The new in-circuit addend selector relies on
-        //   - PA_B1[t], PA_B2[t] ∈ {0, 1} on every active row, and
-        //   - S_ADD[t]  = PA_B1[t] + PA_B2[t] − PA_B1[t]·PA_B2[t]
-        // (with PA_QX, PA_QY, PA_QGX, PA_QGY constant across active
-        // rows of a single proof, matching the public key Q and the
-        // verifier-derivable G + Q).
+        // Encoded with the F1 trick: rather than building a literal-1
+        // expression, factor `S_ACTIVE · b` once and subtract it from
+        // `S_ACTIVE · b · b`, yielding `S_ACTIVE · b · (b − 1) = 0`.
         //
-        // Without those checks, a malicious prover could place
-        // arbitrary values in PA_B1 / PA_B2 (they're public columns
-        // typed as `Int<5>`, not range-restricted by the framework)
-        // and compose any addend it likes via the linear formula.
-        // The intended discharge is `Uair::verify_public_structure`,
-        // following the SHA UAIR's pattern of direct row-wise
-        // inspection of `public_trace`. That requires widening the
-        // trait method's `IntT` bound from `Clone + num_traits::Zero`
-        // to additionally include `PartialEq + num_traits::One` so
-        // the impl can compare `PA_B1[t]` against the canonical
-        // `0` / `1`. Tracked as a follow-up; the synthetic test
-        // below populates the columns honestly so the round-trip
-        // succeeds.
+        // Closes the soundness obligation that previously sat outside
+        // the proof: with `PA_B1[t], PA_B2[t] ∈ {0,1}` and the linear
+        // identity `S_ADD = b_1 + b_2 − b_1·b_2`, the in-circuit
+        // affine addend selector
+        //   T = b_1·G + b_2·Q + b_1·b_2·((G+Q) − G − Q)
+        // is fully bound by the proof. The remaining (deferred)
+        // soundness obligation is row-constancy of PA_QX/PA_QY/PA_QGX/
+        // PA_QGY across active rows of a single proof — still handled
+        // verifier-side via direct public_trace inspection.
         // ===================================================================
+
+        // B1-bool: S_ACTIVE · PA_B1 · (PA_B1 − 1) = 0
+        let s_active_b1 = s_active.clone() * pa_b1;
+        let s_active_b1_b1 = s_active_b1.clone() * pa_b1;
+        b.assert_zero(s_active_b1_b1 - &s_active_b1);
+
+        // B2-bool: S_ACTIVE · PA_B2 · (PA_B2 − 1) = 0
+        let s_active_b2 = s_active.clone() * pa_b2;
+        let s_active_b2_b2 = s_active_b2.clone() * pa_b2;
+        b.assert_zero(s_active_b2_b2 - &s_active_b2);
+
+        // S_ADD-derive: S_ACTIVE · (S_ADD − PA_B1 − PA_B2 + PA_B1·PA_B2) = 0
+        let b1b2_for_sadd = pa_b1.clone() * pa_b2;
+        let s_add_inner = s_add.clone() - pa_b1 - pa_b2 + &b1b2_for_sadd;
+        b.assert_zero(s_active.clone() * &s_add_inner);
+
+        // ===================================================================
+        // Running-sum aggregation: bind W_U1_ACC / W_U2_ACC to the
+        // bit-decompositions PA_B1 / PA_B2 (Augmentation B; 4
+        // constraints, all degree 2).
+        //
+        // Recurrence (MSB-first, matching the existing double-and-add
+        // addend selection):
+        //   acc[0]   = b[0]                        (Init)
+        //   acc[t+1] = 2 · acc[t] + b[t+1]         (Chain, on active rows)
+        // After NUM_SHAMIR_ROUNDS active steps the accumulator equals
+        // the scalar u_i represented by the bit column. Specifically
+        //   acc[t] = Σ_{j=0..t} b[j] · 2^(t-j),
+        // so acc[NUM_SHAMIR_ROUNDS - 1] = Σ_{j=0..255} b[j]·2^{255-j} = u_i,
+        // and acc[NUM_SHAMIR_ROUNDS] = 2 · u_i (since the row-256 bit
+        // is padded to 0 — the chain at row 255 reads down.PA_B1[255]
+        // = PA_B1[256] = 0).
+        // ===================================================================
+
+        // Init-U1: S_INIT · (W_U1_ACC − PA_B1) = 0
+        b.assert_zero(s_init.clone() * &(u1_acc.clone() - pa_b1));
+        // Init-U2: S_INIT · (W_U2_ACC − PA_B2) = 0
+        b.assert_zero(s_init.clone() * &(u2_acc.clone() - pa_b2));
+
+        // Chain-U1: S_ACTIVE · (down.W_U1_ACC − 2·W_U1_ACC − down.PA_B1) = 0
+        let two_u1_acc = mbs(u1_acc, &two_scalar).expect("2·W_U1_ACC overflow");
+        let chain_u1_inner = down_u1_acc.clone() - &two_u1_acc - down_pa_b1;
+        b.assert_zero(s_active.clone() * &chain_u1_inner);
+
+        // Chain-U2: S_ACTIVE · (down.W_U2_ACC − 2·W_U2_ACC − down.PA_B2) = 0
+        let two_u2_acc = mbs(u2_acc, &two_scalar).expect("2·W_U2_ACC overflow");
+        let chain_u2_inner = down_u2_acc.clone() - &two_u2_acc - down_pa_b2;
+        b.assert_zero(s_active.clone() * &chain_u2_inner);
+    }
+
+    fn constrain_general_n<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // ===================================================================
+        // ECDSA n-branch (mod-`n`) constraints.
+        //
+        // After the 256-row Shamir double-and-add loop, the running-sum
+        // accumulators `W_U1_ACC[FINAL_ROW]`, `W_U2_ACC[FINAL_ROW]` hold
+        // `2·u_1` and `2·u_2` over Z (the chain runs one extra doubling
+        // at the end: `acc[256] = 2·acc[255] + b[256] = 2·u_i + 0`). The
+        // dual-pipeline n-branch projects these committed integer cells
+        // mod `n`, so the same accumulator value provides `2·u_i mod n`
+        // for the F_n constraint.
+        //
+        // The two ECDSA scalar identities are:
+        //   u_1 · s ≡ e (mod n)   ⇔  2·u_1 · s ≡ 2·e (mod n)
+        //   u_2 · s ≡ r (mod n)   ⇔  2·u_2 · s ≡ 2·r (mod n)
+        //
+        // We anchor each at `S_FINAL` (the post-loop row) and absorb the
+        // factor of 2 into the constraint expression so the public
+        // columns `PA_E`, `PA_R` carry the canonical ECDSA scalars
+        // (not 2·e, 2·r):
+        //
+        //   F_N1: S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0   (mod n)
+        //   F_N2: S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0   (mod n)
+        //
+        // Soundness caveat: the running-sum accumulator is stored mod
+        // `p`, not over Z. For honest ECDSA inputs `u_i < n < p`, the
+        // chain stays below `p` through row 255 (so `acc[255] = u_i`
+        // exactly over Z); the doubling at row 256 may wrap mod `p`
+        // (`2·u_i` can exceed `p`). The integer cell `acc[256]` is
+        // therefore `2·u_i mod p`, which equals `2·u_i mod n` over Z
+        // only when `2·u_i < p`. When `2·u_i ≥ p` (i.e., `u_i > p/2`),
+        // the stored cell is `2·u_i − p`, and the n-branch reads it as
+        // `(2·u_i − p) mod n` instead of `2·u_i mod n`. Closing this
+        // gap requires either anchoring at row 255 with an additional
+        // selector or changing the chain semantics so `acc[FINAL_ROW]
+        // = u_i` (not `2·u_i`) — left as a follow-up.
+        // ===================================================================
+
+        let int = up.int;
+        let s_final = &int[cols::S_FINAL];
+        let pa_r = &int[cols::PA_R];
+        let pa_s = &int[cols::PA_S];
+        let pa_e = &int[cols::PA_E];
+        let u1_acc = &int[cols::W_U1_ACC];
+        let u2_acc = &int[cols::W_U2_ACC];
+
+        let two_scalar = const_scalar::<R>(R::from(2_u32));
+
+        // F_N1: S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0  (mod n)
+        let two_pa_e = mbs(pa_e, &two_scalar).expect("2·PA_E overflow");
+        let f_n1_inner = u1_acc.clone() * pa_s - &two_pa_e;
+        b.assert_zero(s_final.clone() * &f_n1_inner);
+
+        // F_N2: S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0  (mod n)
+        let two_pa_r = mbs(pa_r, &two_scalar).expect("2·PA_R overflow");
+        let f_n2_inner = u2_acc.clone() * pa_s - &two_pa_r;
+        b.assert_zero(s_final.clone() * &f_n2_inner);
     }
 }
 
@@ -537,6 +691,34 @@ fn sub_mod_p(
         let a_plus_p = a.wrapping_add(&SECP256K1_P_UINT);
         a_plus_p.wrapping_sub(b).rem_vartime(&p_nz)
     }
+}
+
+// === N-modulus arithmetic helpers ==================================
+// Used by the witness generator to compute consistent values for the
+// n-branch public columns (`PA_E`, `PA_R`). The protocol verifies the
+// n-branch constraints `W_U_ACC · PA_S − 2·PA_E ≡ 0 (mod n)` and
+// similar; the prover supplies witness values that make these hold.
+
+fn mul_mod_n(
+    a: &CbUint<EC_FP_INT_LIMBS>,
+    b: &CbUint<EC_FP_INT_LIMBS>,
+) -> CbUint<EC_FP_INT_LIMBS> {
+    let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
+    let n_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_N_UINT.resize();
+    let n_wide_nz = NonZero::new(n_wide).expect("n is nonzero");
+    let (_, rem) = wide.div_rem_vartime(&n_wide_nz);
+    rem.resize()
+}
+
+fn inv_mod_n(a: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
+    let n_odd = Odd::new(SECP256K1_N_UINT).expect("n is odd");
+    a.invert_odd_mod(&n_odd)
+        .expect("a has no inverse mod n (a == 0?)")
+}
+
+fn reduce_mod_n(a: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
+    let n_nz = NonZero::new(SECP256K1_N_UINT).expect("n is nonzero");
+    a.rem_vartime(&n_nz)
 }
 
 fn uint_to_int(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
@@ -723,6 +905,9 @@ where
         let mut pa_r_init_z_col: Vec<R> = mk_col();
         let mut pa_z_inv_col: Vec<R> = mk_col();
         let mut pa_r_x_col: Vec<R> = mk_col();
+        let mut pa_r_col: Vec<R> = mk_col();
+        let mut pa_s_col: Vec<R> = mk_col();
+        let mut pa_e_col: Vec<R> = mk_col();
         let mut x_col: Vec<R> = mk_col();
         let mut y_col: Vec<R> = mk_col();
         let mut z_col: Vec<R> = mk_col();
@@ -731,6 +916,8 @@ where
         let mut z_pa_col: Vec<R> = mk_col();
         let mut c_col: Vec<R> = mk_col();
         let mut d_col: Vec<R> = mk_col();
+        let mut u1_acc_col: Vec<R> = mk_col();
+        let mut u2_acc_col: Vec<R> = mk_col();
 
         // Selectors and bits. Q and G+Q are constant across rows.
         // Bit pair (b_1, b_2) = (0, 1) at every active row → addend = Q,
@@ -783,6 +970,79 @@ where
             d_col[t] = R::from(uint_to_int(step.d.clone()));
         }
 
+        // Running-sum accumulators for u_1, u_2 over PA_B1, PA_B2.
+        // Recurrence: acc[0] = b[0]; acc[t+1] = 2·acc[t] + b[t+1] (mod p).
+        // The chain constraint runs at every active row t in
+        // [0, NUM_SHAMIR_ROUNDS); the row-NUM_SHAMIR_ROUNDS bit is the
+        // padded zero (S_ACTIVE = 0 there ⇒ PA_Bi[NUM_SHAMIR_ROUNDS] = 0
+        // satisfies any algebraic shape we like). We therefore fill rows
+        // 0..=NUM_SHAMIR_ROUNDS using the recurrence (with b[NUM_SHAMIR_ROUNDS]
+        // = 0) and zero-pad the rest.
+        //
+        // The synthetic test pins (b_1, b_2) = (0, 1) at every active
+        // row, so we know the bit pattern statically rather than reading
+        // it back from `pa_b1_col` / `pa_b2_col` (which would require an
+        // extra trait bound on R to extract the underlying CbUint).
+        let bit_b1 = |t: usize| -> CbUint<EC_FP_INT_LIMBS> {
+            // PA_B1 is 0 on every row in the synthetic test.
+            let _ = t;
+            CbUint::<EC_FP_INT_LIMBS>::ZERO
+        };
+        let bit_b2 = |t: usize| -> CbUint<EC_FP_INT_LIMBS> {
+            if t < NUM_SHAMIR_ROUNDS {
+                CbUint::<EC_FP_INT_LIMBS>::from(1u32)
+            } else {
+                CbUint::<EC_FP_INT_LIMBS>::ZERO
+            }
+        };
+        let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
+        let chain_step =
+            |acc: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
+                let two_acc = small_mul_mod_p(acc, 2);
+                let mut sum = two_acc.wrapping_add(b);
+                if p_geq(&sum) {
+                    sum = sum.rem_vartime(&p_nz);
+                }
+                sum
+            };
+        let mut acc1_uint: CbUint<EC_FP_INT_LIMBS> = bit_b1(0);
+        let mut acc2_uint: CbUint<EC_FP_INT_LIMBS> = bit_b2(0);
+        u1_acc_col[0] = R::from(uint_to_int(acc1_uint.clone()));
+        u2_acc_col[0] = R::from(uint_to_int(acc2_uint.clone()));
+        for t in 0..NUM_SHAMIR_ROUNDS {
+            let next = t + 1;
+            acc1_uint = chain_step(&acc1_uint, &bit_b1(next));
+            acc2_uint = chain_step(&acc2_uint, &bit_b2(next));
+            if next < n_rows {
+                u1_acc_col[next] = R::from(uint_to_int(acc1_uint.clone()));
+                u2_acc_col[next] = R::from(uint_to_int(acc2_uint.clone()));
+            }
+        }
+
+        // ECDSA n-branch (mod-n) public columns. The constraints
+        //   F_N1: S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0  (mod n)
+        //   F_N2: S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0  (mod n)
+        // are anchored at FINAL_ROW. Since `acc1_uint`, `acc2_uint`
+        // hold the integer values `W_U1_ACC[FINAL_ROW]` and
+        // `W_U2_ACC[FINAL_ROW]` (= 2·u_i mod p) at this point, we
+        // compute matching `PA_E`, `PA_R` for an arbitrary `PA_S`:
+        //   PA_E = (W_U1_ACC · PA_S) · 2⁻¹  (mod n)
+        //   PA_R = (W_U2_ACC · PA_S) · 2⁻¹  (mod n)
+        // For the synthetic test we pick `PA_S = 1`. Only the
+        // `FINAL_ROW` cells matter (gated by `S_FINAL`); other rows
+        // can be zero.
+        let pa_s_uint = CbUint::<EC_FP_INT_LIMBS>::from(1u32);
+        let two_uint = CbUint::<EC_FP_INT_LIMBS>::from(2u32);
+        let inv_two_n = inv_mod_n(&two_uint);
+        let acc1_n = reduce_mod_n(&acc1_uint);
+        let acc2_n = reduce_mod_n(&acc2_uint);
+        let pa_s_n = reduce_mod_n(&pa_s_uint);
+        let pa_e_uint = mul_mod_n(&mul_mod_n(&acc1_n, &pa_s_n), &inv_two_n);
+        let pa_r_uint = mul_mod_n(&mul_mod_n(&acc2_n, &pa_s_n), &inv_two_n);
+        pa_s_col[FINAL_ROW] = R::from(uint_to_int(pa_s_uint));
+        pa_e_col[FINAL_ROW] = R::from(uint_to_int(pa_e_uint));
+        pa_r_col[FINAL_ROW] = R::from(uint_to_int(pa_r_uint));
+
         let to_mle = |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
 
         let int = vec![
@@ -801,6 +1061,9 @@ where
             to_mle(pa_r_init_z_col),
             to_mle(pa_z_inv_col),
             to_mle(pa_r_x_col),
+            to_mle(pa_r_col),
+            to_mle(pa_s_col),
+            to_mle(pa_e_col),
             to_mle(x_col),
             to_mle(y_col),
             to_mle(z_col),
@@ -809,6 +1072,8 @@ where
             to_mle(z_pa_col),
             to_mle(c_col),
             to_mle(d_col),
+            to_mle(u1_acc_col),
+            to_mle(u2_acc_col),
         ];
 
         UairTrace {
@@ -828,25 +1093,44 @@ mod tests {
     use crypto_bigint::ConstOne;
     use rand::rng;
     use zinc_uair::{
-        constraint_counter::count_constraints,
+        constraint_counter::{count_constraints, count_constraints_n},
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 13 constraints; max degree 7 — `S = Y²` is inlined.
-    /// Final-row affine readout is in-circuit via F1 (P_Z · Z_inv = 1)
-    /// and F2 (P_X · Z_inv² = R_x), gated by S_FINAL; the
-    /// `R_x ≡ r (mod n)` order-field check remains off-protocol.
-    /// Max degree 7 from C-A2 (the in-circuit affine addend `T_y` is
-    /// degree 3, multiplied by Z_pa³ deg 3 and S_ACTIVE deg 1).
+    /// Sanity: 20 p-branch constraints + 2 n-branch constraints.
+    ///
+    /// **p-branch** (`U::constrain_general`): 13 base constraints + 7
+    /// augmentation constraints (3 booleanity / S_ADD-derive at deg 3,
+    /// 2 running-sum init at deg 2, 2 running-sum chain at deg 2) = 20
+    /// total. Max degree 7 from C-A2 (the in-circuit affine addend
+    /// `T_y` is degree 3, multiplied by Z_pa³ deg 3 and S_ACTIVE deg 1).
+    /// Deg-2 constraints: 3 init Jacobian + 2 init U_acc + 2 chain
+    /// U_acc = 7.
+    ///
+    /// **n-branch** (`U::constrain_general_n`): 2 mod-`n` ECDSA scalar
+    /// identities — `u_1·s ≡ e` and `u_2·s ≡ r` — anchored at S_FINAL
+    /// with the off-by-2 absorbed into `2·PA_E` / `2·PA_R`. Both deg 3
+    /// (S_FINAL · W_U_ACC · PA_S).
     #[test]
     fn shamir_constraint_shape() {
         type U = EcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 13);
+        assert_eq!(count_constraints::<U>(), 20);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
-        // Spot-checks: at least one deg-7 (Y addend constraint); 3 init deg-2.
+        // Spot-checks: at least one deg-7 (Y addend constraint); 7 deg-2.
         assert!(degrees.iter().any(|&d| d == 7), "expected at least one deg-7");
-        assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 3, "init = 3 deg-2");
+        assert_eq!(
+            degrees.iter().filter(|&&d| d == 2).count(),
+            7,
+            "expected 7 deg-2 (3 init Jacobian + 2 init U_acc + 2 chain U_acc)",
+        );
+
+        // n-branch: two mod-n ECDSA constraints (F_N1, F_N2).
+        assert_eq!(
+            count_constraints_n::<U>(),
+            2,
+            "expected 2 n-branch constraints (u_1·s ≡ e and u_2·s ≡ r)",
+        );
     }
 
     /// Witness gen produces a trace where every constraint vanishes
@@ -922,5 +1206,57 @@ mod tests {
                 assert_eq!(read_uint(cols::W_X, t), zero_uint, "pad X at {t}");
             }
         }
+
+        // Running-sum accumulators: with the synthetic test's bit
+        // pattern `(b_1, b_2) = (0, 1)` at every active row,
+        //   - PA_B1 ≡ 0 ⇒ W_U1_ACC ≡ 0 at every row.
+        //   - PA_B2 ≡ 1 for t in 0..NUM_SHAMIR_ROUNDS, padded 0
+        //     thereafter. Recurrence: acc[0]=1, acc[t+1] = 2·acc[t] + 1
+        //     ⇒ acc[t] = 2^{t+1} − 1 for t in 0..=NUM_SHAMIR_ROUNDS-1.
+        //     Then the chain at row 255 forces
+        //     acc[NUM_SHAMIR_ROUNDS] = 2·acc[255] + 0 = 2 · (2^256 − 1)
+        //                            = 2^257 − 2 (mod p).
+        //
+        // We spot-check W_U1_ACC[NUM_SHAMIR_ROUNDS-1] / [FINAL_ROW] and
+        // W_U2_ACC[NUM_SHAMIR_ROUNDS-1] / [FINAL_ROW].
+        assert_eq!(
+            read_uint(cols::W_U1_ACC, NUM_SHAMIR_ROUNDS - 1),
+            zero_uint,
+            "W_U1_ACC[NUM_SHAMIR_ROUNDS-1] should be 0 (b_1 ≡ 0)",
+        );
+        assert_eq!(
+            read_uint(cols::W_U1_ACC, FINAL_ROW),
+            zero_uint,
+            "W_U1_ACC[FINAL_ROW] should be 0 (b_1 ≡ 0)",
+        );
+
+        // Compute expected u_2 values via the same recurrence the
+        // witness generator uses, mod p.
+        let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
+        let one_uint = CbUint::<EC_FP_INT_LIMBS>::ONE;
+        let mut expected_acc2 = one_uint.clone();
+        for _ in 0..NUM_SHAMIR_ROUNDS - 1 {
+            // expected = 2·expected + 1
+            let two_e = small_mul_mod_p(&expected_acc2, 2);
+            let mut sum = two_e.wrapping_add(&one_uint);
+            if p_geq(&sum) {
+                sum = sum.rem_vartime(&p_nz);
+            }
+            expected_acc2 = sum;
+        }
+        // expected_acc2 now holds acc[NUM_SHAMIR_ROUNDS-1] = 2^256 - 1 mod p.
+        assert_eq!(
+            read_uint(cols::W_U2_ACC, NUM_SHAMIR_ROUNDS - 1),
+            expected_acc2,
+            "W_U2_ACC[NUM_SHAMIR_ROUNDS-1] = 2^{{256}} − 1 mod p",
+        );
+        // One more chain step at row 255 (with bit 0 padding) → acc[FINAL_ROW]
+        // = 2 · acc[NUM_SHAMIR_ROUNDS-1].
+        let expected_acc2_final = small_mul_mod_p(&expected_acc2, 2);
+        assert_eq!(
+            read_uint(cols::W_U2_ACC, FINAL_ROW),
+            expected_acc2_final,
+            "W_U2_ACC[FINAL_ROW] = 2^{{257}} − 2 mod p",
+        );
     }
 }

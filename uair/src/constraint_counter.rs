@@ -20,6 +20,25 @@ pub fn count_constraints<U: Uair>() -> usize {
     cc.0
 }
 
+/// N-branch counterpart of [`count_constraints`]: counts constraints
+/// emitted by [`Uair::constrain_general_n`].
+pub fn count_constraints_n<U: Uair>() -> usize {
+    let mut cc = ConstraintCounter::new();
+
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+        &down_dummy,
+        sig.down_cols().as_column_layout(),
+        sig.bit_op_down_count(),
+    );
+
+    U::constrain_n(&mut cc, up_row, down_row);
+
+    cc.0
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ConstraintCounter(usize);
 

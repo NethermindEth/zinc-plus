@@ -268,6 +268,113 @@ where
     }
 }
 
+/// Minimal dual-branch test UAIR: one int public column whose entries
+/// are interpreted as a `{0, 1}`-valued selector, and one int witness
+/// column constrained by the **p-branch** to mirror the public selector
+/// (`witness − public ∈ ⟨X − 2⟩`). The **n-branch** asserts the same
+/// public column is booleanity-true (`s² − s = 0`), which is identically
+/// true mod ANY prime and so is sound regardless of which prime is
+/// chosen for the n-branch projecting field.
+///
+/// Phase 2 stopgap: the n-branch pipeline isn't actually run yet (the
+/// p-branch is cloned into `n_branch` inside the prover orchestrators).
+/// This UAIR is added to cover Phase 4's plumbing surface area and to
+/// give static-analysis helpers (`count_constraints_n`,
+/// `collect_ideals_n`, `count_constraint_degrees_n`) something to chew
+/// on beyond an empty body.
+#[derive(Clone, Debug)]
+pub struct DualBranchTestUair<R>(PhantomData<R>);
+
+impl<R> Uair for DualBranchTestUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 1 public int column (selector), 1 witness int column (mirror).
+        let total = TotalColumnLayout::new(0, 0, 2);
+        let public = PublicColumnLayout::new(0, 0, 1);
+        UairSignature::new(total, public, vec![], vec![], vec![])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // p-branch: witness mirrors the public selector exactly,
+        // modulo (X − 2).
+        let s = &up.int[0];
+        let m = &up.int[1];
+        b.assert_in_ideal(
+            m.clone() - s,
+            &ideal_from_ref(&DegreeOneIdeal::new(R::from(2))),
+        );
+    }
+
+    fn constrain_general_n<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // n-branch: booleanity of the public selector — true mod any
+        // prime, so this constraint is sound regardless of the
+        // n-branch projecting field.
+        let s = &up.int[0];
+        b.assert_zero(s.clone() * s - s);
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for DualBranchTestUair<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32> {
+        // Random {0, 1}-valued selector column (public). Witness mirrors
+        // it exactly so the p-branch constraint `witness − public ∈
+        // ⟨X − 2⟩` holds.
+        let n = 1usize << num_vars;
+        let public_col: DenseMultilinearExtension<R> = (0..n)
+            .map(|_| {
+                let bit: u32 = rng.random::<u32>() & 1;
+                R::from(bit)
+            })
+            .collect();
+        let witness_col: DenseMultilinearExtension<R> =
+            public_col.iter().cloned().collect();
+
+        UairTrace {
+            binary_poly: vec![].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![public_col, witness_col].into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BinaryDecompositionUair<R>(PhantomData<R>);
 

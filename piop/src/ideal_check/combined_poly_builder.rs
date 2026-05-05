@@ -17,7 +17,10 @@ use zinc_poly::{
 };
 use zinc_uair::{
     BitOp, ColumnLayout, ConstraintBuilder, TraceRow, Uair,
-    degree_counter::{count_constraint_degrees, count_effective_max_degree},
+    degree_counter::{
+        count_constraint_degrees, count_constraint_degrees_n, count_effective_max_degree,
+        count_effective_max_degree_n,
+    },
     ideal::ImpossibleIdeal,
 };
 use zinc_utils::{
@@ -25,12 +28,13 @@ use zinc_utils::{
 };
 
 /// Given a UAIR `U` and a trace `trace` this function
-/// obtains the combined polynomials' MLE coefficients.
+/// obtains the combined polynomials' MLE coefficients
+/// for the **p-branch** constraint set (`U::constrain_general`).
+///
 /// Since each coefficient is also a univariate polynomial
 /// we split the resulting MLE into coefficient MLEs.
 ///
 /// `trace_matrix` is row-indexed: `trace_matrix[row][col]`.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn compute_combined_polynomials<F, U>(
     trace_matrix: &RowMajorTrace<F>,
     projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -42,6 +46,65 @@ where
     F: PrimeField,
     U: Uair,
 {
+    compute_combined_polynomials_inner::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        field_cfg,
+        skip_constraints,
+        false,
+    )
+}
+
+/// N-branch counterpart of [`compute_combined_polynomials`]: dispatches
+/// `U::constrain_general_n` instead of `U::constrain_general`. Returns
+/// an empty `Vec` when `num_constraints == 0` (the n-branch default for
+/// any UAIR that doesn't override `constrain_general_n`).
+pub fn compute_combined_polynomials_n<F, U>(
+    trace_matrix: &RowMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    field_cfg: &F::Config,
+    skip_constraints: &[bool],
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+where
+    F: PrimeField,
+    U: Uair,
+{
+    compute_combined_polynomials_inner::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        field_cfg,
+        skip_constraints,
+        true,
+    )
+}
+
+/// Shared inner: dispatches `U::constrain_general` (`is_n_branch=false`)
+/// or `U::constrain_general_n` (`is_n_branch=true`).
+#[allow(clippy::arithmetic_side_effects)]
+fn compute_combined_polynomials_inner<F, U>(
+    trace_matrix: &RowMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    field_cfg: &F::Config,
+    skip_constraints: &[bool],
+    is_n_branch: bool,
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+where
+    F: PrimeField,
+    U: Uair,
+{
+    // Empty-constraint short-circuit: every existing UAIR has empty
+    // `constrain_general_n` by default, so the n-branch builder is
+    // called with `num_constraints == 0`. Returning an empty Vec
+    // matches the per-constraint output shape downstream consumers
+    // expect (they iterate `0..num_constraints`).
+    if num_constraints == 0 {
+        return Vec::new();
+    }
+
     let field_zero = F::zero_with_cfg(field_cfg);
     let uair_sig = U::signature();
     let down_layout = uair_sig.down_cols().as_column_layout();
@@ -87,6 +150,7 @@ where
                     projected_scalars,
                     down_layout,
                     bit_op_count,
+                    is_n_branch,
                 )
             })
             .collect();
@@ -95,7 +159,7 @@ where
         .iter()
         .map(|(max_degree, _)| max_degree)
         .max()
-        .expect("We assume the number of constraints is not zero so this iterator is not empty");
+        .expect("num_constraints > 0 so per-row Vecs are non-empty");
 
     // For the sake of padding we duplicate
     // the last combined value
@@ -119,7 +183,11 @@ where
 /// Apply combination polynomial to each row
 /// and compute the maximum degree of resulting polynomials
 /// to pad the resulting vector of MLEs accordingly.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// `is_n_branch` selects which constraint set to dispatch:
+/// `false` → `U::constrain_general` (p-branch, mod-`p` constraints),
+/// `true`  → `U::constrain_general_n` (n-branch, mod-`n` constraints).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn combine_rows_and_get_max_degree<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
@@ -127,6 +195,7 @@ fn combine_rows_and_get_max_degree<F, U>(
     projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
     bit_op_count: usize,
+    is_n_branch: bool,
 ) -> (usize, Vec<DynamicPolynomialF<F>>)
 where
     F: PrimeField,
@@ -156,14 +225,29 @@ where
         v
     };
 
-    U::constrain_general(
-        &mut constraint_builder,
-        TraceRow::from_slice_with_layout(up, U::signature().total_cols().as_column_layout()),
-        TraceRow::from_slice_with_layout_and_bit_op(down, down_layout, bit_op_count),
-        &project,
-        |x, y| Some(project(y) * x),
-        ImpossibleIdeal::from_ref,
-    );
+    let up_row =
+        TraceRow::from_slice_with_layout(up, U::signature().total_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(down, down_layout, bit_op_count);
+
+    if is_n_branch {
+        U::constrain_general_n(
+            &mut constraint_builder,
+            up_row,
+            down_row,
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    } else {
+        U::constrain_general(
+            &mut constraint_builder,
+            up_row,
+            down_row,
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    }
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
 
@@ -248,12 +332,40 @@ where
             degrees: count_constraint_degrees::<U>(),
         });
     }
-    evaluate_combined_polynomials_unchecked::<F, U>(
+    evaluate_combined_polynomials_unchecked_inner::<F, U>(
         trace_matrix,
         projected_scalars,
         num_constraints,
         evaluation_point,
         field_cfg,
+        false,
+    )
+}
+
+/// N-branch counterpart of [`evaluate_combined_polynomials`].
+pub fn evaluate_combined_polynomials_n<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    if count_effective_max_degree_n::<U>() > 1 {
+        return Err(EvaluationError::UnsupportedConstraintDegrees {
+            degrees: count_constraint_degrees_n::<U>(),
+        });
+    }
+    evaluate_combined_polynomials_unchecked_inner::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+        true,
     )
 }
 
@@ -266,7 +378,6 @@ where
 /// the linear subset of a mixed-degree UAIR; the non-linear subset's
 /// values are computed via [`compute_combined_polynomials`] and overwrite
 /// the corresponding slots before transcript absorption.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials_unchecked<F, U>(
     trace_matrix: &ColumnMajorTrace<F>,
     projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -278,6 +389,60 @@ where
     F: InnerTransparentField,
     U: Uair,
 {
+    evaluate_combined_polynomials_unchecked_inner::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+        false,
+    )
+}
+
+/// N-branch counterpart of [`evaluate_combined_polynomials_unchecked`].
+pub fn evaluate_combined_polynomials_unchecked_n<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    evaluate_combined_polynomials_unchecked_inner::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+        true,
+    )
+}
+
+/// Shared inner: dispatches `U::constrain_general` (`is_n_branch=false`)
+/// or `U::constrain_general_n` (`is_n_branch=true`).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn evaluate_combined_polynomials_unchecked_inner<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+    is_n_branch: bool,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    // Empty-constraint short-circuit: every existing UAIR has empty
+    // `constrain_general_n` by default. The linear-only fast path is
+    // never triggered for the n-branch when there's nothing to evaluate.
+    if num_constraints == 0 {
+        return Ok(Vec::new());
+    }
+
     let field_zero = F::zero_with_cfg(field_cfg);
     let zero_inner = field_zero.inner().clone();
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
@@ -382,14 +547,30 @@ where
         v
     };
 
-    U::constrain_general(
-        &mut constraint_builder,
-        TraceRow::from_slice_with_layout(&up_evals, uair_sig.total_cols().as_column_layout()),
-        TraceRow::from_slice_with_layout_and_bit_op(&down_evals, down_layout, bit_op_count),
-        &project,
-        |x, y| Some(project(y) * x),
-        ImpossibleIdeal::from_ref,
-    );
+    let up_row =
+        TraceRow::from_slice_with_layout(&up_evals, uair_sig.total_cols().as_column_layout());
+    let down_row =
+        TraceRow::from_slice_with_layout_and_bit_op(&down_evals, down_layout, bit_op_count);
+
+    if is_n_branch {
+        U::constrain_general_n(
+            &mut constraint_builder,
+            up_row,
+            down_row,
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    } else {
+        U::constrain_general(
+            &mut constraint_builder,
+            up_row,
+            down_row,
+            &project,
+            |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+        );
+    }
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
     combined_evaluations.iter_mut().for_each(|eval| eval.trim());

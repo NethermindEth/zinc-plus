@@ -937,6 +937,33 @@ pub trait Uair: Clone {
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal;
 
+    /// N-branch constraint description.
+    ///
+    /// Mirror of [`Uair::constrain_general`] for the parallel "n-branch"
+    /// proof line that runs the same trace through Steps 1–7 with the
+    /// secondary prime modulus `n` (e.g. the secp256k1 group order). The
+    /// p-branch and n-branch share the same `pcs_transcript` via
+    /// sequential append.
+    ///
+    /// Default: emits no constraints (empty body), so a UAIR that only
+    /// cares about the p-branch needs no opt-in. Override this method to
+    /// emit constraints honest mod `n` (used in Phase 3 for ECDSA mod-n
+    /// arithmetic).
+    fn constrain_general_n<B, FromR, MulByScalar, IFromR>(
+        _b: &mut B,
+        _up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+    }
+
     // Same as `constrain_general` but `from_ref` and `mbs`
     // come from the trait implementations.
     fn constrain<B>(b: &mut B, up: TraceRow<B::Expr>, down: TraceRow<B::Expr>)
@@ -946,6 +973,23 @@ pub trait Uair: Clone {
         B::Ideal: FromRef<Self::Ideal>,
     {
         Self::constrain_general(
+            b,
+            up,
+            down,
+            B::Expr::from_ref,
+            |x, y| B::Expr::mul_by_scalar::<UNCHECKED>(x, y),
+            B::Ideal::from_ref,
+        )
+    }
+
+    /// N-branch counterpart of [`Uair::constrain`].
+    fn constrain_n<B>(b: &mut B, up: TraceRow<B::Expr>, down: TraceRow<B::Expr>)
+    where
+        B: ConstraintBuilder,
+        B::Expr: FromRef<Self::Scalar> + for<'b> MulByScalar<&'b Self::Scalar>,
+        B::Ideal: FromRef<Self::Ideal>,
+    {
+        Self::constrain_general_n(
             b,
             up,
             down,

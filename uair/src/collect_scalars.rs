@@ -37,3 +37,34 @@ pub fn collect_scalars<U: Uair>() -> HashSet<U::Scalar> {
 
     scalars.into_inner()
 }
+
+/// N-branch counterpart of [`collect_scalars`].
+pub fn collect_scalars_n<U: Uair>() -> HashSet<U::Scalar> {
+    let scalars = RefCell::new(HashSet::new());
+
+    let sig = U::signature();
+    let (up_dummy, down_dummy) = sig.dummy_rows(DummySemiring);
+    let up_row = TraceRow::from_slice_with_layout(&up_dummy, sig.total_cols().as_column_layout());
+    let down_row = TraceRow::from_slice_with_layout_and_bit_op(
+        &down_dummy,
+        sig.down_cols().as_column_layout(),
+        sig.bit_op_down_count(),
+    );
+
+    U::constrain_general_n(
+        &mut DoNothingBuilder,
+        up_row,
+        down_row,
+        |x| {
+            scalars.borrow_mut().insert(x.clone());
+            DummySemiring
+        },
+        |_x, y| {
+            scalars.borrow_mut().insert(y.clone());
+            Some(DummySemiring)
+        },
+        |_| ImpossibleIdeal,
+    );
+
+    scalars.into_inner()
+}

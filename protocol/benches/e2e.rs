@@ -373,7 +373,7 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
 // / ShaEcdsaUair ports from main-gamma. Cell type is `Int<EC_FP_INT_LIMBS>`
 // (= `Int<5>`, 320-bit); CwR and CombR scale 2× and 4× respectively. F is
 // shared with `BenchZincTypes` (256-bit MontyField, holds the secp256k1
-// base prime used by `fixed_prime::secp256k1_field_cfg`).
+// base prime used by `fixed_prime::secp256k1_base_field_cfg`).
 //
 
 type RealEcdsaInt = Int<EC_FP_INT_LIMBS>;
@@ -601,8 +601,16 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     // Build the chain once; each bench clones the cached state.
 
+    // Phase 4: prover step1 takes a `field_cfg` selecting the
+    // projecting prime; benches use the secp256k1 base prime (p-branch).
+    let p_field_cfg =
+        || zinc_protocol::fixed_prime::secp256k1_base_field_cfg::<F, Zt::Fmod>();
+
     let p_committed = <piop!()>::step0_commit(pp, trace, num_vars).unwrap();
-    let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
+    let p_projected = p_committed
+        .clone()
+        .step1_combined(p_field_cfg(), project_scalar)
+        .unwrap();
     let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
     let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
     let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
@@ -618,14 +626,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Prove" / "1: Prime projection (Combined)",
         setup = || p_committed.clone(),
-        run = |s| s.step1_combined(project_scalar),
+        run = |s| s.step1_combined(p_field_cfg(), project_scalar),
     );
 
     if count_effective_max_degree::<U>() <= 1 {
         step_bench!(
             "Prove" / "1: Prime projection (MLE-first)",
             setup = || p_committed.clone(),
-            run = |s| s.step1_mle_first(project_scalar),
+            run = |s| s.step1_mle_first(p_field_cfg(), project_scalar),
         );
     }
 
@@ -636,7 +644,10 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     );
 
     if count_effective_max_degree::<U>() <= 1 {
-        let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
+        let p_projected_mle = p_committed
+            .clone()
+            .step1_mle_first(p_field_cfg(), project_scalar)
+            .unwrap();
         step_bench!(
             "Prove" / "2: Ideal check (MLE-first)",
             setup = || p_projected_mle.clone(),
@@ -691,11 +702,28 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    let v_transcript = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
-        IdealOverF,
-    >(pp, proof.clone(), &public_trace, num_vars)
-    .unwrap();
-    let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
+    // Phase 4: verifier step0 returns `(base, commitments, p_branch,
+    // n_branch)`; benches exercise the p-branch chain via
+    // `start_branch(base, commitments, p_branch, false)`.
+    let (v_base, v_commitments, v_p_branch, _v_n_branch) =
+        ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<IdealOverF>(
+            pp,
+            proof.clone(),
+            &public_trace,
+            num_vars,
+        )
+        .unwrap();
+    let v_field_cfg = || zinc_protocol::fixed_prime::secp256k1_base_field_cfg::<F, Zt::Fmod>();
+    let v_transcript = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::start_branch::<IdealOverF>(
+        v_base.clone(),
+        v_commitments.clone(),
+        v_p_branch.clone(),
+        false,
+    );
+    let v_prime_projected = v_transcript
+        .clone()
+        .step1_prime_projection(v_field_cfg())
+        .unwrap();
     let v_ideal_checked = v_prime_projected
         .clone()
         .step2_ideal_check(project_ideal)
@@ -719,7 +747,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "1: Prime projection",
         setup = || v_transcript.clone(),
-        run = |s| s.step1_prime_projection(),
+        run = |s| s.step1_prime_projection(v_field_cfg()),
     );
 
     step_bench!(
@@ -1401,11 +1429,15 @@ where
     commits.extend_from_slice(&to_bytes(&proof.commitments.1));
     commits.extend_from_slice(&to_bytes(&proof.commitments.2));
 
-    let ideal = to_bytes(&proof.ideal_check);
-    let resolver = to_bytes(&proof.resolver);
-    let combined_sumcheck = to_bytes(&proof.combined_sumcheck);
-    let multipoint_eval = to_bytes(&proof.multipoint_eval);
-    let witness_evals = to_bytes(DynamicPolyVecF::reinterpret(&proof.witness_lifted_evals));
+    // Phase 2 stopgap: bench reports the p-branch breakdown (n-branch
+    // is currently a clone; Phase 4 will replace this with separate
+    // per-branch numbers).
+    let p = &proof.p_branch;
+    let ideal = to_bytes(&p.ideal_check);
+    let resolver = to_bytes(&p.resolver);
+    let combined_sumcheck = to_bytes(&p.combined_sumcheck);
+    let multipoint_eval = to_bytes(&p.multipoint_eval);
+    let witness_evals = to_bytes(DynamicPolyVecF::reinterpret(&p.witness_lifted_evals));
 
     eprint_bytes_size_breakdown(
         label,

@@ -175,28 +175,46 @@ pub mod cols {
     /// Inverse of P_Z[FINAL_ROW] mod p; only the final-row cell matters
     /// (gated by ECDSA_S_FINAL). See [ecdsa.rs::cols::PA_Z_INV].
     pub const ECDSA_PA_Z_INV: usize = 22;
-    /// Affine x-coordinate of P[FINAL_ROW]; the verifier is expected to
-    /// check `R_x ≡ r (mod n)` off-protocol against the signature
-    /// scalar r. See [ecdsa.rs::cols::PA_R_X].
+    /// Affine x-coordinate of P[FINAL_ROW]. The order-field equality
+    /// `R_x ≡ r (mod n)` is checked off-protocol via `PA_R` and the
+    /// verifier's separate consistency check.
     pub const ECDSA_PA_R_X: usize = 23;
-    pub const NUM_INT_PUB: usize = 24;
+    /// ECDSA signature scalar `r`. Mirrors [ecdsa::cols::PA_R];
+    /// consumed by the n-branch constraint
+    /// `S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0  (mod n)`.
+    pub const ECDSA_PA_R: usize = 24;
+    /// ECDSA signature scalar `s`. Mirrors [ecdsa::cols::PA_S];
+    /// consumed by both n-branch ECDSA constraints.
+    pub const ECDSA_PA_S: usize = 25;
+    /// ECDSA message digest `e`. Mirrors [ecdsa::cols::PA_E];
+    /// consumed by the n-branch constraint
+    /// `S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0  (mod n)`.
+    pub const ECDSA_PA_E: usize = 26;
+    pub const NUM_INT_PUB: usize = 27;
 
     // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
     // gone — replaced by W_MU_PACKED (binary_poly index 19), with
     // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (24..32): chained Jacobian state + doubled
-    // point + addition scratch. 8 cols; `S = Y²` is inlined.
-    pub const ECDSA_W_X: usize = 24;
-    pub const ECDSA_W_Y: usize = 25;
-    pub const ECDSA_W_Z: usize = 26;
-    pub const ECDSA_W_X_PA: usize = 27;
-    pub const ECDSA_W_Y_PA: usize = 28;
-    pub const ECDSA_W_Z_PA: usize = 29;
-    pub const ECDSA_W_C: usize = 30;
-    pub const ECDSA_W_D: usize = 31;
+    // ECDSA witnesses (27..37): chained Jacobian state + doubled
+    // point + addition scratch + running-sum accumulators for u_1, u_2.
+    // 10 cols; `S = Y²` is inlined.
+    pub const ECDSA_W_X: usize = 27;
+    pub const ECDSA_W_Y: usize = 28;
+    pub const ECDSA_W_Z: usize = 29;
+    pub const ECDSA_W_X_PA: usize = 30;
+    pub const ECDSA_W_Y_PA: usize = 31;
+    pub const ECDSA_W_Z_PA: usize = 32;
+    pub const ECDSA_W_C: usize = 33;
+    pub const ECDSA_W_D: usize = 34;
+    /// Running-sum accumulator for u_1 (mirrors
+    /// [ecdsa::cols::W_U1_ACC]).
+    pub const ECDSA_W_U1_ACC: usize = 35;
+    /// Running-sum accumulator for u_2 (mirrors
+    /// [ecdsa::cols::W_U2_ACC]).
+    pub const ECDSA_W_U2_ACC: usize = 36;
 
-    pub const NUM_INT: usize = 32;
+    pub const NUM_INT: usize = 37;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -214,6 +232,10 @@ pub mod cols {
     pub const FLAT_ECDSA_W_X: usize = NUM_BIN + ECDSA_W_X;
     pub const FLAT_ECDSA_W_Y: usize = NUM_BIN + ECDSA_W_Y;
     pub const FLAT_ECDSA_W_Z: usize = NUM_BIN + ECDSA_W_Z;
+    pub const FLAT_ECDSA_W_U1_ACC: usize = NUM_BIN + ECDSA_W_U1_ACC;
+    pub const FLAT_ECDSA_W_U2_ACC: usize = NUM_BIN + ECDSA_W_U2_ACC;
+    pub const FLAT_ECDSA_PA_B1: usize = NUM_BIN + ECDSA_PA_B1;
+    pub const FLAT_ECDSA_PA_B2: usize = NUM_BIN + ECDSA_PA_B2;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,10 +285,19 @@ where
             //     columns — carries now packed in W_MU_PACKED, accessed
             //     via BitOp::ShiftR virtuals declared below.
             ShiftSpec::new(cols::FLAT_SHA_PA_K, 3),
-            // === ECDSA int shifts (X, Y, Z by 1 each: down.X[t] = R_{t+1}) ===
+            // === ECDSA int shifts ===
+            // X, Y, Z by 1 each: down.X[t] = R_{t+1}.
+            // PA_B1, PA_B2 by 1 so the running-sum chain constraint can
+            // read down.PA_Bi[t] = PA_Bi[t+1].
+            // W_U1_ACC, W_U2_ACC by 1 so the chain can assert
+            // down.W_Ui_ACC[t] = 2·W_Ui_ACC[t] + down.PA_Bi[t].
+            ShiftSpec::new(cols::FLAT_ECDSA_PA_B1, 1),
+            ShiftSpec::new(cols::FLAT_ECDSA_PA_B2, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_X, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_Y, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_Z, 1),
+            ShiftSpec::new(cols::FLAT_ECDSA_W_U1_ACC, 1),
+            ShiftSpec::new(cols::FLAT_ECDSA_W_U2_ACC, 1),
         ];
 
         // discussion.
@@ -487,13 +518,25 @@ where
         let down_w_u_neg_e_g_sh3 = &down.binary_poly[16];
         let _down_w_maj_sh2 = &down.binary_poly[17];
         let down_w_maj_sh3 = &down.binary_poly[18];
-        // int slots: SHA pa_K_sh3 (slot 0), then ECDSA X/Y/Z sh1 (1, 2, 3).
+        // int slots (sorted by source_col):
+        //   0: SHA_PA_K shift 3
+        //   1: ECDSA_PA_B1 shift 1
+        //   2: ECDSA_PA_B2 shift 1
+        //   3: ECDSA_W_X shift 1
+        //   4: ECDSA_W_Y shift 1
+        //   5: ECDSA_W_Z shift 1
+        //   6: ECDSA_W_U1_ACC shift 1
+        //   7: ECDSA_W_U2_ACC shift 1
         // The 3 prior SHA mu_* int shifts are gone alongside the
         // dropped int carry columns.
         let down_pa_k_sh3 = &down.int[0];
-        let down_ecdsa_x_sh1 = &down.int[1];
-        let down_ecdsa_y_sh1 = &down.int[2];
-        let down_ecdsa_z_sh1 = &down.int[3];
+        let down_ecdsa_pa_b1_sh1 = &down.int[1];
+        let down_ecdsa_pa_b2_sh1 = &down.int[2];
+        let down_ecdsa_x_sh1 = &down.int[3];
+        let down_ecdsa_y_sh1 = &down.int[4];
+        let down_ecdsa_z_sh1 = &down.int[5];
+        let down_ecdsa_u1_acc_sh1 = &down.int[6];
+        let down_ecdsa_u2_acc_sh1 = &down.int[7];
 
         // Bit-op virtual columns. With FLAT_W_W < FLAT_W_MU_PACKED,
         // W's 6 bit-ops occupy slots 0-5, then W_MU_PACKED's 5
@@ -696,6 +739,8 @@ where
         let e_z_pa = &int[cols::ECDSA_W_Z_PA];
         let e_c = &int[cols::ECDSA_W_C];
         let e_d = &int[cols::ECDSA_W_D];
+        let e_u1_acc = &int[cols::ECDSA_W_U1_ACC];
+        let e_u2_acc = &int[cols::ECDSA_W_U2_ACC];
 
         let two_scalar = const_scalar::<R>(R::from(2_u32));
         let three_scalar = const_scalar::<R>(R::from(3_u32));
@@ -813,6 +858,93 @@ where
         let e_zinv_sq = e_pa_z_inv.clone() * e_pa_z_inv;
         let e_f2_inner = e_x.clone() * &e_zinv_sq - e_pa_r_x;
         b.assert_zero(e_s_final.clone() * &e_f2_inner);
+
+        // === Booleanity of PA_B1, PA_B2 + S_ADD derivation ===
+        // Mirrors the standalone ecdsa.rs Augmentation A. 3 constraints
+        // at deg 3 each. Closes the soundness obligation that PA_B1,
+        // PA_B2 ∈ {0,1} and S_ADD = b_1 + b_2 − b_1·b_2 (which the
+        // in-circuit affine addend selector relies on).
+
+        // ECDSA-B1-bool: S_ACTIVE · PA_B1 · (PA_B1 − 1) = 0
+        let e_s_active_b1 = e_s_active.clone() * e_pa_b1;
+        let e_s_active_b1_b1 = e_s_active_b1.clone() * e_pa_b1;
+        b.assert_zero(e_s_active_b1_b1 - &e_s_active_b1);
+
+        // ECDSA-B2-bool: S_ACTIVE · PA_B2 · (PA_B2 − 1) = 0
+        let e_s_active_b2 = e_s_active.clone() * e_pa_b2;
+        let e_s_active_b2_b2 = e_s_active_b2.clone() * e_pa_b2;
+        b.assert_zero(e_s_active_b2_b2 - &e_s_active_b2);
+
+        // ECDSA-S_ADD-derive: S_ACTIVE · (S_ADD − PA_B1 − PA_B2 + PA_B1·PA_B2) = 0
+        let e_b1b2_for_sadd = e_pa_b1.clone() * e_pa_b2;
+        let e_s_add_inner = e_s_add.clone() - e_pa_b1 - e_pa_b2 + &e_b1b2_for_sadd;
+        b.assert_zero(e_s_active.clone() * &e_s_add_inner);
+
+        // === Running-sum aggregation: bind W_U1_ACC / W_U2_ACC to
+        // PA_B1 / PA_B2 (Augmentation B; 4 deg-2 constraints) ===
+
+        // Init-U1: ECDSA_S_INIT · (W_U1_ACC − PA_B1) = 0
+        b.assert_zero(e_s_init.clone() * &(e_u1_acc.clone() - e_pa_b1));
+        // Init-U2: ECDSA_S_INIT · (W_U2_ACC − PA_B2) = 0
+        b.assert_zero(e_s_init.clone() * &(e_u2_acc.clone() - e_pa_b2));
+
+        // Chain-U1: S_ACTIVE · (down.W_U1_ACC − 2·W_U1_ACC − down.PA_B1) = 0
+        let two_e_u1_acc = mbs(e_u1_acc, &two_scalar).expect("2·W_U1_ACC overflow");
+        let chain_e_u1_inner =
+            down_ecdsa_u1_acc_sh1.clone() - &two_e_u1_acc - down_ecdsa_pa_b1_sh1;
+        b.assert_zero(e_s_active.clone() * &chain_e_u1_inner);
+
+        // Chain-U2: S_ACTIVE · (down.W_U2_ACC − 2·W_U2_ACC − down.PA_B2) = 0
+        let two_e_u2_acc = mbs(e_u2_acc, &two_scalar).expect("2·W_U2_ACC overflow");
+        let chain_e_u2_inner =
+            down_ecdsa_u2_acc_sh1.clone() - &two_e_u2_acc - down_ecdsa_pa_b2_sh1;
+        b.assert_zero(e_s_active.clone() * &chain_e_u2_inner);
+    }
+
+    fn constrain_general_n<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        // Mirror of [ecdsa.rs::constrain_general_n] on the merged
+        // column indices. Two constraints, both gated by
+        // `ECDSA_S_FINAL`, dispatched in the n-branch:
+        //   F_N1: ECDSA_S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0  (mod n)
+        //   F_N2: ECDSA_S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0  (mod n)
+        // See [ecdsa.rs::constrain_general_n] for the soundness
+        // discussion (the off-by-2 anchor + the `u_i < p/2` caveat).
+        //
+        // The SHA-half has no n-branch constraints — the protocol
+        // commits the digest once and binds it via the verifier's
+        // `pa_e` cross-half check (already in `verify_public_structure`).
+
+        let int = up.int;
+        let e_s_final = &int[cols::ECDSA_S_FINAL];
+        let e_pa_r = &int[cols::ECDSA_PA_R];
+        let e_pa_s = &int[cols::ECDSA_PA_S];
+        let e_pa_e = &int[cols::ECDSA_PA_E];
+        let e_u1_acc = &int[cols::ECDSA_W_U1_ACC];
+        let e_u2_acc = &int[cols::ECDSA_W_U2_ACC];
+
+        let two_scalar = const_scalar::<R>(R::from(2_u32));
+
+        // F_N1: S_FINAL · (W_U1_ACC · PA_S − 2·PA_E) = 0  (mod n)
+        let two_pa_e = mbs(e_pa_e, &two_scalar).expect("2·PA_E overflow");
+        let f_n1_inner = e_u1_acc.clone() * e_pa_s - &two_pa_e;
+        b.assert_zero(e_s_final.clone() * &f_n1_inner);
+
+        // F_N2: S_FINAL · (W_U2_ACC · PA_S − 2·PA_R) = 0  (mod n)
+        let two_pa_r = mbs(e_pa_r, &two_scalar).expect("2·PA_R overflow");
+        let f_n2_inner = e_u2_acc.clone() * e_pa_s - &two_pa_r;
+        b.assert_zero(e_s_final.clone() * &f_n2_inner);
     }
 
     /// Verify the SHA-side public-column structural properties
@@ -977,22 +1109,24 @@ where
 
         // Int section: merge per the layout in `cols`.
         // SHA standalone int layout (9 cols, all public).
-        // ECDSA standalone int layout (23 cols after in-circuit addend
-        // and final-row affine readout):
-        //   0..15   pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
+        // ECDSA standalone int layout (28 cols after the PA_R/PA_S/PA_E
+        // n-branch publics):
+        //   0..18   pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
         //                 PA_QX, PA_QY, PA_QGX, PA_QGY,
-        //                 PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X)
-        //   15..23  witnesses (8 EC cols)
+        //                 PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X,
+        //                 PA_R, PA_S, PA_E)
+        //   18..28  witnesses (10 EC cols: X/Y/Z, X_pa/Y_pa/Z_pa, C, D,
+        //                      W_U1_ACC, W_U2_ACC)
         let mut int: Vec<DenseMultilinearExtension<R>> = Vec::with_capacity(cols::NUM_INT);
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
 
         // [0..9] SHA pubs (sha[0..9])
         int.extend(sha_ints[0..9].iter().cloned());
-        // [9..24] ECDSA pubs (ecdsa[0..15])
-        int.extend(ecdsa_ints[0..15].iter().cloned());
-        // [24..32] ECDSA witnesses (ecdsa[15..23], 8 cols)
-        int.extend(ecdsa_ints[15..23].iter().cloned());
+        // [9..27] ECDSA pubs (ecdsa[0..18], 18 cols)
+        int.extend(ecdsa_ints[0..18].iter().cloned());
+        // [27..37] ECDSA witnesses (ecdsa[18..28], 10 cols)
+        int.extend(ecdsa_ints[18..28].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -1013,29 +1147,45 @@ mod tests {
     use super::*;
     use rand::rng;
     use zinc_uair::{
-        constraint_counter::count_constraints,
+        constraint_counter::{count_constraints, count_constraints_n},
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 13 SHA + 13 ECDSA = 26 constraints. ECDSA contributes
-    /// the 11 doubling/addition/output/init constraints plus 2 final-row
-    /// affine-readout constraints (F1, F2). The 5 SHA compensator-zero
-    /// pins (formerly C17–C21) moved to verifier-side
-    /// `verify_public_structure`. Max degree 7 from the ECDSA C-A2
-    /// constraint after the in-circuit affine addend went live
-    /// (T_y is degree 3 in trace cells; multiplied by Z_pa^3 (deg 3)
-    /// and S_ACTIVE (deg 1)).
+    /// Sanity: 13 SHA + 20 ECDSA = 33 p-branch constraints + 2 ECDSA
+    /// n-branch constraints. ECDSA contributes 11 doubling/addition/
+    /// output/init constraints, 2 final-row affine-readout constraints
+    /// (F1, F2), 3 booleanity / S_ADD-derive constraints (Augmentation
+    /// A), and 4 running-sum aggregation constraints (Augmentation B).
+    /// The 5 SHA compensator-zero pins (formerly C17–C21) moved to
+    /// verifier-side `verify_public_structure`. Max degree 7 from the
+    /// ECDSA C-A2 constraint after the in-circuit affine addend went
+    /// live (T_y is degree 3 in trace cells; multiplied by Z_pa^3
+    /// (deg 3) and S_ACTIVE (deg 1)).
+    ///
+    /// n-branch: two ECDSA mod-`n` scalar identities anchored at
+    /// `ECDSA_S_FINAL` (mirror of [ecdsa::constrain_general_n]).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 26);
+        assert_eq!(count_constraints::<U>(), 33);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-7 (ECDSA C-A2 with in-circuit T_y),
-        // some deg-2 (boundaries + chaining), some deg-1 (SHA C1, C2,
-        // C4, C6 — including the new row-local σ_0/σ_1 equalities).
+        // ≥7 deg-2 (3 ECDSA init Jacobian + 2 init U_acc + 2 chain U_acc;
+        // SHA half adds none).
         assert!(degrees.iter().any(|&d| d == 7), "expected deg-7 from ECDSA C-A2");
-        assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
+        assert!(
+            degrees.iter().filter(|&&d| d == 2).count() >= 7,
+            "expected ≥7 deg-2 (init Jacobian + init/chain U_acc)",
+        );
+
+        // n-branch: two mod-n ECDSA constraints from
+        // [ecdsa::constrain_general_n] (F_N1, F_N2).
+        assert_eq!(
+            count_constraints_n::<U>(),
+            2,
+            "expected 2 n-branch constraints (ECDSA u_1·s ≡ e and u_2·s ≡ r)",
+        );
     }
 
     /// The merged trace builder produces a trace with the right column

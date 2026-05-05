@@ -99,6 +99,24 @@ const SECP256K1_P_HEX: &str = concat!(
 /// width.
 pub const SECP256K1_P_UINT: CbUint<EC_FP_INT_LIMBS> = CbUint::from_be_hex(SECP256K1_P_HEX);
 
+/// secp256k1 group order `n = 2^256 − 432420386565659656852420866394968145599`,
+/// as a 5-limb `Uint` (top limb zero-padded).
+///
+/// This is the prime used as the projecting modulus for the n-branch of
+/// the dual-pipeline protocol — it lets the prover assert ECDSA scalar
+/// identities like `u_1 · s − e ≡ 0 (mod n)` directly.
+const SECP256K1_N_HEX: &str = concat!(
+    "0000000000000000",
+    "FFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFE",
+    "BAAEDCE6AF48A03B",
+    "BFD25E8CD0364141",
+);
+
+/// `n` as a `crypto_bigint::Uint<5>`. Used by the n-branch witness
+/// generator to compute consistent scalar values for `PA_E`, `PA_R`.
+pub const SECP256K1_N_UINT: CbUint<EC_FP_INT_LIMBS> = CbUint::from_be_hex(SECP256K1_N_HEX);
+
 /// Trait knob: a `ConstSemiring` whose representation can hold a
 /// secp256k1 base-field element. The `From<u32>` bound lets the UAIR
 /// build small constant scalars (3, 8, 9, 12) for `mul_by_scalar`.
