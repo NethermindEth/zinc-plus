@@ -29,7 +29,6 @@ jobs:
           - zinc-transcript
           - zinc-uair
           - zinc-utils
-          - zip-plus
     steps:
       - uses: actions/checkout@v6
 
@@ -51,3 +50,48 @@ jobs:
           cargo +nightly miri setup
           MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance -Zmiri-disable-isolation" \
             cargo +nightly miri test -p ${{ matrix.crate }} --lib
+
+  ub-detection-zip-plus:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: "Miri (zip-plus: ${{ matrix.chunk.id }})"
+    timeout-minutes: 480
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk:
+          - id: code-iprs
+            filter: "code::iprs::"
+          - id: code-raa
+            filter: "code::raa::"
+          - id: merkle
+            filter: "merkle::"
+          - id: pcs-commit
+            filter: "pcs::phase_commit::"
+          - id: pcs-prove
+            filter: "pcs::phase_prove::"
+          - id: pcs-verify
+            filter: "pcs::phase_verify::"
+          - id: pcs-transcript
+            filter: "pcs_transcript::"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache cargo build
+        id: cache-cargo
+        uses: actions/cache@v5
+        continue-on-error: false
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-miri-zip-plus-${{ matrix.chunk.id }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-miri-zip-plus-${{ matrix.chunk.id }}
+      - run: |
+          rustup +nightly component add miri
+          cargo +nightly miri setup
+          MIRIFLAGS="-Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE -Zmiri-strict-provenance -Zmiri-disable-isolation" \
+            cargo +nightly miri test -p zip-plus --lib -- ${{ matrix.chunk.filter }}
