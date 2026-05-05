@@ -28,7 +28,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    BitOp, Uair, UairSignature, UairTrace,
+    BitOp, ConstraintRing, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
@@ -1707,6 +1707,7 @@ where
         project_scalar,
         project_ideal,
         None,
+        None,
     )
 }
 
@@ -1782,11 +1783,92 @@ where
         project_scalar,
         project_ideal,
         Some(&mut timings),
+        None,
     )?;
     Ok(timings)
 }
 
+/// Dual-prime variant of [`verify_folded_4x`].
+///
+/// Mirrors [`crate::prover::prove_folded_4x_dual_prime`]: draws `q`
+/// from the FS transcript, runs the F_p-branch ideal check over
+/// `F_q[X]`, and the Z-branch ideal check over `F_p[X]` (secp256k1).
+/// The remaining steps run only against the F_p-branch.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn verify_folded_4x_dual_prime<
+    ZtF,
+    U,
+    F,
+    IdealOverF,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const INT_LIMBS: usize,
+    const INT_QUARTER_LIMBS: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    vp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    proof: crate::DualPrimeProof<F>,
+    public_trace: &UairTrace<Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+) -> Result<(), ProtocolError<F, IdealOverF>>
+where
+    ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
+        + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    verify_folded_4x_inner::<
+        ZtF,
+        U,
+        F,
+        IdealOverF,
+        D,
+        HALF_D,
+        QUARTER_D,
+        INT_LIMBS,
+        INT_QUARTER_LIMBS,
+        CHECK_FOR_OVERFLOW,
+    >(
+        vp,
+        proof.inner,
+        public_trace,
+        num_vars,
+        project_scalar,
+        project_ideal,
+        None,
+        Some(proof.ideal_check_z),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn verify_folded_4x_inner<
     ZtF,
     U,
@@ -1810,6 +1892,7 @@ fn verify_folded_4x_inner<
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
     mut timings: Option<&mut FoldedVerifyTimings>,
+    dual_prime_z_ic: Option<ideal_check::Proof<F>>,
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
     ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
@@ -1868,7 +1951,18 @@ where
 
     // ── Step 1: Prime projection ────────────────────────────────────────
     let _t_step1 = std::time::Instant::now();
-    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    // Mirror the prover's prime sourcing. Single-prime: secp256k1.
+    // Dual-prime: q from the FS transcript at the same position the
+    // prover drew it.
+    let dual_prime_active = dual_prime_z_ic.is_some();
+    let field_cfg = if dual_prime_active {
+        let q: ZtF::Fmod = pcs_transcript
+            .fs_transcript
+            .get_prime::<ZtF::Fmod, ZtF::PrimeTest>();
+        F::make_cfg(&F::Modulus::from_ref(&q)).expect("FS-drawn q must be prime")
+    } else {
+        crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>()
+    };
     if let Some(t) = timings.as_mut() {
         t.step1_prime_projection = _t_step1.elapsed();
     }
@@ -1876,14 +1970,41 @@ where
     // ── Step 2: Ideal check ─────────────────────────────────────────────
     let _t_step2 = std::time::Instant::now();
     let num_constraints = count_constraints::<U>();
-    let ic_subclaim = U::verify_as_subprotocol::<_, IdealOverF, _>(
-        &mut pcs_transcript.fs_transcript,
-        proof.ideal_check,
-        num_constraints,
-        num_vars,
-        |ideal| project_ideal(ideal, &field_cfg),
-        &field_cfg,
-    )?;
+    let ic_subclaim = if dual_prime_active {
+        U::verify_as_subprotocol_typed::<_, IdealOverF, _>(
+            &mut pcs_transcript.fs_transcript,
+            proof.ideal_check,
+            num_constraints,
+            num_vars,
+            |ideal| project_ideal(ideal, &field_cfg),
+            &field_cfg,
+            ConstraintRing::Fp,
+        )?
+    } else {
+        U::verify_as_subprotocol::<_, IdealOverF, _>(
+            &mut pcs_transcript.fs_transcript,
+            proof.ideal_check,
+            num_constraints,
+            num_vars,
+            |ideal| project_ideal(ideal, &field_cfg),
+            &field_cfg,
+        )?
+    };
+    // Dual-prime: replay the Z-branch ideal check on the secp256k1
+    // fixed prime. Discards the subclaim (Z-branch does not feed into
+    // CPR/sumcheck/multipoint eval in this iteration).
+    if let Some(ic_z) = dual_prime_z_ic {
+        let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+        let _z_subclaim = U::verify_as_subprotocol_typed::<_, IdealOverF, _>(
+            &mut pcs_transcript.fs_transcript,
+            ic_z,
+            num_constraints,
+            num_vars,
+            |ideal| project_ideal(ideal, &p_cfg),
+            &p_cfg,
+            ConstraintRing::Z,
+        )?;
+    }
     if let Some(t) = timings.as_mut() {
         t.step2_ideal_check = _t_step2.elapsed();
     }

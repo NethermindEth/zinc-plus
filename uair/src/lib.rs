@@ -21,6 +21,21 @@ use crate::ideal::{Ideal, IdealCheck};
 
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
 
+/// Per-constraint ring tag for the dual-prime protocol.
+///
+/// Each `assert_in_ideal*` call attaches a `ConstraintRing` saying which
+/// branch the constraint belongs to:
+/// - `Z`  — checked over `F_p[X]` where `p` is the secp256k1 fixed prime.
+/// - `Fp` — checked over `F_q[X]` where `q` is a small Fiat–Shamir prime.
+///
+/// The single-prime protocol ignores the tag (all constraints are
+/// effectively `Z` because the projection prime is fixed).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ConstraintRing {
+    Z,
+    Fp,
+}
+
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.
 pub trait ConstraintBuilder {
@@ -34,6 +49,24 @@ pub trait ConstraintBuilder {
 
     /// Add a constraint saying that `expr` belongs to the ideal `ideal`.
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
+
+    /// Add a constraint saying that `expr` belongs to the ideal `ideal`,
+    /// tagged for the dual-prime branch given by `ring`.
+    ///
+    /// Default impl drops the tag and delegates to [`assert_in_ideal`],
+    /// preserving the single-prime semantics for builders that don't
+    /// care about per-constraint typing (counters, degree collectors,
+    /// folders, etc.). Builders driving the dual-prime protocol —
+    /// notably [`crate::ideal_collector::IdealCollector`] — override
+    /// this to capture the tag.
+    fn assert_in_ideal_typed(
+        &mut self,
+        expr: Self::Expr,
+        ideal: &Self::Ideal,
+        _ring: ConstraintRing,
+    ) {
+        self.assert_in_ideal(expr, ideal);
+    }
 
     /// Add a constraint saying that `expr` is equal to zero which is
     /// the same as saying that `expr` belongs to the zero ideal.

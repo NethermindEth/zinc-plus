@@ -23,6 +23,7 @@ use zinc_uair::{
     Uair,
     degree_counter::linear_constraint_mask,
     ideal::{Ideal, IdealCheck},
+    ConstraintRing,
     ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
@@ -159,6 +160,91 @@ pub trait IdealCheckProtocol: Uair {
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
         field_cfg: &F::Config,
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
+
+    // -----------------------------------------------------------------
+    // Dual-prime variants
+    // -----------------------------------------------------------------
+    //
+    // Each `_typed` method accepts a `tag_filter: ConstraintRing` and
+    // restricts the ideal check to the matching branch. Slots whose
+    // recorded tag (from `IdealCollector::tags`) differs from the filter
+    // are forced to `ZERO` in the combined polynomial values BEFORE
+    // they are absorbed into the Fiat-Shamir transcript, and the
+    // verifier rejects the proof if any off-branch slot carries a
+    // non-zero value. Zero-ideal slots (`assert_zero`) are filtered
+    // alongside the off-branch slots — they were already discarded by
+    // the single-prime variants.
+
+    /// Tag-filtered counterpart of [`Self::prove_linear`].
+    #[allow(clippy::type_complexity)]
+    fn prove_linear_typed<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    /// Tag-filtered counterpart of [`Self::prove_combined`].
+    #[allow(clippy::type_complexity)]
+    fn prove_combined_typed<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &RowMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    /// Tag-filtered counterpart of [`Self::prove_hybrid`].
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn prove_hybrid_typed<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<Self::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable;
+
+    /// Tag-filtered counterpart of [`Self::verify_as_subprotocol`].
+    ///
+    /// Off-branch slots in the received proof must be `ZERO` — any
+    /// other value is a soundness violation and is rejected with
+    /// [`IdealCheckError::OffBranchSlotNotZero`].
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn verify_as_subprotocol_typed<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+        tag_filter: ConstraintRing,
     ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
         F: InnerTransparentField,
@@ -426,6 +512,145 @@ where
             .zip(combined_mle_values.iter())
             .filter(|(ideal, _)| !ideal.is_zero_ideal())
             .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
+            .unzip();
+
+        batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
+
+        Ok(VerifierSubclaim {
+            evaluation_point,
+            values: combined_mle_values,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Dual-prime variants (default impls)
+    //
+    // Implementations zero out off-branch slots BEFORE absorbing into
+    // the transcript so the transcript flow exactly matches what the
+    // dual-prime verifier reconstructs.
+    // -----------------------------------------------------------------
+
+    // Note on dual-prime soundness: the typed variants do NOT zero out
+    // off-branch slots in the proof. The off-branch slot values still
+    // participate in the downstream CPR sumcheck via comb_fn — folding
+    // them out would break the equality between the prover's claimed
+    // sum and the verifier's expected sum (computed from
+    // ic_subclaim.values). Soundness for off-branch slots is enforced
+    // implicitly by that sumcheck consistency, not by an explicit
+    // zero-equality check on the proof. Tag filtering only restricts
+    // which ideals get verified by `batched_ideal_check`.
+
+    fn prove_linear_typed<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        _tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        Self::prove_linear(
+            transcript,
+            trace_matrix,
+            projected_scalars,
+            num_constraints,
+            num_vars,
+            field_cfg,
+        )
+    }
+
+    fn prove_combined_typed<F>(
+        transcript: &mut impl Transcript,
+        trace_matrix: &RowMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        _tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        Self::prove_combined(
+            transcript,
+            trace_matrix,
+            projected_scalars,
+            num_constraints,
+            num_vars,
+            field_cfg,
+        )
+    }
+
+    fn prove_hybrid_typed<F>(
+        transcript: &mut impl Transcript,
+        row_major_trace: &RowMajorTrace<F>,
+        column_major_trace: &ColumnMajorTrace<F>,
+        projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        _tag_filter: ConstraintRing,
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+    {
+        Self::prove_hybrid(
+            transcript,
+            row_major_trace,
+            column_major_trace,
+            projected_scalars,
+            num_constraints,
+            num_vars,
+            field_cfg,
+        )
+    }
+
+    fn verify_as_subprotocol_typed<F, IdealOverF, IdealOverFFromRef>(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        num_constraints: usize,
+        num_vars: usize,
+        ideal_over_f_from_ref: IdealOverFFromRef,
+        field_cfg: &F::Config,
+        tag_filter: ConstraintRing,
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    {
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+
+        let combined_mle_values = proof.combined_mle_values;
+
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+        for mle_value in &combined_mle_values {
+            transcript.absorb_random_field_slice(&mle_value.coeffs, &mut transcription_buf);
+        }
+
+        let ideal_collector = collect_ideals::<U>(num_constraints);
+
+        // Tag-filtered ideal check: skip zero-ideal slots (assert_zero)
+        // and slots whose tag doesn't match the active branch.
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
+            .ideals
+            .iter()
+            .zip(ideal_collector.tags.iter())
+            .zip(combined_mle_values.iter())
+            .filter(|((ideal, tag), _)| !ideal.is_zero_ideal() && **tag == tag_filter)
+            .map(|((ideal, _), value)| (ideal_over_f_from_ref(ideal), value.clone()))
             .unzip();
 
         batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;

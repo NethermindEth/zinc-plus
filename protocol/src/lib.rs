@@ -193,6 +193,43 @@ where
     }
 }
 
+/// Proof produced by the dual-prime variant of the Zinc+ PIOP.
+///
+/// Wraps a single-prime [`Proof`] (the F_p-branch — checked via a
+/// Fiat–Shamir-drawn small prime `q`) plus the Z-branch ideal-check
+/// proof (checked via the secp256k1 fixed prime `p`). The Z-branch
+/// runs only the ideal check; while every constraint is tagged
+/// `ConstraintRing::Fp` (the initial deliverable's choice) the
+/// Z-branch ideal check is trivially empty (all slots ZERO) but
+/// keeps the transcript flow consistent so the verifier reproduces
+/// challenges deterministically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DualPrimeProof<F: PrimeField> {
+    pub inner: Proof<F>,
+    pub ideal_check_z: IdealCheckProof<F>,
+}
+
+/// Out-parameter passed to the dual-prime hooks inside
+/// `prove_folded_4x_inner` / `verify_folded_4x_inner`. The wrappers
+/// unwrap `ideal_check_z` after the inner call returns.
+pub struct DualPrimeExtras<F: PrimeField> {
+    pub ideal_check_z: Option<IdealCheckProof<F>>,
+}
+
+impl<F: PrimeField> DualPrimeExtras<F> {
+    pub fn new() -> Self {
+        Self {
+            ideal_check_z: None,
+        }
+    }
+}
+
+impl<F: PrimeField> Default for DualPrimeExtras<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Trait bundling the various type parameters for the public inputs (NYI),
 /// witness and Zinc+ PIOP.
 pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
@@ -1919,6 +1956,65 @@ mod tests {
             sha256_test_project_ideal,
         )
         .expect("Verifier rejected an honest 4× folded ShaEcdsa proof");
+    }
+
+    /// Dual-prime round-trip on ShaEcdsa with all constraints tagged
+    /// `Fp`. Exercises:
+    ///
+    /// - FS-drawn `q` for the F_p-branch (replaces the secp256k1 fixed
+    ///   prime in the F_p-branch's ideal check + sumcheck + multipoint
+    ///   eval + lift).
+    /// - secp256k1 fixed `p` for the Z-branch (every slot is ZERO since
+    ///   no constraint is `Z`-tagged).
+    /// - Single batched Zip+ open at the F_p-branch's `r_0`.
+    #[test]
+    fn test_e2e_sha_ecdsa_folded_4x_dual_prime_round_trip() {
+        use crate::prover::prove_folded_4x_dual_prime;
+        use crate::verifier::verify_folded_4x_dual_prime;
+
+        type ZtF = TestShaEcdsaFolded4xZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+
+        let mut rng = rng();
+        let pp = setup_folded_4x_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let sig = <U as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded_4x_dual_prime::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            false,
+            CHECKED,
+        >(&pp, &trace, SHA_ECDSA_NUM_VARS, project_scalar_fn)
+        .expect("dual-prime prover failed");
+
+        verify_folded_4x_dual_prime::<
+            ZtF,
+            U,
+            F,
+            Sha256Ideal<F>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest dual-prime proof");
     }
 
     /// No-tamper SHA-ECDSA round-trip + structural-shape pins. Prints

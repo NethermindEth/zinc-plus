@@ -1,15 +1,22 @@
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
-    ConstraintBuilder, TraceRow, Uair,
+    ConstraintBuilder, ConstraintRing, TraceRow, Uair,
     dummy_semiring::DummySemiring,
     ideal::{Ideal, IdealCheck, IdealCheckError},
 };
 
 /// A `ConstraintBuilder` that collects
 /// ideals used in a `Uair`.
+///
+/// The `tags` vector is parallel to `ideals` and records the
+/// dual-prime branch tag (`Z` or `Fp`) that each constraint was
+/// added with. `assert_zero` constraints (zero-ideal) get tag
+/// `ConstraintRing::Z` by convention — irrelevant in practice
+/// because they are filtered out of both branches as zero-ideal.
 pub struct IdealCollector<I: Ideal> {
     pub ideals: Vec<IdealOrZero<I>>,
+    pub tags: Vec<ConstraintRing>,
 }
 
 impl<I: Ideal> IdealCollector<I> {
@@ -19,6 +26,7 @@ impl<I: Ideal> IdealCollector<I> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             ideals: Vec::with_capacity(num_constraints),
+            tags: Vec::with_capacity(num_constraints),
         }
     }
 }
@@ -51,10 +59,22 @@ where
 
     fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
         self.ideals.push(ideal.clone());
+        self.tags.push(ConstraintRing::Z);
+    }
+
+    fn assert_in_ideal_typed(
+        &mut self,
+        _expr: Self::Expr,
+        ideal: &Self::Ideal,
+        ring: ConstraintRing,
+    ) {
+        self.ideals.push(ideal.clone());
+        self.tags.push(ring);
     }
 
     fn assert_zero(&mut self, _expr: Self::Expr) {
         self.ideals.push(IdealOrZero::zero());
+        self.tags.push(ConstraintRing::Z);
     }
 }
 

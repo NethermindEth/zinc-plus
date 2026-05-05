@@ -2185,6 +2185,109 @@ fn e2e_folded_4x_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Dual-prime variant of [`bench_real_sha_ecdsa_e2e_folded_4x`].
+/// Routes through `prove_folded_4x_dual_prime` /
+/// `verify_folded_4x_dual_prime`. With every `ShaEcdsaUair` constraint
+/// tagged `ConstraintRing::Fp`, the Z-branch runs an empty (all-ZERO)
+/// ideal check.
+fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+    type ZtF = BenchFoldedRealEcdsaZincTypes4x;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_4x_pp_real_ecdsa(num_vars);
+    let project_scalar = zinc_protocol::project_scalar_fn;
+    let project_ideal = sha256_real_project_ideal;
+
+    let params = format!("ShaEcdsa/nvars={num_vars}");
+
+    group.bench_function(
+        BenchmarkId::new("Prove (folded 4× dual-prime)", &params),
+        |bench| {
+            bench.iter(|| {
+                black_box(
+                    zinc_protocol::prover::prove_folded_4x_dual_prime::<
+                        ZtF,
+                        U,
+                        F,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        QUARTER_DEGREE_PLUS_ONE,
+                        EC_FP_INT_LIMBS,
+                        INT_QUARTER_LIMBS_BENCH,
+                        false,
+                        PERFORM_CHECKS,
+                    >(&pp, &trace, num_vars, project_scalar),
+                )
+                .expect("Folded 4× dual-prime prover failed");
+            });
+        },
+    );
+
+    let proof = zinc_protocol::prover::prove_folded_4x_dual_prime::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        EC_FP_INT_LIMBS,
+        INT_QUARTER_LIMBS_BENCH,
+        false,
+        PERFORM_CHECKS,
+    >(&pp, &trace, num_vars, project_scalar)
+    .expect("dual-prime proof generation");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(
+        BenchmarkId::new("Verify (folded 4× dual-prime)", &params),
+        |bench| {
+            bench.iter_batched(
+                || proof.clone(),
+                |proof| {
+                    black_box(
+                        zinc_protocol::verifier::verify_folded_4x_dual_prime::<
+                            ZtF,
+                            U,
+                            F,
+                            _,
+                            DEGREE_PLUS_ONE,
+                            HALF_DEGREE_PLUS_ONE,
+                            QUARTER_DEGREE_PLUS_ONE,
+                            EC_FP_INT_LIMBS,
+                            INT_QUARTER_LIMBS_BENCH,
+                            PERFORM_CHECKS,
+                        >(
+                            &pp,
+                            proof,
+                            &public_trace,
+                            num_vars,
+                            project_scalar,
+                            project_ideal,
+                        ),
+                    )
+                    .expect("Folded 4× dual-prime verifier failed");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
+fn e2e_folded_4x_dual_prime_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ E2E Folded 4x dual-prime");
+
+    bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(&mut group, 9);
+
+    group.finish();
+}
+
 
 criterion_group! {
     name = e2e;
@@ -2206,4 +2309,15 @@ criterion_group! {
     config = Criterion::default().sample_size(500);
     targets = e2e_folded_4x_benches
 }
-criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x);
+criterion_group! {
+    name = e2e_folded_4x_dual_prime;
+    config = Criterion::default().sample_size(500);
+    targets = e2e_folded_4x_dual_prime_benches
+}
+criterion_main!(
+    e2e,
+    e2e_steps,
+    e2e_folded,
+    e2e_folded_4x,
+    e2e_folded_4x_dual_prime
+);

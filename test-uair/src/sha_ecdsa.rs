@@ -72,7 +72,7 @@ use zinc_poly::{
     univariate::dense::DensePolynomial,
 };
 use zinc_uair::{
-    BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
+    BitOp, BitOpSpec, ConstraintBuilder, ConstraintRing, LookupColumnSpec, PublicColumnLayout,
     PublicStructureError, ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair,
     UairSignature, UairTrace, VirtualBinaryPolySource, VirtualBinaryPolySpec,
     ideal::rotation::RotationIdeal,
@@ -549,17 +549,19 @@ where
                 .expect("2^33 · ShiftR(10)(w_mu_packed) overflow");
 
         // C1: Sigma_0 rotation
-        b.assert_in_ideal(
+        b.assert_in_ideal_typed(
             mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
                 - &mbs(pa_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
+            ConstraintRing::Fp,
         );
 
         // C2: Sigma_1 rotation
-        b.assert_in_ideal(
+        b.assert_in_ideal_typed(
             mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
                 - &mbs(pa_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
+            ConstraintRing::Fp,
         );
 
         // C4 (was σ_0 (X^32 − 1) ideal-lift): row-local Q[X] equality
@@ -588,7 +590,7 @@ where
             - down_w_w_sh9
             - down_w_lsig1_sh14
             + &mu_w_contrib;
-        b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
+        b.assert_in_ideal_typed(sched_inner + pa_c_c7, &ideal_rot_x2, ConstraintRing::Fp);
 
         // C8: Register-update for `a`. mu_a from bits 2-4 of W_MU_PACKED.
         let a_update_inner = down_w_a_sh4.clone()
@@ -601,7 +603,7 @@ where
             - down_w_sig0_sh3
             - down_w_maj_sh3
             + &mu_a_contrib;
-        b.assert_in_ideal(a_update_inner + pa_c_c8, &ideal_rot_x2);
+        b.assert_in_ideal_typed(a_update_inner + pa_c_c8, &ideal_rot_x2, ConstraintRing::Fp);
 
         // C9: Register-update for `e`. mu_e from bits 5-7 of W_MU_PACKED.
         let e_update_inner = down_w_e_sh4.clone()
@@ -613,7 +615,7 @@ where
             - down_pa_k_sh3
             - down_w_w_sh3
             + &mu_e_contrib;
-        b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
+        b.assert_in_ideal_typed(e_update_inner + pa_c_c9, &ideal_rot_x2, ConstraintRing::Fp);
 
         // C13–C15 (B_1/B_2/B_3 materializations) are gone — the
         // residuals are now packed virtual binary_poly columns,
@@ -643,13 +645,13 @@ where
             - w_a
             - pa_a
             + &mu_ff_a_contrib;
-        b.assert_in_ideal(ff_a_inner + pa_c_ff_a, &ideal_rot_x2);
+        b.assert_in_ideal_typed(ff_a_inner + pa_c_ff_a, &ideal_rot_x2, ConstraintRing::Fp);
 
         let ff_e_inner = down_w_e_sh4.clone()
             - w_e
             - pa_e
             + &mu_ff_e_contrib;
-        b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
+        b.assert_in_ideal_typed(ff_e_inner + pa_c_ff_e, &ideal_rot_x2, ConstraintRing::Fp);
 
         // C16: message init (Table 9 row 77). Pin w_W to public message
         // words pa_m at the 16 message-block-seed rows of every

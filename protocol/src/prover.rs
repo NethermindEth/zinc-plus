@@ -27,7 +27,7 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
+    ConstraintRing, Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
     degree_counter::count_max_degree,
 };
 use zinc_utils::{
@@ -1671,7 +1671,7 @@ where
         INT_QUARTER_LIMBS,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, None, None)
+    >(pp, trace, num_vars, project_scalar, None, None, None)
 }
 
 /// Identical to [`prove_folded_4x`], but additionally
@@ -1737,7 +1737,7 @@ where
         INT_QUARTER_LIMBS,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, Some(&mut timings), None)?;
+    >(pp, trace, num_vars, project_scalar, Some(&mut timings), None, None)?;
 
     let (_compressed, dt) = zip_plus::utils::serialize_and_compress(&proof);
     timings.step8_compress = dt;
@@ -1808,9 +1808,101 @@ where
         INT_QUARTER_LIMBS,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, None, Some(&mut breakdown))?;
+    >(pp, trace, num_vars, project_scalar, None, Some(&mut breakdown), None)?;
 
     Ok((proof, breakdown))
+}
+
+/// Dual-prime variant of [`prove_folded_4x`].
+///
+/// After committing the witness columns, the prover draws a small
+/// random prime `q` from the Fiat-Shamir transcript (rather than using
+/// the secp256k1 fixed prime `p`). It then runs:
+///
+/// - the F_p-branch ideal check over `F_q[X]` (every constraint tagged
+///   `ConstraintRing::Fp` participates), and
+/// - the Z-branch ideal check over `F_p[X]` (every constraint tagged
+///   `ConstraintRing::Z` participates).
+///
+/// The remaining steps (CPR sumcheck, multipoint eval, lift, PCS open)
+/// run only for the F_p-branch, since the initial deliverable tags
+/// every `ShaEcdsaUair` constraint as `Fp` and the Z-branch is empty.
+///
+/// See [`crate::DualPrimeProof`] for the proof structure.
+pub fn prove_folded_4x_dual_prime<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const INT_LIMBS: usize,
+    const INT_QUARTER_LIMBS: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<crate::DualPrimeProof<F>, ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let mut extras = crate::DualPrimeExtras::<F>::new();
+    let inner = prove_folded_4x_inner::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        INT_LIMBS,
+        INT_QUARTER_LIMBS,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        None,
+        None,
+        Some(&mut extras),
+    )?;
+    Ok(crate::DualPrimeProof {
+        inner,
+        ideal_check_z: extras
+            .ideal_check_z
+            .expect("dual-prime hook must populate ideal_check_z"),
+    })
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1836,6 +1928,7 @@ fn prove_folded_4x_inner<
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     mut timings: Option<&mut FoldedProveTimings>,
     mut zip_breakdown: Option<&mut FoldedProveZipBreakdown>,
+    mut dual_prime_extras: Option<&mut crate::DualPrimeExtras<F>>,
 ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>>
 where
     ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
@@ -1943,15 +2036,30 @@ where
 
     // ── Step 1: Prime projection ────────────────────────────────────────
     let _t_step1 = std::time::Instant::now();
-    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+    // Single-prime: field_cfg = secp256k1 (compile-time fixed).
+    // Dual-prime:   field_cfg = q sampled from the FS transcript via
+    //               ZtF::PrimeTest. The verifier mirrors this draw at
+    //               the same transcript position.
+    let field_cfg = if dual_prime_extras.is_some() {
+        let q: ZtF::Fmod = pcs_transcript
+            .fs_transcript
+            .get_prime::<ZtF::Fmod, ZtF::PrimeTest>();
+        F::make_cfg(&F::Modulus::from_ref(&q)).expect("FS-drawn q must be prime")
+    } else {
+        crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>()
+    };
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
     if let Some(t) = timings.as_mut() {
         t.step1_prime_projection = _t_step1.elapsed();
     }
 
     // ── Step 2: Ideal check ─────────────────────────────────────────────
+    // In dual-prime mode this is the F_p-branch ideal check (tag = Fp,
+    // field_cfg = q drawn above). The Z-branch ideal check follows
+    // immediately after (tag = Z, field_cfg = secp256k1).
     let _t_step2 = std::time::Instant::now();
     let num_constraints = count_constraints::<U>();
+    let dual_prime_active = dual_prime_extras.is_some();
     let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
         let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
         let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
@@ -1969,14 +2077,26 @@ where
         match (any_linear, any_nonlinear) {
             (true, false) => {
                 let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
-                let (p, s) = U::prove_linear(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let (p, s) = if dual_prime_active {
+                    U::prove_linear_typed(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                        ConstraintRing::Fp,
+                    )?
+                } else {
+                    U::prove_linear(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::ColumnMajor(projected_trace_cm))
             }
             (true, true) => {
@@ -1984,44 +2104,107 @@ where
                     project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg),
                     project_trace_coeffs_column_major(trace, &field_cfg),
                 );
-                let (p, s) = U::prove_hybrid(
-                    &mut pcs_transcript.fs_transcript,
-                    &rm,
-                    &cm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let (p, s) = if dual_prime_active {
+                    U::prove_hybrid_typed(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                        ConstraintRing::Fp,
+                    )?
+                } else {
+                    U::prove_hybrid(
+                        &mut pcs_transcript.fs_transcript,
+                        &rm,
+                        &cm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(rm))
             }
             (false, _) => {
                 let projected_trace_rm =
                     project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-                let (p, s) = U::prove_combined(
-                    &mut pcs_transcript.fs_transcript,
-                    &projected_trace_rm,
-                    &projected_scalars_fx,
-                    num_constraints,
-                    num_vars,
-                    &field_cfg,
-                )?;
+                let (p, s) = if dual_prime_active {
+                    U::prove_combined_typed(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                        ConstraintRing::Fp,
+                    )?
+                } else {
+                    U::prove_combined(
+                        &mut pcs_transcript.fs_transcript,
+                        &projected_trace_rm,
+                        &projected_scalars_fx,
+                        num_constraints,
+                        num_vars,
+                        &field_cfg,
+                    )?
+                };
                 (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
             }
         }
     } else {
         let projected_trace_rm = project_trace_coeffs_row_major::<F, _, _, D>(trace, &field_cfg);
-        let (p, s) = U::prove_combined(
-            &mut pcs_transcript.fs_transcript,
-            &projected_trace_rm,
-            &projected_scalars_fx,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )?;
+        let (p, s) = if dual_prime_active {
+            U::prove_combined_typed(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+                ConstraintRing::Fp,
+            )?
+        } else {
+            U::prove_combined(
+                &mut pcs_transcript.fs_transcript,
+                &projected_trace_rm,
+                &projected_scalars_fx,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+            )?
+        };
         (p, s, ProjectedTrace::RowMajor(projected_trace_rm))
     };
     let ic_eval_point = ic_prover_state.evaluation_point;
+
+    // Z-branch ideal check (dual-prime only). Uses the secp256k1 fixed
+    // prime — the trace must therefore be re-projected through that
+    // config since the F_p-branch projection above used `q`. Result is
+    // stashed in `dual_prime_extras` for the wrapper to assemble into
+    // a `DualPrimeProof`. The Z-branch lives entirely inside the ideal
+    // check; it does NOT participate in CPR/sumcheck/multipoint eval/
+    // PCS-open. With `ShaEcdsaUair` tagging every constraint as `Fp`,
+    // every slot in this proof is `ZERO` by construction.
+    if let Some(extras) = dual_prime_extras.as_mut() {
+        let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+        let projected_scalars_p = project_scalars::<F, U>(|s| project_scalar(s, &p_cfg));
+        let projected_trace_p_rm =
+            project_trace_coeffs_row_major::<F, _, _, D>(trace, &p_cfg);
+        let (ic_z, _) = U::prove_combined_typed(
+            &mut pcs_transcript.fs_transcript,
+            &projected_trace_p_rm,
+            &projected_scalars_p,
+            num_constraints,
+            num_vars,
+            &p_cfg,
+            ConstraintRing::Z,
+        )?;
+        extras.ideal_check_z = Some(ic_z);
+    }
+
     if let Some(t) = timings.as_mut() {
         t.step2_ideal_check = _t_step2.elapsed();
     }
