@@ -1,6 +1,7 @@
 //! UAIR description tools.
 
 pub mod collect_scalars;
+pub mod column_tracker;
 pub mod constraint_counter;
 pub mod degree_counter;
 pub mod do_nothing_builder;

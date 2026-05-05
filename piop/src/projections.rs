@@ -139,6 +139,110 @@ where
     result
 }
 
+/// Like [`project_trace_coeffs_row_major`] but skips the projection of any
+/// column whose `col_mask[i]` is `false`, writing an empty
+/// [`DynamicPolynomialF`] (≡ ZERO) at that slot. Used by the dual-prime
+/// path's Z-branch to avoid projecting columns no Z-tagged constraint
+/// touches. The returned matrix has the same shape as the unmasked
+/// variant — the mask only controls which slots are populated with
+/// non-trivial polynomials.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn project_trace_coeffs_row_major_with_mask<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
+    field_cfg: &F::Config,
+    col_mask: &[bool],
+) -> RowMajorTrace<F>
+where
+    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+
+    let binary_len = trace.binary_poly.len();
+    let arbitrary_len = trace.arbitrary_poly.len();
+    let num_cols = trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len();
+    debug_assert_eq!(col_mask.len(), num_cols);
+
+    let num_rows = trace
+        .binary_poly
+        .first()
+        .map(|c| c.len())
+        .or_else(|| trace.arbitrary_poly.first().map(|c| c.len()))
+        .or_else(|| trace.int.first().map(|c| c.len()))
+        .unwrap_or(0);
+
+    let mut result: RowMajorTrace<F> = iter::repeat_with(|| Vec::with_capacity(num_cols))
+        .take(num_rows)
+        .collect();
+
+    cfg_iter_mut!(result)
+        .enumerate()
+        .for_each(|(row_idx, row)| {
+            let spare = row.spare_capacity_mut();
+
+            cfg_iter_mut!(spare[..binary_len])
+                .zip(cfg_iter!(trace.binary_poly))
+                .enumerate()
+                .for_each(|(col_idx, (slot, col))| {
+                    if !col_mask[col_idx] {
+                        slot.write(DynamicPolynomialF::default());
+                        return;
+                    }
+                    let binary_poly = &col.evaluations[row_idx];
+                    slot.write(
+                        binary_poly
+                            .iter()
+                            .map(|coeff| {
+                                if coeff.into_inner() {
+                                    one.clone()
+                                } else {
+                                    zero.clone()
+                                }
+                            })
+                            .collect(),
+                    );
+                });
+
+            cfg_iter_mut!(spare[binary_len..binary_len + arbitrary_len])
+                .zip(cfg_iter!(trace.arbitrary_poly))
+                .enumerate()
+                .for_each(|(local_idx, (slot, col))| {
+                    let col_idx = binary_len + local_idx;
+                    if !col_mask[col_idx] {
+                        slot.write(DynamicPolynomialF::default());
+                        return;
+                    }
+                    let arbitrary_poly = &col.evaluations[row_idx];
+                    slot.write(
+                        arbitrary_poly
+                            .iter()
+                            .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                            .collect(),
+                    );
+                });
+
+            cfg_iter_mut!(spare[binary_len + arbitrary_len..])
+                .zip(cfg_iter!(trace.int))
+                .enumerate()
+                .for_each(|(local_idx, (slot, col))| {
+                    let col_idx = binary_len + arbitrary_len + local_idx;
+                    if !col_mask[col_idx] {
+                        slot.write(DynamicPolynomialF::default());
+                        return;
+                    }
+                    let int_val = &col.evaluations[row_idx];
+                    slot.write(DynamicPolynomialF {
+                        coeffs: vec![F::from_with_cfg(int_val, field_cfg)],
+                    });
+                });
+
+            unsafe { row.set_len(num_cols) };
+        });
+    result
+}
+
 /// Project a multi-typed trace onto `F[X]`, returning a column-indexed matrix.
 /// Result: `trace[col]` is a
 /// `DenseMultilinearExtension<DynamicPolynomialF<F>>`.

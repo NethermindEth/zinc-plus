@@ -18,6 +18,7 @@ use zinc_piop::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
         evaluate_trace_to_column_mles_fast, project_scalars, project_scalars_to_field,
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
+        project_trace_coeffs_row_major_with_mask,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -2186,13 +2187,20 @@ where
     // stashed in `dual_prime_extras` for the wrapper to assemble into
     // a `DualPrimeProof`. The Z-branch lives entirely inside the ideal
     // check; it does NOT participate in CPR/sumcheck/multipoint eval/
-    // PCS-open. With `ShaEcdsaUair` tagging every constraint as `Fp`,
-    // every slot in this proof is `ZERO` by construction.
+    // PCS-open.
+    //
+    // Per-column projection skipping: only project columns referenced
+    // by at least one Z-tagged constraint (or assert_zero, which is also
+    // Z-tagged by convention in `IdealCollector`). Off-branch slots in
+    // the resulting IC pick up garbage values for any column the Z-mask
+    // skipped — this is fine because the Z-branch verifier filters by
+    // tag and only checks Z-tagged ideals.
     if let Some(extras) = dual_prime_extras.as_mut() {
         let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
         let projected_scalars_p = project_scalars::<F, U>(|s| project_scalar(s, &p_cfg));
+        let z_mask = zinc_uair::column_tracker::compute_branch_column_masks::<U>().z_mask;
         let projected_trace_p_rm =
-            project_trace_coeffs_row_major::<F, _, _, D>(trace, &p_cfg);
+            project_trace_coeffs_row_major_with_mask::<F, _, _, D>(trace, &p_cfg, &z_mask);
         let (ic_z, _) = U::prove_combined_typed(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_p_rm,

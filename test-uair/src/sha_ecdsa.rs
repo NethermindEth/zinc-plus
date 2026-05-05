@@ -179,24 +179,53 @@ pub mod cols {
     /// check `R_x ≡ r (mod n)` off-protocol against the signature
     /// scalar r. See [ecdsa.rs::cols::PA_R_X].
     pub const ECDSA_PA_R_X: usize = 23;
-    pub const NUM_INT_PUB: usize = 24;
+
+    // ===== Dual-prime Z-typed publics (24..28) =====
+    // Verifier-supplied scalars used in the last-row ECDSA-verify
+    // equations and the A_i = u_i pinning constraint. Non-zero only at
+    // the final row; zero elsewhere.
+    /// Verifier-supplied `u_1` integer (= `e * s^-1 mod n`).
+    pub const PA_U1: usize = 24;
+    /// Verifier-supplied `u_2` integer (= `r * s^-1 mod n`).
+    pub const PA_U2: usize = 25;
+    /// Verifier-supplied SHA-digest integer.
+    pub const PA_E_INT: usize = 26;
+    /// Verifier-supplied signature scalar `s`.
+    pub const PA_S: usize = 27;
+    pub const NUM_INT_PUB: usize = 28;
 
     // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
     // gone — replaced by W_MU_PACKED (binary_poly index 19), with
     // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (24..32): chained Jacobian state + doubled
+    // ECDSA witnesses (28..36): chained Jacobian state + doubled
     // point + addition scratch. 8 cols; `S = Y²` is inlined.
-    pub const ECDSA_W_X: usize = 24;
-    pub const ECDSA_W_Y: usize = 25;
-    pub const ECDSA_W_Z: usize = 26;
-    pub const ECDSA_W_X_PA: usize = 27;
-    pub const ECDSA_W_Y_PA: usize = 28;
-    pub const ECDSA_W_Z_PA: usize = 29;
-    pub const ECDSA_W_C: usize = 30;
-    pub const ECDSA_W_D: usize = 31;
+    pub const ECDSA_W_X: usize = 28;
+    pub const ECDSA_W_Y: usize = 29;
+    pub const ECDSA_W_Z: usize = 30;
+    pub const ECDSA_W_X_PA: usize = 31;
+    pub const ECDSA_W_Y_PA: usize = 32;
+    pub const ECDSA_W_Z_PA: usize = 33;
+    pub const ECDSA_W_C: usize = 34;
+    pub const ECDSA_W_D: usize = 35;
 
-    pub const NUM_INT: usize = 32;
+    // ===== Dual-prime Z-typed witnesses (36..40) =====
+    /// Quotient `v_1 = (u_1 * s - e) / n`. Non-zero only at FINAL_ROW.
+    pub const W_V1: usize = 36;
+    /// Quotient `v_2 = (u_2 * s - r) / n`. Non-zero only at FINAL_ROW.
+    pub const W_V2: usize = 37;
+    /// Cumulative big-endian sum `A_1[t+1] = 2 * A_1[t] + PA_B1[t]`.
+    /// At FINAL_ROW it equals PA_U1 by construction (and is enforced
+    /// by the `A_1 = u_1` last-row constraint).
+    pub const W_A1: usize = 38;
+    /// Cumulative big-endian sum for the second scalar.
+    pub const W_A2: usize = 39;
+
+    pub const NUM_INT: usize = 40;
+
+    // Flat indices for the new shift specs.
+    pub const FLAT_W_A1: usize = NUM_BIN + W_A1;
+    pub const FLAT_W_A2: usize = NUM_BIN + W_A2;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -225,7 +254,7 @@ pub struct ShaEcdsaUair<R>(PhantomData<R>);
 
 impl<R> Uair for ShaEcdsaUair<R>
 where
-    R: EcdsaFpRing + From<u32>,
+    R: EcdsaFpRing + From<u32> + From<Int<EC_FP_INT_LIMBS>>,
 {
     type Ideal = Sha256Ideal<R>;
     type Scalar = DensePolynomial<R, 32>;
@@ -267,6 +296,12 @@ where
             ShiftSpec::new(cols::FLAT_ECDSA_W_X, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_Y, 1),
             ShiftSpec::new(cols::FLAT_ECDSA_W_Z, 1),
+            // === Dual-prime Z-typed cumulative-sum shifts ===
+            // down.A_i[t] = A_i[t+1]; the transition constraint
+            // A_i[t+1] = 2 * A_i[t] + PA_B_i[t] is gated by
+            // ECDSA_S_ACTIVE.
+            ShiftSpec::new(cols::FLAT_W_A1, 1),
+            ShiftSpec::new(cols::FLAT_W_A2, 1),
         ];
 
         // discussion.
@@ -815,6 +850,87 @@ where
         let e_zinv_sq = e_pa_z_inv.clone() * e_pa_z_inv;
         let e_f2_inner = e_x.clone() * &e_zinv_sq - e_pa_r_x;
         b.assert_zero(e_s_final.clone() * &e_f2_inner);
+
+        // ===================================================================
+        // Dual-prime Z-typed constraints (6 total)
+        //
+        //   1) A_1[t+1] = 2 * A_1[t] + PA_B1[t]   (gated by S_ACTIVE)
+        //   2) A_2[t+1] = 2 * A_2[t] + PA_B2[t]   (gated by S_ACTIVE)
+        //   3) A_1[FINAL_ROW] = PA_U1             (gated by S_FINAL)
+        //   4) A_2[FINAL_ROW] = PA_U2             (gated by S_FINAL)
+        //   5) PA_U1 * PA_S - PA_E_INT + W_V1 * N = 0   (gated by S_FINAL)
+        //   6) PA_U2 * PA_S - PA_R_X  + W_V2 * N = 0   (gated by S_FINAL)
+        //
+        // All six are tagged `ConstraintRing::Z`. They are checked over
+        // `F_p[X]` (secp256k1 base prime) by the dual-prime Z-branch IC,
+        // and ignored by the F_p-branch (Fp-tag filter).  Constraints 5
+        // and 6 use `N` = secp256k1 group order as a compile-time scalar.
+        // ===================================================================
+        let pa_b1 = &int[cols::ECDSA_PA_B1];
+        let pa_b2 = &int[cols::ECDSA_PA_B2];
+        let w_a1 = &int[cols::W_A1];
+        let w_a2 = &int[cols::W_A2];
+        let w_v1 = &int[cols::W_V1];
+        let w_v2 = &int[cols::W_V2];
+        let pa_u1 = &int[cols::PA_U1];
+        let pa_u2 = &int[cols::PA_U2];
+        let pa_e_int = &int[cols::PA_E_INT];
+        let pa_s = &int[cols::PA_S];
+
+        // down.int is indexed by the sort order of int-section shifts
+        // (by source_col, then shift_amount). With the new W_A1, W_A2
+        // shifts at the end of the int sort, they sit at down.int[4]
+        // and down.int[5] (after the SHA_PA_K and ECDSA X/Y/Z shifts).
+        let down_w_a1 = &down.int[4];
+        let down_w_a2 = &down.int[5];
+
+        // 1, 2: cumulative-sum transitions.
+        let two_scalar_z = const_scalar::<R>(R::ONE + R::ONE);
+        let two_a1 = mbs(w_a1, &two_scalar_z).expect("2 * A_1 overflow");
+        let cumulative_1 = down_w_a1.clone() - &two_a1 - pa_b1;
+        b.assert_in_ideal_typed(
+            e_s_active.clone() * &cumulative_1,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
+        let two_a2 = mbs(w_a2, &two_scalar_z).expect("2 * A_2 overflow");
+        let cumulative_2 = down_w_a2.clone() - &two_a2 - pa_b2;
+        b.assert_in_ideal_typed(
+            e_s_active.clone() * &cumulative_2,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
+
+        // 3, 4: A_i[FINAL_ROW] = u_i, gated by S_FINAL.
+        let pin_u1 = w_a1.clone() - pa_u1;
+        b.assert_in_ideal_typed(
+            e_s_final.clone() * &pin_u1,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
+        let pin_u2 = w_a2.clone() - pa_u2;
+        b.assert_in_ideal_typed(
+            e_s_final.clone() * &pin_u2,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
+
+        // 5, 6: ECDSA verify-over-Z equations.
+        let n_scalar = const_scalar::<R>(secp256k1_group_order_as_r::<R>());
+        let v1_n = mbs(w_v1, &n_scalar).expect("v_1 * n overflow");
+        let v2_n = mbs(w_v2, &n_scalar).expect("v_2 * n overflow");
+        let verify_eq_1 = pa_u1.clone() * pa_s - pa_e_int + &v1_n;
+        b.assert_in_ideal_typed(
+            e_s_final.clone() * &verify_eq_1,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
+        let verify_eq_2 = pa_u2.clone() * pa_s - e_pa_r_x + &v2_n;
+        b.assert_in_ideal_typed(
+            e_s_final.clone() * &verify_eq_2,
+            &ideal_rot_x2,
+            ConstraintRing::Z,
+        );
     }
 
     /// Verify the SHA-side public-column structural properties
@@ -941,6 +1057,32 @@ fn const_scalar<R: ConstSemiring>(c: R) -> DensePolynomial<R, 32> {
     DensePolynomial::<R, 32>::new(coeffs)
 }
 
+/// Secp256k1 group order `n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141`.
+/// Used as the modulus in the dual-prime Z-typed ECDSA-verify equations
+/// `u_i * s - {e,r} + v_i * n = 0`.
+const SECP256K1_N_HEX: &str = concat!(
+    "FFFFFFFFFFFFFFFF",
+    "FFFFFFFFFFFFFFFE",
+    "BAAEDCE6AF48A03B",
+    "BFD25E8CD0364141",
+);
+
+pub const SECP256K1_N_UINT: crypto_bigint::Uint<EC_FP_INT_LIMBS> =
+    crypto_bigint::Uint::<EC_FP_INT_LIMBS>::from_be_hex(SECP256K1_N_HEX);
+
+fn secp256k1_group_order_as_r<R>() -> R
+where
+    R: From<Int<EC_FP_INT_LIMBS>>,
+{
+    // Centered representation: store `n - p` (a small negative Int<4>)
+    // so that mod-p projection recovers `n`. Storing the raw bit pattern
+    // of `n` would read back as `n - 2^256 (mod p) = n - 2^32 - 977 ≠ n`,
+    // which silently projects to the wrong residue.
+    let wrapped = SECP256K1_N_UINT.wrapping_sub(&crate::ecdsa_doubling::SECP256K1_P_UINT);
+    let n_int: Int<EC_FP_INT_LIMBS> = Int::new(*wrapped.as_int());
+    R::from(n_int)
+}
+
 // ---------------------------------------------------------------------------
 // GenerateRandomTrace — call both sub-UAIRs' generators, splice the int
 // sections together at the merged column positions.
@@ -978,23 +1120,30 @@ where
             sha_trace.binary_poly.into_owned();
 
         // Int section: merge per the layout in `cols`.
-        // SHA standalone int layout (9 cols, all public).
-        // ECDSA standalone int layout (23 cols after in-circuit addend
-        // and final-row affine readout):
-        //   0..15   pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
-        //                 PA_QX, PA_QY, PA_QGX, PA_QGY,
-        //                 PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X)
-        //   15..23  witnesses (8 EC cols)
         let mut int: Vec<DenseMultilinearExtension<R>> = Vec::with_capacity(cols::NUM_INT);
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
+
+        // Compute the new dual-prime columns BEFORE moving anything out
+        // of `ecdsa_ints`, so we can read PA_B1, PA_B2 and PA_R_X.
+        let dual_prime_cols = build_dual_prime_columns::<R>(&ecdsa_ints, n_rows);
 
         // [0..9] SHA pubs (sha[0..9])
         int.extend(sha_ints[0..9].iter().cloned());
         // [9..24] ECDSA pubs (ecdsa[0..15])
         int.extend(ecdsa_ints[0..15].iter().cloned());
-        // [24..32] ECDSA witnesses (ecdsa[15..23], 8 cols)
+        // [24..28] Dual-prime publics: PA_U1, PA_U2, PA_E_INT, PA_S
+        int.push(dual_prime_cols.pa_u1);
+        int.push(dual_prime_cols.pa_u2);
+        int.push(dual_prime_cols.pa_e_int);
+        int.push(dual_prime_cols.pa_s);
+        // [28..36] ECDSA witnesses (ecdsa[15..23], 8 cols)
         int.extend(ecdsa_ints[15..23].iter().cloned());
+        // [36..40] Dual-prime witnesses: W_V1, W_V2, W_A1, W_A2
+        int.push(dual_prime_cols.w_v1);
+        int.push(dual_prime_cols.w_v2);
+        int.push(dual_prime_cols.w_a1);
+        int.push(dual_prime_cols.w_a2);
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -1003,6 +1152,158 @@ where
             int: int.into(),
             ..Default::default()
         }
+    }
+}
+
+/// Output of [`build_dual_prime_columns`]: the four new public columns
+/// (PA_U1, PA_U2, PA_E_INT, PA_S) and four new witness columns
+/// (W_V1, W_V2, W_A1, W_A2) populated to satisfy the dual-prime
+/// Z-typed constraints mod p (see `ShaEcdsaUair::constrain_general`).
+struct DualPrimeCols<R>
+where
+    R: ConstSemiring,
+{
+    pa_u1: DenseMultilinearExtension<R>,
+    pa_u2: DenseMultilinearExtension<R>,
+    pa_e_int: DenseMultilinearExtension<R>,
+    pa_s: DenseMultilinearExtension<R>,
+    w_v1: DenseMultilinearExtension<R>,
+    w_v2: DenseMultilinearExtension<R>,
+    w_a1: DenseMultilinearExtension<R>,
+    w_a2: DenseMultilinearExtension<R>,
+}
+
+/// Build the dual-prime columns by inspecting the ECDSA half of the
+/// trace. Computes A_1, A_2 as cumulative sums of PA_B1, PA_B2 mod p,
+/// derives u_1, u_2 from those at FINAL_ROW, picks `s = 1` (any
+/// non-zero scalar works), sets `e_int = u_1 mod p` and v_1 = 0 to
+/// satisfy verify-eq-1 trivially, then solves verify-eq-2 for v_2 mod
+/// p. All values stored in centered Int<4> representation per the
+/// existing trace convention (see `ecdsa::uint_to_int`).
+fn build_dual_prime_columns<R>(
+    ecdsa_ints: &[DenseMultilinearExtension<R>],
+    n_rows: usize,
+) -> DualPrimeCols<R>
+where
+    R: From<Int<EC_FP_INT_LIMBS>> + EcdsaFpRing,
+{
+    use crypto_bigint::{NonZero, Odd, Uint as CbUint};
+
+    // Centered Int<4> -> canonical CbUint mod p.
+    fn int_to_uint(v: &Int<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
+        let raw = *v.inner().as_uint();
+        let is_neg = raw.as_words()[EC_FP_INT_LIMBS - 1] >> 63 != 0;
+        if is_neg {
+            raw.wrapping_add(&crate::ecdsa_doubling::SECP256K1_P_UINT)
+        } else {
+            raw
+        }
+    }
+    fn uint_to_int_centered(u: CbUint<EC_FP_INT_LIMBS>) -> Int<EC_FP_INT_LIMBS> {
+        if u <= crate::ecdsa_doubling::SECP256K1_P_HALF_UINT {
+            Int::new(*u.as_int())
+        } else {
+            let wrapped = u.wrapping_sub(&crate::ecdsa_doubling::SECP256K1_P_UINT);
+            Int::new(*wrapped.as_int())
+        }
+    }
+    let p_uint = crate::ecdsa_doubling::SECP256K1_P_UINT;
+    let p_nz = NonZero::new(p_uint).expect("p is nonzero");
+    let mul_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>,
+                     b: &CbUint<EC_FP_INT_LIMBS>|
+     -> CbUint<EC_FP_INT_LIMBS> {
+        let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
+        let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = p_uint.resize();
+        let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
+        let (_, rem) = wide.div_rem_vartime(&p_wide_nz);
+        rem.resize()
+    };
+    let add_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>,
+                     b: &CbUint<EC_FP_INT_LIMBS>|
+     -> CbUint<EC_FP_INT_LIMBS> {
+        let s = a.wrapping_add(b);
+        s.rem_vartime(&p_nz)
+    };
+    let sub_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>,
+                     b: &CbUint<EC_FP_INT_LIMBS>|
+     -> CbUint<EC_FP_INT_LIMBS> {
+        use crypto_bigint::CheckedSub;
+        if a.checked_sub(b).is_some().into() {
+            a.wrapping_sub(b).rem_vartime(&p_nz)
+        } else {
+            let a_plus_p = a.wrapping_add(&p_uint);
+            a_plus_p.wrapping_sub(b).rem_vartime(&p_nz)
+        }
+    };
+    let inv_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
+        let p_odd = Odd::new(p_uint).expect("p is odd");
+        a.invert_odd_mod(&p_odd).expect("a has no inverse mod p")
+    };
+
+    // Read PA_B1, PA_B2 (ECDSA cols 4, 5) and PA_R_X (col 14) row by row.
+    let pa_b1 = &ecdsa_ints[crate::ecdsa::cols::PA_B1].evaluations;
+    let pa_b2 = &ecdsa_ints[crate::ecdsa::cols::PA_B2].evaluations;
+    let pa_r_x = &ecdsa_ints[crate::ecdsa::cols::PA_R_X].evaluations;
+
+    // Cumulative sums mod p. A_i[t+1] = 2 * A_i[t] + PA_B_i[t] for t in
+    // [0, NUM_SHAMIR_ROUNDS). For rows beyond FINAL_ROW we leave the
+    // cell at zero (the constraint is gated by S_ACTIVE which is 0
+    // there).
+    let mut a1_evals: Vec<R> = vec![R::ZERO; n_rows];
+    let mut a2_evals: Vec<R> = vec![R::ZERO; n_rows];
+    let mut acc1 = CbUint::<EC_FP_INT_LIMBS>::ZERO;
+    let mut acc2 = CbUint::<EC_FP_INT_LIMBS>::ZERO;
+    let two = CbUint::<EC_FP_INT_LIMBS>::from(2u64);
+    a1_evals[0] = R::from(uint_to_int_centered(acc1));
+    a2_evals[0] = R::from(uint_to_int_centered(acc2));
+    for t in 0..NUM_SHAMIR_ROUNDS {
+        let b1 = int_to_uint(&pa_b1[t].to_int());
+        let b2 = int_to_uint(&pa_b2[t].to_int());
+        acc1 = add_mod_p(&mul_mod_p(&acc1, &two), &b1);
+        acc2 = add_mod_p(&mul_mod_p(&acc2, &two), &b2);
+        if t + 1 < n_rows {
+            a1_evals[t + 1] = R::from(uint_to_int_centered(acc1));
+            a2_evals[t + 1] = R::from(uint_to_int_centered(acc2));
+        }
+    }
+    let u1_uint = acc1;
+    let u2_uint = acc2;
+
+    // Pick s = 1 (any non-zero scalar works for the test — keeps v_1 trivial).
+    let s_uint = CbUint::<EC_FP_INT_LIMBS>::ONE;
+    // e_int = u_1 * s mod p so verify-eq-1 holds with v_1 = 0.
+    let e_int_uint = mul_mod_p(&u1_uint, &s_uint);
+
+    // v_2 mod p such that u_2*s - r + v_2*n ≡ 0 (mod p).
+    let r_uint = int_to_uint(&pa_r_x[FINAL_ROW].to_int());
+    let n_uint = SECP256K1_N_UINT;
+    let n_inv = inv_mod_p(&n_uint);
+    let u2_s = mul_mod_p(&u2_uint, &s_uint);
+    let r_minus_u2s = sub_mod_p(&r_uint, &u2_s);
+    let v2_uint = mul_mod_p(&r_minus_u2s, &n_inv);
+
+    // Build single-non-zero-cell columns: PA_U1, PA_U2, PA_E_INT, PA_S,
+    // W_V1, W_V2 — all zero except at FINAL_ROW.
+    let single_cell = |val_uint: CbUint<EC_FP_INT_LIMBS>| -> Vec<R> {
+        let mut v = vec![R::ZERO; n_rows];
+        v[FINAL_ROW] = R::from(uint_to_int_centered(val_uint));
+        v
+    };
+    let num_vars = (n_rows.trailing_zeros()) as usize;
+
+    let mle = |evals: Vec<R>| -> DenseMultilinearExtension<R> {
+        DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
+    };
+
+    DualPrimeCols {
+        pa_u1: mle(single_cell(u1_uint)),
+        pa_u2: mle(single_cell(u2_uint)),
+        pa_e_int: mle(single_cell(e_int_uint)),
+        pa_s: mle(single_cell(s_uint)),
+        w_v1: mle(single_cell(CbUint::<EC_FP_INT_LIMBS>::ZERO)),
+        w_v2: mle(single_cell(v2_uint)),
+        w_a1: mle(a1_evals),
+        w_a2: mle(a2_evals),
     }
 }
 
@@ -1030,7 +1331,10 @@ mod tests {
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 26);
+        // 26 SHA + ECDSA constraints + 6 dual-prime Z-typed constraints
+        // (2 cumulative-sum transitions, 2 A_i = u_i pinnings, 2 verify
+        // equations) = 32.
+        assert_eq!(count_constraints::<U>(), 32);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-7 (ECDSA C-A2 with in-circuit T_y),

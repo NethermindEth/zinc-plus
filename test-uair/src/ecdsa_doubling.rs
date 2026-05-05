@@ -101,10 +101,20 @@ pub const SECP256K1_P_HALF_UINT: CbUint<EC_FP_INT_LIMBS> =
 /// Trait knob: a `ConstSemiring` whose representation can hold a
 /// secp256k1 base-field element. The `From<u32>` bound lets the UAIR
 /// build small constant scalars (3, 8, 9, 12) for `mul_by_scalar`.
+/// `to_int()` exposes the underlying `Int<EC_FP_INT_LIMBS>` for trace
+/// generators that need to perform mod-p arithmetic on cell values
+/// (used by the dual-prime trace builder).
 /// Implemented for `Int<EC_FP_INT_LIMBS>`.
-pub trait EcdsaFpRing: ConstSemiring + From<u32> + 'static {}
+pub trait EcdsaFpRing: ConstSemiring + From<u32> + 'static {
+    fn to_int(&self) -> Int<EC_FP_INT_LIMBS>;
+}
 
-impl EcdsaFpRing for Int<EC_FP_INT_LIMBS> {}
+impl EcdsaFpRing for Int<EC_FP_INT_LIMBS> {
+    #[inline(always)]
+    fn to_int(&self) -> Int<EC_FP_INT_LIMBS> {
+        self.clone()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Column layout.
