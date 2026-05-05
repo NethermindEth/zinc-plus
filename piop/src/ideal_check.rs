@@ -1,6 +1,9 @@
 //! Ideal-check subprotocol.
 mod batched_ideal_check;
-mod combined_poly_builder;
+/// Public to let the protocol crate's dual-prime Z-branch helper
+/// reach `compute_combined_polynomials` directly with a custom skip
+/// mask, bypassing the unmasked `IdealCheckProtocol` trait wrapper.
+pub mod combined_poly_builder;
 mod structs;
 
 pub use structs::*;

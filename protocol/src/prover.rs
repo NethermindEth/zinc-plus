@@ -66,6 +66,86 @@ fn filter_booleanity_witness<const D: usize>(
         .collect()
 }
 
+/// Z-branch IC for the dual-prime path. Specialized version of
+/// `IdealCheckProtocol::prove_combined_typed(.., ConstraintRing::Z)`
+/// that skips the per-coefficient-MLE build and per-slot MLE
+/// evaluation for off-branch and zero-ideal slots — saves the work
+/// the verifier was going to discard anyway. Off-branch values in
+/// the proof are written as `DynamicPolynomialF::ZERO` (empty coeffs)
+/// which absorbs no bytes.
+///
+/// Safe because the Z-branch IC does not feed the shared CPR
+/// sumcheck — only its own `batched_ideal_check` (tag-filtered to Z)
+/// reads the values, and the verifier reconstructs the absorption with
+/// the same zeros.
+fn z_branch_ideal_check<F, U, const D: usize>(
+    transcript: &mut zinc_transcript::Blake3Transcript,
+    trace_matrix: &zinc_piop::projections::RowMajorTrace<F>,
+    projected_scalars: &zinc_piop::projections::ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    num_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<zinc_piop::ideal_check::Proof<F>, ProtocolError<F, U::Ideal>>
+where
+    F: InnerTransparentField,
+    F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable,
+    U: Uair,
+{
+    use num_traits::ConstZero;
+    use zinc_piop::ideal_check::Proof as IcProof;
+    use zinc_uair::{ConstraintRing, ideal_collector::collect_ideals};
+    use zinc_utils::cfg_into_iter;
+
+    let collector = collect_ideals::<U>(num_constraints);
+    let skip: Vec<bool> = (0..num_constraints)
+        .map(|i| collector.tags[i] != ConstraintRing::Z || collector.ideals[i].is_zero_ideal())
+        .collect();
+
+    let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
+
+    let combined_mles =
+        zinc_piop::ideal_check::combined_poly_builder::compute_combined_polynomials::<_, U>(
+            trace_matrix,
+            projected_scalars,
+            num_constraints,
+            field_cfg,
+            &skip,
+        );
+
+    let eq_table = zinc_poly::utils::build_eq_x_r_vec(&evaluation_point, field_cfg)
+        .map_err(|e| ProtocolError::IdealCheck(zinc_piop::ideal_check::IdealCheckError::EqPolyConstructionError(e)))?;
+
+    let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
+        .enumerate()
+        .map(|(i, coeff_mles)| {
+            if skip[i] {
+                return DynamicPolynomialF::ZERO;
+            }
+            let coeffs = coeff_mles
+                .into_iter()
+                .map(|coeff_mle| {
+                    zinc_poly::utils::mle_eval_with_eq_table(
+                        &coeff_mle.evaluations,
+                        &eq_table,
+                        field_cfg,
+                    )
+                })
+                .collect::<Vec<_>>();
+            DynamicPolynomialF::new_trimmed(coeffs)
+        })
+        .collect();
+
+    let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+    for v in &combined_mle_values {
+        transcript.absorb_random_field_slice(&v.coeffs, &mut transcription_buf);
+    }
+
+    Ok(IcProof {
+        combined_mle_values,
+    })
+}
+
 //
 // Shared base
 //
@@ -2291,31 +2371,35 @@ where
     // stashed in `dual_prime_extras` for the wrapper to assemble into
     // a `DualPrimeProof`. The Z-branch lives entirely inside the ideal
     // check; it does NOT participate in CPR/sumcheck/multipoint eval/
-    // PCS-open.
+    // PCS-open, so we are free to zero out off-branch slots in the
+    // produced proof — they neither feed sumcheck consistency nor
+    // contribute to `batched_ideal_check` (filtered by tag == Z).
     //
-    // Per-column projection skipping: only project columns referenced
-    // by at least one Z-tagged constraint (or assert_zero, which is also
-    // Z-tagged by convention in `IdealCollector`). Off-branch slots in
-    // the resulting IC pick up garbage values for any column the Z-mask
-    // skipped — this is fine because the Z-branch verifier filters by
-    // tag and only checks Z-tagged ideals.
+    // Optimisation:
+    // - Per-column projection skipping (mask only the columns referenced
+    //   by Z-tagged constraints).
+    // - `skip_constraints` mask threaded into `compute_combined_polynomials`
+    //   so the per-coefficient MLE build skips off-branch and zero-ideal
+    //   slots, and the per-slot MLE evaluation at the IC point skips them
+    //   too. The per-row `U::constrain_general` call still walks every
+    //   constraint, but its output for off-branch slots is discarded.
     if let Some(extras) = dual_prime_extras.as_mut() {
         let _t_z_total = std::time::Instant::now();
         let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
         let projected_scalars_p = project_scalars::<F, U>(|s| project_scalar(s, &p_cfg));
-        let z_mask = zinc_uair::column_tracker::compute_branch_column_masks::<U>().z_mask;
+        let masks = zinc_uair::column_tracker::compute_branch_column_masks::<U>();
+        let z_mask = masks.z_mask;
         let _t_z_proj = std::time::Instant::now();
         let projected_trace_p_rm =
             project_trace_coeffs_row_major_with_mask::<F, _, _, D>(trace, &p_cfg, &z_mask);
         let z_proj_dt = _t_z_proj.elapsed();
-        let (ic_z, _) = U::prove_combined_typed(
+        let ic_z = z_branch_ideal_check::<F, U, D>(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_p_rm,
             &projected_scalars_p,
             num_constraints,
             num_vars,
             &p_cfg,
-            ConstraintRing::Z,
         )?;
         extras.ideal_check_z = Some(ic_z);
         if let Some(t) = timings.as_mut() {
