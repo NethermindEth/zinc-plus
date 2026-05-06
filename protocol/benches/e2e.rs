@@ -2229,15 +2229,20 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
         };
     }
 
-    // MLE-first dispatch is safe for any UAIR thanks to the hybrid
-    // lane in `prove_folded_4x_inner` — pure-linear UAIRs route through
-    // `prove_linear`, pure-non-linear through `prove_combined`, and
-    // mixed-degree (like ShaEcdsa with the dual-prime Z-typed
-    // constraints) through `prove_hybrid`. We bench both variants to
-    // measure the savings: with MLE-first, the linear SHA
-    // `assert_in_ideal_typed` constraints (C1, C2, C7-C13 — all
-    // degree 1) skip the row-major combined-poly construction.
-    bench_prove!("Prove (folded 4× dual-prime, MLE-first)", true);
+    // Mirror the standard `Folded 4×` bench: enable MLE-first only when
+    // the UAIR's non-zero-ideal effective max degree is ≤ 1 (pure-linear
+    // dispatch through `prove_linear`). For mixed-degree UAIRs the
+    // dispatch falls back to the hybrid lane, which on ShaEcdsa pays
+    // for both projections (column-major + row-major) and both ICs
+    // even though only ~7 of 32 non-zero-ideal constraints are linear,
+    // so the per-row arithmetic doesn't amortize. Result: combined-poly
+    // is ~2 ms faster than hybrid MLE-first on this UAIR. The gate
+    // re-enables MLE-first automatically once `ShaEcdsaUair` only has
+    // linear non-zero-ideal constraints again (or for any future UAIR
+    // that satisfies it).
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove!("Prove (folded 4× dual-prime, MLE-first)", true);
+    }
     bench_prove!("Prove (folded 4× dual-prime, combined-poly)", false);
 
     let proof = zinc_protocol::prover::prove_folded_4x_dual_prime::<
@@ -2292,14 +2297,16 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
     );
 
     let label_full = format!("Folded 4× dual-prime/{}", params);
-    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
-        &label_full,
-        "MLE-first",
-        &pp,
-        &trace,
-        num_vars,
-        project_scalar,
-    );
+    if count_effective_max_degree::<U>() <= 1 {
+        eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
+            &label_full,
+            "MLE-first",
+            &pp,
+            &trace,
+            num_vars,
+            project_scalar,
+        );
+    }
     eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, false>(
         &label_full,
         "combined-poly",
