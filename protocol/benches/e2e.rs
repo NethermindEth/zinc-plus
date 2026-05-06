@@ -2229,20 +2229,18 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
         };
     }
 
-    // Mirror the standard `Folded 4×` bench: enable MLE-first only when
-    // the UAIR's non-zero-ideal effective max degree is ≤ 1 (pure-linear
-    // dispatch through `prove_linear`). For mixed-degree UAIRs the
-    // dispatch falls back to the hybrid lane, which on ShaEcdsa pays
-    // for both projections (column-major + row-major) and both ICs
-    // even though only ~7 of 32 non-zero-ideal constraints are linear,
-    // so the per-row arithmetic doesn't amortize. Result: combined-poly
-    // is ~2 ms faster than hybrid MLE-first on this UAIR. The gate
-    // re-enables MLE-first automatically once `ShaEcdsaUair` only has
-    // linear non-zero-ideal constraints again (or for any future UAIR
-    // that satisfies it).
-    if count_effective_max_degree::<U>() <= 1 {
-        bench_prove!("Prove (folded 4× dual-prime, MLE-first)", true);
-    }
+    // `MLE_FIRST = true` triggers `prove_folded_4x_inner`'s
+    // per-constraint dispatch:
+    //   - all non-zero-ideal slots linear (deg ≤ 1)  → `prove_linear`
+    //   - some linear, some non-linear               → `prove_hybrid`
+    //   - all non-linear                             → `prove_combined`
+    //
+    // For ShaEcdsa+Z-typed (mixed: 7 linear SHA + 6 non-linear Z-typed
+    // assert_in_ideal_typed) it routes to `prove_hybrid` — MLE-first
+    // lane for the linear constraints, combined-poly for the rest.
+    // We bench both variants so the hybrid overhead (extra column-major
+    // projection + extra MLE-first lane) is visible vs pure combined-poly.
+    bench_prove!("Prove (folded 4× dual-prime, MLE-first)", true);
     bench_prove!("Prove (folded 4× dual-prime, combined-poly)", false);
 
     let proof = zinc_protocol::prover::prove_folded_4x_dual_prime::<
@@ -2297,16 +2295,14 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
     );
 
     let label_full = format!("Folded 4× dual-prime/{}", params);
-    if count_effective_max_degree::<U>() <= 1 {
-        eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
-            &label_full,
-            "MLE-first",
-            &pp,
-            &trace,
-            num_vars,
-            project_scalar,
-        );
-    }
+    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
+        &label_full,
+        "MLE-first (hybrid)",
+        &pp,
+        &trace,
+        num_vars,
+        project_scalar,
+    );
     eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, false>(
         &label_full,
         "combined-poly",
