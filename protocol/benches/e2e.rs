@@ -1731,6 +1731,55 @@ where
     );
 }
 
+/// Dual-prime proof size breakdown: same layout as
+/// [`eprint_folded_4x_proof_size_breakdown`] plus the extra
+/// `ideal_check_z` (Z-branch ideal check) line.
+fn eprint_folded_4x_dual_prime_proof_size_breakdown<F>(
+    label: &str,
+    proof: &zinc_protocol::DualPrimeProof<F>,
+) where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn to_bytes<T: Transcribable>(t: &T) -> Vec<u8> {
+        let n = t.get_num_bytes();
+        let mut buf = vec![0_u8; n];
+        t.write_transcription_bytes_exact(&mut buf);
+        buf
+    }
+
+    let inner = &proof.inner;
+    let mut commits = Vec::with_capacity(
+        3_usize.saturating_mul(<ZipPlusCommitment as ConstTranscribable>::NUM_BYTES),
+    );
+    commits.extend_from_slice(&to_bytes(&inner.commitments.0));
+    commits.extend_from_slice(&to_bytes(&inner.commitments.1));
+    commits.extend_from_slice(&to_bytes(&inner.commitments.2));
+
+    let ideal_fp = to_bytes(&inner.ideal_check);
+    let ideal_z = to_bytes(&proof.ideal_check_z);
+    let resolver = to_bytes(&inner.resolver);
+    let combined_sumcheck = to_bytes(&inner.combined_sumcheck);
+    let multipoint_eval = to_bytes(&inner.multipoint_eval);
+    let witness_evals =
+        to_bytes(DynamicPolyVecF::reinterpret(&inner.witness_lifted_evals));
+
+    eprint_bytes_size_breakdown(
+        label,
+        &[
+            ("commitments (3x)", &commits),
+            ("zip (PCS bytes)", &inner.zip),
+            ("ideal_check (F_p)", &ideal_fp),
+            ("ideal_check_z", &ideal_z),
+            ("resolver", &resolver),
+            ("combined_sumcheck", &combined_sumcheck),
+            ("multipoint_eval", &multipoint_eval),
+            ("witness_lifted_evals", &witness_evals),
+        ],
+    );
+}
+
 /// Per-domain (binary / arbitrary / integer) × per-substep breakdown of
 /// the bytes inside `proof.zip`. Substeps mirror the four distinct
 /// writes inside `ZipPlus::prove_f`: row evaluation vector `b`, the
@@ -2295,6 +2344,29 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
     );
 
     let label_full = format!("Folded 4× dual-prime/{}", params);
+    eprint_proof_size(&label_full, &proof);
+
+    // Re-run the prover once more to harvest the per-domain Zip+ byte
+    // breakdown for step 7. We discard the proof and only keep the
+    // breakdown.
+    let (_proof_for_bd, zip_breakdown) =
+        zinc_protocol::prover::prove_folded_4x_dual_prime_with_zip_breakdown::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_BENCH,
+            false,
+            PERFORM_CHECKS,
+        >(&pp, &trace, num_vars, project_scalar)
+        .expect("dual-prime zip-breakdown prove failed");
+
+    eprint_folded_4x_dual_prime_proof_size_breakdown(&label_full, &proof);
+    eprint_folded_4x_zip_substep_breakdown(&label_full, &proof.inner, &zip_breakdown);
+
     eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
         &label_full,
         "MLE-first (hybrid)",

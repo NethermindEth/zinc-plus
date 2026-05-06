@@ -209,6 +209,49 @@ pub struct DualPrimeProof<F: PrimeField> {
     pub ideal_check_z: IdealCheckProof<F>,
 }
 
+impl<F> GenTranscribable for DualPrimeProof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (inner_len, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let inner_len = usize::try_from(inner_len).expect("inner length must fit usize");
+        let (inner_bytes, bytes) = bytes.split_at(inner_len);
+        let inner = Proof::<F>::read_transcription_bytes_exact(inner_bytes);
+        let (ideal_check_z, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        Self { inner, ideal_check_z }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        let inner_len = u32::try_from(self.inner.get_num_bytes())
+            .expect("inner length must fit u32");
+        inner_len.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        let inner_bytes_len = self.inner.get_num_bytes();
+        self.inner.write_transcription_bytes_exact(&mut buf[..inner_bytes_len]);
+        buf = &mut buf[inner_bytes_len..];
+        self.ideal_check_z.write_transcription_bytes_subset(buf);
+    }
+}
+
+impl<F> Transcribable for DualPrimeProof<F>
+where
+    F: PrimeField,
+    F::Inner: ConstTranscribable,
+    F::Modulus: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        u32::NUM_BYTES
+            + self.inner.get_num_bytes()
+            + IdealCheckProof::<F>::LENGTH_NUM_BYTES
+            + self.ideal_check_z.get_num_bytes()
+    }
+}
+
 /// Out-parameter passed to the dual-prime hooks inside
 /// `prove_folded_4x_inner` / `verify_folded_4x_inner`. The wrappers
 /// unwrap `ideal_check_z` after the inner call returns.

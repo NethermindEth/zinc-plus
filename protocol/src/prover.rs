@@ -2155,6 +2155,88 @@ where
     Ok((proof, timings))
 }
 
+/// Dual-prime variant of [`prove_folded_4x_with_zip_breakdown`]. Same
+/// proof as [`prove_folded_4x_dual_prime`] plus the per-domain Zip+
+/// byte breakdown captured during step 7.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_folded_4x_dual_prime_with_zip_breakdown<
+    ZtF,
+    U,
+    F,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+    const INT_LIMBS: usize,
+    const INT_QUARTER_LIMBS: usize,
+    const MLE_FIRST: bool,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+) -> Result<(crate::DualPrimeProof<F>, FoldedProveZipBreakdown), ProtocolError<F, U::Ideal>>
+where
+    ZtF: crate::IntFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS, INT_QUARTER_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F>,
+    Int<INT_QUARTER_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    BinaryPoly<HALF_D>: ProjectableToField<F>,
+    BinaryPoly<QUARTER_D>: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+{
+    let mut extras = crate::DualPrimeExtras::<F>::new();
+    let mut breakdown = FoldedProveZipBreakdown::default();
+    let inner = prove_folded_4x_inner::<
+        ZtF,
+        U,
+        F,
+        D,
+        HALF_D,
+        QUARTER_D,
+        INT_LIMBS,
+        INT_QUARTER_LIMBS,
+        MLE_FIRST,
+        CHECK_FOR_OVERFLOW,
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        None,
+        Some(&mut breakdown),
+        Some(&mut extras),
+    )?;
+    let proof = crate::DualPrimeProof {
+        inner,
+        ideal_check_z: extras
+            .ideal_check_z
+            .expect("dual-prime hook must populate ideal_check_z"),
+    };
+    Ok((proof, breakdown))
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn prove_folded_4x_inner<
     ZtF,
