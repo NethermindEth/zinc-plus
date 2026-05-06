@@ -1293,6 +1293,8 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         };
     }
 
+    bench_prove_folded_4x!("Prove (folded 4×)", false);
+
     if count_effective_max_degree::<U>() <= 1 {
         bench_prove_folded_4x!("Prove (folded 4× MLE-first)", true);
     }
@@ -1371,6 +1373,14 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     eprint_folded_4x_proof_size_breakdown(&label_full, &proof);
     eprint_folded_4x_zip_substep_breakdown(&label_full, &proof, &zip_breakdown);
 
+    eprint_folded_4x_per_region_prove_timings::<ZtF, U, _, false>(
+        &label_full,
+        "non-MLE-first",
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+    );
     if count_effective_max_degree::<U>() <= 1 {
         eprint_folded_4x_per_region_prove_timings::<ZtF, U, _, true>(
             &label_full,
