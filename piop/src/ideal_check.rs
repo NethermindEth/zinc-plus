@@ -396,17 +396,12 @@ where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,
     {
-        // Per-constraint classification: linear vs non-linear (by degree),
-        // and zero-ideal vs non-zero-ideal. The three buckets get filled
-        // from different sources — see comment below.
+        // Per-constraint classification: linear vs non-linear (by degree).
+        // Zero-ideal vs non-zero-ideal does NOT factor in here — both go
+        // through the combined-poly lane when they're non-linear (see
+        // comment below for why).
         let linear_mask = linear_constraint_mask::<U>();
-        let is_zero_ideal: Vec<bool> = collect_ideals::<U>(num_constraints)
-            .ideals
-            .iter()
-            .map(|i| i.is_zero_ideal())
-            .collect();
         debug_assert_eq!(linear_mask.len(), num_constraints);
-        debug_assert_eq!(is_zero_ideal.len(), num_constraints);
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -420,15 +415,20 @@ where
             field_cfg,
         )?;
 
-        // Combined-poly lane: build coefficient MLEs only for the
-        // non-linear, non-zero-ideal slots (skip linear and zero-ideal —
-        // those come from the other sources). Reuses the existing
-        // `skip_constraints` plumbing.
-        let skip_combined: Vec<bool> = linear_mask
-            .iter()
-            .zip(is_zero_ideal.iter())
-            .map(|(&lin, &zero_ideal)| lin || zero_ideal)
-            .collect();
+        // Combined-poly lane: build coefficient MLEs for every slot
+        // that is NOT linear (i.e., every non-linear slot, including
+        // zero-ideal ones). We do NOT skip zero-ideal here — although
+        // the verifier's `batched_ideal_check` skips zero-ideal slots
+        // and the IC's verifier output for them is unused, the values
+        // still feed the downstream CPR sumcheck consistency check via
+        // `comb_fn`. `CombinedPolyRowBuilder::assert_zero` documents
+        // this: an honest prover's per-row F[X] expression for a
+        // non-linear `assert_zero` is generally NOT identically the
+        // zero polynomial — it can be a non-trivial poly that simply
+        // evaluates to zero at the projecting element. Substituting
+        // `ZERO` in the merge would diverge from `prove_combined`'s
+        // output (and break sumcheck consistency).
+        let skip_combined: Vec<bool> = linear_mask.clone();
         let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
             row_major_trace,
             projected_scalars,
@@ -439,13 +439,11 @@ where
 
         let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
 
-        // Merge: zero-ideal → ZERO; linear → MLE-first value;
-        // non-linear → combined-poly value evaluated at the IC point.
+        // Merge: linear → MLE-first value; everything else (including
+        // zero-ideal) → combined-poly value evaluated at the IC point.
         let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(0..num_constraints)
             .map(|i| {
-                if is_zero_ideal[i] {
-                    DynamicPolynomialF::ZERO
-                } else if linear_mask[i] {
+                if linear_mask[i] {
                     linear_values[i].clone()
                 } else {
                     let coeffs = combined_mles[i]

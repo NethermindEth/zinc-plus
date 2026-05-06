@@ -2017,6 +2017,117 @@ mod tests {
         .expect("Verifier rejected an honest dual-prime proof");
     }
 
+    /// Single-prime MLE-first round-trip. After adding the Z-typed
+    /// dual-prime constraints (degree 2-3) the UAIR is mixed-degree,
+    /// so MLE_FIRST=true dispatches via the hybrid lane (MLE-first for
+    /// linear non-zero-ideals, combined-poly for everything else).
+    /// Sanity check that the hybrid path itself works.
+    #[test]
+    fn test_e2e_sha_ecdsa_folded_4x_mle_first_round_trip() {
+        use crate::prover::prove_folded_4x;
+        use crate::verifier::verify_folded_4x;
+
+        type ZtF = TestShaEcdsaFolded4xZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+
+        let mut rng = rng();
+        let pp = setup_folded_4x_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let sig = <U as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded_4x::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            true, // MLE_FIRST
+            CHECKED,
+        >(&pp, &trace, SHA_ECDSA_NUM_VARS, project_scalar_fn)
+        .expect("MLE-first prover failed");
+
+        verify_folded_4x::<
+            ZtF,
+            U,
+            F,
+            Sha256Ideal<F>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest single-prime MLE-first proof");
+    }
+
+    /// MLE-first variant of the dual-prime round-trip. The `ShaEcdsaUair`
+    /// has both linear (degree-1) SHA assert_in_ideal constraints and
+    /// non-linear (degree-2/3) Z-typed dual-prime constraints, so
+    /// `prove_folded_4x_inner` dispatches via the hybrid path —
+    /// MLE-first lane for the linear non-zero-ideals, combined-poly
+    /// lane for the rest.
+    #[test]
+    fn test_e2e_sha_ecdsa_folded_4x_dual_prime_mle_first_round_trip() {
+        use crate::prover::prove_folded_4x_dual_prime;
+        use crate::verifier::verify_folded_4x_dual_prime;
+
+        type ZtF = TestShaEcdsaFolded4xZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+
+        let mut rng = rng();
+        let pp = setup_folded_4x_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let sig = <U as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded_4x_dual_prime::<
+            ZtF,
+            U,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            true, // MLE_FIRST
+            CHECKED,
+        >(&pp, &trace, SHA_ECDSA_NUM_VARS, project_scalar_fn)
+        .expect("dual-prime MLE-first prover failed");
+
+        verify_folded_4x_dual_prime::<
+            ZtF,
+            U,
+            F,
+            Sha256Ideal<F>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            QUARTER_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_QUARTER_LIMBS_TEST,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest dual-prime MLE-first proof");
+    }
+
     /// No-tamper SHA-ECDSA round-trip + structural-shape pins. Prints
     /// the proof size so refactors that grow the proof are easy to
     /// catch.

@@ -2205,28 +2205,40 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
 
     let params = format!("ShaEcdsa/nvars={num_vars}");
 
-    group.bench_function(
-        BenchmarkId::new("Prove (folded 4× dual-prime)", &params),
-        |bench| {
-            bench.iter(|| {
-                black_box(
-                    zinc_protocol::prover::prove_folded_4x_dual_prime::<
-                        ZtF,
-                        U,
-                        F,
-                        DEGREE_PLUS_ONE,
-                        HALF_DEGREE_PLUS_ONE,
-                        QUARTER_DEGREE_PLUS_ONE,
-                        EC_FP_INT_LIMBS,
-                        INT_QUARTER_LIMBS_BENCH,
-                        false,
-                        PERFORM_CHECKS,
-                    >(&pp, &trace, num_vars, project_scalar),
-                )
-                .expect("Folded 4× dual-prime prover failed");
+    macro_rules! bench_prove {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(
+                        zinc_protocol::prover::prove_folded_4x_dual_prime::<
+                            ZtF,
+                            U,
+                            F,
+                            DEGREE_PLUS_ONE,
+                            HALF_DEGREE_PLUS_ONE,
+                            QUARTER_DEGREE_PLUS_ONE,
+                            EC_FP_INT_LIMBS,
+                            INT_QUARTER_LIMBS_BENCH,
+                            { $mle_first },
+                            PERFORM_CHECKS,
+                        >(&pp, &trace, num_vars, project_scalar),
+                    )
+                    .expect("Folded 4× dual-prime prover failed");
+                });
             });
-        },
-    );
+        };
+    }
+
+    // MLE-first dispatch is safe for any UAIR thanks to the hybrid
+    // lane in `prove_folded_4x_inner` — pure-linear UAIRs route through
+    // `prove_linear`, pure-non-linear through `prove_combined`, and
+    // mixed-degree (like ShaEcdsa with the dual-prime Z-typed
+    // constraints) through `prove_hybrid`. We bench both variants to
+    // measure the savings: with MLE-first, the linear SHA
+    // `assert_in_ideal_typed` constraints (C1, C2, C7-C13 — all
+    // degree 1) skip the row-major combined-poly construction.
+    bench_prove!("Prove (folded 4× dual-prime, MLE-first)", true);
+    bench_prove!("Prove (folded 4× dual-prime, combined-poly)", false);
 
     let proof = zinc_protocol::prover::prove_folded_4x_dual_prime::<
         ZtF,
@@ -2280,8 +2292,17 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
     );
 
     let label_full = format!("Folded 4× dual-prime/{}", params);
-    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _>(
+    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, true>(
         &label_full,
+        "MLE-first",
+        &pp,
+        &trace,
+        num_vars,
+        project_scalar,
+    );
+    eprint_folded_4x_dual_prime_per_region_prove_timings::<ZtF, U, _, false>(
+        &label_full,
+        "combined-poly",
         &pp,
         &trace,
         num_vars,
@@ -2291,9 +2312,13 @@ fn bench_real_sha_ecdsa_e2e_folded_4x_dual_prime(
 
 /// Per-region prove timings for the dual-prime int-fold-4× variant.
 /// Uses [`prove_folded_4x_dual_prime_with_timings`] and reports the
-/// extra Z-branch IC cost on its own line.
-fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S>(
+/// extra Z-branch IC cost on its own line. `MLE_FIRST` selects the
+/// step-2 dispatch lane (true → hybrid for mixed-degree UAIRs;
+/// false → combined-poly for every non-zero-ideal constraint).
+#[allow(clippy::too_many_arguments)]
+fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S, const MLE_FIRST: bool>(
     label: &str,
+    variant: &str,
     pp: &(
         ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
         ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
@@ -2340,7 +2365,7 @@ fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S>(
             QUARTER_DEGREE_PLUS_ONE,
             EC_FP_INT_LIMBS,
             INT_QUARTER_LIMBS_BENCH,
-            false,
+            MLE_FIRST,
             PERFORM_CHECKS,
         >(pp, trace, num_vars, project_scalar)
         .expect("dual-prime prover with timings failed");
@@ -2352,8 +2377,8 @@ fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S>(
         |dt: std::time::Duration| -> f64 { (dt.as_secs_f64() / total_dt.as_secs_f64()) * 100.0 };
     let ms = |dt: std::time::Duration| -> f64 { dt.as_secs_f64() * 1_000.0 };
     eprintln!(
-        "    {} per-region prove timings (mean of N={} runs):",
-        label, N_RUNS
+        "    {} per-region prove timings, {} lane (mean of N={} runs):",
+        label, variant, N_RUNS
     );
     eprintln!(
         "      step 0  commit                 {:>8.3} ms ({:>4.1}%)",

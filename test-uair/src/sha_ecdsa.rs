@@ -1342,6 +1342,21 @@ mod tests {
         // C4, C6 — including the new row-local σ_0/σ_1 equalities).
         assert!(degrees.iter().any(|&d| d == 7), "expected deg-7 from ECDSA C-A2");
         assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
+
+        // The non-zero-ideal effective max-degree drives MLE-first
+        // dispatch. For ShaEcdsa the original 7 SHA assert_in_ideal
+        // constraints are all degree 1 — so without the dual-prime
+        // additions, count_effective_max_degree was 1 (pure-linear
+        // MLE-first lane). With our new Z-typed constraints (degrees
+        // 2 and 3 because they're gated by S_ACTIVE / S_FINAL public
+        // selectors and contain quadratic terms), the effective max
+        // is now > 1 → hybrid dispatch (MLE-first lane for the SHA
+        // linear non-zero-ideals, combined-poly lane for the new Z
+        // ones plus any non-linear assert_zero).
+        assert!(
+            zinc_uair::degree_counter::count_effective_max_degree::<U>() > 1,
+            "Z-typed dual-prime constraints push effective max-degree above 1",
+        );
     }
 
     /// The merged trace builder produces a trace with the right column
