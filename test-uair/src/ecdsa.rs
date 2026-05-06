@@ -74,9 +74,20 @@ use crate::ecdsa_doubling::{
 };
 
 /// Number of Shamir doubling+add rounds. With `num_vars >= 9`,
-/// trace rows = 512, so 256 active rounds + 1 final row + 255 padding
+/// trace rows = 512, so 254 active rounds + 1 final row + 257 padding
 /// fits.
-pub const NUM_SHAMIR_ROUNDS: usize = 256;
+///
+/// The active-round count is capped at 254 so the dual-prime
+/// cumulative-sum trace `acc[t+1] = 2·acc[t] + b[t]` stays below
+/// `p_secp256k1 / 2` over Z. With that bound the trace generator's
+/// `add_mod_p` / `mul_mod_p` are no-ops, the centered Int<4>
+/// representation is the integer value itself, and the Z-tagged
+/// constraint `down_W_A − 2·W_A − PA_B = 0` holds over Z — so it
+/// projects correctly to *any* prime, including the dual-prime Z
+/// branch's 3-limb FS-drawn prime. Bumping back to 256 requires
+/// either an overflow-correction column in the constraint or a
+/// wider storage type for the cumulative columns.
+pub const NUM_SHAMIR_ROUNDS: usize = 254;
 
 /// The trace row at which the affine-conversion / final-output
 /// constraints apply (one past the last active doubling round).
