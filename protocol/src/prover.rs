@@ -85,6 +85,7 @@ fn z_branch_ideal_check<F, U, const D: usize>(
     num_constraints: usize,
     num_vars: usize,
     field_cfg: &F::Config,
+    sub_timings: Option<&mut ZBranchSubTimings>,
 ) -> Result<zinc_piop::ideal_check::Proof<F>, ProtocolError<F, U::Ideal>>
 where
     F: InnerTransparentField,
@@ -104,18 +105,33 @@ where
 
     let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
+    // Index the Z-tagged non-zero-ideal slots in the global constraint
+    // vector. The Z-only row builder writes its k-th expression to
+    // `combined_evaluations[z_indices[k]]`.
+    let z_indices: Vec<usize> = (0..num_constraints)
+        .filter(|&i| !skip[i])
+        .collect();
+
+    let _t_combined = std::time::Instant::now();
+    let mut combined_sub =
+        zinc_piop::ideal_check::combined_poly_builder::ComputeCombinedSubTimings::default();
     let combined_mles =
-        zinc_piop::ideal_check::combined_poly_builder::compute_combined_polynomials::<_, U>(
+        zinc_piop::ideal_check::combined_poly_builder::compute_combined_polynomials_z_only::<_, U>(
             trace_matrix,
             projected_scalars,
             num_constraints,
             field_cfg,
-            &skip,
+            &z_indices,
+            Some(&mut combined_sub),
         );
+    let dt_combined = _t_combined.elapsed();
 
+    let _t_eq = std::time::Instant::now();
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(&evaluation_point, field_cfg)
         .map_err(|e| ProtocolError::IdealCheck(zinc_piop::ideal_check::IdealCheckError::EqPolyConstructionError(e)))?;
+    let dt_eq = _t_eq.elapsed();
 
+    let _t_eval = std::time::Instant::now();
     let combined_mle_values: Vec<DynamicPolynomialF<F>> = cfg_into_iter!(combined_mles)
         .enumerate()
         .map(|(i, coeff_mles)| {
@@ -135,15 +151,63 @@ where
             DynamicPolynomialF::new_trimmed(coeffs)
         })
         .collect();
+    let dt_eval = _t_eval.elapsed();
 
+    let _t_absorb = std::time::Instant::now();
     let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
     for v in &combined_mle_values {
         transcript.absorb_random_field_slice(&v.coeffs, &mut transcription_buf);
+    }
+    let dt_absorb = _t_absorb.elapsed();
+
+    if let Some(t) = sub_timings {
+        t.compute_combined_polynomials = dt_combined;
+        t.compute_combined_per_row = combined_sub.per_row_constrain;
+        t.compute_combined_prepare_mles = combined_sub.prepare_coeff_mles;
+        t.eq_table = dt_eq;
+        t.mle_eval = dt_eval;
+        t.absorb = dt_absorb;
     }
 
     Ok(IcProof {
         combined_mle_values,
     })
+}
+
+/// Sub-timings within `z_branch_ideal_check` so the bench can show
+/// where the dual-prime Z-branch IC's time actually goes.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ZBranchSubTimings {
+    pub compute_combined_polynomials: std::time::Duration,
+    /// Phase 1 of `compute_combined_polynomials`: the per-row
+    /// `U::constrain_general` walk over polynomial-typed cells.
+    pub compute_combined_per_row: std::time::Duration,
+    /// Phase 2 of `compute_combined_polynomials`: build per-coefficient
+    /// MLEs from the per-row outputs (skipping off-tag/zero-ideal slots).
+    pub compute_combined_prepare_mles: std::time::Duration,
+    pub eq_table: std::time::Duration,
+    pub mle_eval: std::time::Duration,
+    pub absorb: std::time::Duration,
+}
+
+impl ZBranchSubTimings {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.compute_combined_polynomials += other.compute_combined_polynomials;
+        self.compute_combined_per_row += other.compute_combined_per_row;
+        self.compute_combined_prepare_mles += other.compute_combined_prepare_mles;
+        self.eq_table += other.eq_table;
+        self.mle_eval += other.mle_eval;
+        self.absorb += other.absorb;
+    }
+
+    pub fn divide_by(&mut self, n: u32) {
+        self.compute_combined_polynomials /= n;
+        self.compute_combined_per_row /= n;
+        self.compute_combined_prepare_mles /= n;
+        self.eq_table /= n;
+        self.mle_eval /= n;
+        self.absorb /= n;
+    }
 }
 
 //
@@ -1652,6 +1716,9 @@ pub struct FoldedProveTimings {
     /// Dual-prime only: time spent computing the masked Z-branch trace
     /// projection alone (subset of [`Self::step2_z_branch_ic`]).
     pub step2_z_branch_projection: std::time::Duration,
+    /// Dual-prime only: per-region breakdown of [`Self::step2_z_branch_ic`]
+    /// inside `z_branch_ideal_check`.
+    pub step2_z_branch_sub: ZBranchSubTimings,
     pub step3_eval_projection: std::time::Duration,
     pub step4_sumcheck: std::time::Duration,
     pub step5_multipoint_eval: std::time::Duration,
@@ -1668,6 +1735,7 @@ impl FoldedProveTimings {
         self.step2_ideal_check += other.step2_ideal_check;
         self.step2_z_branch_ic += other.step2_z_branch_ic;
         self.step2_z_branch_projection += other.step2_z_branch_projection;
+        self.step2_z_branch_sub.add_assign(&other.step2_z_branch_sub);
         self.step3_eval_projection += other.step3_eval_projection;
         self.step4_sumcheck += other.step4_sumcheck;
         self.step5_multipoint_eval += other.step5_multipoint_eval;
@@ -1683,6 +1751,7 @@ impl FoldedProveTimings {
         self.step2_ideal_check /= n;
         self.step2_z_branch_ic /= n;
         self.step2_z_branch_projection /= n;
+        self.step2_z_branch_sub.divide_by(n);
         self.step3_eval_projection /= n;
         self.step4_sumcheck /= n;
         self.step5_multipoint_eval /= n;
@@ -2421,6 +2490,7 @@ where
         let projected_trace_p_rm =
             project_trace_coeffs_row_major_with_mask::<F, _, _, D>(trace, &p_cfg, &z_mask);
         let z_proj_dt = _t_z_proj.elapsed();
+        let mut z_sub = ZBranchSubTimings::default();
         let ic_z = z_branch_ideal_check::<F, U, D>(
             &mut pcs_transcript.fs_transcript,
             &projected_trace_p_rm,
@@ -2428,11 +2498,13 @@ where
             num_constraints,
             num_vars,
             &p_cfg,
+            Some(&mut z_sub),
         )?;
         extras.ideal_check_z = Some(ic_z);
         if let Some(t) = timings.as_mut() {
             t.step2_z_branch_ic = _t_z_total.elapsed();
             t.step2_z_branch_projection = z_proj_dt;
+            t.step2_z_branch_sub = z_sub;
         }
     }
 

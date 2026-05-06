@@ -551,17 +551,30 @@ where
             R::ONE + R::ONE,
         )));
 
+        // Scalars declared at outer scope so their addresses remain
+        // stable for the whole `constrain_general` call. The
+        // `ScalarProjCache` in `combine_rows_and_get_max_degree`
+        // memoises by raw pointer; if a scalar were declared inside a
+        // gate and dropped at the gate's `}`, a later scalar reusing
+        // the same stack slot would return a stale cached value. See
+        // `piop/src/scalar_proj_cache.rs`.
         let rho_sig0 = rho_poly::<R>(&[10, 19, 30]);
         let rho_sig1 = rho_poly::<R>(&[7, 21, 26]);
         let two_scalar_sha = const_scalar::<R>(R::ONE + R::ONE);
-        // Carry-extraction multipliers (mirror sha256.rs). Each
-        // contribution `2^32 · mu_X` is built from
-        // `2^32 · ShiftR(k_low) − 2^{32+w} · ShiftR(k_low+w)`.
         let const_2_to_32 = const_scalar::<R>(pow_two::<R>(32));
         let const_2_to_33 = const_scalar::<R>(pow_two::<R>(33));
         let const_2_to_34 = const_scalar::<R>(pow_two::<R>(34));
         let const_2_to_35 = const_scalar::<R>(pow_two::<R>(35));
 
+        // Skip the SHA + ECDSA expensive sub-graph entirely when the
+        // builder advertises that it discards F_p and zero-ideal
+        // constraints (e.g. the dual-prime Z-branch IC, which only
+        // emits Z-tagged non-zero-ideal slots). Default builders return
+        // `true` from both `is_active_for(Fp)` and
+        // `is_active_for_zero_ideal()`, so the condition collapses to
+        // `true || true` and the block runs unconditionally — no
+        // behaviour change for the standard path.
+        if b.is_active_for(ConstraintRing::Fp) || b.is_active_for_zero_ideal() {
         let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32)
             .expect("2^32 · w_mu_packed overflow")
             - &mbs(down_w_mu_packed_shr2, &const_2_to_34)
@@ -705,6 +718,7 @@ where
         // booleanity, confines mu_X to declared bit widths. See
         // sha256.rs cols doc for the soundness argument.
         b.assert_zero(down_w_mu_packed_shr10.clone());
+        }
 
         // ===================================================================
         // ECDSA half — verbatim from ecdsa.rs's constrain_general,
@@ -739,6 +753,13 @@ where
         let eight_scalar = const_scalar::<R>(R::from(8_u32));
         let nine_scalar = const_scalar::<R>(R::from(9_u32));
         let twelve_scalar = const_scalar::<R>(R::from(12_u32));
+
+        // ECDSA expensive sub-graph: same gate as SHA. Default builders
+        // run the block; the dual-prime Z-branch IC's row builder skips
+        // it entirely. Scalar declarations (`two_scalar` etc.) stay
+        // outside the gate so their addresses remain stable for the
+        // `ScalarProjCache` — see the SHA gate's comment for why.
+        if b.is_active_for(ConstraintRing::Fp) || b.is_active_for_zero_ideal() {
 
         // === Doubling block (3 constraints; `S = Y²` inlined) ===
         let e_y_sq = e_y.clone() * e_y;
@@ -850,6 +871,7 @@ where
         let e_zinv_sq = e_pa_z_inv.clone() * e_pa_z_inv;
         let e_f2_inner = e_x.clone() * &e_zinv_sq - e_pa_r_x;
         b.assert_zero(e_s_final.clone() * &e_f2_inner);
+        } // end ECDSA F_p / zero-ideal gate
 
         // ===================================================================
         // Dual-prime Z-typed constraints (6 total)
@@ -908,8 +930,13 @@ where
         let down_w_a1 = &down.int[4];
         let down_w_a2 = &down.int[5];
 
-        // 1, 2: cumulative-sum transitions.
+        // Z scalars at outer scope so the `ScalarProjCache` sees stable
+        // pointers across rows. See the SHA gate's comment.
         let two_scalar_z = const_scalar::<R>(R::ONE + R::ONE);
+        let n_scalar = const_scalar::<R>(secp256k1_group_order_as_r::<R>());
+
+        if b.is_active_for(ConstraintRing::Z) {
+        // 1, 2: cumulative-sum transitions.
         let two_a1 = mbs(w_a1, &two_scalar_z).expect("2 * A_1 overflow");
         let cumulative_1 = down_w_a1.clone() - &two_a1 - pa_b1;
         b.assert_in_ideal_typed(
@@ -940,7 +967,6 @@ where
         );
 
         // 5, 6: ECDSA verify-over-Z equations.
-        let n_scalar = const_scalar::<R>(secp256k1_group_order_as_r::<R>());
         let v1_n = mbs(w_v1, &n_scalar).expect("v_1 * n overflow");
         let v2_n = mbs(w_v2, &n_scalar).expect("v_2 * n overflow");
         let verify_eq_1 = pa_u1.clone() * pa_s - pa_e_int + &v1_n;
@@ -955,6 +981,7 @@ where
             &ideal_rot_x2,
             ConstraintRing::Z,
         );
+        } // end Z-tagged gate
     }
 
     /// Verify the SHA-side public-column structural properties

@@ -72,6 +72,31 @@ pub trait ConstraintBuilder {
     /// Add a constraint saying that `expr` is equal to zero which is
     /// the same as saying that `expr` belongs to the zero ideal.
     fn assert_zero(&mut self, expr: Self::Expr);
+
+    /// Skip-hint: returns `true` if the builder *will keep* (not discard)
+    /// constraints with the given tag. UAIR authors can wrap expensive
+    /// sub-graphs in
+    /// `if b.is_active_for(ring) { ... compute and assert ... }` so that
+    /// short-circuiting builders (notably the dual-prime Z-branch IC,
+    /// which only emits Z-tagged non-zero-ideal slots) avoid the per-row
+    /// polynomial arithmetic for tags they would discard.
+    ///
+    /// Default: `true` (everything kept) — preserves the existing
+    /// behaviour for counters, degree collectors, folders, and the
+    /// standard row builder.
+    #[inline(always)]
+    fn is_active_for(&self, _ring: ConstraintRing) -> bool {
+        true
+    }
+
+    /// Skip-hint companion to [`is_active_for`]: returns `true` if the
+    /// builder will keep `assert_zero` (zero-ideal) constraints. UAIRs
+    /// wrap zero-ideal-asserting blocks in
+    /// `if b.is_active_for_zero_ideal() { ... }`. Default: `true`.
+    #[inline(always)]
+    fn is_active_for_zero_ideal(&self) -> bool {
+        true
+    }
 }
 
 /// Specifies a shifted column

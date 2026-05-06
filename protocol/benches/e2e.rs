@@ -2404,8 +2404,32 @@ fn eprint_folded_4x_dual_prime_per_region_prove_timings<ZtF, U, S, const MLE_FIR
         pct(total.step2_z_branch_ic),
     );
     eprintln!(
-        "         └ of which projection (p)   {:>8.3} ms",
+        "         └ projection (p)            {:>8.3} ms",
         ms(total.step2_z_branch_projection),
+    );
+    eprintln!(
+        "         └ compute_combined_polys    {:>8.3} ms",
+        ms(total.step2_z_branch_sub.compute_combined_polynomials),
+    );
+    eprintln!(
+        "             └ per-row constrain     {:>8.3} ms",
+        ms(total.step2_z_branch_sub.compute_combined_per_row),
+    );
+    eprintln!(
+        "             └ prepare coeff MLEs    {:>8.3} ms",
+        ms(total.step2_z_branch_sub.compute_combined_prepare_mles),
+    );
+    eprintln!(
+        "         └ eq_table                  {:>8.3} ms",
+        ms(total.step2_z_branch_sub.eq_table),
+    );
+    eprintln!(
+        "         └ mle_eval                  {:>8.3} ms",
+        ms(total.step2_z_branch_sub.mle_eval),
+    );
+    eprintln!(
+        "         └ absorb                    {:>8.3} ms",
+        ms(total.step2_z_branch_sub.absorb),
     );
     eprintln!(
         "      step 3  eval projection        {:>8.3} ms ({:>4.1}%)",

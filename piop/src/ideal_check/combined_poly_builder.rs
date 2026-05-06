@@ -42,6 +42,45 @@ where
     F: PrimeField,
     U: Uair,
 {
+    compute_combined_polynomials_timed::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        field_cfg,
+        skip_constraints,
+        None,
+    )
+}
+
+/// Sub-timings within [`compute_combined_polynomials`].
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ComputeCombinedSubTimings {
+    /// Phase 1: per-row `U::constrain_general` walk (parallel) producing
+    /// the per-row combined polynomial values. This is the expensive bit
+    /// for non-linear / per-row paths.
+    pub per_row_constrain: std::time::Duration,
+    /// Phase 2: build per-coefficient MLEs from the per-row outputs,
+    /// honoring `skip_constraints`.
+    pub prepare_coeff_mles: std::time::Duration,
+}
+
+/// Like [`compute_combined_polynomials`] but optionally records the
+/// time spent in the per-row `constrain_general` walk vs. the
+/// coefficient-MLE preparation. Used by the dual-prime Z-branch bench
+/// to attribute IC time to the per-row constraint evaluation.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn compute_combined_polynomials_timed<F, U>(
+    trace_matrix: &RowMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    field_cfg: &F::Config,
+    skip_constraints: &[bool],
+    sub_timings: Option<&mut ComputeCombinedSubTimings>,
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+where
+    F: PrimeField,
+    U: Uair,
+{
     let field_zero = F::zero_with_cfg(field_cfg);
     let uair_sig = U::signature();
     let down_layout = uair_sig.down_cols().as_column_layout();
@@ -49,6 +88,7 @@ where
     let num_rows = trace_matrix.len();
 
     let bit_op_count = uair_sig.bit_op_down_count();
+    let _t_phase1 = std::time::Instant::now();
     let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
         cfg_into_iter!(0..num_rows - 1)
             .map(|row_idx| {
@@ -90,6 +130,7 @@ where
                 )
             })
             .collect();
+    let dt_phase1 = _t_phase1.elapsed();
 
     let max_degree = *max_degrees_and_combined_poly_rows
         .iter()
@@ -107,13 +148,155 @@ where
     //             with selector polynomials.
     max_degrees_and_combined_poly_rows.push((0, vec![DynamicPolynomialF::zero(); num_constraints]));
 
-    prepare_coefficient_mles(
+    let _t_phase2 = std::time::Instant::now();
+    let result = prepare_coefficient_mles(
         num_constraints,
         max_degree,
         &max_degrees_and_combined_poly_rows,
         field_zero.inner(),
         skip_constraints,
-    )
+    );
+    let dt_phase2 = _t_phase2.elapsed();
+
+    if let Some(t) = sub_timings {
+        t.per_row_constrain = dt_phase1;
+        t.prepare_coeff_mles = dt_phase2;
+    }
+
+    result
+}
+
+/// Z-only variant of [`compute_combined_polynomials`]. Uses
+/// [`CombinedPolyRowBuilderZOnly`] so each row's `U::constrain_general`
+/// call only walks the Z-tagged sub-graph (assuming the UAIR gates its
+/// F_p / zero-ideal sections via [`ConstraintBuilder::is_active_for`]).
+///
+/// The output shape matches [`compute_combined_polynomials`] with the
+/// implicit skip set `{i : tags[i] != Z || ideals[i].is_zero_ideal()}`:
+/// per-coefficient MLEs are produced only for Z-tagged non-zero-ideal
+/// slots, and `ZERO` polynomials elsewhere.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn compute_combined_polynomials_z_only<F, U>(
+    trace_matrix: &RowMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    field_cfg: &F::Config,
+    z_indices: &[usize],
+    sub_timings: Option<&mut ComputeCombinedSubTimings>,
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+where
+    F: PrimeField,
+    U: Uair,
+{
+    let field_zero = F::zero_with_cfg(field_cfg);
+    let uair_sig = U::signature();
+    let down_layout = uair_sig.down_cols().as_column_layout();
+
+    let num_rows = trace_matrix.len();
+    let bit_op_count = uair_sig.bit_op_down_count();
+
+    // Skip mask covers everything except Z-tagged non-zero-ideal slots.
+    let skip: Vec<bool> = {
+        let mut s = vec![true; num_constraints];
+        for &i in z_indices {
+            s[i] = false;
+        }
+        s
+    };
+
+    let _t_phase1 = std::time::Instant::now();
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
+        cfg_into_iter!(0..num_rows - 1)
+            .map(|row_idx| {
+                let up = &trace_matrix[row_idx];
+
+                let mut down: Vec<DynamicPolynomialF<F>> = uair_sig
+                    .shifts()
+                    .iter()
+                    .map(|spec| {
+                        if row_idx + spec.shift_amount() < num_rows {
+                            trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
+                        } else {
+                            DynamicPolynomialF::zero()
+                        }
+                    })
+                    .collect();
+
+                for spec in uair_sig.bit_op_specs() {
+                    let src_cell = &trace_matrix[row_idx][spec.source_col()];
+                    let op_cell = match spec.op() {
+                        BitOp::Rot(c) => src_cell.rot_c(c),
+                        BitOp::ShiftR(c) => src_cell.shift_r_c(c),
+                    };
+                    down.push(op_cell);
+                }
+
+                let mut builder = CombinedPolyRowBuilderZOnly::new(num_constraints, z_indices);
+
+                let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+                    RefCell::new(None);
+                let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+                    if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+                        return v;
+                    }
+                    let v = projected_scalars
+                        .get(x)
+                        .cloned()
+                        .expect("all scalars should have been projected at this point");
+                    cache
+                        .borrow_mut()
+                        .get_or_insert_with(ScalarProjCache::new)
+                        .push(x, v.clone());
+                    v
+                };
+
+                U::constrain_general(
+                    &mut builder,
+                    TraceRow::from_slice_with_layout(up, U::signature().total_cols().as_column_layout()),
+                    TraceRow::from_slice_with_layout_and_bit_op(&down, down_layout, bit_op_count),
+                    &project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
+                );
+
+                let mut combined_evaluations = builder.combined_evaluations;
+                combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+
+                let max_degree = z_indices
+                    .iter()
+                    .map(|&i| combined_evaluations[i].degree().unwrap_or(0))
+                    .max()
+                    .unwrap_or(0);
+
+                (max_degree, combined_evaluations)
+            })
+            .collect();
+    let dt_phase1 = _t_phase1.elapsed();
+
+    let max_degree = *max_degrees_and_combined_poly_rows
+        .iter()
+        .map(|(max_degree, _)| max_degree)
+        .max()
+        .expect("Z-branch IC must have at least one row");
+
+    max_degrees_and_combined_poly_rows.push((0, vec![DynamicPolynomialF::zero(); num_constraints]));
+
+    let _t_phase2 = std::time::Instant::now();
+    let result = prepare_coefficient_mles(
+        num_constraints,
+        max_degree,
+        &max_degrees_and_combined_poly_rows,
+        field_zero.inner(),
+        &skip,
+    );
+    let dt_phase2 = _t_phase2.elapsed();
+
+    if let Some(t) = sub_timings {
+        t.per_row_constrain = dt_phase1;
+        t.prepare_coeff_mles = dt_phase2;
+    }
+
+    result
 }
 
 /// Apply combination polynomial to each row
@@ -399,6 +582,77 @@ where
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
+}
+
+/// Z-only row builder: pre-fills `combined_evaluations` with `ZERO` for
+/// every constraint and only writes at slots whose tag is
+/// [`ConstraintRing::Z`]. Used by the dual-prime Z-branch IC together
+/// with a UAIR that gates its F_p / zero-ideal sub-graphs via
+/// [`ConstraintBuilder::is_active_for`] / [`ConstraintBuilder::is_active_for_zero_ideal`]
+/// — those gates short-circuit before the expensive polynomial
+/// arithmetic, leaving only the Z-tagged work per row.
+///
+/// `z_indices` lists the global constraint-vector positions of
+/// Z-tagged non-zero-ideal slots, in declaration order. The k-th call
+/// to `assert_in_ideal_typed(_, _, Z)` writes to
+/// `combined_evaluations[z_indices[k]]`. Off-tag and zero-ideal
+/// assertions are no-ops (the gate prevents them in correctly-written
+/// UAIRs; if they fire anyway the behaviour is still safe — the
+/// pre-filled `ZERO` survives, matching the IC's tag-skip mask).
+pub struct CombinedPolyRowBuilderZOnly<'a, F: PrimeField> {
+    combined_evaluations: Vec<DynamicPolynomialF<F>>,
+    z_indices: &'a [usize],
+    next_z_local: usize,
+}
+
+impl<'a, F: PrimeField> CombinedPolyRowBuilderZOnly<'a, F> {
+    pub fn new(num_constraints: usize, z_indices: &'a [usize]) -> Self {
+        Self {
+            combined_evaluations: vec![DynamicPolynomialF::zero(); num_constraints],
+            z_indices,
+            next_z_local: 0,
+        }
+    }
+}
+
+impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilderZOnly<'_, F> {
+    type Expr = DynamicPolynomialF<F>;
+    type Ideal = ImpossibleIdeal;
+
+    fn assert_in_ideal(&mut self, _expr: Self::Expr, _ideal: &Self::Ideal) {
+        // Untyped asserts are tag-Z-by-default in IdealCollector but the
+        // user's gate should prevent them firing here. Treat as no-op.
+    }
+
+    fn assert_in_ideal_typed(
+        &mut self,
+        expr: Self::Expr,
+        _ideal: &Self::Ideal,
+        ring: zinc_uair::ConstraintRing,
+    ) {
+        if ring == zinc_uair::ConstraintRing::Z && self.next_z_local < self.z_indices.len() {
+            let idx = self.z_indices[self.next_z_local];
+            self.combined_evaluations[idx] = expr;
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                self.next_z_local += 1;
+            }
+        }
+    }
+
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        // Zero-ideal slots are not produced by the Z-branch IC.
+    }
+
+    #[inline(always)]
+    fn is_active_for(&self, ring: zinc_uair::ConstraintRing) -> bool {
+        ring == zinc_uair::ConstraintRing::Z
+    }
+
+    #[inline(always)]
+    fn is_active_for_zero_ideal(&self) -> bool {
+        false
+    }
 }
 
 impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
