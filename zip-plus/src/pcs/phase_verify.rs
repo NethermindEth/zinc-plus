@@ -547,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_with_invalid_point_size() {
         let num_vars = 10;
 
@@ -596,6 +597,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_due_to_incorrect_polynomial() {
         let num_vars = 10;
         let (pp, mle1) = setup_test_params(num_vars);
@@ -644,6 +646,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_due_to_a_hint_that_is_not_close() {
         let num_vars = 10;
         let (pp, mle) = setup_test_params(num_vars);
@@ -698,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_due_to_incorrect_evaluation() {
         let num_vars = 10;
         let (pp, mle) = setup_test_params(num_vars);
@@ -740,6 +744,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_if_proximity_check_is_invalid() {
         let num_vars = 10;
         let poly_size: usize = 1 << num_vars;
@@ -811,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_if_evaluation_consistency_check_is_invalid() {
         let num_vars = 10;
         let poly_size: usize = 1 << num_vars;
@@ -1110,6 +1116,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_at_proximity_link_check_if_combined_row_is_corrupted() {
         let num_vars = 10;
         let poly_size: usize = 1 << num_vars;
@@ -1169,6 +1176,7 @@ mod tests {
 
     /// Mirrors: `Zip/Verify: RandomField<4>, poly_size = 2^12 (Int limbs = 1)`
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn bench_p12_verify() {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
@@ -1227,6 +1235,7 @@ mod tests {
 
     /// Mirrors: `Zip+/Verify` for `poly_size=2^12`
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn bench_p12_verify_poly() {
         fn inner<const P: usize>() {
             let mut rng = ThreadRng::default();
@@ -1329,6 +1338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batched_prove_verify_batch_5() {
         batched_prove_verify_inner::<5>(10);
     }
@@ -1339,6 +1349,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batched_verify_fails_with_tampered_eval() {
         let num_vars = 10;
         let poly_size = 1 << num_vars;

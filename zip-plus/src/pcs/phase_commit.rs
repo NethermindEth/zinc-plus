@@ -225,6 +225,7 @@ mod tests {
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn commit_rejects_too_many_variables() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
@@ -362,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encode_rows_produces_correct_size() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -374,6 +376,7 @@ mod tests {
     /// Verifies that the output of `encode_rows` is semantically correct by
     /// comparing it to a direct, row-by-row encoding.
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encoded_rows_match_linear_code_definition() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -395,6 +398,7 @@ mod tests {
     /// Verifies that corrupting the encoded data after commitment results in a
     /// different Merkle root.
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn corrupted_encoding_changes_merkle_root() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -413,6 +417,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batch_commit_single_poly_matches_single_commit() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -427,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encoded_rows_are_nonzero_for_nonzero_input() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -523,6 +529,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encode_rows_succeeds_for_single_row() {
         let num_vars = 10;
         let poly_size = 1 << num_vars;
@@ -538,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn encode_rows_succeeds_for_single_poly_row() {
         let num_vars = 10;
         let pp = ZipPlusParams::new(num_vars, 1, POLY_C.clone());
@@ -556,6 +564,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn matrix_dimensions_are_invariant() {
         let test_cases = vec![(8, 1), (10, 4), (12, 16)];
         for (num_vars, expected_rows) in test_cases {
@@ -576,6 +585,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn linear_code_preserves_linearity() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -610,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn commit_with_many_variables() {
         let num_vars = 16;
         let (pp, poly) = setup_test_params(num_vars);
@@ -619,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn commit_with_smallest_matrix_arrangement() {
         let num_vars = 8;
         let (pp, poly) = setup_test_params(num_vars);
@@ -737,6 +749,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn proof_size_is_correct_for_parameters() {
         use std::mem::size_of;
 
