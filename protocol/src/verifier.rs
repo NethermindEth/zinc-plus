@@ -1990,11 +1990,17 @@ where
             &field_cfg,
         )?
     };
-    // Dual-prime: replay the Z-branch ideal check on the secp256k1
-    // fixed prime. Discards the subclaim (Z-branch does not feed into
+    // Dual-prime: replay the Z-branch ideal check on a 3-limb FS-drawn
+    // prime (matches the prover's draw via the same byte-size budget).
+    // Discards the subclaim (Z-branch does not feed into
     // CPR/sumcheck/multipoint eval in this iteration).
     if let Some(ic_z) = dual_prime_z_ic {
-        let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+        const Z_PRIME_BYTE_SIZE: usize = 24;
+        let p_cfg = pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg_with_byte_size::<F, ZtF::Fmod, ZtF::PrimeTest>(
+                Z_PRIME_BYTE_SIZE,
+            );
         let _z_subclaim = U::verify_as_subprotocol_typed::<_, IdealOverF, _>(
             &mut pcs_transcript.fs_transcript,
             ic_z,

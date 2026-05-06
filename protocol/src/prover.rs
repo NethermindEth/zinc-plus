@@ -2564,7 +2564,16 @@ where
     //   constraint, but its output for off-branch slots is discarded.
     if let Some(extras) = dual_prime_extras.as_mut() {
         let _t_z_total = std::time::Instant::now();
-        let p_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+        // Z-branch prime: a fresh FS-drawn 3-limb (192-bit) prime.
+        // Constrains the modulus to the low 24 bytes of `Zt::Fmod` so
+        // the high limb stays zero and Z-branch field arithmetic
+        // operates on a narrower value than the F_p branch's q_fp.
+        const Z_PRIME_BYTE_SIZE: usize = 24;
+        let p_cfg = pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg_with_byte_size::<F, ZtF::Fmod, ZtF::PrimeTest>(
+                Z_PRIME_BYTE_SIZE,
+            );
         let projected_scalars_p = project_scalars::<F, U>(|s| project_scalar(s, &p_cfg));
         let masks = zinc_uair::column_tracker::compute_branch_column_masks::<U>();
         let z_mask = masks.z_mask;
