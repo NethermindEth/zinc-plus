@@ -3,7 +3,7 @@ pub mod traits;
 use crate::traits::{ConstTranscribable, GenTranscribable, Transcript};
 use crypto_primitives::{ConstIntSemiring, PrimeField};
 use zinc_primality::PrimalityTest;
-use zinc_utils::add;
+use zinc_utils::{add, from_ref::FromRef};
 
 /// A cryptographic transcript implementation using the BLAKE3 hash
 /// function. Used for Fiat-Shamir transformations in zero-knowledge proof
@@ -41,6 +41,71 @@ impl Blake3Transcript {
         self.fill_with_random_bytes(buf);
         self.absorb_inner(buf);
         R::read_transcription_bytes_exact(buf)
+    }
+
+    /// Like [`Transcript::get_prime`] but constrains the prime to fit in
+    /// the low `byte_size` bytes of `R::NUM_BYTES`. Bytes above that
+    /// stay zero. `R` is little-endian (limb 0 first), so this gives a
+    /// prime `< 2^(byte_size*8)`.
+    ///
+    /// Used by the dual-prime path's Z-branch to draw a smaller prime
+    /// (e.g. 192-bit for `byte_size = 24`) inside a wider field type
+    /// like `Uint<4>`. Both prover and verifier must call this with
+    /// the same `byte_size` so transcripts agree.
+    ///
+    /// Panics if `byte_size > R::NUM_BYTES`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn get_prime_with_byte_size<
+        R: ConstIntSemiring + ConstTranscribable,
+        T: PrimalityTest<R>,
+    >(
+        &mut self,
+        byte_size: usize,
+    ) -> R {
+        assert!(
+            byte_size <= R::NUM_BYTES,
+            "byte_size ({byte_size}) must not exceed R::NUM_BYTES ({})",
+            R::NUM_BYTES,
+        );
+        let buf = &mut vec![0u8; R::NUM_BYTES];
+        loop {
+            // Fill only the low `byte_size` bytes; the rest stay zero.
+            // The transcript only absorbs the bytes we actually drew —
+            // absorbing the implicit zeros would just be padding noise.
+            for byte in buf[..byte_size].iter_mut() {
+                *byte = 0;
+            }
+            self.fill_with_random_bytes(&mut buf[..byte_size]);
+            self.absorb_inner(&buf[..byte_size]);
+            let mut prime_candidate: R = R::read_transcription_bytes_exact(buf);
+            if prime_candidate.is_zero() {
+                continue;
+            }
+            if prime_candidate.is_even() {
+                prime_candidate -= R::ONE;
+            }
+            if T::is_probably_prime(&prime_candidate) {
+                return prime_candidate;
+            }
+        }
+    }
+
+    /// Helper that mirrors [`Transcript::get_random_field_cfg`] but
+    /// constrains the modulus to the low `byte_size` bytes of
+    /// `F::Modulus::NUM_BYTES`. See [`get_prime_with_byte_size`].
+    pub fn get_random_field_cfg_with_byte_size<F, FMod, T>(
+        &mut self,
+        byte_size: usize,
+    ) -> F::Config
+    where
+        F: PrimeField,
+        FMod: ConstTranscribable + ConstIntSemiring,
+        F::Modulus: FromRef<FMod>,
+        T: PrimalityTest<FMod>,
+    {
+        let prime = self.get_prime_with_byte_size::<FMod, T>(byte_size);
+        F::make_cfg(&F::Modulus::from_ref(&prime))
+            .expect("prime is guaranteed to be prime")
     }
 }
 

@@ -299,6 +299,138 @@ where
     result
 }
 
+/// F_p-only mirror of [`compute_combined_polynomials_z_only`]. Uses
+/// [`CombinedPolyRowBuilderFpOnly`] so each row's
+/// `U::constrain_general` call only walks the F_p-tagged sub-graph
+/// (assuming the UAIR gates its Z / zero-ideal sections via
+/// [`ConstraintBuilder::is_active_for`]).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn compute_combined_polynomials_fp_only<F, U>(
+    trace_matrix: &RowMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    field_cfg: &F::Config,
+    fp_indices: &[usize],
+    sub_timings: Option<&mut ComputeCombinedSubTimings>,
+) -> Vec<Vec<DenseMultilinearExtension<F::Inner>>>
+where
+    F: PrimeField,
+    U: Uair,
+{
+    let field_zero = F::zero_with_cfg(field_cfg);
+    let uair_sig = U::signature();
+    let down_layout = uair_sig.down_cols().as_column_layout();
+
+    let num_rows = trace_matrix.len();
+    let bit_op_count = uair_sig.bit_op_down_count();
+
+    let skip: Vec<bool> = {
+        let mut s = vec![true; num_constraints];
+        for &i in fp_indices {
+            s[i] = false;
+        }
+        s
+    };
+
+    let _t_phase1 = std::time::Instant::now();
+    let mut max_degrees_and_combined_poly_rows: Vec<(usize, Vec<DynamicPolynomialF<F>>)> =
+        cfg_into_iter!(0..num_rows - 1)
+            .map(|row_idx| {
+                let up = &trace_matrix[row_idx];
+
+                let mut down: Vec<DynamicPolynomialF<F>> = uair_sig
+                    .shifts()
+                    .iter()
+                    .map(|spec| {
+                        if row_idx + spec.shift_amount() < num_rows {
+                            trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
+                        } else {
+                            DynamicPolynomialF::zero()
+                        }
+                    })
+                    .collect();
+
+                for spec in uair_sig.bit_op_specs() {
+                    let src_cell = &trace_matrix[row_idx][spec.source_col()];
+                    let op_cell = match spec.op() {
+                        BitOp::Rot(c) => src_cell.rot_c(c),
+                        BitOp::ShiftR(c) => src_cell.shift_r_c(c),
+                    };
+                    down.push(op_cell);
+                }
+
+                let mut builder =
+                    CombinedPolyRowBuilderFpOnly::new(num_constraints, fp_indices);
+
+                let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+                    RefCell::new(None);
+                let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+                    if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+                        return v;
+                    }
+                    let v = projected_scalars
+                        .get(x)
+                        .cloned()
+                        .expect("all scalars should have been projected at this point");
+                    cache
+                        .borrow_mut()
+                        .get_or_insert_with(ScalarProjCache::new)
+                        .push(x, v.clone());
+                    v
+                };
+
+                U::constrain_general(
+                    &mut builder,
+                    TraceRow::from_slice_with_layout(
+                        up,
+                        U::signature().total_cols().as_column_layout(),
+                    ),
+                    TraceRow::from_slice_with_layout_and_bit_op(&down, down_layout, bit_op_count),
+                    &project,
+                    |x, y| Some(project(y) * x),
+                    ImpossibleIdeal::from_ref,
+                );
+
+                let mut combined_evaluations = builder.combined_evaluations;
+                combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+
+                let max_degree = fp_indices
+                    .iter()
+                    .map(|&i| combined_evaluations[i].degree().unwrap_or(0))
+                    .max()
+                    .unwrap_or(0);
+
+                (max_degree, combined_evaluations)
+            })
+            .collect();
+    let dt_phase1 = _t_phase1.elapsed();
+
+    let max_degree = *max_degrees_and_combined_poly_rows
+        .iter()
+        .map(|(max_degree, _)| max_degree)
+        .max()
+        .expect("F_p-branch IC must have at least one row");
+
+    max_degrees_and_combined_poly_rows.push((0, vec![DynamicPolynomialF::zero(); num_constraints]));
+
+    let _t_phase2 = std::time::Instant::now();
+    let result = prepare_coefficient_mles(
+        num_constraints,
+        max_degree,
+        &max_degrees_and_combined_poly_rows,
+        field_zero.inner(),
+        &skip,
+    );
+    let dt_phase2 = _t_phase2.elapsed();
+
+    if let Some(t) = sub_timings {
+        t.per_row_constrain = dt_phase1;
+        t.prepare_coeff_mles = dt_phase2;
+    }
+
+    result
+}
+
 /// Apply combination polynomial to each row
 /// and compute the maximum degree of resulting polynomials
 /// to pad the resulting vector of MLEs accordingly.
@@ -580,6 +712,212 @@ where
     Ok(combined_evaluations)
 }
 
+/// Z-only MLE-first evaluator. Mirrors
+/// [`evaluate_combined_polynomials_fp_only`] but uses the Z-only row
+/// builder. Provided for symmetry; in practice the dual-prime
+/// Z-branch goes through `compute_combined_polynomials_z_only`
+/// (combined-poly lane) because Z-tagged constraints in real UAIRs
+/// are typically non-linear.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn evaluate_combined_polynomials_z_only<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+    z_indices: &[usize],
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    evaluate_combined_polynomials_with_builder::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+        TagBuilderKind::ZOnly(z_indices),
+    )
+}
+
+/// F_p-only MLE-first evaluator. Mirrors
+/// [`evaluate_combined_polynomials_unchecked`] but uses
+/// [`CombinedPolyRowBuilderFpOnly`] so the single
+/// `U::constrain_general` call short-circuits on the UAIR's
+/// `is_active_for(Z)` / `is_active_for_zero_ideal()` gates and only
+/// runs the F_p-tagged sub-graph. Off-tag and zero-ideal slots come
+/// back as `ZERO`.
+///
+/// `fp_indices` lists the global constraint-vector positions of
+/// F_p-tagged non-zero-ideal slots, in declaration order.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn evaluate_combined_polynomials_fp_only<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+    fp_indices: &[usize],
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    evaluate_combined_polynomials_with_builder::<F, U>(
+        trace_matrix,
+        projected_scalars,
+        num_constraints,
+        evaluation_point,
+        field_cfg,
+        TagBuilderKind::FpOnly(fp_indices),
+    )
+}
+
+enum TagBuilderKind<'a> {
+    ZOnly(&'a [usize]),
+    FpOnly(&'a [usize]),
+}
+
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn evaluate_combined_polynomials_with_builder<F, U>(
+    trace_matrix: &ColumnMajorTrace<F>,
+    projected_scalars: &ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
+    num_constraints: usize,
+    evaluation_point: &[F],
+    field_cfg: &F::Config,
+    builder_kind: TagBuilderKind<'_>,
+) -> Result<Vec<DynamicPolynomialF<F>>, EvaluationError>
+where
+    F: InnerTransparentField,
+    U: Uair,
+{
+    let field_zero = F::zero_with_cfg(field_cfg);
+    let zero_inner = field_zero.inner().clone();
+    let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
+    let num_vars = evaluation_point.len();
+
+    let max_num_coeffs = trace_matrix
+        .iter()
+        .flat_map(|col| col.evaluations.iter())
+        .map(|p| p.coeffs.len())
+        .max()
+        .unwrap_or(0);
+
+    let uair_sig = U::signature();
+    let down_layout = uair_sig.down_cols().as_column_layout();
+
+    let eval_coeff_mle = |col: &DenseMultilinearExtension<DynamicPolynomialF<F>>,
+                          d: usize,
+                          shift: usize|
+     -> Result<F, EvaluationError> {
+        let coeff_evals: Vec<F::Inner> = (0..num_rows)
+            .map(|i| {
+                if i < num_rows - 1 && i + shift < num_rows {
+                    col.evaluations[i + shift]
+                        .coeffs
+                        .get(d)
+                        .map(|c| c.inner().clone())
+                        .unwrap_or_else(|| zero_inner.clone())
+                } else {
+                    zero_inner.clone()
+                }
+            })
+            .collect();
+        let coeff_mle = DenseMultilinearExtension {
+            evaluations: coeff_evals,
+            num_vars,
+        };
+        coeff_mle.evaluate_with_config(evaluation_point, field_cfg)
+    };
+
+    let up_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_matrix)
+        .map(|col| {
+            let coeffs: Vec<F> = (0..max_num_coeffs)
+                .map(|d| eval_coeff_mle(col, d, 0))
+                .collect::<Result<_, _>>()?;
+            Ok(DynamicPolynomialF::new_trimmed(coeffs))
+        })
+        .collect::<Result<Vec<_>, EvaluationError>>()?;
+
+    let sorted_shifts = uair_sig.shifts();
+    let mut down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
+        .map(|spec| {
+            let col = &trace_matrix[spec.source_col()];
+            let coeffs: Vec<F> = (0..max_num_coeffs)
+                .map(|d| eval_coeff_mle(col, d, spec.shift_amount()))
+                .collect::<Result<_, _>>()?;
+            Ok(DynamicPolynomialF::new_trimmed(coeffs))
+        })
+        .collect::<Result<Vec<_>, EvaluationError>>()?;
+
+    let bit_op_count = uair_sig.bit_op_down_count();
+    for spec in uair_sig.bit_op_specs() {
+        let src = &up_evals[spec.source_col()];
+        let mut op_eval = match spec.op() {
+            BitOp::Rot(c) => src.rot_c(c),
+            BitOp::ShiftR(c) => src.shift_r_c(c),
+        };
+        op_eval.trim();
+        down_evals.push(op_eval);
+    }
+
+    let cache: RefCell<Option<ScalarProjCache<U::Scalar, DynamicPolynomialF<F>>>> =
+        RefCell::new(None);
+    let project = |x: &U::Scalar| -> DynamicPolynomialF<F> {
+        if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(x)) {
+            return v;
+        }
+        let v = projected_scalars
+            .get(x)
+            .cloned()
+            .expect("all scalars should have been projected at this point");
+        cache
+            .borrow_mut()
+            .get_or_insert_with(ScalarProjCache::new)
+            .push(x, v.clone());
+        v
+    };
+
+    let combined_evaluations = match builder_kind {
+        TagBuilderKind::FpOnly(fp_indices) => {
+            let mut builder = CombinedPolyRowBuilderFpOnly::new(num_constraints, fp_indices);
+            U::constrain_general(
+                &mut builder,
+                TraceRow::from_slice_with_layout(
+                    &up_evals,
+                    uair_sig.total_cols().as_column_layout(),
+                ),
+                TraceRow::from_slice_with_layout_and_bit_op(&down_evals, down_layout, bit_op_count),
+                &project,
+                |x, y| Some(project(y) * x),
+                ImpossibleIdeal::from_ref,
+            );
+            builder.combined_evaluations
+        }
+        TagBuilderKind::ZOnly(z_indices) => {
+            let mut builder = CombinedPolyRowBuilderZOnly::new(num_constraints, z_indices);
+            U::constrain_general(
+                &mut builder,
+                TraceRow::from_slice_with_layout(
+                    &up_evals,
+                    uair_sig.total_cols().as_column_layout(),
+                ),
+                TraceRow::from_slice_with_layout_and_bit_op(&down_evals, down_layout, bit_op_count),
+                &project,
+                |x, y| Some(project(y) * x),
+                ImpossibleIdeal::from_ref,
+            );
+            builder.combined_evaluations
+        }
+    };
+
+    let mut combined_evaluations = combined_evaluations;
+    combined_evaluations.iter_mut().for_each(|eval| eval.trim());
+
+    Ok(combined_evaluations)
+}
+
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
@@ -647,6 +985,76 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilderZOnly<'_, F> {
     #[inline(always)]
     fn is_active_for(&self, ring: zinc_uair::ConstraintRing) -> bool {
         ring == zinc_uair::ConstraintRing::Z
+    }
+
+    #[inline(always)]
+    fn is_active_for_zero_ideal(&self) -> bool {
+        false
+    }
+}
+
+/// F_p-only row builder, mirror of [`CombinedPolyRowBuilderZOnly`].
+/// Pre-fills `combined_evaluations` with `ZERO` for every constraint
+/// and only writes at slots whose tag is
+/// [`zinc_uair::ConstraintRing::Fp`]. Used by the dual-prime F_p
+/// branch IC together with a UAIR that gates its Z / zero-ideal
+/// sub-graphs via [`ConstraintBuilder::is_active_for`] /
+/// [`ConstraintBuilder::is_active_for_zero_ideal`] — the gates
+/// short-circuit before the expensive polynomial arithmetic, leaving
+/// only the F_p-tagged work per row.
+///
+/// `fp_indices` lists the global constraint-vector positions of
+/// F_p-tagged non-zero-ideal slots, in declaration order. The k-th
+/// call to `assert_in_ideal_typed(_, _, Fp)` writes to
+/// `combined_evaluations[fp_indices[k]]`.
+pub struct CombinedPolyRowBuilderFpOnly<'a, F: PrimeField> {
+    combined_evaluations: Vec<DynamicPolynomialF<F>>,
+    fp_indices: &'a [usize],
+    next_fp_local: usize,
+}
+
+impl<'a, F: PrimeField> CombinedPolyRowBuilderFpOnly<'a, F> {
+    pub fn new(num_constraints: usize, fp_indices: &'a [usize]) -> Self {
+        Self {
+            combined_evaluations: vec![DynamicPolynomialF::zero(); num_constraints],
+            fp_indices,
+            next_fp_local: 0,
+        }
+    }
+}
+
+impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilderFpOnly<'_, F> {
+    type Expr = DynamicPolynomialF<F>;
+    type Ideal = ImpossibleIdeal;
+
+    fn assert_in_ideal(&mut self, _expr: Self::Expr, _ideal: &Self::Ideal) {
+        // Untyped asserts default to Z in IdealCollector — F_p-only
+        // never wants them. Treat as no-op (gate should prevent them).
+    }
+
+    fn assert_in_ideal_typed(
+        &mut self,
+        expr: Self::Expr,
+        _ideal: &Self::Ideal,
+        ring: zinc_uair::ConstraintRing,
+    ) {
+        if ring == zinc_uair::ConstraintRing::Fp && self.next_fp_local < self.fp_indices.len() {
+            let idx = self.fp_indices[self.next_fp_local];
+            self.combined_evaluations[idx] = expr;
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                self.next_fp_local += 1;
+            }
+        }
+    }
+
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        // Zero-ideal slots are not produced by the F_p-branch IC.
+    }
+
+    #[inline(always)]
+    fn is_active_for(&self, ring: zinc_uair::ConstraintRing) -> bool {
+        ring == zinc_uair::ConstraintRing::Fp
     }
 
     #[inline(always)]

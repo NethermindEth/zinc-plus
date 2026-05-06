@@ -753,12 +753,14 @@ where
         let nine_scalar = const_scalar::<R>(R::from(9_u32));
         let twelve_scalar = const_scalar::<R>(R::from(12_u32));
 
-        // ECDSA expensive sub-graph: same gate as SHA. Default builders
-        // run the block; the dual-prime Z-branch IC's row builder skips
-        // it entirely. Scalar declarations (`two_scalar` etc.) stay
-        // outside the gate so their addresses remain stable for the
-        // `ScalarProjCache` — see the SHA gate's comment for why.
-        if b.is_active_for(ConstraintRing::Fp) || b.is_active_for_zero_ideal() {
+        // ECDSA constraints are all `assert_zero` (zero-ideal), so this
+        // section is gated solely on `is_active_for_zero_ideal()`.
+        // Standard builders enter (default `true`); both the F_p-only
+        // and Z-only dual-prime row builders skip it (they don't keep
+        // zero-ideal slots). Scalar declarations (`two_scalar` etc.)
+        // stay outside the gate so their addresses remain stable for
+        // the `ScalarProjCache` — see the SHA gate's comment for why.
+        if b.is_active_for_zero_ideal() {
 
         // === Doubling block (3 constraints; `S = Y²` inlined) ===
         let e_y_sq = e_y.clone() * e_y;

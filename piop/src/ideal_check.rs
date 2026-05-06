@@ -584,23 +584,34 @@ where
             ));
         }
 
+        // Index the on-tag non-zero-ideal slots; the tag-aware
+        // MLE-first evaluator below uses a tag-aware row builder
+        // (`CombinedPolyRowBuilderFpOnly` / `…ZOnly`) which short-
+        // circuits via the UAIR's `is_active_for` gates and only
+        // walks the on-tag sub-graph.
+        let on_tag_indices: Vec<usize> = (0..num_constraints)
+            .filter(|&i| collector.tags[i] == tag_filter && !collector.ideals[i].is_zero_ideal())
+            .collect();
+
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
-        let mut combined_mle_values =
-            combined_poly_builder::evaluate_combined_polynomials_unchecked::<_, U>(
+        let combined_mle_values = match tag_filter {
+            ConstraintRing::Fp => combined_poly_builder::evaluate_combined_polynomials_fp_only::<_, U>(
                 trace_matrix,
                 projected_scalars,
                 num_constraints,
                 &evaluation_point,
                 field_cfg,
-            )?;
-
-        // Zero out off-tag slots: the tag-filtered CPR sumcheck folder
-        // skips them, so the IC absorbed values must match (zero).
-        for i in 0..num_constraints {
-            if collector.tags[i] != tag_filter {
-                combined_mle_values[i] = DynamicPolynomialF::ZERO;
-            }
-        }
+                &on_tag_indices,
+            )?,
+            ConstraintRing::Z => combined_poly_builder::evaluate_combined_polynomials_z_only::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                &evaluation_point,
+                field_cfg,
+                &on_tag_indices,
+            )?,
+        };
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         combined_mle_values.iter().for_each(|combined_mle_value| {
@@ -634,19 +645,37 @@ where
         F::Modulus: ConstTranscribable,
     {
         let collector = collect_ideals::<U>(num_constraints);
+        let on_tag_indices: Vec<usize> = (0..num_constraints)
+            .filter(|&i| collector.tags[i] == tag_filter && !collector.ideals[i].is_zero_ideal())
+            .collect();
         let skip: Vec<bool> = (0..num_constraints)
             .map(|i| collector.tags[i] != tag_filter || collector.ideals[i].is_zero_ideal())
             .collect();
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
-        let combined_mles = combined_poly_builder::compute_combined_polynomials::<_, U>(
-            trace_matrix,
-            projected_scalars,
-            num_constraints,
-            field_cfg,
-            &skip,
-        );
+        // Tag-aware fast path: a tag-aware row builder relies on the
+        // UAIR's `is_active_for` gates to short-circuit the off-tag
+        // sub-graph in `U::constrain_general`. UAIRs without those
+        // gates still produce correct (just slower) output.
+        let combined_mles = match tag_filter {
+            ConstraintRing::Fp => combined_poly_builder::compute_combined_polynomials_fp_only::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+                &on_tag_indices,
+                None,
+            ),
+            ConstraintRing::Z => combined_poly_builder::compute_combined_polynomials_z_only::<_, U>(
+                trace_matrix,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+                &on_tag_indices,
+                None,
+            ),
+        };
 
         let eq_table = build_eq_x_r_vec(&evaluation_point, field_cfg)?;
 
