@@ -2069,15 +2069,28 @@ where
         &field_cfg,
     )
     .map_err(combined_poly_resolver::CombinedPolyResolverError::SumcheckError)?;
-    let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
-        &mut pcs_transcript.fs_transcript,
-        proof.resolver,
-        md_subclaims.point().to_vec(),
-        md_subclaims.expected_evaluations()[0].clone(),
-        cpr_verifier_ancillary,
-        &projected_scalars_f,
-        &field_cfg,
-    )?;
+    let cpr_subclaim = if dual_prime_active {
+        CombinedPolyResolver::finalize_verifier_typed::<U>(
+            &mut pcs_transcript.fs_transcript,
+            proof.resolver,
+            md_subclaims.point().to_vec(),
+            md_subclaims.expected_evaluations()[0].clone(),
+            cpr_verifier_ancillary,
+            &projected_scalars_f,
+            &field_cfg,
+            ConstraintRing::Fp,
+        )?
+    } else {
+        CombinedPolyResolver::finalize_verifier::<U>(
+            &mut pcs_transcript.fs_transcript,
+            proof.resolver,
+            md_subclaims.point().to_vec(),
+            md_subclaims.expected_evaluations()[0].clone(),
+            cpr_verifier_ancillary,
+            &projected_scalars_f,
+            &field_cfg,
+        )?
+    };
 
     let int_offset = uair_signature.total_cols().num_binary_poly_cols()
         + uair_signature.total_cols().num_arbitrary_poly_cols();

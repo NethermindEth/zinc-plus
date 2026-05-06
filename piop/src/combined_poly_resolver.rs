@@ -191,6 +191,84 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         U::Scalar: 'static,
         U: Uair,
     {
+        Self::prepare_sumcheck_group_inner::<U, D>(
+            transcript,
+            trace_matrix,
+            evaluation_point,
+            projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            field_cfg,
+            trace_bin_poly,
+            projecting_element_f,
+            None,
+        )
+    }
+
+    /// Tag-filtered variant of [`prepare_sumcheck_group`]. The CPR
+    /// sumcheck's `comb_fn` skips constraints whose tag does not match
+    /// `tag_filter` (and `assert_zero` constraints — their honest
+    /// fold-contribution is zero anyway). Used by the dual-prime F_p
+    /// branch so the F_p IC's tag-filtered absorbed values match the
+    /// sumcheck's claimed sum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_sumcheck_group_typed<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
+        evaluation_point: &[F],
+        projected_scalars: &ScalarMap<U::Scalar, F>,
+        num_constraints: usize,
+        num_vars: usize,
+        max_degree: usize,
+        field_cfg: &F::Config,
+        trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projecting_element_f: &F,
+        tag_filter: zinc_uair::ConstraintRing,
+    ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        F::Modulus: ConstTranscribable,
+        F: 'static,
+        U::Scalar: 'static,
+        U: Uair,
+    {
+        Self::prepare_sumcheck_group_inner::<U, D>(
+            transcript,
+            trace_matrix,
+            evaluation_point,
+            projected_scalars,
+            num_constraints,
+            num_vars,
+            max_degree,
+            field_cfg,
+            trace_bin_poly,
+            projecting_element_f,
+            Some(tag_filter),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sumcheck_group_inner<U, const D: usize>(
+        transcript: &mut impl Transcript,
+        trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
+        evaluation_point: &[F],
+        projected_scalars: &ScalarMap<U::Scalar, F>,
+        num_constraints: usize,
+        num_vars: usize,
+        max_degree: usize,
+        field_cfg: &F::Config,
+        trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        projecting_element_f: &F,
+        tag_filter: Option<zinc_uair::ConstraintRing>,
+    ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
+        F::Modulus: ConstTranscribable,
+        F: 'static,
+        U::Scalar: 'static,
+        U: Uair,
+    {
         debug_assert_ne!(
             num_vars, 1,
             "The protocol is not needed when the number of variables is 1 :)"
@@ -276,7 +354,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
+            let mut folder = match tag_filter {
+                Some(t) => ConstraintFolder::new_with_tag_filter(
+                    &folding_challenge_powers,
+                    &zero,
+                    t,
+                ),
+                None => ConstraintFolder::new(&folding_challenge_powers, &zero),
+            };
 
             // Per-call cache: dedup projections of the same scalar reference
             // within a single `constrain_general` walk. See
@@ -526,6 +611,65 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Modulus: ConstTranscribable,
         U: Uair,
     {
+        Self::finalize_verifier_inner::<U>(
+            transcript,
+            proof,
+            shared_point,
+            expected_evaluation,
+            ancillary,
+            projected_scalars,
+            field_cfg,
+            None,
+        )
+    }
+
+    /// Tag-filtered variant of [`finalize_verifier`]. Mirrors the
+    /// prover's [`prepare_sumcheck_group_typed`]: the consistency
+    /// check folds only constraints whose tag matches `tag_filter`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_verifier_typed<U>(
+        transcript: &mut impl Transcript,
+        proof: CprProof<F>,
+        shared_point: Vec<F>,
+        expected_evaluation: F,
+        ancillary: CprVerifierAncillary<F>,
+        projected_scalars: &ScalarMap<U::Scalar, F>,
+        field_cfg: &F::Config,
+        tag_filter: zinc_uair::ConstraintRing,
+    ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        U: Uair,
+    {
+        Self::finalize_verifier_inner::<U>(
+            transcript,
+            proof,
+            shared_point,
+            expected_evaluation,
+            ancillary,
+            projected_scalars,
+            field_cfg,
+            Some(tag_filter),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_verifier_inner<U>(
+        transcript: &mut impl Transcript,
+        proof: CprProof<F>,
+        shared_point: Vec<F>,
+        expected_evaluation: F,
+        ancillary: CprVerifierAncillary<F>,
+        projected_scalars: &ScalarMap<U::Scalar, F>,
+        field_cfg: &F::Config,
+        tag_filter: Option<zinc_uair::ConstraintRing>,
+    ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
+    where
+        F::Inner: ConstTranscribable,
+        F::Modulus: ConstTranscribable,
+        U: Uair,
+    {
         let uair_sig = U::signature();
         let down_layout = uair_sig.down_cols().as_column_layout();
         let bit_op_count = uair_sig.bit_op_down_count();
@@ -539,7 +683,14 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             one.clone(),
         )?;
 
-        let mut folder = ConstraintFolder::new(&ancillary.folding_challenge_powers, &zero);
+        let mut folder = match tag_filter {
+            Some(t) => ConstraintFolder::new_with_tag_filter(
+                &ancillary.folding_challenge_powers,
+                &zero,
+                t,
+            ),
+            None => ConstraintFolder::new(&ancillary.folding_challenge_powers, &zero),
+        };
 
         // Same per-call projection cache as the prover comb_fn. See
         // `scalar_proj_cache`; the verifier invokes `constrain_general`

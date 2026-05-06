@@ -1,5 +1,5 @@
 use crypto_primitives::PrimeField;
-use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
+use zinc_uair::{ConstraintBuilder, ConstraintRing, ideal::ImpossibleIdeal};
 
 /// There are several situations where we need to
 /// compute an RLC `u_0 + \alpha * u_1 + ... + \alpha ^ k * u_k`,
@@ -28,6 +28,13 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
     current_constraint: usize,
     /// The RLC computed so far.
     pub folded_constraints: F,
+    /// Optional tag filter: when `Some(t)`, only constraints
+    /// asserted via `assert_in_ideal_typed(_, _, t)` contribute to the
+    /// fold; off-tag constraints (and `assert_zero` constraints) are
+    /// skipped while still advancing the alpha-power index. Used by the
+    /// dual-prime F_p branch CPR sumcheck so the consistency check
+    /// matches the F_p branch IC's tag-filtered absorbed values.
+    tag_filter: Option<ConstraintRing>,
 }
 
 impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
@@ -36,12 +43,31 @@ impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
             challenge_powers,
             current_constraint: 0,
             folded_constraints: zero.clone(),
+            tag_filter: None,
+        }
+    }
+
+    pub fn new_with_tag_filter(
+        challenge_powers: &'a [F],
+        zero: &F,
+        tag_filter: ConstraintRing,
+    ) -> Self {
+        Self {
+            challenge_powers,
+            current_constraint: 0,
+            folded_constraints: zero.clone(),
+            tag_filter: Some(tag_filter),
         }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn fold_constraint(&mut self, expr: F) {
         self.folded_constraints += expr * &self.challenge_powers[self.current_constraint];
+        self.current_constraint += 1;
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn skip_constraint(&mut self) {
         self.current_constraint += 1;
     }
 }
@@ -53,7 +79,25 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        self.fold_constraint(expr);
+        // No tag attached: when a filter is active treat as off-tag (skip).
+        if self.tag_filter.is_some() {
+            self.skip_constraint();
+        } else {
+            self.fold_constraint(expr);
+        }
+    }
+
+    #[inline(always)]
+    fn assert_in_ideal_typed(
+        &mut self,
+        expr: Self::Expr,
+        _ideal: &Self::Ideal,
+        ring: ConstraintRing,
+    ) {
+        match self.tag_filter {
+            Some(t) if t != ring => self.skip_constraint(),
+            _ => self.fold_constraint(expr),
+        }
     }
 
     /// `assert_zero` constraints contribute to the folded RLC like any
@@ -67,8 +111,15 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     /// combination silently dropped the binding between assert_zero
     /// constraints and the witness, breaking soundness for every UAIR
     /// with assert_zero constraints.
+    ///
+    /// Under a tag filter, `assert_zero` slots are skipped: their
+    /// fold-contribution is zero anyway for an honest prover.
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
-        self.fold_constraint(expr);
+        if self.tag_filter.is_some() {
+            self.skip_constraint();
+        } else {
+            self.fold_constraint(expr);
+        }
     }
 }

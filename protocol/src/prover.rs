@@ -2242,19 +2242,47 @@ where
     let num_constraints = count_constraints::<U>();
     let dual_prime_active = dual_prime_extras.is_some();
     let (ic_proof, ic_prover_state, projected_trace) = if MLE_FIRST {
-        let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
-        let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
-        let (mut any_linear, mut any_nonlinear) = (false, false);
-        for (m, i) in mask.iter().zip(ideals.iter()) {
-            if i.is_zero_ideal() {
-                continue;
+        // For the dual-prime F_p branch we only care about F_p-tagged
+        // constraint degrees — Z-tagged slots are off-branch. This lets
+        // the F_p branch dispatch to `prove_linear_typed` whenever all
+        // F_p-tagged non-zero-ideal constraints are linear, even if the
+        // UAIR has non-linear Z-tagged constraints (which would
+        // otherwise force the slower hybrid lane). Non-dual-prime mode
+        // keeps the global degree analysis it always had.
+        let (any_linear, any_nonlinear) = if dual_prime_active {
+            let mask =
+                zinc_uair::degree_counter::linear_constraint_mask_for_tag::<U>(ConstraintRing::Fp);
+            let collector = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints);
+            let mut any_linear = false;
+            let mut any_nonlinear = false;
+            for i in 0..num_constraints {
+                if collector.tags[i] != ConstraintRing::Fp || collector.ideals[i].is_zero_ideal() {
+                    continue;
+                }
+                if mask[i] {
+                    any_linear = true;
+                } else {
+                    any_nonlinear = true;
+                }
             }
-            if *m {
-                any_linear = true
-            } else {
-                any_nonlinear = true
+            (any_linear, any_nonlinear)
+        } else {
+            let mask = zinc_uair::degree_counter::linear_constraint_mask::<U>();
+            let ideals = zinc_uair::ideal_collector::collect_ideals::<U>(num_constraints).ideals;
+            let mut any_linear = false;
+            let mut any_nonlinear = false;
+            for (m, i) in mask.iter().zip(ideals.iter()) {
+                if i.is_zero_ideal() {
+                    continue;
+                }
+                if *m {
+                    any_linear = true;
+                } else {
+                    any_nonlinear = true;
+                }
             }
-        }
+            (any_linear, any_nonlinear)
+        };
         match (any_linear, any_nonlinear) {
             (true, false) => {
                 let projected_trace_cm = project_trace_coeffs_column_major(trace, &field_cfg);
@@ -2425,18 +2453,37 @@ where
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let _t_step4 = std::time::Instant::now();
     let max_degree = count_max_degree::<U>();
-    let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
-        &mut pcs_transcript.fs_transcript,
-        projected_trace_f.clone(),
-        &ic_eval_point,
-        &projected_scalars_f,
-        num_constraints,
-        num_vars,
-        max_degree,
-        &field_cfg,
-        &trace.binary_poly,
-        &projecting_element_f,
-    )?;
+    let (cpr_group, cpr_ancillary) = if dual_prime_active {
+        // Dual-prime F_p branch: tag-filter the CPR sumcheck so the
+        // claimed sum matches the F_p IC's tag-filtered absorbed values
+        // (Z-tagged slots zeroed in the IC and skipped in the fold).
+        CombinedPolyResolver::prepare_sumcheck_group_typed::<U, D>(
+            &mut pcs_transcript.fs_transcript,
+            projected_trace_f.clone(),
+            &ic_eval_point,
+            &projected_scalars_f,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+            &trace.binary_poly,
+            &projecting_element_f,
+            ConstraintRing::Fp,
+        )?
+    } else {
+        CombinedPolyResolver::prepare_sumcheck_group::<U, D>(
+            &mut pcs_transcript.fs_transcript,
+            projected_trace_f.clone(),
+            &ic_eval_point,
+            &projected_scalars_f,
+            num_constraints,
+            num_vars,
+            max_degree,
+            &field_cfg,
+            &trace.binary_poly,
+            &projecting_element_f,
+        )?
+    };
 
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_pub_int = uair_signature.public_cols().num_int_cols();
