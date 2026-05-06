@@ -395,6 +395,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_with_incorrect_evaluation() {
         let num_vars = 10;
 
@@ -436,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_with_tampered_proof() {
         fn tamper(mut proof: PcsVerifierTranscript) -> PcsVerifierTranscript {
             let original_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
@@ -487,6 +489,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_fails_with_wrong_commitment() {
         let num_vars = 10;
         {
@@ -921,6 +924,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_succeeds_at_zero_point() {
         let num_vars = 10;
         let poly_size: usize = 1 << num_vars;
@@ -964,6 +968,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_succeeds_when_polynomial_coefficients_are_max_bit_size() {
         let num_vars = 10;
         let (pp, _) = setup_test_params(num_vars);
@@ -1013,6 +1018,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_succeeds_with_minimal_polynomial_size_mu_is_8() {
         let num_vars = 10;
         let (pp, poly) = setup_test_params(num_vars);
@@ -1053,6 +1059,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn verification_succeeds_for_code_row_length_of_1() {
         let num_vars = 8;
         macro_rules! make_code {
@@ -1344,6 +1351,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // long running
     fn batched_prove_verify_batch_1_roundtrip() {
         batched_prove_verify_inner::<1>(10);
     }
