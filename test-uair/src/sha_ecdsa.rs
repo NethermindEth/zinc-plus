@@ -24,13 +24,17 @@
 //! Flat trace = `binary_poly || arbitrary_poly || int` (no
 //! arbitrary_poly columns).
 //!
-//! **binary_poly section** (23 cols, mirrors SHA standalone):
-//! - `[0..6]` public: `PA_A`, `PA_E`, `PA_OV_SIG0/SIG1/LSIG0/LSIG1`
-//!   (rotation-ideal overflow witnesses, made public)
-//! - `[6..23]` witness: SHA's remaining witness bit-polys, including
-//!   the Ch operand split (`u_ef`, `u_{¬e,g}`) that replaces the old
-//!   `Ch` column and the three Table 9 affine-combination
-//!   materializations (`B_1`, `B_2`, `B_3`).
+//! **binary_poly section** (20 cols):
+//! - `[0..5]` public: `PA_A`, `PA_E`, `PA_R_CH2_COMP`, `PA_R_MAJ_COMP`,
+//!   `PA_M`. The 4 rotation-ideal overflow witnesses
+//!   (`OV_SIG0/SIG1/LSIG0/LSIG1`), public in the standalone SHA UAIR,
+//!   are demoted to witness columns here — making them private trims
+//!   the merged proof's public input without changing the constraint
+//!   set (the OVs are already verifier-derivable when shadow-running,
+//!   but supplying them as witness is sound and cheaper).
+//! - `[5..20]` witness: SHA's witness bit-polys (including the Ch
+//!   operand split `u_ef`, `u_{¬e,g}`) plus the four `W_OV_*` overflow
+//!   witnesses at the tail.
 //!
 //! **int section** (27 cols total, 16 pubs + 11 witness):
 //! - `[0..6]` public: SHA pubs (S_INIT, S_FINAL, PA_K, PA_C_C7/8/9)
@@ -95,42 +99,49 @@ pub use crate::ecdsa::FINAL_ROW;
 // ---------------------------------------------------------------------------
 
 pub mod cols {
-    // ===== binary_poly (mirrors sha256.rs: 8 pub + 10 witness) =====
-    // OV cols are public — overflow witnesses for the rotation-ideal
-    // constraints (C1, C2, C4, C6) are verifier-derivable. PA_R_*_COMP
-    // are public boundary compensators for the Ch (63) / Maj (64) virtual
-    // binary_poly residuals (see sha256.rs doc).
+    // ===== binary_poly (5 pub + 15 witness) =====
+    //
+    // Diverges from sha256.rs's standalone layout: the 4 rotation-ideal
+    // overflow witnesses (W_OV_SIG0/SIG1/LSIG0/LSIG1) are witness here
+    // rather than public. They sit at the tail of the witness section
+    // so the rest of the indexing mirrors the standalone shape.
+    //
+    // PA_R_*_COMP are public boundary compensators for the Ch (63) /
+    // Maj (64) virtual binary_poly residuals (see sha256.rs doc).
     pub const PA_A: usize = 0;
     pub const PA_E: usize = 1;
-    pub const PA_OV_SIG0: usize = 2;
-    pub const PA_OV_SIG1: usize = 3;
-    pub const PA_OV_LSIG0: usize = 4;
-    pub const PA_OV_LSIG1: usize = 5;
-    pub const PA_R_CH2_COMP: usize = 6;
-    pub const PA_R_MAJ_COMP: usize = 7;
+    pub const PA_R_CH2_COMP: usize = 2;
+    pub const PA_R_MAJ_COMP: usize = 3;
     // Public message-block words (Table 9 row 77). See sha256.rs cols
     // doc for the layout.
-    pub const PA_M: usize = 8;
-    pub const W_A: usize = 9;
-    pub const W_SIG0: usize = 10;
-    pub const W_E: usize = 11;
-    pub const W_SIG1: usize = 12;
-    pub const W_W: usize = 13;
-    pub const W_LSIG0: usize = 14;
-    pub const W_LSIG1: usize = 15;
+    pub const PA_M: usize = 4;
+    pub const W_A: usize = 5;
+    pub const W_SIG0: usize = 6;
+    pub const W_E: usize = 7;
+    pub const W_SIG1: usize = 8;
+    pub const W_W: usize = 9;
+    pub const W_LSIG0: usize = 10;
+    pub const W_LSIG1: usize = 11;
     // Ch is split into two AND-operand bit-polys (see sha256.rs doc).
-    pub const W_U_EF: usize = 16;
-    pub const W_U_NEG_E_G: usize = 17;
-    pub const W_MAJ: usize = 18;
+    pub const W_U_EF: usize = 12;
+    pub const W_U_NEG_E_G: usize = 13;
+    pub const W_MAJ: usize = 14;
     // Packed integer-carry witness column. Replaces the 5 prior int
     // carry columns. See sha256.rs cols doc for bit layout +
     // soundness argument.
-    pub const W_MU_PACKED: usize = 19;
+    pub const W_MU_PACKED: usize = 15;
+    // Per-coefficient mod-2 overflow witnesses for the rotation-ideal
+    // constraints (C1, C2, C4, C6). Public in the standalone SHA UAIR;
+    // demoted to witness here.
+    pub const W_OV_SIG0: usize = 16;
+    pub const W_OV_SIG1: usize = 17;
+    pub const W_OV_LSIG0: usize = 18;
+    pub const W_OV_LSIG1: usize = 19;
     // The Table 9 affine combinations B_1 / B_2 / B_3 are now declared
     // as packed virtual binary_poly columns in `signature()` via
     // `with_virtual_binary_poly_cols` — no committed columns.
     pub const NUM_BIN: usize = 20;
-    pub const NUM_BIN_PUB: usize = 9;
+    pub const NUM_BIN_PUB: usize = 5;
 
     // ===== int section =====
     // SHA publics (0..9) — see sha256.rs cols module for chained-
@@ -432,10 +443,10 @@ where
 
         let pa_a = &bp[cols::PA_A];
         let pa_e = &bp[cols::PA_E];
-        let pa_ov_sig0 = &bp[cols::PA_OV_SIG0];
-        let pa_ov_sig1 = &bp[cols::PA_OV_SIG1];
-        let pa_ov_lsig0 = &bp[cols::PA_OV_LSIG0];
-        let pa_ov_lsig1 = &bp[cols::PA_OV_LSIG1];
+        let w_ov_sig0 = &bp[cols::W_OV_SIG0];
+        let w_ov_sig1 = &bp[cols::W_OV_SIG1];
+        let w_ov_lsig0 = &bp[cols::W_OV_LSIG0];
+        let w_ov_lsig1 = &bp[cols::W_OV_LSIG1];
         let pa_m = &bp[cols::PA_M];
         let w_a = &bp[cols::W_A];
         let w_sig0 = &bp[cols::W_SIG0];
@@ -551,32 +562,32 @@ where
         // C1: Sigma_0 rotation
         b.assert_in_ideal(
             mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
-                - &mbs(pa_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
+                - &mbs(w_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
 
         // C2: Sigma_1 rotation
         b.assert_in_ideal(
             mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
-                - &mbs(pa_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
+                - &mbs(w_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
 
         // C4 (was σ_0 (X^32 − 1) ideal-lift): row-local Q[X] equality
         // with bit-XOR overflow correction. See sha256.rs for the
-        // derivation. `pa_ov_lsig0` retained — only the modular lift
+        // derivation. `w_ov_lsig0` retained — only the modular lift
         // and the C3/C5 right-shift decompositions go away.
-        //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · pa_ov_lsig0 == 0
+        //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · w_ov_lsig0 == 0
         b.assert_zero(
             down_w_rot25.clone() + down_w_rot14 + down_w_shr3 - w_lsig0
-                - &mbs(pa_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
+                - &mbs(w_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
         );
 
         // C6 (was σ_1 (X^32 − 1) ideal-lift): σ_1 analogue of C4.
-        //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · pa_ov_lsig1 == 0
+        //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · w_ov_lsig1 == 0
         b.assert_zero(
             down_w_rot15.clone() + down_w_rot13 + down_w_shr10 - w_lsig1
-                - &mbs(pa_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
+                - &mbs(w_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
         );
 
         // C7: Message-schedule modular sum. mu_W from up.w_mu_packed
@@ -971,9 +982,35 @@ where
         assert_eq!(sha_trace.int.len(), sha256::cols::NUM_INT);
         assert_eq!(ecdsa_trace.int.len(), ecdsa::cols::NUM_INT);
 
-        // Binary_poly: copy SHA's directly (ECDSA contributes nothing).
-        let binary_poly: Vec<DenseMultilinearExtension<_>> =
-            sha_trace.binary_poly.into_owned();
+        // Binary_poly: SHA's columns permuted into the merged layout.
+        // The standalone SHA UAIR keeps `PA_OV_*` (indices 2..6) inside its
+        // public prefix; in the merged UAIR those four overflow witnesses
+        // are demoted to witness columns at the tail (`W_OV_*`, indices
+        // 16..20). The remaining columns map by name.
+        let sha_bp = sha_trace.binary_poly.into_owned();
+        let binary_poly: Vec<DenseMultilinearExtension<_>> = vec![
+            sha_bp[sha256::cols::PA_A].clone(),
+            sha_bp[sha256::cols::PA_E].clone(),
+            sha_bp[sha256::cols::PA_R_CH2_COMP].clone(),
+            sha_bp[sha256::cols::PA_R_MAJ_COMP].clone(),
+            sha_bp[sha256::cols::PA_M].clone(),
+            sha_bp[sha256::cols::W_A].clone(),
+            sha_bp[sha256::cols::W_SIG0].clone(),
+            sha_bp[sha256::cols::W_E].clone(),
+            sha_bp[sha256::cols::W_SIG1].clone(),
+            sha_bp[sha256::cols::W_W].clone(),
+            sha_bp[sha256::cols::W_LSIG0].clone(),
+            sha_bp[sha256::cols::W_LSIG1].clone(),
+            sha_bp[sha256::cols::W_U_EF].clone(),
+            sha_bp[sha256::cols::W_U_NEG_E_G].clone(),
+            sha_bp[sha256::cols::W_MAJ].clone(),
+            sha_bp[sha256::cols::W_MU_PACKED].clone(),
+            sha_bp[sha256::cols::PA_OV_SIG0].clone(),
+            sha_bp[sha256::cols::PA_OV_SIG1].clone(),
+            sha_bp[sha256::cols::PA_OV_LSIG0].clone(),
+            sha_bp[sha256::cols::PA_OV_LSIG1].clone(),
+        ];
+        debug_assert_eq!(binary_poly.len(), cols::NUM_BIN);
 
         // Int section: merge per the layout in `cols`.
         // SHA standalone int layout (9 cols, all public).
