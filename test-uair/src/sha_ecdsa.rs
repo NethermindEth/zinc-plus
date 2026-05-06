@@ -935,7 +935,13 @@ where
         // Z scalars at outer scope so the `ScalarProjCache` sees stable
         // pointers across rows. See the SHA gate's comment.
         let two_scalar_z = const_scalar::<R>(R::ONE + R::ONE);
-        let n_scalar = const_scalar::<R>(secp256k1_group_order_as_r::<R>());
+        // The integer group order `n` does not fit a centered Int<4>
+        // (it is `> p/2`). Decompose as `n = (n - p) + 2·(p-1)/2 + 1`,
+        // each piece fits centered, and build `v · n` symbolically in the
+        // constraint via `v · n_a + 2·(v · p_half) + v` — exact over Z and
+        // congruent to `v · n` mod p.
+        let n_a_scalar = const_scalar::<R>(secp256k1_group_order_as_r::<R>());
+        let p_half_scalar = const_scalar::<R>(secp256k1_p_half_as_r::<R>());
 
         if b.is_active_for(ConstraintRing::Z) {
         // 1, 2: cumulative-sum transitions.
@@ -969,8 +975,16 @@ where
         );
 
         // 5, 6: ECDSA verify-over-Z equations.
-        let v1_n = mbs(w_v1, &n_scalar).expect("v_1 * n overflow");
-        let v2_n = mbs(w_v2, &n_scalar).expect("v_2 * n overflow");
+        // `v · n = v · n_a + 2·(v · p_half) + v` — see the comment near
+        // `n_a_scalar` for why this decomposition is needed.
+        let v1_n_a = mbs(w_v1, &n_a_scalar).expect("v_1 * (n - p) overflow");
+        let v1_p_half = mbs(w_v1, &p_half_scalar).expect("v_1 * (p-1)/2 overflow");
+        let v1_two_p_half = mbs(&v1_p_half, &two_scalar_z).expect("2 * v_1 * (p-1)/2 overflow");
+        let v1_n = v1_n_a + &v1_two_p_half + w_v1;
+        let v2_n_a = mbs(w_v2, &n_a_scalar).expect("v_2 * (n - p) overflow");
+        let v2_p_half = mbs(w_v2, &p_half_scalar).expect("v_2 * (p-1)/2 overflow");
+        let v2_two_p_half = mbs(&v2_p_half, &two_scalar_z).expect("2 * v_2 * (p-1)/2 overflow");
+        let v2_n = v2_n_a + &v2_two_p_half + w_v2;
         let verify_eq_1 = pa_u1.clone() * pa_s - pa_e_int + &v1_n;
         b.assert_in_ideal_typed(
             e_s_final.clone() * &verify_eq_1,
@@ -1136,6 +1150,19 @@ where
     R::from(n_int)
 }
 
+/// `(p - 1) / 2` as a positive centered Int<4>. Used in the over-Z lift
+/// `n = (n - p) + 2·((p-1)/2) + 1` so `v · n` can be expressed in the
+/// constraint expression purely from Int<4>-fitting scalars (the integer
+/// `n` itself does not fit centered).
+fn secp256k1_p_half_as_r<R>() -> R
+where
+    R: From<Int<EC_FP_INT_LIMBS>>,
+{
+    let p_half_int: Int<EC_FP_INT_LIMBS> =
+        Int::new(*crate::ecdsa_doubling::SECP256K1_P_HALF_UINT.as_int());
+    R::from(p_half_int)
+}
+
 // ---------------------------------------------------------------------------
 // GenerateRandomTrace — call both sub-UAIRs' generators, splice the int
 // sections together at the merged column positions.
@@ -1227,12 +1254,14 @@ where
 }
 
 /// Build the dual-prime columns by inspecting the ECDSA half of the
-/// trace. Computes A_1, A_2 as cumulative sums of PA_B1, PA_B2 mod p,
-/// derives u_1, u_2 from those at FINAL_ROW, picks `s = 1` (any
-/// non-zero scalar works), sets `e_int = u_1 mod p` and v_1 = 0 to
-/// satisfy verify-eq-1 trivially, then solves verify-eq-2 for v_2 mod
-/// p. All values stored in centered Int<4> representation per the
-/// existing trace convention (see `ecdsa::uint_to_int`).
+/// trace. Computes A_1, A_2 as cumulative sums of PA_B1, PA_B2 (over Z;
+/// the mod-p reductions are no-ops since `NUM_SHAMIR_ROUNDS = 254` keeps
+/// `u_i < 2^254 < p/2`). Derives u_1, u_2 at FINAL_ROW, then runs honest
+/// ECDSA signature generation: pick `s := r·u_2^{-1} mod n` and `e :=
+/// u_1·s mod n`, so the verify equations `u_i·s ≡ {e, r} (mod n)` hold by
+/// construction. The quotients `v_i = (target_i - u_i·s)/n` are exact
+/// integer divisions, so the lifted constraint `u_i·s - target_i + v_i·n
+/// = 0` holds over Z and projects to zero under any prime.
 fn build_dual_prime_columns<R>(
     ecdsa_ints: &[DenseMultilinearExtension<R>],
     n_rows: usize,
@@ -1240,7 +1269,8 @@ fn build_dual_prime_columns<R>(
 where
     R: From<Int<EC_FP_INT_LIMBS>> + EcdsaFpRing,
 {
-    use crypto_bigint::{NonZero, Odd, Uint as CbUint};
+    use crypto_bigint::{NonZero, Odd, Uint as CbUint, Zero as _};
+    use crypto_primitives::IntRing as _;
 
     // Centered Int<4> -> canonical CbUint mod p.
     fn int_to_uint(v: &Int<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
@@ -1277,22 +1307,6 @@ where
         let s = a.wrapping_add(b);
         s.rem_vartime(&p_nz)
     };
-    let sub_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>,
-                     b: &CbUint<EC_FP_INT_LIMBS>|
-     -> CbUint<EC_FP_INT_LIMBS> {
-        use crypto_bigint::CheckedSub;
-        if a.checked_sub(b).is_some().into() {
-            a.wrapping_sub(b).rem_vartime(&p_nz)
-        } else {
-            let a_plus_p = a.wrapping_add(&p_uint);
-            a_plus_p.wrapping_sub(b).rem_vartime(&p_nz)
-        }
-    };
-    let inv_mod_p = |a: &CbUint<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
-        let p_odd = Odd::new(p_uint).expect("p is odd");
-        a.invert_odd_mod(&p_odd).expect("a has no inverse mod p")
-    };
-
     // Read PA_B1, PA_B2 (ECDSA cols 4, 5) and PA_R_X (col 14) row by row.
     let pa_b1 = &ecdsa_ints[crate::ecdsa::cols::PA_B1].evaluations;
     let pa_b2 = &ecdsa_ints[crate::ecdsa::cols::PA_B2].evaluations;
@@ -1322,24 +1336,123 @@ where
     let u1_uint = acc1;
     let u2_uint = acc2;
 
-    // Pick s = 1 (any non-zero scalar works for the test — keeps v_1 trivial).
-    let s_uint = CbUint::<EC_FP_INT_LIMBS>::ONE;
-    // e_int = u_1 * s mod p so verify-eq-1 holds with v_1 = 0.
-    let e_int_uint = mul_mod_p(&u1_uint, &s_uint);
-
-    // v_2 mod p such that u_2*s - r + v_2*n ≡ 0 (mod p).
-    let r_uint = int_to_uint(&pa_r_x[FINAL_ROW].to_int());
+    // -------------------------------------------------------------------
+    // Honest ECDSA signature generation.
+    //
+    // u_2 (cumulative sum of PA_B2) is the verifier-side `u_2 = r·s^{-1}
+    // mod n`. To make `u_2·s ≡ r (mod n)` and `u_1·s ≡ e (mod n)` hold by
+    // construction, pick `s := r·u_2^{-1} mod n`, then `e := u_1·s mod
+    // n`. With u_2 < 2^254 < n and n prime, u_2 is coprime to n with
+    // overwhelming probability.
+    //
+    // The constraint expressions are evaluated over Z (then projected to
+    // F_p / F_q for the dual-prime branches). The cell values stored in
+    // PA_S, PA_E_INT, W_V1, W_V2 are *centered* signed Int<4>: any
+    // canonical residue in [0, n) larger than n/2 is shifted by `-n` so
+    // it fits in [-n/2, n/2), which is inside the centered Int<4> range
+    // [-2^255, 2^255). Centered shifts by `-n` preserve all `(mod n)`
+    // congruences, so the integer divisions below stay exact.
+    // -------------------------------------------------------------------
+    let r_int = pa_r_x[FINAL_ROW].to_int();
     let n_uint = SECP256K1_N_UINT;
-    let n_inv = inv_mod_p(&n_uint);
-    let u2_s = mul_mod_p(&u2_uint, &s_uint);
-    let r_minus_u2s = sub_mod_p(&r_uint, &u2_s);
-    let v2_uint = mul_mod_p(&r_minus_u2s, &n_inv);
+    let n_nz = NonZero::new(n_uint).expect("n is nonzero");
+    let n_odd = Odd::new(n_uint).expect("n is odd");
 
-    // Build single-non-zero-cell columns: PA_U1, PA_U2, PA_E_INT, PA_S,
-    // W_V1, W_V2 — all zero except at FINAL_ROW.
-    let single_cell = |val_uint: CbUint<EC_FP_INT_LIMBS>| -> Vec<R> {
+    let mul_mod_n = |a: &CbUint<EC_FP_INT_LIMBS>,
+                     b: &CbUint<EC_FP_INT_LIMBS>|
+     -> CbUint<EC_FP_INT_LIMBS> {
+        let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
+        let n_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = n_uint.resize();
+        let n_wide_nz = NonZero::new(n_wide).expect("n is nonzero");
+        let (_, rem) = wide.div_rem_vartime(&n_wide_nz);
+        rem.resize()
+    };
+
+    // Reduce a (signed) centered Int<4> to its canonical residue in [0, n).
+    let signed_mod_n = |x_int: Int<EC_FP_INT_LIMBS>| -> CbUint<EC_FP_INT_LIMBS> {
+        if x_int.is_negative() {
+            // |x_int| as Uint, take mod n, then negate mod n.
+            let abs_int = -x_int;
+            let abs_uint: CbUint<EC_FP_INT_LIMBS> = *abs_int.inner().as_uint();
+            let abs_mod = abs_uint.rem_vartime(&n_nz);
+            if bool::from(abs_mod.is_zero()) {
+                CbUint::<EC_FP_INT_LIMBS>::ZERO
+            } else {
+                n_uint.wrapping_sub(&abs_mod)
+            }
+        } else {
+            let raw: CbUint<EC_FP_INT_LIMBS> = *x_int.inner().as_uint();
+            raw.rem_vartime(&n_nz)
+        }
+    };
+
+    // Convert a canonical residue in [0, n) to centered Int<4> in [-n/2, n/2).
+    // n is odd, so n/2 (floor) = (n-1)/2.
+    let n_half_floor = n_uint.wrapping_shr_vartime(1);
+    let mod_n_to_centered = |x: CbUint<EC_FP_INT_LIMBS>| -> Int<EC_FP_INT_LIMBS> {
+        if x <= n_half_floor {
+            Int::new(*x.as_int())
+        } else {
+            // x - n: a small negative; bit pattern via wrapping_sub.
+            let wrapped = x.wrapping_sub(&n_uint);
+            Int::new(*wrapped.as_int())
+        }
+    };
+
+    let r_canonical_n = signed_mod_n(r_int.clone());
+    let u2_canonical_n = u2_uint.rem_vartime(&n_nz);
+    let u1_canonical_n = u1_uint.rem_vartime(&n_nz);
+    assert!(
+        !bool::from(u2_canonical_n.is_zero()),
+        "u_2 ≡ 0 (mod n); honest sig gen requires u_2 invertible (vanishingly rare for random PA_B2)"
+    );
+    let u2_inv_n = u2_canonical_n
+        .invert_odd_mod(&n_odd)
+        .expect("u_2 has no inverse mod n");
+
+    let s_canonical_n = mul_mod_n(&r_canonical_n, &u2_inv_n);
+    let e_canonical_n = mul_mod_n(&u1_canonical_n, &s_canonical_n);
+
+    let s_int = mod_n_to_centered(s_canonical_n);
+    let e_int = mod_n_to_centered(e_canonical_n);
+
+    // v_i = (target_i - u_i · s_int) / n  over Z (exact integer division).
+    // u_i ∈ [0, 2^254), |s_int| < n/2, so |u_i · s_int| < 2^509 — fits Int<8>.
+    // |target_i| ≤ p/2 < 2^255, so |target_i - u_i · s_int| < 2^510. Divided
+    // by n (≈ 2^256) gives |v_i| < 2^254, which fits centered Int<4>.
+    let solve_v = |u_uint: &CbUint<EC_FP_INT_LIMBS>,
+                   target_int: &Int<EC_FP_INT_LIMBS>|
+     -> Int<EC_FP_INT_LIMBS> {
+        let u_int_4: Int<EC_FP_INT_LIMBS> = Int::new(*u_uint.as_int());
+        let u_s_8: Int<{ EC_FP_INT_LIMBS * 2 }> = u_int_4.concatenating_mul(&s_int);
+        let target_8: Int<{ EC_FP_INT_LIMBS * 2 }> = target_int.resize();
+        let diff_8: Int<{ EC_FP_INT_LIMBS * 2 }> = target_8 - u_s_8;
+        let neg = diff_8.is_negative();
+        let abs_diff_8: Int<{ EC_FP_INT_LIMBS * 2 }> = if neg { -diff_8 } else { diff_8 };
+        let abs_uint_8: CbUint<{ EC_FP_INT_LIMBS * 2 }> = *abs_diff_8.inner().as_uint();
+        let n_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = n_uint.resize();
+        let n_wide_nz = NonZero::new(n_wide).expect("n is nonzero");
+        let (q_8, rem_8) = abs_uint_8.div_rem_vartime(&n_wide_nz);
+        debug_assert!(
+            bool::from(rem_8.is_zero()),
+            "target - u*s_int not divisible by n (honest sig gen invariant violated)"
+        );
+        let q_4: CbUint<EC_FP_INT_LIMBS> = q_8.resize();
+        if neg {
+            let neg_uint = q_4.wrapping_neg();
+            Int::new(*neg_uint.as_int())
+        } else {
+            Int::new(*q_4.as_int())
+        }
+    };
+
+    let v1_int = solve_v(&u1_uint, &e_int);
+    let v2_int = solve_v(&u2_uint, &r_int);
+
+    // Build single-non-zero-cell columns: all zero except at FINAL_ROW.
+    let single_cell_int = |val_int: Int<EC_FP_INT_LIMBS>| -> Vec<R> {
         let mut v = vec![R::ZERO; n_rows];
-        v[FINAL_ROW] = R::from(uint_to_int_centered(val_uint));
+        v[FINAL_ROW] = R::from(val_int);
         v
     };
     let num_vars = (n_rows.trailing_zeros()) as usize;
@@ -1348,13 +1461,17 @@ where
         DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, R::ZERO)
     };
 
+    // u_1, u_2 < 2^254 < p/2, so they fit centered as positive Int<4>.
+    let u1_int_centered = uint_to_int_centered(u1_uint);
+    let u2_int_centered = uint_to_int_centered(u2_uint);
+
     DualPrimeCols {
-        pa_u1: mle(single_cell(u1_uint)),
-        pa_u2: mle(single_cell(u2_uint)),
-        pa_e_int: mle(single_cell(e_int_uint)),
-        pa_s: mle(single_cell(s_uint)),
-        w_v1: mle(single_cell(CbUint::<EC_FP_INT_LIMBS>::ZERO)),
-        w_v2: mle(single_cell(v2_uint)),
+        pa_u1: mle(single_cell_int(u1_int_centered)),
+        pa_u2: mle(single_cell_int(u2_int_centered)),
+        pa_e_int: mle(single_cell_int(e_int)),
+        pa_s: mle(single_cell_int(s_int)),
+        w_v1: mle(single_cell_int(v1_int)),
+        w_v2: mle(single_cell_int(v2_int)),
         w_a1: mle(a1_evals),
         w_a2: mle(a2_evals),
     }
