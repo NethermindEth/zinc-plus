@@ -861,10 +861,34 @@ where
         //   5) PA_U1 * PA_S - PA_E_INT + W_V1 * N = 0   (gated by S_FINAL)
         //   6) PA_U2 * PA_S - PA_R_X  + W_V2 * N = 0   (gated by S_FINAL)
         //
-        // All six are tagged `ConstraintRing::Z`. They are checked over
-        // `F_p[X]` (secp256k1 base prime) by the dual-prime Z-branch IC,
-        // and ignored by the F_p-branch (Fp-tag filter).  Constraints 5
-        // and 6 use `N` = secp256k1 group order as a compile-time scalar.
+        // Why `assert_in_ideal_typed` (with `ideal_rot_x2`) and NOT
+        // `assert_zero`:
+        //
+        // Tempting to use `assert_zero` since the gated expression is
+        // zero at every row for honest provers — it would tag Z (via
+        // `IdealCollector::assert_zero`'s default), keep
+        // `count_effective_max_degree` at 1, and re-enable MLE-first
+        // dispatch via `prove_linear`. But `prove_linear` evaluates
+        // column MLEs at the IC eval point FIRST, then runs the
+        // constraint expression on those evals. For a non-linear
+        // constraint `f * g` (here `selector * inner`) this gives
+        // `MLE_f(pt) · MLE_g(pt)`, which is NOT `MLE_{f·g}(pt)`. The
+        // product polynomial is zero per-row but the factor MLEs at a
+        // point aren't, so the IC value is a non-zero F element while
+        // `comb_fn` gives zero — sumcheck consistency breaks. The
+        // existing test suite never surfaced this for ECDSA's similar
+        // `assert_zero` non-linears because no test verified a
+        // ShaEcdsa MLE-first proof; the bench's `Prove (folded 4×
+        // MLE-first)` line measures the prover only.
+        //
+        // `assert_in_ideal_typed` keeps `count_effective_max_degree`
+        // above 1 → MLE-first gate fails → pure-prove_combined path,
+        // which is correct.  The (now-fixed) hybrid path also handles
+        // these constraints correctly.  See the bench's gate comment
+        // for why we don't bench MLE-first via hybrid here either.
+        //
+        // Constraints 5 and 6 use `N` = secp256k1 group order as a
+        // compile-time scalar.
         // ===================================================================
         let pa_b1 = &int[cols::ECDSA_PA_B1];
         let pa_b2 = &int[cols::ECDSA_PA_B2];
@@ -1344,15 +1368,17 @@ mod tests {
         assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
 
         // The non-zero-ideal effective max-degree drives MLE-first
-        // dispatch. For ShaEcdsa the original 7 SHA assert_in_ideal
-        // constraints are all degree 1 — so without the dual-prime
-        // additions, count_effective_max_degree was 1 (pure-linear
-        // MLE-first lane). With our new Z-typed constraints (degrees
-        // 2 and 3 because they're gated by S_ACTIVE / S_FINAL public
-        // selectors and contain quadratic terms), the effective max
-        // is now > 1 → hybrid dispatch (MLE-first lane for the SHA
-        // linear non-zero-ideals, combined-poly lane for the new Z
-        // ones plus any non-linear assert_zero).
+        // dispatch. For the original `ShaEcdsaUair` (without the
+        // dual-prime Z-typed constraints) this was 1, so the
+        // standard bench's `count_effective_max_degree::<U>() <= 1`
+        // gate triggered. With our new Z-typed `assert_in_ideal_typed`
+        // constraints (degrees 2-3 because they're gated by public
+        // selectors) the gate now fails — both for the dual-prime
+        // bench and the standard one. MLE-first dispatch via
+        // `prove_linear` would silently produce invalid proofs for
+        // ShaEcdsa anyway (see the comment on the new constraints
+        // in `constrain_general` for why), so the gate failing is
+        // the correct outcome.
         assert!(
             zinc_uair::degree_counter::count_effective_max_degree::<U>() > 1,
             "Z-typed dual-prime constraints push effective max-degree above 1",
