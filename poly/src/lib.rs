@@ -4,6 +4,7 @@ pub mod utils;
 pub mod zero_degree;
 
 use thiserror::Error;
+use zinc_utils::inner_product::InnerProductError;
 
 /// Polynomial with coefficients of type `C` and degree bounded by
 /// `DEGREE_BOUND`.
@@ -35,4 +36,12 @@ pub enum EvaluationError {
     EmptyPolynomial,
     #[error("Unsupported constraint degrees: {degrees:?}")]
     UnsupportedConstraintDegrees { degrees: Vec<usize> },
+    #[error("Inner product error: {0}")]
+    InnerProductError(InnerProductError),
+}
+
+impl From<InnerProductError> for EvaluationError {
+    fn from(inner_product_error: InnerProductError) -> Self {
+        Self::InnerProductError(inner_product_error)
+    }
 }

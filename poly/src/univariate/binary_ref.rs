@@ -258,7 +258,7 @@ impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usi
             .iter()
             .try_fold(
                 (self.0.coeffs[0].widen::<R>(), R::one()),
-                |(mut acc, mut pow), coeff| {
+                |(mut acc, mut pow), coeff| -> Result<(R, R), EvaluationError> {
                     pow = pow.checked_mul(point).ok_or(EvaluationError::Overflow)?;
 
                     if coeff.inner() {

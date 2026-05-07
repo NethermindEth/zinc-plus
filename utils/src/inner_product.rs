@@ -1,6 +1,8 @@
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{
+    from_ref::FromRef, inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+};
 use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
-use num_traits::CheckedAdd;
+use num_traits::{CheckedAdd, Zero};
 use thiserror::Error;
 
 /// A trait for inner product algorithms implementations.
@@ -83,6 +85,33 @@ impl MBSInnerProduct {
             let product: F = F::from_with_cfg(a, &cfg) * r;
             acc + product
         }))
+    }
+
+    pub fn inner_product_inner_field<F>(
+        lhs: &[F::Inner],
+        rhs: &[F::Inner],
+        field_cfg: &F::Config,
+    ) -> Result<F, InnerProductError>
+    where
+        F: InnerTransparentField,
+    {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        Ok(lhs
+            .iter()
+            .zip(rhs)
+            .fold(F::zero_with_cfg(field_cfg), |acc, (a, r)| {
+                let mut product = F::new_unchecked_with_cfg(a.clone(), field_cfg);
+
+                product.mul_assign_by_inner(r);
+
+                acc + product
+            }))
     }
 }
 

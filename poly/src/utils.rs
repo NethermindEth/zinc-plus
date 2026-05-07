@@ -195,6 +195,36 @@ where
     Ok(())
 }
 
+pub fn precompute_eq_r_b_inner<F>(point: &[F], field_cfg: &F::Config) -> Vec<F::Inner>
+where
+    F: InnerTransparentField,
+{
+    if point.is_empty() {
+        return vec![];
+    }
+
+    let one = F::one_with_cfg(point[0].cfg());
+    let mut res = vec![F::zero_with_cfg(field_cfg).into_inner(); 1 << point.len()];
+
+    res[0] = one.inner().clone();
+
+    let mut a = one.clone();
+    let mut b = one.clone();
+
+    for (i, r) in point.iter().enumerate() {
+        for j in (0..1 << i).rev() {
+            *a.inner_mut() = r.inner().clone();
+            a.mul_assign_by_inner(&res[j]);
+            *b.inner_mut() = F::sub_inner(&res[j], a.inner(), field_cfg);
+
+            res[j] = b.inner().clone();
+            res[j | (1 << i)] = a.inner().clone();
+        }
+    }
+
+    res
+}
+
 /// Build the shift selector MLE `next_c_mle(r, *)` with the first `num_vars`
 /// variables fixed to `r`.
 ///
@@ -364,8 +394,10 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
+    use itertools::Itertools;
     use num_traits::One;
     use proptest::{prelude::*, proptest};
+    use zinc_utils::inner_product::MBSInnerProduct;
 
     use crate::mle::MultilinearExtensionWithConfig;
 
@@ -425,6 +457,10 @@ mod tests {
     }
 
     fn point_n(n: usize) -> impl Strategy<Value = Vec<F>> {
+        prop::collection::vec(any_f(()), n)
+    }
+
+    fn mle_evals_n_vars(n: usize) -> impl Strategy<Value = Vec<F>> {
         prop::collection::vec(any_f(()), n)
     }
 
@@ -553,6 +589,33 @@ mod tests {
         for b in c..n {
             prop_assert_eq!(&next_c.evaluations[b], &eq_r.evaluations[b - c]);
         }
+    }
+    }
+
+    proptest! {
+    #[test]
+    fn prop_precompute_eq_r_b_inner_correct(r in point_n(4)) {
+        let precomputed_eq_r_bs = precompute_eq_r_b_inner(&r, &());
+
+        for (b, eq_b) in precomputed_eq_r_bs.iter().enumerate() {
+            let point_from_b = (0..4).map(|i| if b & (1 << i) == 0 { F::zero() } else { F::one() }).collect_vec();
+            let eq_b_built_at_r = build_eq_x_r(&point_from_b, &()).unwrap().evaluate(&r, F::zero()).unwrap();
+            prop_assert_eq!(eq_b, eq_b_built_at_r.inner());
+        }
+    }
+    }
+
+    proptest! {
+    #[test]
+    fn prop_precompute_eq_r_b_inner_compare_with_mle_eval(r in point_n(4), mle_evals in mle_evals_n_vars(4)) {
+        let precomputed_eq_r_bs = precompute_eq_r_b_inner(&r, &()).into_iter().map(F::new_unchecked).collect_vec();
+
+        let mle = DenseMultilinearExtension::from_evaluations_vec(4, mle_evals, F::zero());
+
+        let mle_val_expected = mle.evaluate(&r, F::zero()).unwrap();
+        let mle_val_computed = MBSInnerProduct::inner_product_field(&mle, &precomputed_eq_r_bs, F::zero()).unwrap();
+
+        prop_assert_eq!(mle_val_computed, mle_val_expected);
     }
     }
 }
