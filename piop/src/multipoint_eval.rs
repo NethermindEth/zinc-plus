@@ -163,7 +163,7 @@ where
                                 trace_mles[i].evaluations[b].clone(),
                                 field_cfg,
                             );
-                            acc + gamma.clone() * eval_f
+                            acc + eval_f * gamma
                         })
                         .into_inner()
                 })

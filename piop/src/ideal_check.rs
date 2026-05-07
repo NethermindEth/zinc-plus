@@ -375,12 +375,7 @@ mod tests {
     //             Once we have time we need to create a comprehensive test suite
     //             akin to the one we have for the PCS or the sumcheck.
 
-    fn test_successful_verification_linear<
-        U,
-        IdealOverF,
-        IdealOverFFromRef,
-        const DEGREE_PLUS_ONE: usize,
-    >(
+    fn do_test<U, IdealOverF, IdealOverFFromRef, const DEGREE_PLUS_ONE: usize>(
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
@@ -388,75 +383,63 @@ mod tests {
             + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
             + IdealCheckProtocol,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF + Copy,
     {
         let mut rng = rng();
-        let transcript = Blake3Transcript::new();
 
-        let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
-            num_vars,
-            &U::generate_random_trace(num_vars, &mut rng),
-            &mut transcript.clone(),
-        );
+        // Combined approach
+        {
+            let transcript = Blake3Transcript::new();
+            let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
+                num_vars,
+                &U::generate_random_trace(num_vars, &mut rng),
+                &mut transcript.clone(),
+            );
 
-        let num_constraints = count_constraints::<U>();
+            let num_constraints = count_constraints::<U>();
 
-        let verifier_result = U::verify_as_subprotocol(
-            &mut transcript.clone(),
-            proof,
-            num_constraints,
-            num_vars,
-            ideal_over_f_from_ref,
-            &test_config(),
-        )
-        .expect("Verification failed");
+            let verifier_result = U::verify_as_subprotocol(
+                &mut transcript.clone(),
+                proof,
+                num_constraints,
+                num_vars,
+                ideal_over_f_from_ref,
+                &test_config(),
+            )
+            .expect("Verification failed");
 
-        assert_eq!(
-            prover_state.evaluation_point,
-            verifier_result.evaluation_point
-        );
-    }
+            assert_eq!(
+                prover_state.evaluation_point,
+                verifier_result.evaluation_point
+            );
+        }
 
-    fn test_successful_verification_combined<
-        U,
-        IdealOverF,
-        IdealOverFFromRef,
-        const DEGREE_PLUS_ONE: usize,
-    >(
-        num_vars: usize,
-        ideal_over_f_from_ref: IdealOverFFromRef,
-    ) where
-        U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
-            + IdealCheckProtocol,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
-    {
-        let mut rng = rng();
-        let transcript = Blake3Transcript::new();
+        // MLE-first
+        {
+            let transcript = Blake3Transcript::new();
+            let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
+                num_vars,
+                &U::generate_random_trace(num_vars, &mut rng),
+                &mut transcript.clone(),
+            );
 
-        let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
-            num_vars,
-            &U::generate_random_trace(num_vars, &mut rng),
-            &mut transcript.clone(),
-        );
+            let num_constraints = count_constraints::<U>();
 
-        let num_constraints = count_constraints::<U>();
+            let verifier_result = U::verify_as_subprotocol(
+                &mut transcript.clone(),
+                proof,
+                num_constraints,
+                num_vars,
+                ideal_over_f_from_ref,
+                &test_config(),
+            )
+            .expect("Verification failed");
 
-        let verifier_result = U::verify_as_subprotocol(
-            &mut transcript.clone(),
-            proof,
-            num_constraints,
-            num_vars,
-            ideal_over_f_from_ref,
-            &test_config(),
-        )
-        .expect("Verification failed");
-
-        assert_eq!(
-            prover_state.evaluation_point,
-            verifier_result.evaluation_point
-        );
+            assert_eq!(
+                prover_state.evaluation_point,
+                verifier_result.evaluation_point
+            );
+        }
     }
 
     #[test]
@@ -465,27 +448,14 @@ mod tests {
 
         let num_vars = 2;
 
-        // Linear UAIR with non-zero ideals: both approaches work; MLE-first
-        // dispatches every constraint through `evaluate_combined_polynomials`.
-        test_successful_verification_linear::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
-        );
-        test_successful_verification_combined::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
-        );
+        // Linear UAIR with non-zero ideals
+        do_test::<TestUairNoMultiplication<Int<5>>, _, _, 32>(num_vars, |ideal_over_ring| {
+            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+        });
 
-        // Non-linear UAIR with all-zero ideals: combined approach works
-        // unconditionally; MLE-first works too because the hybrid prover
-        // short-circuits zero-ideal constraints to zero regardless of degree.
-        test_successful_verification_combined::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
-        );
-        test_successful_verification_linear::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
-        );
+        // Non-linear UAIR with all-zero ideals
+        do_test::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(num_vars, |_ideal_over_ring| {
+            IdealOrZero::<DegreeOneIdeal<_>>::zero()
+        });
     }
 }

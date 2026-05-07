@@ -323,13 +323,9 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
     uair_scalars
         .into_iter()
         .map(|scalar| {
-            (scalar.clone(), {
-                let mut dynamic_poly = project(&scalar);
-
-                dynamic_poly.trim();
-
-                dynamic_poly
-            })
+            let mut dynamic_poly = project(&scalar);
+            dynamic_poly.trim();
+            (scalar, dynamic_poly)
         })
         .collect()
 }
