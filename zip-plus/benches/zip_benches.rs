@@ -27,7 +27,7 @@ const REP_FACTOR: usize = 8;
 #[derive(Debug, Clone)]
 struct BenchZipTypes {}
 impl ZipTypes for BenchZipTypes {
-    const NUM_COLUMN_OPENINGS: usize = 96;
+    const NUM_COLUMN_OPENINGS: usize = 100;
     type Eval = i32;
     type Cw = i128;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;

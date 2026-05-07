@@ -48,7 +48,7 @@ pub type TestIprsConfig = PnttConfigF65537;
 #[derive(Debug, Clone)]
 pub struct TestZipTypes<const N: usize, const K: usize, const M: usize> {}
 impl<const N: usize, const K: usize, const M: usize> ZipTypes for TestZipTypes<N, K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 96;
+    const NUM_COLUMN_OPENINGS: usize = 100;
     type Eval = Int<N>;
     type Cw = Int<K>;
     type Fmod = Uint<K>;
@@ -67,7 +67,7 @@ pub struct TestBinPolyZipTypes<const K: usize, const M: usize, const DEGREE_PLUS
 impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     for TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE>
 {
-    const NUM_COLUMN_OPENINGS: usize = 96;
+    const NUM_COLUMN_OPENINGS: usize = 100;
     type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
     type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
     type Fmod = Uint<K>;
