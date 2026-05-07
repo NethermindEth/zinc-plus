@@ -27,9 +27,14 @@ $2^{\nu}$-row trace; \emph{(ii)}~ replacement of the  Zinc+ paper's Table~9
 materialization columns by virtual binary-polynomial residuals pinned
 through booleanity; \emph{(iii)}~ packing of the five integer-carry
 columns into a single binary-polynomial column;
-\emph{(iv)}~ an all-$\Q[X]$ instantiation that uses public
-\emph{compensator} columns to keep the SHA recurrence constraints at
-algebraic degree~$1$ in the trace MLEs, together with quotient or \emph{overflow} columns resulting from liftinig the constraints over $\mathbb{F}_2[X]$ from the Zinc+ paper arithmetization, to constraints over $\mathbb{Q}[X]$.
+\emph{(iv)}~ an all-$\Q[X]$ instantiation that uses witness
+\emph{compensator} columns (with their zero-on-active-row property
+enforced by in-circuit zero-ideal pins against public active-range
+selectors) to keep the SHA recurrence constraints at algebraic
+degree~$1$ in the trace MLEs, together with quotient or
+\emph{overflow} columns resulting from lifting the constraints over
+$\mathbb{F}_2[X]$ from the Zinc+ paper arithmetization, to
+constraints over $\mathbb{Q}[X]$.
 \end{abstract}
 
 \tableofcontents

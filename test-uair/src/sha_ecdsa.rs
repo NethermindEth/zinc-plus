@@ -144,70 +144,75 @@ pub mod cols {
     pub const NUM_BIN_PUB: usize = 5;
 
     // ===== int section =====
-    // SHA publics (0..9) — see sha256.rs cols module for chained-
+    // SHA publics (0..6) — see sha256.rs cols module for chained-
     // compression layout details. S_INIT_PREFIX/S_FEEDFORWARD replace
-    // the old S_INIT/S_FINAL pair. PA_C_FF_A/E are the feed-forward
-    // compensators (added so C12/C13 stay degree-1 in the trace MLEs,
-    // preserving MLE-first eligibility — see sha256.rs cols doc).
-    // S_MSG_INIT gates the C16 message-init pinning constraint.
-    //
-    // The two SHA compensator-zero selector columns
-    // (SHA_S_ACTIVE_SCHED/SHA_S_ACTIVE_UPD) are gone — compensator-zero
-    // is enforced by direct verifier inspection of public_trace via
-    // `verify_public_structure` (see sha256.rs doc + the SHA UAIR doc).
+    // the old S_INIT/S_FINAL pair. S_MSG_INIT gates C16 (message-init
+    // pinning). SHA_S_ACTIVE_SCHED / SHA_S_ACTIVE_UPD are the active-
+    // range selectors that pin each linear-constraint compensator to 0
+    // on its honest range via the in-circuit `pa_c_* · s_active_* == 0`
+    // assert_zero constraints (FF compensators reuse SHA_S_FEEDFORWARD
+    // — see sha256.rs cols doc).
     pub const SHA_S_INIT_PREFIX: usize = 0;
     pub const SHA_S_FEEDFORWARD: usize = 1;
     pub const SHA_S_MSG_INIT: usize = 2;
     pub const SHA_PA_K: usize = 3;
-    pub const SHA_PA_C_C7: usize = 4;
-    pub const SHA_PA_C_C8: usize = 5;
-    pub const SHA_PA_C_C9: usize = 6;
-    pub const SHA_PA_C_FF_A: usize = 7;
-    pub const SHA_PA_C_FF_E: usize = 8;
-    // ECDSA publics (9..22): the addend columns (PA_X_ADDEND, PA_Y_ADDEND
+    pub const SHA_S_ACTIVE_SCHED: usize = 4;
+    pub const SHA_S_ACTIVE_UPD: usize = 5;
+    // ECDSA publics (6..20): the addend columns (PA_X_ADDEND, PA_Y_ADDEND
     // of the verifier-supplied design) are replaced by the bit pair
     // (PA_B1, PA_B2) plus the `Q` and `G + Q` affine coordinates, so the
     // affine addend selection happens entirely in-circuit via the linear
     // formula T = b_1·G + b_2·Q + b_1·b_2·((G+Q) − G − Q). See
     // [ecdsa.rs] for the standalone version this mirrors.
-    pub const ECDSA_S_INIT: usize = 9;
-    pub const ECDSA_S_ACTIVE: usize = 10;
-    pub const ECDSA_S_FINAL: usize = 11;
-    pub const ECDSA_S_ADD: usize = 12;
-    pub const ECDSA_PA_B1: usize = 13;
-    pub const ECDSA_PA_B2: usize = 14;
-    pub const ECDSA_PA_QX: usize = 15;
-    pub const ECDSA_PA_QY: usize = 16;
-    pub const ECDSA_PA_QGX: usize = 17;
-    pub const ECDSA_PA_QGY: usize = 18;
-    pub const ECDSA_PA_R_INIT_X: usize = 19;
-    pub const ECDSA_PA_R_INIT_Y: usize = 20;
-    pub const ECDSA_PA_R_INIT_Z: usize = 21;
+    pub const ECDSA_S_INIT: usize = 6;
+    pub const ECDSA_S_ACTIVE: usize = 7;
+    pub const ECDSA_S_FINAL: usize = 8;
+    pub const ECDSA_S_ADD: usize = 9;
+    pub const ECDSA_PA_B1: usize = 10;
+    pub const ECDSA_PA_B2: usize = 11;
+    pub const ECDSA_PA_QX: usize = 12;
+    pub const ECDSA_PA_QY: usize = 13;
+    pub const ECDSA_PA_QGX: usize = 14;
+    pub const ECDSA_PA_QGY: usize = 15;
+    pub const ECDSA_PA_R_INIT_X: usize = 16;
+    pub const ECDSA_PA_R_INIT_Y: usize = 17;
+    pub const ECDSA_PA_R_INIT_Z: usize = 18;
     /// Inverse of P_Z[FINAL_ROW] mod p; only the final-row cell matters
     /// (gated by ECDSA_S_FINAL). See [ecdsa.rs::cols::PA_Z_INV].
-    pub const ECDSA_PA_Z_INV: usize = 22;
+    pub const ECDSA_PA_Z_INV: usize = 19;
     /// Affine x-coordinate of P[FINAL_ROW]; the verifier is expected to
     /// check `R_x ≡ r (mod n)` off-protocol against the signature
     /// scalar r. See [ecdsa.rs::cols::PA_R_X].
-    pub const ECDSA_PA_R_X: usize = 23;
-    pub const NUM_INT_PUB: usize = 24;
+    pub const ECDSA_PA_R_X: usize = 20;
+    pub const NUM_INT_PUB: usize = 21;
 
     // The 5 prior SHA int carry columns (W_MU_W/A/E/JUNCTION_A/E) are
     // gone — replaced by W_MU_PACKED (binary_poly index 19), with
     // booleanity providing free range-checks. See sha256.rs cols doc.
 
-    // ECDSA witnesses (24..32): chained Jacobian state + doubled
+    // ECDSA witnesses (21..29): chained Jacobian state + doubled
     // point + addition scratch. 8 cols; `S = Y²` is inlined.
-    pub const ECDSA_W_X: usize = 24;
-    pub const ECDSA_W_Y: usize = 25;
-    pub const ECDSA_W_Z: usize = 26;
-    pub const ECDSA_W_X_PA: usize = 27;
-    pub const ECDSA_W_Y_PA: usize = 28;
-    pub const ECDSA_W_Z_PA: usize = 29;
-    pub const ECDSA_W_C: usize = 30;
-    pub const ECDSA_W_D: usize = 31;
+    pub const ECDSA_W_X: usize = 21;
+    pub const ECDSA_W_Y: usize = 22;
+    pub const ECDSA_W_Z: usize = 23;
+    pub const ECDSA_W_X_PA: usize = 24;
+    pub const ECDSA_W_Y_PA: usize = 25;
+    pub const ECDSA_W_Z_PA: usize = 26;
+    pub const ECDSA_W_C: usize = 27;
+    pub const ECDSA_W_D: usize = 28;
 
-    pub const NUM_INT: usize = 32;
+    // SHA linear-constraint compensators (witness, 29..34). Each
+    // `pa_c_*[k]` carries `−inner_*(2)` mod p so that
+    // `(inner_* + pa_c_*) ∈ (X − 2)` holds on every row. Compensator-
+    // zero on each constraint's active range is enforced in-circuit by
+    // `pa_c_* · s_active_* == 0` (with FF using SHA_S_FEEDFORWARD).
+    pub const SHA_PA_C_C7: usize = 29;
+    pub const SHA_PA_C_C8: usize = 30;
+    pub const SHA_PA_C_C9: usize = 31;
+    pub const SHA_PA_C_FF_A: usize = 32;
+    pub const SHA_PA_C_FF_E: usize = 33;
+
+    pub const NUM_INT: usize = 34;
 
     // Flat indices (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
@@ -457,12 +462,14 @@ where
         let w_lsig1 = &bp[cols::W_LSIG1];
 
         let sha_s_init_prefix = &int[cols::SHA_S_INIT_PREFIX];
-        // SHA_S_FEEDFORWARD is no longer multiplied into any in-circuit
-        // constraint (FF compensator-zero pins moved to verifier-side
-        // `verify_public_structure`); it remains as a public selector
-        // documenting the junction-window row pattern.
-        let _sha_s_feedforward = &int[cols::SHA_S_FEEDFORWARD];
+        // SHA_S_FEEDFORWARD doubles as the C12/C13 compensator-zero
+        // selector: it is 1 on the junction window where the
+        // feed-forward addition holds honestly (so PA_C_FF_{A,E} must
+        // be 0), 0 elsewhere.
+        let sha_s_feedforward = &int[cols::SHA_S_FEEDFORWARD];
         let sha_s_msg_init = &int[cols::SHA_S_MSG_INIT];
+        let sha_s_active_sched = &int[cols::SHA_S_ACTIVE_SCHED];
+        let sha_s_active_upd = &int[cols::SHA_S_ACTIVE_UPD];
         let pa_c_c7 = &int[cols::SHA_PA_C_C7];
         let pa_c_c8 = &int[cols::SHA_PA_C_C8];
         let pa_c_c9 = &int[cols::SHA_PA_C_C9];
@@ -667,12 +674,24 @@ where
         // compression. Mirrors the standalone SHA UAIR.
         b.assert_zero(sha_s_msg_init.clone() * &(w_big_w.clone() - pa_m));
 
-        // Compensator-zero pinning (formerly C17–C21) is now enforced
-        // by direct verifier inspection of public_trace via
-        // `Uair::verify_public_structure`, not as in-circuit
-        // constraints. The pa_c_* binders are retained because they
-        // appear inside C7/C8/C9 (W) and C12/C13 (FF) above.
-        let _ = (pa_c_c7, pa_c_c8, pa_c_c9, pa_c_ff_a, pa_c_ff_e);
+        // Compensator-zero pinning (C18-C22 in the SHA UAIR doc). Each
+        // compensator must be 0 on its constraint's honest active
+        // range — outside that range it freely absorbs `−inner(2)` so
+        // that `(inner + comp) ∈ (X − 2)` everywhere. The compensators
+        // are witness columns; the prover-claimed values are pinned
+        // to 0 on the active rows by these in-circuit zero-ideal
+        // constraints rather than by an out-of-band public-structure
+        // check on a public column.
+        //
+        // Each constraint is polynomial-degree 2 (witness compensator
+        // MLE × public selector MLE), but `assert_zero` constraints
+        // are excluded from `count_effective_max_degree`, so MLE-first
+        // eligibility is preserved — same pattern as C10/C11/C16.
+        b.assert_zero(pa_c_c7.clone() * sha_s_active_sched);
+        b.assert_zero(pa_c_c8.clone() * sha_s_active_upd);
+        b.assert_zero(pa_c_c9.clone() * sha_s_active_upd);
+        b.assert_zero(pa_c_ff_a.clone() * sha_s_feedforward);
+        b.assert_zero(pa_c_ff_e.clone() * sha_s_feedforward);
 
         // C17 (renumbered from C22): high-bits-zero pin on W_MU_PACKED. Forces positions
         // 10..31 of w_mu_packed to be 0 at every row. Combined with
@@ -826,78 +845,31 @@ where
         b.assert_zero(e_s_final.clone() * &e_f2_inner);
     }
 
-    /// Verify the SHA-side public-column structural properties
-    /// (compensator-zero on active rows, tail-compensator-zero on
-    /// inner rows). Mirrors `Sha256CompressionSliceUair::verify_public_structure`
-    /// with merged-layout column indices. The ECDSA half has no
-    /// compensator pattern that needs verifier-side
-    /// inspection.
+    /// Verify the SHA-side public-column structural properties.
+    ///
+    /// The two tail-compensator columns (`PA_R_CH2_COMP`,
+    /// `PA_R_MAJ_COMP`) must be zero on every inner row. The five
+    /// linear-constraint compensators
+    /// (`SHA_PA_C_C7`/`C8`/`C9`/`FF_A`/`FF_E`) are no longer in this
+    /// list — they are now witness columns and their compensator-zero
+    /// pins on each constraint's active range are enforced in-circuit
+    /// by the `pa_c_* · sha_s_active_* == 0` assert_zero constraints
+    /// in `constrain_general`. The ECDSA half has no compensator
+    /// pattern that needs verifier-side inspection.
     fn verify_public_structure<RT, IntT, const D: usize>(
         public_trace: &UairTrace<'_, RT, IntT, D>,
         num_vars: usize,
     ) -> Result<(), PublicStructureError>
     where
         RT: Clone,
-        IntT: Clone + num_traits::Zero,
+        IntT: Clone,
     {
         let n = 1usize << num_vars;
         debug_assert_eq!(public_trace.int.len(), cols::NUM_INT_PUB);
         debug_assert!(public_trace.binary_poly.len() >= cols::NUM_BIN_PUB);
 
-        let pa_c_c7 = &public_trace.int[cols::SHA_PA_C_C7].evaluations;
-        let pa_c_c8 = &public_trace.int[cols::SHA_PA_C_C8].evaluations;
-        let pa_c_c9 = &public_trace.int[cols::SHA_PA_C_C9].evaluations;
-        let pa_c_ff_a = &public_trace.int[cols::SHA_PA_C_FF_A].evaluations;
-        let pa_c_ff_e = &public_trace.int[cols::SHA_PA_C_FF_E].evaluations;
         let pa_r_ch2_comp = &public_trace.binary_poly[cols::PA_R_CH2_COMP].evaluations;
         let pa_r_maj_comp = &public_trace.binary_poly[cols::PA_R_MAJ_COMP].evaluations;
-
-        for i in 0..sha256::cols::NUM_COMPRESSIONS {
-            let start = i * sha256::cols::ROWS_PER_COMP;
-
-            let sched_end = start + (sha256::cols::ROUNDS_PER_COMP - 16);
-            for k in start..sched_end.min(n) {
-                if !pa_c_c7[k].is_zero() {
-                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                        column: "PA_C_C7",
-                        row: k,
-                    });
-                }
-            }
-
-            let upd_end = start + sha256::cols::ROUNDS_PER_COMP;
-            for k in start..upd_end.min(n) {
-                if !pa_c_c8[k].is_zero() {
-                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                        column: "PA_C_C8",
-                        row: k,
-                    });
-                }
-                if !pa_c_c9[k].is_zero() {
-                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                        column: "PA_C_C9",
-                        row: k,
-                    });
-                }
-            }
-
-            let junc_start = start + sha256::cols::ROUNDS_PER_COMP;
-            let junc_end = start + sha256::cols::ROWS_PER_COMP;
-            for k in junc_start.min(n)..junc_end.min(n) {
-                if !pa_c_ff_a[k].is_zero() {
-                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                        column: "PA_C_FF_A",
-                        row: k,
-                    });
-                }
-                if !pa_c_ff_e[k].is_zero() {
-                    return Err(PublicStructureError::NonZeroOnRequiredZeroRow {
-                        column: "PA_C_FF_E",
-                        row: k,
-                    });
-                }
-            }
-        }
 
         let inner_end = n.saturating_sub(2);
         for k in 0..inner_end {
@@ -1013,23 +985,32 @@ where
         debug_assert_eq!(binary_poly.len(), cols::NUM_BIN);
 
         // Int section: merge per the layout in `cols`.
-        // SHA standalone int layout (9 cols, all public).
-        // ECDSA standalone int layout (23 cols after in-circuit addend
-        // and final-row affine readout):
-        //   0..15   pubs (S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1, PA_B2,
-        //                 PA_QX, PA_QY, PA_QGX, PA_QGY,
-        //                 PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X)
-        //   15..23  witnesses (8 EC cols)
+        //
+        // SHA standalone int layout (11 cols):
+        //   0..6   public:  S_INIT_PREFIX, S_FEEDFORWARD, S_MSG_INIT,
+        //                   PA_K, S_ACTIVE_SCHED, S_ACTIVE_UPD
+        //   6..11  witness: PA_C_C7, PA_C_C8, PA_C_C9, PA_C_FF_A, PA_C_FF_E
+        //
+        // ECDSA standalone int layout (23 cols):
+        //   0..15  public:  S_INIT, S_ACTIVE, S_FINAL, S_ADD, PA_B1,
+        //                   PA_B2, PA_QX, PA_QY, PA_QGX, PA_QGY,
+        //                   PA_R_INIT_X/Y/Z, PA_Z_INV, PA_R_X
+        //   15..23 witness: 8 EC cols
+        //
+        // Merged layout (NUM_INT = 34, NUM_INT_PUB = 21):
+        //   0..6   SHA publics  (sha[0..6])
+        //   6..21  ECDSA publics (ecdsa[0..15])
+        //   21..29 ECDSA witnesses (ecdsa[15..23])
+        //   29..34 SHA witnesses (sha[6..11]) — the linear-constraint
+        //                                       compensators
         let mut int: Vec<DenseMultilinearExtension<R>> = Vec::with_capacity(cols::NUM_INT);
         let sha_ints = sha_trace.int.into_owned();
         let ecdsa_ints = ecdsa_trace.int.into_owned();
 
-        // [0..9] SHA pubs (sha[0..9])
-        int.extend(sha_ints[0..9].iter().cloned());
-        // [9..24] ECDSA pubs (ecdsa[0..15])
+        int.extend(sha_ints[0..6].iter().cloned());
         int.extend(ecdsa_ints[0..15].iter().cloned());
-        // [24..32] ECDSA witnesses (ecdsa[15..23], 8 cols)
         int.extend(ecdsa_ints[15..23].iter().cloned());
+        int.extend(sha_ints[6..11].iter().cloned());
 
         debug_assert_eq!(int.len(), cols::NUM_INT);
 
@@ -1054,23 +1035,24 @@ mod tests {
         degree_counter::{count_constraint_degrees, count_max_degree},
     };
 
-    /// Sanity: 13 SHA + 13 ECDSA = 26 constraints. ECDSA contributes
+    /// Sanity: 18 SHA + 13 ECDSA = 31 constraints. ECDSA contributes
     /// the 11 doubling/addition/output/init constraints plus 2 final-row
-    /// affine-readout constraints (F1, F2). The 5 SHA compensator-zero
-    /// pins (formerly C17–C21) moved to verifier-side
-    /// `verify_public_structure`. Max degree 7 from the ECDSA C-A2
-    /// constraint after the in-circuit affine addend went live
+    /// affine-readout constraints (F1, F2). SHA contributes 13 prior
+    /// constraints plus the 5 in-circuit compensator-zero pins (C17–C21,
+    /// each `pa_c_* · s_active_* == 0`). Max degree 7 from the ECDSA
+    /// C-A2 constraint after the in-circuit affine addend went live
     /// (T_y is degree 3 in trace cells; multiplied by Z_pa^3 (deg 3)
     /// and S_ACTIVE (deg 1)).
     #[test]
     fn sha_ecdsa_constraint_shape() {
         type U = ShaEcdsaUair<Int<EC_FP_INT_LIMBS>>;
-        assert_eq!(count_constraints::<U>(), 26);
+        assert_eq!(count_constraints::<U>(), 31);
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot checks: at least one deg-7 (ECDSA C-A2 with in-circuit T_y),
-        // some deg-2 (boundaries + chaining), some deg-1 (SHA C1, C2,
-        // C4, C6 — including the new row-local σ_0/σ_1 equalities).
+        // some deg-2 (boundaries + chaining + the compensator-zero pins),
+        // some deg-1 (SHA C1, C2, C4, C6 — including the new row-local
+        // σ_0/σ_1 equalities).
         assert!(degrees.iter().any(|&d| d == 7), "expected deg-7 from ECDSA C-A2");
         assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
     }

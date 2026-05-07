@@ -51,7 +51,7 @@ Inside the $\Q[X]$ branch, the trace cells are typed as either
 $\Q$).
 
 Tables \ref{tab:bin-cols} and~\ref{tab:int-cols} list the $20$
-binary-polynomial columns and $9$ integer columns of our trace,
+binary-polynomial columns and $11$ integer columns of our trace,
 respectively, separated into their public and witness portions. We
 write $\bp{x}\rowidx{t}$ for the entry of column $\bp{x}$ at row $t$,
 and $\bp{x}^{\downarrow\Delta}\rowidx{t} := \bp{x}\rowidx{t+\Delta}$
@@ -99,19 +99,23 @@ $\bp{W_{\mu\text{-packed}}}$ & Packed integer-carry column (Remark~\ref{rem:mu-b
 \toprule
 \textbf{Column} & \textbf{Role} & \textbf{Lookup set $\subseteq$ Domain} \\
 \midrule
-\multicolumn{3}{l}{\textit{Public integer columns ($9$ — entire integer section is public)}} \\[1pt]
+\multicolumn{3}{l}{\textit{Public integer columns ($6$)}} \\[1pt]
 $S_{\mathrm{INIT-PREFIX}}$  & Selector: $1$ on each of the $N+1$ init-prefix blocks, else $0$ & $\{0,1\} \subseteq \Q$ \\
-$S_{\mathrm{FF}}$           & Selector: $1$ on the $N$ junction windows, else $0$ & $\{0,1\} \subseteq \Q$ \\
+$S_{\mathrm{FF}}$           & Selector: $1$ on the $N$ junction windows, else $0$. Doubles as the C\ref{con:ff-a}/C\ref{con:ff-e} compensator-zero selector (C\ref{con:cz-ff-a}, C\ref{con:cz-ff-e}). & $\{0,1\} \subseteq \Q$ \\
 $S_{\mathrm{MSG-INIT}}$     & Selector for the message-init pin (C\ref{con:msg-init}) & $\{0,1\} \subseteq \Q$ \\
 $\col{PA\_K}$               & SHA-256 round constants $K_t$ & $[0..2^{32}-1] \subseteq \Q$ \\
-$\col{PA\_C\_C7}$           & Compensator for C\ref{con:c7}; zero on schedule-active rows, arbitrary on inactive rows (verifier-checked, see \Cref{cons:public-checks}) & $\Q$ \\
-$\col{PA\_C\_C8}$           & Compensator for C\ref{con:c8}; zero on update-active rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
-$\col{PA\_C\_C9}$           & Compensator for C\ref{con:c9}; zero on update-active rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
-$\col{PA\_C\_FF\_A}$        & Compensator for C\ref{con:ff-a}; zero on junction-window rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
-$\col{PA\_C\_FF\_E}$        & Compensator for C\ref{con:ff-e}; zero on junction-window rows, arbitrary on inactive rows (verifier-checked) & $\Q$ \\
+$S_{\mathrm{ACTIVE-SCHED}}$ & Selector: $1$ on the $N$ schedule-active windows $[\,68i,\,68i+48\,)$, else $0$. Reads pin $\col{PA\_C\_C7}$ to $0$ via C\ref{con:cz-c7}. & $\{0,1\} \subseteq \Q$ \\
+$S_{\mathrm{ACTIVE-UPD}}$   & Selector: $1$ on the $N$ update-active windows $[\,68i,\,68i+64\,)$, else $0$. Reads pin $\col{PA\_C\_C8}, \col{PA\_C\_C9}$ to $0$ via C\ref{con:cz-c8}, C\ref{con:cz-c9}. & $\{0,1\} \subseteq \Q$ \\
+\midrule
+\multicolumn{3}{l}{\textit{Witness integer columns ($5$)}} \\[1pt]
+$\col{PA\_C\_C7}$           & Compensator for C\ref{con:c7}; zero on schedule-active rows (in-circuit-pinned by C\ref{con:cz-c7}), arbitrary on inactive rows & $\Q$ \\
+$\col{PA\_C\_C8}$           & Compensator for C\ref{con:c8}; zero on update-active rows (in-circuit-pinned by C\ref{con:cz-c8}), arbitrary on inactive rows & $\Q$ \\
+$\col{PA\_C\_C9}$           & Compensator for C\ref{con:c9}; zero on update-active rows (in-circuit-pinned by C\ref{con:cz-c9}), arbitrary on inactive rows & $\Q$ \\
+$\col{PA\_C\_FF\_A}$        & Compensator for C\ref{con:ff-a}; zero on junction-window rows (in-circuit-pinned by C\ref{con:cz-ff-a}), arbitrary on inactive rows & $\Q$ \\
+$\col{PA\_C\_FF\_E}$        & Compensator for C\ref{con:ff-e}; zero on junction-window rows (in-circuit-pinned by C\ref{con:cz-ff-e}), arbitrary on inactive rows & $\Q$ \\
 \bottomrule
 \end{tabularx}
-\caption{Integer columns ($9$ total, all public). Compensator columns ($\col{PA\_C\_*}$) are inspected by the verifier and checked to be zero on the appropriate entries (see below).}
+\caption{Integer columns ($11$ total: $6$ public, $5$ witness). The five $\Q$-valued compensator columns $\col{PA\_C\_*}$ are committed witnesses; their zero-on-active-row property is enforced in-circuit by the assert-zero constraints C\ref{con:cz-c7}--C\ref{con:cz-ff-e} (each of the form $\col{PA\_C\_*}\rowidx{t} \cdot S_{\mathrm{ACTIVE-*}}\rowidx{t} = 0$), not by verifier-side public-trace inspection.}
 \label{tab:int-cols}
 \end{table}
 
@@ -128,7 +132,7 @@ both follow the same pattern but have different types and different
 
 \paragraph{Active-row compensators
 $\col{PA\_C\_C7}, \col{PA\_C\_C8}, \col{PA\_C\_C9}, \col{PA\_C\_FF\_A}, \col{PA\_C\_FF\_E}$
-($\Q$-valued).}
+($\Q$-valued, witness).}
 Each of constraints \ref{con:c7}--\ref{con:c9} (the SHA recurrence)
 and \ref{con:ff-a}--\ref{con:ff-e} (the feed-forward) is of the form
 $\mathrm{inner}(t) + \col{pa\_c}(t) \in (X-2)$, where
@@ -139,13 +143,30 @@ and is \emph{arbitrary} elsewhere. The compensator $\col{pa\_c}(t)$
 takes value $0$ on the active rows and absorbs $-\mathrm{inner}(t)$
 on the inactive rows so that the overall expression lies in $(X-2)$
 \emph{everywhere}, sidestepping a multiplicative selector that would
-inflate the constraint degree. Why $\Q$-valued: on inactive rows,
-$\mathrm{inner}(2)$ can be any rational, so the compensator must
-range over all of $\Q$. The active-row zero-pinning is enforced by
-the verifier directly on \texttt{public\_trace} (\Cref{cons:public-checks}).
+inflate the constraint's effective degree. Why $\Q$-valued: on
+inactive rows, $\mathrm{inner}(2)$ can be any rational, so the
+compensator must range over all of $\Q$.
+
+The compensator columns are committed \emph{witness} columns. Their
+zero-on-active-row property is pinned in-circuit by the assert-zero
+constraints C\ref{con:cz-c7}--C\ref{con:cz-ff-e}, each of the form
+$\col{PA\_C\_*}\rowidx{t} \cdot S_{\mathrm{ACTIVE-*}}\rowidx{t} = 0$
+where $S_{\mathrm{ACTIVE-*}}$ is the public selector that takes the
+value $1$ on the constraint's active rows and $0$ elsewhere. The
+selector is shared across constraints whose active ranges coincide:
+$S_{\mathrm{ACTIVE-SCHED}}$ pins $\col{PA\_C\_C7}$,
+$S_{\mathrm{ACTIVE-UPD}}$ pins both $\col{PA\_C\_C8}$ and
+$\col{PA\_C\_C9}$, and $S_{\mathrm{FF}}$ (already needed elsewhere)
+pins both $\col{PA\_C\_FF\_A}$ and $\col{PA\_C\_FF\_E}$.
+
+The pinning constraints C\ref{con:cz-c7}--C\ref{con:cz-ff-e} are
+polynomial-degree~$2$ (witness compensator $\times$ public selector),
+but they live in the zero ideal, so they do not enter the projected
+sum-check's effective-degree count and MLE-first eligibility is
+preserved.
 
 \paragraph{Tail compensators
-$\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$ (bit-polynomial-typed).}
+$\col{PA\_R\_CH2\_COMP}, \col{PA\_R\_MAJ\_COMP}$ (bit-polynomial-typed, public).}
 The virtual residuals
 $r_{\mathrm{ch}_2}, r_{\mathrm{maj}}$ of \Cref{sec:ch-maj} are
 booleanity-pinned to $\{0,1\}^{32}$ per coefficient. On every
@@ -157,15 +178,10 @@ $\{0,1\}^{32}$ unless corrected. The tail compensators
 $c_{\mathrm{ch}_2}, c_{\mathrm{maj}}$ carry the exact boundary
 bit-pattern that restores the residual to $\bitpoly{32}$ on those
 two tail rows (and are zero everywhere else; see \eqref{eq:compensators}).
-
-
-In both families, the compensator is \emph{public}: the verifier
-either supplies the values directly (active-row case, with the
-zero-on-active rows discharged by direct row-wise inspection) or
-reads them from \texttt{public\_trace} (tail case, with the
-$\bitpoly{32}$ structural property type-enforced). No in-circuit
-constraint pins compensator values explicitly; their structure is
-discharged outside the algebraic part of the protocol.
+These remain \emph{public} columns: the verifier reads them from
+\texttt{public\_trace} and discharges the zero-on-inner-rows property
+by direct row-wise inspection (\Cref{cons:public-checks}). The
+$\bitpoly{32}$ structural property is type-enforced.
 \end{remark}
 
 \begin{remark}[Public boundaries: all init-prefix blocks live on $\col{PA\_A}/\col{PA\_E}$]
@@ -194,14 +210,14 @@ The constraint family is supplemented by a small set of
 \emph{verifier-side public-column structural checks}
 (\Cref{cons:public-checks} below) that the verifier discharges by
 direct inspection of \texttt{public\_trace} before the algebraic
-checks begin. These structural checks pin the public compensators
-and compensators row-wise without consuming any selector column or
+checks begin. These structural checks pin the public selectors,
+round constants, and tail compensators row-wise without consuming
 any algebraic constraint.
 
 \phantomsection\label{cons:public-checks}
 \paragraph{Public-column properties.}
 
-We assume that the public input is well formed, in the following sense (i.e.\ we do not enforce the properties below in our constraints). 
+We assume that the public input is well formed, in the following sense (i.e.\ we do not enforce the properties below in our constraints).
 \begin{itemize}[leftmargin=2em]
   \item Every public binary-polynomial column lies in $\bitpoly{32}$
     coefficient-wise. Concretely: for each row $t$ of every
@@ -209,18 +225,8 @@ We assume that the public input is well formed, in the following sense (i.e.\ we
     coefficient of the cell is in $\{0,1\}$.
   \item Every cell of every public integer column lies in its
     declared lookup set of \Cref{tab:int-cols}, namely
-    $\{0,1\}$ for the $S$-selectors, $[0..2^{32}-1]$ for $\col{PA\_K}$,
-    and any $\Q$-value for the compensators.
-  \item Checked by the verifier: Compensator columns are zero on
-    their constraint's row set $\mathcal{T}$ (defined in the row-set
-    table just below):
-    \begin{align*}
-      \col{PA\_C\_C7}\rowidx{t}    &= 0 \quad\text{for every schedule-active row } t, \\
-      \col{PA\_C\_C8}\rowidx{t}    &= 0 \quad\text{for every update-active row } t, \\
-      \col{PA\_C\_C9}\rowidx{t}    &= 0 \quad\text{for every update-active row } t, \\
-      \col{PA\_C\_FF\_A}\rowidx{t} &= 0 \quad\text{for every junction-window row } t, \\
-      \col{PA\_C\_FF\_E}\rowidx{t} &= 0 \quad\text{for every junction-window row } t.
-    \end{align*}
+    $\{0,1\}$ for the $S$-selectors and $[0..2^{32}-1]$ for
+    $\col{PA\_K}$.
   \item Checked by the verifier: Tail-compensator zero-on-inner-rows and boundary closed form:
     for every $t$ with $t+2 < n$,
     \[
@@ -234,12 +240,21 @@ We assume that the public input is well formed, in the following sense (i.e.\ we
     update-active row $t$ (i.e.\ on the C\ref{con:c8}, C\ref{con:c9}
     re-anchored row variable).
   \item Selector value pattern: each of $S_{\mathrm{INIT-PREFIX}},
-    S_{\mathrm{FF}}, S_{\mathrm{MSG-INIT}}$ takes the value $1$ on
-    its declared support set (\Cref{tab:int-cols}) and $0$ elsewhere.
+    S_{\mathrm{FF}}, S_{\mathrm{MSG-INIT}},
+    S_{\mathrm{ACTIVE-SCHED}}, S_{\mathrm{ACTIVE-UPD}}$ takes the
+    value $1$ on its declared support set (\Cref{tab:int-cols}) and
+    $0$ elsewhere.
 \end{itemize}
 These are $O(n)$ row-wise inspections of \texttt{public\_trace} that
 the verifier already iterates through to derive public lifted
 evaluations; the marginal cost is negligible.
+
+The active-row compensator columns
+$\col{PA\_C\_C7}, \col{PA\_C\_C8}, \col{PA\_C\_C9}, \col{PA\_C\_FF\_A}, \col{PA\_C\_FF\_E}$
+are no longer in this list: they have been moved to the witness
+section, and their zero-on-active-row property is now enforced
+in-circuit by the assert-zero constraints
+C\ref{con:cz-c7}--C\ref{con:cz-ff-e}.
 
 \paragraph{Row-variable convention.}\label{sec:row-conv}
 
@@ -273,7 +288,7 @@ Update-active rows    & $\bigcup_{i=0}^{N-1} [\,68i,\,68i + 64\,)$ & C\ref{con:c
 Init-prefix rows      & $\bigcup_{i=0}^{N}   [\,68i,\,68i + 4\,)$  & C\ref{con:c10}, C\ref{con:c11} \\
 Junction-window rows  & $\bigcup_{i=0}^{N-1} [\,68i + 64,\,68(i{+}1)\,)$ & C\ref{con:ff-a}, C\ref{con:ff-e} \\
 Message-seed rows     & $\bigcup_{i=0}^{N-1} [\,68i,\,68i + 16\,)$ & C\ref{con:msg-init} \\
-Every row             & $[0, n)$                                  & C\ref{con:mu-zero}, C\ref{con:lkup-uef}, C\ref{con:lkup-uneg}, C\ref{con:lkup-maj} \\
+Every row             & $[0, n)$                                  & C\ref{con:mu-zero}, C\ref{con:cz-c7}, C\ref{con:cz-c8}, C\ref{con:cz-c9}, C\ref{con:cz-ff-a}, C\ref{con:cz-ff-e}, C\ref{con:lkup-uef}, C\ref{con:lkup-uneg}, C\ref{con:lkup-maj} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -438,6 +453,33 @@ Equivalently, the high $22$ bits of $\bp{W_{\mu\text{-packed}}}$ are
 zero; the low $10$ bits are read by the five $\mathrm{ShiftR}$ virtuals
 of \Cref{rem:mu-budget}.
 
+\paragraph{In-circuit compensator-zero pinning.}
+
+For every row $t \in [0, n)$, the witness compensator columns of
+\Cref{tab:int-cols} are pinned to $0$ on each constraint's active
+row range by multiplying by the corresponding public selector and
+asserting the zero ideal:
+\begin{align}
+\col{PA\_C\_C7}\rowidx{t}    \cdot S_{\mathrm{ACTIVE-SCHED}}\rowidx{t} &= 0, \tag{C18}\label{con:cz-c7}\\
+\col{PA\_C\_C8}\rowidx{t}    \cdot S_{\mathrm{ACTIVE-UPD}}\rowidx{t}   &= 0, \tag{C19}\label{con:cz-c8}\\
+\col{PA\_C\_C9}\rowidx{t}    \cdot S_{\mathrm{ACTIVE-UPD}}\rowidx{t}   &= 0, \tag{C20}\label{con:cz-c9}\\
+\col{PA\_C\_FF\_A}\rowidx{t} \cdot S_{\mathrm{FF}}\rowidx{t}           &= 0, \tag{C21}\label{con:cz-ff-a}\\
+\col{PA\_C\_FF\_E}\rowidx{t} \cdot S_{\mathrm{FF}}\rowidx{t}           &= 0. \tag{C22}\label{con:cz-ff-e}
+\end{align}
+On the active rows the public selector evaluates to $1$, so the
+constraint forces the corresponding compensator cell to $0$ and the
+ambient $(X-2)$ membership of C\ref{con:c7}/C\ref{con:c8}/C\ref{con:c9}/C\ref{con:ff-a}/C\ref{con:ff-e}
+becomes a genuine SHA-recurrence/feed-forward equality on those
+rows; on inactive rows the selector is $0$ and the compensator is
+free to absorb $-\mathrm{inner}(2)$ (\Cref{rem:what-is-comp}).
+
+Each of C\ref{con:cz-c7}--C\ref{con:cz-ff-e} is a constraint in the
+zero ideal (strict equality), of polynomial-degree~$2$ in the trace
+MLEs (witness compensator $\times$ public selector). Because the
+zero ideal is excluded from the projected sum-check's
+effective-degree count (same accounting as C\ref{con:c10}/C\ref{con:c11}/C\ref{con:msg-init}),
+these constraints do not affect MLE-first eligibility.
+
 \paragraph{Affine-combination lookups for $\Ch$ / $\Maj$.}
 
 In addition to the per-column lookups of \Cref{tab:bin-cols}, we
@@ -451,9 +493,9 @@ constraint section. With $\bp{x}^{\downarrow\Delta}\rowidx{t} = \bp{x}\rowidx{t+
 (zero past the trace tail) and the public bit-poly tail compensators
 of \eqref{eq:compensators}:
 \begin{align}
-\bp{W_e}^{\downarrow 2}\rowidx{t} + \bp{W_e}^{\downarrow 1}\rowidx{t} - 2\,\bp{W_{u_{ef}}}^{\downarrow 2}\rowidx{t} &\in \bitpoly{32}, \tag{C21}\label{con:lkup-uef}\\
-\bp{W_e}^{\downarrow 2}\rowidx{t} - \bp{W_e}\rowidx{t} + 2\,\bp{W_{u_{\neg e,g}}}^{\downarrow 2}\rowidx{t} + 2\,\col{PA\_R\_CH2\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C22}\label{con:lkup-uneg}\\
-\bp{W_a}\rowidx{t} + \bp{W_a}^{\downarrow 1}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t} - 2\,\bp{W_{\Maj}}^{\downarrow 2}\rowidx{t} - 2\,\col{PA\_R\_MAJ\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C23}\label{con:lkup-maj}
+\bp{W_e}^{\downarrow 2}\rowidx{t} + \bp{W_e}^{\downarrow 1}\rowidx{t} - 2\,\bp{W_{u_{ef}}}^{\downarrow 2}\rowidx{t} &\in \bitpoly{32}, \tag{C23}\label{con:lkup-uef}\\
+\bp{W_e}^{\downarrow 2}\rowidx{t} - \bp{W_e}\rowidx{t} + 2\,\bp{W_{u_{\neg e,g}}}^{\downarrow 2}\rowidx{t} + 2\,\col{PA\_R\_CH2\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C24}\label{con:lkup-uneg}\\
+\bp{W_a}\rowidx{t} + \bp{W_a}^{\downarrow 1}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t} - 2\,\bp{W_{\Maj}}^{\downarrow 2}\rowidx{t} - 2\,\col{PA\_R\_MAJ\_COMP}\rowidx{t} &\in \bitpoly{32}, \tag{C25}\label{con:lkup-maj}
 \end{align}
 on every row $t$. The implementation registers the three left-hand
 sides as virtual binary-polynomial columns (no commit), and the
