@@ -16,12 +16,12 @@ use zinc_utils::{
 
 /// Row-indexed trace matrix: `trace[row][col]`.
 /// Each row contains all column values for that row.
-/// Used by `evaluate_for_constraints` for non-linear constraints.
+/// Used by `evaluate_for_constraints`.
 pub type RowMajorTrace<F> = Vec<Vec<DynamicPolynomialF<F>>>;
 
 /// Column-indexed trace matrix: `trace[col][row]`.
 /// Each column is a `DenseMultilinearExtension` over the hypercube.
-/// Used by `evaluate_combined_polynomials` for linear constraints (MLE-first).
+/// Used by `evaluate_combined_polynomials` (MLE-first approach).
 pub type ColumnMajorTrace<F> = Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>;
 
 /// Holds the projected trace in either row-major or column-major layout,
@@ -36,7 +36,7 @@ pub enum ProjectedTrace<F: PrimeField> {
 /// matrix. Result: `trace[row][col]` where columns are ordered as binary_poly,
 /// arbitrary_poly, int.
 ///
-/// Use this for the combined polynomial approach (non-linear constraints).
+/// Use this for the combined polynomial approach.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
     trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
@@ -127,7 +127,7 @@ where
 /// Result: `trace[col]` is a
 /// `DenseMultilinearExtension<DynamicPolynomialF<F>>`.
 ///
-/// Use this for the MLE-first approach (linear constraints only).
+/// Use this for the MLE-first approach.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
     trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
@@ -218,6 +218,24 @@ where
     );
 
     result
+}
+
+/// Transpose a column-indexed trace into a row-indexed trace.
+///
+/// `result[row][col] = trace[col].evaluations[row].clone()`. Used by the
+/// MLE-first prover when it needs to fall back to the row-major
+/// `evaluate_for_constraints` path for non-linear constraints.
+pub fn column_major_to_row_major<F: PrimeField>(trace: &ColumnMajorTrace<F>) -> RowMajorTrace<F> {
+    let num_rows = trace.first().map(|c| c.evaluations.len()).unwrap_or(0);
+
+    cfg_into_iter!(0..num_rows)
+        .map(|row_idx| {
+            trace
+                .iter()
+                .map(|col| col.evaluations[row_idx].clone())
+                .collect()
+        })
+        .collect()
 }
 
 /// Evaluate a projected trace along `F[X] -> F` and return column-indexed

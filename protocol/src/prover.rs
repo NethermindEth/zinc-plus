@@ -306,7 +306,6 @@ impl_with_type_bounds!(ProverBase
     /// Step 1 (MLE-first / column-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the column-major layout.
-    /// Only suitable for linear constraints.
     pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         mut self,
         project_scalar: S,
@@ -354,8 +353,12 @@ impl_with_type_bounds!(ProverProjectedCombined
 
 impl_with_type_bounds!(ProverProjectedMleFirst
 {
-    /// Step 2 (MLE-first): Ideal check via `prove_linear` on the column-major
-    /// trace. Only suitable for linear constraints.
+    /// Step 2 (MLE-first): Ideal check via `prove_mle_first` on the
+    /// column-major trace. Works for any UAIR: linear non-zero-ideal
+    /// constraints go through the column-major MLE-first path, non-linear
+    /// non-zero-ideal constraints fall back to the row-major path (with an
+    /// internal transpose), and zero-ideal constraints are short-circuited
+    /// to zero.
     pub fn step2_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {

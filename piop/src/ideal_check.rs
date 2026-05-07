@@ -5,7 +5,7 @@ mod structs;
 
 pub use structs::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace};
+use crate::projections::{ColumnMajorTrace, RowMajorTrace, column_major_to_row_major};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use num_traits::ConstZero;
@@ -18,6 +18,7 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair,
+    degree_counter::count_constraint_degrees,
     ideal::{Ideal, IdealCheck},
     ideal_collector::{IdealOrZero, collect_ideals},
 };
@@ -25,11 +26,19 @@ use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 /// Ideal-check subprotocol.
 pub trait IdealCheckProtocol: Uair {
-    /// Prover for linear-only UAIRs using MLE-first evaluation.
+    /// Prover using MLE-first evaluation (column-indexed trace).
     ///
-    /// Uses column-indexed trace for efficient MLE evaluation:
-    /// evaluates trace columns at the challenge point first,
-    /// then applies constraints to the evaluated values.
+    /// Routes each constraint through the most efficient evaluation path:
+    /// - Linear constraints with non-zero ideals are batched through
+    ///   [`evaluate_combined_polynomials`], which evaluates trace column MLEs
+    ///   at the challenge point and then applies the constraints to the
+    ///   evaluated values.
+    /// - Non-linear constraints with non-zero ideals fall back to the row-major
+    ///   [`evaluate_for_constraints`] path; the trace is transposed on demand
+    ///   via [`column_major_to_row_major`].
+    /// - Constraints with zero ideals are short-circuited to zero (their
+    ///   combined polynomial value is zero by construction for an honest
+    ///   prover).
     ///
     /// # Parameters
     /// - `transcript`: the Fiat-Shamir transcript.
@@ -145,12 +154,35 @@ where
     {
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
+        // Classify constraints to drive dispatch below:
+        // * Linear non-zero-ideal goes through the column-major MLE-first path
+        // * Linear zero-ideal constraints need no tracking — their value is zero by
+        //   construction.
+        // * Non-linear non-zero-ideal goes through the row-major fallback
+        // * Non-linear zero-ideal entries are zeroed afterwards.
         let ideal_collector = collect_ideals::<U>(num_constraints);
+        let degrees = count_constraint_degrees::<U>();
 
-        let all_zero = ideal_collector.ideals.iter().all(|i| i.is_zero_ideal());
-        let combined_mle_values = if all_zero {
-            vec![DynamicPolynomialF::ZERO; num_constraints]
-        } else {
+        let mut has_linear_nonzero: bool = false;
+        let mut nonlinear_nonzero: Vec<usize> = Vec::new();
+        let mut nonlinear_zero: Vec<usize> = Vec::new();
+        for (idx, ideal) in ideal_collector.ideals.iter().enumerate() {
+            if degrees[idx] <= 1 {
+                if !has_linear_nonzero && !ideal.is_zero_ideal() {
+                    has_linear_nonzero = true;
+                }
+            } else if ideal.is_zero_ideal() {
+                nonlinear_zero.push(idx);
+            } else {
+                nonlinear_nonzero.push(idx);
+            }
+        }
+
+        // When any linear non-zero-ideal constraint exists, run
+        // `evaluate_combined_polynomials` once: all linear entries (zero or not) come
+        // out correct.
+        // Non-linear entries are garbage and get replaced below.
+        let mut combined_mle_values: Vec<DynamicPolynomialF<F>> = if has_linear_nonzero {
             combined_poly_builder::evaluate_combined_polynomials::<_, U>(
                 trace_matrix,
                 projected_scalars,
@@ -158,7 +190,33 @@ where
                 &evaluation_point,
                 field_cfg,
             )?
+        } else {
+            vec![DynamicPolynomialF::ZERO; num_constraints]
         };
+
+        if !nonlinear_nonzero.is_empty() {
+            let row_major = column_major_to_row_major(trace_matrix);
+            let values = combined_poly_builder::evaluate_for_constraints::<_, U>(
+                &row_major,
+                projected_scalars,
+                num_constraints,
+                field_cfg,
+                &nonlinear_nonzero,
+                &evaluation_point,
+            )?;
+            for (&i, v) in nonlinear_nonzero.iter().zip(values) {
+                combined_mle_values[i] = v;
+            }
+        }
+
+        // Scrub garbage left by `evaluate_combined_polynomials` at non-linear
+        // zero-ideal indices. Skipped when the initializer already produced
+        // an all-zeros vector.
+        if !nonlinear_zero.is_empty() && has_linear_nonzero {
+            for &i in &nonlinear_zero {
+                combined_mle_values[i] = DynamicPolynomialF::ZERO;
+            }
+        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
@@ -407,7 +465,8 @@ mod tests {
 
         let num_vars = 2;
 
-        // Linear UAIR - test both approaches
+        // Linear UAIR with non-zero ideals: both approaches work; MLE-first
+        // dispatches every constraint through `evaluate_combined_polynomials`.
         test_successful_verification_linear::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
@@ -417,8 +476,14 @@ mod tests {
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
 
-        // Non-linear UAIR - only combined approach works
+        // Non-linear UAIR with all-zero ideals: combined approach works
+        // unconditionally; MLE-first works too because the hybrid prover
+        // short-circuits zero-ideal constraints to zero regardless of degree.
         test_successful_verification_combined::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
+            num_vars,
+            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
+        );
+        test_successful_verification_linear::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
             |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
         );

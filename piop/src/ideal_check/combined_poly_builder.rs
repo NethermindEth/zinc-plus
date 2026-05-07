@@ -13,11 +13,7 @@ use zinc_poly::{
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
-use zinc_uair::{
-    ColumnLayout, ConstraintBuilder, TraceRow, Uair,
-    degree_counter::{count_constraint_degrees, count_max_degree},
-    ideal::ImpossibleIdeal,
-};
+use zinc_uair::{ColumnLayout, ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
 };
@@ -193,14 +189,18 @@ where
     combined_evaluations
 }
 
-/// For linear UAIRs, evaluate combined polynomials directly
-/// by first evaluating trace column MLEs at the evaluation point,
-/// then applying UAIR constraints to the evaluated values.
+/// Evaluate combined polynomials by first evaluating trace column MLEs at the
+/// evaluation point, then applying UAIR constraints to the evaluated values.
 ///
-/// This avoids building the full combined polynomial MLEs row by row
-/// and is more efficient for linear constraints because the evaluation
-/// of a linear combination of MLEs equals the linear combination of
-/// individual MLE evaluations.
+/// This avoids building per-row combined polynomials and is faster than
+/// `evaluate_for_constraints`. The technique relies on the evaluation of a
+/// linear combination of MLEs equalling the linear combination of individual
+/// MLE evaluations, so the entries of the returned vector are only correct
+/// for constraints that are linear in the column values; non-linear entries
+/// are garbage and must be ignored by the caller. The prover-side caller
+/// [`crate::ideal_check`] partitions constraints by degree and reads only
+/// the linear indices from this output, routing non-linear constraints
+/// through [`evaluate_for_constraints`] instead.
 ///
 /// `trace_matrix` is column-indexed: `trace_matrix[col]` is an MLE.
 ///
@@ -222,13 +222,6 @@ where
     let zero_inner = field_zero.inner().clone();
     let num_rows = trace_matrix.first().map(|c| c.len()).unwrap_or(0);
     let num_vars = evaluation_point.len();
-
-    // Sanity check: this approach only works for linear constraints
-    if count_max_degree::<U>() > 1 {
-        return Err(EvaluationError::UnsupportedConstraintDegrees {
-            degrees: count_constraint_degrees::<U>(),
-        });
-    }
 
     // Maximum number of coefficients across all trace entries
     let max_num_coeffs = trace_matrix
