@@ -164,13 +164,11 @@ where
         let degrees = count_constraint_degrees::<U>();
 
         let mut has_linear_nonzero: bool = false;
-        let mut nonlinear_nonzero: Vec<usize> = Vec::new();
         let mut nonlinear_zero: Vec<usize> = Vec::new();
+        let mut nonlinear_nonzero: Vec<usize> = Vec::new();
         for (idx, ideal) in ideal_collector.ideals.iter().enumerate() {
             if degrees[idx] <= 1 {
-                if !has_linear_nonzero && !ideal.is_zero_ideal() {
-                    has_linear_nonzero = true;
-                }
+                has_linear_nonzero |= !ideal.is_zero_ideal();
             } else if ideal.is_zero_ideal() {
                 nonlinear_zero.push(idx);
             } else {
@@ -183,18 +181,29 @@ where
         // out correct.
         // Non-linear entries are garbage and get replaced below.
         let mut combined_mle_values: Vec<DynamicPolynomialF<F>> = if has_linear_nonzero {
-            combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+            let mut res = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
                 trace_matrix,
                 projected_scalars,
                 num_constraints,
                 &evaluation_point,
                 field_cfg,
-            )?
+            )?;
+
+            // Scrub garbage left by `evaluate_combined_polynomials` at non-linear
+            // zero-ideal indices.
+            for &i in &nonlinear_zero {
+                res[i] = DynamicPolynomialF::ZERO;
+            }
+
+            res
         } else {
             vec![DynamicPolynomialF::ZERO; num_constraints]
         };
 
         if !nonlinear_nonzero.is_empty() {
+            // `evaluate_for_constraints` works with row-major traces, so we have to
+            // transpose here.
+            // TODO(alex): Can/should we avoid the transposition?
             let row_major = column_major_to_row_major(trace_matrix);
             let values = combined_poly_builder::evaluate_for_constraints::<_, U>(
                 &row_major,
@@ -206,15 +215,6 @@ where
             )?;
             for (&i, v) in nonlinear_nonzero.iter().zip(values) {
                 combined_mle_values[i] = v;
-            }
-        }
-
-        // Scrub garbage left by `evaluate_combined_polynomials` at non-linear
-        // zero-ideal indices. Skipped when the initializer already produced
-        // an all-zeros vector.
-        if !nonlinear_zero.is_empty() && has_linear_nonzero {
-            for &i in &nonlinear_zero {
-                combined_mle_values[i] = DynamicPolynomialF::ZERO;
             }
         }
 
