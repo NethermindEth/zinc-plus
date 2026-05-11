@@ -761,7 +761,7 @@ where
             })
             .collect_vec();
         let mut r_0_ext = r_0.clone();
-        r_0_ext.extend(folding_challenges.clone());
+        r_0_ext.extend_from_slice(&folding_challenges);
 
         verify_pcs_batch!(
             Zt::BinaryZt,

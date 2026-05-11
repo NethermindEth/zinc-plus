@@ -182,10 +182,6 @@ fn split_binary_poly_mle<const D: usize, const HALF_D: usize>(
 fn split_binary_poly_mle_ref<const D: usize, const HALF_D: usize>(
     mle: &DenseMultilinearExtension<BinaryRefPoly<D>>,
 ) -> DenseMultilinearExtension<BinaryRefPoly<HALF_D>> {
-    const {
-        assert!(D == 2 * HALF_D, "split_column: D must equal 2 * HALF_D");
-    }
-
     let n = mle.evaluations.len();
     let mut lo_evals = Vec::with_capacity(n);
     let mut hi_evals = Vec::with_capacity(n);
@@ -200,18 +196,30 @@ fn split_binary_poly_mle_ref<const D: usize, const HALF_D: usize>(
     // Concatenate: v' = u || w (low halves first, high halves second).
     lo_evals.extend(hi_evals);
 
-    DenseMultilinearExtension::from_evaluations_vec(
-        add!(mle.num_vars, 1, "split_column: num_vars overflow"),
-        lo_evals,
-        Zero::zero(),
-    )
+    DenseMultilinearExtension::from_evaluations_vec(add!(mle.num_vars, 1), lo_evals, Zero::zero())
 }
 
 #[allow(dead_code)]
 fn split_binary_poly_mle_u64<const D: usize, const HALF_D: usize>(
     mle: &DenseMultilinearExtension<BinaryU64Poly<D>>,
 ) -> DenseMultilinearExtension<BinaryU64Poly<HALF_D>> {
-    todo!("{:?}", mle)
+    let n = mle.evaluations.len();
+    let mut lo_evals: Vec<BinaryU64Poly<HALF_D>> = Vec::with_capacity(n);
+    let mut hi_evals: Vec<BinaryU64Poly<HALF_D>> = Vec::with_capacity(n);
+
+    for entry in &mle.evaluations {
+        let bits: u64 = *entry.inner();
+        // `From<u64>` masks off bits at positions `>= HALF_D` so each half
+        // upholds the `BinaryU64Poly<HALF_D>` invariant.
+        lo_evals.push(BinaryU64Poly::<HALF_D>::from(bits));
+        hi_evals.push(BinaryU64Poly::<HALF_D>::from(bits >> HALF_D));
+    }
+
+    // Concatenate: v' = u || w (low halves first, high halves second), matching
+    // the layout produced by `split_binary_poly_mle_ref`.
+    lo_evals.extend(hi_evals);
+
+    DenseMultilinearExtension::from_evaluations_vec(add!(mle.num_vars, 1), lo_evals, Zero::zero())
 }
 
 /// Multilinear evaluation of `values` (length `2^gammas.len()`, MSB-first
@@ -240,4 +248,146 @@ fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], field_cfg: &F
         next.push(lo);
     }
     mle_eval_msb_first(next, &gammas[1..], field_cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{Rng, rng};
+    use zinc_transcript::traits::GenTranscribable;
+
+    /// Build two MLEs (`BinaryRefPoly<D>` and `BinaryU64Poly<D>`) carrying the
+    /// same coefficient pattern from a list of bit-packed `u64` entries.
+    fn build_matched_mles<const D: usize>(
+        bits_list: &[u64],
+    ) -> (
+        DenseMultilinearExtension<BinaryRefPoly<D>>,
+        DenseMultilinearExtension<BinaryU64Poly<D>>,
+    ) {
+        let n = bits_list.len();
+        assert!(n.is_power_of_two(), "n must be a power of two");
+        let num_vars = n.trailing_zeros() as usize;
+
+        let ref_entries: Vec<BinaryRefPoly<D>> = bits_list
+            .iter()
+            .map(|&bits| BinaryRefPoly::read_transcription_bytes_exact(&bits.to_le_bytes()))
+            .collect();
+        let u64_entries: Vec<BinaryU64Poly<D>> = bits_list
+            .iter()
+            .map(|&bits| BinaryU64Poly::from(bits))
+            .collect();
+
+        let ref_mle =
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, ref_entries, Zero::zero());
+        let u64_mle =
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, u64_entries, Zero::zero());
+
+        (ref_mle, u64_mle)
+    }
+
+    /// Run both splitters on matched inputs and assert that every output
+    /// coefficient agrees bit-for-bit.
+    fn assert_split_matches<const D: usize, const HALF_D: usize>(bits_list: Vec<u64>) {
+        let (ref_mle, u64_mle) = build_matched_mles::<D>(&bits_list);
+
+        let split_ref = split_binary_poly_mle_ref::<D, HALF_D>(&ref_mle);
+        let split_u64 = split_binary_poly_mle_u64::<D, HALF_D>(&u64_mle);
+
+        assert_eq!(split_ref.num_vars, split_u64.num_vars);
+        assert_eq!(split_ref.evaluations.len(), split_u64.evaluations.len());
+        for (idx, (r, u)) in split_ref
+            .evaluations
+            .iter()
+            .zip(split_u64.evaluations.iter())
+            .enumerate()
+        {
+            // Compare bits in two different ways - directly, as via iterator
+
+            for i in 0..HALF_D {
+                let r_bit = r[i].inner();
+                let u_bit = ((*u.inner()) >> i) & 1 != 0;
+                assert_eq!(
+                    r_bit, u_bit,
+                    "mismatch at output entry {idx}, coefficient bit {i}",
+                );
+            }
+
+            for (i, pair) in r.iter().zip_longest(u.iter()).enumerate() {
+                match pair {
+                    itertools::EitherOrBoth::Both(r_bit, u_bit) => {
+                        assert_eq!(
+                            r_bit.inner(),
+                            *u_bit,
+                            "mismatch at output entry {idx}, coefficient bit {i}",
+                        );
+                    }
+                    itertools::EitherOrBoth::Left(_) | itertools::EitherOrBoth::Right(_) => {
+                        panic!("mismatch in number of coefficients at output entry {idx}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_ref_and_u64_match_d4_exhaustive() {
+        // Single-entry input: enumerate all 16 bit patterns.
+        for bits in 0u64..16 {
+            assert_split_matches::<4, 2>(vec![bits]);
+        }
+
+        // 4-entry input: enumerate all 16^4 = 65536 patterns is too much; sample.
+        let mut rng = rng();
+        for _ in 0..32 {
+            let bits_list: Vec<u64> = (0..4).map(|_| rng.random::<u64>() & 0xF).collect();
+            assert_split_matches::<4, 2>(bits_list);
+        }
+    }
+
+    #[test]
+    fn split_ref_and_u64_match_random() {
+        let mut rng = rng();
+
+        for n_log in 0..=3 {
+            let n = 1usize << n_log;
+            let bits_list: Vec<u64> = (0..n).map(|_| rng.random::<u64>() & 0xF).collect();
+            assert_split_matches::<4, 2>(bits_list);
+        }
+
+        for n_log in 0..=4 {
+            let n = 1usize << n_log;
+            let bits_list: Vec<u64> = (0..n).map(|_| rng.random::<u64>() & 0xFF).collect();
+            assert_split_matches::<8, 4>(bits_list);
+        }
+
+        for n_log in 0..=5 {
+            let n = 1usize << n_log;
+            let bits_list: Vec<u64> = (0..n).map(|_| rng.random::<u64>() & 0xFFFF_FFFF).collect();
+            assert_split_matches::<32, 16>(bits_list);
+        }
+
+        for n_log in 0..=6 {
+            let n = 1usize << n_log;
+            let bits_list: Vec<u64> = (0..n).map(|_| rng.random::<u64>()).collect();
+            assert_split_matches::<64, 32>(bits_list);
+        }
+    }
+
+    #[test]
+    fn split_u64_pins_all_zero_entries() {
+        // Zero input should round-trip to all-zero output regardless of D.
+        let bits_list = vec![0u64; 8];
+        assert_split_matches::<8, 4>(bits_list.clone());
+        assert_split_matches::<32, 16>(bits_list.clone());
+        assert_split_matches::<64, 32>(bits_list);
+    }
+
+    #[test]
+    fn split_u64_handles_all_ones_d64() {
+        // All-ones (every bit set) is the high-edge case for D=64 since the
+        // mask `(1 << 64) - 1` is not directly representable. Expect lo = hi =
+        // 2^32 - 1 for D=64, HALF_D=32.
+        let bits_list = vec![u64::MAX; 4];
+        assert_split_matches::<64, 32>(bits_list);
+    }
 }

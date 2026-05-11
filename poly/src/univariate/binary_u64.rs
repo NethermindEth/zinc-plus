@@ -28,8 +28,19 @@ use zinc_utils::{
 pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 64, which is ok for now
 
 impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
+    const _DEGREE_CHECK: () = {
+        // Note that associated constants on generic types are evaluated lazily, so we
+        // have to "access" this to trigger the assertion.
+        assert!(
+            DEGREE_PLUS_ONE <= 64,
+            "For BinaryU64Poly, degree cannot exceed 63"
+        );
+    };
+
     #[inline(always)]
+    #[allow(clippy::let_unit_value)]
     pub const fn inner(&self) -> &u64 {
+        let _ = Self::_DEGREE_CHECK; // Force lazy evaluation of constraint
         &self.0
     }
 }
@@ -52,15 +63,30 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
-impl From<u32> for BinaryU64Poly<32> {
+impl<const DEGREE_PLUS_ONE: usize> From<u32> for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
     fn from(value: u32) -> Self {
-        Self(u64::from(value)) // we ignore upper bits
+        // Delegate to `From<u64>` so the masking contract is enforced in a
+        // single place. Bits at positions `>= DEGREE_PLUS_ONE` are dropped.
+        Self::from(u64::from(value))
     }
 }
 
-impl From<u64> for BinaryU64Poly<64> {
+impl<const DEGREE_PLUS_ONE: usize> From<u64> for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects, clippy::let_unit_value)]
     fn from(value: u64) -> Self {
-        Self(value) // we don't ignore any bits
+        let _ = Self::_DEGREE_CHECK; // Force lazy evaluation of constraint
+
+        // Bit `i` of `value` becomes the coefficient of `X^i`.
+        if DEGREE_PLUS_ONE == 64 {
+            Self(value)
+        } else {
+            // Bits at positions `>= DEGREE_PLUS_ONE` are masked off so that no bits beyond
+            // the polynomial degree are set. This is important, as downstream
+            // code (such as `BinaryU64PolyInnerProduct::inner_product`) relies on it.
+            Self(value & ((1_u64 << DEGREE_PLUS_ONE) - 1))
+        }
     }
 }
 
