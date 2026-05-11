@@ -71,7 +71,7 @@ where
     fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         let mut a: Vec<DynamicPolynomialFS<R>> =
             vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
         let mut b: Vec<DynamicPolynomialFS<R>> = vec![DynamicPolynomialFS::new(vec![
@@ -178,7 +178,7 @@ where
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         let a: DenseMultilinearExtension<DensePolynomial<R, 32>> =
             DenseMultilinearExtension::rand(num_vars, rng)
                 .into_iter()
@@ -304,7 +304,7 @@ where
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         let int_col_u32: DenseMultilinearExtension<u32> =
             DenseMultilinearExtension::rand(num_vars, rng);
 
@@ -391,7 +391,7 @@ where
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         /// Generate a random binary polynomial with the given number of 1-bits.
         fn random_binary_poly_with_popcount(
             popcount: u32,
@@ -498,7 +498,7 @@ where
     fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, 32> {
+    ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, 32, 32> {
         BigLinearUair::<R>::generate_random_trace(num_vars, rng)
     }
 }
@@ -615,7 +615,7 @@ where
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         /// Generate a random binary polynomial with the given number of 1-bits.
         fn random_binary_poly_with_popcount(
             popcount: u32,
@@ -820,7 +820,7 @@ where
     fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, R, R, 32> {
+    ) -> UairTrace<'static, R, R, 32, 32> {
         let n = 1 << num_vars;
 
         // Random b column (degree-0 polynomials to stay under degree 32)

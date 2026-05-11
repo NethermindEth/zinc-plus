@@ -55,7 +55,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
+                 trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
@@ -147,7 +147,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
+                 trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
@@ -241,7 +241,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<BinaryDecompositionUair<u32>>();
 
     let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                 trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
+                 trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
         let trace = project_trace_coeffs_row_major(trace, field_cfg);
@@ -323,7 +323,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
 
     macro_rules! prove {
         ($transcript:expr, $field_cfg:expr, $gen_trace:ident, $prove_fn:ident) => {{
-            let trace = $gen_trace::<_, u32, u32, _>(&trace, $field_cfg);
+            let trace = $gen_trace::<_, u32, u32, _, _>(&trace, $field_cfg);
 
             let projected_scalars =
                 project_scalars::<F<FIELD_LIMBS>, BigLinearUair<u32>>(|scalar| {

@@ -56,7 +56,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let max_degree = count_max_degree::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                     trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
+                     trace: &UairTrace<_, _, _, _>,
                      transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
@@ -235,7 +235,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let max_degree = count_max_degree::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
-                     trace: &UairTrace<_, _, DEGREE_PLUS_ONE>,
+                     trace: &UairTrace<_, _, _, _>,
                      transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 

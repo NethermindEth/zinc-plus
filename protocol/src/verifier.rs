@@ -41,7 +41,7 @@ pub struct VerifierBase<'a, Zt: ZincTypes<D, D>, const D: usize> {
     num_vars: usize,
     uair_signature: UairSignature,
     pcs_transcript: PcsVerifierTranscript,
-    public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D>,
+    public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
 
     // Commitment info
     vp_bin: &'a ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -236,7 +236,7 @@ where
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         mut proof: Proof<F>,
-        public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D>,
+        public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
     ) -> Result<
         VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D>,
@@ -573,7 +573,7 @@ where
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
 
         let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
-            let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D>(
+            let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
                 self.base.public_trace,
                 &self.field_cfg,
             );
@@ -782,7 +782,7 @@ where
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         proof: Proof<F>,
-        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,

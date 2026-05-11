@@ -34,7 +34,7 @@ type F = MontyField<4>;
 #[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -68,7 +68,7 @@ where
             .collect()
     });
 
-    let trace = project_trace_coeffs_column_major::<F, _, _, DEGREE_PLUS_ONE>(trace, &field_cfg);
+    let trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(trace, &field_cfg);
 
     let (proof, state) = U::prove_mle_first(
         transcript,
@@ -88,7 +88,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
-    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -122,7 +122,7 @@ where
             .collect()
     });
 
-    let trace = project_trace_coeffs_row_major::<F, _, _, DEGREE_PLUS_ONE>(trace, &field_cfg);
+    let trace: RowMajorTrace<F> = project_trace_coeffs_row_major(trace, &field_cfg);
 
     let (proof, state) = U::prove_combined(
         transcript,

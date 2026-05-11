@@ -11,5 +11,5 @@ pub trait GenerateRandomTrace<const DEGREE_PLUS_ONE: usize>: Uair {
     fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
         rng: &mut Rng,
-    ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, DEGREE_PLUS_ONE>;
+    ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>;
 }

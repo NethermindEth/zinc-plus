@@ -287,7 +287,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     label: &str,
     num_vars: usize,
     pp: &Pp<Zt>,
-    trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
@@ -377,7 +377,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     label: &str,
     num_vars: usize,
     pp: &Pp<Zt>,
-    trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     project_scalar: fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where

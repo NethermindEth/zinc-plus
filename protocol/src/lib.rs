@@ -267,7 +267,9 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
 /// (Note that type parameters are further constrained in the impl blocks for
 /// the prover and verifier)
 #[derive(Copy, Clone, Default, Debug)]
-pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(PhantomData<(Zt, U, F)>)
+pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(
+    PhantomData<(Zt, U, F)>,
+)
 where
     Zt: ZincTypes<DEGREE_PLUS_ONE, FOLDED_DEGREE_PLUS_ONE>,
     U: Uair,

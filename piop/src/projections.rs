@@ -38,8 +38,8 @@ pub enum ProjectedTrace<F: PrimeField> {
 ///
 /// Use this for the combined polynomial approach.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
+pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DB: usize, const DA: usize>(
+    trace: &UairTrace<PolyCoeff, Int, DB, DA>,
     field_cfg: &F::Config,
 ) -> RowMajorTrace<F>
 where
@@ -129,8 +129,8 @@ where
 ///
 /// Use this for the MLE-first approach.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
-    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
+pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DB: usize, const DA: usize>(
+    trace: &UairTrace<PolyCoeff, Int, DB, DA>,
     field_cfg: &F::Config,
 ) -> ColumnMajorTrace<F>
 where

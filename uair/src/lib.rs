@@ -316,16 +316,18 @@ impl UairSignature {
 /// If owned, it contains the full trace, otherwise it contains a view on the
 /// full trace (e.g. only public columns).
 #[derive(Debug, Clone, Default)]
-pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const D: usize> {
-    pub binary_poly: Cow<'a, [DenseMultilinearExtension<BinaryPoly<D>>]>,
-    pub arbitrary_poly: Cow<'a, [DenseMultilinearExtension<DensePolynomial<PolyCoeff, D>>]>,
+pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize> {
+    pub binary_poly: Cow<'a, [DenseMultilinearExtension<BinaryPoly<DB>>]>,
+    pub arbitrary_poly: Cow<'a, [DenseMultilinearExtension<DensePolynomial<PolyCoeff, DA>>]>,
     pub int: Cow<'a, [DenseMultilinearExtension<Int>]>,
 }
 
-impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff, Int, D> {
+impl<PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize>
+    UairTrace<'static, PolyCoeff, Int, DB, DA>
+{
     /// Returns a sub-trace containing only public columns.
     /// Returned trace is borrowed from the full trace.
-    pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+    pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
         let p = sig.public_cols();
         UairTrace {
             binary_poly: Cow::Borrowed(&self.binary_poly[0..p.num_binary_poly_cols()]),
@@ -336,7 +338,7 @@ impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff,
 
     /// Returns a sub-trace containing only witness columns.
     /// Returned trace is borrowed from the full trace.
-    pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, D> {
+    pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
         let p = sig.public_cols();
         UairTrace {
             binary_poly: Cow::Borrowed(&self.binary_poly[p.num_binary_poly_cols()..]),
