@@ -140,7 +140,7 @@ struct GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D
     PhantomData<(Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest)>,
 );
 
-impl<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize> ZincTypes<D>
+impl<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize> ZincTypes<D, D>
     for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D>
 where
     Int: ConstIntSemiring
@@ -234,7 +234,8 @@ where
 // Constants and concrete types
 //
 
-const DEGREE_PLUS_ONE: usize = 32;
+/// Degree + 1 of polynomials used in the protocol, including the trace.
+const D: usize = 32;
 const INT_LIMBS: usize = U64::LIMBS;
 const FIELD_LIMBS: usize = U64::LIMBS * 3;
 
@@ -248,21 +249,12 @@ type BenchZincTypes = GenericBenchZincTypes<
     /* CombR = */ Int<{ INT_LIMBS * 6 }>,
     /* Fmod = */ Uint<FIELD_LIMBS>,
     MillerRabin,
-    DEGREE_PLUS_ONE,
+    D,
 >;
 type Pp<Zt> = (
-    ZipPlusParams<
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::BinaryZt,
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::BinaryLc,
-    >,
-    ZipPlusParams<
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
-    >,
-    ZipPlusParams<
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
-        <Zt as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
-    >,
+    ZipPlusParams<<Zt as ZincTypes<D, D>>::BinaryZt, <Zt as ZincTypes<D, D>>::BinaryLc>,
+    ZipPlusParams<<Zt as ZincTypes<D, D>>::ArbitraryZt, <Zt as ZincTypes<D, D>>::ArbitraryLc>,
+    ZipPlusParams<<Zt as ZincTypes<D, D>>::IntZt, <Zt as ZincTypes<D, D>>::IntLc>,
 );
 
 /// Use row size equal to poly size, resulting in flat single-row matrices
@@ -295,11 +287,11 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     label: &str,
     num_vars: usize,
     pp: &Pp<Zt>,
-    trace: &UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
     project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -323,7 +315,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
 
     macro_rules! zinc_plus {
         () => {
-            ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>
+            ZincPlusPiop::<Zt, U, F, D, D>
         };
     }
 
@@ -385,11 +377,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     label: &str,
     num_vars: usize,
     pp: &Pp<Zt>,
-    trace: &UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
     project_scalar: fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -430,7 +422,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     macro_rules! piop {
         () => {
-            ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>
+            ZincPlusPiop::<Zt, U, F, D, D>
         };
     }
 
@@ -515,7 +507,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     macro_rules! zinc_plus {
         () => {
-            ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>
+            ZincPlusPiop::<Zt, U, F, D, D>
         };
     }
 
@@ -526,9 +518,12 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    let v_transcript = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
-        IdealOverF,
-    >(pp, proof.clone(), &public_trace, num_vars)
+    let v_transcript = ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
+        pp,
+        proof.clone(),
+        &public_trace,
+        num_vars,
+    )
     .unwrap();
     let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
     let v_ideal_checked = v_prime_projected
@@ -546,9 +541,12 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "0: Transcript reconstruct",
         setup = || proof.clone(),
-        run = |proof| ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::step0_reconstruct_transcript::<
-            IdealOverF,
-        >(pp, proof, &public_trace, num_vars,),
+        run = |proof| ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
+            pp,
+            proof,
+            &public_trace,
+            num_vars,
+        ),
     );
 
     step_bench!(
@@ -601,14 +599,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 fn do_bench_uair<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
 where
     U: Uair<
-            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
-            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, D>>::Int>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, D>>::Int, 32>,
         > + GenerateRandomTrace<
-            DEGREE_PLUS_ONE,
-            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
-            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            D,
+            PolyCoeff = <BenchZincTypes as ZincTypes<D, D>>::Int,
+            Int = <BenchZincTypes as ZincTypes<D, D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);
@@ -633,14 +631,14 @@ where
 fn do_bench_steps_uair<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
 where
     U: Uair<
-            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
-            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int, 32>,
+            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, D>>::Int>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, D>>::Int, 32>,
         > + GenerateRandomTrace<
-            DEGREE_PLUS_ONE,
-            PolyCoeff = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
-            Int = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int,
+            D,
+            PolyCoeff = <BenchZincTypes as ZincTypes<D, D>>::Int,
+            Int = <BenchZincTypes as ZincTypes<D, D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Int>,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);

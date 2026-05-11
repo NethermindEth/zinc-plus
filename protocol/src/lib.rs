@@ -189,7 +189,9 @@ where
 
 /// Trait bundling the various type parameters for the public inputs (NYI),
 /// witness and Zinc+ PIOP.
-pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
+pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usize>:
+    Clone + Debug
+{
     /// Main integer type for the protocol, used as a coefficient type for the
     /// arbitrary polynomial trace columns and for the integer trace columns.
     type Int: Semiring
@@ -221,7 +223,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
 
     /// Zip+ types for the binary polynomial trace columns.
     type BinaryZt: ZipTypes<
-            Eval = BinaryPoly<DEGREE_PLUS_ONE>,
+            Eval = BinaryPoly<FOLDED_DEG_PLUS_ONE>,
             Chal = Self::Chal,
             Pt = Self::Pt,
             CombR = Self::CombR,
@@ -265,9 +267,9 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
 /// (Note that type parameters are further constrained in the impl blocks for
 /// the prover and verifier)
 #[derive(Copy, Clone, Default, Debug)]
-pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize>(PhantomData<(Zt, U, F)>)
+pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(PhantomData<(Zt, U, F)>)
 where
-    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    Zt: ZincTypes<DEGREE_PLUS_ONE, FOLDED_DEGREE_PLUS_ONE>,
     U: Uair,
     F: PrimeField;
 
@@ -557,7 +559,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestZincTypesIprs;
 
-    impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesIprs {
+    impl ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE> for TestZincTypesIprs {
         type Int = ZtInt;
         type Chal = i128;
         type Pt = i128;
@@ -584,7 +586,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestZincTypesRaa;
 
-    impl ZincTypes<DEGREE_PLUS_ONE> for TestZincTypesRaa {
+    impl ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE> for TestZincTypesRaa {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
@@ -620,7 +622,7 @@ mod tests {
         ZipPlusParams<Zt::IntZt, Zt::IntLc>,
     )
     where
-        Zt: ZincTypes<DEGREE_PLUS_ONE>,
+        Zt: ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
     {
         let poly_size = 1 << num_vars;
         (
@@ -648,7 +650,7 @@ mod tests {
         tamper: impl Fn(&mut Proof<F>),
         check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
     ) where
-        Zt: ZincTypes<DEGREE_PLUS_ONE>,
+        Zt: ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -673,7 +675,7 @@ mod tests {
 
         macro_rules! run_protocol {
             ($mle_first:ident) => {
-                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<
+                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>::prove::<
                     { $mle_first },
                     CHECKED,
                 >(&pp, &trace, num_vars, project_scalar_fn)
@@ -691,7 +693,7 @@ mod tests {
                 tamper(&mut proof);
 
                 let verification_result =
-                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
                         &pp,
                         proof,
                         &public_trace,

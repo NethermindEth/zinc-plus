@@ -37,7 +37,7 @@ use zip_plus::{
 
 /// Persistent verifier infrastructure carried across every step.
 #[derive(Clone, Debug)]
-pub struct VerifierBase<'a, Zt: ZincTypes<D>, const D: usize> {
+pub struct VerifierBase<'a, Zt: ZincTypes<D, D>, const D: usize> {
     num_vars: usize,
     uair_signature: UairSignature,
     pcs_transcript: PcsVerifierTranscript,
@@ -57,7 +57,7 @@ pub struct VerifierBase<'a, Zt: ZincTypes<D>, const D: usize> {
 #[derive(Clone, Debug)]
 pub struct VerifierTranscriptReconstructed<
     'a,
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
@@ -80,7 +80,7 @@ pub struct VerifierTranscriptReconstructed<
 #[derive(Clone, Debug)]
 pub struct VerifierPrimeProjected<
     'a,
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
@@ -104,7 +104,7 @@ pub struct VerifierPrimeProjected<
 #[derive(Clone, Debug)]
 pub struct VerifierIdealChecked<
     'a,
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
@@ -128,7 +128,7 @@ pub struct VerifierIdealChecked<
 #[derive(Clone, Debug)]
 pub struct VerifierEvalProjected<
     'a,
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
@@ -152,7 +152,7 @@ pub struct VerifierEvalProjected<
 
 /// After step 4 (sumcheck verify).
 #[derive(Clone, Debug)]
-pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, const D: usize> {
+pub struct VerifierSumchecked<'a, Zt: ZincTypes<D, D>, F: PrimeField, IdealOverF, const D: usize> {
     base: VerifierBase<'a, Zt, D>,
     field_cfg: F::Config,
     projecting_element_f: F,
@@ -168,8 +168,13 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
 
 /// After step 5 (multi-point eval).
 #[derive(Clone, Debug)]
-pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, const D: usize>
-{
+pub struct VerifierMultipointEvaled<
+    'a,
+    Zt: ZincTypes<D, D>,
+    F: PrimeField,
+    IdealOverF,
+    const D: usize,
+> {
     base: VerifierBase<'a, Zt, D>,
     field_cfg: F::Config,
     projecting_element_f: F,
@@ -187,7 +192,7 @@ pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOv
 #[allow(dead_code)]
 pub struct VerifierLiftedEvalsChecked<
     'a,
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     F: PrimeField,
     IdealOverF,
     const D: usize,
@@ -214,9 +219,9 @@ pub struct VerifierPcsVerified<IdealOverF> {
 // Step implementations
 //
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
+impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     U: Uair,
     F: PrimeField,
     F::Inner: ConstTranscribable,
@@ -292,7 +297,7 @@ where
 impl<'a, Zt, U, F, IdealOverF, const D: usize>
     VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -328,7 +333,7 @@ where
 
 impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -381,7 +386,7 @@ where
 
 impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     F: InnerTransparentField
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + FromRef<F>
@@ -426,7 +431,7 @@ where
 
 impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -497,7 +502,7 @@ where
 
 impl<'a, Zt, F, IdealOverF, const D: usize> VerifierSumchecked<'a, Zt, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -534,7 +539,7 @@ where
 
 impl<'a, Zt, F, IdealOverF, const D: usize> VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -629,7 +634,7 @@ where
 
 impl<'a, Zt, F, IdealOverF, const D: usize> VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -737,11 +742,13 @@ impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
     }
 }
 
-// ── verify() wrapper ───────────────────────────────────────────────────
+//
+// verify() wrapper
+//
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
+impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
 where
-    Zt: ZincTypes<D>,
+    Zt: ZincTypes<D, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -783,7 +790,7 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
+        ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
             public_trace,
