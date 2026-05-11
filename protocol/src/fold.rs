@@ -71,16 +71,17 @@ pub trait FoldTrace<From, To> {
             .collect_vec();
 
         let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
 
         // Step 1: Per-chunk inner products
-        //   P_i = sum_{l < chunk_size} alphas[l] * bar_u_coeffs[i*chunk_size + j],
+        //   P_i = sum_{j < chunk_size} alphas[j] * bar_u_coeffs[i*chunk_size + j],
         // Trimmed (missing-trailing-zero) coefficients are treated as zero.
         let chunk_evals: Vec<F> = (0..Self::FOLDING_FACTOR)
             .map(|i| {
                 let start = mul!(i, chunk_size);
                 let mut acc = zero.clone();
-                for (l, alpha) in alphas.iter().enumerate() {
-                    if let Some(coeff) = bar_u_coeffs.get(add!(start, l)) {
+                for (j, alpha) in alphas.iter().enumerate() {
+                    if let Some(coeff) = bar_u_coeffs.get(add!(start, j)) {
                         acc += alpha.clone() * coeff;
                     }
                 }
@@ -90,7 +91,7 @@ pub trait FoldTrace<From, To> {
 
         // Step 2: MLE-evaluate the per-chunk inner products at folding_challenges,
         // MSB-first (gamma_1 = high bit, peeled first).
-        mle_eval_msb_first(chunk_evals, folding_challenges, field_cfg)
+        mle_eval_msb_first(chunk_evals, folding_challenges, &one)
     }
 }
 
@@ -226,7 +227,7 @@ fn split_binary_poly_mle_u64<const D: usize, const HALF_D: usize>(
 /// indexed) at point `gammas`. Peels `gammas[0]` (the high bit, equivalently
 /// the first sampled challenge) at each recursive step, splitting `values`
 /// into a lower half (high bit = 0) and an upper half (high bit = 1).
-fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], field_cfg: &F::Config) -> F {
+fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], one: &F) -> F {
     if gammas.is_empty() {
         debug_assert_eq!(values.len(), 1);
         return values.into_iter().next().expect("non-empty values");
@@ -235,8 +236,7 @@ fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], field_cfg: &F
 
     let half = values.len() >> 1;
     let g = &gammas[0];
-    let one = F::one_with_cfg(field_cfg);
-    let one_minus_g = one - g;
+    let one_minus_g = one.clone() - g;
 
     let mut next: Vec<F> = Vec::with_capacity(half);
     for i in 0..half {
@@ -247,7 +247,7 @@ fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], field_cfg: &F
         lo += &hi;
         next.push(lo);
     }
-    mle_eval_msb_first(next, &gammas[1..], field_cfg)
+    mle_eval_msb_first(next, &gammas[1..], one)
 }
 
 #[cfg(test)]
