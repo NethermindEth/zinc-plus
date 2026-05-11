@@ -1,4 +1,4 @@
-# Zinc+: SNARKs for Polynomial Rings
+# Zinc+: transparent post-quantum SNARKs for Polynomial Rings
 
 [![Docs](https://github.com/NethermindEth/zinc-plus/actions/workflows/docs.yml/badge.svg)](https://github.com/NethermindEth/zinc-plus/actions/workflows/docs.yml)
 [![Lint](https://github.com/NethermindEth/zinc-plus/actions/workflows/linter.yml/badge.svg)](https://github.com/NethermindEth/zinc-plus/actions/workflows/linter.yml)
@@ -16,6 +16,8 @@
 
 Traditional SNARKs are restricted to a single finite field, forcing complex bitwise logic and non-native modular arithmetic to be emulated, which often bloats the witness by orders of magnitude. 
 Zinc+ resolves this by allowing constraints to be expressed directly and simultaneously over rational ($\mathbb{Q}[X]$), integer ($\mathbb{Z}[X]$), and multiple finite field ($\mathbb{F}_{q_i}[X]$) polynomial rings.
+
+Zinc+ is transparent (**no** trusted setup) and plausibly post-quantum.
 
 > [!IMPORTANT]
 > For benchmark results of Sha256 and ECDSA, see [README](https://github.com/NethermindEth/zinc-plus/blob/main-beta/README.md) in [main-beta](https://github.com/NethermindEth/zinc-plus/tree/main-beta) branch.
