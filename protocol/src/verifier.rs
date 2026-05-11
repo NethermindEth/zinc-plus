@@ -38,7 +38,7 @@ use zip_plus::{
 
 /// Persistent verifier infrastructure carried across every step.
 #[derive(Clone, Debug)]
-pub struct VerifierBase<'a, Zt: ZincTypes<D, D>, const D: usize> {
+pub struct VerifierBase<'a, Zt: ZincTypes<D, FD>, const D: usize, const FD: usize> {
     num_vars: usize,
     uair_signature: UairSignature,
     pcs_transcript: PcsVerifierTranscript,
@@ -58,13 +58,14 @@ pub struct VerifierBase<'a, Zt: ZincTypes<D, D>, const D: usize> {
 #[derive(Clone, Debug)]
 pub struct VerifierTranscriptReconstructed<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -81,13 +82,14 @@ pub struct VerifierTranscriptReconstructed<
 #[derive(Clone, Debug)]
 pub struct VerifierPrimeProjected<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
 
     // Proof leftovers
@@ -105,13 +107,14 @@ pub struct VerifierPrimeProjected<
 #[derive(Clone, Debug)]
 pub struct VerifierIdealChecked<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
 
@@ -129,13 +132,14 @@ pub struct VerifierIdealChecked<
 #[derive(Clone, Debug)]
 pub struct VerifierEvalProjected<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
     projecting_element_f: F,
@@ -153,8 +157,15 @@ pub struct VerifierEvalProjected<
 
 /// After step 4 (sumcheck verify).
 #[derive(Clone, Debug)]
-pub struct VerifierSumchecked<'a, Zt: ZincTypes<D, D>, F: PrimeField, IdealOverF, const D: usize> {
-    base: VerifierBase<'a, Zt, D>,
+pub struct VerifierSumchecked<
+    'a,
+    Zt: ZincTypes<D, FD>,
+    F: PrimeField,
+    IdealOverF,
+    const D: usize,
+    const FD: usize,
+> {
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     projecting_element_f: F,
     cpr_subclaim: combined_poly_resolver::VerifierSubclaim<F>,
@@ -171,12 +182,13 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D, D>, F: PrimeField, IdealOverF
 #[derive(Clone, Debug)]
 pub struct VerifierMultipointEvaled<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     projecting_element_f: F,
     mp_subclaim: multipoint_eval::Subclaim<F>,
@@ -193,12 +205,13 @@ pub struct VerifierMultipointEvaled<
 #[allow(dead_code)]
 pub struct VerifierLiftedEvalsChecked<
     'a,
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    const FD: usize,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     mp_subclaim: multipoint_eval::Subclaim<F>,
     all_lifted_evals: Vec<DynamicPolynomialF<F>>,
@@ -220,9 +233,9 @@ pub struct VerifierPcsVerified<IdealOverF> {
 // Step implementations
 //
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
+impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     F::Inner: ConstTranscribable,
@@ -240,7 +253,7 @@ where
         public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
     ) -> Result<
-        VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D>,
+        VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>,
         ProtocolError<F, IdealOverF>,
     >
     where
@@ -295,10 +308,10 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize>
-    VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -309,7 +322,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn step1_prime_projection(
         mut self,
-    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
     {
         let field_cfg = self
             .base
@@ -332,9 +345,10 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -357,7 +371,7 @@ where
     pub fn step2_ideal_check(
         mut self,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
     {
         let num_constraints = count_constraints::<U>();
 
@@ -385,9 +399,10 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     F: InnerTransparentField
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + FromRef<F>
@@ -403,7 +418,7 @@ where
     pub fn step3_eval_projection(
         mut self,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
     {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
@@ -430,9 +445,10 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -453,7 +469,8 @@ where
     /// Step 4: Sumcheck verification (CPR + lookup groups).
     pub fn step4_sumcheck_verify(
         mut self,
-    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>> {
+    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
+    {
         let num_constraints = count_constraints::<U>();
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
@@ -501,9 +518,10 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierSumchecked<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -512,7 +530,7 @@ where
     /// Step 5: Multi-point evaluation sumcheck.
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
-    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
     {
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -538,9 +556,10 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -560,8 +579,10 @@ where
     /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
-    ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
-    {
+    ) -> Result<
+        VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>,
+        ProtocolError<F, IdealOverF>,
+    > {
         let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
 
         let pub_cols = self.base.uair_signature.public_cols();
@@ -633,9 +654,10 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -675,31 +697,52 @@ where
         let field_cfg = &self.field_cfg;
         let all_lifted_evals = &self.all_lifted_evals;
 
+        let zero = F::zero_with_cfg(field_cfg);
+
         macro_rules! verify_pcs_batch {
-            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
+            // Non-folded variant
+            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, $pt:expr, [$evals_range:expr]) => {{
+                verify_pcs_batch!(
+                    $Zt,
+                    $Lc,
+                    $vp,
+                    $idx,
+                    $pt,
+                    [$evals_range],
+                    |bar_u: &DynamicPolynomialF<F>, alphas: &[_]| {
+                        let mut eval_j = zero.clone();
+                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            let mut term = F::from_with_cfg(alpha, field_cfg);
+                            term *= coeff;
+                            eval_j += &term;
+                        }
+                        eval_j
+                    }
+                )
+            }};
+
+            // Universal variant with custom eval_j computation (used for folded columns)
+            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, $pt:expr, [$evals_range:expr], $compute_eval_j:expr) => {{
                 let comm = &commitments.$idx;
                 if comm.batch_size > 0 {
                     let per_poly_alphas = ZipPlus::<$Zt, $Lc>::sample_alphas(
                         &mut pcs_transcript.fs_transcript,
                         comm.batch_size,
                     );
-                    let mut eval_f = F::zero_with_cfg(field_cfg);
+                    let mut eval_f = zero.clone();
                     for (bar_u, alphas) in all_lifted_evals[$evals_range]
                         .iter()
                         .zip(per_poly_alphas.iter())
                     {
-                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
-                            let mut term = F::from_with_cfg(alpha, field_cfg);
-                            term *= coeff;
-                            eval_f += &term;
-                        }
+                        let eval_j = $compute_eval_j(bar_u, alphas);
+                        eval_f += eval_j;
                     }
                     ZipPlus::<$Zt, $Lc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
                         pcs_transcript,
                         $vp,
                         comm,
                         field_cfg,
-                        r_0,
+                        $pt,
                         &eval_f,
                         &per_poly_alphas,
                     )
@@ -709,7 +752,7 @@ where
         }
 
         // Folded witness columns are proved using the extended evaluation point
-        // `r_0_ext`, which extends `r_0` with additional sampled folding challenges.
+        // `r_0_ext = r_0 || folding_challenges`.
         let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
         let folding_challenges = (0..num_folding_challenges)
             .map(|_| {
@@ -725,13 +768,23 @@ where
             Zt::BinaryLc,
             self.base.vp_bin,
             0,
-            [num_pub_bin..num_total_bin]
+            &r_0_ext,
+            [num_pub_bin..num_total_bin],
+            |bar_u: &DynamicPolynomialF<F>, alphas: &[_]| {
+                Zt::BinaryFold::fold_eval_claim(
+                    &bar_u.coeffs,
+                    alphas,
+                    &folding_challenges,
+                    field_cfg,
+                )
+            }
         );
         verify_pcs_batch!(
             Zt::ArbitraryZt,
             Zt::ArbitraryLc,
             self.base.vp_arb,
             1,
+            &r_0,
             [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
         );
         verify_pcs_batch!(
@@ -739,6 +792,7 @@ where
             Zt::IntLc,
             self.base.vp_int,
             2,
+            &r_0,
             [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
         );
 
@@ -759,9 +813,9 @@ impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
 // verify() wrapper
 //
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
+impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -803,7 +857,7 @@ where
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
+        ZincPlusPiop::<Zt, U, F, D, FD>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
             public_trace,

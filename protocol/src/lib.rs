@@ -427,7 +427,7 @@ where
 #[cfg(not(miri))] // long running
 mod tests {
     use super::*;
-    use crate::fold::NoopFoldTrace;
+    use crate::fold::FoldBinaryTrace4x;
     use crypto_bigint::U64;
     use crypto_primitives::{
         Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
@@ -460,7 +460,10 @@ mod tests {
 
     const INT_LIMBS: usize = U64::LIMBS;
     const FIELD_LIMBS: usize = U64::LIMBS * 3;
-    const DEGREE_PLUS_ONE: usize = 32;
+
+    const D: usize = 32;
+    const HALF_D: usize = D / 2;
+    const QUARTER_D: usize = D / 4;
 
     // Zip+ type parameters.
 
@@ -475,22 +478,17 @@ mod tests {
     pub struct BinPolyZipTypes {}
     impl ZipTypes for BinPolyZipTypes {
         const NUM_COLUMN_OPENINGS: usize = 100;
-        type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
-        type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
+        type Eval = BinaryPoly<QUARTER_D>;
+        type Cw = DensePolynomial<i64, QUARTER_D>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
-        type CombDotChal = DensePolyInnerProduct<
-            Self::CombR,
-            Self::Chal,
-            Self::CombR,
-            MBSInnerProduct,
-            DEGREE_PLUS_ONE,
-        >;
+        type Comb = DensePolynomial<Self::CombR, QUARTER_D>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, QUARTER_D>;
+        type CombDotChal =
+            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, QUARTER_D>;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -498,23 +496,17 @@ mod tests {
     pub struct ArbitraryPolyZipTypesIprs {}
     impl ZipTypes for ArbitraryPolyZipTypesIprs {
         const NUM_COLUMN_OPENINGS: usize = 100;
-        type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
-        type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
+        type Eval = DensePolynomial<i64, D>;
+        type Cw = DensePolynomial<i64, D>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal =
-            DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
-        type CombDotChal = DensePolyInnerProduct<
-            Self::CombR,
-            Self::Chal,
-            Self::CombR,
-            MBSInnerProduct,
-            DEGREE_PLUS_ONE,
-        >;
+        type Comb = DensePolynomial<Self::CombR, D>;
+        type EvalDotChal = DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+        type CombDotChal =
+            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -524,23 +516,17 @@ mod tests {
     pub struct ArbitraryPolyZipTypesRaa {}
     impl ZipTypes for ArbitraryPolyZipTypesRaa {
         const NUM_COLUMN_OPENINGS: usize = 100;
-        type Eval = DensePolynomial<i64, DEGREE_PLUS_ONE>;
-        type Cw = DensePolynomial<Int<K>, DEGREE_PLUS_ONE>;
+        type Eval = DensePolynomial<i64, D>;
+        type Cw = DensePolynomial<Int<K>, D>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
-        type EvalDotChal =
-            DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, DEGREE_PLUS_ONE>;
-        type CombDotChal = DensePolyInnerProduct<
-            Self::CombR,
-            Self::Chal,
-            Self::CombR,
-            MBSInnerProduct,
-            DEGREE_PLUS_ONE,
-        >;
+        type Comb = DensePolynomial<Self::CombR, D>;
+        type EvalDotChal = DensePolyInnerProduct<i64, Self::Chal, Self::CombR, MBSInnerProduct, D>;
+        type CombDotChal =
+            DensePolyInnerProduct<Self::CombR, Self::Chal, Self::CombR, MBSInnerProduct, D>;
         type ArrCombRDotChal = MBSInnerProduct;
     }
 
@@ -566,7 +552,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestZincTypesIprs;
 
-    impl ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE> for TestZincTypesIprs {
+    impl ZincTypes<D, QUARTER_D> for TestZincTypesIprs {
         type Int = ZtInt;
         type Chal = i128;
         type Pt = i128;
@@ -578,7 +564,7 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
-        type BinaryFold = NoopFoldTrace;
+        type BinaryFold = FoldBinaryTrace4x<D, HALF_D, QUARTER_D>;
 
         type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
         type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
@@ -595,7 +581,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct TestZincTypesRaa;
 
-    impl ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE> for TestZincTypesRaa {
+    impl ZincTypes<D, QUARTER_D> for TestZincTypesRaa {
         type Int = i64;
         type Chal = i128;
         type Pt = i128;
@@ -607,7 +593,7 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
 
-        type BinaryFold = NoopFoldTrace;
+        type BinaryFold = FoldBinaryTrace4x<D, HALF_D, QUARTER_D>;
 
         type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP_FACTOR>;
         type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP_FACTOR>;
@@ -623,7 +609,7 @@ mod tests {
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
     fn setup_pp<Zt>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
@@ -633,11 +619,14 @@ mod tests {
         ZipPlusParams<Zt::IntZt, Zt::IntLc>,
     )
     where
-        Zt: ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
+        Zt: ZincTypes<D, QUARTER_D>,
     {
+        let folded_num_vars = num_vars + Zt::BinaryFold::FOLDING_FACTOR.ilog2() as usize;
+
         let poly_size = 1 << num_vars;
+        let folded_poly_size = 1 << folded_num_vars;
         (
-            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(poly_size, linear_codes.0),
+            ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::setup(folded_poly_size, linear_codes.0),
             ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::setup(poly_size, linear_codes.1),
             ZipPlus::<Zt::IntZt, Zt::IntLc>::setup(poly_size, linear_codes.2),
         )
@@ -661,13 +650,13 @@ mod tests {
         tamper: impl Fn(&mut Proof<F>),
         check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
     ) where
-        Zt: ZincTypes<DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
+        Zt: ZincTypes<D, QUARTER_D>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-        U: Uair<Scalar = DensePolynomial<Zt::Int, DEGREE_PLUS_ONE>>
-            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Zt::Int, Int = Zt::Int>
+        U: Uair<Scalar = DensePolynomial<Zt::Int, D>>
+            + GenerateRandomTrace<D, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
         F: for<'a> FromWithConfig<&'a Zt::Int>
             + for<'a> FromWithConfig<&'a Zt::CombR>
@@ -686,7 +675,7 @@ mod tests {
 
         macro_rules! run_protocol {
             ($mle_first:ident) => {
-                let mut proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>::prove::<
+                let mut proof = ZincPlusPiop::<Zt, U, F, D, QUARTER_D>::prove::<
                     { $mle_first },
                     CHECKED,
                 >(&pp, &trace, num_vars, project_scalar_fn)
@@ -704,7 +693,7 @@ mod tests {
                 tamper(&mut proof);
 
                 let verification_result =
-                    ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+                    ZincPlusPiop::<Zt, U, F, D, QUARTER_D>::verify::<_, CHECKED>(
                         &pp,
                         proof,
                         &public_trace,

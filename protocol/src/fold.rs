@@ -1,4 +1,11 @@
-use zinc_poly::mle::DenseMultilinearExtension;
+use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
+use itertools::Itertools;
+use num_traits::Zero;
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, binary_ref::BinaryRefPoly, binary_u64::BinaryU64Poly},
+};
+use zinc_utils::{add, mul};
 
 /// Fold a trace of one type into a trace of another (similar but smaller) type.
 ///
@@ -8,8 +15,83 @@ pub trait FoldTrace<From, To> {
     /// Folding factor, a positive power of 2.
     const FOLDING_FACTOR: usize;
 
-    fn fold_trace_column(column: &DenseMultilinearExtension<From>)
-    -> DenseMultilinearExtension<To>;
+    fn fold_trace_mle(mle: &DenseMultilinearExtension<From>) -> DenseMultilinearExtension<To>;
+
+    /// Verifier-side: compute one column's contribution to the folded PCS
+    /// eval-claim at the extended evaluation point
+    /// `r_0 || gamma_1 || ... || gamma_k`, where `k = log2(FOLDING_FACTOR)`.
+    ///
+    /// # Inputs:
+    /// - `bar_u_coeffs`: the column's unfolded lifted-eval coefficients in
+    ///   `F_q[X]`, of formal length `D`. May be shorter than `D` if trailing
+    ///   zero coefficients were trimmed.
+    /// - `alphas`: per-poly PCS alphas, of length `D / FOLDING_FACTOR`,
+    ///   matching the folded entry size.
+    /// - `folding_challenges`: `k` field-typed challenges sampled by the
+    ///   verifier, in sampling order (`gamma_1` first, `gamma_k` last).
+    ///
+    /// Returns the value `<alphas, bar_u_folded>` where `bar_u_folded` is the
+    /// column's lifted-eval polynomial after applying `k` chained 2x splits
+    /// and pinning the appended boolean variables to `(gamma_1, ..., gamma_k)`.
+    fn fold_eval_claim<F, A>(
+        bar_u_coeffs: &[F],
+        alphas: &[A],
+        folding_challenges: &[F],
+        field_cfg: &F::Config,
+    ) -> F
+    where
+        F: PrimeField + for<'a> FromWithConfig<&'a A>,
+    {
+        // MSB-first contiguous chained-2x-split chunking.
+        //
+        // `bar_u_coeffs` is partitioned into `FOLDING_FACTOR` contiguous chunks of
+        // length `D / FOLDING_FACTOR`.
+        //
+        // Their inner products with `alphas` form a `k`-variable multilinear polynomial
+        // which is then evaluated at `(gamma_1, ..., gamma_k)` with `gamma_1` paired
+        // with the high bit of the chunk index.
+        //
+        // This covers `NoopFoldTrace` (k = 0, degenerating to a single inner product)
+        // as well as chained 2x folds.
+
+        debug_assert_eq!(
+            1usize << folding_challenges.len(),
+            Self::FOLDING_FACTOR,
+            "fold_eval_claim: 1 << folding_challenges.len() must equal FOLDING_FACTOR",
+        );
+        debug_assert!(
+            bar_u_coeffs.len() <= mul!(alphas.len(), Self::FOLDING_FACTOR),
+            "fold_eval_claim: bar_u_coeffs.len() must not exceed alphas.len() * FOLDING_FACTOR",
+        );
+
+        let chunk_size = alphas.len();
+        let alphas = alphas
+            .iter()
+            .map(|a| F::from_with_cfg(a, field_cfg))
+            .collect_vec();
+
+        let zero = F::zero_with_cfg(field_cfg);
+
+        // Step 1: Per-chunk inner products
+        //   P_i = sum_{l < chunk_size} alphas[l] * bar_u_coeffs[i*chunk_size + j],
+        // Trimmed (missing-trailing-zero) coefficients are treated as zero.
+        let chunk_evals: Vec<F> = (0..Self::FOLDING_FACTOR)
+            .map(|i| {
+                let start = mul!(i, chunk_size);
+                let mut acc = zero.clone();
+                for (l, alpha) in alphas.iter().enumerate() {
+                    if let Some(coeff) = bar_u_coeffs.get(add!(start, l)) {
+                        acc += alpha.clone() * coeff;
+                    }
+                }
+                acc
+            })
+            .collect();
+
+        // Step 2: MLE-evaluate the per-chunk inner products at folding_challenges,
+        // MSB-first (gamma_1 = high bit, peeled first).
+        mle_eval_msb_first(chunk_evals, folding_challenges, field_cfg)
+    }
 }
 
 //
@@ -21,7 +103,141 @@ pub struct NoopFoldTrace;
 impl<T: Clone> FoldTrace<T, T> for NoopFoldTrace {
     const FOLDING_FACTOR: usize = 1;
 
-    fn fold_trace_column(trace: &DenseMultilinearExtension<T>) -> DenseMultilinearExtension<T> {
-        trace.clone()
+    fn fold_trace_mle(mle: &DenseMultilinearExtension<T>) -> DenseMultilinearExtension<T> {
+        mle.clone()
     }
+}
+
+//
+// Binary folds
+//
+
+pub struct FoldBinaryTrace2x<const D: usize, const HALF_D: usize>;
+
+impl<const D: usize, const HALF_D: usize> FoldTrace<BinaryPoly<D>, BinaryPoly<HALF_D>>
+    for FoldBinaryTrace2x<D, HALF_D>
+{
+    const FOLDING_FACTOR: usize = 2;
+
+    fn fold_trace_mle(
+        mle: &DenseMultilinearExtension<BinaryPoly<D>>,
+    ) -> DenseMultilinearExtension<BinaryPoly<HALF_D>> {
+        split_binary_poly_mle(mle)
+    }
+}
+
+pub struct FoldBinaryTrace4x<const D: usize, const HALF_D: usize, const QUARTER_D: usize>;
+
+impl<const D: usize, const HALF_D: usize, const QUARTER_D: usize>
+    FoldTrace<BinaryPoly<D>, BinaryPoly<QUARTER_D>> for FoldBinaryTrace4x<D, HALF_D, QUARTER_D>
+{
+    const FOLDING_FACTOR: usize = 4;
+
+    fn fold_trace_mle(
+        mle: &DenseMultilinearExtension<BinaryPoly<D>>,
+    ) -> DenseMultilinearExtension<BinaryPoly<QUARTER_D>> {
+        let mle = split_binary_poly_mle::<D, HALF_D>(mle);
+        split_binary_poly_mle::<HALF_D, QUARTER_D>(&mle)
+    }
+}
+
+//
+// Helper functions
+//
+
+/// Split a column of `BinaryPoly<D>` entries into a concatenated column
+/// of `BinaryPoly<HALF_D>` entries.
+///
+/// Each entry `v[i]` with `D` binary coefficients is split into:
+/// - `u[i]` = low `HALF_D` coefficients (indices `0..HALF_D`)
+/// - `w[i]` = high `HALF_D` coefficients (indices `HALF_D..D`)
+///
+/// so that `v[i] = u[i] + X^HALF_D · w[i]`.
+///
+/// Returns a column of length `2n` where:
+/// - `v'[0..n]   = u[0..n]`  (low halves)
+/// - `v'[n..2n]  = w[0..n]`  (high halves)
+///
+/// The returned MLE has `num_vars + 1` variables, with the last variable
+/// selecting between the low half (0) and high half (1).
+///
+/// Panics at compile-time if `D != 2 * HALF_D`.
+fn split_binary_poly_mle<const D: usize, const HALF_D: usize>(
+    mle: &DenseMultilinearExtension<BinaryPoly<D>>,
+) -> DenseMultilinearExtension<BinaryPoly<HALF_D>> {
+    const {
+        assert!(D == 2 * HALF_D, "split_column: D must equal 2 * HALF_D");
+    }
+
+    #[cfg(not(feature = "simd"))]
+    let res = split_binary_poly_mle_ref(mle);
+
+    #[cfg(feature = "simd")]
+    let res = split_binary_poly_mle_u64(mle);
+
+    res
+}
+
+#[allow(dead_code)]
+fn split_binary_poly_mle_ref<const D: usize, const HALF_D: usize>(
+    mle: &DenseMultilinearExtension<BinaryRefPoly<D>>,
+) -> DenseMultilinearExtension<BinaryRefPoly<HALF_D>> {
+    const {
+        assert!(D == 2 * HALF_D, "split_column: D must equal 2 * HALF_D");
+    }
+
+    let n = mle.evaluations.len();
+    let mut lo_evals = Vec::with_capacity(n);
+    let mut hi_evals = Vec::with_capacity(n);
+
+    for entry in &mle.evaluations {
+        let lo_arr: [Boolean; HALF_D] = std::array::from_fn(|i| entry[i]);
+        let hi_arr: [Boolean; HALF_D] = std::array::from_fn(|i| entry[add!(HALF_D, i)]);
+        lo_evals.push(BinaryRefPoly::<HALF_D>::new(lo_arr));
+        hi_evals.push(BinaryRefPoly::<HALF_D>::new(hi_arr));
+    }
+
+    // Concatenate: v' = u || w (low halves first, high halves second).
+    lo_evals.extend(hi_evals);
+
+    DenseMultilinearExtension::from_evaluations_vec(
+        add!(mle.num_vars, 1, "split_column: num_vars overflow"),
+        lo_evals,
+        Zero::zero(),
+    )
+}
+
+#[allow(dead_code)]
+fn split_binary_poly_mle_u64<const D: usize, const HALF_D: usize>(
+    mle: &DenseMultilinearExtension<BinaryU64Poly<D>>,
+) -> DenseMultilinearExtension<BinaryU64Poly<HALF_D>> {
+    todo!("{:?}", mle)
+}
+
+/// Multilinear evaluation of `values` (length `2^gammas.len()`, MSB-first
+/// indexed) at point `gammas`. Peels `gammas[0]` (the high bit, equivalently
+/// the first sampled challenge) at each recursive step, splitting `values`
+/// into a lower half (high bit = 0) and an upper half (high bit = 1).
+fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], field_cfg: &F::Config) -> F {
+    if gammas.is_empty() {
+        debug_assert_eq!(values.len(), 1);
+        return values.into_iter().next().expect("non-empty values");
+    }
+    debug_assert_eq!(values.len(), 1usize << gammas.len());
+
+    let half = values.len() >> 1;
+    let g = &gammas[0];
+    let one = F::one_with_cfg(field_cfg);
+    let one_minus_g = one - g;
+
+    let mut next: Vec<F> = Vec::with_capacity(half);
+    for i in 0..half {
+        let mut lo = one_minus_g.clone();
+        lo *= &values[i];
+        let mut hi = g.clone();
+        hi *= &values[add!(i, half)];
+        lo += &hi;
+        next.push(lo);
+    }
+    mle_eval_msb_first(next, &gammas[1..], field_cfg)
 }

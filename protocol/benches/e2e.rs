@@ -20,7 +20,10 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes, fold::NoopFoldTrace};
+use zinc_protocol::{
+    Proof, ZincPlusPiop, ZincTypes,
+    fold::{FoldBinaryTrace4x, FoldTrace},
+};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
     ShaProxy, TestUairNoMultiplication,
@@ -136,12 +139,32 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize>(
-    PhantomData<(Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest)>,
-);
+struct GenericBenchZincTypes<
+    Int,
+    CwR,
+    Chal,
+    Pt,
+    CombR,
+    Fmod,
+    PrimeTest,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+>(PhantomData<(Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest)>);
 
-impl<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, const D: usize> ZincTypes<D, D>
-    for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D>
+impl<
+    Int,
+    CwR,
+    Chal,
+    Pt,
+    CombR,
+    Fmod,
+    PrimeTest,
+    const D: usize,
+    const HALF_D: usize,
+    const QUARTER_D: usize,
+> ZincTypes<D, QUARTER_D>
+    for GenericBenchZincTypes<Int, CwR, Chal, Pt, CombR, Fmod, PrimeTest, D, HALF_D, QUARTER_D>
 where
     Int: ConstIntSemiring
         + for<'a> MulByScalar<&'a i64, CwR>
@@ -186,16 +209,16 @@ where
     type PrimeTest = PrimeTest;
 
     type BinaryZt = GenericBenchZipTypes<
-        BinaryPoly<D>,
-        DensePolynomial<i64, D>,
+        BinaryPoly<QUARTER_D>,
+        DensePolynomial<i64, QUARTER_D>,
         Fmod,
         PrimeTest,
         Chal,
         Pt,
         CombR,
-        DensePolynomial<CombR, D>,
-        BinaryPolyInnerProduct<Chal, D>,
-        DensePolyInnerProduct<CombR, Chal, CombR, MBSInnerProduct, D>,
+        DensePolynomial<CombR, QUARTER_D>,
+        BinaryPolyInnerProduct<Chal, QUARTER_D>,
+        DensePolyInnerProduct<CombR, Chal, CombR, MBSInnerProduct, QUARTER_D>,
         MBSInnerProduct,
     >;
     type ArbitraryZt = GenericBenchZipTypes<
@@ -225,7 +248,7 @@ where
         MBSInnerProduct,
     >;
 
-    type BinaryFold = NoopFoldTrace;
+    type BinaryFold = FoldBinaryTrace4x<D, HALF_D, QUARTER_D>;
 
     type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
     type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
@@ -238,6 +261,8 @@ where
 
 /// Degree + 1 of polynomials used in the protocol, including the trace.
 const D: usize = 32;
+const HALF_D: usize = D / 2;
+const QUARTER_D: usize = D / 4;
 const INT_LIMBS: usize = U64::LIMBS;
 const FIELD_LIMBS: usize = U64::LIMBS * 3;
 
@@ -252,21 +277,33 @@ type BenchZincTypes = GenericBenchZincTypes<
     /* Fmod = */ Uint<FIELD_LIMBS>,
     MillerRabin,
     D,
+    HALF_D,
+    QUARTER_D,
 >;
 type Pp<Zt> = (
-    ZipPlusParams<<Zt as ZincTypes<D, D>>::BinaryZt, <Zt as ZincTypes<D, D>>::BinaryLc>,
-    ZipPlusParams<<Zt as ZincTypes<D, D>>::ArbitraryZt, <Zt as ZincTypes<D, D>>::ArbitraryLc>,
-    ZipPlusParams<<Zt as ZincTypes<D, D>>::IntZt, <Zt as ZincTypes<D, D>>::IntLc>,
+    ZipPlusParams<
+        <Zt as ZincTypes<D, QUARTER_D>>::BinaryZt,
+        <Zt as ZincTypes<D, QUARTER_D>>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <Zt as ZincTypes<D, QUARTER_D>>::ArbitraryZt,
+        <Zt as ZincTypes<D, QUARTER_D>>::ArbitraryLc,
+    >,
+    ZipPlusParams<<Zt as ZincTypes<D, QUARTER_D>>::IntZt, <Zt as ZincTypes<D, QUARTER_D>>::IntLc>,
 );
 
 /// Use row size equal to poly size, resulting in flat single-row matrices
 #[allow(clippy::unwrap_used)]
 fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
+    let folded_num_vars =
+        num_vars + <BenchZincTypes as ZincTypes<_, _>>::BinaryFold::FOLDING_FACTOR.ilog2() as usize;
+
     let poly_size = 1 << num_vars;
+    let folded_poly_size = 1 << folded_num_vars;
     (
         ZipPlus::setup(
-            poly_size,
-            IprsCode::new_with_optimal_depth(poly_size).unwrap(),
+            folded_poly_size,
+            IprsCode::new_with_optimal_depth(folded_poly_size).unwrap(),
         ),
         ZipPlus::setup(
             poly_size,
@@ -293,7 +330,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, QUARTER_D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -317,7 +354,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
 
     macro_rules! zinc_plus {
         () => {
-            ZincPlusPiop::<Zt, U, F, D, D>
+            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
         };
     }
 
@@ -383,7 +420,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     project_scalar: fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 ) where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, QUARTER_D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -424,7 +461,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     macro_rules! piop {
         () => {
-            ZincPlusPiop::<Zt, U, F, D, D>
+            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
         };
     }
 
@@ -516,7 +553,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     macro_rules! zinc_plus {
         () => {
-            ZincPlusPiop::<Zt, U, F, D, D>
+            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
         };
     }
 
@@ -527,7 +564,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    let v_transcript = ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
+    let v_transcript = <piop!()>::step0_reconstruct_transcript::<IdealOverF>(
         pp,
         proof.clone(),
         &public_trace,
@@ -550,7 +587,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "0: Transcript reconstruct",
         setup = || proof.clone(),
-        run = |proof| ZincPlusPiop::<Zt, U, F, D, D>::step0_reconstruct_transcript::<IdealOverF>(
+        run = |proof| <piop!()>::step0_reconstruct_transcript::<IdealOverF>(
             pp,
             proof,
             &public_trace,
@@ -608,14 +645,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 fn do_bench_uair<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
 where
     U: Uair<
-            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, D>>::Int>,
-            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, D>>::Int, 32>,
+            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int, 32>,
         > + GenerateRandomTrace<
             D,
-            PolyCoeff = <BenchZincTypes as ZincTypes<D, D>>::Int,
-            Int = <BenchZincTypes as ZincTypes<D, D>>::Int,
+            PolyCoeff = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
+            Int = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, D>>::Int>,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);
@@ -640,14 +677,14 @@ where
 fn do_bench_steps_uair<U>(group: &mut BenchmarkGroup<WallTime>, label: &str, num_vars: usize)
 where
     U: Uair<
-            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, D>>::Int>,
-            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, D>>::Int, 32>,
+            Ideal = DegreeOneIdeal<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
+            Scalar = DensePolynomial<<BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int, 32>,
         > + GenerateRandomTrace<
             D,
-            PolyCoeff = <BenchZincTypes as ZincTypes<D, D>>::Int,
-            Int = <BenchZincTypes as ZincTypes<D, D>>::Int,
+            PolyCoeff = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
+            Int = <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int,
         > + 'static,
-    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, D>>::Int>,
+    F: for<'a> FromWithConfig<&'a <BenchZincTypes as ZincTypes<D, QUARTER_D>>::Int>,
 {
     let mut rng = rng();
     let trace = U::generate_random_trace(num_vars, &mut rng);

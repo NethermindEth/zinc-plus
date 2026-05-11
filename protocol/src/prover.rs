@@ -300,7 +300,7 @@ where
         let witness_trace = trace.witness(&uair_signature);
 
         let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)
-            .map(Zt::BinaryFold::fold_trace_column)
+            .map(Zt::BinaryFold::fold_trace_mle)
             .collect();
 
         let folded_witness_trace = UairTrace {
@@ -666,8 +666,8 @@ impl_with_type_bounds!(ProverLifted
     ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let witness_trace = &self.base.folded_witness_trace;
 
-        // Folded witness columns are proved using the extended evaluation point `r_0_ext`,
-        // which extends `r_0` with additional sampled folding challenges.
+        // Folded witness columns are proved using the extended evaluation point
+        // `r_0_ext = r_0 || folding_challenges`.
         let mut r_0_ext = self.r_0.clone();
         let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
         (0..num_folding_challenges).for_each(|_| {
