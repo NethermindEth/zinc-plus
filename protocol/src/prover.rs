@@ -1,7 +1,7 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use num_traits::Zero;
-use std::{collections::HashMap, fmt::Debug};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
@@ -29,14 +29,34 @@ use zip_plus::{
 };
 
 //
-// Shared base
+// Type-state structs
 //
 
 /// Persistent prover infrastructure carried across every step: the
 /// Fiat-Shamir transcript, PCS parameters/hints/commitments, and trace
 /// reference.
 #[derive(Clone, Debug)]
-pub struct ProverBase<
+pub struct ProverFolded<
+    'a,
+    Zt: ZincTypes<D, FD>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    const FD: usize,
+> {
+    uair_signature: UairSignature,
+    original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
+    folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
+
+    _phantom: PhantomData<(&'a u8, U, F)>,
+}
+
+/// Persistent prover infrastructure carried across every step: the
+/// Fiat-Shamir transcript, PCS parameters/hints/commitments, and trace
+/// reference.
+/// Obtained after step 1 via [`step1_commit`](ProverFolded::step1_commit).
+#[derive(Clone, Debug)]
+pub struct ProverCommitted<
     'a,
     Zt: ZincTypes<D, FD>,
     U: Uair,
@@ -46,8 +66,9 @@ pub struct ProverBase<
 > {
     num_vars: usize,
     uair_signature: UairSignature,
+    original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
+    folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
     pcs_transcript: PcsProverTranscript,
-    trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
 
     // Commitment info
     pp_bin: &'a ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -63,12 +84,8 @@ pub struct ProverBase<
     _phantom: PhantomData<(U, F)>,
 }
 
-//
-// Type-state structs
-//
-
-/// After step 1 via [`step1_combined`](ProverCommitted::step1_combined)
-/// (row-major / "combined" projection). `project_scalar` has been consumed.
+/// After step 2 via [`step2_combined`](ProverCommitted::step2_combined)
+/// (row-major / "combined" projection).
 #[derive(Clone, Debug)]
 pub struct ProverProjectedCombined<
     'a,
@@ -78,14 +95,14 @@ pub struct ProverProjectedCombined<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
     projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
-/// After step 1 via [`step1_mle_first`](ProverCommitted::step1_mle_first)
-/// (column-major / MLE-first projection). `project_scalar` has been consumed.
+/// After step 2 via [`step2_mle_first`](ProverCommitted::step2_mle_first)
+/// (column-major / MLE-first projection).
 #[derive(Clone, Debug)]
 pub struct ProverProjectedMleFirst<
     'a,
@@ -95,13 +112,13 @@ pub struct ProverProjectedMleFirst<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
     projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
 }
 
-/// After step 2 (ideal check).
+/// After step 3 (ideal check).
 #[derive(Clone, Debug)]
 pub struct ProverIdealChecked<
     'a,
@@ -111,7 +128,7 @@ pub struct ProverIdealChecked<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: HashMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -121,7 +138,7 @@ pub struct ProverIdealChecked<
     ic_eval_point: Vec<F>,
 }
 
-/// After step 3 (eval projection). `projected_scalars_fx` has been consumed.
+/// After step 4 (eval projection). `projected_scalars_fx` has been consumed.
 #[derive(Clone, Debug)]
 pub struct ProverEvalProjected<
     'a,
@@ -131,7 +148,7 @@ pub struct ProverEvalProjected<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -142,7 +159,7 @@ pub struct ProverEvalProjected<
     projected_scalars_f: HashMap<U::Scalar, F>,
 }
 
-/// After step 4 (sumcheck).
+/// After step 5 (sumcheck).
 #[allow(clippy::type_complexity)]
 #[derive(Clone, Debug)]
 pub struct ProverSumchecked<
@@ -153,7 +170,7 @@ pub struct ProverSumchecked<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -166,7 +183,7 @@ pub struct ProverSumchecked<
     lookup_proof: Option<BatchedLookupProof<F>>,
 }
 
-/// After step 5 (multipoint eval).
+/// After step 6 (multipoint eval).
 #[derive(Clone, Debug)]
 pub struct ProverMultipointEvaled<
     'a,
@@ -176,7 +193,7 @@ pub struct ProverMultipointEvaled<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -189,7 +206,7 @@ pub struct ProverMultipointEvaled<
     r_0: Vec<F>,
 }
 
-/// After step 6 (lift-and-project).
+/// After step 7 (lift-and-project).
 #[derive(Clone, Debug)]
 pub struct ProverLifted<
     'a,
@@ -199,7 +216,7 @@ pub struct ProverLifted<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -212,7 +229,7 @@ pub struct ProverLifted<
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
-/// After step 7 (PCS open). No new fields are added here, but the PCS
+/// After step 8 (PCS open). No new fields are added here, but the PCS
 /// transcript has been updated with the opening proof.
 /// Ready for generating the final proof object in
 /// [`finish`](ProverPcsOpened::finish).
@@ -225,7 +242,7 @@ pub struct ProverPcsOpened<
     const D: usize,
     const FD: usize,
 > {
-    base: ProverBase<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, U, F, D, FD>,
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -242,9 +259,9 @@ pub struct ProverPcsOpened<
 /// define them
 macro_rules! impl_with_type_bounds {
     ($type_name:ident { $($code:tt)* }) => {
-        impl<'a, Zt, U, F, const D: usize> $type_name<'a, Zt, U, F, D, D>
+        impl<'a, Zt, U, F, const D: usize, const FD: usize> $type_name<'a, Zt, U, F, D, FD>
         where
-            Zt: ZincTypes<D, D>,
+            Zt: ZincTypes<D, FD>,
             Zt::Int: ProjectableToField<F>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
             U: Uair + 'static,
@@ -267,34 +284,62 @@ macro_rules! impl_with_type_bounds {
     };
 }
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
+impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
     F::Inner: ConstTranscribable,
 {
-    /// Step 0: Prover entry point.
+    /// Step 1: Folding the trace.
+    #[allow(clippy::type_complexity)]
+    pub fn step0_fold<'a>(
+        trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
+    ) -> Result<ProverFolded<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+        let uair_signature = U::signature();
+        let witness_trace = trace.witness(&uair_signature);
+
+        let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)
+            .map(Zt::BinaryFold::fold_trace_column)
+            .collect();
+
+        let folded_witness_trace = UairTrace {
+            binary_poly: Cow::Owned(folded_bin_witness_trace),
+            arbitrary_poly: witness_trace.arbitrary_poly.clone(),
+            int: witness_trace.int.clone(),
+        };
+
+        Ok(ProverFolded {
+            uair_signature,
+            original_trace: trace,
+            folded_witness_trace,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl_with_type_bounds!(ProverFolded
+{
+    /// Step 1: Commitment.
     /// Commit *witness* columns via Zip+ PCS, absorb roots and public
     /// data into the Fiat-Shamir transcript.
     #[allow(clippy::type_complexity)]
-    pub fn step0_commit<'a>(
+    pub fn step1_commit(
+        self,
         (pp_bin, pp_arb, pp_int): &'a (
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-    ) -> Result<ProverBase<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
-        let uair_signature = U::signature();
-        let public_trace = trace.public(&uair_signature);
-        let witness_trace = trace.witness(&uair_signature);
+    ) -> Result<ProverCommitted<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+        let sig = &self.uair_signature;
+        let public_trace = self.original_trace.public(sig);
 
         let (res_bin, (res_arb, res_int)) = cfg_join!(
-            commit_optionally(pp_bin, &witness_trace.binary_poly),
-            commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
-            commit_optionally(pp_int, &witness_trace.int),
+            commit_optionally(pp_bin, &self.folded_witness_trace.binary_poly),
+            commit_optionally(pp_arb, &self.folded_witness_trace.arbitrary_poly),
+            commit_optionally(pp_int, &self.folded_witness_trace.int),
         );
         let (hint_bin, commitment_bin) = res_bin?;
         let (hint_arb, commitment_arb) = res_arb?;
@@ -311,11 +356,12 @@ where
         );
         absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
-        Ok(ProverBase {
+        Ok(ProverCommitted {
             num_vars,
-            uair_signature,
+            uair_signature: self.uair_signature,
+            original_trace: self.original_trace,
+            folded_witness_trace: self.folded_witness_trace,
             pcs_transcript,
-            trace,
             pp_bin,
             pp_arb,
             pp_int,
@@ -328,9 +374,9 @@ where
             _phantom: PhantomData,
         })
     }
-}
+});
 
-impl_with_type_bounds!(ProverBase
+impl_with_type_bounds!(ProverCommitted
 {
     #[allow(clippy::type_complexity)]
     fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
@@ -347,17 +393,17 @@ impl_with_type_bounds!(ProverBase
         Ok((field_cfg, projected_scalars_fx))
     }
 
-    /// Step 1 (combined / row-major): Prime projection
+    /// Step 2 (combined / row-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the row-major layout.
     /// Works for both linear and non-linear constraints.
-    pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step2_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
 
-        let projected_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
+        let projected_trace = project_trace_coeffs_row_major(self.original_trace, &field_cfg);
         Ok(ProverProjectedCombined {
             base: self,
             field_cfg,
@@ -366,16 +412,16 @@ impl_with_type_bounds!(ProverBase
         })
     }
 
-    /// Step 1 (MLE-first / column-major): Prime projection
+    /// Step 2 (MLE-first / column-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the column-major layout.
-    pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step2_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
 
-        let projected_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
+        let projected_trace = project_trace_coeffs_column_major(self.original_trace, &field_cfg);
         Ok(ProverProjectedMleFirst {
             base: self,
             field_cfg,
@@ -387,11 +433,11 @@ impl_with_type_bounds!(ProverBase
 
 impl_with_type_bounds!(ProverProjectedCombined
 {
-    /// Step 2 (combined): Ideal check via `prove_combined` on the row-major
+    /// Step 3 (combined): Ideal check via `prove_combined` on the row-major
     /// trace. Works for both linear and non-linear constraints.
-    pub fn step2_ideal_check(
+    pub fn step3_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
         let (ic_proof, ic_prover_state) = U::prove_combined(
@@ -416,15 +462,15 @@ impl_with_type_bounds!(ProverProjectedCombined
 
 impl_with_type_bounds!(ProverProjectedMleFirst
 {
-    /// Step 2 (MLE-first): Ideal check via `prove_mle_first` on the
+    /// Step 3 (MLE-first): Ideal check via `prove_mle_first` on the
     /// column-major trace. Works for any UAIR: linear non-zero-ideal
     /// constraints go through the column-major MLE-first path, non-linear
     /// non-zero-ideal constraints fall back to the row-major path (with an
     /// internal transpose), and zero-ideal constraints are short-circuited
     /// to zero.
-    pub fn step2_ideal_check(
+    pub fn step3_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
         let (ic_proof, ic_prover_state) = U::prove_mle_first(
@@ -449,11 +495,11 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 
 impl_with_type_bounds!(ProverIdealChecked
 {
-    /// Step 3: Evaluation projection (`\psi_a`: `F_q[X] -> F_q`). Samples
+    /// Step 4: Evaluation projection (`\psi_a`: `F_q[X] -> F_q`). Samples
     /// `a in F_q`, evaluates polynomials at `X = a`.
-    pub fn step3_eval_projection(
+    pub fn step4_eval_projection(
         mut self,
-    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
@@ -478,13 +524,13 @@ impl_with_type_bounds!(ProverIdealChecked
 
 impl_with_type_bounds!(ProverEvalProjected
 {
-    /// Step 4: Combined CPR + Lookup multi-degree sumcheck over F_q.
+    /// Step 5: Combined CPR + Lookup multi-degree sumcheck over F_q.
     /// Batches the CPR constraint claim (degree `max_deg+2`) with lookup groups
     /// (one per table type) into a single sumcheck sharing one evaluation point `r*`.
     /// Produces `up_evals` and `down_evals` (CPR) and lookup auxiliary witnesses at `r*`.
-    pub fn step4_sumcheck(
+    pub fn step5_sumcheck(
         mut self,
-    ) -> Result<ProverSumchecked<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
@@ -541,13 +587,13 @@ impl_with_type_bounds!(ProverEvalProjected
 
 impl_with_type_bounds!(ProverSumchecked
 {
-    /// Step 5: Multi-point evaluation sumcheck. Combines `up_evals` and
+    /// Step 6: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
     /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 6
-    pub fn step5_multipoint_eval(
+    /// polynomial-valued `lifted_evals` in Step 7.
+    pub fn step6_multipoint_eval(
         mut self,
-    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace_f,
@@ -574,18 +620,18 @@ impl_with_type_bounds!(ProverSumchecked
 
 impl_with_type_bounds!(ProverMultipointEvaled
 {
-    /// Step 6: Lift-and-project. Computes per-column polynomial MLE
+    /// Step 7: Lift-and-project. Computes per-column polynomial MLE
     /// evaluations at `r_0` in `F_q[X]` and absorbs them into the transcript.
-    pub fn step6_lift_and_project(
+    pub fn step7_lift_and_project(
         mut self,
-    ) -> Result<ProverLifted<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
         // (after \phi_q but before \psi_a). The verifier derives the scalar
         // open_evals via \psi_a for the sumcheck consistency check, and
         // supplies these to the Zip+ PCS for alpha-projection.
-        let lifted_evals = compute_lifted_evals::<F, D>(
+        let lifted_evals = compute_lifted_evals(
             &self.r_0,
-            &self.base.trace.binary_poly,
+            &self.base.original_trace.binary_poly,
             &self.projected_trace,
             &self.field_cfg,
         );
@@ -614,18 +660,28 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
 impl_with_type_bounds!(ProverLifted
 {
-    /// Step 7: PCS open at `r_0` (witness columns only).
-    pub fn step7_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
+    /// Step 8: PCS open at `r_0` (witness columns only).
+    pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, D>, ProtocolError<F, U::Ideal>> {
-        let witness_trace = self.base.trace.witness(&self.base.uair_signature);
+    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+        let witness_trace = &self.base.folded_witness_trace;
+
+        // Folded witness columns are proved using the extended evaluation point `r_0_ext`,
+        // which extends `r_0` with additional sampled folding challenges.
+        let mut r_0_ext = self.r_0.clone();
+        let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
+        (0..num_folding_challenges).for_each(|_| {
+            let g_chal: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
+            let gamma = F::from_with_cfg(&g_chal, &self.field_cfg);
+            r_0_ext.push(gamma);
+        });
 
         if let Some(hint_bin) = &self.base.hint_bin {
             let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 &mut self.base.pcs_transcript,
                 self.base.pp_bin,
                 &witness_trace.binary_poly,
-                &self.r_0,
+                &r_0_ext,
                 hint_bin,
                 &self.field_cfg,
             )?;
@@ -713,9 +769,9 @@ impl_with_type_bounds!(ProverPcsOpened
 // prove() wrapper
 //
 
-impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D, D>
+impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
-    Zt: ZincTypes<D, D>,
+    Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -737,7 +793,7 @@ where
     /// Zinc+ full PIOP prover.
     ///
     /// Runs all protocol steps in sequence and returns the assembled proof.
-    /// For per-step control, start with [`Self::step0_commit`] and chain the
+    /// For per-step control, start with [`Self::step1_commit`] and chain the
     /// individual `stepN_*` methods.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
@@ -750,24 +806,24 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
-        let committed = Self::step0_commit(pp, trace, num_vars)?;
+        let committed = Self::step0_fold(trace)?.step1_commit(pp, num_vars)?;
 
         let ideal_checked = if MLE_FIRST {
             committed
-                .step1_mle_first(project_scalar)?
-                .step2_ideal_check()?
+                .step2_mle_first(project_scalar)?
+                .step3_ideal_check()?
         } else {
             committed
-                .step1_combined(project_scalar)?
-                .step2_ideal_check()?
+                .step2_combined(project_scalar)?
+                .step3_ideal_check()?
         };
 
         ideal_checked
-            .step3_eval_projection()?
-            .step4_sumcheck()?
-            .step5_multipoint_eval()?
-            .step6_lift_and_project()?
-            .step7_pcs_open::<CHECK_FOR_OVERFLOW>()?
+            .step4_eval_projection()?
+            .step5_sumcheck()?
+            .step6_multipoint_eval()?
+            .step7_lift_and_project()?
+            .step8_pcs_open::<CHECK_FOR_OVERFLOW>()?
             .finish()
     }
 }

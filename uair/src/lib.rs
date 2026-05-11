@@ -316,9 +316,18 @@ impl UairSignature {
 /// If owned, it contains the full trace, otherwise it contains a view on the
 /// full trace (e.g. only public columns).
 #[derive(Debug, Clone, Default)]
-pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize> {
-    pub binary_poly: Cow<'a, [DenseMultilinearExtension<BinaryPoly<DB>>]>,
-    pub arbitrary_poly: Cow<'a, [DenseMultilinearExtension<DensePolynomial<PolyCoeff, DA>>]>,
+pub struct UairTrace<
+    'a,
+    PolyCoeff: Clone,
+    Int: Clone,
+    const BINARY_POLY_DEGREE_PLUS_ONE: usize,
+    const ARBITRARY_POLY_DEGREE_PLUS_ONE: usize,
+> {
+    pub binary_poly: Cow<'a, [DenseMultilinearExtension<BinaryPoly<BINARY_POLY_DEGREE_PLUS_ONE>>]>,
+    pub arbitrary_poly: Cow<
+        'a,
+        [DenseMultilinearExtension<DensePolynomial<PolyCoeff, ARBITRARY_POLY_DEGREE_PLUS_ONE>>],
+    >,
     pub int: Cow<'a, [DenseMultilinearExtension<Int>]>,
 }
 

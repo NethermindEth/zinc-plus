@@ -17,12 +17,14 @@
 //! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
 //! - Step 7: Zip+ PCS open/verify at r_0
 
+pub mod fold;
 pub mod prover;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::fold::FoldTrace;
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
 use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
@@ -251,6 +253,8 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
             PrimeTest = Self::PrimeTest,
         >;
 
+    type BinaryFold: FoldTrace<BinaryPoly<DEGREE_PLUS_ONE>, BinaryPoly<FOLDED_DEG_PLUS_ONE>>;
+
     /// Linear code used in Zip+ for the binary polynomial trace columns.
     type BinaryLc: LinearCode<Self::BinaryZt>;
 
@@ -423,6 +427,7 @@ where
 #[cfg(not(miri))] // long running
 mod tests {
     use super::*;
+    use crate::fold::NoopFoldTrace;
     use crypto_bigint::U64;
     use crypto_primitives::{
         Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
@@ -573,6 +578,8 @@ mod tests {
         type ArbitraryZt = ArbitraryPolyZipTypesIprs;
         type IntZt = IntZipTypes;
 
+        type BinaryFold = NoopFoldTrace;
+
         type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
         type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
         type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP_FACTOR, CHECKED>;
@@ -599,6 +606,8 @@ mod tests {
         type BinaryZt = BinPolyZipTypes;
         type ArbitraryZt = ArbitraryPolyZipTypesRaa;
         type IntZt = IntZipTypes;
+
+        type BinaryFold = NoopFoldTrace;
 
         type BinaryLc = RaaCode<Self::BinaryZt, TestRaaConfig, REP_FACTOR>;
         type ArbitraryLc = RaaCode<Self::ArbitraryZt, TestRaaConfig, REP_FACTOR>;

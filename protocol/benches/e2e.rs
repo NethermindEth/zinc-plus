@@ -20,7 +20,7 @@ use zinc_poly::{
     },
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
-use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes};
+use zinc_protocol::{Proof, ZincPlusPiop, ZincTypes, fold::NoopFoldTrace};
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
     ShaProxy, TestUairNoMultiplication,
@@ -224,6 +224,8 @@ where
         ScalarProduct,
         MBSInnerProduct,
     >;
+
+    type BinaryFold = NoopFoldTrace;
 
     type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
     type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP_FACTOR, PERFORM_CHECKS>;
@@ -432,73 +434,80 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     // Build the chain once; each bench clones the cached state.
 
-    let p_committed = <piop!()>::step0_commit(pp, trace, num_vars).unwrap();
-    let p_projected = p_committed.clone().step1_combined(project_scalar).unwrap();
-    let p_projected_mle = p_committed.clone().step1_mle_first(project_scalar).unwrap();
-    let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
-    let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
-    let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
-    let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
-    let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
+    let p_folded = <piop!()>::step0_fold(trace).unwrap();
+    let p_committed = p_folded.clone().step1_commit(pp, num_vars).unwrap();
+    let p_projected = p_committed.clone().step2_combined(project_scalar).unwrap();
+    let p_projected_mle = p_committed.clone().step2_mle_first(project_scalar).unwrap();
+    let p_ideal_checked = p_projected.clone().step3_ideal_check().unwrap();
+    let p_eval_projected = p_ideal_checked.clone().step4_eval_projection().unwrap();
+    let p_sumchecked = p_eval_projected.clone().step5_sumcheck().unwrap();
+    let p_mp_evaled = p_sumchecked.clone().step6_multipoint_eval().unwrap();
+    let p_lifted = p_mp_evaled.clone().step7_lift_and_project().unwrap();
 
     step_bench!(
-        "Prove" / "0: Commit",
+        "Prove" / "0: Fold",
         setup = || {},
-        run = |_s| <piop!()>::step0_commit(pp, trace, num_vars),
+        run = |_s| <piop!()>::step0_fold(trace),
     );
 
     step_bench!(
-        "Prove" / "1: Prime projection (Combined)",
+        "Prove" / "1: Commit",
+        setup = || p_folded.clone(),
+        run = |s| s.step1_commit(pp, num_vars),
+    );
+
+    step_bench!(
+        "Prove" / "2: Prime projection (Combined)",
         setup = || p_committed.clone(),
-        run = |s| s.step1_combined(project_scalar),
+        run = |s| s.step2_combined(project_scalar),
     );
 
     step_bench!(
-        "Prove" / "1: Prime projection (MLE-first)",
+        "Prove" / "2: Prime projection (MLE-first)",
         setup = || p_committed.clone(),
-        run = |s| s.step1_mle_first(project_scalar),
+        run = |s| s.step2_mle_first(project_scalar),
     );
 
     step_bench!(
-        "Prove" / "2: Ideal check (Combined)",
+        "Prove" / "3: Ideal check (Combined)",
         setup = || p_projected.clone(),
-        run = |s| s.step2_ideal_check(),
+        run = |s| s.step3_ideal_check(),
     );
 
     step_bench!(
-        "Prove" / "2: Ideal check (MLE-first)",
+        "Prove" / "3: Ideal check (MLE-first)",
         setup = || p_projected_mle.clone(),
-        run = |s| s.step2_ideal_check(),
+        run = |s| s.step3_ideal_check(),
     );
 
     step_bench!(
-        "Prove" / "3: Eval projection",
+        "Prove" / "4: Eval projection",
         setup = || p_ideal_checked.clone(),
-        run = |s| s.step3_eval_projection(),
+        run = |s| s.step4_eval_projection(),
     );
 
     step_bench!(
-        "Prove" / "4: Combined sumcheck",
+        "Prove" / "5: Combined sumcheck",
         setup = || p_eval_projected.clone(),
-        run = |s| s.step4_sumcheck(),
+        run = |s| s.step5_sumcheck(),
     );
 
     step_bench!(
-        "Prove" / "5: Multi-point eval",
+        "Prove" / "6: Multi-point eval",
         setup = || p_sumchecked.clone(),
-        run = |s| s.step5_multipoint_eval(),
+        run = |s| s.step6_multipoint_eval(),
     );
 
     step_bench!(
-        "Prove" / "6: Lift-and-project",
+        "Prove" / "7: Lift-and-project",
         setup = || p_mp_evaled.clone(),
-        run = |s| s.step6_lift_and_project(),
+        run = |s| s.step7_lift_and_project(),
     );
 
     step_bench!(
-        "Prove" / "7: PCS open",
+        "Prove" / "8: PCS open",
         setup = || p_lifted.clone(),
-        run = |s| s.step7_pcs_open::<PERFORM_CHECKS>(),
+        run = |s| s.step8_pcs_open::<PERFORM_CHECKS>(),
     );
 
     //

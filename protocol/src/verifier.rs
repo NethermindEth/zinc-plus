@@ -1,5 +1,6 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use itertools::Itertools;
 use num_traits::Zero;
 use std::{collections::HashMap, io::Cursor};
 use zinc_piop::{
@@ -706,6 +707,18 @@ where
                 }
             }};
         }
+
+        // Folded witness columns are proved using the extended evaluation point
+        // `r_0_ext`, which extends `r_0` with additional sampled folding challenges.
+        let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
+        let folding_challenges = (0..num_folding_challenges)
+            .map(|_| {
+                let g_chal: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
+                F::from_with_cfg(&g_chal, &self.field_cfg)
+            })
+            .collect_vec();
+        let mut r_0_ext = r_0.clone();
+        r_0_ext.extend(folding_challenges.clone());
 
         verify_pcs_batch!(
             Zt::BinaryZt,
