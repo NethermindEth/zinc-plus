@@ -316,6 +316,6 @@ mod tests {
             type ArrCombRDotChal = MBSInnerProduct;
         }
 
-        do_encode::<BenchZipPlusTypes<i64>, 4>(14);
+        do_encode::<BenchZipPlusTypes<i64>, 4>(12);
     }
 }
