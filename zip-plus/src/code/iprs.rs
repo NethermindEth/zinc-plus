@@ -41,7 +41,7 @@ where
     /// Currently, keeps number of columns <= 2^8 but this might be tweaked in
     /// the future.
     pub fn new_with_optimal_depth(row_len: usize) -> Result<Self, ZipError> {
-        const MAX_BASE_COLS_LOG2: usize = 8;
+        const MAX_BASE_COLS_LOG2: usize = 6;
 
         let target_base_len = 1 << MAX_BASE_COLS_LOG2;
         // We want depth to be at least 1.
