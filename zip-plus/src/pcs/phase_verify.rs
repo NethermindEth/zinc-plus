@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use zinc_poly::Polynomial;
 use zinc_transcript::{
     Blake3Transcript,
-    traits::{Transcribable, Transcript},
+    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{
     UNCHECKED, add, cfg_into_iter,
@@ -220,20 +220,33 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
         }
 
+        let elem_bytes = <Zt::Cw as ConstTranscribable>::NUM_BYTES;
+        let n_entries = batch_size * vp.num_rows;
         let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
             .map(|_| -> Result<_, ZipError> {
                 let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
+                let (decompressed, leaf) = transcript.read_compressed_blob()?;
+                if decompressed.len() != n_entries * elem_bytes {
+                    return Err(ZipError::InvalidPcsOpen(format!(
+                        "Decompressed column blob has unexpected size: got {}, expected {}",
+                        decompressed.len(),
+                        n_entries * elem_bytes
+                    )));
+                }
+                let column_values: Vec<Zt::Cw> = decompressed
+                    .chunks_exact(elem_bytes)
+                    .map(<Zt::Cw as GenTranscribable>::read_transcription_bytes_exact)
+                    .collect();
                 let proof = transcript.read_merkle_proof().map_err(|e| {
                     ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
                 })?;
 
-                Ok((column_idx, column_values, proof))
+                Ok((column_idx, column_values, leaf, proof))
             })
             .try_collect()?;
 
         cfg_into_iter!(columns_and_proofs).try_for_each(
-            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
+            |(column_idx, column_values, leaf, proof)| -> Result<(), ZipError> {
                 Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
                     per_poly_alphas,
                     &coeffs,
@@ -245,7 +258,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 )?;
 
                 proof
-                    .verify(&comm.root, &column_values, column_idx)
+                    .verify_with_leaf_hash(&comm.root, leaf, column_idx)
                     .map_err(|e| {
                         ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
                     })?;
@@ -926,25 +939,39 @@ mod tests {
 
         let point_f: Vec<F> = point.iter().map(|v| v.into_with_cfg(&field_cfg)).collect();
 
-        // New transcript layout: [b field elems] [combined_row] [column openings...]
-        // To trigger "Proximity failure", corrupt a column value (past b +
-        // combined_row).
+        // Layout: [b field elems] [combined_row] [opening: (u64
+        // compressed_len, compressed_blob, merkle_proof) ...]. Column
+        // bytes are zstd-compressed before the prover writes them, so
+        // a byte flip inside the blob now fans out one of several
+        // ways:
+        //   - decompression fails (Transcript(InvalidData, ...)),
+        //   - decompression succeeds but yields different column
+        //     bytes — leaf hash changes → Merkle path verification
+        //     fails ("Column opening verification failed: ..."),
+        //   - on a rare lucky tamper, only proximity changes.
+        // The contract we still want to assert is "tampering inside
+        // the column-opening region breaks verification"; the exact
+        // failure variant depends on which byte we hit. We accept any
+        // error and only fail on Ok.
         let row_len = pp.linear_code.row_len();
         let num_bytes_f = eval_f.inner().get_num_bytes();
         let b_section_size = 1 + pp.num_rows * 2 * num_bytes_f;
         let bytes_per_comb_r = M * size_of::<crypto_bigint::Word>();
         let combined_row_size = row_len * bytes_per_comb_r;
+        // Skip the u64 length prefix so the flip lands inside the
+        // compressed payload (a zstd magic-bytes flip would fail
+        // immediately, which is fine too — we just want some flip
+        // inside the blob).
         let column_values_start = b_section_size + combined_row_size;
-        let bytes_per_cw = K * size_of::<crypto_bigint::Word>();
+        let blob_payload_offset = column_values_start + size_of::<u64>();
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
         assert!(
-            column_values_start + bytes_per_cw <= verifier_transcript.stream.get_ref().len(),
-            "proof too small to tamper column values"
+            blob_payload_offset < verifier_transcript.stream.get_ref().len(),
+            "proof too small to tamper compressed column blob"
         );
 
-        let flip_at = column_values_start + bytes_per_cw / 2;
-        verifier_transcript.stream.get_mut()[flip_at] ^= 0x01;
+        verifier_transcript.stream.get_mut()[blob_payload_offset + 4] ^= 0x01;
 
         verifier_transcript.fs_transcript.absorb_slice(&comm.root);
         let field_cfg = get_field_cfg::<Zt, F>(&mut verifier_transcript.fs_transcript);
@@ -958,13 +985,10 @@ mod tests {
             &eval_f,
         );
 
-        match res {
-            Err(ZipError::InvalidPcsOpen(msg)) => {
-                assert_eq!(msg, "Proximity failure");
-            }
-            Ok(()) => panic!("verification unexpectedly succeeded"),
-            Err(e) => panic!("unexpected error: {e:?}"),
-        }
+        assert!(
+            res.is_err(),
+            "verification unexpectedly succeeded after tampering compressed column bytes"
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_transcript::traits::Transcribable;
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{
     cfg_into_iter, cfg_iter, cfg_join, from_ref::FromRef, mul_by_scalar::MulByScalar,
 };
@@ -258,21 +258,45 @@ where
             )?)
         };
 
+        // Layout of the column blob mirrors `new_combined_3`'s leaf
+        // input: group 0 rows, then group 1, then group 2, in matrix
+        // order. The verifier splits the decompressed buffer by the
+        // same per-group byte counts.
+        let eb0 = <Zt0::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb1 = <Zt1::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb2 = <Zt2::Cw as ConstTranscribable>::NUM_BYTES;
+        let total_rows_0: usize = hint.cw_matrices_0.iter().map(|m| m.num_rows).sum();
+        let total_rows_1: usize = hint.cw_matrices_1.iter().map(|m| m.num_rows).sum();
+        let total_rows_2: usize = hint.cw_matrices_2.iter().map(|m| m.num_rows).sum();
+        let blob_size = total_rows_0 * eb0 + total_rows_1 * eb1 + total_rows_2 * eb2;
+
         for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(codeword_len);
 
+            let mut col_buf = vec![0_u8; blob_size];
+            let mut offset = 0;
             for cw_matrix in &hint.cw_matrices_0 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb0]);
+                    offset += eb0;
+                }
             }
             for cw_matrix in &hint.cw_matrices_1 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb1]);
+                    offset += eb1;
+                }
             }
             for cw_matrix in &hint.cw_matrices_2 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb2]);
+                    offset += eb2;
+                }
             }
+            transcript.write_compressed_blob(&col_buf)?;
 
             let merkle_proof = hint
                 .merkle_tree
@@ -389,30 +413,55 @@ where
             2
         };
 
+        // Same layout as `prove_f`: one compressed blob per opening,
+        // covering group 0, 1, 2 in order. Per-domain byte breakdown
+        // can no longer measure each group's contribution exactly (the
+        // blob is a single compressed unit), so the full compressed
+        // blob is attributed to the shared-merkle target domain
+        // alongside the Merkle path bytes.
+        let eb0 = <Zt0::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb1 = <Zt1::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb2 = <Zt2::Cw as ConstTranscribable>::NUM_BYTES;
+        let total_rows_0: usize = hint.cw_matrices_0.iter().map(|m| m.num_rows).sum();
+        let total_rows_1: usize = hint.cw_matrices_1.iter().map(|m| m.num_rows).sum();
+        let total_rows_2: usize = hint.cw_matrices_2.iter().map(|m| m.num_rows).sum();
+        let blob_size = total_rows_0 * eb0 + total_rows_1 * eb1 + total_rows_2 * eb2;
+
         for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
             let column_idx = transcript.squeeze_challenge_idx(codeword_len);
 
-            let q0 = pos(transcript);
+            let mut col_buf = vec![0_u8; blob_size];
+            let mut offset = 0;
             for cw_matrix in &hint.cw_matrices_0 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb0]);
+                    offset += eb0;
+                }
             }
-            let q1 = pos(transcript);
-            bd0.column_values.extend(snapshot(transcript, q0, q1));
-
             for cw_matrix in &hint.cw_matrices_1 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb1]);
+                    offset += eb1;
+                }
             }
-            let q2 = pos(transcript);
-            bd1.column_values.extend(snapshot(transcript, q1, q2));
-
             for cw_matrix in &hint.cw_matrices_2 {
-                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+                for row in cw_matrix.as_rows() {
+                    row[column_idx]
+                        .write_transcription_bytes_exact(&mut col_buf[offset..offset + eb2]);
+                    offset += eb2;
+                }
             }
-            let q3 = pos(transcript);
-            bd2.column_values.extend(snapshot(transcript, q2, q3));
+            let q0 = pos(transcript);
+            transcript.write_compressed_blob(&col_buf)?;
+            let q1 = pos(transcript);
+            let blob_bytes = snapshot(transcript, q0, q1);
+            match shared_merkle_target {
+                0 => bd0.column_values.extend(blob_bytes),
+                1 => bd1.column_values.extend(blob_bytes),
+                _ => bd2.column_values.extend(blob_bytes),
+            }
 
             let merkle_proof = hint
                 .merkle_tree
@@ -519,21 +568,49 @@ where
         assert_eq!(pre1.is_some(), bs1 > 0);
         assert_eq!(pre2.is_some(), bs2 > 0);
 
+        let eb0 = <Zt0::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb1 = <Zt1::Cw as ConstTranscribable>::NUM_BYTES;
+        let eb2 = <Zt2::Cw as ConstTranscribable>::NUM_BYTES;
+        let bytes_0 = bs0 * n0 * eb0;
+        let bytes_1 = bs1 * n1 * eb1;
+        let bytes_2 = bs2 * n2 * eb2;
+        let total_bytes = bytes_0 + bytes_1 + bytes_2;
+
         let openings: Vec<_> = (0..Zt0::NUM_COLUMN_OPENINGS)
             .map(|_| -> Result<_, ZipError> {
                 let column_idx = transcript.squeeze_challenge_idx(codeword_len);
-                let cv0: Vec<Zt0::Cw> = transcript.read_const_many(bs0 * n0)?;
-                let cv1: Vec<Zt1::Cw> = transcript.read_const_many(bs1 * n1)?;
-                let cv2: Vec<Zt2::Cw> = transcript.read_const_many(bs2 * n2)?;
+                let (decompressed, leaf) = transcript.read_compressed_blob()?;
+                if decompressed.len() != total_bytes {
+                    return Err(ZipError::InvalidPcsOpen(format!(
+                        "Decompressed combined column blob has unexpected size: got {}, expected {}",
+                        decompressed.len(),
+                        total_bytes,
+                    )));
+                }
+                let (s0, rest) = decompressed.split_at(bytes_0);
+                let (s1, s2) = rest.split_at(bytes_1);
+                debug_assert_eq!(s2.len(), bytes_2);
+                let cv0: Vec<Zt0::Cw> = s0
+                    .chunks_exact(eb0)
+                    .map(<Zt0::Cw as GenTranscribable>::read_transcription_bytes_exact)
+                    .collect();
+                let cv1: Vec<Zt1::Cw> = s1
+                    .chunks_exact(eb1)
+                    .map(<Zt1::Cw as GenTranscribable>::read_transcription_bytes_exact)
+                    .collect();
+                let cv2: Vec<Zt2::Cw> = s2
+                    .chunks_exact(eb2)
+                    .map(<Zt2::Cw as GenTranscribable>::read_transcription_bytes_exact)
+                    .collect();
                 let proof = transcript.read_merkle_proof().map_err(|e| {
                     ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
                 })?;
-                Ok((column_idx, cv0, cv1, cv2, proof))
+                Ok((column_idx, cv0, cv1, cv2, leaf, proof))
             })
             .try_collect()?;
 
         cfg_into_iter!(openings).try_for_each(
-            |(column_idx, cv0, cv1, cv2, proof)| -> Result<(), ZipError> {
+            |(column_idx, cv0, cv1, cv2, leaf, proof)| -> Result<(), ZipError> {
                 if let Some(pre) = pre0 {
                     ZipPlus::<Zt0, Lc0>::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
                         per_poly_alphas_0,
@@ -569,7 +646,7 @@ where
                 }
 
                 proof
-                    .verify_combined_3(&comm0.root, &cv0, &cv1, &cv2, column_idx)
+                    .verify_with_leaf_hash(&comm0.root, leaf, column_idx)
                     .map_err(|e| {
                         ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
                     })?;

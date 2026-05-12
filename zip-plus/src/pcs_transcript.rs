@@ -1,4 +1,9 @@
-use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
+use crate::{
+    ZipError,
+    merkle::{MerkleProof, MtHash, hash_compressed_bytes},
+    pcs::structs::ZipPlusCommitment,
+    utils::ZSTD_LEVEL,
+};
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -207,6 +212,22 @@ impl PcsProverTranscript {
         self.write(&value_u64)
     }
 
+    /// Compress `raw` with zstd-3 and write `(u64 compressed_len,
+    /// compressed_bytes)` to the proof stream. Used for column-opening
+    /// payloads: the verifier hashes the same compressed bytes to
+    /// recover the Merkle leaf, so the bytes written here must match
+    /// what the prover compressed at commit time. zstd is
+    /// deterministic at a fixed level, so re-compressing the same
+    /// `raw` here produces identical bytes.
+    pub fn write_compressed_blob(&mut self, raw: &[u8]) -> Result<(), ZipError> {
+        let compressed = zstd::encode_all(raw, ZSTD_LEVEL).map_err(|e| {
+            ZipError::Transcript(ErrorKind::Other, format!("zstd compression failed: {e}"))
+        })?;
+        self.write_usize(compressed.len())?;
+        self.stream.write_all(&compressed)?;
+        Ok(())
+    }
+
     pub fn write_merkle_proof(&mut self, proof: &MerkleProof) -> Result<(), ZipError> {
         // Write the dimensions of matrix used to construct the Merkle tree
         self.write_usize(proof.leaf_index)?;
@@ -311,6 +332,25 @@ impl PcsVerifierTranscript {
     fn read_usize(&mut self) -> Result<usize, ZipError> {
         let value = self.read::<u64>()?;
         safe_cast!(value, u64, usize)
+    }
+
+    /// Counterpart of [`PcsProverTranscript::write_compressed_blob`].
+    /// Reads `(u64 compressed_len, compressed_bytes)`, computes the
+    /// Merkle leaf hash from the compressed bytes (no re-compression),
+    /// and decompresses the payload for downstream use. Returning the
+    /// leaf hash here avoids re-walking the compressed buffer for the
+    /// caller — the verifier needs both the decompressed bytes (to
+    /// parse column values for the proximity check) and the leaf hash
+    /// (to verify the Merkle path).
+    pub fn read_compressed_blob(&mut self) -> Result<(Vec<u8>, MtHash), ZipError> {
+        let compressed_len = self.read_usize()?;
+        let mut compressed = vec![0_u8; compressed_len];
+        self.stream.read_exact(&mut compressed)?;
+        let leaf = hash_compressed_bytes(&compressed);
+        let decompressed = zstd::decode_all(&compressed[..]).map_err(|e| {
+            ZipError::Transcript(ErrorKind::InvalidData, format!("zstd decompression failed: {e}"))
+        })?;
+        Ok((decompressed, leaf))
     }
 
     pub fn read_merkle_proof(&mut self) -> Result<MerkleProof, ZipError> {

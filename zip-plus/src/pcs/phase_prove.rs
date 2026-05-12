@@ -48,7 +48,7 @@ use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_utils::{
     UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
     from_ref::FromRef,
@@ -534,11 +534,29 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         column_idx: usize,
         mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
     ) -> Result<(), ZipError> {
-        let pos_v_start = stream_pos(transcript);
+        // Serialize this column's bytes in the same layout the Merkle
+        // commit used (each cw_matrix's `as_rows()[*][column_idx]`, in
+        // order), then ship them through `write_compressed_blob` so
+        // the verifier can recover the Merkle leaf by hashing the
+        // compressed bytes directly.
+        let elem_bytes = <Zt::Cw as ConstTranscribable>::NUM_BYTES;
+        let total_rows: usize = commit_hint
+            .cw_matrices
+            .iter()
+            .map(|m| m.num_rows)
+            .sum();
+        let mut col_buf = vec![0_u8; total_rows * elem_bytes];
+        let mut offset = 0;
         for cw_matrix in &commit_hint.cw_matrices {
-            let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-            transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+            for row in cw_matrix.as_rows() {
+                row[column_idx]
+                    .write_transcription_bytes_exact(&mut col_buf[offset..offset + elem_bytes]);
+                offset += elem_bytes;
+            }
         }
+
+        let pos_v_start = stream_pos(transcript);
+        transcript.write_compressed_blob(&col_buf)?;
         let pos_v_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
             bd.column_values

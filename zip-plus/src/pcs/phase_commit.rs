@@ -735,15 +735,16 @@ mod tests {
     fn proof_size_is_correct_for_parameters() {
         use std::mem::size_of;
 
-        fn calculate_expected_proof_size_bytes(
+        // Column-opening payloads are zstd-3 compressed, so the
+        // proof's exact size is data-dependent. We can still bound it
+        // by the uncompressed projection plus per-blob length-prefix
+        // overhead; the actual size should never exceed that.
+        fn calculate_uncompressed_upper_bound(
             pp: &ZipPlusParams<Zt, C>,
             batch_size: usize,
         ) -> usize {
-            // size of a single entry of cw_matrix
             let size_of_zt_k = K * size_of::<Word>();
-            // size of CombR in combine row
             let size_of_zt_m = M * size_of::<Word>();
-            // size_f = field_value || field_modulus
             let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
             let size_of_usize_field = size_of::<u64>();
             let size_of_path_elem = size_of::<MtHash>();
@@ -751,17 +752,17 @@ mod tests {
             let codeword_len = pp.linear_code.codeword_len();
             let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-            // b vectors: per poly, 1-byte length prefix + num_rows field elements
             let b_phase_size = batch_size * (1 + pp.num_rows * size_of_f);
             let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
 
-            // Column openings: per opening, column values from all cw_matrices + one Merkle
-            // proof
-            let column_values_size = batch_size * pp.num_rows * size_of_zt_k;
+            // Per opening: u64 compressed_len prefix + uncompressed
+            // column blob (worst case = no compression savings) +
+            // merkle proof.
+            let column_values_uncompressed = batch_size * pp.num_rows * size_of_zt_k;
             let single_merkle_proof_size =
                 size_of_usize_field * 3 + merkle_depth * size_of_path_elem;
-            let column_opening_phase_size =
-                Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
+            let column_opening_phase_size = Zt::NUM_COLUMN_OPENINGS
+                * (size_of_usize_field + column_values_uncompressed + single_merkle_proof_size);
 
             b_phase_size + combined_row_size + column_opening_phase_size
         }
@@ -795,7 +796,10 @@ mod tests {
         )
         .unwrap();
         let actual_proof_size_bytes = transcript.stream.get_ref().len();
-        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param, 1);
-        assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
+        let uncompressed_upper_bound = calculate_uncompressed_upper_bound(&param, 1);
+        assert!(
+            actual_proof_size_bytes <= uncompressed_upper_bound,
+            "actual proof size {actual_proof_size_bytes} exceeds uncompressed upper bound {uncompressed_upper_bound}",
+        );
     }
 }

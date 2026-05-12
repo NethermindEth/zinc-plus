@@ -1,3 +1,4 @@
+use crate::utils::ZSTD_LEVEL;
 use blake3::hazmat;
 use itertools::Itertools;
 use std::{
@@ -13,6 +14,31 @@ use zinc_utils::{add, cfg_into_iter, cfg_iter, sub};
 use rayon::prelude::*;
 
 pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
+
+/// Compress a leaf-input buffer with zstd at [`ZSTD_LEVEL`].
+///
+/// Leaves are `H(zstd(column_bytes))`: the prover compresses each
+/// column once at commit time (this function) and again when emitting
+/// the opening (the bytes it sends on the wire are the same compressed
+/// blob). The verifier recovers the leaf hash by hashing the
+/// transmitted blob directly — it does not re-compress. zstd is
+/// deterministic at a fixed level, so re-compression by the prover at
+/// open time matches the commit-time bytes.
+#[inline]
+fn zstd_compress(raw: &[u8]) -> Vec<u8> {
+    zstd::encode_all(raw, ZSTD_LEVEL).expect("zstd compression failed")
+}
+
+/// Hash a pre-compressed leaf blob — the verifier's path. Splitting
+/// this out from `hash_column` lets verifiers compute the Merkle leaf
+/// directly from the bytes they receive over the wire, without
+/// re-running compression.
+#[inline]
+pub fn hash_compressed_bytes(compressed: &[u8]) -> MtHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(compressed);
+    hasher.finalize().into()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -159,10 +185,15 @@ impl MerkleTree {
     }
 }
 
-/// Serialize all elements of `values` into a single contiguous byte buffer
-/// and hash them with Blake3 in one `update` call.  This lets Blake3 process
-/// full 1 KiB chunks with SIMD, which is significantly faster than the
-/// per-element `update` approach.
+/// Serialize all elements of `values` into a contiguous byte buffer,
+/// compress with zstd-3, and hash the compressed bytes with Blake3.
+///
+/// Leaves are `H(zstd(column_bytes))`. The compression happens before
+/// hashing so that prover and verifier can ship the compressed blob on
+/// the wire and recover the leaf hash from it directly (the verifier
+/// reuses [`hash_compressed_bytes`] on the received bytes). This
+/// function is the prover/commit path; the verifier path skips
+/// compression because it already has the compressed bytes.
 #[allow(clippy::arithmetic_side_effects)]
 fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
     let elem_bytes = S::NUM_BYTES;
@@ -171,18 +202,17 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
         let start = i * elem_bytes;
         v.write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&buf);
-    hasher.finalize().into()
+    let compressed = zstd_compress(&buf);
+    hash_compressed_bytes(&compressed)
 }
 
-/// Construct the leaves of the Merkle tree by hashing each column across all
-/// rows.
+/// Construct the leaves of the Merkle tree by compressing each
+/// column's serialized bytes with zstd-3 and hashing the compressed
+/// blob with Blake3.
 ///
-/// For each column, serializes all row elements into a single contiguous byte
-/// buffer and feeds it to Blake3 in one `update` call.  This lets Blake3
-/// process full 1 KiB chunks with SIMD, which is significantly faster than
-/// the per-element `update` approach when columns are tall (many rows).
+/// Each leaf is `H(zstd(column_bytes))`; see [`hash_column`] for the
+/// motivation. Compression is independent per column so the
+/// `cfg_into_iter!` parallelism still applies.
 #[allow(clippy::arithmetic_side_effects)]
 fn hash_leaves<S>(rows: &[&[S]], m_cols: usize) -> Vec<MtHash>
 where
@@ -199,9 +229,8 @@ where
                 let start = r * elem_bytes;
                 row[i].write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
             }
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&buf);
-            hasher.finalize().into()
+            let compressed = zstd_compress(&buf);
+            hash_compressed_bytes(&compressed)
         })
         .collect()
 }
@@ -248,9 +277,8 @@ where
                 row[i].write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes_2]);
                 offset += elem_bytes_2;
             }
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&buf);
-            hasher.finalize().into()
+            let compressed = zstd_compress(&buf);
+            hash_compressed_bytes(&compressed)
         })
         .collect()
 }
@@ -283,9 +311,8 @@ where
         v.write_transcription_bytes_exact(&mut buf[offset..offset + eb2]);
         offset += eb2;
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&buf);
-    hasher.finalize().into()
+    let compressed = zstd_compress(&buf);
+    hash_compressed_bytes(&compressed)
 }
 
 /// Builds a Merkle tree from the given leaves, abusing blake3::hazmat module
@@ -428,6 +455,21 @@ impl MerkleProof {
         S2: ConstTranscribable,
     {
         self.verify_with_leaf(root, hash_combined_column_3(col0, col1, col2), leaf_index)
+    }
+
+    /// Verify against a precomputed leaf hash. Used by callers that
+    /// have already computed `blake3(compressed_bytes)` — typically the
+    /// PCS verifier, which reads the compressed column blob off the
+    /// transcript and hashes it via [`hash_compressed_bytes`] before
+    /// the path walk. Equivalent to `verify` but skips the column
+    /// serialization + compression step.
+    pub fn verify_with_leaf_hash(
+        &self,
+        root: &MtHash,
+        leaf_hash: MtHash,
+        leaf_index: usize,
+    ) -> Result<(), MerkleError> {
+        self.verify_with_leaf(root, leaf_hash, leaf_index)
     }
 
     fn verify_with_leaf(
