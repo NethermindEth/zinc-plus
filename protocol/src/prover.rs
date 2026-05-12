@@ -575,9 +575,14 @@ impl_with_type_bounds!(ProverEvalProjected
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
+        // TODO(#185): once protocol-level prover materializes bit-op virtual
+        // MLEs, pass them here. For now no UAIR on `main` declares
+        // `bit_op_specs`, so passing an empty vec keeps behaviour identical.
+        let bit_op_down_mles = Vec::new();
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.projected_trace_f.clone(),
+            bit_op_down_mles,
             &self.ic_eval_point,
             &self.projected_scalars_f,
             num_constraints,
@@ -622,7 +627,7 @@ impl_with_type_bounds!(ProverEvalProjected
 
         let mut md_iter = md_states.into_iter();
 
-        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
+        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             md_iter.next().expect("CPR group always present"),
             cpr_ancillary,

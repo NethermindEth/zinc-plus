@@ -61,6 +61,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// # Parameters
     /// - `transcript`: FS-transcript.
     /// - `trace_matrix`: The trace that have been projected to F.
+    /// - `bit_op_down_mles`: MLEs of the bit-op virtual columns, projected to
+    ///   `F::Inner`, in `UairSignature::bit_op_specs()` order. The caller is
+    ///   responsible for applying the bit-op (ROTR / SHR) entry-wise on the
+    ///   *unprojected* binary_poly source column *before* projection — see
+    ///   Lemma 2.3 of the Zinc+ paper. The length must equal the signature's
+    ///   `bit_op_specs().len()`.
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
@@ -72,6 +78,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     pub fn prepare_sumcheck_group<U>(
         transcript: &mut impl Transcript,
         trace_matrix: Vec<DenseMultilinearExtension<F::Inner>>,
+        bit_op_down_mles: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
         num_constraints: usize,
@@ -100,9 +107,16 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // TODO consider working with pointers since down cols are virtual cols until
         // folded in sumcheck - virtual MLE trait needed in sumcheck.
         let uair_sig = U::signature();
+
+        assert_eq!(
+            bit_op_down_mles.len(),
+            uair_sig.bit_op_specs().len(),
+            "bit_op_down_mles count must match UairSignature::bit_op_specs().len()",
+        );
+
         let zero_inner = zero.clone().into_inner();
         let n = 1usize << num_vars;
-        let down: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(uair_sig.shifts())
+        let shift_mles: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(uair_sig.shifts())
             .map(|spec| {
                 let mut evals = trace_matrix[spec.source_col()][spec.shift_amount()..].to_vec();
                 evals.resize(n, zero_inner.clone());
@@ -112,6 +126,28 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 }
             })
             .collect();
+
+        // Down-row layout (see UairSignature::with_bit_op_specs):
+        //
+        //     [shifted_binary..., bit_op_binary...,
+        //      shifted_arbitrary..., shifted_int...]
+        //
+        // Shifts are sorted by source_col, so binary-source shifts come first.
+        // We splice the bit-op MLEs in between the binary and non-binary
+        // shift groups so that the resulting `down` vector is consistent with
+        // the down ColumnLayout (binary_poly_cols + arbitrary_poly_cols +
+        // int_cols).
+        let bit_op_down_offset = uair_sig.bit_op_down_offset();
+        let num_shift_down = shift_mles.len();
+        let num_bit_op_specs = bit_op_down_mles.len();
+        let mut down: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(num_shift_down + num_bit_op_specs);
+        let mut shift_iter = shift_mles.into_iter();
+        for _ in 0..bit_op_down_offset {
+            down.push(shift_iter.next().expect("offset within shift_mles range"));
+        }
+        down.extend(bit_op_down_mles);
+        down.extend(shift_iter);
 
         let eq_r = build_eq_x_r_inner(evaluation_point, field_cfg)?;
         // To get the constraints on the last row ignored
@@ -179,7 +215,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             MultiDegreeSumcheckGroup::new(max_degree + 2, mles, comb_fn),
             CprProverAncillary {
                 num_cols,
-                num_down_cols,
+                num_down_cols: num_shift_down,
                 num_vars,
             },
         ))
@@ -195,7 +231,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   counts and `num_vars` needed to split the flat eval vector.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::arithmetic_side_effects)]
-    pub fn finalize_prover(
+    pub fn finalize_prover<U>(
         transcript: &mut impl Transcript,
         sumcheck_prover_state: SumcheckProverState<F>,
         ancillary: CprProverAncillary,
@@ -204,6 +240,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     where
         F::Inner: ConstTranscribable + Zero,
         F::Modulus: ConstTranscribable,
+        U: Uair,
     {
         // Sumcheck prover stops evaluating MLEs
         // at the second to last challenge
@@ -230,17 +267,40 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             })
             .try_collect()?;
 
-        debug_assert_eq!(evals.len(), ancillary.num_cols + ancillary.num_down_cols);
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
-        transcript.absorb_random_field_slice(&evals, &mut transcription_buf);
-        let (up_evals, down_evals) = (
-            evals[0..ancillary.num_cols].to_vec(),
-            evals[ancillary.num_cols..].to_vec(),
+        let uair_sig = U::signature();
+        let num_bit_op_specs = uair_sig.bit_op_specs().len();
+        let bit_op_down_offset = uair_sig.bit_op_down_offset();
+
+        debug_assert_eq!(
+            evals.len(),
+            ancillary.num_cols + ancillary.num_down_cols + num_bit_op_specs,
         );
+
+        // The post-sumcheck evals are laid out as
+        //   [up_evals..., shifted_binary..., bit_op_evals..., shifted_non_binary...]
+        // matching the order in which `prepare_sumcheck_group` packed them
+        // into the MLE vector. We split them into three on-wire vectors:
+        // `up_evals`, `down_evals` (shifts only, in their UAIR-signature
+        // order), and `bit_op_evals` (in `bit_op_specs()` order).
+        let up_end = ancillary.num_cols;
+        let bit_op_start = up_end + bit_op_down_offset;
+        let bit_op_end = bit_op_start + num_bit_op_specs;
+
+        let up_evals = evals[..up_end].to_vec();
+        let bit_op_evals = evals[bit_op_start..bit_op_end].to_vec();
+        let mut down_evals = Vec::with_capacity(ancillary.num_down_cols);
+        down_evals.extend_from_slice(&evals[up_end..bit_op_start]);
+        down_evals.extend_from_slice(&evals[bit_op_end..]);
+
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&bit_op_evals, &mut transcription_buf);
         Ok((
             CprProof {
                 up_evals,
                 down_evals,
+                bit_op_evals,
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,
@@ -281,8 +341,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         U: Uair,
     {
         let uair_sig = U::signature();
-        proof
-            .validate_evaluation_sizes(uair_sig.total_cols().cols(), uair_sig.down_cols().cols())?;
+        proof.validate_evaluation_sizes(
+            uair_sig.total_cols().cols(),
+            uair_sig.shifts().len(),
+            uair_sig.bit_op_specs().len(),
+        )?;
 
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -387,13 +450,24 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 .expect("all scalars should have been projected at this point")
         };
 
+        // Build the full down-row eval vec by splicing bit-op evals into the
+        // binary_poly slot, matching the down ColumnLayout enforced by
+        // `UairSignature::with_bit_op_specs`:
+        //   [shifted_binary..., bit_op_evals..., shifted_arbitrary..., shifted_int...]
+        let bit_op_down_offset = uair_sig.bit_op_down_offset();
+        let mut full_down_evals =
+            Vec::with_capacity(add!(proof.down_evals.len(), proof.bit_op_evals.len()));
+        full_down_evals.extend_from_slice(&proof.down_evals[..bit_op_down_offset]);
+        full_down_evals.extend_from_slice(&proof.bit_op_evals);
+        full_down_evals.extend_from_slice(&proof.down_evals[bit_op_down_offset..]);
+
         U::constrain_general(
             &mut folder,
             TraceRow::from_slice_with_layout(
                 &proof.up_evals,
                 uair_sig.total_cols().as_column_layout(),
             ),
-            TraceRow::from_slice_with_layout(&proof.down_evals, down_layout),
+            TraceRow::from_slice_with_layout(&full_down_evals, down_layout),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -411,10 +485,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
+        transcript.absorb_random_field_slice(&proof.bit_op_evals, &mut transcription_buf);
 
         Ok(VerifierSubclaim {
             up_evals: proof.up_evals,
             down_evals: proof.down_evals,
+            bit_op_evals: proof.bit_op_evals,
             evaluation_point: shared_point,
         })
     }
@@ -432,6 +508,8 @@ pub enum CombinedPolyResolverError<F: PrimeField> {
     WrongUpEvalsNumber { got: usize, expected: usize },
     #[error("wrong shifted trace columns evaluations number: got {got}, expected {expected}")]
     WrongDownEvalsNumber { got: usize, expected: usize },
+    #[error("wrong bit-op virtual columns evaluations number: got {got}, expected {expected}")]
+    WrongBitOpEvalsNumber { got: usize, expected: usize },
     #[error("sumcheck verification failed: {0}")]
     SumcheckError(SumCheckError<F>),
     #[error("wrong sumcheck claimed sum: received {got}, expected {expected}")]
@@ -541,6 +619,7 @@ mod tests {
                 &ProjectedTrace::RowMajor(projected_trace),
                 &projecting_element,
             ),
+            Vec::new(),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
             num_constraints,
@@ -557,7 +636,7 @@ mod tests {
             &test_config(),
         );
 
-        let (proof, _) = CombinedPolyResolver::finalize_prover(
+        let (proof, _) = CombinedPolyResolver::finalize_prover::<U>(
             &mut prover_transcript,
             states.into_iter().next().unwrap(),
             cpr_ancillary,

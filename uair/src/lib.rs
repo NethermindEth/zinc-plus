@@ -423,6 +423,20 @@ impl UairSignature {
         &self.bit_op_specs
     }
 
+    /// Number of row-shift virtual columns that precede bit-op virtuals in the
+    /// down-row ordering.
+    ///
+    /// The full down-row order is:
+    /// `[shifted_binary_poly..., bit_op_binary_poly...,
+    /// shifted_arbitrary_poly..., shifted_int...]`.
+    pub fn bit_op_down_offset(&self) -> usize {
+        let binary_poly_end = self.total_cols.num_binary_poly_cols();
+        self.shifts
+            .iter()
+            .take_while(|spec| spec.source_col() < binary_poly_end)
+            .count()
+    }
+
     /// Column-type layout of the down row (shifted virtuals + bit-op virtuals).
     pub fn down_cols(&self) -> &VirtualColumnLayout {
         &self.down_cols
@@ -632,6 +646,7 @@ mod tests {
         assert_eq!(sig.down_cols().num_binary_poly_cols(), 3);
         assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
         assert_eq!(sig.down_cols().num_int_cols(), 1);
+        assert_eq!(sig.bit_op_down_offset(), 1);
     }
 
     #[test]
@@ -642,6 +657,7 @@ mod tests {
         assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
         assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
         assert_eq!(sig.down_cols().num_int_cols(), 1);
+        assert_eq!(sig.bit_op_down_offset(), 1);
     }
 
     #[test]

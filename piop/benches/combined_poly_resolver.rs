@@ -95,6 +95,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
                 transcript,
                 trace_f,
+                Vec::new(),
                 &ic_prover_state.evaluation_point,
                 &scalars_f,
                 num_constraints,
@@ -111,13 +112,14 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             field_cfg,
         );
 
-        let (cpr_proof, cpr_state) = CombinedPolyResolver::finalize_prover(
-            transcript,
-            md_states.into_iter().next().expect("one CPR group"),
-            cpr_ancillary,
-            field_cfg,
-        )
-        .expect("CPR finalize failed");
+        let (cpr_proof, cpr_state) =
+            CombinedPolyResolver::finalize_prover::<TestUairNoMultiplication<_>>(
+                transcript,
+                md_states.into_iter().next().expect("one CPR group"),
+                cpr_ancillary,
+                field_cfg,
+            )
+            .expect("CPR finalize failed");
 
         (
             ic_proof,
@@ -280,6 +282,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         >(
             transcript,
             trace_f,
+            Vec::new(),
             &ic_prover_state.evaluation_point,
             &scalars_f,
             num_constraints,
@@ -296,13 +299,14 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             field_cfg,
         );
 
-        let (cpr_proof, cpr_state) = CombinedPolyResolver::finalize_prover(
-            transcript,
-            md_states.into_iter().next().expect("one CPR group"),
-            cpr_ancillary,
-            field_cfg,
-        )
-        .expect("CPR finalize failed");
+        let (cpr_proof, cpr_state) =
+            CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
+                transcript,
+                md_states.into_iter().next().expect("one CPR group"),
+                cpr_ancillary,
+                field_cfg,
+            )
+            .expect("CPR finalize failed");
 
         (
             ic_proof,
