@@ -58,6 +58,68 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE
 
         DensePolynomial { coeffs }
     }
+
+    /// Right-rotation by `c` bit positions on the bounded-degree coefficient
+    /// vector `R^{<W}[X]`, where `W = DEGREE_PLUS_ONE`.
+    ///
+    /// Concretely, the result's coefficient at position `i` is the source's
+    /// at `(i + c) mod W`. Equivalently, viewing the input as `sum u_i X^i`,
+    /// this returns `u * X^{W - c}` reduced modulo `X^W - 1` (cf. Lemma 8.8
+    /// of the Zinc+ paper); `rot_c` may therefore also be read as an
+    /// endomorphism of the quotient ring `R[X]/(X^W - 1)`.
+    ///
+    /// The map is `R`-linear (per Lemma 2.3) and defined for any commutative
+    /// ring `R`. The same routine is used (a) by the prover on
+    /// bit-polynomial cells with `{0,1}` coefficients during CPR
+    /// materialization, and (b) by the verifier on the lifted opening in
+    /// `F_q^{<W}[X]` at the multi-point evaluation endpoint.
+    ///
+    /// Panics if `c == 0` or `c >= W`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn rot_c(&self, c: usize) -> Self {
+        assert!(
+            c > 0 && c < DEGREE_PLUS_ONE,
+            "rot_c count {} out of range (must satisfy 0 < c < {})",
+            c,
+            DEGREE_PLUS_ONE,
+        );
+        let coeffs = array::from_fn(|i| self.coeffs[(i + c) % DEGREE_PLUS_ONE].clone());
+        DensePolynomial { coeffs }
+    }
+
+    /// Right-shift by `c` bit positions on the bounded-degree coefficient
+    /// vector `R^{<W}[X]`, where `W = DEGREE_PLUS_ONE`.
+    ///
+    /// The result's coefficient at position `i` is the source's at `i + c`
+    /// when `i + c < W`, and zero otherwise: the low `c` coefficients are
+    /// dropped and the top `c` positions are zero-padded. This is `R`-linear
+    /// in the input (per Lemma 2.3) but is *not* a quotient-ring
+    /// endomorphism; unlike [`Self::rot_c`], `shift_r_c` cannot be viewed
+    /// as a map on `R[X]/(X^W - 1)`.
+    ///
+    /// Defined for any commutative ring `R` with a `Zero`; same dual use as
+    /// [`Self::rot_c`] across prover (bit-polynomial cells) and verifier
+    /// (lifted opening in `F_q^{<W}[X]`).
+    ///
+    /// Panics if `c == 0` or `c >= W`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn shift_r_c(&self, c: usize) -> Self {
+        assert!(
+            c > 0 && c < DEGREE_PLUS_ONE,
+            "shift_r_c count {} out of range (must satisfy 0 < c < {})",
+            c,
+            DEGREE_PLUS_ONE,
+        );
+        let coeffs = array::from_fn(|i| {
+            let j = i + c;
+            if j < DEGREE_PLUS_ONE {
+                self.coeffs[j].clone()
+            } else {
+                R::zero()
+            }
+        });
+        DensePolynomial { coeffs }
+    }
 }
 
 impl<R: Semiring, const DEGREE_PLUS_ONE: usize> DensePolynomial<R, DEGREE_PLUS_ONE> {
@@ -678,5 +740,79 @@ where
         zero: Out,
     ) -> Result<Out, InnerProductError> {
         I::inner_product::<CHECK>(&lhs.coeffs, rhs, zero)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(coeffs: [u8; 8]) -> DensePolynomial<Boolean, 8> {
+        DensePolynomial {
+            coeffs: coeffs.map(|b| Boolean::new(b != 0)),
+        }
+    }
+
+    #[test]
+    fn rot_c_permutes_coefficients() {
+        // Non-periodic pattern: rot_c by different counts must yield
+        // observably different outputs.
+        let u = bits([1, 1, 1, 0, 0, 1, 0, 0]);
+        // rot_c(u, 3).coeffs[i] = u.coeffs[(i + 3) mod 8]
+        // (u[3], u[4], u[5], u[6], u[7], u[0], u[1], u[2])
+        // = (0,    0,    1,    0,    0,    1,    1,    1)
+        assert_eq!(u.rot_c(3), bits([0, 0, 1, 0, 0, 1, 1, 1]));
+        // rot_c(u, 5).coeffs[i] = u.coeffs[(i + 5) mod 8]
+        // (u[5], u[6], u[7], u[0], u[1], u[2], u[3], u[4])
+        // = (1,    0,    0,    1,    1,    1,    0,    0)
+        assert_eq!(u.rot_c(5), bits([1, 0, 0, 1, 1, 1, 0, 0]));
+        // Distinct outputs witness that rot_c is not periodic on this input.
+        assert_ne!(u.rot_c(3), u.rot_c(5));
+    }
+
+    #[test]
+    fn rot_c_is_cyclic() {
+        let u = bits([1, 1, 0, 0, 1, 0, 0, 0]);
+        let r1 = u.rot_c(3);
+        let r2 = r1.rot_c(5); // (3 + 5) mod 8 == 0, identity
+        assert_eq!(r2, u);
+    }
+
+    #[test]
+    fn shift_r_c_drops_low_bits_and_zero_pads_top() {
+        let u = bits([1, 0, 1, 0, 1, 0, 1, 0]);
+        // shift_r_c(u, 3).coeffs[i] = u.coeffs[i + 3] if i + 3 < 8 else 0
+        assert_eq!(u.shift_r_c(3), bits([0, 1, 0, 1, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn shift_r_c_max_zeros_all_but_top() {
+        let u = bits([1, 1, 1, 1, 1, 1, 1, 1]);
+        // c = 7 keeps only u.coeffs[7] at position 0
+        assert_eq!(u.shift_r_c(7), bits([1, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    #[should_panic(expected = "rot_c count")]
+    fn rot_c_panics_on_zero() {
+        let _ = bits([1, 0, 0, 0, 0, 0, 0, 0]).rot_c(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "rot_c count")]
+    fn rot_c_panics_on_full_width() {
+        let _ = bits([1, 0, 0, 0, 0, 0, 0, 0]).rot_c(8);
+    }
+
+    #[test]
+    #[should_panic(expected = "shift_r_c count")]
+    fn shift_r_c_panics_on_zero() {
+        let _ = bits([1, 0, 0, 0, 0, 0, 0, 0]).shift_r_c(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "shift_r_c count")]
+    fn shift_r_c_panics_on_full_width() {
+        let _ = bits([1, 0, 0, 0, 0, 0, 0, 0]).shift_r_c(8);
     }
 }
