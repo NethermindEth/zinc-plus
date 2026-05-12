@@ -747,23 +747,18 @@ fn e2e_benches(c: &mut Criterion) {
 
     bench_no_mult_e2e(&mut group, 8);
     bench_no_mult_e2e(&mut group, 10);
-    bench_no_mult_e2e(&mut group, 12);
 
     bench_binary_decomposition_e2e(&mut group, 8);
     bench_binary_decomposition_e2e(&mut group, 10);
-    bench_binary_decomposition_e2e(&mut group, 12);
 
     bench_big_linear_e2e(&mut group, 8);
     bench_big_linear_e2e(&mut group, 10);
-    bench_big_linear_e2e(&mut group, 12);
 
     bench_big_linear_public_input_e2e(&mut group, 8);
     bench_big_linear_public_input_e2e(&mut group, 10);
-    bench_big_linear_public_input_e2e(&mut group, 12);
 
     bench_sha_proxy_e2e(&mut group, 8);
     bench_sha_proxy_e2e(&mut group, 10);
-    bench_sha_proxy_e2e(&mut group, 12);
 
     group.finish();
 }
@@ -773,23 +768,18 @@ fn e2e_steps_benches(c: &mut Criterion) {
 
     bench_no_mult_steps(&mut group, 8);
     bench_no_mult_steps(&mut group, 10);
-    bench_no_mult_steps(&mut group, 12);
 
     bench_binary_decomposition_steps(&mut group, 8);
     bench_binary_decomposition_steps(&mut group, 10);
-    bench_binary_decomposition_steps(&mut group, 12);
 
     bench_big_linear_steps(&mut group, 8);
     bench_big_linear_steps(&mut group, 10);
-    bench_big_linear_steps(&mut group, 12);
 
     bench_big_linear_public_input_steps(&mut group, 8);
     bench_big_linear_public_input_steps(&mut group, 10);
-    bench_big_linear_public_input_steps(&mut group, 12);
 
     bench_sha_proxy_steps(&mut group, 8);
     bench_sha_proxy_steps(&mut group, 10);
-    bench_sha_proxy_steps(&mut group, 12);
 
     group.finish();
 }
