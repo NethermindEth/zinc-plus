@@ -1012,10 +1012,11 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e(&mut group, 12);
 
     // Real UAIRs ported from main-gamma. Trace size for ECDSA needs >= 256
-    // rows (Shamir loop), so num_vars=9 is the smallest meaningful size.
+    // rows (Shamir loop); SHA needs num_vars >= MIN_NUM_VARS=13 to host all
+    // 120 chained compressions (120·68+4 = 8164 ≤ 8192 = 2^13).
     // bench_real_ecdsa_e2e(&mut group, 9);
-    bench_real_sha256_e2e(&mut group, 9);
-    bench_real_sha_ecdsa_e2e(&mut group, 9);
+    bench_real_sha256_e2e(&mut group, 13);
+    bench_real_sha_ecdsa_e2e(&mut group, 13);
 
     group.finish();
 }
@@ -1044,10 +1045,10 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // bench_sha_proxy_steps(&mut group, 12);
 
     // Real UAIRs ported from main-gamma. See `e2e_benches` for the
-    // num_vars=9 lower-bound rationale.
+    // num_vars lower-bound rationale (ECDSA: 9, SHA / ShaEcdsa: 13).
     bench_real_ecdsa_steps(&mut group, 9);
-    bench_real_sha256_steps(&mut group, 9);
-    bench_real_sha_ecdsa_steps(&mut group, 9);
+    bench_real_sha256_steps(&mut group, 13);
+    bench_real_sha_ecdsa_steps(&mut group, 13);
 
     group.finish();
 }
@@ -2163,6 +2164,31 @@ fn bench_real_sha_ecdsa_e2e_folded_4x(
     );
 }
 
+/// SHA-256 (7 chained compressions) 4× folded, no ECDSA. Uses the same
+/// `BenchFoldedRealEcdsaZincTypes4x` setup as the ShaEcdsa variant — the
+/// SHA-256 UAIR's witness fits inside the same Int<EC_FP_INT_LIMBS> cell
+/// type, so the public-parameter shapes match.
+fn bench_real_sha256_e2e_folded_4x(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_4x_pp_real_ecdsa(num_vars);
+
+    do_bench_e2e_folded_4x::<BenchFoldedRealEcdsaZincTypes4x, U, _>(
+        group,
+        "RealSha256",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
 fn e2e_folded_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded");
 
@@ -2171,8 +2197,11 @@ fn e2e_folded_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e_folded(&mut group, 12);
 
     bench_real_ecdsa_e2e_folded(&mut group, 9);
-    bench_real_sha256_e2e_folded(&mut group, 9);
-    bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
+    // SHA 1× folded at nvars=14 would force IPRS depth=3, which overflows
+    // the bench's `Binary::Cw = DensePolynomial<i64, D>` for any field big
+    // enough to host codeword = 2^16. Re-enable after widening Cw to i128.
+    // bench_real_sha256_e2e_folded(&mut group, 14);
+    // bench_real_sha_ecdsa_e2e_folded(&mut group, 14);
 
     group.finish();
 }
@@ -2180,7 +2209,11 @@ fn e2e_folded_benches(c: &mut Criterion) {
 fn e2e_folded_4x_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ E2E Folded 4x");
 
-    bench_real_sha_ecdsa_e2e_folded_4x(&mut group, 9);
+    // SHA 4× folded at nvars=14 forces IPRS depth ≥ 3 on row_len=2^16,
+    // which overflows the bench's i64 Cw with any field big enough to
+    // host the codeword. Disabled until Binary::Cw is widened to i128.
+    // bench_real_sha256_e2e_folded_4x(&mut group, 14);
+    // bench_real_sha_ecdsa_e2e_folded_4x(&mut group, 14);
 
     group.finish();
 }
@@ -2188,22 +2221,22 @@ fn e2e_folded_4x_benches(c: &mut Criterion) {
 
 criterion_group! {
     name = e2e;
-    config = Criterion::default().sample_size(500);
+    config = Criterion::default().sample_size(50);
     targets = e2e_benches
 }
 criterion_group! {
     name = e2e_steps;
-    config = Criterion::default().sample_size(100);
+    config = Criterion::default().sample_size(50);
     targets = e2e_steps_benches
 }
 criterion_group! {
     name = e2e_folded;
-    config = Criterion::default().sample_size(500);
+    config = Criterion::default().sample_size(50);
     targets = e2e_folded_benches
 }
 criterion_group! {
     name = e2e_folded_4x;
-    config = Criterion::default().sample_size(500);
+    config = Criterion::default().sample_size(50);
     targets = e2e_folded_4x_benches
 }
 criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x);

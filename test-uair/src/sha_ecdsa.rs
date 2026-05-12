@@ -54,9 +54,10 @@
 //! ## Selectors and trace length
 //!
 //! Both halves use row-0 init and end-of-trace final selectors on
-//! disjoint columns. Trace length is bounded by ECDSA: needs >
-//! 256 (`FINAL_ROW = NUM_SHAMIR_ROUNDS = 256`), so `num_vars >= 9`.
-//! SHA needs >= 16 rows; satisfied.
+//! disjoint columns. Trace length is bounded by SHA: with
+//! `NUM_COMPRESSIONS = 120`, SHA needs `120·68 + 4 = 8164` active
+//! rows, so `num_vars >= 13` (2^13 = 8192). ECDSA needs > 256
+//! (`FINAL_ROW = NUM_SHAMIR_ROUNDS = 256`); satisfied.
 //!
 //! ## Quotient-witness convention
 //!
@@ -1062,7 +1063,9 @@ mod tests {
     /// sub-UAIRs already test their halves individually).
     #[test]
     fn merged_trace_shape() {
-        let num_vars = 9;
+        // Lower bound is the SHA sub-UAIR's MIN_NUM_VARS (13) once
+        // NUM_COMPRESSIONS=120; ECDSA only needs 256 rows.
+        let num_vars = 13;
         let mut r = rng();
         let trace = <ShaEcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
             generate_random_trace(num_vars, &mut r);

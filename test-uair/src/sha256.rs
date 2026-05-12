@@ -406,7 +406,7 @@ pub mod cols {
     // ---------------------------------------------------------------------
 
     /// Number of chained SHA-256 compressions in the trace.
-    pub const NUM_COMPRESSIONS: usize = 7;
+    pub const NUM_COMPRESSIONS: usize = 120;
     /// Rows per compression: 4 init-prefix rows + 64 round-update outputs.
     pub const ROWS_PER_COMP: usize = 68;
     /// Number of round-update steps per compression.
@@ -414,8 +414,8 @@ pub mod cols {
     /// Trace rows used by all compressions plus the H_N output prefix.
     pub const ACTIVE_ROWS: usize = NUM_COMPRESSIONS * ROWS_PER_COMP + 4;
     /// Required `num_vars`: smallest power-of-two `n ≥ ACTIVE_ROWS`.
-    /// 7·68+4 = 480 ≤ 512 = 2^9, so num_vars must be ≥ 9.
-    pub const MIN_NUM_VARS: usize = 9;
+    /// 120·68+4 = 8164 ≤ 8192 = 2^13, so num_vars must be ≥ 13.
+    pub const MIN_NUM_VARS: usize = 13;
 
     /// Flat trace indices for ShiftSpec (binary_poly || arbitrary_poly || int).
     pub const FLAT_W_A: usize = W_A;
