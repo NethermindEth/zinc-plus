@@ -6,6 +6,7 @@ use crate::{
 use core::slice;
 use crypto_primitives::{
     FixedSemiring, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring, boolean::Boolean,
+    crypto_bigint_int,
 };
 use itertools::Itertools;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, One, Zero};
@@ -130,6 +131,40 @@ impl<R: Semiring + Zero, const DEGREE_PLUS_ONE: usize> Zero
     fn is_zero(&self) -> bool {
         self.coeffs.iter().all(|c| c.is_zero())
     }
+}
+
+// `ConstZero` lets `DensePolynomial<C, D>` serve as `Zt::CombR` in the
+// no-alpha-projection variant of Zip+, where the prove/verify code
+// reads `Zt::CombR::ZERO`. Narrowed to specific coefficient types
+// (Int<N> and the primitive ints) rather than a generic
+// `R: Copy + ConstZero` bound, because the generic version triggers a
+// coherence conflict with `MulByScalar<&Boolean> for T where
+// T: ConstZero + From<Boolean>` once `DensePolynomial<Boolean, D>`
+// becomes `ConstZero`.
+impl<const N: usize, const DEGREE_PLUS_ONE: usize> ConstZero
+    for DensePolynomial<crypto_bigint_int::Int<N>, DEGREE_PLUS_ONE>
+{
+    const ZERO: Self = Self {
+        coeffs: [crypto_bigint_int::Int::<N>::ZERO; DEGREE_PLUS_ONE],
+    };
+}
+
+impl<const DEGREE_PLUS_ONE: usize> ConstZero for DensePolynomial<i128, DEGREE_PLUS_ONE> {
+    const ZERO: Self = Self {
+        coeffs: [0i128; DEGREE_PLUS_ONE],
+    };
+}
+
+impl<const DEGREE_PLUS_ONE: usize> ConstZero for DensePolynomial<i64, DEGREE_PLUS_ONE> {
+    const ZERO: Self = Self {
+        coeffs: [0i64; DEGREE_PLUS_ONE],
+    };
+}
+
+impl<const DEGREE_PLUS_ONE: usize> ConstZero for DensePolynomial<i32, DEGREE_PLUS_ONE> {
+    const ZERO: Self = Self {
+        coeffs: [0i32; DEGREE_PLUS_ONE],
+    };
 }
 
 impl<F: PrimeField, const DEGREE_PLUS_ONE: usize> DensePolynomial<F, DEGREE_PLUS_ONE> {
@@ -435,7 +470,11 @@ impl<R: Semiring + Named, const DEGREE_PLUS_ONE: usize> Named
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn type_name() -> String {
-        format!("Poly<{}, {}>", R::type_name(), Self::DEGREE_BOUND)
+        format!(
+            "Poly<{}, {}>",
+            R::type_name(),
+            <Self as Polynomial<R>>::DEGREE_BOUND
+        )
     }
 }
 

@@ -1,0 +1,219 @@
+\section{Implementation}
+\label{sec:implementation}
+
+\subsection{Module layout}
+
+The implementation lives in
+\code{zip-plus/src/code/binary\_add\_fft/} and mirrors the existing
+IPRS layout in \code{zip-plus/src/code/iprs/}:
+
+\begin{itemize}
+  \item \code{basis.rs}: a $\GF(2^{32})$ \code{Gf2\_32} type with
+    addition (XOR), multiplication (peasant + reduce mod $f$), the
+    half-trace solver (Gaussian elimination over $\F_2$) for
+    $Y^2 + Y = \beta$, and Cantor basis generation.
+  \item \code{params.rs}: a \code{Config} trait declaring the
+    extension degree and irreducible $f$, plus a
+    \code{Radix2AddFftParams} struct holding precomputed
+    Cantor basis, evaluation points, and subspace polynomials
+    (stored sparsely as coefficient lists at the
+    $\{2^j\}$ positions).
+  \item \code{ring\_ops.rs}: the lifted-ring arithmetic. Exports
+    \code{reduce\_mod\_ftilde}, \code{mul\_by\_lifted\_gf32}
+    (the FFT's only multiplication primitive),
+    \code{add\_in\_z}, and the \code{FftRingElement} trait.
+  \item \code{add\_fft.rs}: the generic radix-2 FFT kernel.
+\end{itemize}
+
+The top-level \code{binary\_add\_fft.rs} exposes the public
+\code{BinaryAddFftCode} struct and its \code{LinearCode<Zt>} impl.
+
+\subsection{The {\tt FftRingElement} trait}
+\label{sec:fft-ring-element}
+
+The kernel is polymorphic over a \code{FftRingElement} trait that
+exposes the three primitives the FFT needs:
+
+\begin{lstlisting}[language=Rust]
+pub trait FftRingElement: Sized + Clone + Send + Sync {
+    fn fft_zero() -> Self;
+    fn fft_add(&self, other: &Self) -> Self;
+    fn fft_mul_lifted_gf32(&self, twiddle: Gf2_32) -> Self;
+}
+\end{lstlisting}
+
+Implementations exist for
+\code{DensePolynomial<Int<N>, 32>} (any~$N$, via the crypto-bigint
+multi-limb arithmetic), \code{DensePolynomial<i128, 32>},
+\code{DensePolynomial<i32, 32>} (both native CPU types), and
+\code{Gf2\_32} itself (used by tests as the unlifted reference
+implementation). The trait abstraction lets us swap the coefficient
+type without touching the kernel.
+
+\subsection{The kernel}
+\label{sec:kernel}
+
+The kernel is iterative and natural-order (no bit reversal). The
+hot loop is
+
+\begin{lstlisting}[language=Rust]
+for i in (0..m).rev() {
+    let h = 1usize << i;
+    let block_size = h << 1;
+    let s_i = &params.subspace_polys[i];
+    let cantor_basis = &params.cantor_basis;
+
+    cfg_chunks_mut!(data, block_size)
+        .enumerate()
+        .for_each(|(block_idx, block_data)| {
+            let block_start = block_idx * block_size;
+            let block_offset =
+                block_offset_for_stage(block_start, i, m, cantor_basis);
+            let twiddle = evaluate_subspace_poly_at_gf32(s_i, block_offset);
+            for k in 0..h {
+                butterfly(block_data, k, k + h, twiddle);
+            }
+        });
+}
+\end{lstlisting}
+
+\noindent The
+\code{cfg\_chunks\_mut!} macro from \code{zinc-utils} compiles to a
+rayon \code{par\_chunks\_mut} under the \code{parallel} feature and
+to a plain sequential \code{chunks\_mut} otherwise. Block-level
+parallelism is safe because each block is a disjoint slice of the
+data vector.
+
+The butterfly itself has a small zero-twiddle fast path:
+
+\begin{lstlisting}[language=Rust]
+fn butterfly<T: FftRingElement>(
+    data: &mut [T], idx_a: usize, idx_b: usize, twiddle: Gf2_32,
+) {
+    if twiddle == Gf2_32::ZERO {
+        // (a, b) -> (a, a + b), skipping the multiplication.
+        let new_b = data[idx_a].fft_add(&data[idx_b]);
+        data[idx_b] = new_b;
+        return;
+    }
+    let b = data[idx_b].clone();
+    let t_b = b.fft_mul_lifted_gf32(twiddle);
+    let new_a = data[idx_a].fft_add(&t_b);
+    let new_b = new_a.fft_add(&b);
+    data[idx_a] = new_a;
+    data[idx_b] = new_b;
+}
+\end{lstlisting}
+
+\noindent The zero-twiddle case fires once per FFT stage --- for the
+block whose offset is~$0 \in V_i$, since $s_i$ vanishes on $V_i$.
+
+\subsection{The {\tt LinearCode} impl}
+\label{sec:linear-code-impl}
+
+\code{BinaryAddFftCode<Zt, C, REP, CHECK>} implements
+\code{LinearCode<Zt>}:
+
+\begin{lstlisting}[language=Rust]
+impl<Zt, C, const REP: usize, const CHECK: bool> LinearCode<Zt>
+    for BinaryAddFftCode<Zt, C, REP, CHECK>
+where
+    Zt: ZipTypes,
+    C: Config,
+    Zt::Cw: FftRingElement + FromRef<Zt::Eval>,
+    Zt::CombR: FftRingElement,
+{
+    const REPETITION_FACTOR: usize = REP;
+    fn row_len(&self) -> usize { self.params.row_len }
+    fn codeword_len(&self) -> usize { self.params.codeword_len }
+    fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
+        let mut data: Vec<Zt::Cw> = row.iter().map(Zt::Cw::from_ref).collect();
+        data.resize_with(self.params.codeword_len, Zt::Cw::fft_zero);
+        additive_fft(&mut data, &self.params);
+        data
+    }
+    fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
+        let mut data: Vec<Zt::CombR> = row.to_vec();
+        data.resize_with(self.params.codeword_len, Zt::CombR::fft_zero);
+        additive_fft(&mut data, &self.params);
+        data
+    }
+    fn encode_f<F>(&self, _row: &[F]) -> Vec<F> where ... {
+        unimplemented!() // see Section \ref{sec:protocol-gap}
+    }
+}
+\end{lstlisting}
+
+The trait-bound shape pushes the encode/wire-typing constraints to
+the \code{ZipTypes} definition site, which is where the user
+chooses the coefficient widths.
+
+\subsection{ZipTypes for no alpha-projection}
+\label{sec:zip-types}
+
+To skip alpha-projection (as the user requested in the original
+design) we define a \code{ZipTypes} where the
+\code{Comb} associated type equals the \code{CombR} associated
+type. The existing prove/verify path then short-circuits the
+alpha-sampling logic to $\alpha = [1]$ (because
+$\code{Comb::DEGREE\_BOUND}$ is~$0$ when
+$\code{Comb} = \code{CombR}$ thanks to a \code{Polynomial<Self>}
+blanket impl we added in \code{poly/src/zero\_degree.rs}). The
+concrete type is
+
+\begin{lstlisting}[language=Rust]
+pub struct BinPolyAddFftZipTypes<const K: usize, const M: usize> {}
+
+impl<const K: usize, const M: usize> ZipTypes
+    for BinPolyAddFftZipTypes<K, M>
+{
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval  = BinaryPoly<32>;
+    type Cw    = DensePolynomial<Int<K>, 32>;
+    type Fmod  = Uint<K>;
+    type PrimeTest = MillerRabin;
+    type Chal  = i128;
+    type Pt    = i128;
+    type CombR = DensePolynomial<Int<M>, 32>;
+    type Comb  = Self::CombR; // <-- this is the "no alpha-projection" knob
+    type EvalDotChal     = ScalarProduct;
+    type CombDotChal     = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+\end{lstlisting}
+
+\subsection{Relaxations needed to the {\tt ZipTypes} trait}
+\label{sec:zip-types-relaxation}
+
+The original \code{ZipTypes::CombR} bound was
+\code{ConstIntRing + Neg<Output = Self::CombR> + \ldots}, which
+presumed \code{CombR} to be a scalar integer ring. To admit
+\code{CombR = DensePolynomial<Int<M>, 32>} we relaxed the bound to
+\code{FixedSemiring + ConstZero + \ldots}, after auditing the
+prove/verify code to confirm that
+\code{Neg} and \code{From<i8>} are never actually used on
+\code{CombR}.
+
+The \code{RAA} and \code{RaaSignFlipping} \code{LinearCode} impls
+that \emph{do} need \code{Neg + CheckedNeg} on \code{CombR} were
+updated to declare those bounds in their own \code{where}-clauses.
+Existing scalar \code{Int<N>} \code{CombR}s still satisfy the
+weaker trait-level bound without other changes.
+
+We also added two narrowly-scoped impls in \code{poly/}:
+\begin{itemize}
+  \item \code{Polynomial<Self> for DensePolynomial<R, D>} with
+    \code{DEGREE\_BOUND = 0}, mirroring the existing
+    \code{Polynomial<Self> for Int<LIMBS>} impl. This is the
+    mechanism by which $\code{Comb} = \code{CombR}$ produces
+    $\code{DEGREE\_BOUND} = 0$.
+  \item \code{ConstZero for DensePolynomial<Int<N>, D>}
+    (and later \code{i64}, \code{i128}, \code{i32}) so that the
+    relaxed \code{CombR} bound is satisfiable. The impls are
+    intentionally narrow (per coefficient type) to avoid a
+    coherence conflict with the
+    \code{MulByScalar<\&Boolean> for T where T: ConstZero + From<Boolean>}
+    blanket --- a generic \code{R: ConstZero + Copy} bound on the
+    \code{DensePolynomial} impl would trigger an overlap with
+    \code{DensePolynomial<Boolean, D>}.
+\end{itemize}

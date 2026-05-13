@@ -1,0 +1,44 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{A Binary Additive Reed--Solomon Code for Zip$^+$, Structurally Lifted to $\Z[X]/\flift$ \\
+       \large Design, implementation and optimization notes}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{AI-generated implementation report. Reviewed by author.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We design and implement a new linear code for the Zip$^+$ PCS that uses
+an additive Reed--Solomon FFT over $\GF(2^{32}) = \F_2[X]/f$ as its
+underlying structure, but applies that algorithm \emph{structurally
+in the lifted integer ring} $\Z[X]/\flift$, where $\flift$ is the
+$\Z$-polynomial with the same coefficients as $f$. The construction
+is the binary-field analogue of the IPRS code already shipped in
+Zinc$^+$, which lifts a multiplicative Reed--Solomon NTT over
+$\F_{65537}$ to a pseudo-NTT over $\Z$. We describe the algorithm,
+the Rust implementation, the open protocol-integration gap, and the
+optimization journey that took the per-commit cost from a baseline of
+$\sim 6$\,s down to $\sim 232$\,ms on Apple M4 with rayon parallelism
+and a tightly-sized native coefficient type.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/algorithm}
+\input{sections/implementation}
+\input{sections/protocol-gap}
+\input{sections/optimization}
+\input{sections/measurements}
+\input{sections/future-work}
+
+\end{document}

@@ -1,0 +1,95 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper / other Zinc+ docs.
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{cleveref}
+
+% --- Theorem environments --------------------------------------------------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}[theorem]{Claim}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Operators, macros -----------------------------------------------------
+\DeclareMathOperator{\GF}{GF}
+\DeclareMathOperator{\Tr}{Tr}
+
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+
+% Cantor basis vectors
+\newcommand{\bb}{\beta}
+
+% Modulus polynomial: F_2[X]/f for the field, Z[X]/ftilde for the lift.
+\newcommand{\flift}{\tilde f}
+
+% Lifted ring shorthand: Z[X]/(ftilde)
+\newcommand{\Rlift}{\Z[X]/\flift}
+
+% Inline code style for short tokens
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Math-mode shorthand for the codebase's `Int<N>` type.
+\newcommand{\Int}{\mathtt{Int}}
+
+% Define Rust as a listings language (the `listings` package doesn't ship
+% one by default).
+\lstdefinelanguage{Rust}{
+  keywords={as, async, await, break, const, continue, crate, dyn, else, enum,
+            extern, false, fn, for, if, impl, in, let, loop, match, mod, move,
+            mut, pub, ref, return, self, Self, static, struct, super, trait,
+            true, type, unsafe, use, where, while},
+  morekeywords={i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, usize, isize,
+                bool, char, str, String, Vec, Option, Result, Box},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  showstringspaces=false,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  keywordstyle=\color{teal!70!black}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{teal!50!black},
+}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}

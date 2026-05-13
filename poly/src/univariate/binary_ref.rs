@@ -241,7 +241,8 @@ impl<const DEGREE_PLUS_ONE: usize> Distribution<BinaryRefPoly<DEGREE_PLUS_ONE>>
 // Zip-specific traits
 //
 impl<const DEGREE_PLUS_ONE: usize> Polynomial<Boolean> for BinaryRefPoly<DEGREE_PLUS_ONE> {
-    const DEGREE_BOUND: usize = DensePolynomial::<Boolean, DEGREE_PLUS_ONE>::DEGREE_BOUND;
+    const DEGREE_BOUND: usize =
+        <DensePolynomial<Boolean, DEGREE_PLUS_ONE> as Polynomial<Boolean>>::DEGREE_BOUND;
 }
 
 impl<R: Clone + Zero + One + CheckedAdd + CheckedMul, const DEGREE_PLUS_ONE: usize>

@@ -1,0 +1,102 @@
+\section{Open questions and future work}
+\label{sec:future-work}
+
+\subsection{Polynomial-valued prove/verify}
+
+The single biggest open item is implementing the
+$F[X]/\flift$-valued prove/verify path described in
+\autoref{sec:protocol-gap}. Until that lands, the new code is
+encoder-only; it cannot be wired through \code{MultiZip3} into the
+SHA / ECDSA UAIRs. The scope of that change is itself substantial
+and deserves its own design pass.
+
+\subsection{Soundness analysis}
+
+The empirical $\Rlift \to \GF(2^{32})$ commutative diagram tests
+are reassuring but not a formal soundness proof. A complete
+analysis should:
+\begin{itemize}
+  \item Establish that the lifted code's minimum distance is the
+    same as (or close to) the underlying $\GF(2^{32})$ RS code's
+    distance. The standard
+    Reed--Solomon-over-$\GF(2^{32})$ has MDS distance $N - n + 1$,
+    so the lifted code modulo $2$ has the same distance. Lifting
+    to $\Z[X]/\flift$ adds a generally-non-trivial torsion, but
+    the proximity argument can recover by reducing mod a prime
+    $p$ at which $\flift$ is irreducible.
+  \item Argue the proximity test in the $F[X]/\flift$
+    setting --- the existing Zip$^+$ proximity argument uses the
+    Schwartz--Zippel lemma over the prime field $F$, which has
+    a clean analogue in the extension $\F_{p^{32}}$ when
+    $\flift \bmod p$ is irreducible.
+  \item Bound the soundness error contribution from the
+    structural lift, particularly for column-opening checks.
+\end{itemize}
+
+\subsection{Performance follow-ups}
+
+After the optimizations described in \autoref{sec:optimization},
+the next steps for performance would likely be:
+\begin{itemize}
+  \item \textbf{Within-FFT parallelism for small batches.} At
+    \code{batch = 1} the row-level parallelism is only
+    \code{num\_rows}-way (often $\le 16$), so within-stage
+    parallelism becomes more impactful. The current
+    implementation already does this via \code{cfg\_chunks\_mut!}
+    but rayon's adaptive splitter may not extract maximum
+    parallelism for small block counts; a manual scope-spawn
+    structure could help.
+  \item \textbf{AVX-512 SIMD path.} The
+    \code{mul\_by\_lifted\_gf32\_i128\_split} function
+    (\autoref{sec:simd-attempt}) is dead code on Apple Silicon
+    but expected to pay on AVX-512 hosts where $4 \times i128$
+    fits in a $512$-bit vector. Untested.
+  \item \textbf{Base-layer optimization.} IPRS's $3\times$ depth
+    reduction via a Vandermonde base layer is conceptually
+    portable to additive FFT (e.g.\ via a radix-$8$ or radix-$16$
+    butterfly at the bottom of the recursion). The constant-factor
+    savings would be substantial.
+  \item \textbf{Algorithm replacement: LCH base-conversion.}
+    The novel-polynomial-basis FFT we implemented is correct
+    but has constant factors larger than basis-conversion-style
+    variants (LCH 2014, Cantor 1989). A future implementation
+    could adopt one of those, with the trade-off being a more
+    intricate kernel.
+\end{itemize}
+
+\subsection{Larger $\GF(2^k)$}
+
+Everything in this document is fixed at $k = 32$. A natural
+extension is to parameterize over $k$ via the existing
+\code{Config} trait, supporting e.g.\ $\GF(2^{64})$ or
+$\GF(2^{16})$. The math is identical; only the precomputation
+changes. For $\GF(2^{64})$ with a $\code{BinaryPoly<64>}$ input,
+the $\flift$ modulus has $64$ low monomials --- the
+\code{reduce\_mod\_ftilde} loop would adapt --- and the
+worst-case bit budget per coefficient scales accordingly.
+
+\subsection{Code-survey reference}
+
+For readers exploring the source, the key files are:
+
+\begin{itemize}\small
+  \item \code{zip-plus/src/code/binary\_add\_fft.rs}: top-level,
+    \code{BinaryAddFftCode}, \code{LinearCode<Zt>} impl.
+  \item \code{zip-plus/src/code/binary\_add\_fft/basis.rs}:
+    \code{Gf2\_32}, Cantor basis.
+  \item \code{zip-plus/src/code/binary\_add\_fft/params.rs}:
+    \code{Config}, \code{Radix2AddFftParams}, subspace polynomials.
+  \item \code{zip-plus/src/code/binary\_add\_fft/ring\_ops.rs}:
+    \code{FftRingElement}, \code{FftCoeff}, lifted-ring arithmetic.
+  \item \code{zip-plus/src/code/binary\_add\_fft/add\_fft.rs}: FFT
+    kernel.
+  \item \code{zip-plus/src/pcs/test\_utils.rs}:
+    \code{BinPolyAddFftZipTypes}.
+  \item \code{zip-plus/src/pcs/structs.rs}: the relaxed
+    \code{ZipTypes::CombR} trait bound.
+  \item \code{poly/src/zero\_degree.rs} and
+    \code{poly/src/univariate/dense.rs}: \code{Polynomial<Self>}
+    and \code{ConstZero} impls.
+  \item \code{zip-plus/benches/zip\_plus\_benches.rs}: bench
+    harness for both \code{Int<N>} and \code{i32} paths.
+\end{itemize}

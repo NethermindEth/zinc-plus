@@ -1,0 +1,136 @@
+\section{Measurements}
+\label{sec:measurements}
+
+All numbers below come from
+\code{cargo bench --bench zip\_plus\_benches --features parallel}
+on Apple~M4. The corresponding test for column sizes is
+\code{column\_size\_report} (and \code{\_i32} variant) in
+\code{zip-plus/src/code/binary\_add\_fft.rs}, runnable as
+\begin{quote}\small
+  \code{cargo test -p zip-plus --release column\_size\_report -- --nocapture --ignored}
+\end{quote}
+
+\subsection{Commit performance}
+
+For \code{Commit(batch=11)} at \code{poly\_size = $2^9$},
+\code{row\_len = 128}, \code{codeword\_len = 512}, \code{REP = 4}:
+
+\begin{center}\small
+\begin{tabular}{lr}
+  \toprule
+  Coefficient type & Commit time \\
+  \midrule
+  \code{Cw = DensePolynomial<Int<2>, 32>}  & $6.3$\,ms \\
+  \code{Cw = DensePolynomial<i32, 32>}     & $2.5$\,ms \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+At the larger \code{poly\_size = $2^{14}$} workload used during the
+optimization journey, the corresponding numbers (rayon enabled
+throughout) were:
+
+\begin{center}\small
+\begin{tabular}{lr}
+  \toprule
+  Coefficient type & Commit time \\
+  \midrule
+  \code{Cw = DensePolynomial<Int<2>, 32>}  & $365$\,ms \\
+  \code{Cw = DensePolynomial<i128, 32>}    & $265$\,ms \\
+  + within-stage par.                      & $232$\,ms \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Column-opening sizes (raw and zstd-3 compressed)}
+
+For \code{poly\_size = $2^{14}$, batch = 11}, \code{num\_rows = 4}
+per polynomial, on truly-random \code{BinaryPoly<32>} inputs:
+
+\begin{center}\small
+\begin{tabularx}{0.95\textwidth}{l rrr}
+  \toprule
+  Quantity & \code{Int<2>} \code{Cw} & \code{i32} \code{Cw} & Change \\
+  \midrule
+  Bytes per \code{Cw} entry                & 512   & 128  & $4\times$ smaller \\
+  Per-poly column (4 entries)              & 2{,}048 B  & 512 B  & $4\times$ \\
+  Batched column raw (44 entries)          & 22.0 KiB   & 5.5 KiB  & $4\times$ \\
+  Batched column zstd-3                    & 646 B      & 521 B    & $1.24\times$ \\
+  zstd compression ratio                   & $35\times$ & $11\times$ & --- \\
+  Non-zero bytes in raw column             & 703        & 703        & identical \\
+  Full proof openings raw (147 openings)   & 3234 KiB   & 808 KiB    & $4\times$ \\
+  Full proof openings zstd-3               & 92.7 KiB   & 74.8 KiB   & $1.24\times$ \\
+  \bottomrule
+\end{tabularx}
+\end{center}
+
+\noindent The striking observation is that the
+\emph{non-zero byte count is identical} ($703$ bytes) for both
+representations --- the actual information content of the column
+is the same, and the $\code{Int<2>}$ representation simply
+stored each value in a $16$-byte slot with $\sim 13$ zero bytes
+of padding. zstd-3 was extracting most of that padding anyway, so
+the compressed size only drops by $\sim 19\%$; the bigger wins
+from the $\code{i32}$ shrink are in raw size ($4\times$),
+working-set memory, cache locality, and ALU width.
+
+\subsection{Why the lifted code is so compressible}
+
+For a randomly-sampled $\code{BinaryPoly<32>}$ input vector at
+$\code{poly\_size} = 2^{14}$, \emph{$96.9\%$} of the raw column
+bytes are zero (in the \code{Int<2>} representation). Three
+compounding reasons:
+
+\begin{enumerate}
+  \item \textbf{Heavy bit-width over-provisioning.} The
+    coefficient is stored in $16$ bytes, but
+    the loose worst-case after $m = 14$ FFT stages is bounded by
+    $33^{14} \approx 2^{71}$; so the high $\sim 7$ of $16$ bytes
+    per coefficient are always zero just from that bound.
+  \item \textbf{Reality is tighter than $33^m$.} The codeword is
+    a \emph{sum} of $N$ lifted-GF products
+    (\autoref{sec:i32-shrink}), so the worst case is linear in
+    $N$, not exponential. Empirical max at $N = 2^{14}$ is
+    $\sim 2^{21}$.
+  \item \textbf{Many entries are exactly zero.} The polynomial
+    has $\code{row\_len} / \code{codeword\_len} = 1/4$ non-zero
+    novel-basis coefficients (the zero-padding); the FFT
+    preserves significant sparsity in many evaluation points.
+\end{enumerate}
+
+The $\code{i32}$ shrink removes most of the wasted high-byte
+zeros at the source, so the compression ratio drops from
+$35\times$ to $11\times$ --- but the absolute compressed size is
+still smaller because the non-zero ``effective'' bytes are still
+compressible.
+
+\subsection{Test coverage}
+
+The following tests in \code{zip-plus/src/code/binary\_add\_fft/}
+exercise the implementation:
+
+\begin{itemize}
+  \item \code{basis::tests::*}: \code{Gf2\_32} arithmetic
+    identities, the Cantor recurrence
+    $\bb_i^2 + \bb_i = \bb_{i-1}$, basis linear independence, and
+    the half-trace solver.
+  \item \code{params::tests::*}: subspace polynomial
+    monicity, $s_i(\bb_i) = 1$, $s_i$ vanishes on $V_i$, the
+    Cantor recurrence at evaluation points.
+  \item \code{ring\_ops::tests::*}: $\flift$-reduction
+    correctness, the $\Rlift \to \GF(2^{32})$ commutative diagram
+    for multiplication, the
+    \code{mul\_by\_lifted\_gf32} contract.
+  \item \code{add\_fft::tests::*}: the lifted-FFT-vs-naive
+    equivalence, the
+    $\Rlift \to \GF(2^{32})$ commutative diagram for the full
+    FFT (both \code{Int<N>}- and \code{i128}-instantiated), FFT
+    linearity, zero-padding.
+  \item \code{binary\_add\_fft::linear\_code\_tests::*}: the
+    \code{LinearCode<Zt>} interface smoke test, plus the
+    column-size measurement tests
+    (\code{\#[ignore]}-gated).
+\end{itemize}
+
+All tests pass under both \code{cargo test -p zip-plus} (sequential
+default) and \code{cargo test -p zip-plus --features parallel}.

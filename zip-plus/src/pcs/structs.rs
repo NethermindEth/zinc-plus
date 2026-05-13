@@ -3,8 +3,8 @@ use crate::{
     merkle::{MerkleTree, MtHash},
 };
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, DenseRowMatrix, FixedSemiring};
-use num_traits::CheckedAdd;
-use std::{fmt::Debug, marker::PhantomData, ops::Neg};
+use num_traits::{CheckedAdd, ConstZero};
+use std::{fmt::Debug, marker::PhantomData};
 use zinc_poly::{ConstCoeffBitWidth, Polynomial};
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
@@ -40,9 +40,22 @@ pub trait ZipTypes: Clone + Debug + Send + Sync {
     /// Ring of point coordinates to evaluate the multilinear polynomial
     type Pt: ConstIntRing;
 
-    /// Coefficient ring of linear combination polynomial [Self::Comb]
-    type CombR: ConstIntRing
-        + Neg<Output = Self::CombR>
+    /// Coefficient ring of linear combination polynomial [Self::Comb].
+    ///
+    /// The bound was historically `ConstIntRing + Neg<Output = Self>` which
+    /// presumed `CombR` to be a scalar integer ring. This is now relaxed to
+    /// `FixedSemiring + ConstZero` to admit `CombR = DensePolynomial<Int<M>, 32>`
+    /// for the binary-additive-FFT Zip+ variant, which skips alpha-projection
+    /// and keeps the combined row in polynomial form. The prove/verify path
+    /// only needs the `Semiring` ops + `ConstZero` + `Sum` (from `FixedSemiring`)
+    /// + `MulByScalar<&Chal>` + `FromRef<Self>` + `ConstTranscribable` — never
+    /// `Neg` or `From<i8>` on `CombR`. Linear codes that need additional
+    /// ring structure (e.g. RAA's `Neg`/`CheckedNeg`) must declare those
+    /// bounds in their own `LinearCode<Zt>` impls (see `code/raa.rs`,
+    /// `code/raa_sign_flip.rs`). Scalar `Int<N>` `CombR`s still satisfy
+    /// the weaker bound without other changes.
+    type CombR: FixedSemiring
+        + ConstZero
         + ConstTranscribable
         + FromRef<Self::CombR>
         + for<'a> MulByScalar<&'a Self::Chal>;

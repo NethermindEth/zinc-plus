@@ -65,7 +65,7 @@ where
         } else {
             accumulate_unchecked(&mut result);
         }
-        debug_assert_eq!(result.len(), self.codeword_len());
+        debug_assert_eq!(result.len(), self.raa.row_len() * REP);
         result
     }
 }
@@ -74,6 +74,7 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
     for RaaSignFlippingCode<Zt, Config, REP>
 where
     Zt::Cw: Ring,
+    Zt::CombR: Ring,
 {
     const REPETITION_FACTOR: usize = REP;
 
