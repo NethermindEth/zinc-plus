@@ -10,12 +10,12 @@
 //!
 //! After the three compiler steps, the protocol continues with:
 //!
-//! - Step 4: combined CPR + Lookup multi-degree sumcheck (CPR group at degree
+//! - Combined CPR + Lookup multi-degree sumcheck (CPR group at degree
 //!   `max_deg+2`, one lookup group per table type; shared eval point `r*`)
-//! - Step 5: multi-point evaluation sumcheck (combines up/down evals at r* into
-//!   a single evaluation point r_0)
-//! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
-//! - Step 7: Zip+ PCS open/verify at r_0
+//! - Multi-point evaluation sumcheck (combines up/down evals at r* into a
+//!   single evaluation point r_0)
+//! - Lift-and-project (unprojected MLE evaluations at r_0)
+//! - Zip+ PCS open/verify at r_0
 
 pub mod fold;
 pub mod prover;
