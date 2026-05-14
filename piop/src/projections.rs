@@ -8,10 +8,10 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
 };
-use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
+use zinc_uair::{BitOp, BitOpSpec, Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
-    powers,
+    UNCHECKED, add, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
+    powers, rem,
 };
 
 /// Row-indexed trace matrix: `trace[row][col]`.
@@ -312,6 +312,80 @@ pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
     }
 }
 
+/// Build the projected MLE of a bit-op virtual column.
+///
+/// The bit operation is applied to each source cell's coefficients before
+/// evaluating the cell at `projecting_element`.
+pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
+    trace: &ProjectedTrace<F>,
+    spec: &BitOpSpec,
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> DenseMultilinearExtension<F::Inner> {
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let projection_powers: Vec<F> = powers(projecting_element.clone(), one, D);
+
+    let c = spec.op().count();
+    assert!(
+        c > 0 && c < D,
+        "BitOp count {} out of range for cell width D = {}",
+        c,
+        D,
+    );
+
+    let evaluate_with_bit_op = |cell: &DynamicPolynomialF<F>| -> F::Inner {
+        let mut coeffs = cell.coeffs.to_vec();
+        coeffs.resize(D, zero.clone());
+        let transformed: Vec<F> = match spec.op() {
+            BitOp::Rot(c) => (0..D)
+                .map(|i| coeffs[rem!(add!(i, c), D)].clone())
+                .collect(),
+            BitOp::ShR(c) => (0..D)
+                .map(|i| {
+                    let j = add!(i, c);
+                    if j < D {
+                        coeffs[j].clone()
+                    } else {
+                        zero.clone()
+                    }
+                })
+                .collect(),
+        };
+        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+            &transformed,
+            &projection_powers,
+            zero.clone(),
+        )
+        .expect("inner product cannot fail here")
+        .into_inner()
+    };
+
+    match trace {
+        ProjectedTrace::RowMajor(t) => {
+            let num_rows = t.len();
+            let num_vars = num_rows.next_power_of_two().trailing_zeros() as usize;
+            let evaluations: Vec<F::Inner> = (0..num_rows)
+                .map(|row_idx| evaluate_with_bit_op(&t[row_idx][spec.source_col()]))
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evaluations,
+                zero.inner().clone(),
+            )
+        }
+        ProjectedTrace::ColumnMajor(t) => {
+            let col_mle = &t[spec.source_col()];
+            let evaluations: Vec<F::Inner> = col_mle.iter().map(evaluate_with_bit_op).collect();
+            DenseMultilinearExtension::from_evaluations_vec(
+                col_mle.num_vars,
+                evaluations,
+                zero.inner().clone(),
+            )
+        }
+    }
+}
+
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
@@ -366,4 +440,130 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
             )
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{LIMBS, test_config};
+    use crypto_primitives::{Field, FromWithConfig, crypto_bigint_monty::MontyField};
+
+    type F = MontyField<LIMBS>;
+
+    fn f(value: u32, cfg: &<F as PrimeField>::Config) -> F {
+        F::from_with_cfg(value, cfg)
+    }
+
+    fn poly(coeffs: Vec<F>) -> DynamicPolynomialF<F> {
+        DynamicPolynomialF { coeffs }
+    }
+
+    fn expected_inner(
+        coeffs: &[F],
+        projecting_element: &F,
+        cfg: &<F as PrimeField>::Config,
+    ) -> <F as Field>::Inner {
+        let zero = F::zero_with_cfg(cfg);
+        let one = F::one_with_cfg(cfg);
+        let powers = powers(projecting_element.clone(), one, coeffs.len());
+        DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(coeffs, &powers, zero)
+            .expect("inner product cannot fail here")
+            .into_inner()
+    }
+
+    #[test]
+    fn builds_bit_op_virtual_mle_from_row_major_trace() {
+        let cfg = test_config();
+        let alpha = f(2, &cfg);
+        let zero = F::zero_with_cfg(&cfg);
+        let row0 = [f(1, &cfg), f(2, &cfg), f(3, &cfg), f(4, &cfg)];
+        let row1 = [f(5, &cfg), f(6, &cfg), f(7, &cfg), f(8, &cfg)];
+        let trace =
+            ProjectedTrace::RowMajor(vec![vec![poly(row0.to_vec())], vec![poly(row1.to_vec())]]);
+
+        let mle = build_bit_op_virtual_mle::<F, 4>(
+            &trace,
+            &BitOpSpec::new(0, BitOp::ShR(2)),
+            &alpha,
+            &cfg,
+        );
+
+        assert_eq!(mle.num_vars, 1);
+        assert_eq!(
+            mle.evaluations,
+            vec![
+                expected_inner(
+                    &[row0[2].clone(), row0[3].clone(), zero.clone(), zero.clone()],
+                    &alpha,
+                    &cfg
+                ),
+                expected_inner(
+                    &[row1[2].clone(), row1[3].clone(), zero.clone(), zero],
+                    &alpha,
+                    &cfg
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn builds_bit_op_virtual_mle_from_column_major_trace() {
+        let cfg = test_config();
+        let alpha = f(3, &cfg);
+        let row0 = [f(1, &cfg), f(2, &cfg), f(3, &cfg), f(4, &cfg)];
+        let row1 = [f(5, &cfg), f(6, &cfg), f(7, &cfg), f(8, &cfg)];
+        let trace = ProjectedTrace::ColumnMajor(vec![DenseMultilinearExtension {
+            evaluations: vec![poly(row0.to_vec()), poly(row1.to_vec())],
+            num_vars: 1,
+        }]);
+
+        let mle = build_bit_op_virtual_mle::<F, 4>(
+            &trace,
+            &BitOpSpec::new(0, BitOp::Rot(1)),
+            &alpha,
+            &cfg,
+        );
+
+        assert_eq!(mle.num_vars, 1);
+        assert_eq!(
+            mle.evaluations,
+            vec![
+                expected_inner(
+                    &[
+                        row0[1].clone(),
+                        row0[2].clone(),
+                        row0[3].clone(),
+                        row0[0].clone()
+                    ],
+                    &alpha,
+                    &cfg,
+                ),
+                expected_inner(
+                    &[
+                        row1[1].clone(),
+                        row1[2].clone(),
+                        row1[3].clone(),
+                        row1[0].clone()
+                    ],
+                    &alpha,
+                    &cfg,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn rejects_bit_op_count_at_cell_width() {
+        let cfg = test_config();
+        let alpha = f(2, &cfg);
+        let trace = ProjectedTrace::RowMajor(vec![vec![poly(vec![f(1, &cfg), f(2, &cfg)])]]);
+
+        let _ = build_bit_op_virtual_mle::<F, 2>(
+            &trace,
+            &BitOpSpec::new(0, BitOp::Rot(2)),
+            &alpha,
+            &cfg,
+        );
+    }
 }
