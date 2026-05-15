@@ -13,6 +13,7 @@ pub mod basis;
 pub mod ext_field;
 pub mod packed_cw;
 pub mod params;
+pub mod poly_ext;
 pub mod radix8;
 pub mod ring_ops;
 
