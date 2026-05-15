@@ -62,18 +62,23 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryRefPoly<DEGREE_PLUS_ONE>>
     }
 }
 
-impl From<u32> for BinaryRefPoly<32> {
+impl<const DEGREE_PLUS_ONE: usize> From<u32> for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
     fn from(value: u32) -> Self {
-        Self(DensePolynomial {
-            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
-        })
+        // Keep masking enforced in a single place
+        Self::from(u64::from(value))
     }
 }
 
-impl From<u64> for BinaryRefPoly<64> {
+impl<const DEGREE_PLUS_ONE: usize> From<u64> for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
     fn from(value: u64) -> Self {
+        // Bit `i` of `value` becomes the coefficient of `X^i`. Bits at
+        // positions `>= 64` are not present in `u64` and are therefore zero;
+        // bits at positions `>= DEGREE_PLUS_ONE` are dropped by virtue of
+        // the fixed-size coefficient array.
         Self(DensePolynomial {
-            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+            coeffs: array::from_fn(|i| Boolean::new(i < 64 && value & (1_u64 << i) != 0)),
         })
     }
 }

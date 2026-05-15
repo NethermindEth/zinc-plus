@@ -5,6 +5,7 @@ use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
+    lookup::booleanity::{self, BooleanityChecker, BooleanityProof},
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
@@ -181,6 +182,7 @@ pub struct ProverSumchecked<
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
+    booleanity_proof: Option<BooleanityProof<F>>,
 }
 
 /// After step 6 (multipoint eval).
@@ -200,6 +202,7 @@ pub struct ProverMultipointEvaled<
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
+    booleanity_proof: Option<BooleanityProof<F>>,
 
     // New
     mp_proof: MultipointEvalProof<F>,
@@ -222,6 +225,7 @@ pub struct ProverLifted<
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
+    booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
 
@@ -247,6 +251,7 @@ pub struct ProverPcsOpened<
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
+    booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
@@ -524,10 +529,12 @@ impl_with_type_bounds!(ProverIdealChecked
 
 impl_with_type_bounds!(ProverEvalProjected
 {
-    /// Step 5: Combined CPR + Lookup multi-degree sumcheck over F_q.
-    /// Batches the CPR constraint claim (degree `max_deg+2`) with lookup groups
-    /// (one per table type) into a single sumcheck sharing one evaluation point `r*`.
-    /// Produces `up_evals` and `down_evals` (CPR) and lookup auxiliary witnesses at `r*`.
+    /// Step 5: Combined CPR + Booleanity + Lookup multi-degree sumcheck over F_q.
+    /// Batches the CPR constraint claim (degree `max_deg+2`), the booleanity
+    /// argument (degree 3), and lookup groups (one per table type) into a
+    /// single sumcheck sharing one evaluation point `r*`. Produces
+    /// `up_evals`/`down_evals` (CPR), `bit_slice_evals` (booleanity), and
+    /// lookup auxiliary witnesses at `r*`.
     pub fn step5_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
@@ -545,28 +552,65 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        // 4b: Lookup prepare — placeholder
-        let lookup_specs = &self.base.uair_signature;
-        let groups = vec![cpr_group];
+        let mut groups = vec![cpr_group];
+
+        // Booleanity: prepare optional group over witness binary-poly cols.
+        let trace_wit_bin_poly = {
+            let sig = &self.base.uair_signature;
+            let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+            let num_total_bin = sig.total_cols().num_binary_poly_cols();
+            &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin]
+        };
+
+        let bool_ancillary = if !trace_wit_bin_poly.is_empty() {
+            let (bool_group, anc) = BooleanityChecker::prepare_sumcheck_group::<D>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                trace_wit_bin_poly,
+                self.base.num_vars,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+            groups.push(bool_group);
+            Some(anc)
+        } else {
+            None
+        };
+
         // TODO: for each LookupGroup from group_lookup_specs(lookup_specs):
         //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
         //   - push triple into groups, collect pending proofs + metas
-        let _ = lookup_specs; // suppress unused warning until logup is implemented
 
-        // 4c: Multi-degree sumcheck width CPR group and lookup groups
+        // Multi-degree sumcheck over CPR (+ booleanity + lookup groups).
         let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             groups,
             self.base.num_vars,
             &self.field_cfg,
         );
-        // 4c: Finalize up_evals, down_evals
+
+        let mut md_iter = md_states.into_iter();
+
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover(
             &mut self.base.pcs_transcript.fs_transcript,
-            md_states.into_iter().next().expect("one CPR group"),
+            md_iter.next().expect("CPR group always present"),
             cpr_ancillary,
             &self.field_cfg,
         )?;
+
+        let booleanity_proof = if let Some(anc) = bool_ancillary {
+            let state = md_iter.next().expect("booleanity group present");
+            Some(
+                BooleanityChecker::finalize_prover(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    state,
+                    anc,
+                    &self.field_cfg,
+                )
+                .map_err(ProtocolError::Booleanity)?,
+            )
+        } else {
+            None
+        };
 
         // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
         let lookup_proof = None;
@@ -581,6 +625,7 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
             lookup_proof,
+            booleanity_proof,
         })
     }
 });
@@ -590,15 +635,43 @@ impl_with_type_bounds!(ProverSumchecked
     /// Step 6: Multi-point evaluation sumcheck. Combines `up_evals` and
     /// `down_evals` at `r'` into a single evaluation point `r_0`.
     /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 7.
+    /// polynomial-valued `lifted_evals` in Step 7. When the booleanity argument
+    /// is present, its bit-slice MLEs and `bit_slice_evals` are appended to
+    /// the `trace_mles` / `up_evals` passed to `MultipointEval`; the
+    /// corresponding `r_0`-side scalar claims are discharged for free by the
+    /// verifier against `lifted_evals.coeffs` in step 6.
     pub fn step6_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+        // Build extended trace_mles and up_evals: append witness bit-slice
+        // MLEs and their evaluations at r*, in the canonical order produced
+        // by `build_witness_bit_slice_mles` (j-major, i-minor).
+        let (extended_trace_mles, extended_up_evals) = if let Some(bp) = &self.booleanity_proof {
+            let trace_wit_bin_poly = {
+                let sig = &self.base.uair_signature;
+                let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+                let num_total_bin = sig.total_cols().num_binary_poly_cols();
+                &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin]
+            };
+
+            let mut trace_mles = self.projected_trace_f.clone();
+            trace_mles.extend(booleanity::build_witness_bit_slice_mles::<F, D>(
+                trace_wit_bin_poly,
+                &self.field_cfg,
+            ));
+
+            let mut up_evals = self.cpr_proof.up_evals.clone();
+            up_evals.extend_from_slice(&bp.bit_slice_evals);
+            (trace_mles, up_evals)
+        } else {
+            (self.projected_trace_f.clone(), self.cpr_proof.up_evals.clone())
+        };
+
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.projected_trace_f,
+            &extended_trace_mles,
             &self.cpr_eval_point,
-            &self.cpr_proof.up_evals,
+            &extended_up_evals,
             &self.cpr_proof.down_evals,
             self.base.uair_signature.shifts(),
             &self.field_cfg,
@@ -612,6 +685,7 @@ impl_with_type_bounds!(ProverSumchecked
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            booleanity_proof: self.booleanity_proof,
             mp_proof,
             r_0: mp_prover_state.eval_point,
         })
@@ -651,6 +725,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
             lifted_evals,
@@ -713,6 +788,7 @@ impl_with_type_bounds!(ProverLifted
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
+            booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
             lifted_evals: self.lifted_evals,
         })
@@ -761,6 +837,7 @@ impl_with_type_bounds!(ProverPcsOpened
             zip: zip_proof,
             witness_lifted_evals,
             lookup_proof: self.lookup_proof,
+            booleanity_proof: self.booleanity_proof,
         })
     }
 });

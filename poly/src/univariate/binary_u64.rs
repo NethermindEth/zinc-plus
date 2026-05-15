@@ -66,8 +66,7 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>>
 impl<const DEGREE_PLUS_ONE: usize> From<u32> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn from(value: u32) -> Self {
-        // Delegate to `From<u64>` so the masking contract is enforced in a
-        // single place. Bits at positions `>= DEGREE_PLUS_ONE` are dropped.
+        // Keep masking enforced in a single place
         Self::from(u64::from(value))
     }
 }

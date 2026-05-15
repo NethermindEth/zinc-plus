@@ -31,7 +31,10 @@ use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
-    lookup::{BatchedLookupProof, LookupError},
+    lookup::{
+        BatchedLookupProof, LookupError,
+        booleanity::{BooleanityError, BooleanityProof},
+    },
     multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
@@ -84,6 +87,10 @@ pub struct Proof<F: PrimeField> {
     pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Option<BatchedLookupProof<F>>,
+    /// Binary-polynomial booleanity argument proof. `None` when the UAIR
+    /// has no witness binary-poly columns (the argument is omitted from
+    /// the multi-degree sumcheck in that case).
+    pub booleanity_proof: Option<BooleanityProof<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -113,6 +120,16 @@ where
         let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
+        // booleanity_proof: presence flag (u32: 0 = absent, 1 = present)
+        // followed by the proof body (length-prefixed) when present.
+        let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let (booleanity_proof, bytes) = if presence != 0 {
+            let (p, rest) = BooleanityProof::<F>::read_transcription_bytes_subset(bytes);
+            (Some(p), rest)
+        } else {
+            (None, bytes)
+        };
+
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         assert!(bytes.is_empty(), "All bytes should be consumed");
@@ -126,6 +143,7 @@ where
             multipoint_eval,
             witness_lifted_evals,
             lookup_proof: None,
+            booleanity_proof,
         }
     }
 
@@ -155,10 +173,25 @@ where
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
         // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
+        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+            .write_transcription_bytes_subset(buf);
+
+        // booleanity_proof: u32 presence flag, then (optionally) the body
+        // with its own length prefix.
+        let presence: u32 = if self.booleanity_proof.is_some() {
+            1
+        } else {
+            0
+        };
+        presence.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        if let Some(ref bp) = self.booleanity_proof {
+            buf = bp.write_transcription_bytes_subset(buf);
+        }
+
         // TODO: serialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
-        DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
-            .write_transcription_bytes_subset(buf);
+        let _ = buf;
     }
 }
 
@@ -171,6 +204,10 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
         let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        let booleanity_bytes = match &self.booleanity_proof {
+            Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
+            None => 0,
+        };
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -186,6 +223,9 @@ where
             // Transcribable impls (lookup is not yet implemented).
             + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
+            // booleanity presence flag + optional payload
+            + u32::NUM_BYTES
+            + booleanity_bytes
     }
 }
 
@@ -295,6 +335,10 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     LiftedEvalProjection(PolyEvaluationError),
     #[error("lookup argument failed: {0}")]
     Lookup(#[from] LookupError),
+    #[error("booleanity argument failed: {0}")]
+    Booleanity(#[from] BooleanityError<F>),
+    #[error("booleanity proof missing from proof object")]
+    BooleanityProofMissing,
     #[error("PCS error: {0}")]
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
@@ -425,6 +469,11 @@ where
 
 #[cfg(test)]
 #[cfg(not(miri))] // long running
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::result_large_err,
+    clippy::type_complexity
+)]
 mod tests {
     use super::*;
     use crate::fold::FoldBinaryTrace4x;
@@ -609,7 +658,6 @@ mod tests {
     }
 
     /// Set up Zip+ PCS parameters for a given number of MLE variables.
-    #[allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
     fn setup_pp<Zt>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
@@ -638,7 +686,6 @@ mod tests {
         };
     }
 
-    #[allow(clippy::result_large_err)]
     fn do_test<Zt, U>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
@@ -961,6 +1008,108 @@ mod tests {
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
+            },
+        );
+    }
+
+    //
+    // Booleanity-specific end-to-end tests. `BigLinearUair` has 16 binary-poly
+    // witness columns, so the booleanity argument is exercised by all of the
+    // protocol tests above. The tests here verify that tampering with the
+    // booleanity proof and with witness bit values produces well-typed
+    // verifier errors.
+    //
+
+    /// Swapping two entries of `booleanity_proof.bit_slice_evals` breaks
+    /// the recomputed booleanity residue at `r*`, which the verifier's
+    /// `finalize_verifier` catches against the sumcheck's
+    /// `expected_evaluation`. (With overwhelming probability over the
+    /// random transcript, two distinct bit-slice MLE evaluations at `r*`
+    /// produce different `v*(v-1)` residues.)
+    #[test]
+    fn test_big_linear_tamper_booleanity_evals() {
+        use zinc_piop::lookup::booleanity::BooleanityError;
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                let bp = proof
+                    .booleanity_proof
+                    .as_mut()
+                    .expect("BigLinearUair has binary-poly witnesses");
+                // Double one entry: x -> 2x. The booleanity residue at x is
+                // x*(x-1); at 2x it is 2x*(2x-1). For random F_q-valued x
+                // these differ with overwhelming probability.
+                let dup = bp.bit_slice_evals[0].clone();
+                bp.bit_slice_evals[0] += dup;
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Booleanity(BooleanityError::ClaimValueDoesNotMatch { .. })
+                ));
+            },
+        );
+    }
+
+    /// Removing entries from `booleanity_proof.bit_slice_evals` breaks the
+    /// length invariant; `finalize_verifier` detects this via
+    /// `WrongBitSliceEvalsNumber` before the residue check.
+    #[test]
+    fn test_big_linear_tamper_booleanity_evals_length() {
+        use zinc_piop::lookup::booleanity::BooleanityError;
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                let bp = proof
+                    .booleanity_proof
+                    .as_mut()
+                    .expect("BigLinearUair has binary-poly witnesses");
+                bp.bit_slice_evals.pop();
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::Booleanity(BooleanityError::WrongBitSliceEvalsNumber { .. })
+                ));
+            },
+        );
+    }
+
+    /// Removing `booleanity_proof` entirely when the UAIR has bin-poly
+    /// witnesses produces `BooleanityProofMissing`.
+    #[test]
+    fn test_big_linear_drop_booleanity_proof() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |proof| {
+                proof.booleanity_proof = None;
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::BooleanityProofMissing
+                ));
             },
         );
     }
