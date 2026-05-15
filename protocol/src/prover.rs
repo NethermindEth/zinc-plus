@@ -25,7 +25,7 @@ use zinc_poly::{
     mle::MultilinearExtensionWithConfig,
     univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
     degree_counter::count_max_degree,
@@ -1106,6 +1106,7 @@ pub fn prove_folded<
     ZtF,
     U,
     F,
+    BinF,
     const D: usize,
     const HALF_D: usize,
     const MLE_FIRST: bool,
@@ -1142,6 +1143,16 @@ where
     F::Inner:
         ConstIntSemiring + ConstTranscribable + FromRef<ZtF::Fmod> + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    // Binary-lane PCS field. Only needs the `ZipPlus::prove_f` surface
+    // plus config interchangeability with `F` and an embedding from `F`
+    // (to lift the scalar evaluation point `r0_ext` into `BinF`).
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> MulByScalar<&'a BinF>
+        + FromRef<BinF>
+        + for<'a> FromWithConfig<&'a F>,
+    BinF::Inner: Transcribable,
+    BinF::Modulus: Transcribable,
 {
     let (pp_bin_split, pp_arb, pp_int) = pp;
     let uair_signature = U::signature();
@@ -1454,11 +1465,18 @@ where
     r0_ext.push(gamma);
 
     if let Some(hint_bin) = &hint_bin_split {
-        let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+        // Binary lane runs on the (possibly distinct) binary-lane PCS
+        // field `BinF`. Embed the scalar evaluation point `r0_ext` into
+        // `BinF` (`field_cfg` is `&F::Config == &BinF::Config`).
+        let r0_ext_binf: Vec<BinF> = r0_ext
+            .iter()
+            .map(|f| BinF::from_with_cfg(f, &field_cfg))
+            .collect();
+        let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<BinF, CHECK_FOR_OVERFLOW>(
             &mut pcs_transcript,
             pp_bin_split,
             &split_binary_witness,
-            &r0_ext,
+            &r0_ext_binf,
             hint_bin,
             &field_cfg,
         )?;

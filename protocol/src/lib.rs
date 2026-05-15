@@ -329,6 +329,86 @@ pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
     type IntLc: LinearCode<Self::IntZt>;
 }
 
+/// Folds one `HALF_D`-coefficient block of a binary witness lifted-eval
+/// into the binary-lane PCS field `BinF`.
+///
+/// In the 1×-folded verifier (`verify_folded`), each binary witness
+/// lifted-eval `bar_u` is a [`DynamicPolynomialF<F>`] (i.e. `coeffs:
+/// Vec<F>`). Step-7's binary `eval_f` is built by collapsing each
+/// `HALF_D`-coefficient half of `bar_u` against the PCS-sampled `alphas`
+/// and γ-interpolating the two halves. For the scalar binary-lane field
+/// (`BinF = F`) this "collapse" is the dot product `Σ_l alpha_l ·
+/// coeff_l`; for a polynomial-valued binary-lane PCS it is instead an
+/// assembly of the `HALF_D` coefficients into a `BinF`. This trait
+/// abstracts the per-half operation so `verify_folded` is generic over
+/// `BinF`.
+pub trait BinaryFoldEval<F: PrimeField, Chal>: PrimeField {
+    /// Folds a single half-block. `coeffs` is a `HALF_D`-length slice of
+    /// `F` (a half of `bar_u.coeffs`; it may be shorter than `HALF_D` —
+    /// missing entries are treated as zero). `alphas` is the PCS-sampled
+    /// per-poly alpha vector (length `HALF_D`).
+    fn fold_half(coeffs: &[F], alphas: &[Chal], cfg: &F::Config) -> Self;
+}
+
+/// Scalar binary-lane case: `BinF = F`. Reproduces the historical
+/// 1×-folded contraction `Σ_l F::from_with_cfg(&alphas[l], cfg) *
+/// coeffs[l]` exactly (byte-for-byte identical to the pre-`BinF` `c1` /
+/// `c2` accumulation loop in `verify_folded`).
+impl<F, Chal> BinaryFoldEval<F, Chal> for F
+where
+    F: PrimeField + for<'a> FromWithConfig<&'a Chal>,
+{
+    #[inline]
+    fn fold_half(coeffs: &[F], alphas: &[Chal], cfg: &F::Config) -> Self {
+        let mut acc = F::zero_with_cfg(cfg);
+        for (l, alpha) in alphas.iter().enumerate() {
+            if let Some(coeff) = coeffs.get(l) {
+                let mut term: F = F::from_with_cfg(alpha, cfg);
+                term *= coeff;
+                acc += &term;
+            }
+        }
+        acc
+    }
+}
+
+/// Polynomial-valued binary-lane case: `BinF = PolyExt16<LIMBS>`,
+/// `F = MontyField<LIMBS>`, `Chal = i128`.
+///
+/// Unlike the scalar case, this is the "no alpha-collapse, keep
+/// polynomial-valued" path: rather than contracting the `HALF_D = 16`
+/// coefficients against `alphas` into one scalar, it **assembles** the
+/// 16 coefficients into a `PolyExt16` element directly (`coeffs[i]` →
+/// polynomial coefficient `i`; missing entries become zero). `alphas`
+/// is ignored — for a scalar evaluation point the binary lane's
+/// `PolyExt16` evaluation decomposes coordinate-wise into 16
+/// independent `F_p` evaluations, and the per-coordinate folding is
+/// recovered structurally without the alpha contraction.
+impl<const LIMBS: usize>
+    BinaryFoldEval<
+        crypto_primitives::crypto_bigint_monty::MontyField<LIMBS>,
+        i128,
+    > for zip_plus::code::binary_add_fft_16::poly_ext::PolyExt16<LIMBS>
+{
+    #[inline]
+    fn fold_half(
+        coeffs: &[crypto_primitives::crypto_bigint_monty::MontyField<LIMBS>],
+        _alphas: &[i128],
+        cfg: &<crypto_primitives::crypto_bigint_monty::MontyField<LIMBS> as PrimeField>::Config,
+    ) -> Self {
+        use crypto_primitives::crypto_bigint_monty::MontyField;
+        let n = coeffs.len().min(16);
+        let arr: [MontyField<LIMBS>; 16] = core::array::from_fn(|i| {
+            if i < n {
+                coeffs[i].clone()
+            } else {
+                MontyField::<LIMBS>::zero_with_cfg(cfg)
+            }
+        });
+        Self::from_coeffs(arr)
+    }
+}
+
 /// Like [`FoldedZincTypes`], but additionally folds int witness columns by
 /// 2× via the `v = lo + 2^128 · hi` decomposition, with halves stored as
 /// `Int<INT_HALF_LIMBS>`. The int Zip+ commits the split witness at length
@@ -2156,6 +2236,7 @@ mod tests {
             TestFoldedZincTypesIprs,
             BinaryDecompositionUair<ZtInt>,
             F,
+            F,
             DEGREE_PLUS_ONE,
             HALF_DEGREE_PLUS_ONE,
             false,
@@ -2166,6 +2247,7 @@ mod tests {
         verify_folded::<
             TestFoldedZincTypesIprs,
             BinaryDecompositionUair<ZtInt>,
+            F,
             F,
             IdealOrZero<DegreeOneIdeal<F>>,
             DEGREE_PLUS_ONE,

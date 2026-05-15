@@ -2,10 +2,11 @@
 \label{sec:protocol-integration}
 
 The code is wired end-to-end through Zip$^+$'s commit / prove / verify.
-This section describes the verifier-side field and the challenge type
-that make that possible. (An earlier draft of this document described
-this as an open ``protocol-integration gap''; it is now closed, and the
-content below supersedes it.)
+This section describes the verifier-side field, the challenge type, and
+then the three algorithms as the implementation runs them. (An earlier
+draft of this document described this as an open
+``protocol-integration gap''; it is now closed, and the content below
+supersedes it.)
 
 \subsection{The obstruction}
 
@@ -23,6 +24,7 @@ and no map into a \emph{prime} field $\F_p$ is natural: the encoder's
 algebra is polynomial-shaped, so the verifier-side scalar must be too.
 
 \subsection{The verifier-side field $F = \F_p[X]/\flift$}
+\label{sec:verifier-field}
 
 The fix is to make $F$ itself polynomial-shaped. Define
 \[
@@ -39,6 +41,7 @@ is coefficient-wise mod-$p$ reduction. Because $f \equiv \flift
 \emph{ring homomorphism} $\Rlift \to F$ --- it commutes with addition,
 multiplication, and the $\flift$ reduction --- so it preserves every
 algebraic identity the proximity and eval-consistency checks rely on.
+This is the property the whole integration rests on.
 
 When $\flift \bmod p$ is irreducible over $\F_p$, $F$ is a genuine
 field, the degree-$16$ extension $\F_{p^{16}}$. The implementation
@@ -64,6 +67,7 @@ $\flift = X^{16}+X^5+X^3+X^2+1$ is irreducible mod $p$. A non-ignored
 test pins this choice; $P$ is a const-generic, so it can be swapped.
 
 \subsection{The challenge type {\tt Bit4Poly16}}
+\label{sec:bit4poly}
 
 The row-batching challenge $\code{Chal}$ and evaluation point
 $\code{Pt}$ are also polynomial-shaped: \code{Bit4Poly16}, a
@@ -71,35 +75,179 @@ $16$-nibble polynomial with $4$-bit integer coefficients in
 $\{0,\ldots,15\}$, drawn fresh via Fiat--Shamir. It is backed by a
 single \code{i64} ($16 \times 4 = 64$ bits) and has an $8$-byte wire
 encoding. The narrow $4$-bit coefficients keep the combined-row
-magnitudes small: at $\code{num\_rows} = 1$, a combined-row
-coefficient is a sum of $\le \code{batch}$ products of a binary
-message bit and a $4$-bit challenge coefficient, hence bounded by
-$\code{batch}\cdot 15$ --- which is why \code{BITS\_CR = 8} suffices
-for the combined-row wire encoding (\autoref{sec:packed-cw}).
+magnitudes small (see \autoref{sec:prove}).
 
-\subsection{The coherence identity}
+\subsection{Notation}
 
-With $F = \F_p[X]/\flift$ and $\pi_p$ a ring homomorphism, the
-protocol's coherence identity holds by algebra: the prover's
-combined row, the evaluation, and the tensor coordinates
-$(q_0, q_1)$ all live in $F$, and
-\[
-  \langle \text{combined\_row}, q_1 \rangle_F
-  \;=\;
-  \langle \text{coeffs}, b \rangle_F
-\]
-because every quantity is the $\pi_p$-image of the corresponding
-$\Rlift$-valued quantity the prover computed, and $\pi_p$ commutes
-with the inner product. The transcript serializes the combined-row
-vector $b$ as polynomial-valued (packed) entries rather than scalar
-field elements.
+A single committed polynomial has $N = 2^{\code{num\_vars}}$
+evaluations, arranged as a $\code{num\_rows} \times \code{row\_len}$
+matrix with $\code{num\_rows}\cdot\code{row\_len} = N$. The linear
+code maps each length-$\code{row\_len}$ row to a length-$\code{codeword\_len}
+= \code{REP}\cdot\code{row\_len}$ codeword. A \emph{batch} of $\ell$
+polynomials is committed together. For the shipped binary lane
+$\code{num\_rows} = 1$, $\code{Eval} = \code{BinaryPoly<16>}$,
+$\code{Cw} = \code{CombR} = \code{PackedI64Poly16}$, and
+$\code{Chal} = \code{Pt} = \code{Bit4Poly16}$.
+
+\subsection{Commit}
+\label{sec:commit}
+
+\begin{enumerate}
+  \item For each of the $\ell$ batched polynomials, split its
+    evaluation vector into $\code{num\_rows}$ rows and encode each row
+    with the radix-8 additive FFT (\autoref{sec:radix8}): a length-%
+    $\code{row\_len}$ vector of \code{Eval} becomes a length-%
+    $\code{codeword\_len}$ vector of \code{Cw} in $\Rlift$.
+  \item Stack all $\ell \cdot \code{num\_rows}$ codeword rows into one
+    matrix and build a Merkle tree over its $\code{codeword\_len}$
+    \emph{columns} --- each leaf is the full column (one \code{Cw}
+    cell per codeword row).
+  \item The commitment is the Merkle root. The per-polynomial codeword
+    matrices and the tree are retained as the prover's hint.
+\end{enumerate}
+
+\subsection{Prove}
+\label{sec:prove}
+
+\textbf{Input:} the batch, the evaluation point
+$\code{point} \in F^{\code{num\_vars}}$, the commit hint.
+\textbf{Output:} the combined evaluation $\code{eval} \in F$, and a
+transcript.
+
+\begin{enumerate}
+  \item \textbf{Tensor split.}
+    $(q_0, q_1) = \code{point\_to\_tensor}(\code{point})$, where $q_0$
+    (length $\code{num\_rows}$) is the equality polynomial over the
+    low $\log_2\code{num\_rows}$ coordinates of $\code{point}$ and
+    $q_1$ (length $\code{row\_len}$) over the high coordinates. Both
+    live in $F$.
+  \item \textbf{Row lift.} For each polynomial, map every \code{Eval}
+    entry to a \code{CombR} entry via the alpha-projection inner
+    product. Because $\code{Comb} = \code{CombR}$ forces
+    $\code{DEGREE\_BOUND} = 0$, the alpha vector is $[1]$ and the lift
+    is trivial: each \code{BinaryPoly<16>} becomes the \code{CombR}
+    polynomial with the same $\{0,1\}$ coefficients. Call the result
+    $w'$, a $\code{num\_rows}\times\code{row\_len}$ matrix of
+    \code{CombR} per polynomial.
+  \item \textbf{Row-evaluation vector $b$.} Compute, accumulated
+    across all polynomials,
+    \[
+      b_j \;=\; \sum_{\text{polys}} \bigl\langle\, w'_j,\; q_1 \,\bigr\rangle_F,
+      \qquad j = 0,\ldots,\code{num\_rows}-1,
+    \]
+    where $w'_j$ is row $j$ and the inner product reduces each
+    \code{CombR} entry to $F$ via $\pi_p$ before dotting against
+    $q_1 \in F^{\code{row\_len}}$. Write $b$ to the transcript.
+  \item \textbf{Claimed evaluation.}
+    $\code{eval} = \langle q_0, b\rangle_F$.
+  \item \textbf{Row-batching challenges.} Sample
+    $\code{coeffs} \in \code{Chal}^{\code{num\_rows}}$ via
+    Fiat--Shamir (or $\code{coeffs} = [1]$ when
+    $\code{num\_rows} = 1$).
+  \item \textbf{Combined row.} Compute, in $\Rlift$ (\emph{not} in
+    $F$),
+    \[
+      \code{combined\_row}[c] \;=\;
+      \sum_{\text{polys}} \;\sum_{j=0}^{\code{num\_rows}-1}
+      \code{coeffs}[j]\;\cdot\; w'_{\text{poly}}[j][c],
+      \qquad c = 0,\ldots,\code{row\_len}-1.
+    \]
+    Each product is a \code{CombR} $\times$ \code{Bit4Poly16}
+    multiplication in $\Rlift$. The coefficients of
+    $\code{combined\_row}$ stay small: at $\code{num\_rows} = 1$ each
+    is a sum of $\le \ell$ products of a $\{0,1\}$-coefficient entry
+    and a $4$-bit challenge coefficient, hence bounded by
+    $\ell \cdot 15$ --- which is why the combined row packs at
+    $\code{BITS\_CR} = 8$ bits per coefficient. Write
+    $\code{combined\_row}$ to the transcript.
+  \item \textbf{Column openings.} Repeat $\code{NUM\_COLUMN\_OPENINGS}$
+    times: squeeze a column index from the transcript; write the
+    \code{Cw} cells of all $\ell\cdot\code{num\_rows}$ codeword rows
+    at that column; append the column's Merkle authentication path.
+\end{enumerate}
+
+\subsection{Verify}
+\label{sec:verify}
+
+\textbf{Input:} the commitment, the point
+$\code{point} \in F^{\code{num\_vars}}$, the claimed
+$\code{eval} \in F$, the transcript. \textbf{Output:} accept or
+reject.
+
+\begin{enumerate}
+  \item \textbf{Tensor split.} Recompute $(q_0, q_1)$ from
+    $\code{point}$ as in Prove.
+  \item Read $b \in F^{\code{num\_rows}}$ from the transcript.
+  \item \textbf{Check 1 --- evaluation consistency.} Reject unless
+    \[
+      \langle q_0, b\rangle_F \;=\; \code{eval}.
+    \]
+  \item Re-sample $\code{coeffs}$ (Fiat--Shamir, same as Prove).
+  \item Read $\code{combined\_row} \in \code{CombR}^{\code{row\_len}}$
+    and encode it with the radix-8 FFT (\code{encode\_wide}) to obtain
+    $\code{encoded\_combined\_row} \in
+    \code{CombR}^{\code{codeword\_len}}$.
+  \item \textbf{Check 2 --- coherence.} Reject unless
+    \[
+      \bigl\langle\, \code{combined\_row},\; q_1 \,\bigr\rangle_F
+      \;=\;
+      \bigl\langle\, \code{coeffs},\; b \,\bigr\rangle_F.
+    \]
+    Both sides are computed in $F$ (the \code{CombR} / \code{Chal}
+    operands reduced via $\pi_p$). The left side is the row $b$
+    \emph{would} produce from $\code{combined\_row}$; the right side
+    is the $\code{coeffs}$-combination of the $b$ the prover wrote.
+    Equality ties the proximity-tested $\code{combined\_row}$ to the
+    eval-tested $b$ --- they are derived from the same underlying
+    rows $w'$.
+  \item \textbf{Column checks.} Repeat
+    $\code{NUM\_COLUMN\_OPENINGS}$ times: squeeze the column index,
+    read the $\ell\cdot\code{num\_rows}$ \code{Cw} cells and the
+    Merkle path.
+    \begin{enumerate}
+      \item \textbf{Check 3 --- proximity (column testing).} For each
+        polynomial, alpha-project its $\code{num\_rows}$ \code{Cw}
+        cells at this column into \code{CombR}, then dot the resulting
+        $\code{num\_rows}$-vector against $\code{coeffs}$; sum across
+        polynomials. Reject unless the result --- an exact equality in
+        $\Rlift$, \emph{not} in $F$ --- equals
+        $\code{encoded\_combined\_row}[\code{column}]$.
+      \item \textbf{Check 4 --- Merkle.} Reject unless the column
+        cells authenticate against the commitment root at this
+        column index.
+    \end{enumerate}
+  \item Accept if all checks pass.
+\end{enumerate}
+
+\paragraph{Chain of trust.}
+Check 4 establishes that the opened column data is the data that was
+committed. Check 3 establishes that $\code{combined\_row}$ is (close
+to) a genuine codeword consistent with that committed data --- this is
+the proximity test, and it is an \emph{exact} $\Rlift$ identity
+because both sides are honest $\Rlift$-arithmetic with no field
+reduction. Check 2 then transfers that guarantee from
+$\code{combined\_row}$ to $b$, and Check 1 transfers it from $b$ to
+$\code{eval}$. So $\code{eval}$ is the correct evaluation of the
+committed polynomials at $\code{point}$.
+
+\paragraph{Where the field appears.}
+Only Checks 1 and 2 are computed in $F = \F_p[X]/\flift$ --- they
+involve $q_0, q_1, b$, which are field-valued. The encoder, the
+combined-row computation, and the column-testing identity (Check 3)
+all run in $\Rlift$ with no field reduction; $\pi_p$ enters only when
+a \code{CombR} value is dotted against a field-valued tensor. Because
+$\pi_p$ is a ring homomorphism (\autoref{sec:verifier-field}), Checks
+1 and 2 hold for the honest prover by algebra: every field-valued
+quantity is the $\pi_p$-image of the corresponding $\Rlift$-valued
+quantity, and $\pi_p$ commutes with the inner products.
 
 \subsection{Soundness note}
 
 The proximity argument for the lifted code in $F = \F_p[X]/\flift$ is
 not given a formal proof here. The structural ingredients are: the
 lifted code reduces mod $2$ to a genuine $\GF(2^{16})$ Reed--Solomon
-code (\autoref{sec:lift}), and the Schwartz--Zippel-style argument
-the Zip$^+$ proximity test uses has a clean analogue in the extension
-$\F_{p^{16}}$ when $\flift \bmod p$ is irreducible. A complete
-analysis is left as follow-up (\autoref{sec:future-work}).
+code (\autoref{sec:lift}); Check 3 is an exact $\Rlift$ identity; and
+the Schwartz--Zippel-style argument the Zip$^+$ proximity test uses
+has a clean analogue in the extension $\F_{p^{16}}$ when $\flift \bmod
+p$ is irreducible. A complete analysis is left as follow-up
+(\autoref{sec:future-work}).

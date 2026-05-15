@@ -129,6 +129,64 @@ impl<const LIMBS: usize> ConstTranscribable for PolyExt16Inner<LIMBS> {
 }
 
 // ===========================================================================
+// PolyExt16Modulus — the coefficient modulus, width-matched to `Inner`.
+//
+// `PrimeField::Modulus` is used by the protocol's PCS transcript
+// (`pcs_transcript::write_field_element_no_length`), which reuses a
+// SINGLE buffer sized at `Inner::NUM_BYTES` for both the modulus and the
+// inner writes. So `Modulus::NUM_BYTES` must equal `Inner::NUM_BYTES`
+// (= `D_16 * Uint<LIMBS>::NUM_BYTES`).
+//
+// `MontyField<LIMBS>`'s own modulus is just a `Uint<LIMBS>` (one
+// coefficient's worth), which is `D_16`× too narrow. `PolyExt16Modulus`
+// is the width-matched newtype: it stores the single coefficient
+// modulus and transcribes it into slot 0 of a `D_16`-slot buffer,
+// zero-padding the remaining slots.
+// ===========================================================================
+
+/// The modulus of `PolyExt16<LIMBS>`: the coefficient field's modulus
+/// (`Uint<LIMBS>`), width-matched to [`PolyExt16Inner`] for transcript
+/// purposes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PolyExt16Modulus<const LIMBS: usize>(pub Uint<LIMBS>);
+
+impl<const LIMBS: usize> GenTranscribable for PolyExt16Modulus<LIMBS> {
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let w = <Uint<LIMBS> as ConstTranscribable>::NUM_BYTES;
+        // The coefficient modulus lives in slot 0; the remaining
+        // `D_16 - 1` zero-padded slots are ignored.
+        Self(<Uint<LIMBS> as GenTranscribable>::read_transcription_bytes_exact(
+            &bytes[..w],
+        ))
+    }
+
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        buf.fill(0);
+        let w = <Uint<LIMBS> as ConstTranscribable>::NUM_BYTES;
+        self.0.write_transcription_bytes_exact(&mut buf[..w]);
+    }
+}
+
+impl<const LIMBS: usize> ConstTranscribable for PolyExt16Modulus<LIMBS> {
+    const NUM_BYTES: usize = D_16 * <Uint<LIMBS> as ConstTranscribable>::NUM_BYTES;
+    const NUM_BITS: usize = D_16 * <Uint<LIMBS> as ConstTranscribable>::NUM_BITS;
+}
+
+/// `Uint<LIMBS>` (the protocol's `Fmod`) → `PolyExt16Modulus`. Required
+/// by `verify_folded`'s `BinF::Modulus: FromRef<ZtF::Fmod>` bound.
+impl<const LIMBS: usize> FromRef<Uint<LIMBS>> for PolyExt16Modulus<LIMBS> {
+    fn from_ref(value: &Uint<LIMBS>) -> Self {
+        Self(*value)
+    }
+}
+
+impl<const LIMBS: usize> FromRef<PolyExt16Modulus<LIMBS>> for PolyExt16Modulus<LIMBS> {
+    fn from_ref(value: &Self) -> Self {
+        *value
+    }
+}
+
+// ===========================================================================
 // PolyExt16<LIMBS> — F[X] / f̃ with F = MontyField<LIMBS>.
 // ===========================================================================
 
@@ -675,7 +733,12 @@ impl<const LIMBS: usize> Ring for PolyExt16<LIMBS> {}
 
 impl<const LIMBS: usize> Field for PolyExt16<LIMBS> {
     type Inner = PolyExt16Inner<LIMBS>;
-    type Modulus = <MontyField<LIMBS> as Field>::Modulus;
+    // Width-matched to `Inner` (`D_16 * Uint<LIMBS>::NUM_BYTES`): the
+    // protocol's PCS transcript reuses one `Inner`-sized buffer for both
+    // the modulus and inner writes. `MontyField`'s bare `Uint<LIMBS>`
+    // modulus is `D_16`× too narrow; `PolyExt16Modulus` wraps it with
+    // the matching transcript width.
+    type Modulus = PolyExt16Modulus<LIMBS>;
 
     fn inner(&self) -> &Self::Inner {
         // The storage *is* the `Inner`: a real, panic-free borrow.
@@ -705,8 +768,9 @@ impl<const LIMBS: usize> PrimeField for PolyExt16<LIMBS> {
 
     fn modulus(&self) -> Self::Modulus {
         // The coefficient field's modulus; `f̃` is a *ring* quotient and
-        // is not part of the modulus the protocol transcribes.
-        self.coef(0).modulus()
+        // is not part of the modulus the protocol transcribes. Wrapped
+        // in `PolyExt16Modulus` so its transcript width matches `Inner`.
+        PolyExt16Modulus(self.coef(0).modulus())
     }
 
     fn modulus_minus_one_div_two(&self) -> Self::Inner {
@@ -718,8 +782,9 @@ impl<const LIMBS: usize> PrimeField for PolyExt16<LIMBS> {
 
     fn make_cfg(modulus: &Self::Modulus) -> Result<Self::Config, crypto_primitives::FieldError> {
         // Delegate to the coefficient field: the config IS the
-        // coefficient field's config.
-        <MontyField<LIMBS> as PrimeField>::make_cfg(modulus)
+        // coefficient field's config. Unwrap the width-matched newtype
+        // to recover the bare `Uint<LIMBS>` coefficient modulus.
+        <MontyField<LIMBS> as PrimeField>::make_cfg(&modulus.0)
     }
 
     fn new_with_cfg(inner: Self::Inner, cfg: &Self::Config) -> Self {
@@ -802,6 +867,71 @@ impl<const LIMBS: usize> FromWithConfig<&DensePolynomial<i64, 16>> for PolyExt16
 impl<const LIMBS: usize, const B: u32> FromWithConfig<&PackedI64Poly16<B>> for PolyExt16<LIMBS> {
     fn from_with_cfg(value: &PackedI64Poly16<B>, cfg: &Self::Config) -> Self {
         <Self as FromWithConfig<&DensePolynomial<i64, 16>>>::from_with_cfg(&value.0, cfg)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Primitive-integer → constant-polynomial conversions.
+//
+// Each primitive scalar `v` maps to the degree-0 constant polynomial
+// `v·X^0` (the scalar, reduced mod p, in coefficient 0; coefficients
+// 1..16 zero). The scalar is reduced into the coefficient field via
+// `MontyField`'s own signed/unsigned `FromWithConfig` (correct mod-p
+// reduction). Implementing all ten primitive widths satisfies the
+// blanket `FromPrimitiveWithConfig` impl in `crypto-primitives`.
+// ---------------------------------------------------------------------------
+
+/// Builds the constant polynomial `c·X^0` for a `MontyField` coefficient.
+#[inline]
+fn const_poly_from_coef<const LIMBS: usize>(
+    c: Coef<LIMBS>,
+    cfg: &Cfg<LIMBS>,
+) -> PolyExt16<LIMBS> {
+    let mut coeffs: [Coef<LIMBS>; D_16] =
+        core::array::from_fn(|_| Coef::<LIMBS>::zero_with_cfg(cfg));
+    coeffs[0] = c;
+    PolyExt16::from_coef_array(coeffs, *cfg)
+}
+
+macro_rules! impl_from_primitive {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl<const LIMBS: usize> FromWithConfig<$t> for PolyExt16<LIMBS> {
+                fn from_with_cfg(value: $t, cfg: &Self::Config) -> Self {
+                    let c = <MontyField<LIMBS> as FromWithConfig<$t>>::from_with_cfg(value, cfg);
+                    const_poly_from_coef(c, cfg)
+                }
+            }
+
+            impl<const LIMBS: usize> FromWithConfig<&$t> for PolyExt16<LIMBS> {
+                fn from_with_cfg(value: &$t, cfg: &Self::Config) -> Self {
+                    <Self as FromWithConfig<$t>>::from_with_cfg(*value, cfg)
+                }
+            }
+        )*
+    };
+}
+
+// All ten primitive integer widths — this makes `PolyExt16` satisfy the
+// blanket `FromPrimitiveWithConfig` impl required by `verify_folded`'s
+// `BinF` bounds.
+impl_from_primitive!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+
+/// `MontyField<LIMBS>` scalar → `PolyExt16`: the constant polynomial
+/// whose coefficient 0 is the scalar (rest zero). This is the `BinF:
+/// FromWithConfig<&F>` embedding the protocol uses to lift the scalar
+/// evaluation point `r0_ext` into the binary-lane PCS field.
+impl<const LIMBS: usize> FromWithConfig<&MontyField<LIMBS>> for PolyExt16<LIMBS> {
+    fn from_with_cfg(value: &MontyField<LIMBS>, _cfg: &Self::Config) -> Self {
+        // `from_scalar` builds the degree-0 constant polynomial directly
+        // from a `MontyField` coefficient (its config is the shared cfg).
+        Self::from_scalar(value.clone())
+    }
+}
+
+impl<const LIMBS: usize> FromWithConfig<MontyField<LIMBS>> for PolyExt16<LIMBS> {
+    fn from_with_cfg(value: MontyField<LIMBS>, _cfg: &Self::Config) -> Self {
+        Self::from_scalar(value)
     }
 }
 
@@ -1099,5 +1229,61 @@ mod tests {
         let b = poly([2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9, 0, 4, 5]);
         let via_scalar = a.mul_by_scalar::<false>(&b).unwrap();
         assert_eq!(via_scalar, a.clone() * b.clone());
+    }
+
+    /// `FromWithConfig<&i128>` builds the degree-0 constant polynomial:
+    /// the scalar (reduced mod p) in coefficient 0, rest zero.
+    #[test]
+    fn from_i128_constant_poly() {
+        let cfg = test_cfg();
+        for &v in &[0i128, 1, 2, 42, -1, -7, 1_000_000_007, -123_456_789] {
+            let got = <P as FromWithConfig<&i128>>::from_with_cfg(&v, &cfg);
+            let mut expected = [0i64; 16];
+            // `i128` test values all fit in `i64` here.
+            expected[0] = v as i64;
+            assert_eq!(got, poly(expected), "i128 const-poly mismatch for {v}");
+            // Coefficients 1..16 must be zero.
+            for i in 1..16 {
+                assert!(Coef::<LIMBS>::is_zero(&got.coeffs()[i]));
+            }
+        }
+    }
+
+    /// `FromWithConfig<&MontyField>` builds the constant polynomial whose
+    /// coefficient 0 is the scalar (rest zero).
+    #[test]
+    fn from_monty_field_constant_poly() {
+        let cfg = test_cfg();
+        for &v in &[0i64, 1, 99, -5, 7_777_777] {
+            let scalar = cf(v);
+            let got = <P as FromWithConfig<&F>>::from_with_cfg(&scalar, &cfg);
+            assert_eq!(got.coeffs()[0], scalar);
+            for i in 1..16 {
+                assert!(Coef::<LIMBS>::is_zero(&got.coeffs()[i]));
+            }
+        }
+    }
+
+    /// `FromPrimitiveWithConfig` blanket impl is satisfied: each
+    /// primitive width yields the degree-0 constant polynomial.
+    #[test]
+    fn from_primitive_with_config() {
+        use crypto_primitives::FromPrimitiveWithConfig;
+        fn assert_fp<T: FromPrimitiveWithConfig>() {}
+        assert_fp::<P>();
+
+        let cfg = test_cfg();
+        let a = <P as FromWithConfig<u8>>::from_with_cfg(200u8, &cfg);
+        assert_eq!(a, poly([200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        let b = <P as FromWithConfig<u64>>::from_with_cfg(1_234_567_890u64, &cfg);
+        assert_eq!(
+            b,
+            poly([1_234_567_890, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
+        let c = <P as FromWithConfig<i32>>::from_with_cfg(-99i32, &cfg);
+        assert_eq!(c, poly([-99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        // Negative reduces correctly: -1 → 0 - 1 in the coefficient field.
+        let neg = <P as FromWithConfig<i8>>::from_with_cfg(-1i8, &cfg);
+        assert_eq!(neg.coeffs()[0], cf(0) - cf(1));
     }
 }

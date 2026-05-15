@@ -44,6 +44,10 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
+    code::binary_add_fft_16::{
+        AddFftConfigGF2_16, BinaryAddFft16Code, packed_cw::PackedI64Poly16,
+        poly_ext::PolyExt16,
+    },
     code::iprs::{IprsCode, PnttConfigF65537},
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     utils::{eprint_bytes_size_breakdown, eprint_proof_size},
@@ -1098,7 +1102,7 @@ fn setup_folded_pp_real_ecdsa(num_vars: usize) -> FoldedPp1x<BenchFoldedRealEcds
 }
 
 #[allow(clippy::too_many_arguments)]
-fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
+fn do_bench_e2e_folded<ZtF, U, BinF, IdealOverF>(
     group: &mut BenchmarkGroup<WallTime>,
     label: &str,
     num_vars: usize,
@@ -1124,6 +1128,19 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
     <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    // Binary-lane PCS field. `BinF = F` recovers the historical scalar
+    // path (blanket `BinaryFoldEval` impl); a distinct `BinF` (e.g.
+    // `PolyExt16`) routes the binary lane through a polynomial-valued PCS.
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + crypto_primitives::FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> MulByScalar<&'a BinF>
+        + FromRef<BinF>
+        + for<'a> FromWithConfig<&'a F>
+        + zinc_protocol::BinaryFoldEval<F, ZtF::Chal>,
+    <BinF as Field>::Inner: Transcribable,
+    <BinF as Field>::Modulus: FromRef<ZtF::Fmod> + Transcribable,
 {
     let params = format!("{label}/nvars={num_vars}");
 
@@ -1135,6 +1152,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
                         ZtF,
                         U,
                         F,
+                        BinF,
                         DEGREE_PLUS_ONE,
                         HALF_DEGREE_PLUS_ONE,
                         { $mle_first },
@@ -1156,6 +1174,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
         ZtF,
         U,
         F,
+        BinF,
         DEGREE_PLUS_ONE,
         HALF_DEGREE_PLUS_ONE,
         false,
@@ -1174,6 +1193,7 @@ fn do_bench_e2e_folded<ZtF, U, IdealOverF>(
                     ZtF,
                     U,
                     F,
+                    BinF,
                     IdealOverF,
                     DEGREE_PLUS_ONE,
                     HALF_DEGREE_PLUS_ONE,
@@ -1928,6 +1948,107 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedRealE
 
 
 //
+// Polychal folded Zinc-types: identical to `BenchFoldedRealEcdsaZincTypes`
+// except the binary lane commits via the degree-16 binary-additive-FFT
+// PCS ("polychal") instead of IPRS. The binary `Cw` / `CombR` are
+// bit-packed `PackedI64Poly16<B>` polynomials over `Z[X]/f̃`, and the
+// binary-lane PCS field `BinF` is `PolyExt16<FIELD_LIMBS>`.
+//
+// `Chal = Pt = i128` (the protocol's shared scalar challenge). At
+// `num_rows = 1` the only `MulByScalar<&i128>` invocation uses
+// `i128::ONE`, so the `PackedI64Poly16` coefficient magnitudes are
+// unchanged by the combined-row step.
+//
+
+/// Polychal binary-lane `ZipTypes`: `Eval = BinaryPoly<16>`,
+/// `Cw = PackedI64Poly16<32>`, `CombR = Comb = PackedI64Poly16<32>`,
+/// `Chal = Pt = i128`.
+///
+/// Defined as a fresh `ZipTypes` struct (not `GenericBenchZipTypes`)
+/// because that helper's `CombR` bound is `ConstIntRing + Neg`, which a
+/// polynomial-valued `PackedI64Poly16` cannot satisfy. The real
+/// `ZipTypes` trait only needs `CombR: FixedSemiring + ConstZero + …`,
+/// which `PackedI64Poly16` does meet. Modeled on
+/// `BenchAddFft16PolyChalPackedZipTypes` in
+/// `zip-plus/benches/zip_plus_benches.rs`, but with scalar `Chal = Pt =
+/// i128` instead of `Bit4Poly16`.
+///
+/// `CombR` uses a 32-bit packed encoding (not the 8-bit one the
+/// `Bit4Poly16`-chal standalone bench uses). The `i128` scalar
+/// challenge inflates `validate_input`'s conservative
+/// `actual_lc_bits` estimate to ~148, which must not exceed
+/// `CombR::NUM_BITS = 16 * B`; `B = 32` gives 512 bits of slack. The
+/// actual transcribed `combined_row` values stay small (at
+/// `num_rows = 1` the row-combination coefficient is `i128::ONE`), so
+/// the wider `B` only relaxes the static gate — the `i64`-backed
+/// arithmetic is unchanged.
+#[derive(Debug, Clone)]
+struct PolyChalBinaryZt;
+
+impl ZipTypes for PolyChalBinaryZt {
+    const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
+    type Eval = BinaryPoly<HALF_DEGREE_PLUS_ONE>;
+    type Cw = PackedI64Poly16<32>;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = PackedI64Poly16<32>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
+#[derive(Clone, Debug)]
+struct BenchFoldedPolyChalZincTypes;
+
+impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedPolyChalZincTypes {
+    type Int = RealEcdsaInt;
+    type Chal = i128;
+    type Pt = i128;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = PolyChalBinaryZt;
+
+    type ArbitraryZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
+
+    type BinaryLc =
+        BinaryAddFft16Code<Self::BinaryZt, AddFftConfigGF2_16, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
+}
+
+/// Polychal counterpart of `setup_folded_pp_real_ecdsa`. The binary
+/// lane uses `BinaryAddFft16Code::new(split_size)` (radix-8 additive
+/// FFT); arbitrary / int lanes are unchanged (IPRS).
+///
+/// `split_size = 1 << (num_vars + 1)`; for `num_vars = 9` that is
+/// `1024`, and `BinaryAddFft16Code::new(1024)` yields
+/// `codeword_len = 1024 * REP = 4096 = 2^12` (radix-8 requires
+/// `log2(codeword_len) % 3 == 0` — `12 % 3 == 0`).
+fn setup_folded_pp_polychal(num_vars: usize) -> FoldedPp1x<BenchFoldedPolyChalZincTypes> {
+    let split_size = 1 << (num_vars + 1);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            split_size,
+            BinaryAddFft16Code::new(split_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+    )
+}
+
+//
 // 4× int-fold variant of the bench Zinc-types. Implements
 // `IntFoldedZincTypes4x` so that `prove_folded_4x` /
 // `verify_folded_4x` route the int Zip+ commitments
@@ -2091,7 +2212,7 @@ fn bench_real_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: u
         unreachable!("EcdsaUair has only assert_zero constraints")
     };
 
-    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
+    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, F, _>(
         group,
         "RealEcdsa",
         num_vars,
@@ -2109,9 +2230,33 @@ fn bench_real_sha256_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: 
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_folded_pp_real_ecdsa(num_vars);
 
-    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
+    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, F, _>(
         group,
         "RealSha256",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+/// Polychal variant of `bench_real_sha256_e2e_folded`: the binary lane
+/// is committed via the degree-16 binary-additive-FFT PCS, with
+/// `BinF = PolyExt16<FIELD_LIMBS>` as the binary-lane PCS field.
+fn bench_real_sha256_e2e_folded_polychal(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_pp_polychal(num_vars);
+
+    do_bench_e2e_folded::<BenchFoldedPolyChalZincTypes, U, PolyExt16<FIELD_LIMBS>, _>(
+        group,
+        "RealSha256Polychal",
         num_vars,
         &pp,
         &trace,
@@ -2127,7 +2272,7 @@ fn bench_real_sha_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_var
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_folded_pp_real_ecdsa(num_vars);
 
-    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
+    do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, F, _>(
         group,
         "ShaEcdsa",
         num_vars,
@@ -2172,6 +2317,7 @@ fn e2e_folded_benches(c: &mut Criterion) {
 
     bench_real_ecdsa_e2e_folded(&mut group, 9);
     bench_real_sha256_e2e_folded(&mut group, 9);
+    bench_real_sha256_e2e_folded_polychal(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
 
     group.finish();

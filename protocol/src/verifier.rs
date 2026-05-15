@@ -25,7 +25,7 @@ use zinc_poly::{
 };
 use zinc_transcript::{
     Blake3Transcript,
-    traits::{ConstTranscribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_uair::{
     BitOp, Uair, UairSignature, UairTrace,
@@ -1073,6 +1073,7 @@ pub fn verify_folded<
     ZtF,
     U,
     F,
+    BinF,
     IdealOverF,
     const D: usize,
     const HALF_D: usize,
@@ -1111,6 +1112,20 @@ where
         + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    // Binary-lane PCS field. Needs the `ZipPlus::verify_with_alphas`
+    // surface, config interchangeability with `F`, an embedding from `F`
+    // (to lift `r0_ext` into `BinF`), and the `BinaryFoldEval` seam used
+    // to reconstruct the binary `eval_f` from the lifted-eval halves.
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b BinF>
+        + FromRef<BinF>
+        + for<'b> FromWithConfig<&'b F>
+        + crate::BinaryFoldEval<F, ZtF::Chal>,
+    BinF::Inner: Transcribable,
+    BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
     // Verifier-side public-column structural checks (compensator/
@@ -1434,46 +1449,58 @@ where
                     comm.batch_size,
                 );
 
-            let one = F::one_with_cfg(&field_cfg);
-            let one_minus_gamma = one - gamma.clone();
-            let zero = F::zero_with_cfg(&field_cfg);
-            let mut eval_f = zero.clone();
+            // The binary lane runs on the (possibly distinct) binary-lane
+            // PCS field `BinF`. `(1−γ)` and `γ` are embedded into `BinF`;
+            // each `HALF_D`-coefficient half of a witness lifted-eval is
+            // collapsed into `BinF` via `BinaryFoldEval::fold_half`. With
+            // `BinF = F` and the scalar `BinaryFoldEval` impl this is
+            // byte-for-byte the historical `(1−γ)·c1 + γ·c2` algebra.
+            let one_minus_gamma: BinF = {
+                let g_binf: BinF = BinF::from_with_cfg(&gamma, &field_cfg);
+                BinF::one_with_cfg(&field_cfg) - g_binf
+            };
+            let gamma_binf: BinF = BinF::from_with_cfg(&gamma, &field_cfg);
+            let mut eval_f: BinF = BinF::zero_with_cfg(&field_cfg);
 
             for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
                 .iter()
                 .zip(per_poly_alphas.iter())
             {
                 debug_assert_eq!(alphas.len(), HALF_D);
-                let mut c1 = zero.clone();
-                let mut c2 = zero.clone();
-                for l in 0..HALF_D {
-                    let a_l: F = F::from_with_cfg(&alphas[l], &field_cfg);
+                let lo = bar_u.coeffs.get(..HALF_D).unwrap_or(&bar_u.coeffs);
+                let hi = bar_u.coeffs.get(HALF_D..).unwrap_or(&[]);
 
-                    if let Some(coeff_lo) = bar_u.coeffs.get(l) {
-                        let mut term = a_l.clone();
-                        term *= coeff_lo;
-                        c1 += &term;
-                    }
-                    if let Some(coeff_hi) = bar_u.coeffs.get(l + HALF_D) {
-                        let mut term = a_l;
-                        term *= coeff_hi;
-                        c2 += &term;
-                    }
-                }
+                let c1: BinF =
+                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(
+                        lo, alphas, &field_cfg,
+                    );
+                let c2: BinF =
+                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(
+                        hi, alphas, &field_cfg,
+                    );
+
                 let mut folded = one_minus_gamma.clone();
-                folded *= c1;
-                let mut g_c2 = gamma.clone();
-                g_c2 *= c2;
+                folded *= &c1;
+                let mut g_c2 = gamma_binf.clone();
+                g_c2 *= &c2;
                 folded += &g_c2;
                 eval_f += &folded;
             }
 
-            ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+            let r0_ext_binf: Vec<BinF> = r0_ext
+                .iter()
+                .map(|f| BinF::from_with_cfg(f, &field_cfg))
+                .collect();
+
+            ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<
+                BinF,
+                CHECK_FOR_OVERFLOW,
+            >(
                 &mut pcs_transcript,
                 vp_bin_split,
                 comm,
                 &field_cfg,
-                &r0_ext,
+                &r0_ext_binf,
                 &eval_f,
                 &per_poly_alphas,
             )

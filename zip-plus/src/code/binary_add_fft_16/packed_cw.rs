@@ -184,6 +184,36 @@ impl<const B: u32> MulByScalar<&Bit4Poly16> for PackedI64Poly16<B> {
     }
 }
 
+// --- MulByScalar<&i128> ---
+//
+// The scalar-challenge variant: `CombR = PackedI64Poly16<B>` with
+// `Chal = i128` (the protocol's folded binary lane). Multiplies each
+// `i64` coefficient by the `i128` scalar, keeping the `i64` backing.
+// `DensePolynomial<i64,16>`'s generic `MulByScalar` would require
+// `i64: MulByScalar<&i128, i64>` (which does not exist — only the
+// widening `i64: MulByScalar<&i64, i128>` does), so this is implemented
+// directly. At `num_rows = 1` the only invocation uses `i128::ONE`, so
+// no value-range concern arises in the prove/verify path.
+impl<const B: u32> MulByScalar<&i128> for PackedI64Poly16<B> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &i128) -> Option<Self> {
+        let mut coeffs = [0i64; 16];
+        for (out, &x) in coeffs.iter_mut().zip(self.0.coeffs.iter()) {
+            let prod: i128 = if CHECK {
+                (x as i128).checked_mul(*rhs)?
+            } else {
+                (x as i128).wrapping_mul(*rhs)
+            };
+            if CHECK {
+                *out = i64::try_from(prod).ok()?;
+            } else {
+                *out = prod as i64;
+            }
+        }
+        Some(Self(DensePolynomial { coeffs }))
+    }
+}
+
 // --- FromWithConfig<&PackedI64Poly16> for the verifier field ---
 
 impl<const P: u64, const B: u32> FromWithConfig<&PackedI64Poly16<B>> for Gf2_16Ext<P> {
@@ -191,6 +221,37 @@ impl<const P: u64, const B: u32> FromWithConfig<&PackedI64Poly16<B>> for Gf2_16E
         <Self as FromWithConfig<&DensePolynomial<i64, 16>>>::from_with_cfg(&value.0, cfg)
     }
 }
+
+// --- FromWithConfig<&PackedI64Poly16> for a scalar MontyField ---
+//
+// The protocol's `prove_folded` / `verify_folded` carry a uniform
+// `F: FromWithConfig<&<BinaryZt as ZipTypes>::CombR>` bound across all
+// three lanes. With the polychal binary lane (`CombR =
+// PackedI64Poly16`) the *scalar* field `F = MontyField<LIMBS>` must
+// satisfy it — but the binary lane never actually projects a
+// polynomial `CombR` to the scalar `F` (its PCS runs on the
+// polynomial-valued `BinF = PolyExt16`), so this conversion is dead on
+// the binary path. It is defined as the constant-term projection
+// (coefficient 0, reduced mod p) so the bound resolves; the higher
+// coefficients are not consulted.
+impl<const LIMBS: usize, const B: u32> FromWithConfig<&PackedI64Poly16<B>>
+    for crypto_primitives::crypto_bigint_monty::MontyField<LIMBS>
+{
+    fn from_with_cfg(value: &PackedI64Poly16<B>, cfg: &Self::Config) -> Self {
+        <Self as FromWithConfig<i64>>::from_with_cfg(value.0.coeffs[0], cfg)
+    }
+}
+
+// --- ProjectableToField ---
+//
+// The protocol's `verify_folded` requires `<BinaryZt::Cw>:
+// ProjectableToField<F>` (`Cw = PackedI64Poly16<B>`). For a
+// `MontyField` target field this is already covered by the blanket
+// `impl<T, LIMBS> ProjectableToField<MontyField<LIMBS>> for T where
+// MontyField<LIMBS>: FromWithConfig<&T>` in `zinc-utils` — the
+// `MontyField: FromWithConfig<&PackedI64Poly16>` impl above unlocks it.
+// No explicit `ProjectableToField` impl is needed (and adding one would
+// conflict with that blanket).
 
 // --- FftRingElement16 ---
 
