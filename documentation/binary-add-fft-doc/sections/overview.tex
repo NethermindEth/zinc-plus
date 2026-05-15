@@ -6,7 +6,7 @@ to a multilinear polynomial whose evaluations live in some semiring
 $\mathrm{Eval}$. The prover encodes each row of the evaluation matrix
 with a linear error-correcting code, arranges the encoded rows into
 a matrix, and builds a Merkle tree over the columns. The two
-linear-code families already shipped are:
+linear-code families previously shipped are:
 
 \begin{itemize}
   \item \textbf{IPRS}: a radix-8 pseudo Reed--Solomon NTT over
@@ -19,49 +19,73 @@ linear-code families already shipped are:
     properties.
 \end{itemize}
 
+This document describes a third code: a binary additive
+Reed--Solomon FFT, structurally lifted to $\Z[X]/\flift$, integrated
+end-to-end into Zip$^+$.
+
 \paragraph{The motivation.}
 SHA-256 and ECDSA witnesses are \emph{natively binary}: each evaluation
-is most naturally represented as a polynomial of degree $<32$ over
-$\F_2$ (\code{BinaryPoly<32>} in the codebase). When these witnesses
-are passed through IPRS, the binary nature of the input is invisible
-to the encoder; the algebra runs over $\F_{65537}$ even though every
-input has only $\{0,1\}$ coefficients. A natural question is
-whether a Reed--Solomon code defined directly over the binary
-extension field $\GF(2^{32})$ would be a tighter fit.
+is most naturally represented as a polynomial of small degree over
+$\F_2$. When these witnesses are passed through IPRS, the binary nature
+of the input is invisible to the encoder; the algebra runs over
+$\F_{65537}$ even though every input has only $\{0,1\}$ coefficients. A
+Reed--Solomon code defined directly over a binary extension field
+$\GF(2^k)$ is a tighter structural fit, and that is what this code
+provides.
+
+\paragraph{Why $\GF(2^{16})$.}
+The Zinc$^+$ protocol's folding machinery (\code{FoldedZincTypes})
+splits each degree-$32$ binary witness column into two
+degree-$16$ halves (\code{BinaryPoly<16>} in the codebase) before
+commitment --- the ``$1\times$ folded'' binary lane. The code in this
+document is built for exactly that lane, so the binary extension
+field is $\GF(2^{16})$ and the lifted ring has dimension $16$. The
+$\GF(2^{16})$ evaluation domain has $2^{16}$ points, which bounds
+the codeword length at $2^{16}$.
 
 \paragraph{The construction at a glance.}
-Pick an irreducible $f \in \F_2[X]$ of degree $32$. Let $\flift$ be
+Pick an irreducible $f \in \F_2[X]$ of degree~$16$. Let $\flift$ be
 the integer polynomial with the same monomials and coefficients in
 $\{0,1\} \subset \Z$. Take a standard additive Reed--Solomon FFT
-algorithm over $\GF(2^{32}) = \F_2[X]/f$ --- we use the LCH
-(Lin--Chung--Han) variant with the Cantor basis, since the latter
-makes the subspace polynomials $F_2$-linearised, hence
-$\{0,1\}$-coefficient even after the lift. Now apply the
-\emph{exact same algorithm}, with the same twiddles, but with every
-arithmetic operation performed in $\Rlift$ instead of $\GF(2^{32})$.
-Inputs (\code{BinaryPoly<32>}) lift trivially: each $\F_2$-coefficient
-becomes a $\Z$-coefficient in $\{0,1\}$.
+algorithm over $\GF(2^{16}) = \F_2[X]/f$, using the Cantor basis ---
+which makes the subspace polynomials $\F_2$-linearised, hence
+$\{0,1\}$-coefficient even after the lift. Then apply that algorithm,
+with the same twiddles, but with every arithmetic operation performed
+in $\Rlift$ instead of $\GF(2^{16})$. Inputs (\code{BinaryPoly<16>})
+lift trivially: each $\F_2$-coefficient becomes a $\Z$-coefficient in
+$\{0,1\}$.
 
-The resulting code has two pleasant properties:
+The evaluator is \emph{radix-8}: rather than $m = \log_2 N$ radix-2
+butterfly stages, it runs $m/3$ meta-stages, each applying an
+$8 \times 8$ Vandermonde matrix per block of $8$. The Vandermonde
+matrices are precomputed once in $\GF(2^{16})$ and lifted to
+$\{0,1\}$-coefficient polynomials; the per-block matrix--vector
+product is then carried out in $\Rlift$. This radix-8 design is
+not merely a cache/locality optimization --- composing the FFT out of
+$8 \times 8$ blocks precomputed in the binary field, rather than out
+of $m$ sequential lifted-twiddle multiplications in $\Z$, dramatically
+shrinks the magnitude of the lifted codeword coefficients
+(\autoref{sec:radix8}, \autoref{sec:optimization}).
+
+\paragraph{Properties of the lifted code.}
 \begin{enumerate}
   \item \textbf{Mod-2 commutativity.} Reducing the lifted codeword
     coefficient-wise modulo $2$ recovers exactly the
-    $\GF(2^{32})$-RS codeword. This is the soundness witness we
+    $\GF(2^{16})$-RS codeword. This is the soundness witness we
     rely on to argue that the lifted code inherits good distance
-    from the original RS code, modulo the lift.
-  \item \textbf{Sparse-twiddle multiplication.} Every twiddle in the
-    FFT is a Cantor-basis vector or a subspace-polynomial value at
-    a basis vector --- all of these are lifted $\GF(2^{32})$ elements
-    with $\{0,1\}$ coefficients. Multiplying any element of
-    $\Rlift$ by such a twiddle is a sparse shift-and-add, no
-    coefficient multiplications.
+    from the original RS code.
+  \item \textbf{Sparse-twiddle multiplication.} Every Vandermonde
+    entry is a lifted $\GF(2^{16})$ element with $\{0,1\}$
+    coefficients. Multiplying any element of $\Rlift$ by such an
+    entry is a sparse shift-and-add, with no coefficient
+    multiplications.
 \end{enumerate}
 
 \paragraph{Scope of this document.}
-We cover (i) the algorithm, (ii) the Rust implementation in
-\code{zip-plus/src/code/binary\_add\_fft/}, (iii) the
-\code{ZipTypes} plumbing that makes the no-alpha-projection variant
-of Zip$^+$ admissible, (iv) the protocol-level gap that currently
-prevents end-to-end prove/verify, (v) the optimization journey from
-naive to $\sim 26\times$-faster commit, and (vi) measured proof-size
-properties (raw and zstd-3 compressed) of column openings.
+We cover (i) the algorithm and the radix-8 evaluator, (ii) the Rust
+implementation in
+\code{zip-plus/src/code/binary\_add\_fft\_16/}, (iii) the
+protocol integration --- the verifier-side field $F = \F_p[X]/\flift$
+and the polynomial-valued challenges that make end-to-end
+commit / prove / verify work, (iv) the design decisions behind the
+shipped encoder, and (v) measured timing and proof-size properties.

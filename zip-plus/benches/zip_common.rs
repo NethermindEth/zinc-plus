@@ -73,6 +73,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     merkle_root::<Zt, 15>(group);
     merkle_root::<Zt, 16>(group);
 
+    commit::<Zt, Lc, 9, 1>(group, make_linear_code);
     commit::<Zt, Lc, 12, 1>(group, make_linear_code);
     commit::<Zt, Lc, 13, 1>(group, make_linear_code);
     commit::<Zt, Lc, 14, 1>(group, make_linear_code);
@@ -84,6 +85,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     commit::<Zt, Lc, 16, 2>(group, make_linear_code);
     commit::<Zt, Lc, 16, 5>(group, make_linear_code);
 
+    prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 9, 1>(group, make_linear_code);
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group, make_linear_code);
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group, make_linear_code);
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group, make_linear_code);
@@ -95,6 +97,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 2>(group, make_linear_code);
     prove::<Zt, Lc, CHECK_FOR_OVERFLOWS, 16, 5>(group, make_linear_code);
 
+    verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 9, 1>(group, make_linear_code);
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 12, 1>(group, make_linear_code);
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 13, 1>(group, make_linear_code);
     verify::<Zt, Lc, CHECK_FOR_OVERFLOWS, 14, 1>(group, make_linear_code);
@@ -427,9 +430,9 @@ pub fn verify<
 //
 
 /// Used to calculate total proof size
-struct CombinedProof {
-    comm: ZipPlusCommitment,
-    proof_transcript: Vec<u8>,
+pub struct CombinedProof {
+    pub comm: ZipPlusCommitment,
+    pub proof_transcript: Vec<u8>,
 }
 
 impl GenTranscribable for CombinedProof {

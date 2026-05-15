@@ -52,15 +52,21 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>>
     }
 }
 
-impl From<u32> for BinaryU64Poly<32> {
+impl<const DEGREE_PLUS_ONE: usize> From<u32> for BinaryU64Poly<DEGREE_PLUS_ONE> {
     fn from(value: u32) -> Self {
-        Self(u64::from(value)) // we ignore upper bits
+        Self::from(u64::from(value))
     }
 }
 
-impl From<u64> for BinaryU64Poly<64> {
+impl<const DEGREE_PLUS_ONE: usize> From<u64> for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[allow(clippy::arithmetic_side_effects)]
     fn from(value: u64) -> Self {
-        Self(value) // we don't ignore any bits
+        assert!(DEGREE_PLUS_ONE <= 64, "BinaryU64Poly degree must be <= 64");
+        if DEGREE_PLUS_ONE == 64 {
+            Self(value)
+        } else {
+            Self(value & ((1u64 << DEGREE_PLUS_ONE) - 1))
+        }
     }
 }
 

@@ -87,40 +87,6 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
-/// ZipTypes for the binary additive-FFT variant where alpha-projection
-/// is skipped. `Eval`, `Cw`, and `CombR` all live in `Z[X]/f̃` (32
-/// coefficients each):
-///
-/// - `Eval = BinaryPoly<32>` — the natural shape of a SHA / ECDSA-style
-///   binary witness.
-/// - `Cw = DensePolynomial<Int<K>, 32>` — codeword entry in the lifted
-///   ring with `K`-limb coefficients.
-/// - `Comb = CombR = DensePolynomial<Int<M>, 32>` — wider lifted ring
-///   for the combined-row. Setting `Comb = CombR` makes
-///   `Comb::DEGREE_BOUND = 0` via the `Polynomial<Self>` impl in
-///   `zero_degree.rs`, which short-circuits the alpha sampling at
-///   `phase_prove.rs:251-258` to `alphas = [1]`.
-///
-/// `EvalDotChal` lifts `BinaryPoly<32>` to `Cw`-shaped form (with
-/// `alphas = [1]`, the "lift" is literally each Boolean coefficient
-/// becoming `Int::<M>::ONE` or `Int::<M>::ZERO`). `CombDotChal` is
-/// then the identity-by-1 scalar product since `Comb = CombR`.
-#[derive(Debug, Clone)]
-pub struct BinPolyAddFftZipTypes<const K: usize, const M: usize> {}
-impl<const K: usize, const M: usize> ZipTypes for BinPolyAddFftZipTypes<K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 147;
-    type Eval = BinaryPoly<32>;
-    type Cw = DensePolynomial<Int<K>, 32>;
-    type Fmod = Uint<K>;
-    type PrimeTest = MillerRabin;
-    type Chal = i128;
-    type Pt = i128;
-    type CombR = DensePolynomial<Int<M>, 32>;
-    type Comb = Self::CombR;
-    type EvalDotChal = ScalarProduct;
-    type CombDotChal = ScalarProduct;
-    type ArrCombRDotChal = MBSInnerProduct;
-}
 
 /// Helper function to set up common parameters for tests.
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(

@@ -2,135 +2,146 @@
 \label{sec:measurements}
 
 All numbers below come from
-\code{cargo bench --bench zip\_plus\_benches --features parallel}
-on Apple~M4. The corresponding test for column sizes is
-\code{column\_size\_report} (and \code{\_i32} variant) in
-\code{zip-plus/src/code/binary\_add\_fft.rs}, runnable as
 \begin{quote}\small
-  \code{cargo test -p zip-plus --release column\_size\_report -- --nocapture --ignored}
+\code{RUSTFLAGS="-C target-cpu=native" cargo bench --bench zip\_plus\_benches}\\
+\code{\quad --features parallel,simd,unchecked -- "PolyChal D16"}
 \end{quote}
+on Apple~M4. The codeword-coefficient measurement is the test
+\code{codeword\_coef\_bits} in
+\code{zip-plus/src/code/binary\_add\_fft\_16.rs}.
 
-\subsection{Commit performance}
+Two configurations are reported, both with $\code{num\_rows} = 1$ and
+$\code{batch} = 11$:
+\begin{itemize}
+  \item \textbf{D16 R4}: $\code{REP} = 4$, $\code{num\_vars} = 10$
+    ($\code{poly\_size} = 2^{10}$, $\code{codeword\_len} = 4096$).
+  \item \textbf{D16 R8}: $\code{REP} = 8$, $\code{num\_vars} = 9$
+    ($\code{poly\_size} = 2^{9}$, $\code{codeword\_len} = 4096$).
+\end{itemize}
+The radix-8 evaluator requires $3 \mid \log_2(\code{codeword\_len})$,
+which both configurations satisfy ($\log_2 4096 = 12$). The D16 R4
+configuration commits the same total bit-count
+($2^{10}\cdot 16 = 2^{14}$) as the protocol's $1\times$-folded binary
+lane at $\code{protocol\_num\_vars} = 9$.
 
-For \code{Commit(batch=11)} at \code{poly\_size = $2^9$},
-\code{row\_len = 128}, \code{codeword\_len = 512}, \code{REP = 4}:
+\subsection{Codeword coefficient magnitude}
+\label{sec:meas-coef}
+
+The defining measurement for this code. On random
+\code{BinaryPoly<16>} input at $\code{codeword\_len} = 4096$:
 
 \begin{center}\small
-\begin{tabular}{lr}
+\begin{tabular}{lrr}
   \toprule
-  Coefficient type & Commit time \\
+  Evaluator & Max $|$coef$|$ & Bits incl.\ sign \\
   \midrule
-  \code{Cw = DensePolynomial<Int<2>, 32>}  & $6.3$\,ms \\
-  \code{Cw = DensePolynomial<i32, 32>}     & $2.5$\,ms \\
+  Radix-8 (shipped)           & $\sim 2^{26.4}$ & $28$ \\
+  Radix-2 $\Z$-lift (historic)& $\sim 2^{47.1}$ & $49$ \\
   \bottomrule
 \end{tabular}
 \end{center}
 
-At the larger \code{poly\_size = $2^{14}$} workload used during the
-optimization journey, the corresponding numbers (rayon enabled
-throughout) were:
+\noindent The radix-8 evaluator's $\sim 21$-bit reduction
+(\autoref{sec:opt-radix8}) is what makes a $32$-bit on-wire codeword
+cell lossless. A radix-2 $\Z$-lift would need a $\ge 49$-bit encoding,
+inflating the dominant proof component by $\sim 1.5\times$.
+
+\subsection{Commit / prove / verify timing}
+
+Representative wall-clock figures (Apple~M4, \code{parallel} +
+\code{simd} + \code{unchecked}; the M-series exhibits noticeable
+run-to-run variance, so treat these as $\pm 30\%$):
 
 \begin{center}\small
-\begin{tabular}{lr}
+\begin{tabular}{lrrr}
   \toprule
-  Coefficient type & Commit time \\
+  Configuration & Commit & Prove & Verify \\
   \midrule
-  \code{Cw = DensePolynomial<Int<2>, 32>}  & $365$\,ms \\
-  \code{Cw = DensePolynomial<i128, 32>}    & $265$\,ms \\
-  + within-stage par.                      & $232$\,ms \\
+  D16 R4 & $\sim 3$--$7$\,ms & $\sim 1.8$\,ms & $\sim 1.1$--$1.7$\,ms \\
+  D16 R8 & $\sim 7$\,ms       & $\sim 1.2$\,ms & $\sim 1.5$\,ms \\
   \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Column-opening sizes (raw and zstd-3 compressed)}
+\noindent Commit is the heaviest step --- it runs the radix-8 FFT on
+all \code{batch} rows --- and is where the radix-8 form costs more raw
+arithmetic than a radix-2 lift would (\autoref{sec:opt-radix8}). Prove
+and verify are dominated by the transcript / Merkle-opening work and
+are largely independent of the FFT.
 
-For \code{poly\_size = $2^{14}$, batch = 11}, \code{num\_rows = 4}
-per polynomial, on truly-random \code{BinaryPoly<32>} inputs:
+\subsection{Proof size}
+
+Total proof size (commitment + transcript), raw and after zstd-3
+compression:
 
 \begin{center}\small
-\begin{tabularx}{0.95\textwidth}{l rrr}
+\begin{tabular}{lrr}
   \toprule
-  Quantity & \code{Int<2>} \code{Cw} & \code{i32} \code{Cw} & Change \\
+  Configuration & Raw & zstd-3 \\
   \midrule
-  Bytes per \code{Cw} entry                & 512   & 128  & $4\times$ smaller \\
-  Per-poly column (4 entries)              & 2{,}048 B  & 512 B  & $4\times$ \\
-  Batched column raw (44 entries)          & 22.0 KiB   & 5.5 KiB  & $4\times$ \\
-  Batched column zstd-3                    & 646 B      & 521 B    & $1.24\times$ \\
-  zstd compression ratio                   & $35\times$ & $11\times$ & --- \\
-  Non-zero bytes in raw column             & 703        & 703        & identical \\
-  Full proof openings raw (147 openings)   & 3234 KiB   & 808 KiB    & $4\times$ \\
-  Full proof openings zstd-3               & 92.7 KiB   & 74.8 KiB   & $1.24\times$ \\
+  D16 R4 & $\sim 176$\,KiB & $\sim 127$--$138$\,KiB \\
+  D16 R8 & $\sim 117$\,KiB & $\sim 83$\,KiB \\
   \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{center}
 
-\noindent The striking observation is that the
-\emph{non-zero byte count is identical} ($703$ bytes) for both
-representations --- the actual information content of the column
-is the same, and the $\code{Int<2>}$ representation simply
-stored each value in a $16$-byte slot with $\sim 13$ zero bytes
-of padding. zstd-3 was extracting most of that padding anyway, so
-the compressed size only drops by $\sim 19\%$; the bigger wins
-from the $\code{i32}$ shrink are in raw size ($4\times$),
-working-set memory, cache locality, and ALU width.
+\noindent The proof is dominated by column openings: each of the
+\code{NUM\_COLUMN\_OPENINGS} openings reveals $\code{batch}$ codeword
+cells, each a $16$-coefficient polynomial packed at \code{BITS\_CW}$=32$
+bits per coefficient. Rate $1/8$ (D16 R8) uses fewer openings ($100$
+versus $147$) and so produces a smaller proof, at the cost of a longer
+codeword and heavier commit.
 
-\subsection{Why the lifted code is so compressible}
+For reference, the IPRS code at the same SHA-256 binary-lane
+dimensions ($\code{num\_vars} = 9$, $\code{batch} = 11$, run as the
+\code{Zip+ SHA-style (IPRS)} bench group) commits the same
+$2^{14}$-bit workload and produces a $\sim 479$\,KiB raw /
+$\sim 288$\,KiB zstd proof. The D16 R4 polychal code is $\sim 2.7\times$
+smaller raw and $\sim 2.2\times$ smaller compressed at that workload ---
+the binary-additive-FFT structure plus the radix-8 small-coefficient
+codeword is a substantially tighter fit for binary witnesses than
+running them through the $\F_{65537}$ IPRS encoder.
 
-For a randomly-sampled $\code{BinaryPoly<32>}$ input vector at
-$\code{poly\_size} = 2^{14}$, \emph{$96.9\%$} of the raw column
-bytes are zero (in the \code{Int<2>} representation). Three
-compounding reasons:
+\subsection{Why the lifted codeword is compressible}
 
-\begin{enumerate}
-  \item \textbf{Heavy bit-width over-provisioning.} The
-    coefficient is stored in $16$ bytes, but
-    the loose worst-case after $m = 14$ FFT stages is bounded by
-    $33^{14} \approx 2^{71}$; so the high $\sim 7$ of $16$ bytes
-    per coefficient are always zero just from that bound.
-  \item \textbf{Reality is tighter than $33^m$.} The codeword is
-    a \emph{sum} of $N$ lifted-GF products
-    (\autoref{sec:i32-shrink}), so the worst case is linear in
-    $N$, not exponential. Empirical max at $N = 2^{14}$ is
-    $\sim 2^{21}$.
-  \item \textbf{Many entries are exactly zero.} The polynomial
-    has $\code{row\_len} / \code{codeword\_len} = 1/4$ non-zero
-    novel-basis coefficients (the zero-padding); the FFT
-    preserves significant sparsity in many evaluation points.
-\end{enumerate}
-
-The $\code{i32}$ shrink removes most of the wasted high-byte
-zeros at the source, so the compression ratio drops from
-$35\times$ to $11\times$ --- but the absolute compressed size is
-still smaller because the non-zero ``effective'' bytes are still
-compressible.
+A codeword cell holds $16$ \code{i64} coefficients, but the radix-8
+coefficients occupy only $\sim 28$ bits each, and \code{BITS\_CW}$=32$
+already trims the on-wire encoding to $32$ of the $64$ in-memory bits.
+Beyond that, many evaluation points carry significant sparsity (the
+input is zero-padded from $\code{row\_len}$ to
+$\code{codeword\_len} = \code{REP}\cdot\code{row\_len}$), and the
+$\{0,1\}$-coefficient Vandermonde structure leaves predictable
+low-entropy patterns. zstd-3 recovers a further $\sim 25$--$30\%$ on
+top of the bit-packing.
 
 \subsection{Test coverage}
 
-The following tests in \code{zip-plus/src/code/binary\_add\_fft/}
-exercise the implementation:
+The following tests in
+\code{zip-plus/src/code/binary\_add\_fft\_16/} exercise the
+implementation:
 
 \begin{itemize}
-  \item \code{basis::tests::*}: \code{Gf2\_32} arithmetic
-    identities, the Cantor recurrence
-    $\bb_i^2 + \bb_i = \bb_{i-1}$, basis linear independence, and
-    the half-trace solver.
-  \item \code{params::tests::*}: subspace polynomial
-    monicity, $s_i(\bb_i) = 1$, $s_i$ vanishes on $V_i$, the
-    Cantor recurrence at evaluation points.
-  \item \code{ring\_ops::tests::*}: $\flift$-reduction
-    correctness, the $\Rlift \to \GF(2^{32})$ commutative diagram
-    for multiplication, the
-    \code{mul\_by\_lifted\_gf32} contract.
-  \item \code{add\_fft::tests::*}: the lifted-FFT-vs-naive
-    equivalence, the
-    $\Rlift \to \GF(2^{32})$ commutative diagram for the full
-    FFT (both \code{Int<N>}- and \code{i128}-instantiated), FFT
-    linearity, zero-padding.
-  \item \code{binary\_add\_fft::linear\_code\_tests::*}: the
-    \code{LinearCode<Zt>} interface smoke test, plus the
-    column-size measurement tests
-    (\code{\#[ignore]}-gated).
+  \item \code{basis::tests::*}: \code{Gf2\_16} arithmetic
+    identities, the Cantor recurrence $\bb_i^2 + \bb_i = \bb_{i-1}$,
+    basis linear independence, the half-trace solver.
+  \item \code{params::tests::*}: subspace polynomial monicity,
+    $s_i(\bb_i) = 1$, $s_i$ vanishes on $V_i$, the Cantor recurrence
+    at evaluation points.
+  \item \code{ring\_ops::tests::*}: $\flift$-reduction correctness,
+    the $\Rlift \to \GF(2^{16})$ commutative diagram for
+    multiplication, the lifted-twiddle multiplication contract.
+  \item \code{radix8::tests::*}: the radix-8 parameter constructor
+    accepting / rejecting $\log_2(\code{codeword\_len})$ by
+    divisibility-by-$3$.
+  \item \code{ext\_field::tests::*}: $\GF(2^{16})$-extension
+    arithmetic, and \code{default\_prime\_makes\_f\_tilde\_irreducible}
+    pinning \code{P\_16\_DEFAULT}.
+  \item \code{linear\_code\_tests::*}: the \code{LinearCode<Zt>}
+    encode smoke test; the full commit / prove / verify roundtrip
+    (\code{commit\_prove\_verify\_polychal\_smoke\_16}); tamper
+    detection (\code{polychal\_tamper\_detection\_16}); and the
+    codeword-coefficient measurement (\code{codeword\_coef\_bits}).
 \end{itemize}
 
-All tests pass under both \code{cargo test -p zip-plus} (sequential
-default) and \code{cargo test -p zip-plus --features parallel}.
+All tests pass under \code{cargo test -p zip-plus --features
+parallel,simd,unchecked}.

@@ -6,42 +6,42 @@
 
 Fix
 \[
-  f(X) \;=\; X^{32} + X^7 + X^3 + X^2 + 1 \;\in\; \F_2[X],
+  f(X) \;=\; X^{16} + X^{5} + X^{3} + X^{2} + 1 \;\in\; \F_2[X],
 \]
-an irreducible polynomial of degree~$32$ (the AES-style choice). Define
-$\GF(2^{32}) = \F_2[X]/f$ and $\flift \in \Z[X]$ to be the integer
+an irreducible polynomial of degree~$16$. Define
+$\GF(2^{16}) = \F_2[X]/f$ and $\flift \in \Z[X]$ to be the integer
 polynomial with the same set of monomials and the same $\{0,1\}$
 coefficients. The lifted ring is
 \[
   \Rlift \;=\; \Z[X]/\flift,
 \]
-a $32$-dimensional $\Z$-module on which addition is component-wise and
+a $16$-dimensional $\Z$-module on which addition is component-wise and
 multiplication is schoolbook poly-multiplication followed by reduction
-modulo $\flift$. The reduction is simply
+modulo $\flift$. The reduction is
 \[
-  X^{32} \;\equiv\; X^7 + X^3 + X^2 + 1 \pmod{\flift},
+  X^{16} \;\equiv\; X^{5} + X^{3} + X^{2} + 1 \pmod{\flift},
 \]
-so any product whose temporary degree exceeds $31$ is folded back by
+so any product whose temporary degree exceeds $15$ is folded back by
 contributing to four low positions per high monomial.
 
 \subsection{The Cantor basis}
 \label{sec:cantor}
 
-The Cantor basis of $\GF(2^{32})$ is the sequence
-$\bb_0, \bb_1, \ldots, \bb_{31}$ defined recursively by
+The Cantor basis of $\GF(2^{16})$ is the sequence
+$\bb_0, \bb_1, \ldots, \bb_{15}$ defined recursively by
 \begin{equation}
   \bb_0 = 1, \qquad \bb_i^2 + \bb_i = \bb_{i-1} \quad \text{for } i \ge 1.
   \label{eq:cantor-recurrence}
 \end{equation}
-The recurrence solvable because $\Tr(\bb_{i-1}) = 0$ at every step
-(which is straightforward: $\Tr(\bb_i^2 + \bb_i) = \Tr(\bb_i)^2 + \Tr(\bb_i)
-= 0$ in $\F_2$). For~$i = 0$, $\Tr(1) = 32 \cdot 1 = 0$ since the
-extension degree is even.
+The recurrence is solvable because $\Tr(\bb_{i-1}) = 0$ at every step
+($\Tr(\bb_i^2 + \bb_i) = \Tr(\bb_i)^2 + \Tr(\bb_i) = 0$ in $\F_2$).
+For~$i = 0$, $\Tr(1) = 16 \cdot 1 = 0$ since the extension degree is
+even.
 
 The two crucial properties for the additive FFT are:
 \begin{itemize}
   \item $V_i := \mathrm{span}_{\F_2}(\bb_0, \ldots, \bb_{i-1})$ is a
-    chain of $\F_2$-subspaces of $\GF(2^{32})$, with
+    chain of $\F_2$-subspaces of $\GF(2^{16})$, with
     $\dim V_i = i$.
   \item The associated subspace polynomial
     \[
@@ -60,77 +60,122 @@ The two crucial properties for the additive FFT are:
 
 Crucially for the structural lift: every $s_i$ coefficient is in
 $\F_2$, so its lift to $\Z$ is in $\{0, 1\}$. Combined with the fact
-that Cantor basis vectors themselves are elements of $\GF(2^{32})$
-(hence their lifts have $\{0, 1\}$ coefficients), every twiddle the
-FFT uses is a $\{0, 1\}$-coefficient polynomial in $\Rlift$.
+that Cantor basis vectors themselves are elements of $\GF(2^{16})$,
+every twiddle the FFT uses --- and hence every entry of the radix-8
+Vandermonde matrices below --- is a $\{0, 1\}$-coefficient polynomial
+once lifted to $\Rlift$.
 
-\subsection{The LCH novel polynomial basis FFT}
+\subsection{The novel polynomial basis}
 \label{sec:lch}
 
-Let $m = \log_2 N$, where $N$ is a power of $2$ at most $2^{32}$.
+Let $m = \log_2 N$, where $N$ is a power of $2$ at most $2^{16}$.
 Express the input polynomial $P(X)$ of degree~$< N$ in the
 \emph{novel polynomial basis}
 \[
   X_i(X) \;=\; \prod_{j \in \{0..m-1\}\,:\, i_j = 1} s_j(X),
 \]
 where $i_j$ is the $j$-th bit of $i$. Then $P = \sum_{i=0}^{N-1} c_i \, X_i$,
-and the LCH forward FFT maps the coefficient vector
+and the forward FFT maps the coefficient vector
 $(c_0, \ldots, c_{N-1})$ to the evaluation vector $(P(v_0), \ldots,
-P(v_{N-1}))$ at the points $v_k = \sum_l k_l \bb_l \in V_m$. The FFT
-proceeds in $m$ stages indexed from $i = m-1$ down to $0$. At
-stage~$i$:
+P(v_{N-1}))$ at the points $v_k = \sum_l k_l \bb_l \in V_m$. Data is
+in natural order at both input and output --- no bit-reversal
+permutation is required.
+
+The textbook radix-2 LCH FFT computes this in $m$ stages: at stage $i$,
+each block of $2^{i+1}$ entries is processed by $2^i$ butterflies, each
+mixing a pair $(a,b)$ via a single twiddle $t = s_i(\omega)$:
+$a' = a + t\cdot b$, $b' = a' + b$. We do \emph{not} use the radix-2
+form directly --- see below.
+
+\subsection{The radix-8 evaluator}
+\label{sec:radix8}
+
+The shipped encoder uses a \textbf{radix-8} variant. Three consecutive
+radix-2 stages are merged into one \emph{meta-stage}: instead of
+$m$ stages of $2\times 2$ butterflies, the FFT runs $m/3$ meta-stages,
+each applying an $8 \times 8$ Vandermonde matrix per block of $8$
+codeword positions. (This requires $3 \mid m$; the linear-code
+constructor rejects parameters that violate it.)
+
+Concretely, meta-stage $K$ covers the three subspace polynomials
+$s_{3K}, s_{3K+1}, s_{3K+2}$. For each block $B$ of $8$ positions
+the $8 \times 8$ matrix $V_{K,B}$ has entries
+\[
+  V_{K,B}[j][i] \;=\; X^{(K)}_i\!\left( v_{K,B,j} \right)
+  \;=\;
+  \prod_{a \,:\, i_a = 1} s_{3K+a}\!\left( v_{K,B,j} \right),
+\]
+the $i$-th novel-basis polynomial of the $3$-dimensional
+sub-recursion, evaluated at the $j$-th point of that block. The
+meta-stage output is the per-block matrix--vector product
+\[
+  \mathrm{out}[j] \;=\; \sum_{i=0}^{7} V_{K,B}[j][i] \cdot \mathrm{in}[i].
+\]
+Composed over the $m/3$ meta-stages, this evaluates exactly the same
+multilinear extension as the radix-2 FFT --- over $\GF(2^{16})$ the two
+agree identically.
+
+\paragraph{Why radix-8, and why it matters for the lift.}
+The radix-8 form is the load-bearing design choice for this code,
+\emph{not} a peephole optimization. The reason is the magnitude of the
+lifted codeword coefficients (\autoref{sec:optimization}):
 
 \begin{itemize}
-  \item Partition the data into blocks of size $2^{i+1}$. Within
-    each block, pair entry~$k$ with entry~$k + 2^i$ for
-    $k = 0, \ldots, 2^i - 1$.
-  \item Each block has a fixed \emph{block offset}
-    \[
-      \omega \;=\; \sum_{l > i \,:\, \text{bit }l\text{ of block\_start set}} \bb_l \;\in\; V_m,
-    \]
-    and a fixed twiddle $t = s_i(\omega)$.
-  \item For each pair $(a, b)$:
-    \begin{equation}
-      a' = a + t \cdot b, \qquad b' = a' + b = a + (t+1) \cdot b.
-      \label{eq:butterfly}
-    \end{equation}
+  \item In a radix-2 $\Z$-lift, the codeword is computed as a chain of
+    $m$ sequential multiplications in $\Rlift$ by lifted twiddles. Each
+    multiplication is a $\Z$-arithmetic \code{mul + reduce-mod-}$\flift$,
+    so $\Z$-carries accumulate across all $m$ stages. Empirically the
+    coefficients reach $\sim 2^{47}$ at $\code{codeword\_len} = 4096$.
+  \item In the radix-8 form, each $V_{K,B}$ is computed \emph{in
+    $\GF(2^{16})$} --- where the product of three subspace-polynomial
+    values is just another $\GF(2^{16})$ element --- and only then
+    lifted, so every Vandermonde entry has $\{0,1\}$ coefficients. The
+    FFT then composes $m/3$ such $\{0,1\}$-coefficient matvecs in
+    $\Rlift$. With only $m/3$ carry-accumulating meta-stages instead of
+    $m$, and a $\{0,1\}$-coefficient multiplier at each, the codeword
+    coefficients stay near $2^{26}$ ($\sim 28$ signed bits) --- a
+    $\sim 21$-bit reduction over the radix-2 $\Z$-lift.
 \end{itemize}
 
-The data is in natural order both at input and output --- no
-bit-reversal permutation is required, unlike the multiplicative
-Cooley--Tukey FFT.
+This is a genuine change of code: the radix-8-with-GF-lifted-Vandermonde
+encoder produces a \emph{different} lifted code than a radix-2 $\Z$-lift
+would. The two agree modulo $2$ (both reduce to the standard
+$\GF(2^{16})$ RS codeword, see below), but differ in the higher
+$\Z$-bits, because precomputing $V_{K,B}$ in $\GF(2^{16})$ discards the
+inter-stage $\Z$-carries that a sequential radix-2 lift would keep.
+Choosing the radix-8 code is choosing the variant with the small
+coefficients.
 
-\subsection{Structural lift}
+\subsection{The structural lift and mod-2 commutativity}
 \label{sec:lift}
 
-The lifted FFT runs the \emph{exact same algorithm} but with
-arithmetic in $\Rlift$ rather than $\GF(2^{32})$. The Cantor basis
-elements, subspace polynomial coefficients, and all derived
-twiddles are computed once in $\GF(2^{32})$ and then \emph{lifted}
-coefficient-by-coefficient from $\F_2$ to $\{0, 1\} \subset \Z$.
-The inputs are \code{BinaryPoly<32>} elements, whose
-$\F_2$-coefficients also lift trivially.
+The lifted FFT runs the radix-8 algorithm with arithmetic in $\Rlift$
+rather than $\GF(2^{16})$. The Cantor basis, subspace polynomials, and
+the $8 \times 8$ Vandermonde matrices are all computed once in
+$\GF(2^{16})$ and then \emph{lifted} coefficient-by-coefficient from
+$\F_2$ to $\{0, 1\} \subset \Z$. The inputs are \code{BinaryPoly<16>}
+elements, whose $\F_2$-coefficients also lift trivially.
 
-The butterfly in equation~\eqref{eq:butterfly} becomes a sequence of
-additions in $\Rlift$ and one $\Rlift$-multiplication by the lifted
-twiddle. The multiplication is implemented as a
-\emph{sparse shift-and-accumulate}: for every set bit $i$ of the
-lifted twiddle, we add $x$ shifted by $i$ positions to an
-accumulator (length-$63$ buffer in the unreduced domain), then
-fold the buffer back to length~$32$ via the $\flift$ reduction.
+Each per-block matvec is a sequence of $\Rlift$-additions and
+multiplications by lifted, $\{0,1\}$-coefficient Vandermonde entries.
+The multiplication is a \emph{sparse shift-and-accumulate}: for every
+set bit of the entry, add the operand shifted by that many positions
+to a length-$31$ unreduced accumulator, then fold the accumulator back
+to length~$16$ via the $\flift$ reduction.
 
-The soundness witness we rely on is the following commutative diagram:
-let $\pi_2 : \Rlift \to \GF(2^{32})$ be the coefficient-wise mod-$2$
-reduction. Then for any input vector $\mathbf c$,
+The soundness witness is the commutative diagram: let
+$\pi_2 : \Rlift \to \GF(2^{16})$ be coefficient-wise mod-$2$ reduction.
+Then for any input vector $\mathbf c$,
 \[
-  \pi_2\!\bigl( \mathrm{LiftedFFT}(\mathrm{lift}(\mathbf c)) \bigr)
+  \pi_2\!\bigl( \mathrm{LiftedRadix8FFT}(\mathrm{lift}(\mathbf c)) \bigr)
   \;=\;
-  \mathrm{FFT}_{\GF(2^{32})}(\mathbf c).
+  \mathrm{FFT}_{\GF(2^{16})}(\mathbf c).
 \]
-This is verified empirically by the test
-\code{lifted\_fft\_mod\_2\_matches\_gf32\_fft} on randomized inputs.
-A direct argument: every step in the lifted FFT is the same as in
-the $\GF(2^{32})$ FFT, but each addition is in $\Z$ rather than
-$\F_2$; mod-$2$ reduction is a ring homomorphism that commutes with
-both addition and the $\flift$ reduction (since
-$f \equiv \flift \pmod 2$).
+This holds because mod-$2$ reduction is a ring homomorphism that
+commutes with addition and the $\flift$ reduction (as
+$f \equiv \flift \pmod 2$), the lifted Vandermonde entries reduce mod
+$2$ to the $\GF(2^{16})$ entries they were lifted from, and the
+$\GF(2^{16})$ radix-8 evaluator computes exactly the standard
+$\GF(2^{16})$ additive-FFT codeword. So the lifted code reduces mod $2$
+to a genuine $\GF(2^{16})$ Reed--Solomon code, which is the basis for
+inheriting that code's distance.

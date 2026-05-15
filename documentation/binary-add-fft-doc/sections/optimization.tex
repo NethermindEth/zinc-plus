@@ -1,169 +1,120 @@
-\section{Optimization journey}
+\section{Design decisions and performance}
 \label{sec:optimization}
 
-The first working implementation produced a per-commit cost in the
-multi-second range. The following series of optimizations brought
-it down to $\sim 232$\,ms at \code{poly\_size = $2^{14}$}, \code{batch = 11}
-on Apple~M4 with rayon parallelism enabled. We document each step
-because the relative win sizes are a useful guide for similar
-codes.
+This section records the design decisions that shape the shipped
+encoder's cost --- both wall-clock and proof size --- and the
+reasoning behind each. The single most consequential one is the
+radix-8 evaluator; the rest are coefficient-representation and
+parallelism choices.
 
-\subsection{Coefficient-width shrink: $\Int<5> \to \Int<2>$}
-\label{sec:width-shrink-int}
+\subsection{Radix-8 evaluator: the coefficient-size win}
+\label{sec:opt-radix8}
 
-The initial \code{ZipTypes} used \code{Cw = DensePolynomial<Int<5>, 32>}
-(320-bit coefficients) and \code{CombR = DensePolynomial<Int<8>, 32>}
-(512-bit). Bit-budget analysis: each butterfly stage can grow
-max-abs by a factor of at most $\sim 33$ (the loose
-\code{D + 1 = 33} bound), so after $m$ stages the worst case is
-$33^m$. For \code{row\_len $\le 2^{16}$} ($m \le 18$):
-$33^{18} \approx 2^{91}$, which fits comfortably in \code{Int<2>}
-(128~bits) with headroom. \code{Int<5>} and \code{Int<8>} were
-wildly over-budget.
+The dominant design choice is the radix-8 evaluator
+(\autoref{sec:radix8}). Its purpose is \emph{not} cache locality ---
+it is to control the magnitude of the lifted codeword coefficients.
 
-Shrinking to \code{Int<2>} / \code{Int<3>} cut per-butterfly cost
-by roughly $2.5\times$ (the \code{crypto-bigint} multi-limb add is
-dominated by per-limb carry propagation) and reduced Merkle-leaf
-sizes correspondingly. \textbf{Speedup: $\sim 1.8\times$.}
+A codeword cell is $P(v_k) = \sum_i c_i\, X_i(v_k)$ evaluated in
+$\Rlift$. How that sum is computed determines how large the
+$\Z$-coefficients of the result grow:
 
-\subsection{Zero-twiddle fast path}
+\begin{itemize}
+  \item \textbf{Radix-2 $\Z$-lift.} The FFT is a chain of $m$
+    sequential multiplications in $\Rlift$ by lifted twiddles. Each is
+    a $\Z$-arithmetic \code{mul + reduce-mod-}$\flift$; $\Z$-carries
+    accumulate across all $m$ stages. Empirically the codeword
+    coefficients reach $\sim 2^{47}$ ($49$ signed bits) at
+    $\code{codeword\_len} = 4096$ --- they do not fit in \code{i32}
+    and need \code{i64} storage and a $\ge 49$-bit wire encoding.
+  \item \textbf{Radix-8 with $\GF$-precomputed Vandermonde.} Each
+    $8 \times 8$ block matrix is computed once in $\GF(2^{16})$ --- so
+    every entry is a $\{0,1\}$-coefficient lifted element --- and the
+    FFT composes only $m/3$ such matvecs in $\Rlift$. With a third as
+    many carry-accumulating meta-stages, and a $\{0,1\}$-coefficient
+    multiplier at each, the codeword coefficients stay near $2^{26}$
+    ($28$ signed bits) at the same $\code{codeword\_len} = 4096$.
+\end{itemize}
 
-For each FFT stage the first block has $\code{block\_offset} = 0$,
-and $s_i$ vanishes on $V_i$, so the twiddle is~$0$. The butterfly
-then degenerates to $(a, b) \mapsto (a, a+b)$ and the
-\code{mul\_by\_lifted\_gf32} call (which is the dominant cost per
-butterfly) is skipped. The savings are small in aggregate ($1/N$
-of blocks per stage), but free correctness-wise.
+That is a $\sim 21$-bit reduction in coefficient magnitude. It is
+\emph{not} free: the radix-8 form does more arithmetic overall
+(an $8\times 8$ matvec is $64$ multiplications per block of $8$, versus
+$\sim 8$ for three radix-2 stages), so commit time is somewhat higher
+than a radix-2 lift would be. The trade is deliberate: the bit-size win
+is what lets each codeword cell pack into $32$ bits on the wire
+(\autoref{sec:opt-packing}), which is the dominant term of the proof
+size. \autoref{sec:measurements} quantifies both sides.
 
-\subsection{Generic kernel + native primitive types ($\Int<2> \to i128 \to i32$)}
-\label{sec:width-shrink-native}
+\paragraph{It is a different code.} As noted in \autoref{sec:radix8},
+the radix-8-with-$\GF$-lifted-Vandermonde encoder produces a different
+lifted code than a radix-2 $\Z$-lift --- the two agree mod $2$ but not
+in the higher $\Z$-bits. The small-coefficient variant is the one we
+ship.
 
-We refactored \code{mul\_by\_lifted\_gf32},
-\code{reduce\_mod\_ftilde}, and \code{add\_in\_z} to be generic
-over a \code{FftCoeff} trait
-\[
-  \code{FftCoeff} \;\equiv\;
-    \code{Copy} + \code{ConstZero} + \code{Add<Self, Output=Self>}
-    + \code{PartialEq}.
-\]
-Both \code{Int<N>} and the primitive \code{i64}, \code{i128},
-\code{i32} satisfy these bounds, so we can specialize the
-\code{FftRingElement} impl on
-\code{DensePolynomial<i128, 32>} (or \code{i32}, etc.) to use
-native CPU arithmetic, avoiding \code{crypto-bigint}'s generic
-multi-limb overhead.
+\subsection{Native {\tt i64} coefficient storage}
+\label{sec:opt-native}
 
-Sequence of width shrinks, each on the same workload
-(\code{poly\_size = $2^{14}$, batch = 11}, with rayon):
-\begin{center}\small
-\begin{tabular}{lrr}
-  \toprule
-  Coefficient type & Per-coeff bytes & Commit time \\
-  \midrule
-  \code{Int<5>}                       & 40 & $\sim$\,6\,s (extrapolated) \\
-  \code{Int<2>}                       & 16 & 1.71\,s \\
-  \code{i128}                         & 16 & 1.26\,s \\
-  \code{Int<2>} + \code{parallel}     & 16 & 365\,ms \\
-  \code{i128}  + \code{parallel}      & 16 & 265\,ms \\
-  \code{i128}  + within-stage par     & 16 & 240\,ms \\
-  \bottomrule
-\end{tabular}
-\end{center}
+Codeword and combined-row cells store their $16$ coefficients as
+native \code{i64} (\code{DensePolynomial<i64, 16>}), not
+\code{crypto-bigint}'s multi-limb \code{Int<N>}. The radix-8
+coefficient bound ($\sim 2^{26}$ at our workload, growing toward
+$2^{63}$ only at the largest $\code{codeword\_len} = 2^{16}$) fits
+\code{i64}, so the FFT runs on single-instruction $64$-bit ALU adds
+instead of generic limb-by-limb carry propagation. The
+\code{FftRingElement16} trait keeps the kernel generic, so an
+\code{Int<N>} instantiation remains available if a future workload
+needs more than $64$ bits per coefficient.
 
-The native-\code{i128} step gives roughly $30\%$ over
-\code{Int<2>}, which is largely the cost of \code{crypto-bigint}'s
-generic limb-by-limb carry propagation versus the CPU's single
-\code{adcs} instruction.
+\subsection{Bit-packed wire encoding}
+\label{sec:opt-packing}
 
-\subsection{The {\tt parallel} feature: row-level rayon parallelism}
+In-memory width and on-wire width are decoupled. Cells are
+\code{i64}-backed in memory (\autoref{sec:opt-native}) but the
+\code{Transcribable} encoding of \code{PackedI64Poly16<BITS>}
+(\autoref{sec:packed-cw}) writes only \code{BITS} bits per
+coefficient.
 
-The biggest single win was enabling the \code{parallel} feature
-flag, which routes \code{encode\_rows} through rayon's
-\code{cfg\_chunks\_mut!}. At \code{batch = 11} and \code{num\_rows
-= 4} per polynomial, there are $44$ independent FFTs that rayon
-distributes across CPU cores. \textbf{Speedup: $\sim 4.7\times$.}
+\begin{itemize}
+  \item \textbf{Codeword cells: \code{BITS\_CW = 32}.} The radix-8
+    codeword coefficients max near $2^{26}$, so $32$ bits is lossless
+    with $\sim 6$ bits of headroom. Column openings are the dominant
+    proof component, so this width sets most of the proof size.
+  \item \textbf{Combined-row cells: \code{BITS\_CR = 8}.} At
+    $\code{num\_rows} = 1$ a combined-row coefficient is bounded by
+    $\code{batch}\cdot 15$ (\autoref{sec:protocol-integration}), which
+    fits $8$ signed bits at $\code{batch} = 11$. Packing the
+    combined row at $8$ bits rather than the full $64$ shrinks that
+    proof component $\sim 8\times$.
+\end{itemize}
 
-\subsection{Within-FFT (stage-level) parallelism}
+Splitting the two widths matters because the codeword and combined-row
+cells have very different magnitude budgets --- codeword coefficients
+are FFT-amplified, combined-row coefficients are not.
 
-After row-level parallelism saturates, additional parallelism
-within each FFT must be extracted from inside a single row. We
-parallelized the block loop within each stage by passing the data
-slice through \code{cfg\_chunks\_mut!(data, block\_size)}: each
-block's butterflies are independent and operate on a disjoint
-sub-slice.
+\subsection{Batched $\flift$-reduction in the matvec}
+\label{sec:opt-batched-reduce}
 
-At \code{batch = 11} on Apple~M4 the row-level parallelism already
-nearly saturates the CPU, so within-stage parallelism only adds a
-modest $\sim 3\%$ on the i128 path. The win would be larger at
-smaller batches.
+Each $8 \times 8$ block matvec produces one output cell as a sum of
+eight lifted-twiddle products. Reducing mod $\flift$ after every one
+of the eight multiplications wastes work: the
+\code{FftRingElement16::UnreducedAcc} path
+(\autoref{sec:fft-ring-element}) accumulates all eight products in a
+single length-$31$ unreduced buffer and folds it back mod $\flift$
+exactly once per output cell --- one reduction instead of eight.
 
-\subsection{Manual NEON SIMD attempt (split-i128 kernel) --- regressed}
-\label{sec:simd-attempt}
+\subsection{The {\tt parallel} feature}
+\label{sec:opt-parallel}
 
-We attempted a SIMD-friendly variant of \code{mul\_by\_lifted\_gf32}
-specialized to $i128$: unpack each $i128$ coefficient into a
-separate \code{[u64; 32]} (low limbs) and \code{[i64; 32]} (high
-limbs), run the inner loops on $u64$/$i64$ (natively SIMD types),
-and collect lo$\to$hi carries in a second pass to break the
-data dependency that prevents auto-vectorization of the $i128$
-add directly.
+Under the \code{parallel} feature the per-meta-stage block loop is a
+rayon \code{par\_chunks\_mut} (via \code{cfg\_chunks\_mut!}). Each
+block of $8$ is a disjoint slice, so block-level parallelism is
+data-race-free. At commit time there are also \code{batch} independent
+row FFTs, giving rayon ample work to distribute. This is the largest
+single wall-clock lever; benchmarks in \autoref{sec:measurements} are
+all run with \code{parallel} enabled.
 
-The result \emph{regressed by} $\sim 30\%$. The reason: Apple~M4's
-NEON has $128$-bit registers (one $i128$ per register), so there
-is no per-register parallelism to be had on $i128$ adds; and the
-scalar \code{adcs} + \code{add} dual-issue is already at the
-throughput ceiling. The split/recombine overhead and the extra
-carries scratch array cost more than they save.
+\subsection{Zero-twiddle skip}
 
-The function (\code{mul\_by\_lifted\_gf32\_i128\_split} in
-\code{ring\_ops.rs}) is kept in the codebase as \code{\#[allow(dead\_code)]}
-with a note pointing at AVX-512 hosts (where 512-bit vectors can
-hold 4~$i128$ values and the math may pay).
-
-\subsection{Tightest type: $i128 \to i32$}
-\label{sec:i32-shrink}
-
-A direct examination of the codeword as
-\[
-  P(v_k) \;=\; \sum_{i=0}^{N-1} c_i \cdot X_i(v_k) \quad \text{in } \Rlift
-\]
-shows that the loose stage-by-stage bound $33^m$ is far too
-pessimistic: $P(v_k)$ is a sum of at most $N$ products of
-$\{0,1\}$-coefficient elements, each with per-coefficient
-magnitude bounded by $\sim 32 \cdot 5 \approx 160$ in $\Rlift$
-(the factor of $5$ comes from the $\flift$-reduction fan-in). So
-the worst-case magnitude grows \emph{linearly} with $N$, not
-exponentially with $m$. At $N = 2^{16}$, worst case is
-$\le 2^{16} \cdot 160 \approx 2^{24}$ --- well within $i32$'s
-$\pm 2^{31}$ range. The empirical max at $N = 2^{14}$ is around
-$2^{21}$ (see \autoref{sec:measurements}).
-
-Switching the bench from $i128$ to $i32$ gave a further
-$2.5\times$ commit speedup at the smaller \code{poly\_size = $2^9$}
-config (the bench was reconfigured to that workload during the
-exercise), since $i32$ uses native $32$-bit ALU ops instead of
-$128$-bit, and the per-coefficient storage shrinks $4\times$
-(from $16$ to $4$ bytes), with corresponding cache-locality and
-Merkle-leaf-size benefits.
-
-\subsection{Summary table}
-
-\begin{center}\small
-\begin{tabular}{lrr}
-  \toprule
-  Step & Speedup at that step & Cumulative \\
-  \midrule
-  Original (\code{Int<5>}, sequential, naive butterfly) & $1\times$  & $1\times$ \\
-  $\Int<5> \to \Int<2>$ + zero-twiddle skip             & $\sim 3.5\times$ & $\sim 3.5\times$ \\
-  \code{parallel} feature                               & $\sim 4.7\times$ & $\sim 16\times$  \\
-  $\Int<2> \to i128$ (native)                           & $\sim 1.4\times$ & $\sim 23\times$  \\
-  Within-stage parallelism                              & $\sim 1.03\times$ & $\sim 24\times$ \\
-  Manual NEON SIMD (regressed; reverted)                & $0.7\times$ & --- \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-The single biggest win was the \code{parallel} feature; the
-biggest \emph{single line of code change} was the
-\code{Int<5> $\to$ Int<2>} swap, which dropped the bench config to
-a sane bit-budget.
+Vandermonde entries equal to $0 \in \GF(2^{16})$ contribute nothing
+and are skipped in the matvec inner loop; the $X_0 \equiv 1$ column,
+whose entries are all $1$, contributes a plain add with no
+lifted-twiddle multiplication. Small but free.

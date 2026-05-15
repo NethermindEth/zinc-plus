@@ -62,18 +62,17 @@ impl<const DEGREE_PLUS_ONE: usize> From<BinaryRefPoly<DEGREE_PLUS_ONE>>
     }
 }
 
-impl From<u32> for BinaryRefPoly<32> {
+impl<const DEGREE_PLUS_ONE: usize> From<u32> for BinaryRefPoly<DEGREE_PLUS_ONE> {
     fn from(value: u32) -> Self {
-        Self(DensePolynomial {
-            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
-        })
+        Self::from(u64::from(value))
     }
 }
 
-impl From<u64> for BinaryRefPoly<64> {
+impl<const DEGREE_PLUS_ONE: usize> From<u64> for BinaryRefPoly<DEGREE_PLUS_ONE> {
     fn from(value: u64) -> Self {
+        assert!(DEGREE_PLUS_ONE <= 64, "BinaryRefPoly From<u64> requires degree <= 64");
         Self(DensePolynomial {
-            coeffs: array::from_fn(|i| Boolean::new(value & (1 << i) != 0)),
+            coeffs: array::from_fn(|i| Boolean::new(i < 64 && value & (1u64 << i) != 0)),
         })
     }
 }

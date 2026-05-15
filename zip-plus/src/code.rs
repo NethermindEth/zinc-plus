@@ -1,4 +1,4 @@
-pub mod binary_add_fft;
+pub mod binary_add_fft_16;
 pub mod iprs;
 pub mod raa;
 pub mod raa_sign_flip;

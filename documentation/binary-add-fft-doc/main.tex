@@ -3,7 +3,7 @@
 \input{preamble}
 
 \title{A Binary Additive Reed--Solomon Code for Zip$^+$, Structurally Lifted to $\Z[X]/\flift$ \\
-       \large Design, implementation and optimization notes}
+       \large Design, implementation and integration notes}
 \author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
 \date{\today}
 
@@ -17,18 +17,32 @@
 \vspace{0.5em}
 
 \begin{abstract}
-We design and implement a new linear code for the Zip$^+$ PCS that uses
-an additive Reed--Solomon FFT over $\GF(2^{32}) = \F_2[X]/f$ as its
+We design and implement a linear code for the Zip$^+$ PCS that uses
+an additive Reed--Solomon FFT over $\GF(2^{16}) = \F_2[X]/f$ as its
 underlying structure, but applies that algorithm \emph{structurally
 in the lifted integer ring} $\Z[X]/\flift$, where $\flift$ is the
 $\Z$-polynomial with the same coefficients as $f$. The construction
 is the binary-field analogue of the IPRS code already shipped in
 Zinc$^+$, which lifts a multiplicative Reed--Solomon NTT over
-$\F_{65537}$ to a pseudo-NTT over $\Z$. We describe the algorithm,
-the Rust implementation, the open protocol-integration gap, and the
-optimization journey that took the per-commit cost from a baseline of
-$\sim 6$\,s down to $\sim 232$\,ms on Apple M4 with rayon parallelism
-and a tightly-sized native coefficient type.
+$\F_{65537}$ to a pseudo-NTT over $\Z$.
+
+The encoder uses a \emph{radix-8} evaluator: each meta-stage applies
+an $8 \times 8$ $\GF(2^{16})$ Vandermonde matrix whose entries are
+precomputed in the binary field and lifted to $\{0,1\}$-coefficient
+polynomials, with the matrix--vector product carried out in
+$\Z[X]/\flift$. Computing the Vandermonde in $\GF(2^{16})$ rather than
+composing lifted twiddles in $\Z$ is what keeps the lifted codeword
+coefficients near $2^{26}$ ($\sim 28$ signed bits) instead of the
+$\sim 2^{47}$ a radix-2 $\Z$-lift produces --- a $\sim 21$-bit
+reduction that lets each codeword cell pack into $32$ bits on the wire.
+
+The code is integrated end-to-end into Zip$^+$'s commit / prove /
+verify: the verifier-side field is $F = \F_p[X]/\flift$ (a degree-$16$
+extension of $\F_p$ when $\flift$ is irreducible mod $p$), and the
+row-batching challenges are small $4$-bit-coefficient polynomials. We
+describe the algorithm, the Rust implementation in
+\code{zip-plus/src/code/binary\_add\_fft\_16/}, the protocol
+integration, and the design decisions behind the shipped encoder.
 \end{abstract}
 
 \tableofcontents
@@ -36,7 +50,7 @@ and a tightly-sized native coefficient type.
 \input{sections/overview}
 \input{sections/algorithm}
 \input{sections/implementation}
-\input{sections/protocol-gap}
+\input{sections/protocol-integration}
 \input{sections/optimization}
 \input{sections/measurements}
 \input{sections/future-work}

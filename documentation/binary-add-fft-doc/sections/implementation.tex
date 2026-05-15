@@ -4,124 +4,146 @@
 \subsection{Module layout}
 
 The implementation lives in
-\code{zip-plus/src/code/binary\_add\_fft/} and mirrors the existing
-IPRS layout in \code{zip-plus/src/code/iprs/}:
+\code{zip-plus/src/code/binary\_add\_fft\_16/} and mirrors the
+existing IPRS layout in \code{zip-plus/src/code/iprs/}:
 
 \begin{itemize}
-  \item \code{basis.rs}: a $\GF(2^{32})$ \code{Gf2\_32} type with
-    addition (XOR), multiplication (peasant + reduce mod $f$), the
-    half-trace solver (Gaussian elimination over $\F_2$) for
-    $Y^2 + Y = \beta$, and Cantor basis generation.
-  \item \code{params.rs}: a \code{Config} trait declaring the
-    extension degree and irreducible $f$, plus a
-    \code{Radix2AddFftParams} struct holding precomputed
+  \item \code{basis.rs}: a $\GF(2^{16})$ \code{Gf2\_16} type (a
+    \code{u16} newtype) with addition (XOR), multiplication
+    (carry-less multiply + reduce mod $f$), the half-trace solver
+    (Gaussian elimination over $\F_2$) for $Y^2 + Y = \beta$, and
+    Cantor basis generation.
+  \item \code{params.rs}: a \code{Config16} trait declaring the
+    extension degree and irreducible $f$, plus the precomputed
     Cantor basis, evaluation points, and subspace polynomials
-    (stored sparsely as coefficient lists at the
-    $\{2^j\}$ positions).
+    (stored sparsely as coefficient lists at the $\{2^j\}$
+    positions).
   \item \code{ring\_ops.rs}: the lifted-ring arithmetic. Exports
-    \code{reduce\_mod\_ftilde}, \code{mul\_by\_lifted\_gf32}
-    (the FFT's only multiplication primitive),
-    \code{add\_in\_z}, and the \code{FftRingElement} trait.
-  \item \code{add\_fft.rs}: the generic radix-2 FFT kernel.
+    \code{reduce\_mod\_ftilde\_16}, the lifted-twiddle
+    multiplication primitive, and the \code{FftRingElement16} trait.
+  \item \code{radix8.rs}: the radix-8 evaluator ---
+    \code{Radix8FftParams16}, which precomputes the per-meta-stage
+    $8 \times 8$ Vandermonde tables, and \code{additive\_fft\_radix8\_16},
+    the kernel.
+  \item \code{ext\_field.rs}: the verifier-side field
+    $F = \F_p[X]/\flift$ (\code{Gf2\_16Ext<P>}) and the
+    $4$-bit-coefficient polynomial challenge type \code{Bit4Poly16}.
+    See \autoref{sec:protocol-integration}.
+  \item \code{packed\_cw.rs}: \code{PackedI64Poly16<BITS>}, a
+    codeword/combined-row cell type with a bit-packed wire encoding
+    (\autoref{sec:packed-cw}).
 \end{itemize}
 
-The top-level \code{binary\_add\_fft.rs} exposes the public
-\code{BinaryAddFftCode} struct and its \code{LinearCode<Zt>} impl.
+The top-level \code{binary\_add\_fft\_16.rs} exposes the public
+\code{BinaryAddFft16Code} struct and its \code{LinearCode<Zt>} impl.
 
-\subsection{The {\tt FftRingElement} trait}
+\subsection{The {\tt FftRingElement16} trait}
 \label{sec:fft-ring-element}
 
-The kernel is polymorphic over a \code{FftRingElement} trait that
-exposes the three primitives the FFT needs:
+The kernel is polymorphic over a \code{FftRingElement16} trait that
+exposes the primitives the radix-8 matvec needs:
 
 \begin{lstlisting}[language=Rust]
-pub trait FftRingElement: Sized + Clone + Send + Sync {
+pub trait FftRingElement16: Sized + Clone + Send + Sync {
     fn fft_zero() -> Self;
     fn fft_add(&self, other: &Self) -> Self;
-    fn fft_mul_lifted_gf32(&self, twiddle: Gf2_32) -> Self;
+    fn fft_mul_lifted_gf16(&self, twiddle: Gf2_16) -> Self;
+
+    // Batched-reduction path for the 8x8 matvec: accumulate the
+    // eight lifted-twiddle products in an UNREDUCED buffer, then
+    // reduce mod ftilde exactly once per output cell.
+    type UnreducedAcc: Send + Sync + Clone;
+    fn fft_unreduced_zero() -> Self::UnreducedAcc;
+    fn fft_acc_mul_lifted_gf16(
+        input: &Self, twiddle: Gf2_16, acc: &mut Self::UnreducedAcc,
+    );
+    fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self;
 }
 \end{lstlisting}
 
-Implementations exist for
-\code{DensePolynomial<Int<N>, 32>} (any~$N$, via the crypto-bigint
-multi-limb arithmetic), \code{DensePolynomial<i128, 32>},
-\code{DensePolynomial<i32, 32>} (both native CPU types), and
-\code{Gf2\_32} itself (used by tests as the unlifted reference
-implementation). The trait abstraction lets us swap the coefficient
-type without touching the kernel.
+The \code{UnreducedAcc} associated type is the key to a fast radix-8
+matvec: each $8 \times 8$ block accumulates all eight
+lifted-twiddle products of an output cell into one length-$31$
+unreduced buffer, and folds it back mod $\flift$ exactly once ---
+rather than reducing after every one of the eight multiplications.
 
-\subsection{The kernel}
+Implementations exist for \code{DensePolynomial<Int<N>, 16>} (any~$N$,
+via crypto-bigint multi-limb arithmetic), the native
+\code{DensePolynomial<i64, 16>} and \code{DensePolynomial<i128, 16>},
+\code{Gf2\_16} itself (the unlifted reference), and
+\code{PackedI64Poly16<BITS>} (which delegates to its inner
+\code{DensePolynomial<i64, 16>}). The trait abstraction lets the
+\code{ZipTypes} definition site choose the coefficient representation
+without touching the kernel.
+
+\subsection{The packed codeword cell}
+\label{sec:packed-cw}
+
+A codeword cell is a degree-$16$ polynomial. The shipped \code{Cw}
+type is \code{PackedI64Poly16<BITS>}: in memory it is a
+\code{DensePolynomial<i64, 16>} (so arithmetic uses native $64$-bit
+ALU ops, with headroom for the FFT growth), but its \code{Transcribable}
+(wire) encoding writes only \code{BITS} bits per coefficient instead of
+the full $64$. The encoder packs $16$ coefficients of \code{BITS} bits
+each into $\lceil 16 \cdot \code{BITS} / 8 \rceil$ bytes; the decoder
+sign-extends each field back to \code{i64}.
+
+This decouples the in-memory width (fixed at $64$ bits, for safe FFT
+arithmetic) from the on-wire width (chosen per use). The shipped Zip$^+$
+types use \code{BITS\_CW = 32} for codeword cells --- lossless given the
+radix-8 codeword coefficients max near $2^{26}$, with $\sim 6$ bits of
+headroom --- and \code{BITS\_CR = 8} for combined-row cells, whose
+coefficients are bounded by $\code{batch} \cdot 15$ at $\code{num\_rows}
+= 1$.
+
+\subsection{The radix-8 kernel}
 \label{sec:kernel}
 
-The kernel is iterative and natural-order (no bit reversal). The
-hot loop is
+\code{Radix8FftParams16::new(row\_len, codeword\_len)} asserts
+$3 \mid \log_2(\code{codeword\_len})$ and precomputes the
+per-meta-stage Vandermonde tables: a
+\code{Vec<Vec<[[Gf2\_16; 8]; 8]>>} indexed by
+\code{[meta\_stage][block\_idx]}, each entry an $8 \times 8$ matrix
+of $\GF(2^{16})$ elements (later lifted at FFT time).
+
+The kernel iterates the $m/3$ meta-stages from the top down; per
+meta-stage it processes each block of $8$ in parallel; per block it
+runs the $8 \times 8$ matvec using the batched-reduction path:
 
 \begin{lstlisting}[language=Rust]
-for i in (0..m).rev() {
-    let h = 1usize << i;
-    let block_size = h << 1;
-    let s_i = &params.subspace_polys[i];
-    let cantor_basis = &params.cantor_basis;
-
-    cfg_chunks_mut!(data, block_size)
-        .enumerate()
-        .for_each(|(block_idx, block_data)| {
-            let block_start = block_idx * block_size;
-            let block_offset =
-                block_offset_for_stage(block_start, i, m, cantor_basis);
-            let twiddle = evaluate_subspace_poly_at_gf32(s_i, block_offset);
-            for k in 0..h {
-                butterfly(block_data, k, k + h, twiddle);
-            }
-        });
-}
-\end{lstlisting}
-
-\noindent The
-\code{cfg\_chunks\_mut!} macro from \code{zinc-utils} compiles to a
-rayon \code{par\_chunks\_mut} under the \code{parallel} feature and
-to a plain sequential \code{chunks\_mut} otherwise. Block-level
-parallelism is safe because each block is a disjoint slice of the
-data vector.
-
-The butterfly itself has a small zero-twiddle fast path:
-
-\begin{lstlisting}[language=Rust]
-fn butterfly<T: FftRingElement>(
-    data: &mut [T], idx_a: usize, idx_b: usize, twiddle: Gf2_32,
-) {
-    if twiddle == Gf2_32::ZERO {
-        // (a, b) -> (a, a + b), skipping the multiplication.
-        let new_b = data[idx_a].fft_add(&data[idx_b]);
-        data[idx_b] = new_b;
-        return;
+for j in 0..8 {
+    let mut acc = T::fft_unreduced_zero();
+    for i in 0..8 {
+        let twiddle = matrix[block][j][i];
+        if twiddle != Gf2_16::ZERO {
+            T::fft_acc_mul_lifted_gf16(&input[i], twiddle, &mut acc);
+        }
     }
-    let b = data[idx_b].clone();
-    let t_b = b.fft_mul_lifted_gf32(twiddle);
-    let new_a = data[idx_a].fft_add(&t_b);
-    let new_b = new_a.fft_add(&b);
-    data[idx_a] = new_a;
-    data[idx_b] = new_b;
+    output[j] = T::fft_finalize_acc(acc);
 }
 \end{lstlisting}
 
-\noindent The zero-twiddle case fires once per FFT stage --- for the
-block whose offset is~$0 \in V_i$, since $s_i$ vanishes on $V_i$.
+\noindent Block-level parallelism (via \code{cfg\_chunks\_mut!} from
+\code{zinc-utils}, which compiles to a rayon \code{par\_chunks\_mut}
+under the \code{parallel} feature) is safe because each block is a
+disjoint slice of the data vector. The zero-twiddle entries are
+skipped --- in particular the $X_0 \equiv 1$ column contributes a
+plain add.
 
 \subsection{The {\tt LinearCode} impl}
 \label{sec:linear-code-impl}
 
-\code{BinaryAddFftCode<Zt, C, REP, CHECK>} implements
+\code{BinaryAddFft16Code<Zt, C, REP, CHECK>} implements
 \code{LinearCode<Zt>}:
 
 \begin{lstlisting}[language=Rust]
 impl<Zt, C, const REP: usize, const CHECK: bool> LinearCode<Zt>
-    for BinaryAddFftCode<Zt, C, REP, CHECK>
+    for BinaryAddFft16Code<Zt, C, REP, CHECK>
 where
     Zt: ZipTypes,
-    C: Config,
-    Zt::Cw: FftRingElement + FromRef<Zt::Eval>,
-    Zt::CombR: FftRingElement,
+    C: Config16,
+    Zt::Cw: FftRingElement16 + FromRef<Zt::Eval>,
+    Zt::CombR: FftRingElement16,
 {
     const REPETITION_FACTOR: usize = REP;
     fn row_len(&self) -> usize { self.params.row_len }
@@ -129,91 +151,59 @@ where
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         let mut data: Vec<Zt::Cw> = row.iter().map(Zt::Cw::from_ref).collect();
         data.resize_with(self.params.codeword_len, Zt::Cw::fft_zero);
-        additive_fft(&mut data, &self.params);
+        additive_fft_radix8_16(&mut data, &self.params);
         data
     }
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
         let mut data: Vec<Zt::CombR> = row.to_vec();
         data.resize_with(self.params.codeword_len, Zt::CombR::fft_zero);
-        additive_fft(&mut data, &self.params);
+        additive_fft_radix8_16(&mut data, &self.params);
         data
     }
     fn encode_f<F>(&self, _row: &[F]) -> Vec<F> where ... {
-        unimplemented!() // see Section \ref{sec:protocol-gap}
+        unimplemented!() // verifier uses encode_wide for proximity
     }
 }
 \end{lstlisting}
 
-The trait-bound shape pushes the encode/wire-typing constraints to
-the \code{ZipTypes} definition site, which is where the user
-chooses the coefficient widths.
+\code{encode} runs the radix-8 FFT on \code{Cw}-typed data;
+\code{encode\_wide} runs the identical kernel on \code{CombR}-typed
+data for the verifier's proximity check. \code{encode\_f} is part of
+the \code{LinearCode} trait but unused by the Zip$^+$ protocol --- the
+additive FFT over $\Rlift$ is not naturally expressible over an
+arbitrary prime field --- so it is left \code{unimplemented!}.
 
-\subsection{ZipTypes for no alpha-projection}
+\subsection{ZipTypes for the binary lane}
 \label{sec:zip-types}
 
-To skip alpha-projection (as the user requested in the original
-design) we define a \code{ZipTypes} where the
-\code{Comb} associated type equals the \code{CombR} associated
-type. The existing prove/verify path then short-circuits the
+The shipped \code{ZipTypes} for this code sets \code{Comb} equal to
+\code{CombR}; the prove/verify path then short-circuits the
 alpha-sampling logic to $\alpha = [1]$ (because
-$\code{Comb::DEGREE\_BOUND}$ is~$0$ when
-$\code{Comb} = \code{CombR}$ thanks to a \code{Polynomial<Self>}
-blanket impl we added in \code{poly/src/zero\_degree.rs}). The
-concrete type is
+$\code{Comb::DEGREE\_BOUND} = 0$ when $\code{Comb} = \code{CombR}$,
+via a \code{Polynomial<Self>} blanket impl in
+\code{poly/src/zero\_degree.rs}). The concrete shape used by the
+bench and tests is
 
 \begin{lstlisting}[language=Rust]
-pub struct BinPolyAddFftZipTypes<const K: usize, const M: usize> {}
-
-impl<const K: usize, const M: usize> ZipTypes
-    for BinPolyAddFftZipTypes<K, M>
-{
-    const NUM_COLUMN_OPENINGS: usize = 147;
-    type Eval  = BinaryPoly<32>;
-    type Cw    = DensePolynomial<Int<K>, 32>;
-    type Fmod  = Uint<K>;
+impl<...> ZipTypes for BenchAddFft16PolyChalPackedZipTypes<...> {
+    const NUM_COLUMN_OPENINGS: usize = NUM_OPENINGS;
+    type Eval  = BinaryPoly<16>;
+    type Cw    = PackedI64Poly16<BITS_CW>;     // 32 bits/coef on wire
+    type Fmod  = Uint<16>;                     // matches F::Modulus width
     type PrimeTest = MillerRabin;
-    type Chal  = i128;
-    type Pt    = i128;
-    type CombR = DensePolynomial<Int<M>, 32>;
-    type Comb  = Self::CombR; // <-- this is the "no alpha-projection" knob
+    type Chal  = Bit4Poly16;                   // 4-bit-coef poly challenge
+    type Pt    = Bit4Poly16;
+    type CombR = PackedI64Poly16<BITS_CR>;     //  8 bits/coef on wire
+    type Comb  = Self::CombR;                  // no alpha-projection
     type EvalDotChal     = ScalarProduct;
     type CombDotChal     = ScalarProduct;
     type ArrCombRDotChal = MBSInnerProduct;
 }
 \end{lstlisting}
 
-\subsection{Relaxations needed to the {\tt ZipTypes} trait}
-\label{sec:zip-types-relaxation}
-
-The original \code{ZipTypes::CombR} bound was
-\code{ConstIntRing + Neg<Output = Self::CombR> + \ldots}, which
-presumed \code{CombR} to be a scalar integer ring. To admit
-\code{CombR = DensePolynomial<Int<M>, 32>} we relaxed the bound to
-\code{FixedSemiring + ConstZero + \ldots}, after auditing the
-prove/verify code to confirm that
-\code{Neg} and \code{From<i8>} are never actually used on
-\code{CombR}.
-
-The \code{RAA} and \code{RaaSignFlipping} \code{LinearCode} impls
-that \emph{do} need \code{Neg + CheckedNeg} on \code{CombR} were
-updated to declare those bounds in their own \code{where}-clauses.
-Existing scalar \code{Int<N>} \code{CombR}s still satisfy the
-weaker trait-level bound without other changes.
-
-We also added two narrowly-scoped impls in \code{poly/}:
-\begin{itemize}
-  \item \code{Polynomial<Self> for DensePolynomial<R, D>} with
-    \code{DEGREE\_BOUND = 0}, mirroring the existing
-    \code{Polynomial<Self> for Int<LIMBS>} impl. This is the
-    mechanism by which $\code{Comb} = \code{CombR}$ produces
-    $\code{DEGREE\_BOUND} = 0$.
-  \item \code{ConstZero for DensePolynomial<Int<N>, D>}
-    (and later \code{i64}, \code{i128}, \code{i32}) so that the
-    relaxed \code{CombR} bound is satisfiable. The impls are
-    intentionally narrow (per coefficient type) to avoid a
-    coherence conflict with the
-    \code{MulByScalar<\&Boolean> for T where T: ConstZero + From<Boolean>}
-    blanket --- a generic \code{R: ConstZero + Copy} bound on the
-    \code{DensePolynomial} impl would trigger an overlap with
-    \code{DensePolynomial<Boolean, D>}.
-\end{itemize}
+\code{Eval = BinaryPoly<16>} is the natural shape of a $1\times$-folded
+binary witness. \code{Cw} and \code{CombR} are both
+\code{PackedI64Poly16} but with independent on-wire widths, since the
+codeword coefficients are large (FFT-amplified) while the combined-row
+coefficients stay small ($\le \code{batch}\cdot 15$ at
+$\code{num\_rows} = 1$).

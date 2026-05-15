@@ -1,102 +1,110 @@
 \section{Open questions and future work}
 \label{sec:future-work}
 
-\subsection{Polynomial-valued prove/verify}
-
-The single biggest open item is implementing the
-$F[X]/\flift$-valued prove/verify path described in
-\autoref{sec:protocol-gap}. Until that lands, the new code is
-encoder-only; it cannot be wired through \code{MultiZip3} into the
-SHA / ECDSA UAIRs. The scope of that change is itself substantial
-and deserves its own design pass.
-
 \subsection{Soundness analysis}
 
-The empirical $\Rlift \to \GF(2^{32})$ commutative diagram tests
-are reassuring but not a formal soundness proof. A complete
-analysis should:
+The implementation is complete and exercised end-to-end, but the
+soundness of the lifted code in the verifier-side field
+$F = \F_p[X]/\flift$ is not formally proved here. The structural
+ingredients are in place --- the lifted code reduces mod $2$ to a
+genuine $\GF(2^{16})$ Reed--Solomon code (\autoref{sec:lift}), which
+is MDS with distance $N - n + 1$ --- but a complete analysis should:
 \begin{itemize}
-  \item Establish that the lifted code's minimum distance is the
-    same as (or close to) the underlying $\GF(2^{32})$ RS code's
-    distance. The standard
-    Reed--Solomon-over-$\GF(2^{32})$ has MDS distance $N - n + 1$,
-    so the lifted code modulo $2$ has the same distance. Lifting
-    to $\Z[X]/\flift$ adds a generally-non-trivial torsion, but
-    the proximity argument can recover by reducing mod a prime
-    $p$ at which $\flift$ is irreducible.
-  \item Argue the proximity test in the $F[X]/\flift$
-    setting --- the existing Zip$^+$ proximity argument uses the
-    Schwartz--Zippel lemma over the prime field $F$, which has
-    a clean analogue in the extension $\F_{p^{32}}$ when
-    $\flift \bmod p$ is irreducible.
-  \item Bound the soundness error contribution from the
-    structural lift, particularly for column-opening checks.
+  \item Establish that the lifted code's effective minimum distance,
+    as seen by the proximity test, matches (or closely tracks) the
+    underlying $\GF(2^{16})$ RS distance, accounting for the
+    structural lift's torsion.
+  \item Carry the Zip$^+$ proximity argument through the
+    $F = \F_p[X]/\flift$ setting. The existing argument uses a
+    Schwartz--Zippel bound over a prime field; the analogue over the
+    degree-$16$ extension $\F_{p^{16}}$ (valid when $\flift \bmod p$
+    is irreducible, as it is for \code{P\_16\_DEFAULT}) is the natural
+    target.
+  \item Bound the soundness-error contribution of the radix-8
+    evaluator specifically. The radix-8-with-$\GF$-lifted-Vandermonde
+    code differs from a radix-2 $\Z$-lift in its higher $\Z$-bits
+    (\autoref{sec:radix8}); the analysis should confirm the proximity
+    argument is insensitive to that difference, since both reduce mod
+    $2$ to the same $\GF(2^{16})$ code.
 \end{itemize}
+
+\subsection{Rate / opening-count tuning}
+
+The shipped configurations use $\code{REP} = 4$ ($147$ column
+openings) and $\code{REP} = 8$ ($100$ openings), matching the
+protocol's IPRS opening table. The radix-8 evaluator constrains
+$\log_2(\code{codeword\_len})$ to be a multiple of $3$, which couples
+the admissible $(\code{row\_len}, \code{REP})$ pairs; e.g.\ a
+bit-budget-matched $\code{REP} = 8$ run at $\code{num\_vars} = 10$
+would need $\log_2(\code{codeword\_len}) = 13$, which the radix-8
+constructor rejects. A radix-$2$/radix-$8$ \emph{mixed} evaluator
+(one or two radix-2 stages plus radix-8 meta-stages) would lift this
+divisibility constraint, at the cost of a slightly more intricate
+kernel and a small reintroduction of radix-2 carry growth.
+
+\subsection{Tighter codeword packing}
+
+\code{BITS\_CW = 32} carries $\sim 6$ bits of headroom over the
+empirical $\sim 2^{26}$ codeword-coefficient maximum at
+$\code{codeword\_len} = 4096$. A workload-specific bound could push
+\code{BITS\_CW} down toward $28$, shrinking the dominant proof
+component a further $\sim 10\%$ --- at the cost of a non-power-of-two
+field width and a tighter (workload-dependent) safety margin. The
+coefficient magnitude grows with $\code{codeword\_len}$ (it approaches
+$2^{63}$ at the maximal $\code{codeword\_len} = 2^{16}$, see
+\autoref{sec:meas-coef}), so any tightened \code{BITS\_CW} must be
+chosen per codeword length.
 
 \subsection{Performance follow-ups}
 
-After the optimizations described in \autoref{sec:optimization},
-the next steps for performance would likely be:
 \begin{itemize}
   \item \textbf{Within-FFT parallelism for small batches.} At
-    \code{batch = 1} the row-level parallelism is only
-    \code{num\_rows}-way (often $\le 16$), so within-stage
-    parallelism becomes more impactful. The current
-    implementation already does this via \code{cfg\_chunks\_mut!}
-    but rayon's adaptive splitter may not extract maximum
-    parallelism for small block counts; a manual scope-spawn
-    structure could help.
-  \item \textbf{AVX-512 SIMD path.} The
-    \code{mul\_by\_lifted\_gf32\_i128\_split} function
-    (\autoref{sec:simd-attempt}) is dead code on Apple Silicon
-    but expected to pay on AVX-512 hosts where $4 \times i128$
-    fits in a $512$-bit vector. Untested.
-  \item \textbf{Base-layer optimization.} IPRS's $3\times$ depth
-    reduction via a Vandermonde base layer is conceptually
-    portable to additive FFT (e.g.\ via a radix-$8$ or radix-$16$
-    butterfly at the bottom of the recursion). The constant-factor
-    savings would be substantial.
-  \item \textbf{Algorithm replacement: LCH base-conversion.}
-    The novel-polynomial-basis FFT we implemented is correct
-    but has constant factors larger than basis-conversion-style
-    variants (LCH 2014, Cantor 1989). A future implementation
-    could adopt one of those, with the trade-off being a more
-    intricate kernel.
+    $\code{batch} = 1$ the row-level rayon parallelism vanishes and
+    only the per-meta-stage block loop remains; rayon's adaptive
+    splitter may under-extract parallelism for small block counts.
+  \item \textbf{SIMD matvec.} The $8 \times 8$ block matvec multiplies
+    by $\{0,1\}$-coefficient lifted twiddles --- shift-and-add over
+    \code{i64} coefficients --- which is a natural target for an
+    explicit SIMD inner loop on hosts with wide vector registers.
+  \item \textbf{Commit-side cost of radix-8.} The radix-8 form does
+    more raw arithmetic than a radix-2 lift (\autoref{sec:opt-radix8}).
+    The current trade favours proof size; a deployment that weights
+    commit time more heavily could expose the radix as a tunable knob.
 \end{itemize}
 
-\subsection{Larger $\GF(2^k)$}
+\subsection{Larger / other $\GF(2^k)$}
 
-Everything in this document is fixed at $k = 32$. A natural
-extension is to parameterize over $k$ via the existing
-\code{Config} trait, supporting e.g.\ $\GF(2^{64})$ or
-$\GF(2^{16})$. The math is identical; only the precomputation
-changes. For $\GF(2^{64})$ with a $\code{BinaryPoly<64>}$ input,
-the $\flift$ modulus has $64$ low monomials --- the
-\code{reduce\_mod\_ftilde} loop would adapt --- and the
-worst-case bit budget per coefficient scales accordingly.
+The implementation is fixed at $k = 16$, matching the protocol's
+$1\times$-folded binary lane (\code{BinaryPoly<16>}). The algebra is
+identical for other even $k$; only the precomputation changes ---
+the irreducible $f$, the Cantor basis size, and the
+\code{reduce\_mod\_ftilde} fold pattern. A $\GF(2^{32})$ instantiation
+would serve the \emph{unfolded} binary lane directly (no protocol-side
+folding), at the cost of larger codeword coefficients and a
+$\GF(2^{32})$ evaluation domain.
 
 \subsection{Code-survey reference}
 
 For readers exploring the source, the key files are:
 
 \begin{itemize}\small
-  \item \code{zip-plus/src/code/binary\_add\_fft.rs}: top-level,
-    \code{BinaryAddFftCode}, \code{LinearCode<Zt>} impl.
-  \item \code{zip-plus/src/code/binary\_add\_fft/basis.rs}:
-    \code{Gf2\_32}, Cantor basis.
-  \item \code{zip-plus/src/code/binary\_add\_fft/params.rs}:
-    \code{Config}, \code{Radix2AddFftParams}, subspace polynomials.
-  \item \code{zip-plus/src/code/binary\_add\_fft/ring\_ops.rs}:
-    \code{FftRingElement}, \code{FftCoeff}, lifted-ring arithmetic.
-  \item \code{zip-plus/src/code/binary\_add\_fft/add\_fft.rs}: FFT
-    kernel.
-  \item \code{zip-plus/src/pcs/test\_utils.rs}:
-    \code{BinPolyAddFftZipTypes}.
-  \item \code{zip-plus/src/pcs/structs.rs}: the relaxed
-    \code{ZipTypes::CombR} trait bound.
-  \item \code{poly/src/zero\_degree.rs} and
-    \code{poly/src/univariate/dense.rs}: \code{Polynomial<Self>}
-    and \code{ConstZero} impls.
-  \item \code{zip-plus/benches/zip\_plus\_benches.rs}: bench
-    harness for both \code{Int<N>} and \code{i32} paths.
+  \item \code{zip-plus/src/code/binary\_add\_fft\_16.rs}: top-level,
+    \code{BinaryAddFft16Code}, \code{LinearCode<Zt>} impl, smoke /
+    roundtrip / measurement tests.
+  \item \code{.../binary\_add\_fft\_16/basis.rs}:
+    \code{Gf2\_16}, Cantor basis.
+  \item \code{.../binary\_add\_fft\_16/params.rs}:
+    \code{Config16}, precomputed basis / subspace polynomials.
+  \item \code{.../binary\_add\_fft\_16/ring\_ops.rs}:
+    \code{FftRingElement16}, lifted-ring arithmetic.
+  \item \code{.../binary\_add\_fft\_16/radix8.rs}:
+    \code{Radix8FftParams16}, the radix-8 kernel.
+  \item \code{.../binary\_add\_fft\_16/ext\_field.rs}:
+    \code{Gf2\_16Ext<P>} ($F = \F_p[X]/\flift$), \code{Bit4Poly16},
+    \code{P\_16\_DEFAULT}, the irreducibility test.
+  \item \code{.../binary\_add\_fft\_16/packed\_cw.rs}:
+    \code{PackedI64Poly16<BITS>}, the bit-packed wire encoding.
+  \item \code{zip-plus/benches/zip\_plus\_benches.rs}: the bench
+    harness --- RAA / IPRS references plus the D16 R4 / R8 polychal
+    groups.
 \end{itemize}

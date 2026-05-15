@@ -10,23 +10,32 @@ use crypto_bigint::U64;
 use crypto_primitives::{
     FixedSemiring, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
-use std::marker::PhantomData;
+use rand::prelude::*;
+use std::{hint::black_box, marker::PhantomData, time::{Duration, Instant}};
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_poly::univariate::{
     binary::{BinaryPoly, BinaryPolyInnerProduct},
     dense::{DensePolyInnerProduct, DensePolynomial},
 };
 use zinc_primality::MillerRabin;
-use zinc_transcript::traits::ConstTranscribable;
-use zinc_utils::{from_ref::FromRef, inner_product::MBSInnerProduct, named::Named};
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_utils::{
+    from_ref::FromRef,
+    inner_product::{MBSInnerProduct, ScalarProduct},
+    named::Named,
+};
 use zip_plus::{
     code::{
-        binary_add_fft::{AddFftConfigGF2_32, BinaryAddFftCode},
+        binary_add_fft_16::{
+            AddFftConfigGF2_16, BinaryAddFft16Code,
+            ext_field::{Bit4Poly16, Gf2_16Ext, P_16_DEFAULT},
+        },
         iprs::{IprsCode, PnttConfigF65537},
         raa::{RaaCode, RaaConfig},
     },
-    pcs::structs::ZipTypes,
+    pcs::structs::{ZipPlus, ZipTypes},
+    pcs_transcript::PcsProverTranscript,
 };
-use zinc_utils::inner_product::ScalarProduct;
 
 const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
     zinc_utils::UNCHECKED
@@ -35,6 +44,21 @@ const PERFORM_CHECKS: bool = if cfg!(feature = "unchecked") {
 };
 
 const INT_LIMBS: usize = U64::LIMBS;
+
+/// Column-opening counts by inverse-rate, matching the protocol's IPRS
+/// table (`bench_real_*` in `protocol/benches/e2e.rs`: 150 / 100 / 75 for
+/// REP = 4 / 8 / 16). We use 147 at REP=4 as the polychal benches have
+/// historically. Any Zt struct whose `NUM_COLUMN_OPENINGS` references one
+/// of these constants is implicitly tied to that REP — wiring it to a
+/// different REP requires picking the matching constant.
+const OPENINGS_REP_4: usize = 147;
+const OPENINGS_REP_8: usize = 100;
+#[allow(dead_code)]
+const OPENINGS_REP_16: usize = 75;
+
+// ===========================================================================
+// Reference codes (RAA, IPRS) and the ZipTypes they use.
+// ===========================================================================
 
 #[derive(Debug, Clone)]
 struct BenchZipPlusTypes<CwCoeff, const D_PLUS_ONE: usize>(PhantomData<CwCoeff>);
@@ -51,7 +75,8 @@ where
         + Sync,
     Int<5>: FromRef<CwCoeff>,
 {
-    const NUM_COLUMN_OPENINGS: usize = 147;
+    // `BenchZipPlusTypes` is only used by REP=4 reference codes (RAA, IPRS).
+    const NUM_COLUMN_OPENINGS: usize = OPENINGS_REP_4;
     type Eval = BinaryPoly<D_PLUS_ONE>;
     type Cw = DensePolynomial<CwCoeff, D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
@@ -95,7 +120,6 @@ fn zip_plus_benchmarks_raa(c: &mut Criterion) {
 fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ IPRS");
 
-    // Use flat single-row Zip+ matrix
     do_bench::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS>(&mut group, |poly_size| {
         BenchIprsCode::new_with_optimal_depth(poly_size).ok()
     });
@@ -106,154 +130,227 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
     group.finish();
 }
 
-/// ZipTypes for the binary additive-FFT bench. Mirrors
-/// `BinPolyAddFftZipTypes` from `pcs::test_utils` (which is `#[cfg(test)]`
-/// and not visible to benches). `D_PLUS_ONE = 32` is fixed (the additive
-/// FFT operates over `GF(2^32) = F_2[X]/(f)` with `deg(f) = 32`).
-#[derive(Debug, Clone)]
-struct BenchAddFftZipPlusTypes<const K: usize, const M: usize>(PhantomData<()>);
+/// IPRS at the SHA-256 binary-lane dimensions (`num_vars=9, batch=11`),
+/// kept as a reference baseline alongside the D=16 radix-8 polychal bench.
+fn zip_plus_benchmarks_sha_iprs(c: &mut Criterion) {
+    use criterion::{BenchmarkGroup, measurement::WallTime};
+    let mut group: BenchmarkGroup<WallTime> =
+        c.benchmark_group("Zip+ SHA-style (IPRS, i64/Int<5>)");
+    group.sample_size(20);
 
-impl<const K: usize, const M: usize> ZipTypes for BenchAddFftZipPlusTypes<K, M> {
-    const NUM_COLUMN_OPENINGS: usize = 147;
-    type Eval = BinaryPoly<32>;
-    type Cw = DensePolynomial<Int<K>, 32>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
-    type PrimeTest = MillerRabin;
-    type Chal = i128;
-    type Pt = i128;
-    type CombR = DensePolynomial<Int<M>, 32>;
-    type Comb = Self::CombR;
-    type EvalDotChal = ScalarProduct;
-    type CombDotChal = ScalarProduct;
-    type ArrCombRDotChal = MBSInnerProduct;
-}
-
-type BenchBinaryAddFftCode<const K: usize, const M: usize> =
-    BinaryAddFftCode<BenchAddFftZipPlusTypes<K, M>, AddFftConfigGF2_32, 4, PERFORM_CHECKS>;
-
-/// Variant of `BenchAddFftZipPlusTypes` using native `i32` for the
-/// codeword / combined-row coefficients — the tightest single
-/// primitive that's safe for our codeword bit-budget. The codeword
-/// `P(v_k) = ∑_i c_i · X_i(v_k)` is a sum of at most `codeword_len`
-/// products of `{0,1}`-coefficient lifted GF elements (each product
-/// has per-coefficient magnitude ≤ ~200 in `Z[X]/f̃`), so the
-/// worst-case grows linearly with `codeword_len`. At
-/// `codeword_len = 2^16`, worst case ≈ `2^16 × 200 ≈ 2^24`, well
-/// within `i32`'s `±2^31` range; empirical max at
-/// `poly_size = 2^14` is `≈ 2^21` (see `column_size_report` test).
-/// 4× smaller storage than `i128` and operates on native CPU 32-bit
-/// adds.
-#[derive(Debug, Clone)]
-struct BenchAddFftI32ZipPlusTypes;
-
-impl ZipTypes for BenchAddFftI32ZipPlusTypes {
-    const NUM_COLUMN_OPENINGS: usize = 147;
-    type Eval = BinaryPoly<32>;
-    type Cw = DensePolynomial<i32, 32>;
-    type Fmod = Uint<{ INT_LIMBS * 4 }>;
-    type PrimeTest = MillerRabin;
-    // i32 (vs the usual i128) — must match Cw's coefficient width so that
-    // `MulByScalar<&Chal>` on `DensePolynomial<i32, 32>` resolves via the
-    // existing `i32: MulByScalar<&i32, i32>` impl. Chal is only used by
-    // the inner-product traits (`EvalDotChal`, etc.); the encode/commit
-    // bench path doesn't actually consume it.
-    type Chal = i32;
-    type Pt = i32;
-    type CombR = DensePolynomial<i32, 32>;
-    type Comb = Self::CombR;
-    type EvalDotChal = ScalarProduct;
-    type CombDotChal = ScalarProduct;
-    type ArrCombRDotChal = MBSInnerProduct;
-}
-
-type BenchBinaryAddFftI32Code =
-    BinaryAddFftCode<BenchAddFftI32ZipPlusTypes, AddFftConfigGF2_32, 4, PERFORM_CHECKS>;
-
-/// Bench harness for the binary additive-FFT linear code. Exercises the
-/// encode-side operations only (encode_rows / encode_single_row /
-/// merkle_root / commit). Prove/verify benches need an `F`-projection
-/// for `CombR = DensePolynomial<Int<M>, 32>` which is not yet
-/// implemented — see the plan file's "Blocked — full prove/verify
-/// integration" section.
-fn zip_plus_benchmarks_add_fft(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip+ AddFFT");
-
-    // K=2 (128-bit) Cw coefficients, M=3 (192-bit) CombR coefficients.
-    // Bit budget: each butterfly stage grows max-abs by a factor of at
-    // most ~33, so after `m` stages the worst-case coefficient is
-    // bounded by `33^m`. For `row_len = 2^16` (m = 18 with REP=4),
-    // `33^18 ≈ 2^91`, which fits comfortably in `Int<2>`. K and M were
-    // previously 5/8 (320/512-bit), wildly over-budget for the row
-    // sizes we benchmark — the smaller widths roughly halve the per-
-    // butterfly `Int<N>::add` cost.
-    bench_encode_only::<BenchAddFftZipPlusTypes<2, 3>, _>(&mut group, |poly_size| {
-        BenchBinaryAddFftCode::<2, 3>::new(poly_size / 4).ok()
+    zip_common::commit::<BenchZipPlusTypes<i64, 32>, _, 9, 11>(&mut group, |poly_size| {
+        BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok()
     });
-
+    zip_common::prove::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS, 9, 11>(
+        &mut group,
+        |poly_size| BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok(),
+    );
+    zip_common::verify::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS, 9, 11>(
+        &mut group,
+        |poly_size| BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok(),
+    );
     group.finish();
 }
 
-fn zip_plus_benchmarks_add_fft_i32(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Zip+ AddFFT (i32)");
+/// IPRS at SHA+ECDSA binary-lane dimensions (`num_vars=9, batch=15`).
+fn zip_plus_benchmarks_sha_ecdsa_iprs(c: &mut Criterion) {
+    use criterion::{BenchmarkGroup, measurement::WallTime};
+    let mut group: BenchmarkGroup<WallTime> =
+        c.benchmark_group("Zip+ SHA+ECDSA-style (IPRS, i64/Int<5>)");
+    group.sample_size(20);
 
-    // Native i32 coefficients — tight to the actual bit-budget of the
-    // codeword (real max ≈ 2^24 at codeword_len = 2^16, comfortably
-    // inside i32's ±2^31). 4× smaller per-coefficient storage than
-    // i128, with native CPU 32-bit ALU ops.
-    bench_encode_only::<BenchAddFftI32ZipPlusTypes, _>(&mut group, |poly_size| {
-        BenchBinaryAddFftI32Code::new(poly_size / 4).ok()
+    zip_common::commit::<BenchZipPlusTypes<i64, 32>, _, 9, 15>(&mut group, |poly_size| {
+        BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok()
     });
-
+    zip_common::prove::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS, 9, 15>(
+        &mut group,
+        |poly_size| BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok(),
+    );
+    zip_common::verify::<BenchZipPlusTypes<i64, 32>, _, PERFORM_CHECKS, 9, 15>(
+        &mut group,
+        |poly_size| BenchIprsCode::<i64, 32>::new_with_optimal_depth(poly_size).ok(),
+    );
     group.finish();
 }
 
-/// Encode-only bench harness. Mirrors the encode/merkle/commit subset of
-/// `do_bench` from `zip_common.rs`. Used by `zip_plus_benchmarks_add_fft`
-/// because the full `do_bench` exercises prove/verify which currently
-/// requires `F: FromWithConfig<&Zt::CombR>` — not available for
-/// polynomial `CombR`.
-fn bench_encode_only<Zt: ZipTypes, Lc: zip_plus::code::LinearCode<Zt>>(
-    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
-    make_linear_code: impl Fn(usize) -> Option<Lc> + Copy,
-) where
-    rand::distr::StandardUniform:
-        rand::prelude::Distribution<Zt::Eval> + rand::prelude::Distribution<Zt::Cw>,
+// ===========================================================================
+// D=16 polychal Zip+ — the binary-additive-FFT variant we ship.
+//
+// `Eval = BinaryPoly<16>` (1× folded — each `BinaryPoly<32>` witness column
+// is split into 2 halves at the protocol layer). The encoder is a radix-8
+// additive FFT over `GF(2^16)` lifted to `Z[X]/f̃`: per-meta-stage 8×8
+// Vandermonde matrices are precomputed in GF and lifted as 0/1-coef polys,
+// and the matvec is carried out in `Z[X]/f̃`. The verifier-side field is
+// `F = F_p[X]/f̃` with `P = P_16_DEFAULT`.
+//
+// Cw and CombR are bit-packed `PackedI64Poly16<BITS>`. At the bench dim
+// `codeword_len = 4096` the codeword coefs empirically max at ~2^26, so
+// BITS_CW=32 has ~6 bits of headroom. CombR coefs are bounded by
+// `batch × max_chal_coef` (≤ batch · 15 at num_rows=1) so BITS_CR=8 is
+// safe at batch=11.
+// ===========================================================================
+
+const BITS_CW: u32 = 32;
+const BITS_CR: u32 = 8;
+
+#[derive(Debug, Clone)]
+struct BenchAddFft16PolyChalPackedZipTypes<const PP: u64, const NUM_OPENINGS: usize>;
+impl<const PP: u64, const NUM_OPENINGS: usize> ZipTypes
+    for BenchAddFft16PolyChalPackedZipTypes<PP, NUM_OPENINGS>
 {
-    use itertools::Itertools as _;
-    use zip_common::{commit, encode_rows, encode_single_row, merkle_root};
+    const NUM_COLUMN_OPENINGS: usize = NUM_OPENINGS;
+    type Eval = BinaryPoly<16>;
+    type Cw = zip_plus::code::binary_add_fft_16::packed_cw::PackedI64Poly16<BITS_CW>;
+    type Fmod = Uint<16>;
+    type PrimeTest = MillerRabin;
+    type Chal = Bit4Poly16;
+    type Pt = Bit4Poly16;
+    type CombR = zip_plus::code::binary_add_fft_16::packed_cw::PackedI64Poly16<BITS_CR>;
+    type Comb = Self::CombR;
+    type EvalDotChal = ScalarProduct;
+    type CombDotChal = ScalarProduct;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
 
-    // encode_rows::<Zt, Lc, 9>(group, make_linear_code);
-    //encode_rows::<Zt, Lc, 10>(group, make_linear_code);
-    // encode_rows::<Zt, Lc, 14>(group, make_linear_code);
-    // encode_rows::<Zt, Lc, 15>(group, make_linear_code);
-    // encode_rows::<Zt, Lc, 16>(group, make_linear_code);
+/// D=16 polychal commit/prove/verify bench. `num_rows = 1`. Radix-8 FFT
+/// requires `log2(row_len · REP) % 3 == 0`.
+fn bench_polychal_16<const REP: usize, const NUM_OPENINGS: usize>(
+    c: &mut Criterion,
+    label: &str,
+    num_vars: usize,
+    batch: usize,
+) {
+    use criterion::{BenchmarkGroup, measurement::WallTime};
 
-    for lc in (9..=9)
-        .filter_map(|row_len_ilog2| {
-            let row_len = 1usize << row_len_ilog2;
-            make_linear_code(row_len)
+    type Zt<const NO: usize> = BenchAddFft16PolyChalPackedZipTypes<P_16_DEFAULT, NO>;
+    type Code<const NO: usize, const R: usize> =
+        BinaryAddFft16Code<Zt<NO>, AddFftConfigGF2_16, R, PERFORM_CHECKS>;
+    type F = Gf2_16Ext<P_16_DEFAULT>;
+
+    let mut group: BenchmarkGroup<WallTime> = c.benchmark_group(label);
+    group.sample_size(20);
+
+    let poly_size: usize = 1 << num_vars;
+    let row_len = poly_size; // num_rows = 1
+    assert!(
+        poly_size.checked_mul(REP).map(|c| c <= (1 << 16)).unwrap_or(false),
+        "D=16 + num_rows=1 needs poly_size*REP <= 2^16; got poly_size={poly_size}, REP={REP}",
+    );
+    let code = Code::<NUM_OPENINGS, REP>::new(row_len).expect("valid params");
+    let pp = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::setup(poly_size, code);
+
+    let mut rng = StdRng::seed_from_u64(0xcafe_f00d);
+    let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+        .map(|_| DenseMultilinearExtension::<BinaryPoly<16>>::rand(num_vars, &mut rng))
+        .collect();
+
+    let tag = format!("D16, REP={REP}, batch={batch}, poly_size=2^{num_vars}");
+
+    group.bench_function(format!("Commit({tag})"), |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let timer = Instant::now();
+                let res = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::commit(&pp, &polys).unwrap();
+                total += timer.elapsed();
+                black_box(res);
+            }
+            total
         })
-        .dedup_by(|a, b| a.row_len() == b.row_len() && a.codeword_len() == b.codeword_len())
-    {
-        //encode_single_row::<Zt, Lc>(group, lc);
-    }
+    });
 
-    //merkle_root::<Zt, 9>(group);
-    // merkle_root::<Zt, 13>(group);
-    // merkle_root::<Zt, 14>(group);
-    // merkle_root::<Zt, 15>(group);
-    // merkle_root::<Zt, 16>(group);
+    let (hint, comm) = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::commit(&pp, &polys).unwrap();
+    let field_cfg = ();
+    let point: Vec<Bit4Poly16> = (0..num_vars).map(|i| Bit4Poly16(2 + i as i64)).collect();
 
-    commit::<Zt, Lc, 17, 11>(group, make_linear_code);
-    //commit::<Zt, Lc, 13, 1>(group, make_linear_code);
-    //commit::<Zt, Lc, 14, 1>(group, make_linear_code);
-    //commit::<Zt, Lc, 15, 1>(group, make_linear_code);
-    //commit::<Zt, Lc, 16, 1>(group, make_linear_code);
+    group.bench_function(format!("Prove({tag})"), |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+                let timer = Instant::now();
+                let res = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::prove::<F, PERFORM_CHECKS>(
+                    &mut transcript, &pp, &polys, &point, &hint, &field_cfg,
+                ).unwrap();
+                total += timer.elapsed();
+                black_box(res);
+            }
+            total
+        })
+    });
+
+    let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+    let eval_f = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::prove::<F, PERFORM_CHECKS>(
+        &mut transcript, &pp, &polys, &point, &hint, &field_cfg,
+    ).unwrap();
+
+    let combined_proof = CombinedProof {
+        comm: comm.clone(),
+        proof_transcript: transcript.stream.get_ref().clone(),
+    };
+    zip_plus::utils::eprint_proof_size(format!("{tag}"), &combined_proof);
+
+    let point_f: Vec<F> = point.iter()
+        .map(|v| <F as crypto_primitives::FromWithConfig<&Bit4Poly16>>::from_with_cfg(v, &field_cfg))
+        .collect();
+    let v_transcript_template = transcript.into_verification_transcript();
+
+    group.bench_function(format!("Verify({tag})"), |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let mut transcript = v_transcript_template.clone();
+                let timer = Instant::now();
+                transcript.fs_transcript.absorb_slice(&comm.root);
+                let res = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::verify::<F, PERFORM_CHECKS>(
+                    &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
+                ).unwrap();
+                total += timer.elapsed();
+                black_box(res);
+            }
+            total
+        })
+    });
+
+    group.finish();
+}
+
+// ===========================================================================
+// D=16 polychal entry points.
+//
+// `num_vars = 10` mirrors the protocol's "folded" binary-lane dim at
+// `protocol_num_vars=9` (each `BinaryPoly<32>` cell becomes 2 `BinaryPoly<16>`
+// cells). Radix-8 constraint: `log2(poly_size · REP) % 3 == 0`.
+//
+// - R=4: `log2(2^10 · 4) = 12` ✓
+// - R=8 at `num_vars=10` would give `m=13`, which fails. To keep `num_rows=1`
+//   with R=8 we drop to `num_vars=9` (`m=12` ✓), committing HALF the bits —
+//   not bit-budget-matched but a useful rate-axis sanity at the same `m`.
+// ===========================================================================
+
+fn zip_plus_benchmarks_polychal_d16_r4(c: &mut Criterion) {
+    bench_polychal_16::<4, OPENINGS_REP_4>(
+        c, "Zip+ PolyChal D16 R4 (Cw32/CombR8)",
+        /* num_vars = */ 10, /* batch = */ 11,
+    );
+}
+
+fn zip_plus_benchmarks_polychal_d16_r8(c: &mut Criterion) {
+    bench_polychal_16::<8, OPENINGS_REP_8>(
+        c, "Zip+ PolyChal D16 R8 (Cw32/CombR8)",
+        /* num_vars = */ 9, /* batch = */ 11,
+    );
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(500);
-    targets = zip_plus_benchmarks_raa, zip_plus_benchmarks_iprs, zip_plus_benchmarks_add_fft, zip_plus_benchmarks_add_fft_i32
+    targets =
+        zip_plus_benchmarks_raa,
+        zip_plus_benchmarks_iprs,
+        zip_plus_benchmarks_sha_iprs,
+        zip_plus_benchmarks_sha_ecdsa_iprs,
+        zip_plus_benchmarks_polychal_d16_r4,
+        zip_plus_benchmarks_polychal_d16_r8,
 }
 criterion_main!(benches);

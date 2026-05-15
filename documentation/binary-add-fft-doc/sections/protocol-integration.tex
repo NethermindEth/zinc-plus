@@ -1,0 +1,105 @@
+\section{Protocol integration}
+\label{sec:protocol-integration}
+
+The code is wired end-to-end through Zip$^+$'s commit / prove / verify.
+This section describes the verifier-side field and the challenge type
+that make that possible. (An earlier draft of this document described
+this as an open ``protocol-integration gap''; it is now closed, and the
+content below supersedes it.)
+
+\subsection{The obstruction}
+
+The Zip$^+$ prover, at its combined-row / proximity step, computes
+inner products of \code{Zt::CombR} slices against verifier-side
+field elements. This requires a map
+\[
+  \mathrm{Zt::CombR} \;\longrightarrow\; F,
+\]
+i.e.\ $F : \mathrm{FromWithConfig}\langle \&\,\code{Zt::CombR}\rangle$.
+For the IPRS / RAA codes \code{CombR} is a scalar \code{Int<N>} and
+the map is the standard ``integer mod $p$'' lift into a prime field.
+For this code, \code{CombR} is a degree-$16$ polynomial in $\Rlift$,
+and no map into a \emph{prime} field $\F_p$ is natural: the encoder's
+algebra is polynomial-shaped, so the verifier-side scalar must be too.
+
+\subsection{The verifier-side field $F = \F_p[X]/\flift$}
+
+The fix is to make $F$ itself polynomial-shaped. Define
+\[
+  F \;=\; \F_p[X]/\flift,
+\]
+the same quotient shape as $\Rlift$ but with prime-field coefficients
+in place of $\Z$-coefficients. The map
+\[
+  \pi_p : \Rlift \longrightarrow F, \qquad
+  \pi_p(\,\textstyle\sum a_i X^i\,) = \sum (a_i \bmod p)\, X^i
+\]
+is coefficient-wise mod-$p$ reduction. Because $f \equiv \flift
+\pmod p$ for the integer-coefficient $\flift$, $\pi_p$ is a
+\emph{ring homomorphism} $\Rlift \to F$ --- it commutes with addition,
+multiplication, and the $\flift$ reduction --- so it preserves every
+algebraic identity the proximity and eval-consistency checks rely on.
+
+When $\flift \bmod p$ is irreducible over $\F_p$, $F$ is a genuine
+field, the degree-$16$ extension $\F_{p^{16}}$. The implementation
+is \code{Gf2\_16Ext<const P: u64>} in \code{ext\_field.rs}, a
+\code{[u64; 16]} coefficient vector mod $p$. It carries
+\code{Field::Modulus = Uint<16>} (width-matched to the inner
+representation so the transcript's shared modulus / inner buffers
+agree) and implements the \code{PrimeField} trait surface that
+prove/verify actually exercises --- the trait name is a slight abuse,
+but only the \code{Field} operations and config-handling methods are
+used; field-specific methods (square roots, $(p-1)/2$) are stubbed.
+
+\paragraph{Prime selection.}
+$F$ is a field --- so that \code{Div} / \code{Inv} make sense --- only
+when $\flift \bmod p$ is irreducible. \code{ext\_field.rs} ships a
+Rabin-style irreducibility test (\code{f\_tilde\_is\_irreducible\_mod\_p})
+and a prime scanner. The default prime is
+\[
+  \code{P\_16\_DEFAULT} \;=\; 2\,147\,482\,921,
+\]
+the largest prime below $2^{31}$ for which
+$\flift = X^{16}+X^5+X^3+X^2+1$ is irreducible mod $p$. A non-ignored
+test pins this choice; $P$ is a const-generic, so it can be swapped.
+
+\subsection{The challenge type {\tt Bit4Poly16}}
+
+The row-batching challenge $\code{Chal}$ and evaluation point
+$\code{Pt}$ are also polynomial-shaped: \code{Bit4Poly16}, a
+$16$-nibble polynomial with $4$-bit integer coefficients in
+$\{0,\ldots,15\}$, drawn fresh via Fiat--Shamir. It is backed by a
+single \code{i64} ($16 \times 4 = 64$ bits) and has an $8$-byte wire
+encoding. The narrow $4$-bit coefficients keep the combined-row
+magnitudes small: at $\code{num\_rows} = 1$, a combined-row
+coefficient is a sum of $\le \code{batch}$ products of a binary
+message bit and a $4$-bit challenge coefficient, hence bounded by
+$\code{batch}\cdot 15$ --- which is why \code{BITS\_CR = 8} suffices
+for the combined-row wire encoding (\autoref{sec:packed-cw}).
+
+\subsection{The coherence identity}
+
+With $F = \F_p[X]/\flift$ and $\pi_p$ a ring homomorphism, the
+protocol's coherence identity holds by algebra: the prover's
+combined row, the evaluation, and the tensor coordinates
+$(q_0, q_1)$ all live in $F$, and
+\[
+  \langle \text{combined\_row}, q_1 \rangle_F
+  \;=\;
+  \langle \text{coeffs}, b \rangle_F
+\]
+because every quantity is the $\pi_p$-image of the corresponding
+$\Rlift$-valued quantity the prover computed, and $\pi_p$ commutes
+with the inner product. The transcript serializes the combined-row
+vector $b$ as polynomial-valued (packed) entries rather than scalar
+field elements.
+
+\subsection{Soundness note}
+
+The proximity argument for the lifted code in $F = \F_p[X]/\flift$ is
+not given a formal proof here. The structural ingredients are: the
+lifted code reduces mod $2$ to a genuine $\GF(2^{16})$ Reed--Solomon
+code (\autoref{sec:lift}), and the Schwartz--Zippel-style argument
+the Zip$^+$ proximity test uses has a clean analogue in the extension
+$\F_{p^{16}}$ when $\flift \bmod p$ is irreducible. A complete
+analysis is left as follow-up (\autoref{sec:future-work}).
