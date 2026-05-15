@@ -2022,13 +2022,15 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedPolyC
 }
 
 /// Polychal counterpart of `setup_folded_pp_real_ecdsa`. The binary
-/// lane uses `BinaryAddFft16Code::new(split_size)` (radix-8 additive
-/// FFT); arbitrary / int lanes are unchanged (IPRS).
+/// lane uses `BinaryAddFft16Code::new(split_size)` (mixed-radix
+/// additive FFT); arbitrary / int lanes are unchanged (IPRS).
 ///
 /// `split_size = 1 << (num_vars + 1)`; for `num_vars = 9` that is
 /// `1024`, and `BinaryAddFft16Code::new(1024)` yields
-/// `codeword_len = 1024 * REP = 4096 = 2^12` (radix-8 requires
-/// `log2(codeword_len) % 3 == 0` — `12 % 3 == 0`).
+/// `codeword_len = 1024 * REP`. At the default rate 1/4 that is
+/// `2^12` (pure radix-8); under `iprs-rate-1-8` it is `2^13`, which
+/// the mixed-radix encoder handles with one radix-16 base stage plus
+/// three radix-8 stages.
 fn setup_folded_pp_polychal(num_vars: usize) -> FoldedPp1x<BenchFoldedPolyChalZincTypes> {
     let split_size = 1 << (num_vars + 1);
     let normal_size = 1 << num_vars;

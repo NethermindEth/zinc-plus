@@ -1,8 +1,9 @@
 //! Binary additive RS-FFT code over `GF(2^16) = F_2[X]/(X^16 + X^5 + X^3
 //! + X^2 + 1)` lifted structurally to `Z[X]/f̃` with `f̃ = X^16 + X^5 +
-//! X^3 + X^2 + 1`, using a **radix-8** evaluator: each meta-stage applies
-//! an 8×8 `GF(2^16)` Vandermonde matvec whose entries are precomputed in
-//! GF and lifted to 0/1-coef polynomials in `Z[X]/f̃`.
+//! X^3 + X^2 + 1`, using a **mixed-radix** evaluator: each stage applies
+//! a radix-8 (8×8) or radix-16 (16×16) `GF(2^16)` Vandermonde matvec
+//! whose entries are precomputed in GF and lifted to 0/1-coef
+//! polynomials in `Z[X]/f̃`. Radix-16 stages sit at the base.
 //!
 //! Intended use: the "1× folded" Zip+ variant for the binary lane that
 //! commits `BinaryPoly<16>` rows, as the protocol's `FoldedZincTypes`
@@ -11,10 +12,10 @@
 
 pub mod basis;
 pub mod ext_field;
+pub mod mixed_radix;
 pub mod packed_cw;
 pub mod params;
 pub mod poly_ext;
-pub mod radix8;
 pub mod ring_ops;
 
 use std::{fmt::Debug, marker::PhantomData};
@@ -23,26 +24,27 @@ use crypto_primitives::FromPrimitiveWithConfig;
 use zinc_utils::from_ref::FromRef;
 
 use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
+pub use mixed_radix::MixedRadixFftParams16;
 pub use params::{AddFftConfigGF2_16, Config16};
-pub use radix8::Radix8FftParams16;
 use ring_ops::FftRingElement16;
 
 
-/// Reed-Solomon linear code whose encoder is a **radix-8** additive
-/// FFT over `GF(2^16)` lifted structurally to `Z[X]/(f̃)`. Each radix-8
-/// meta-stage covers three subspace polynomials and is applied as an
-/// 8×8 `GF(2^16)` Vandermonde matvec carried out in `Z[X]/f̃` (per-entry
-/// twiddles are 0/1-coef GF-lifted).
+/// Reed-Solomon linear code whose encoder is a **mixed-radix** additive
+/// FFT over `GF(2^16)` lifted structurally to `Z[X]/(f̃)`. Each stage
+/// covers three (radix-8) or four (radix-16) subspace polynomials and
+/// is applied as an 8×8 or 16×16 `GF(2^16)` Vandermonde matvec carried
+/// out in `Z[X]/f̃` (per-entry twiddles are 0/1-coef GF-lifted).
 ///
-/// Requires `log2(row_len * REP) % 3 == 0` (e.g. `row_len=1024, REP=4`
-/// gives `m=12`, `m/3 = 4` meta-stages).
+/// Requires `m = log2(row_len * REP)` to be expressible as `3a + 4b`
+/// with non-negative `a, b` — every `m` except `{1, 2, 5}`. Pure
+/// radix-8 (`m % 3 == 0`) uses no radix-16 stages.
 pub struct BinaryAddFft16Code<
     Zt: ZipTypes,
     C: Config16,
     const REP: usize,
     const CHECK: bool,
 > {
-    params: Radix8FftParams16<C>,
+    params: MixedRadixFftParams16<C>,
     _phantom: PhantomData<Zt>,
 }
 
@@ -59,7 +61,7 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
         let codeword_len = row_len.checked_mul(REP).ok_or_else(|| {
             ZipError::InvalidPcsParam(format!("row_len ({row_len}) * REP ({REP}) overflows usize"))
         })?;
-        let params = Radix8FftParams16::new(row_len, codeword_len)?;
+        let params = MixedRadixFftParams16::new(row_len, codeword_len)?;
         Ok(Self {
             params,
             _phantom: PhantomData,
@@ -70,7 +72,7 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
         Self::new(row_len)
     }
 
-    pub fn params(&self) -> &Radix8FftParams16<C> {
+    pub fn params(&self) -> &MixedRadixFftParams16<C> {
         &self.params
     }
 }
@@ -129,9 +131,10 @@ where
 
     fn params_string(&self) -> String {
         format!(
-            "row_len={}, rate=1/{REP}, log2_codeword_len={} (radix-8)",
+            "row_len={}, rate=1/{REP}, log2_codeword_len={} (mixed-radix, {} radix-16 stage(s))",
             self.row_len(),
-            self.params.log2_codeword_len()
+            self.params.log2_codeword_len(),
+            self.params.num_radix16_stages(),
         )
     }
 
@@ -145,7 +148,7 @@ where
         );
         let mut data: Vec<Zt::Cw> = row.iter().map(Zt::Cw::from_ref).collect();
         data.resize_with(self.params.codeword_len(), Zt::Cw::fft_zero);
-        radix8::additive_fft_radix8_16(&mut data, &self.params);
+        mixed_radix::additive_fft_mixed_radix_16(&mut data, &self.params);
         data
     }
 
@@ -159,7 +162,7 @@ where
         );
         let mut data: Vec<Zt::CombR> = row.to_vec();
         data.resize_with(self.params.codeword_len(), Zt::CombR::fft_zero);
-        radix8::additive_fft_radix8_16(&mut data, &self.params);
+        mixed_radix::additive_fft_mixed_radix_16(&mut data, &self.params);
         data
     }
 
@@ -329,6 +332,53 @@ mod linear_code_tests {
                 bits,
             );
         }
+    }
+
+    /// Measure the empirical max |coefficient| of the codeword at the
+    /// rate-1/8 SHA dims (`row_len = 1024`, `REP = 8`, `codeword_len =
+    /// 8192`, `m = 13`). This `m` is not divisible by 3, so the encoder
+    /// runs one radix-16 base stage plus three radix-8 stages. The
+    /// result must stay under `2^32` for `BITS_CW = 32` to be lossless.
+    #[test]
+    fn codeword_coef_bits_rep8_radix16() {
+        const REP: usize = 8;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+
+        let row_len = 1024usize;
+        let code = Code::new(row_len).expect("valid mixed-radix params");
+        assert_eq!(code.params().num_radix16_stages(), 1);
+
+        let mut rng = StdRng::seed_from_u64(0xdead_b00f);
+        let row: Vec<BinaryPoly<16>> = (0..row_len)
+            .map(|_| BinaryPoly::<16>::from(rng.random::<u64>()))
+            .collect();
+        let cw = LinearCode::<Zt>::encode(&code, &row);
+        let mut max_abs: i64 = 0;
+        for cell in &cw {
+            for &c in &cell.coeffs {
+                let a = c.unsigned_abs() as i64;
+                if a > max_abs {
+                    max_abs = a;
+                }
+            }
+        }
+        let bits = if max_abs == 0 {
+            0
+        } else {
+            65 - (max_abs as u64).leading_zeros() as u64
+        };
+        eprintln!(
+            "  mixed-radix REP=8, row_len=1024: codeword_len={}, m=13, \
+             max |coef| = {max_abs} (~ 2^{:.2}), bits-incl-sign = {}",
+            row_len * REP,
+            if max_abs == 0 { 0.0 } else { (max_abs as f64).log2() },
+            bits,
+        );
+        assert!(
+            bits <= 32,
+            "rate-1/8 codeword coefficient needs {bits} bits, exceeds BITS_CW=32"
+        );
     }
 
     /// Tamper test for the radix-8 variant.
