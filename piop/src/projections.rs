@@ -10,8 +10,8 @@ use zinc_poly::{
 };
 use zinc_uair::{BitOp, BitOpSpec, Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, add, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
-    powers, rem,
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
+    powers,
 };
 
 /// Row-indexed trace matrix: `trace[row][col]`.
@@ -329,31 +329,16 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
     let c = spec.op().count();
     assert!(
         c > 0 && c < D,
-        "BitOp count {} out of range for cell width D = {}",
-        c,
-        D,
+        "BitOp count {c} out of range for cell width D = {D}",
     );
 
     let evaluate_with_bit_op = |cell: &DynamicPolynomialF<F>| -> F::Inner {
-        let mut coeffs = cell.coeffs.to_vec();
-        coeffs.resize(D, zero.clone());
-        let transformed: Vec<F> = match spec.op() {
-            BitOp::Rot(c) => (0..D)
-                .map(|i| coeffs[rem!(add!(i, c), D)].clone())
-                .collect(),
-            BitOp::ShR(c) => (0..D)
-                .map(|i| {
-                    let j = add!(i, c);
-                    if j < D {
-                        coeffs[j].clone()
-                    } else {
-                        zero.clone()
-                    }
-                })
-                .collect(),
+        let transformed = match spec.op() {
+            BitOp::Rot(c) => cell.rotate_right::<D>(c, field_cfg),
+            BitOp::ShR(c) => cell.shr::<D>(c, field_cfg),
         };
         DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
-            &transformed,
+            &transformed.coeffs,
             &projection_powers,
             zero.clone(),
         )

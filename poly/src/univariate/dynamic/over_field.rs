@@ -9,7 +9,7 @@ use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribabl
 use zinc_utils::{
     UNCHECKED, add,
     inner_product::{InnerProduct, InnerProductError},
-    mul,
+    mul, rem,
 };
 
 use crate::{
@@ -64,6 +64,54 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
             Self::default()
         } else {
             DynamicPolynomialF { coeffs: vec![a] }
+        }
+    }
+
+    /// Right-rotate the coefficient vector by `c` positions within width `D`.
+    ///
+    /// The output coefficient at position `i` is the input coefficient at
+    /// `(i + c) mod D`. Missing coefficients are padded with zero before the
+    /// rotation.
+    pub fn rotate_right<const D: usize>(&self, c: usize, field_cfg: &F::Config) -> Self {
+        assert!(
+            c > 0 && c < D,
+            "rotate_right count {c} out of range (must satisfy 0 < c < {D})",
+        );
+
+        let mut coeffs = self.coeffs.clone();
+        coeffs.resize(D, F::zero_with_cfg(field_cfg));
+        Self {
+            coeffs: (0..D)
+                .map(|i| coeffs[rem!(add!(i, c), D)].clone())
+                .collect(),
+        }
+    }
+
+    /// Right-shift the coefficient vector by `c` positions within width `D`.
+    ///
+    /// The output coefficient at position `i` is the input coefficient at
+    /// `i + c`, or zero when that index is outside width `D`. Missing
+    /// coefficients are padded with zero before the shift.
+    pub fn shr<const D: usize>(&self, c: usize, field_cfg: &F::Config) -> Self {
+        assert!(
+            c > 0 && c < D,
+            "shr count {c} out of range (must satisfy 0 < c < {D})",
+        );
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let mut coeffs = self.coeffs.clone();
+        coeffs.resize(D, zero.clone());
+        Self {
+            coeffs: (0..D)
+                .map(|i| {
+                    let j = add!(i, c);
+                    if j < D {
+                        coeffs[j].clone()
+                    } else {
+                        zero.clone()
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -811,6 +859,56 @@ mod tests {
 
     fn f(v: u64) -> F {
         F::from_with_cfg(v, &test_config())
+    }
+
+    #[test]
+    fn rotate_right_pads_and_permutes_coefficients() {
+        let field_cfg = test_config();
+        let poly = DynamicPolynomialF::new([f(1), f(2), f(3)]);
+
+        assert_eq!(
+            poly.rotate_right::<5>(2, &field_cfg),
+            DynamicPolynomialF::new([f(3), f(0), f(0), f(1), f(2)])
+        );
+    }
+
+    #[test]
+    fn shr_pads_and_drops_coefficients() {
+        let field_cfg = test_config();
+        let poly = DynamicPolynomialF::new([f(1), f(2), f(3)]);
+
+        assert_eq!(
+            poly.shr::<5>(2, &field_cfg),
+            DynamicPolynomialF::new([f(3), f(0), f(0), f(0), f(0)])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "rotate_right count 0 out of range")]
+    fn rotate_right_panics_on_zero() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1)]).rotate_right::<5>(0, &field_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "rotate_right count 5 out of range")]
+    fn rotate_right_panics_on_full_width() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1)]).rotate_right::<5>(5, &field_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "shr count 0 out of range")]
+    fn shr_panics_on_zero() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1)]).shr::<5>(0, &field_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "shr count 5 out of range")]
+    fn shr_panics_on_full_width() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1)]).shr::<5>(5, &field_cfg);
     }
 
     #[test]
