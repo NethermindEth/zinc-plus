@@ -220,39 +220,51 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
         }
 
-        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
-            .map(|_| -> Result<_, ZipError> {
-                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
-                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
-                let proof = transcript.read_merkle_proof().map_err(|e| {
-                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
-                })?;
+        // Squeeze every column index up front, then read the batched
+        // opening: per-distinct-column matrix entries, then one Merkle
+        // multiproof. Reads do not feed Fiat-Shamir, so this matches the
+        // prover's squeeze sequence exactly.
+        let mut column_indices: Vec<usize> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(vp.linear_code.codeword_len()))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
 
-                Ok((column_idx, column_values, proof))
-            })
-            .try_collect()?;
+        let column_values: Vec<Vec<Zt::Cw>> = column_indices
+            .iter()
+            .map(|_| transcript.read_const_many(batch_size * vp.num_rows))
+            .collect::<Result<_, ZipError>>()?;
 
-        cfg_into_iter!(columns_and_proofs).try_for_each(
-            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
+        let multi_proof = transcript.read_merkle_multi_proof().map_err(|e| {
+            ZipError::InvalidPcsOpen(format!("Failed to read Merkle multiproof: {e}"))
+        })?;
+
+        // Check 3 (proximity): per distinct queried column.
+        let checks: Vec<(usize, &Vec<Zt::Cw>)> = column_indices
+            .iter()
+            .copied()
+            .zip(column_values.iter())
+            .collect();
+        cfg_into_iter!(checks).try_for_each(
+            |(column_idx, column_values)| -> Result<(), ZipError> {
                 Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
                     per_poly_alphas,
                     &coeffs,
                     &encoded_combined_row,
-                    &column_values,
+                    column_values,
                     column_idx,
                     vp.num_rows,
                     batch_size,
-                )?;
-
-                proof
-                    .verify(&comm.root, &column_values, column_idx)
-                    .map_err(|e| {
-                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
-                    })?;
-
-                Ok(())
+                )
             },
         )?;
+
+        // Check 4 (Merkle): one batched multiproof over all distinct columns.
+        multi_proof
+            .verify(&comm.root, &column_indices, &column_values)
+            .map_err(|e| {
+                ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
+            })?;
 
         Ok(())
     }

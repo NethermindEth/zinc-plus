@@ -1,4 +1,8 @@
-use crate::{ZipError, merkle::MerkleProof, pcs::structs::ZipPlusCommitment};
+use crate::{
+    ZipError,
+    merkle::{MerkleMultiProof, MerkleProof},
+    pcs::structs::ZipPlusCommitment,
+};
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -219,6 +223,18 @@ impl PcsProverTranscript {
         self.write_const_many(&proof.siblings)?;
         Ok(())
     }
+
+    /// Writes a batched Merkle multiproof: the leaf count, the sibling
+    /// count, then the sibling hashes.
+    pub fn write_merkle_multi_proof(
+        &mut self,
+        proof: &MerkleMultiProof,
+    ) -> Result<(), ZipError> {
+        self.write_usize(proof.leaf_count)?;
+        self.write_usize(proof.siblings.len())?;
+        self.write_const_many(&proof.siblings)?;
+        Ok(())
+    }
 }
 
 /// Version of [[PcsProverTranscript]] used for proof verification.
@@ -325,6 +341,18 @@ impl PcsVerifierTranscript {
         let merkle_path = self.read_const_many(path_length)?;
 
         Ok(MerkleProof::new(leaf_index, leaf_count, merkle_path))
+    }
+
+    /// Reads a batched Merkle multiproof written by
+    /// [`PcsProverTranscript::write_merkle_multi_proof`].
+    pub fn read_merkle_multi_proof(&mut self) -> Result<MerkleMultiProof, ZipError> {
+        let leaf_count = self.read_usize()?;
+        let num_siblings = self.read_usize()?;
+        let siblings = self.read_const_many(num_siblings)?;
+        Ok(MerkleMultiProof {
+            leaf_count,
+            siblings,
+        })
     }
 }
 

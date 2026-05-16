@@ -734,39 +734,17 @@ mod tests {
     #[test]
     fn proof_size_is_correct_for_parameters() {
         use std::mem::size_of;
-
-        fn calculate_expected_proof_size_bytes(
-            pp: &ZipPlusParams<Zt, C>,
-            batch_size: usize,
-        ) -> usize {
-            // size of a single entry of cw_matrix
-            let size_of_zt_k = K * size_of::<Word>();
-            // size of CombR in combine row
-            let size_of_zt_m = M * size_of::<Word>();
-            // size_f = field_value || field_modulus
-            let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
-            let size_of_usize_field = size_of::<u64>();
-            let size_of_path_elem = size_of::<MtHash>();
-
-            let codeword_len = pp.linear_code.codeword_len();
-            let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
-
-            // b vectors: per poly, 1-byte length prefix + num_rows field elements
-            let b_phase_size = batch_size * (1 + pp.num_rows * size_of_f);
-            let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
-
-            // Column openings: per opening, column values from all cw_matrices + one Merkle
-            // proof
-            let column_values_size = batch_size * pp.num_rows * size_of_zt_k;
-            let single_merkle_proof_size =
-                size_of_usize_field * 3 + merkle_depth * size_of_path_elem;
-            let column_opening_phase_size =
-                Zt::NUM_COLUMN_OPENINGS * (column_values_size + single_merkle_proof_size);
-
-            b_phase_size + combined_row_size + column_opening_phase_size
-        }
+        use zinc_transcript::traits::Transcript;
 
         type F = BoxedMontyField;
+        let batch_size = 1;
+
+        let size_of_zt_k = K * size_of::<Word>();
+        let size_of_zt_m = M * size_of::<Word>();
+        // size_f = 1-byte length prefix amortised below + value || modulus.
+        let size_of_f = 2 * U256::LIMBS * size_of::<Word>();
+        let size_of_usize_field = size_of::<u64>();
+        let size_of_path_elem = size_of::<MtHash>();
 
         let mut rng = rng();
         let num_vars = 10;
@@ -795,7 +773,54 @@ mod tests {
         )
         .unwrap();
         let actual_proof_size_bytes = transcript.stream.get_ref().len();
-        let expected_proof_size_bytes = calculate_expected_proof_size_bytes(&param, 1);
+
+        // Re-derive the queried column indices by replaying the verifier's
+        // Fiat-Shamir steps up to the column-opening phase. Only FS-absorbing
+        // operations matter; stream reads (e.g. `combined_row`) are inert and
+        // are skipped here.
+        let mut vt = transcript.clone().into_verification_transcript();
+        vt.fs_transcript.absorb_slice(&comm.root);
+        let _cfg = get_field_cfg::<Zt, F>(&mut vt.fs_transcript);
+        let _alphas = TestZip::sample_alphas(&mut vt.fs_transcript, comm.batch_size);
+        let _b: Vec<F> = vt.read_field_elements(param.num_rows).unwrap();
+        if param.num_rows != 1 {
+            let _coeffs: Vec<<Zt as ZipTypes>::Chal> =
+                vt.fs_transcript.get_challenges(param.num_rows);
+        }
+        let codeword_len = param.linear_code.codeword_len();
+        let mut column_indices: Vec<usize> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| vt.squeeze_challenge_idx(codeword_len))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
+
+        let multi_proof = hint.merkle_tree.prove_many(&column_indices).unwrap();
+
+        // New proof layout: [b] [combined_row] [distinct-column values]
+        // [one batched Merkle multiproof].
+        let b_phase_size = batch_size * (1 + param.num_rows * size_of_f);
+        let combined_row_size = param.linear_code.row_len() * size_of_zt_m;
+        let column_values_size =
+            column_indices.len() * batch_size * param.num_rows * size_of_zt_k;
+        let multi_proof_size =
+            2 * size_of_usize_field + multi_proof.siblings.len() * size_of_path_elem;
+        let expected_proof_size_bytes =
+            b_phase_size + combined_row_size + column_values_size + multi_proof_size;
         assert_eq!(actual_proof_size_bytes, expected_proof_size_bytes);
+
+        // The batched multiproof must beat the old per-opening layout, in
+        // which every one of NUM_COLUMN_OPENINGS queries carried its own
+        // column values and a full root-length authentication path.
+        let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
+        let old_per_opening = batch_size * param.num_rows * size_of_zt_k
+            + size_of_usize_field * 3
+            + merkle_depth * size_of_path_elem;
+        let old_proof_size_bytes =
+            b_phase_size + combined_row_size + Zt::NUM_COLUMN_OPENINGS * old_per_opening;
+        assert!(
+            actual_proof_size_bytes < old_proof_size_bytes,
+            "batched multiproof ({actual_proof_size_bytes} B) did not shrink the proof \
+             vs the per-opening layout ({old_proof_size_bytes} B)"
+        );
     }
 }

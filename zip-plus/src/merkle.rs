@@ -157,6 +157,69 @@ impl MerkleTree {
             siblings,
         })
     }
+
+    /// Generates a single batched proof (an "octopus" multiproof) for an
+    /// arbitrary set of leaves.
+    ///
+    /// The leaves' authentication paths overlap heavily near the root; a
+    /// batched proof emits each internal sibling node at most once
+    /// instead of re-sending shared nodes once per leaf. `leaf_indices`
+    /// may be unsorted and may contain duplicates — both are normalised
+    /// internally (and the verifier must apply the identical
+    /// sort+dedup).
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_many(&self, leaf_indices: &[usize]) -> Result<MerkleMultiProof, MerkleError> {
+        let leaf_count = self.layers[0].len();
+        if leaf_indices.is_empty() {
+            return Err(MerkleError::InvalidMerkleProof(
+                "multiproof requires at least one leaf".to_owned(),
+            ));
+        }
+
+        let mut current: Vec<usize> = leaf_indices.to_vec();
+        current.sort_unstable();
+        current.dedup();
+
+        if current[current.len() - 1] >= leaf_count {
+            return Err(MerkleError::InvalidLeafIndex(current[current.len() - 1]));
+        }
+
+        // Single-leaf tree: the root is the (only) leaf, no siblings.
+        if leaf_count == 1 {
+            return Ok(MerkleMultiProof {
+                leaf_count,
+                siblings: Vec::new(),
+            });
+        }
+
+        let root_layer_idx = leaf_count.trailing_zeros() as usize;
+        let mut siblings = Vec::new();
+
+        for layer in &self.layers[..root_layer_idx] {
+            let mut next = Vec::with_capacity(current.len());
+            let mut i = 0;
+            while i < current.len() {
+                let idx = current[i];
+                let sib = idx ^ 1;
+                // `current` is sorted+unique, so a sibling pair is always
+                // two adjacent entries (even index followed by odd).
+                if i + 1 < current.len() && current[i + 1] == sib {
+                    // Both children are known to the verifier — emit nothing.
+                    i += 2;
+                } else {
+                    siblings.push(layer[sib].clone());
+                    i += 1;
+                }
+                next.push(idx >> 1);
+            }
+            current = next;
+        }
+
+        Ok(MerkleMultiProof {
+            leaf_count,
+            siblings,
+        })
+    }
 }
 
 /// Serialize all elements of `values` into a single contiguous byte buffer
@@ -164,7 +227,7 @@ impl MerkleTree {
 /// full 1 KiB chunks with SIMD, which is significantly faster than the
 /// per-element `update` approach.
 #[allow(clippy::arithmetic_side_effects)]
-fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
+pub(crate) fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
     let elem_bytes = S::NUM_BYTES;
     let mut buf = vec![0_u8; values.len() * elem_bytes];
     for (i, v) in values.iter().enumerate() {
@@ -259,7 +322,7 @@ where
 /// `hash_combined_leaves_3`). Layout must match: bytes from group 0, then 1,
 /// then 2.
 #[allow(clippy::arithmetic_side_effects)]
-fn hash_combined_column_3<S0, S1, S2>(col0: &[S0], col1: &[S1], col2: &[S2]) -> MtHash
+pub(crate) fn hash_combined_column_3<S0, S1, S2>(col0: &[S0], col1: &[S1], col2: &[S2]) -> MtHash
 where
     S0: ConstTranscribable,
     S1: ConstTranscribable,
@@ -522,6 +585,179 @@ impl Display for MerkleProof {
     }
 }
 
+/// A single batched authentication proof covering many leaves of one
+/// Merkle tree. Compared to one [`MerkleProof`] per leaf, internal
+/// sibling nodes shared by several leaves' paths are stored only once.
+///
+/// The proven leaf indices are *not* carried in the proof: the verifier
+/// derives them independently (e.g. from Fiat-Shamir challenges) and
+/// passes them to [`Self::verify_with_leaf_hashes`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MerkleMultiProof {
+    /// Total number of leaves in the tree.
+    pub leaf_count: usize,
+    /// Sibling chaining values, in the deterministic bottom-up,
+    /// left-to-right traversal order produced by [`MerkleTree::prove_many`].
+    pub siblings: Vec<MtHash>,
+}
+
+impl MerkleMultiProof {
+    /// Verifies the batched proof against a known `root`.
+    ///
+    /// `leaf_indices` must be sorted, duplicate-free, and in range — the
+    /// exact normalisation [`MerkleTree::prove_many`] applies. `leaf_hashes`
+    /// holds the leaf hashes for those indices, in the same order.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn verify_with_leaf_hashes(
+        &self,
+        root: &MtHash,
+        leaf_indices: &[usize],
+        leaf_hashes: &[MtHash],
+    ) -> Result<(), MerkleError> {
+        if leaf_indices.is_empty() {
+            return Err(MerkleError::InvalidMerkleProof(
+                "multiproof requires at least one leaf".to_owned(),
+            ));
+        }
+        if leaf_indices.len() != leaf_hashes.len() {
+            return Err(MerkleError::InvalidMerkleProof(
+                "multiproof leaf index/hash count mismatch".to_owned(),
+            ));
+        }
+        for w in leaf_indices.windows(2) {
+            if w[0] >= w[1] {
+                return Err(MerkleError::InvalidMerkleProof(
+                    "multiproof leaf indices must be sorted and unique".to_owned(),
+                ));
+            }
+        }
+        if leaf_indices[leaf_indices.len() - 1] >= self.leaf_count {
+            return Err(MerkleError::InvalidLeafIndex(
+                leaf_indices[leaf_indices.len() - 1],
+            ));
+        }
+
+        if self.leaf_count == 1 {
+            return if leaf_indices == [0] && self.siblings.is_empty() {
+                if &leaf_hashes[0] == root {
+                    Ok(())
+                } else {
+                    Err(MerkleError::InvalidRootHash)
+                }
+            } else {
+                Err(MerkleError::InvalidMerkleProof(
+                    "single-leaf multiproof is invalid".to_owned(),
+                ))
+            };
+        }
+
+        let root_layer_idx = self.leaf_count.trailing_zeros() as usize;
+        let mut current: Vec<(usize, MtHash)> = leaf_indices
+            .iter()
+            .copied()
+            .zip(leaf_hashes.iter().cloned())
+            .collect();
+        let mut sib_iter = self.siblings.iter();
+
+        for layer_idx in 0..root_layer_idx {
+            let is_root = layer_idx + 1 == root_layer_idx;
+            let mut next: Vec<(usize, MtHash)> = Vec::with_capacity(current.len());
+            let mut i = 0;
+            while i < current.len() {
+                let idx = current[i].0;
+                let has_pair = i + 1 < current.len() && current[i + 1].0 == (idx ^ 1);
+                // Inside a pair the lower (left) index is always even.
+                let (left, right): (MtHash, MtHash) = if has_pair {
+                    (current[i].1.clone(), current[i + 1].1.clone())
+                } else {
+                    let sib = sib_iter
+                        .next()
+                        .ok_or_else(|| {
+                            MerkleError::InvalidMerkleProof("multiproof: too few siblings".to_owned())
+                        })?
+                        .clone();
+                    if idx.is_multiple_of(2) {
+                        (current[i].1.clone(), sib)
+                    } else {
+                        (sib, current[i].1.clone())
+                    }
+                };
+                let parent: MtHash = if is_root {
+                    hazmat::merge_subtrees_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                } else {
+                    hazmat::merge_subtrees_non_root(&left.0, &right.0, hazmat::Mode::Hash).into()
+                };
+                next.push((idx >> 1, parent));
+                i += if has_pair { 2 } else { 1 };
+            }
+            current = next;
+        }
+
+        if sib_iter.next().is_some() {
+            return Err(MerkleError::InvalidMerkleProof(
+                "multiproof: unused siblings".to_owned(),
+            ));
+        }
+        debug_assert_eq!(current.len(), 1);
+        if &current[0].1 == root {
+            Ok(())
+        } else {
+            Err(MerkleError::InvalidRootHash)
+        }
+    }
+
+    /// [`Self::verify_with_leaf_hashes`] for leaves built by hashing a
+    /// single homogeneous column slice (matches [`MerkleTree::new`]).
+    pub fn verify<S: ConstTranscribable>(
+        &self,
+        root: &MtHash,
+        leaf_indices: &[usize],
+        column_values: &[Vec<S>],
+    ) -> Result<(), MerkleError> {
+        let leaf_hashes: Vec<MtHash> = column_values.iter().map(|c| hash_column(c)).collect();
+        self.verify_with_leaf_hashes(root, leaf_indices, &leaf_hashes)
+    }
+
+    /// [`Self::verify_with_leaf_hashes`] for leaves built by hashing three
+    /// heterogeneous column slices (matches [`MerkleTree::new_combined_3`]).
+    ///
+    /// `cols0`, `cols1`, `cols2` all hold one column slice per entry of
+    /// `leaf_indices`, in the same order.
+    pub fn verify_combined_3<S0, S1, S2>(
+        &self,
+        root: &MtHash,
+        leaf_indices: &[usize],
+        cols0: &[Vec<S0>],
+        cols1: &[Vec<S1>],
+        cols2: &[Vec<S2>],
+    ) -> Result<(), MerkleError>
+    where
+        S0: ConstTranscribable,
+        S1: ConstTranscribable,
+        S2: ConstTranscribable,
+    {
+        if cols0.len() != leaf_indices.len()
+            || cols1.len() != leaf_indices.len()
+            || cols2.len() != leaf_indices.len()
+        {
+            return Err(MerkleError::InvalidMerkleProof(
+                "multiproof combined-3 column count mismatch".to_owned(),
+            ));
+        }
+        let leaf_hashes: Vec<MtHash> = (0..leaf_indices.len())
+            .map(|k| hash_combined_column_3(&cols0[k], &cols1[k], &cols2[k]))
+            .collect();
+        self.verify_with_leaf_hashes(root, leaf_indices, &leaf_hashes)
+    }
+
+    /// Estimate the byte size this proof occupies in the PCS transcript:
+    /// `leaf_count` and the sibling count as `u64`s, then the siblings.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn estimate_transcribed_size(num_siblings: usize) -> usize {
+        2 * u64::NUM_BYTES + num_siblings * MtHash::NUM_BYTES
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathDirection {
     Left,
@@ -612,6 +848,87 @@ mod tests {
                 "Merkle proof verification failed for leaf index {i}: {}",
                 result.err().unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn test_merkle_multiproof() {
+        const N: usize = 3;
+        let leaves_len = 1024;
+        let mut rng = rng();
+        let leaves_data = (0..leaves_len)
+            .map(|_| Int::random(&mut rng))
+            .collect::<Vec<Int<N>>>();
+        let tree = MerkleTree::new(&[leaves_data.as_slice()]);
+        let root = tree.root();
+
+        // A spread of query-set shapes: singletons, sibling pairs,
+        // contiguous runs, scattered indices, the full set, and a set
+        // with duplicates / out-of-order entries.
+        let query_sets: Vec<Vec<usize>> = vec![
+            vec![0],
+            vec![1023],
+            vec![0, 1],
+            vec![2, 3, 7, 8, 9, 500, 501, 1022, 1023],
+            vec![17, 942, 942, 17, 3, 3],
+            (0..leaves_len).step_by(7).collect(),
+            (0..leaves_len).collect(),
+        ];
+
+        for queries in query_sets {
+            let proof = tree.prove_many(&queries).expect("prove_many failed");
+
+            let mut uniq: Vec<usize> = queries.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            let column_values: Vec<Vec<Int<N>>> =
+                uniq.iter().map(|&i| vec![leaves_data[i]]).collect();
+
+            proof
+                .verify(&root, &uniq, &column_values)
+                .unwrap_or_else(|e| panic!("multiproof verify failed for {uniq:?}: {e}"));
+
+            // A batched proof never costs more than independent paths.
+            let single_total: usize = uniq
+                .iter()
+                .map(|&i| tree.prove(i).unwrap().siblings.len())
+                .sum();
+            assert!(
+                proof.siblings.len() <= single_total,
+                "batched proof ({}) larger than {single_total} independent siblings",
+                proof.siblings.len()
+            );
+
+            // Wrong root must be rejected.
+            let bad_root = MtHash::default();
+            assert!(proof.verify(&bad_root, &uniq, &column_values).is_err());
+
+            // A tampered leaf value must be rejected.
+            if !uniq.is_empty() {
+                let mut bad_values = column_values.clone();
+                bad_values[0] = vec![Int::random(&mut rng)];
+                assert!(proof.verify(&root, &uniq, &bad_values).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_multiproof_matches_single() {
+        const N: usize = 3;
+        let leaves_len = 256;
+        let mut rng = rng();
+        let leaves_data = (0..leaves_len)
+            .map(|_| Int::random(&mut rng))
+            .collect::<Vec<Int<N>>>();
+        let tree = MerkleTree::new(&[leaves_data.as_slice()]);
+        let root = tree.root();
+
+        // Multiproof over every singleton must agree with the per-leaf proof.
+        for i in 0..leaves_len {
+            let proof = tree.prove_many(&[i]).unwrap();
+            proof
+                .verify(&root, &[i], &[vec![leaves_data[i]]])
+                .unwrap_or_else(|e| panic!("singleton multiproof failed at {i}: {e}"));
         }
     }
 }

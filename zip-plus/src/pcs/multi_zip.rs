@@ -28,7 +28,6 @@ use crate::{
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
 };
 use crypto_primitives::{DenseRowMatrix, FromPrimitiveWithConfig, FromWithConfig, PrimeField};
-use itertools::Itertools;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::marker::PhantomData;
@@ -258,9 +257,16 @@ where
             )?)
         };
 
-        for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+        // Squeeze every column index, then emit the batched opening:
+        // per-distinct-column values for all three domains followed by a
+        // single shared Merkle multiproof.
+        let mut column_indices: Vec<usize> = (0..Zt0::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(codeword_len))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
 
+        for &column_idx in &column_indices {
             for cw_matrix in &hint.cw_matrices_0 {
                 let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
                 transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
@@ -273,15 +279,15 @@ where
                 let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
                 transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
             }
-
-            let merkle_proof = hint
-                .merkle_tree
-                .prove(column_idx)
-                .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
-            transcript.write_merkle_proof(&merkle_proof).map_err(|_| {
-                ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into())
-            })?;
         }
+
+        let merkle_proof = hint
+            .merkle_tree
+            .prove_many(&column_indices)
+            .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
+        transcript.write_merkle_multi_proof(&merkle_proof).map_err(|_| {
+            ZipError::InvalidPcsOpen("Failed to write a merkle multiproof".into())
+        })?;
 
         Ok((eval0, eval1, eval2))
     }
@@ -389,9 +395,13 @@ where
             2
         };
 
-        for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(codeword_len);
+        let mut column_indices: Vec<usize> = (0..Zt0::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(codeword_len))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
 
+        for &column_idx in &column_indices {
             let q0 = pos(transcript);
             for cw_matrix in &hint.cw_matrices_0 {
                 let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
@@ -413,22 +423,22 @@ where
             }
             let q3 = pos(transcript);
             bd2.column_values.extend(snapshot(transcript, q2, q3));
+        }
 
-            let merkle_proof = hint
-                .merkle_tree
-                .prove(column_idx)
-                .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
-            let m0 = pos(transcript);
-            transcript.write_merkle_proof(&merkle_proof).map_err(|_| {
-                ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into())
-            })?;
-            let m1 = pos(transcript);
-            let bytes = snapshot(transcript, m0, m1);
-            match shared_merkle_target {
-                0 => bd0.merkle_proofs.extend(bytes),
-                1 => bd1.merkle_proofs.extend(bytes),
-                _ => bd2.merkle_proofs.extend(bytes),
-            }
+        let merkle_proof = hint
+            .merkle_tree
+            .prove_many(&column_indices)
+            .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
+        let m0 = pos(transcript);
+        transcript.write_merkle_multi_proof(&merkle_proof).map_err(|_| {
+            ZipError::InvalidPcsOpen("Failed to write a merkle multiproof".into())
+        })?;
+        let m1 = pos(transcript);
+        let bytes = snapshot(transcript, m0, m1);
+        match shared_merkle_target {
+            0 => bd0.merkle_proofs.extend(bytes),
+            1 => bd1.merkle_proofs.extend(bytes),
+            _ => bd2.merkle_proofs.extend(bytes),
         }
 
         Ok((eval0, eval1, eval2))
@@ -519,27 +529,42 @@ where
         assert_eq!(pre1.is_some(), bs1 > 0);
         assert_eq!(pre2.is_some(), bs2 > 0);
 
-        let openings: Vec<_> = (0..Zt0::NUM_COLUMN_OPENINGS)
-            .map(|_| -> Result<_, ZipError> {
-                let column_idx = transcript.squeeze_challenge_idx(codeword_len);
-                let cv0: Vec<Zt0::Cw> = transcript.read_const_many(bs0 * n0)?;
-                let cv1: Vec<Zt1::Cw> = transcript.read_const_many(bs1 * n1)?;
-                let cv2: Vec<Zt2::Cw> = transcript.read_const_many(bs2 * n2)?;
-                let proof = transcript.read_merkle_proof().map_err(|e| {
-                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
-                })?;
-                Ok((column_idx, cv0, cv1, cv2, proof))
-            })
-            .try_collect()?;
+        // Squeeze every column index, then read the batched opening:
+        // per-distinct-column values for all three domains followed by one
+        // shared Merkle multiproof.
+        let mut column_indices: Vec<usize> = (0..Zt0::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(codeword_len))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
+
+        let mut cols0: Vec<Vec<Zt0::Cw>> = Vec::with_capacity(column_indices.len());
+        let mut cols1: Vec<Vec<Zt1::Cw>> = Vec::with_capacity(column_indices.len());
+        let mut cols2: Vec<Vec<Zt2::Cw>> = Vec::with_capacity(column_indices.len());
+        for _ in &column_indices {
+            cols0.push(transcript.read_const_many(bs0 * n0)?);
+            cols1.push(transcript.read_const_many(bs1 * n1)?);
+            cols2.push(transcript.read_const_many(bs2 * n2)?);
+        }
+        let multi_proof = transcript.read_merkle_multi_proof().map_err(|e| {
+            ZipError::InvalidPcsOpen(format!("Failed to read Merkle multiproof: {e}"))
+        })?;
+
+        let openings: Vec<_> = column_indices
+            .iter()
+            .copied()
+            .zip(cols0.iter().zip(cols1.iter()).zip(cols2.iter()))
+            .map(|(column_idx, ((cv0, cv1), cv2))| (column_idx, cv0, cv1, cv2))
+            .collect();
 
         cfg_into_iter!(openings).try_for_each(
-            |(column_idx, cv0, cv1, cv2, proof)| -> Result<(), ZipError> {
+            |(column_idx, cv0, cv1, cv2)| -> Result<(), ZipError> {
                 if let Some(pre) = pre0 {
                     ZipPlus::<Zt0, Lc0>::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
                         per_poly_alphas_0,
                         &pre.coeffs,
                         &pre.encoded_combined_row,
-                        &cv0,
+                        cv0,
                         column_idx,
                         n0,
                         bs0,
@@ -550,7 +575,7 @@ where
                         per_poly_alphas_1,
                         &pre.coeffs,
                         &pre.encoded_combined_row,
-                        &cv1,
+                        cv1,
                         column_idx,
                         n1,
                         bs1,
@@ -561,22 +586,22 @@ where
                         per_poly_alphas_2,
                         &pre.coeffs,
                         &pre.encoded_combined_row,
-                        &cv2,
+                        cv2,
                         column_idx,
                         n2,
                         bs2,
                     )?;
                 }
-
-                proof
-                    .verify_combined_3(&comm0.root, &cv0, &cv1, &cv2, column_idx)
-                    .map_err(|e| {
-                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
-                    })?;
-
                 Ok(())
             },
         )?;
+
+        // One batched Merkle check over all distinct columns.
+        multi_proof
+            .verify_combined_3(&comm0.root, &column_indices, &cols0, &cols1, &cols2)
+            .map_err(|e| {
+                ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
+            })?;
 
         Ok(())
     }

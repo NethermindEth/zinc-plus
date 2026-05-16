@@ -21,10 +21,10 @@ pub struct ZipPlusProveByteBreakdown {
     /// Bytes written for the combined row (`Zt::CombR` entries).
     pub combined_row: Vec<u8>,
     /// Bytes written for the opened column values across all
-    /// `cw_matrices`, concatenated across `NUM_COLUMN_OPENINGS` queries.
+    /// `cw_matrices`, concatenated across every distinct queried column.
     pub column_values: Vec<u8>,
-    /// Bytes written for the Merkle authentication paths, concatenated
-    /// across `NUM_COLUMN_OPENINGS` queries.
+    /// Bytes written for the single batched Merkle multiproof covering
+    /// every distinct queried column.
     pub merkle_proofs: Vec<u8>,
 }
 
@@ -376,15 +376,17 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             bd.combined_row
                 .extend_from_slice(&transcript.stream.get_ref()[pos_cr_start..pos_cr_end]);
         }
-        for _ in 0..Zt::NUM_COLUMN_OPENINGS {
-            let column_idx = transcript.squeeze_challenge_idx(pp.linear_code.codeword_len());
-            Self::open_merkle_trees_for_column_inner(
-                transcript,
-                commit_hint,
-                column_idx,
-                breakdown.as_deref_mut(),
-            )?;
-        }
+        // Squeeze every column index up front. Column values and the
+        // Merkle proof are written to the proof stream only (they do not
+        // feed Fiat-Shamir), so the squeezed indices are unaffected by
+        // batching the subsequent writes.
+        let mut column_indices: Vec<usize> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| transcript.squeeze_challenge_idx(pp.linear_code.codeword_len()))
+            .collect();
+        column_indices.sort_unstable();
+        column_indices.dedup();
+
+        Self::open_merkle_trees_batched(transcript, commit_hint, &column_indices, breakdown)?;
 
         Ok(eval)
     }
@@ -541,27 +543,23 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(eval)
     }
 
-    /// Public counterpart of `open_merkle_trees_for_column_inner`. Used
-    /// by [`crate::pcs::multi_zip::MultiZip3`].
-    pub fn open_merkle_trees_for_column(
-        transcript: &mut PcsProverTranscript,
-        commit_hint: &ZipPlusHint<Zt::Cw>,
-        column_idx: usize,
-    ) -> Result<(), ZipError> {
-        Self::open_merkle_trees_for_column_inner(transcript, commit_hint, column_idx, None)
-    }
-
+    /// Opens the committed columns at `column_indices` (which must be
+    /// sorted and duplicate-free): writes the per-column matrix entries
+    /// for every distinct column, then a single batched Merkle
+    /// multiproof covering them all.
     #[allow(clippy::arithmetic_side_effects)]
-    fn open_merkle_trees_for_column_inner(
+    fn open_merkle_trees_batched(
         transcript: &mut PcsProverTranscript,
         commit_hint: &ZipPlusHint<Zt::Cw>,
-        column_idx: usize,
+        column_indices: &[usize],
         mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
     ) -> Result<(), ZipError> {
         let pos_v_start = stream_pos(transcript);
-        for cw_matrix in &commit_hint.cw_matrices {
-            let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
-            transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+        for &column_idx in column_indices {
+            for cw_matrix in &commit_hint.cw_matrices {
+                let column_values = cw_matrix.as_rows().map(|row| &row[column_idx]);
+                transcript.write_const_many_iter(column_values, cw_matrix.num_rows)?;
+            }
         }
         let pos_v_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
@@ -572,11 +570,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let pos_m_start = stream_pos(transcript);
         let merkle_proof = commit_hint
             .merkle_tree
-            .prove(column_idx)
+            .prove_many(column_indices)
             .map_err(|_| ZipError::InvalidPcsOpen("Failed to open merkle tree".into()))?;
         transcript
-            .write_merkle_proof(&merkle_proof)
-            .map_err(|_| ZipError::InvalidPcsOpen("Failed to write a merkle tree proof".into()))?;
+            .write_merkle_multi_proof(&merkle_proof)
+            .map_err(|_| ZipError::InvalidPcsOpen("Failed to write a merkle multiproof".into()))?;
         let pos_m_end = stream_pos(transcript);
         if let Some(bd) = breakdown.as_deref_mut() {
             bd.merkle_proofs
