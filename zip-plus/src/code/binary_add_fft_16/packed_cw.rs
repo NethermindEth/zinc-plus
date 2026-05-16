@@ -21,7 +21,7 @@ use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named};
 
 use super::basis::Gf2_16;
 use super::ext_field::{Bit4Poly16, Gf2_16Ext};
-use super::ring_ops::FftRingElement16;
+use super::ring_ops::{FftRingElement16, I32FftConvert};
 
 /// Bit-packed wrapper around `DensePolynomial<i64, 16>`. The
 /// Transcribable encoding writes each coefficient in `BITS_PER_COEF`
@@ -34,6 +34,19 @@ pub struct PackedI64Poly16<const BITS_PER_COEF: u32>(pub DensePolynomial<i64, 16
 impl<const B: u32> PackedI64Poly16<B> {
     pub const fn from_inner(inner: DensePolynomial<i64, 16>) -> Self {
         Self(inner)
+    }
+}
+
+/// Delegates to the `i64` inner poly: the narrow-`i32` encode fast path
+/// produces a codeword bit-identical to the `i64` path.
+impl<const B: u32> I32FftConvert for PackedI64Poly16<B> {
+    #[inline]
+    fn narrow_to_i32_fft(&self) -> DensePolynomial<i32, 16> {
+        self.0.narrow_to_i32_fft()
+    }
+    #[inline]
+    fn widen_from_i32_fft(p: &DensePolynomial<i32, 16>) -> Self {
+        Self(<DensePolynomial<i64, 16> as I32FftConvert>::widen_from_i32_fft(p))
     }
 }
 

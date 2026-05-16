@@ -6,10 +6,12 @@
 //! (since `deg(a) + deg(b) ≤ 30`) and then fold the high monomials
 //! back down using `X^16 ≡ X^5 + X^3 + X^2 + 1 (mod f̃)`.
 //!
-//! Mirrors `binary_add_fft_8/ring_ops.rs` but for D = 16. We omit the
-//! `i32` impl (D=8's i32 path was found to overflow at codeword_len ≥
-//! 256, and D=16 amplifies further); `i64`, `i128`, and `Int<N>` are
-//! provided.
+//! Mirrors `binary_add_fft_8/ring_ops.rs` but for D = 16. `i64`,
+//! `i128`, and `Int<N>` are provided, plus a narrow `i32` variant.
+//! The `i32` element is *not* generally safe — for large codewords the
+//! lifted coefficients exceed 32 bits — so it is used only on the
+//! encode fast path, gated by a sound per-instance bound computed in
+//! `BinaryAddFft16Code::new` (see [`I32FftConvert`]).
 
 use crypto_primitives::crypto_bigint_int::Int;
 use num_traits::ConstZero;
@@ -328,6 +330,91 @@ impl FftRingElement16 for DensePolynomial<i64, REDUCED_LEN_16> {
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
         let coeffs = reduce_mod_ftilde_16(&acc);
         Self { coeffs }
+    }
+}
+
+/// Narrow native-`i32` variant. Only sound when the whole transform
+/// provably stays within 32 bits; selected on the encode fast path via
+/// [`I32FftConvert`] after `BinaryAddFft16Code::new` proves the bound.
+impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
+    #[inline]
+    fn fft_zero() -> Self {
+        Self {
+            coeffs: [0i32; REDUCED_LEN_16],
+        }
+    }
+
+    #[inline]
+    fn fft_add(&self, other: &Self) -> Self {
+        let mut coeffs = [0i32; REDUCED_LEN_16];
+        for i in 0..REDUCED_LEN_16 {
+            coeffs[i] = self.coeffs[i] + other.coeffs[i];
+        }
+        Self { coeffs }
+    }
+
+    #[inline]
+    fn fft_mul_lifted_gf16(&self, twiddle: Gf2_16) -> Self {
+        let coeffs = mul_by_lifted_gf16(&self.coeffs, twiddle);
+        Self { coeffs }
+    }
+
+    type UnreducedAcc = [i32; PRODUCT_LEN_16];
+    #[inline]
+    fn fft_unreduced_zero() -> Self::UnreducedAcc {
+        [0i32; PRODUCT_LEN_16]
+    }
+    #[inline]
+    fn fft_acc_mul_lifted_gf16(input: &Self, twiddle: Gf2_16, acc: &mut Self::UnreducedAcc) {
+        let x = &input.coeffs;
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                *d = d.wrapping_add(xj);
+            }
+        }
+    }
+    #[inline]
+    fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
+        let coeffs = reduce_mod_ftilde_16(&acc);
+        Self { coeffs }
+    }
+}
+
+/// Conversion between a codeword element type (`Zt::Cw`) and the
+/// `i32`-backed FFT working buffer used by the narrow-integer encode
+/// fast path.
+///
+/// `BinaryAddFft16Code::new` runs a sound worst-case probe; when it
+/// proves the whole transform stays within `i32`, `encode` lifts inputs
+/// via `narrow_to_i32_fft`, runs the FFT on 64-byte `i32` elements
+/// instead of 128-byte `i64` ones (halving encode memory traffic), and
+/// widens the result with `widen_from_i32_fft`. The produced codeword
+/// is bit-identical to the `i64` path, so the proof and verifier are
+/// unaffected.
+pub trait I32FftConvert {
+    /// Narrow a freshly-lifted codeword element to the `i32` FFT buffer.
+    /// Lossless whenever the fast path is selected.
+    fn narrow_to_i32_fft(&self) -> DensePolynomial<i32, REDUCED_LEN_16>;
+    /// Widen a finished `i32` FFT element back to the codeword type.
+    fn widen_from_i32_fft(p: &DensePolynomial<i32, REDUCED_LEN_16>) -> Self;
+}
+
+impl I32FftConvert for DensePolynomial<i64, REDUCED_LEN_16> {
+    #[inline]
+    fn narrow_to_i32_fft(&self) -> DensePolynomial<i32, REDUCED_LEN_16> {
+        DensePolynomial {
+            coeffs: self.coeffs.map(|c| c as i32),
+        }
+    }
+    #[inline]
+    fn widen_from_i32_fft(p: &DensePolynomial<i32, REDUCED_LEN_16>) -> Self {
+        DensePolynomial {
+            coeffs: p.coeffs.map(i64::from),
+        }
     }
 }
 

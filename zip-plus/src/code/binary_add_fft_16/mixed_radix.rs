@@ -254,15 +254,33 @@ fn precompute_stage_vandermondes<C: Config16>(
     out
 }
 
-/// Apply the mixed-radix additive FFT in place.
-///
-/// Stages run from top (highest `bit_offset`) down to the base, matching
-/// the radix-2 stage ordering. For each stage, every outer block is an
-/// independent `2^radix_log × 2^radix_log` matvec carried out in
-/// `Z[X]/f̃`.
+/// Apply the mixed-radix additive FFT in place over a fully-dense
+/// input. Thin wrapper over [`additive_fft_mixed_radix_16_padded`].
 pub fn additive_fft_mixed_radix_16<C: Config16, T: FftRingElement16>(
     data: &mut [T],
     params: &MixedRadixFftParams16<C>,
+) {
+    let len = data.len();
+    additive_fft_mixed_radix_16_padded(data, params, len);
+}
+
+/// Apply the mixed-radix additive FFT in place, exploiting zero
+/// padding. `num_nonzero` is the count of nonzero leading cells of
+/// `data`; the rest are zero — the Reed-Solomon rate-`1/REP` padding
+/// added by `encode` / `encode_wide`.
+///
+/// Stages run from top (highest `bit_offset`) down to the base. The
+/// top stage runs first and is the only one that sees the zero
+/// padding: it spans the whole array as a single outer block, and its
+/// later sub-blocks lie entirely in `[num_nonzero, len)`. So its
+/// `radix × radix` matvec sums only the `⌈num_nonzero / stride⌉`
+/// non-zero input sub-blocks instead of all `radix` — a `1 − 1/REP`
+/// saving on that stage. Every later stage operates on already-dense
+/// data and processes all `radix` inputs.
+pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
+    data: &mut [T],
+    params: &MixedRadixFftParams16<C>,
+    num_nonzero: usize,
 ) {
     assert_eq!(
         data.len(),
@@ -272,36 +290,64 @@ pub fn additive_fft_mixed_radix_16<C: Config16, T: FftRingElement16>(
         params.base.codeword_len
     );
 
+    let mut is_first_stage = true;
     for stage in params.stages.iter().rev() {
         let radix = 1usize << stage.radix_log;
         let outer_block_size = 1usize << (stage.bit_offset + stage.radix_log);
         let stride = 1usize << stage.bit_offset;
         let matrices = &stage.vandermondes;
 
+        // The first stage processed is the top stage — a single outer
+        // block spanning all of `data`. Sub-blocks lying entirely in
+        // the zero-padding region `[num_nonzero, len)` contribute
+        // nothing to the matvec and are skipped. Skipping a zero input
+        // is exact: `twiddle · 0 = 0`. Later stages see dense data.
+        let nonzero_inputs = if is_first_stage {
+            debug_assert_eq!(outer_block_size, data.len());
+            num_nonzero.div_ceil(stride).min(radix)
+        } else {
+            radix
+        };
+        is_first_stage = false;
+
         cfg_chunks_mut!(data, outer_block_size)
             .enumerate()
             .for_each(|(block_idx, block_data)| {
-                mixed_radix_stage_block::<T>(block_data, stride, radix, &matrices[block_idx]);
+                mixed_radix_stage_block::<T>(
+                    block_data,
+                    stride,
+                    radix,
+                    &matrices[block_idx],
+                    nonzero_inputs,
+                );
             });
     }
 }
 
 /// Apply one stage's `radix × radix` matvec to a single outer block.
+///
+/// Only the first `nonzero_inputs` (`≤ radix`) input sub-blocks are
+/// read and fed into the matvec; the rest are known-zero (the FFT's
+/// zero-padding, on the top stage) and contribute nothing. All `radix`
+/// outputs are still produced. For a dense stage `nonzero_inputs ==
+/// radix`.
 #[inline]
 fn mixed_radix_stage_block<T: FftRingElement16>(
     block_data: &mut [T],
     stride: usize,
     radix: usize,
     matrix: &[Gf2_16],
+    nonzero_inputs: usize,
 ) {
     debug_assert!(radix <= 8, "mixed-radix kernel supports radix ≤ 8");
-    // Stack-allocated snapshot of the `radix` inputs at offset `t` —
+    debug_assert!(nonzero_inputs <= radix);
+    // Stack-allocated snapshot of the input sub-blocks at offset `t` —
     // radix is at most 8 (radix-8 is the largest shipped stage), so
     // this avoids a per-block heap allocation.
     let mut inputs: [T; 8] = std::array::from_fn(|_| T::fft_zero());
 
     for t in 0..stride {
-        for i in 0..radix {
+        for i in 0..nonzero_inputs {
             inputs[i] = block_data[i * stride + t].clone();
         }
 
@@ -312,7 +358,7 @@ fn mixed_radix_stage_block<T: FftRingElement16>(
         // resident while it is scattered into all `radix` accumulators.
         let mut accs: [T::UnreducedAcc; 8] =
             std::array::from_fn(|_| T::fft_unreduced_zero());
-        for i in 0..radix {
+        for i in 0..nonzero_inputs {
             let input_i = &inputs[i];
             for j in 0..radix {
                 let tw = matrix[j * radix + i];

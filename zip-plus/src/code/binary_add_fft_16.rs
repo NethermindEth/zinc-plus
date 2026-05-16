@@ -21,12 +21,13 @@ pub mod ring_ops;
 use std::{fmt::Debug, marker::PhantomData};
 
 use crypto_primitives::FromPrimitiveWithConfig;
+use zinc_poly::{ConstCoeffBitWidth, univariate::dense::DensePolynomial};
 use zinc_utils::from_ref::FromRef;
 
 use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
 pub use mixed_radix::MixedRadixFftParams16;
 pub use params::{AddFftConfigGF2_16, Config16};
-use ring_ops::FftRingElement16;
+use ring_ops::{FftRingElement16, I32FftConvert};
 
 
 /// Reed-Solomon linear code whose encoder is a **mixed-radix** additive
@@ -45,6 +46,10 @@ pub struct BinaryAddFft16Code<
     const CHECK: bool,
 > {
     params: MixedRadixFftParams16<C>,
+    /// Whether the narrow-`i32` encode fast path is provably safe for
+    /// these parameters — decided once in [`Self::new`] by a sound
+    /// worst-case probe (see [`Self::probe_i32_safe`]).
+    i32_safe: bool,
     _phantom: PhantomData<Zt>,
 }
 
@@ -62,8 +67,10 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
             ZipError::InvalidPcsParam(format!("row_len ({row_len}) * REP ({REP}) overflows usize"))
         })?;
         let params = MixedRadixFftParams16::new(row_len, codeword_len)?;
+        let i32_safe = Self::probe_i32_safe(&params);
         Ok(Self {
             params,
+            i32_safe,
             _phantom: PhantomData,
         })
     }
@@ -75,6 +82,42 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
     pub fn params(&self) -> &MixedRadixFftParams16<C> {
         &self.params
     }
+
+    /// Whether `encode` runs on the narrow-`i32` fast path for these
+    /// parameters.
+    pub fn uses_i32_fast_path(&self) -> bool {
+        self.i32_safe
+    }
+
+    /// Sound worst-case check of whether the whole transform stays
+    /// within `i32` for these parameters.
+    ///
+    /// The lifted additive FFT is a *non-negative* integer-linear map:
+    /// every codeword coefficient is a sum (twiddles are 0/1-coef, the
+    /// mod-`f̃` reduction only adds) of input coefficients. So running
+    /// the real FFT with every input coefficient pinned to a sound
+    /// upper bound `b_in` yields, per output position, exactly the
+    /// largest magnitude any codeword coefficient can reach. `i128`
+    /// arithmetic carries the probe without itself overflowing
+    /// (`codeword_len ≤ 2^16`, so the bound stays well under `2^64`).
+    ///
+    /// `b_in = 2^(Eval::COEFF_BIT_WIDTH)` is a sound upper bound on a
+    /// lifted input coefficient (the lift never widens a coefficient
+    /// beyond the evaluation ring's magnitude range).
+    fn probe_i32_safe(params: &MixedRadixFftParams16<C>) -> bool {
+        let b_in: i128 = 1i128 << Zt::Eval::COEFF_BIT_WIDTH;
+        let input = DensePolynomial::<i128, 16> { coeffs: [b_in; 16] };
+        let zero = <DensePolynomial<i128, 16> as FftRingElement16>::fft_zero();
+
+        let mut probe = vec![input; params.row_len()];
+        probe.resize(params.codeword_len(), zero);
+        mixed_radix::additive_fft_mixed_radix_16_padded(&mut probe, params, params.row_len());
+
+        probe
+            .iter()
+            .flat_map(|p| p.coeffs.iter())
+            .all(|&c| c <= i128::from(i32::MAX) && c >= i128::from(i32::MIN))
+    }
 }
 
 impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool> Clone
@@ -83,6 +126,7 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool> Clone
     fn clone(&self) -> Self {
         Self {
             params: self.params.clone(),
+            i32_safe: self.i32_safe,
             _phantom: PhantomData,
         }
     }
@@ -116,7 +160,7 @@ impl<Zt, C, const REP: usize, const CHECK: bool> LinearCode<Zt>
 where
     Zt: ZipTypes,
     C: Config16,
-    Zt::Cw: FftRingElement16 + FromRef<Zt::Eval>,
+    Zt::Cw: FftRingElement16 + FromRef<Zt::Eval> + I32FftConvert,
     Zt::CombR: FftRingElement16,
 {
     const REPETITION_FACTOR: usize = REP;
@@ -147,9 +191,26 @@ where
             row.len(),
             self.params.row_len()
         );
+        if self.i32_safe {
+            // Fast path: run the FFT on 64-byte `i32` elements instead
+            // of 128-byte `i64` ones. `probe_i32_safe` proved the whole
+            // transform stays within `i32`, so the narrowed buffer
+            // yields a codeword bit-identical to the `i64` path.
+            let mut data: Vec<DensePolynomial<i32, 16>> = row
+                .iter()
+                .map(|e| Zt::Cw::from_ref(e).narrow_to_i32_fft())
+                .collect();
+            data.resize_with(
+                self.params.codeword_len(),
+                <DensePolynomial<i32, 16> as FftRingElement16>::fft_zero,
+            );
+            mixed_radix::additive_fft_mixed_radix_16_padded(&mut data, &self.params, row.len());
+            return data.iter().map(Zt::Cw::widen_from_i32_fft).collect();
+        }
+
         let mut data: Vec<Zt::Cw> = row.iter().map(Zt::Cw::from_ref).collect();
         data.resize_with(self.params.codeword_len(), Zt::Cw::fft_zero);
-        mixed_radix::additive_fft_mixed_radix_16(&mut data, &self.params);
+        mixed_radix::additive_fft_mixed_radix_16_padded(&mut data, &self.params, row.len());
         data
     }
 
@@ -163,7 +224,7 @@ where
         );
         let mut data: Vec<Zt::CombR> = row.to_vec();
         data.resize_with(self.params.codeword_len(), Zt::CombR::fft_zero);
-        mixed_radix::additive_fft_mixed_radix_16(&mut data, &self.params);
+        mixed_radix::additive_fft_mixed_radix_16_padded(&mut data, &self.params, row.len());
         data
     }
 
@@ -288,6 +349,193 @@ mod linear_code_tests {
             &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
         );
         assert!(result.is_ok(), "radix-8 polychal batch verify failed: {result:?}");
+    }
+
+    /// The narrow-`i32` encode fast path must produce a codeword
+    /// bit-identical to the reference `i64` FFT, and the soundness
+    /// probe must only accept it when every coefficient fits `i32`.
+    #[test]
+    fn i32_fast_path_matches_i64() {
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+
+        let row_len = 1024usize; // m = 12
+        let code = Code::new(row_len).expect("valid radix-8 params");
+        assert!(
+            code.uses_i32_fast_path(),
+            "m=12 (peak ~2^26) should select the i32 fast path"
+        );
+
+        let mut rng = StdRng::seed_from_u64(0x1234_5678);
+        let row: Vec<BinaryPoly<16>> = (0..row_len)
+            .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+            .collect();
+
+        // Fast path, via the public encoder.
+        let cw_fast = LinearCode::<Zt>::encode(&code, &row);
+
+        // Reference: the i64 FFT run directly.
+        let mut reference: Vec<DensePolynomial<i64, 16>> =
+            row.iter().map(<DensePolynomial<i64, 16>>::from_ref).collect();
+        reference.resize_with(
+            row_len * REP,
+            <DensePolynomial<i64, 16> as FftRingElement16>::fft_zero,
+        );
+        mixed_radix::additive_fft_mixed_radix_16(&mut reference, code.params());
+
+        assert_eq!(
+            cw_fast, reference,
+            "i32 fast-path codeword differs from the i64 reference"
+        );
+        for cell in &cw_fast {
+            for &c in &cell.coeffs {
+                assert!(
+                    i32::try_from(c).is_ok(),
+                    "coefficient {c} exceeds i32 but the probe accepted the fast path"
+                );
+            }
+        }
+    }
+
+    /// The soundness probe must reject the `i32` path when the codeword
+    /// is large enough to overflow it (m=16 peaks at ~2^39).
+    #[test]
+    fn probe_discriminates_by_codeword_size() {
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+
+        // m = 12, codeword 4096: peak ~2^26 → i32-safe.
+        assert!(Code::new(1024).unwrap().uses_i32_fast_path());
+        // m = 16, codeword 65536: peak ~2^39 → must fall back to i64.
+        assert!(!Code::new(16384).unwrap().uses_i32_fast_path());
+    }
+
+    /// Controlled A/B of the encode FFT: `i32` vs `i64` working buffer,
+    /// interleaved in one process so machine noise cancels. Ignored by
+    /// default; run with `cargo test -p zip-plus --release --features
+    /// parallel encode_i32_vs_i64_ab -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing measurement"]
+    fn encode_i32_vs_i64_ab() {
+        use std::time::{Duration, Instant};
+
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+
+        for &log_row in &[10usize, 11] {
+            let row_len = 1usize << log_row;
+            let code = Code::new(row_len).expect("valid radix-8 params");
+            let cw_len = row_len * REP;
+            let mut rng = StdRng::seed_from_u64(0xa11ce);
+            let row: Vec<BinaryPoly<16>> = (0..row_len)
+                .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                .collect();
+
+            let build_i64 = || {
+                let mut d: Vec<DensePolynomial<i64, 16>> =
+                    row.iter().map(<DensePolynomial<i64, 16>>::from_ref).collect();
+                d.resize_with(cw_len, <DensePolynomial<i64, 16> as FftRingElement16>::fft_zero);
+                d
+            };
+            let build_i32 = || {
+                let mut d: Vec<DensePolynomial<i32, 16>> = row
+                    .iter()
+                    .map(|e| <DensePolynomial<i64, 16>>::from_ref(e).narrow_to_i32_fft())
+                    .collect();
+                d.resize_with(cw_len, <DensePolynomial<i32, 16> as FftRingElement16>::fft_zero);
+                d
+            };
+
+            let iters = 400;
+            let (mut t64, mut t32) = (Duration::MAX, Duration::MAX);
+            for _ in 0..iters {
+                let mut d64 = build_i64();
+                let s = Instant::now();
+                mixed_radix::additive_fft_mixed_radix_16(&mut d64, code.params());
+                t64 = t64.min(s.elapsed());
+                std::hint::black_box(&d64);
+
+                let mut d32 = build_i32();
+                let s = Instant::now();
+                mixed_radix::additive_fft_mixed_radix_16(&mut d32, code.params());
+                t32 = t32.min(s.elapsed());
+                std::hint::black_box(&d32);
+            }
+            println!(
+                "single-row FFT m={} (codeword {cw_len}) : i64={t64:?}  i32={t32:?}  \
+                 speedup={:.2}x",
+                log_row + 2,
+                t64.as_secs_f64() / t32.as_secs_f64(),
+            );
+        }
+    }
+
+    /// Commit-time breakdown: how much of `commit` is RS-FFT encoding
+    /// vs Merkle-tree construction. Ignored by default; run with
+    /// `cargo test -p zip-plus --release --features parallel \
+    ///   commit_time_breakdown -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing measurement"]
+    fn commit_time_breakdown() {
+        use crate::merkle::MerkleTree;
+        use std::time::{Duration, Instant};
+        use zinc_utils::cfg_iter;
+        #[cfg(feature = "parallel")]
+        use rayon::prelude::*;
+
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+
+        // (num_vars, batch); num_rows = 1 so row_len = poly_size.
+        for &(num_vars, batch) in &[(10usize, 11usize), (13usize, 11usize)] {
+            let row_len = 1usize << num_vars;
+            let poly_size = row_len;
+            let code = Code::new(row_len).expect("valid radix-8 params");
+            let pp = ZipPlus::<Zt, Code>::setup(poly_size, code);
+
+            let mut rng = StdRng::seed_from_u64(0xdead_b00f);
+            let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+                .map(|_| {
+                    let evaluations: Vec<BinaryPoly<16>> = (0..poly_size)
+                        .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                        .collect();
+                    DenseMultilinearExtension::<BinaryPoly<16>> { num_vars, evaluations }
+                })
+                .collect();
+
+            let iters = 5;
+            let (mut enc_min, mut mt_min) = (Duration::MAX, Duration::MAX);
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                let cw_matrices: Vec<_> = cfg_iter!(polys)
+                    .map(|p| ZipPlus::<Zt, Code>::encode_rows(&pp, p))
+                    .collect();
+                let enc = t0.elapsed();
+
+                let t1 = Instant::now();
+                let all_rows: Vec<&[<Zt as ZipTypes>::Cw]> =
+                    cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
+                let mt = MerkleTree::new(&all_rows);
+                let mt_elapsed = t1.elapsed();
+                std::hint::black_box(mt.root());
+
+                enc_min = enc_min.min(enc);
+                mt_min = mt_min.min(mt_elapsed);
+            }
+            let total = enc_min + mt_min;
+            let pct = |d: Duration| 100.0 * d.as_secs_f64() / total.as_secs_f64();
+            println!(
+                "num_vars={num_vars} batch={batch} codeword_len={} : \
+                 encode={enc_min:?} ({:.1}%)  merkle={mt_min:?} ({:.1}%)  total={total:?}",
+                poly_size * REP,
+                pct(enc_min),
+                pct(mt_min),
+            );
+        }
     }
 
     /// Measure the empirical max |coefficient| of the radix-8 codeword
