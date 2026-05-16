@@ -291,6 +291,9 @@ impl<const B: u32> FftRingElement16 for PackedI64Poly16<B> {
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
         Self(<DensePolynomial<i64, 16> as FftRingElement16>::fft_finalize_acc(acc))
     }
+    fn fft_neg(&self) -> Self {
+        Self(self.0.fft_neg())
+    }
 }
 
 // --- Packed Transcribable encoding ---
@@ -307,6 +310,10 @@ fn write_packed<const B: u32>(coeffs: &[i64; 16], out: &mut [u8]) {
     let mask: u64 = if B >= 64 { u64::MAX } else { (1u64 << B) - 1 };
     let mut bit_pos: usize = 0;
     for &c in coeffs {
+        debug_assert!(
+            B >= 64 || (-(1i64 << (B - 1))..(1i64 << (B - 1))).contains(&c),
+            "codeword coefficient {c} does not fit a signed {B}-bit pack"
+        );
         let v: u64 = (c as u64) & mask;
         let lo_byte = bit_pos / 8;
         let lo_off = bit_pos % 8;

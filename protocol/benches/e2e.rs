@@ -2078,8 +2078,12 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedRealE
 //
 
 /// Polychal binary-lane `ZipTypes`: `Eval = BinaryPoly<16>`,
-/// `Cw = PackedI64Poly16<32>`, `CombR = Comb = PackedI64Poly16<32>`,
+/// `Cw = PackedI64Poly16<24>`, `CombR = Comb = PackedI64Poly16<32>`,
 /// `Chal = Pt = i128`.
+///
+/// `Cw` uses a 24-bit pack: the binary lane is encoded with the signed
+/// `{-1,0,1}` twiddle lift (`BinaryAddFft16Code::new_signed`), whose
+/// certified worst-case codeword coefficient is < 2^23.
 ///
 /// Defined as a fresh `ZipTypes` struct (not `GenericBenchZipTypes`)
 /// because that helper's `CombR` bound is `ConstIntRing + Neg`, which a
@@ -2105,7 +2109,7 @@ struct PolyChalBinaryZt;
 impl ZipTypes for PolyChalBinaryZt {
     const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
     type Eval = BinaryPoly<HALF_DEGREE_PLUS_ONE>;
-    type Cw = PackedI64Poly16<32>;
+    type Cw = PackedI64Poly16<24>;
     type Fmod = Uint<FIELD_LIMBS>;
     type PrimeTest = MillerRabin;
     type Chal = i128;
@@ -2139,11 +2143,12 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedPolyC
 }
 
 /// Polychal counterpart of `setup_folded_pp_real_ecdsa`. The binary
-/// lane uses `BinaryAddFft16Code::new(split_size)` (mixed-radix
-/// additive FFT); arbitrary / int lanes are unchanged (IPRS).
+/// lane uses `BinaryAddFft16Code::new_signed(split_size)` (mixed-radix
+/// additive FFT, signed twiddle lift); arbitrary / int lanes are
+/// unchanged (IPRS).
 ///
 /// `split_size = 1 << (num_vars + 1)`; for `num_vars = 9` that is
-/// `1024`, and `BinaryAddFft16Code::new(1024)` yields
+/// `1024`, and `BinaryAddFft16Code::new_signed(1024)` yields
 /// `codeword_len = 1024 * REP`. At the default rate 1/4 that is
 /// `2^12` (pure radix-8); under `iprs-rate-1-8` it is `2^13`, which
 /// the mixed-radix encoder handles with one radix-16 base stage plus
@@ -2154,7 +2159,7 @@ fn setup_folded_pp_polychal(num_vars: usize) -> FoldedPp1x<BenchFoldedPolyChalZi
     (
         ZipPlus::setup(
             split_size,
-            BinaryAddFft16Code::new(split_size).unwrap(),
+            BinaryAddFft16Code::new_signed(split_size).unwrap(),
         ),
         ZipPlus::setup(
             normal_size,

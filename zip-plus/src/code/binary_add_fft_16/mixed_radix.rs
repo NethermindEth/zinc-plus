@@ -57,6 +57,12 @@ pub struct RadixStage {
     /// outer block, row-major (`matrix[j * radix + i]`). Entries are
     /// `Gf2_16` to be lifted at FFT time.
     pub vandermondes: Vec<Vec<Gf2_16>>,
+
+    /// Optional per-twiddle sign masks for the signed `{-1, 0, 1}` lift
+    /// (Approach 1, prototype). Same shape as `vandermondes`: bit `b` of
+    /// `signs[block][j * radix + i]` flips the sign of coefficient `b`
+    /// of that twiddle's lift. Empty ⇒ the plain `{0, 1}` lift.
+    pub signs: Vec<Vec<u16>>,
 }
 
 /// Precomputed parameters for the mixed-radix additive FFT.
@@ -144,6 +150,7 @@ impl<C: Config16> MixedRadixFftParams16<C> {
                 radix_log,
                 bit_offset,
                 vandermondes,
+                signs: Vec::new(),
             });
             bit_offset += radix_log;
         }
@@ -178,6 +185,37 @@ impl<C: Config16> MixedRadixFftParams16<C> {
         let r8 = self.stages.iter().filter(|s| s.radix_log == 3).count();
         (r4, r8)
     }
+
+    /// Replace the plain `{0, 1}` twiddle lift with a randomized
+    /// `{-1, 0, 1}` signed lift (Approach 1, prototype): each twiddle
+    /// coefficient that is `1` is lifted to `+1` or `-1` per a
+    /// deterministic stream seeded by `seed`.
+    ///
+    /// Any sign assignment is a valid lift (`±1 ≡ 1 mod 2`), so the FFT
+    /// reduced mod 2 is unchanged; the goal is cancellation that slows
+    /// integer coefficient growth. The signs become part of the (fixed,
+    /// public) FFT parameters.
+    pub fn randomize_signs(&mut self, seed: u64) {
+        let mut state = seed;
+        for stage in &mut self.stages {
+            stage.signs = stage
+                .vandermondes
+                .iter()
+                .map(|matrix| matrix.iter().map(|_| splitmix64(&mut state) as u16).collect())
+                .collect();
+        }
+    }
+}
+
+/// splitmix64: a tiny deterministic PRNG, used to derive twiddle signs
+/// without pulling `rand` into non-test code.
+#[inline]
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// Precompute the per-block Vandermonde matrices for one stage.
@@ -254,6 +292,73 @@ fn precompute_stage_vandermondes<C: Config16>(
     out
 }
 
+/// Exact worst-case bound on `|codeword coefficient|` for an `encode`
+/// whose `row_len` input cells each carry 16 independent binary
+/// coefficients — the polychal binary lane (`Eval = BinaryPoly<16>`).
+///
+/// The lifted FFT is `Z`-linear, so every codeword coefficient is a
+/// *fixed* integer combination of the `16 · row_len` input bits. Over
+/// inputs in `{0,1}` the largest reachable magnitude of output
+/// coefficient `(k, p)` is the sum of its positive contributions (or,
+/// in absolute value, of its negative ones). Summing positive and
+/// negative parts separately is what makes this bound *sign-aware* —
+/// the cheap submultiplicative / L1 bound is sign-blind and so cannot
+/// see the cancellation a signed `{-1,0,1}` twiddle lift produces.
+///
+/// Cost: `row_len` FFTs. Exploiting `Z[X]/f̃`-linearity
+/// (`FFT(X^q · e_j) = X^q · FFT(e_j)`) only the unit *ring element* at
+/// each input cell is transformed; the 16 bit-coordinates are then
+/// recovered by the `X^q` shift-expansion. Intended as a one-time
+/// setup probe.
+pub fn worst_case_binary_coeff_bound<C: Config16>(
+    params: &MixedRadixFftParams16<C>,
+    row_len: usize,
+) -> u128 {
+    use super::ring_ops::{REDUCED_LEN_16, mul_by_lifted_gf16};
+    use zinc_poly::univariate::dense::DensePolynomial;
+
+    let n = params.codeword_len();
+    // pos / neg [k * 16 + p]: running Σ of the positive (resp. |negative|)
+    // contributions to codeword coefficient (k, p).
+    let mut pos = vec![0i128; n * REDUCED_LEN_16];
+    let mut neg = vec![0i128; n * REDUCED_LEN_16];
+
+    for j in 0..row_len {
+        // Transform the unit ring element `1` at input cell j → the
+        // j-th transform column M_{·,j}.
+        let mut data: Vec<DensePolynomial<i64, REDUCED_LEN_16>> = vec![
+            DensePolynomial {
+                coeffs: [0i64; REDUCED_LEN_16]
+            };
+            n
+        ];
+        data[j].coeffs[0] = 1;
+        additive_fft_mixed_radix_16(&mut data, params);
+
+        for (k, m_kj) in data.iter().enumerate() {
+            // Bit q of input cell j contributes X^q · M_{k,j} to
+            // codeword_k; accumulate each coefficient's signed parts.
+            for q in 0..REDUCED_LEN_16 {
+                let shifted = mul_by_lifted_gf16(&m_kj.coeffs, Gf2_16(1u16 << q));
+                for (p, &c) in shifted.iter().enumerate() {
+                    let c = i128::from(c);
+                    if c > 0 {
+                        pos[k * REDUCED_LEN_16 + p] += c;
+                    } else {
+                        neg[k * REDUCED_LEN_16 + p] -= c;
+                    }
+                }
+            }
+        }
+    }
+
+    pos.iter()
+        .zip(&neg)
+        .map(|(&p, &q)| p.max(q) as u128)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Apply the mixed-radix additive FFT in place over a fully-dense
 /// input. Thin wrapper over [`additive_fft_mixed_radix_16_padded`].
 pub fn additive_fft_mixed_radix_16<C: Config16, T: FftRingElement16>(
@@ -310,6 +415,11 @@ pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
         };
         is_first_stage = false;
 
+        // Empty `stage.signs` ⇒ the plain `{0,1}` lift; otherwise the
+        // randomized signed lift (Approach 1).
+        let stage_signs: Option<&[Vec<u16>]> =
+            (!stage.signs.is_empty()).then_some(stage.signs.as_slice());
+
         cfg_chunks_mut!(data, outer_block_size)
             .enumerate()
             .for_each(|(block_idx, block_data)| {
@@ -318,6 +428,7 @@ pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
                     stride,
                     radix,
                     &matrices[block_idx],
+                    stage_signs.map(|s| s[block_idx].as_slice()),
                     nonzero_inputs,
                 );
             });
@@ -337,6 +448,7 @@ fn mixed_radix_stage_block<T: FftRingElement16>(
     stride: usize,
     radix: usize,
     matrix: &[Gf2_16],
+    signs: Option<&[u16]>,
     nonzero_inputs: usize,
 ) {
     debug_assert!(radix <= 8, "mixed-radix kernel supports radix ≤ 8");
@@ -361,11 +473,17 @@ fn mixed_radix_stage_block<T: FftRingElement16>(
         for i in 0..nonzero_inputs {
             let input_i = &inputs[i];
             for j in 0..radix {
-                let tw = matrix[j * radix + i];
+                let slot = j * radix + i;
+                let tw = matrix[slot];
                 if tw == Gf2_16::ZERO {
                     continue;
                 }
-                T::fft_acc_mul_lifted_gf16(input_i, tw, &mut accs[j]);
+                match signs {
+                    None => T::fft_acc_mul_lifted_gf16(input_i, tw, &mut accs[j]),
+                    Some(s) => {
+                        T::fft_acc_mul_signed_lifted_gf16(input_i, tw, s[slot], &mut accs[j])
+                    }
+                }
             }
         }
         for j in 0..radix {
@@ -524,6 +642,194 @@ mod tests {
                     "lifted FFT mod 2 mismatch at m={m}, k={k}"
                 );
             }
+        }
+    }
+
+    /// The signed `{-1,0,1}` lift must still satisfy the structural-lift
+    /// invariant: reduced mod 2, the signed lifted FFT equals the
+    /// `GF(2^16)` FFT (signs vanish mod 2).
+    #[test]
+    fn signed_lifted_fft_reduces_to_gf16_fft() {
+        use super::super::ring_ops::REDUCED_LEN_16;
+        use zinc_poly::univariate::dense::DensePolynomial;
+
+        for &m in &[4usize, 7, 8, 12] {
+            let codeword_len = 1usize << m;
+            let mut params = P::new(codeword_len, codeword_len).expect("valid params");
+            params.randomize_signs(0xC0FF_EE00 ^ m as u64);
+
+            let input: Vec<Gf2_16> = (0..codeword_len)
+                .map(|i| Gf2_16(((i as u64).wrapping_mul(0xC2B2_AE35) ^ 0x1357) as u16))
+                .collect();
+
+            // GF(2^16) reference FFT (signs are irrelevant mod 2).
+            let mut gf_data = input.clone();
+            additive_fft_mixed_radix_16(&mut gf_data, &params);
+
+            // Signed lifted i64 FFT from the {0,1}-lift of the input.
+            let mut lifted: Vec<DensePolynomial<i64, REDUCED_LEN_16>> = input
+                .iter()
+                .map(|&g| {
+                    let mut coeffs = [0i64; REDUCED_LEN_16];
+                    for (j, c) in coeffs.iter_mut().enumerate() {
+                        *c = i64::from(g.coeff(j));
+                    }
+                    DensePolynomial { coeffs }
+                })
+                .collect();
+            additive_fft_mixed_radix_16(&mut lifted, &params);
+
+            for k in 0..codeword_len {
+                let mut bits = 0u16;
+                for j in 0..REDUCED_LEN_16 {
+                    // Two's complement LSB is the value mod 2, valid for
+                    // negative coefficients too.
+                    if lifted[k].coeffs[j] & 1 != 0 {
+                        bits |= 1u16 << j;
+                    }
+                }
+                assert_eq!(
+                    Gf2_16(bits),
+                    gf_data[k],
+                    "signed lifted FFT mod 2 mismatch at m={m}, k={k}"
+                );
+            }
+        }
+    }
+
+    /// Approach 1 prototype measurement: empirical max |codeword
+    /// coefficient| of the lifted `i64` FFT, plain `{0,1}` lift vs the
+    /// randomized `{-1,0,1}` signed lift (a few seeds). Ignored by
+    /// default; run with `cargo test -p zip-plus --release
+    /// signed_lift_coef_bits -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "coefficient-growth measurement"]
+    fn signed_lift_coef_bits() {
+        use super::super::ring_ops::REDUCED_LEN_16;
+        use zinc_poly::univariate::dense::DensePolynomial;
+
+        // (label, row_len, codeword_len, radix_logs).
+        let configs: [(&str, usize, usize, Vec<usize>); 3] = [
+            ("m=12 radix-8 (shipped 1/4)", 1024, 4096, vec![3, 3, 3, 3]),
+            ("m=13 radix-4+8 (shipped 1/8)", 1024, 8192, vec![2, 2, 3, 3, 3]),
+            ("m=16 radix-4+8 (nvars=13 1/4)", 16384, 65536, vec![2, 2, 3, 3, 3, 3]),
+        ];
+
+        let build_input = |row_len: usize, codeword_len: usize| -> Vec<DensePolynomial<i64, 16>> {
+            (0..codeword_len)
+                .map(|i| {
+                    let mut coeffs = [0i64; REDUCED_LEN_16];
+                    if i < row_len {
+                        let g = (i as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add(0xABCD) as u16;
+                        for (j, c) in coeffs.iter_mut().enumerate() {
+                            *c = ((g >> j) & 1) as i64;
+                        }
+                    }
+                    DensePolynomial { coeffs }
+                })
+                .collect()
+        };
+        let peak = |params: &MixedRadixFftParams16<AddFftConfigGF2_16>,
+                    row_len: usize,
+                    codeword_len: usize|
+         -> i64 {
+            let mut data = build_input(row_len, codeword_len);
+            additive_fft_mixed_radix_16(&mut data, params);
+            data.iter()
+                .flat_map(|c| c.coeffs)
+                .map(|c| c.unsigned_abs() as i64)
+                .max()
+                .unwrap_or(0)
+        };
+        let log2 = |x: i64| if x == 0 { 0.0 } else { (x as f64).log2() };
+
+        for (label, row_len, codeword_len, radix_logs) in configs {
+            let unsigned = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+                row_len,
+                codeword_len,
+                radix_logs.clone(),
+            )
+            .expect("valid radix decomposition");
+            let u = peak(&unsigned, row_len, codeword_len);
+            eprintln!("  {label}");
+            eprintln!("    unsigned {{0,1}} lift : max |coef| = {u} (~2^{:.1})", log2(u));
+            for seed in [1u64, 2, 3] {
+                let mut signed = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+                    row_len,
+                    codeword_len,
+                    radix_logs.clone(),
+                )
+                .expect("valid radix decomposition");
+                signed.randomize_signs(seed);
+                let s = peak(&signed, row_len, codeword_len);
+                eprintln!(
+                    "    signed(seed={seed})       : max |coef| = {s} (~2^{:.1}, {:.1}x smaller)",
+                    log2(s),
+                    u as f64 / s as f64,
+                );
+            }
+        }
+    }
+
+    /// Soundness certification for the 24-bit codeword pack: the exact,
+    /// sign-aware worst-case coefficient bound for the shipped
+    /// folded-lane sizes, under the signed lift with the production
+    /// [`SIGN_SEED`](crate::code::binary_add_fft_16::SIGN_SEED), must
+    /// stay below `2^23` (signed 24-bit range). Also reports the plain
+    /// `{0,1}` lift for comparison.
+    ///
+    /// Ignored by default (runs `row_len` FFTs, ~seconds); run with
+    /// `cargo test -p zip-plus --release certified_worst_case_bound
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "exact worst-case bound: row_len FFTs"]
+    fn certified_worst_case_bound() {
+        let sign_seed = crate::code::binary_add_fft_16::SIGN_SEED;
+        // Signed 24-bit pack holds magnitudes strictly below 2^23.
+        let pack_limit: u128 = 1 << 23;
+
+        // (label, row_len, codeword_len, radix_logs) — the shipped
+        // `decompose_radices` output for each m.
+        let configs: [(&str, usize, usize, Vec<usize>); 2] = [
+            ("m=12 radix-8 (folded lane, rate 1/4)", 1024, 4096, vec![3, 3, 3, 3]),
+            ("m=13 radix-4+8 (folded lane, rate 1/8)", 1024, 8192, vec![2, 2, 3, 3, 3]),
+        ];
+        let log2 = |x: u128| if x == 0 { 0.0 } else { (x as f64).log2() };
+
+        for (label, row_len, codeword_len, radix_logs) in configs {
+            let unsigned = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+                row_len,
+                codeword_len,
+                radix_logs.clone(),
+            )
+            .expect("valid radix decomposition");
+            let u = worst_case_binary_coeff_bound(&unsigned, row_len);
+
+            let mut signed = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+                row_len,
+                codeword_len,
+                radix_logs.clone(),
+            )
+            .expect("valid radix decomposition");
+            signed.randomize_signs(sign_seed);
+            let s = worst_case_binary_coeff_bound(&signed, row_len);
+
+            eprintln!("  {label}");
+            eprintln!("    unsigned {{0,1}}        : certified bound = {u} (~2^{:.1})", log2(u));
+            eprintln!(
+                "    signed(SIGN_SEED={sign_seed}) : certified bound = {s} (~2^{:.1}, {:.1}x smaller)",
+                log2(s),
+                u as f64 / s as f64,
+            );
+
+            assert!(
+                s < pack_limit,
+                "{label}: certified signed bound {s} (~2^{:.1}) does not fit a \
+                 signed 24-bit pack (limit 2^23 = {pack_limit})",
+                log2(s),
+            );
         }
     }
 

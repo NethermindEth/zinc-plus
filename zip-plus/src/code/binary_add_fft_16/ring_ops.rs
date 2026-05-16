@@ -180,6 +180,39 @@ pub trait FftRingElement16: Sized + Clone + Send + Sync {
     /// Reduce an unreduced accumulator mod `f̃` and produce a finished
     /// ring element.
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self;
+
+    /// Coefficient-wise additive inverse. Used only by the signed-lift
+    /// FFT path ([`Self::fft_acc_mul_signed_lifted_gf16`]).
+    fn fft_neg(&self) -> Self;
+
+    /// Accumulate `input × twiddle` where the twiddle is lifted to
+    /// `{-1, 0, 1}` coefficients: bit `b` of `signs` flips the sign of
+    /// twiddle coefficient `b` (`0` → `+1`, `1` → `-1`); `signs` is only
+    /// consulted at bits set in `twiddle`.
+    ///
+    /// Any sign choice is a valid lift — `±1 ≡ 1 (mod 2)` — so the
+    /// signed-lift FFT reduced mod 2 is still the `GF(2^16)` FFT. The
+    /// point of the signs is to introduce cancellation and so slow the
+    /// growth of the lifted integer coefficients (Approach 1).
+    ///
+    /// Provided in terms of [`Self::fft_acc_mul_lifted_gf16`] and
+    /// [`Self::fft_neg`]: the positive-signed twiddle bits are
+    /// accumulated directly, the negative-signed bits against `-input`.
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        let pos = Gf2_16(twiddle.0 & !signs);
+        if pos.0 != 0 {
+            Self::fft_acc_mul_lifted_gf16(input, pos, acc);
+        }
+        let neg = Gf2_16(twiddle.0 & signs);
+        if neg.0 != 0 {
+            Self::fft_acc_mul_lifted_gf16(&input.fft_neg(), neg, acc);
+        }
+    }
 }
 
 /// Lifted-`Z[X]/f̃` ring element backed by `Int<N>` coefficients.
@@ -232,6 +265,15 @@ impl<const N: usize> FftRingElement16 for DensePolynomial<Int<N>, REDUCED_LEN_16
         let coeffs = reduce_mod_ftilde_16(&acc);
         Self { coeffs }
     }
+
+    #[inline]
+    fn fft_neg(&self) -> Self {
+        let mut coeffs = [Int::<N>::ZERO; REDUCED_LEN_16];
+        for i in 0..REDUCED_LEN_16 {
+            coeffs[i] = -self.coeffs[i];
+        }
+        Self { coeffs }
+    }
 }
 
 /// Native-`i128`-coefficient variant.
@@ -279,6 +321,15 @@ impl FftRingElement16 for DensePolynomial<i128, REDUCED_LEN_16> {
     #[inline]
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
         let coeffs = reduce_mod_ftilde_16(&acc);
+        Self { coeffs }
+    }
+
+    #[inline]
+    fn fft_neg(&self) -> Self {
+        let mut coeffs = [0i128; REDUCED_LEN_16];
+        for i in 0..REDUCED_LEN_16 {
+            coeffs[i] = self.coeffs[i].wrapping_neg();
+        }
         Self { coeffs }
     }
 }
@@ -331,6 +382,15 @@ impl FftRingElement16 for DensePolynomial<i64, REDUCED_LEN_16> {
         let coeffs = reduce_mod_ftilde_16(&acc);
         Self { coeffs }
     }
+
+    #[inline]
+    fn fft_neg(&self) -> Self {
+        let mut coeffs = [0i64; REDUCED_LEN_16];
+        for i in 0..REDUCED_LEN_16 {
+            coeffs[i] = self.coeffs[i].wrapping_neg();
+        }
+        Self { coeffs }
+    }
 }
 
 /// Narrow native-`i32` variant. Only sound when the whole transform
@@ -380,6 +440,15 @@ impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
     #[inline]
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
         let coeffs = reduce_mod_ftilde_16(&acc);
+        Self { coeffs }
+    }
+
+    #[inline]
+    fn fft_neg(&self) -> Self {
+        let mut coeffs = [0i32; REDUCED_LEN_16];
+        for i in 0..REDUCED_LEN_16 {
+            coeffs[i] = self.coeffs[i].wrapping_neg();
+        }
         Self { coeffs }
     }
 }
@@ -448,6 +517,12 @@ impl FftRingElement16 for Gf2_16 {
     #[inline]
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
         acc
+    }
+
+    /// Negation is the identity in `GF(2)` — signs vanish mod 2.
+    #[inline]
+    fn fft_neg(&self) -> Self {
+        *self
     }
 }
 

@@ -183,14 +183,15 @@ fn zip_plus_benchmarks_sha_ecdsa_iprs(c: &mut Criterion) {
 // and the matvec is carried out in `Z[X]/f̃`. The verifier-side field is
 // `F = F_p[X]/f̃` with `P = P_16_DEFAULT`.
 //
-// Cw and CombR are bit-packed `PackedI64Poly16<BITS>`. At the bench dim
-// `codeword_len = 4096` the codeword coefs empirically max at ~2^26, so
-// BITS_CW=32 has ~6 bits of headroom. CombR coefs are bounded by
-// `batch × max_chal_coef` (≤ batch · 15 at num_rows=1) so BITS_CR=8 is
-// safe at batch=11.
+// Cw and CombR are bit-packed `PackedI64Poly16<BITS>`. The codeword is
+// encoded with the signed `{-1,0,1}` twiddle lift (`new_signed`); the
+// certified worst-case codeword coefficient for the folded-lane sizes
+// is < 2^23, so BITS_CW=24 is lossless (see `certified_worst_case_bound`).
+// CombR coefs are bounded by `batch × max_chal_coef` (≤ batch · 15 at
+// num_rows=1) so BITS_CR=8 is safe at batch=11.
 // ===========================================================================
 
-const BITS_CW: u32 = 32;
+const BITS_CW: u32 = 24;
 const BITS_CR: u32 = 8;
 
 #[derive(Debug, Clone)]
@@ -236,7 +237,7 @@ fn bench_polychal_16<const REP: usize, const NUM_OPENINGS: usize>(
         poly_size.checked_mul(REP).map(|c| c <= (1 << 16)).unwrap_or(false),
         "D=16 + num_rows=1 needs poly_size*REP <= 2^16; got poly_size={poly_size}, REP={REP}",
     );
-    let code = Code::<NUM_OPENINGS, REP>::new(row_len).expect("valid params");
+    let code = Code::<NUM_OPENINGS, REP>::new_signed(row_len).expect("valid params");
     let pp = ZipPlus::<Zt<NUM_OPENINGS>, Code<NUM_OPENINGS, REP>>::setup(poly_size, code);
 
     let mut rng = StdRng::seed_from_u64(0xcafe_f00d);

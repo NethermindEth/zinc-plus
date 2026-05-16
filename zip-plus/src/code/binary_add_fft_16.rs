@@ -29,6 +29,14 @@ pub use mixed_radix::MixedRadixFftParams16;
 pub use params::{AddFftConfigGF2_16, Config16};
 use ring_ops::{FftRingElement16, I32FftConvert};
 
+/// Fixed seed for the signed `{-1, 0, 1}` twiddle lift used by
+/// [`BinaryAddFft16Code::new_signed`]. The signs are public,
+/// deterministic FFT parameters; this value is chosen so the certified
+/// worst-case codeword bound for the shipped folded-lane sizes (m = 12,
+/// m = 13) stays below `2^23`, i.e. fits a signed 24-bit pack — see the
+/// `certified_worst_case_bound` test in `mixed_radix`.
+pub(crate) const SIGN_SEED: u64 = 3;
+
 
 /// Reed-Solomon linear code whose encoder is a **mixed-radix** additive
 /// FFT over `GF(2^16)` lifted structurally to `Z[X]/(f̃)`. Each stage
@@ -77,6 +85,26 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
 
     pub fn new_with_optimal_depth(row_len: usize) -> Result<Self, ZipError> {
         Self::new(row_len)
+    }
+
+    /// Like [`Self::new`], but lifts the Vandermonde twiddles with a
+    /// randomized `{-1, 0, 1}` signed lift
+    /// ([`MixedRadixFftParams16::randomize_signs`], seed [`SIGN_SEED`]).
+    ///
+    /// The signs introduce cancellation that cuts the lifted integer
+    /// coefficient growth by ~6 bits (certified worst case) — enough to
+    /// commit the codeword in a 24-bit pack instead of 32. Any sign
+    /// choice is a valid lift (`±1 ≡ 1 mod 2`), so the code reduced mod
+    /// 2 is unchanged.
+    ///
+    /// The signed encode runs on the `i64` element type: the `i32`
+    /// fast path's cheap uniform-input probe is not sound for signed
+    /// twiddles (it would see the cancelled, not the worst-case, sum).
+    pub fn new_signed(row_len: usize) -> Result<Self, ZipError> {
+        let mut code = Self::new(row_len)?;
+        code.params.randomize_signs(SIGN_SEED);
+        code.i32_safe = false;
+        Ok(code)
     }
 
     pub fn params(&self) -> &MixedRadixFftParams16<C> {
@@ -244,6 +272,7 @@ mod linear_code_tests {
     use super::*;
     use crate::code::LinearCode;
     use crate::code::binary_add_fft_16::ext_field::{Bit4Poly16, Gf2_16Ext, P_16_DEFAULT};
+    use crate::code::binary_add_fft_16::packed_cw::PackedI64Poly16;
     use crate::pcs::structs::{ZipPlus, ZipTypes};
     use crate::pcs_transcript::PcsProverTranscript;
     use crypto_primitives::crypto_bigint_uint::Uint;
@@ -278,6 +307,80 @@ mod linear_code_tests {
         type EvalDotChal = zinc_utils::inner_product::ScalarProduct;
         type CombDotChal = zinc_utils::inner_product::ScalarProduct;
         type ArrCombRDotChal = zinc_utils::inner_product::MBSInnerProduct;
+    }
+
+    /// Polychal `ZipTypes` with the production *packed* codeword:
+    /// `Cw = PackedI64Poly16<24>` (the 24-bit pack enabled by the
+    /// signed lift). `CombR` keeps an 8-bit pack (combined-row coefs
+    /// are tiny at `num_rows = 1`).
+    #[derive(Debug, Clone)]
+    struct PolyChalZt16Packed24;
+    impl ZipTypes for PolyChalZt16Packed24 {
+        const NUM_COLUMN_OPENINGS: usize = 147;
+        type Eval = BinaryPoly<16>;
+        type Cw = PackedI64Poly16<24>;
+        type Fmod = Uint<16>;
+        type PrimeTest = zinc_primality::MillerRabin;
+        type Chal = Bit4Poly16;
+        type Pt = Bit4Poly16;
+        type CombR = PackedI64Poly16<8>;
+        type Comb = Self::CombR;
+        type EvalDotChal = zinc_utils::inner_product::ScalarProduct;
+        type CombDotChal = zinc_utils::inner_product::ScalarProduct;
+        type ArrCombRDotChal = zinc_utils::inner_product::MBSInnerProduct;
+    }
+
+    /// End-to-end check of the *shipped* polychal configuration: signed
+    /// `{-1,0,1}` lift (`new_signed`) **and** the 24-bit codeword pack.
+    /// If any codeword coefficient exceeded the signed 24-bit range the
+    /// `write_packed` debug-assert would fire (or the proximity check
+    /// would fail) — so a passing roundtrip certifies the pack is
+    /// lossless for these dimensions.
+    #[test]
+    fn commit_prove_verify_polychal_signed_packed24() {
+        const REP: usize = 4;
+        type Zt = PolyChalZt16Packed24;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+        type F = Gf2_16Ext<P_16_DEFAULT>;
+
+        let num_vars = 10usize;
+        let row_len = 1024usize;
+        let batch = 11usize;
+        let code = Code::new_signed(row_len).expect("valid radix-8 params");
+        let poly_size = 1usize << num_vars;
+        let pp = ZipPlus::<Zt, Code>::setup(poly_size, code);
+
+        let mut rng = StdRng::seed_from_u64(0x7a4b_24cd);
+        let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+            .map(|_| {
+                let evaluations: Vec<BinaryPoly<16>> = (0..poly_size)
+                    .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                    .collect();
+                DenseMultilinearExtension::<BinaryPoly<16>> { num_vars, evaluations }
+            })
+            .collect();
+
+        let (hint, comm) = ZipPlus::<Zt, Code>::commit(&pp, &polys).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        let field_cfg = ();
+        let point: Vec<Bit4Poly16> = (0..num_vars).map(|i| Bit4Poly16(2 + i as i64)).collect();
+
+        let eval_f = ZipPlus::<Zt, Code>::prove::<F, CHECKED>(
+            &mut transcript, &pp, &polys, &point, &hint, &field_cfg,
+        )
+        .expect("prove succeeds");
+
+        let point_f: Vec<F> = point
+            .iter()
+            .map(|v| <F as crypto_primitives::FromWithConfig<&Bit4Poly16>>::from_with_cfg(v, &field_cfg))
+            .collect();
+        let mut transcript = transcript.into_verification_transcript();
+        transcript.fs_transcript.absorb_slice(&comm.root.0);
+
+        let result = ZipPlus::<Zt, Code>::verify::<F, CHECKED>(
+            &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
+        );
+        assert!(result.is_ok(), "signed+packed24 polychal verify failed: {result:?}");
     }
 
     /// Encode-only smoke test for the radix-8 variant at the bench dims:
@@ -349,6 +452,62 @@ mod linear_code_tests {
             &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
         );
         assert!(result.is_ok(), "radix-8 polychal batch verify failed: {result:?}");
+    }
+
+    /// Commit→prove→verify roundtrip with the **signed** `{-1,0,1}`
+    /// twiddle lift (`new_signed`): exercises the signed FFT end to end
+    /// through the PCS. The signed lift changes the integer codeword
+    /// but prover and verifier share the same signed parameters, so the
+    /// opening still verifies.
+    #[test]
+    fn commit_prove_verify_polychal_signed_16() {
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+        type F = Gf2_16Ext<P_16_DEFAULT>;
+
+        let num_vars = 10usize;
+        let row_len = 1024usize;
+        let batch = 11usize;
+        let code = Code::new_signed(row_len).expect("valid radix-8 params");
+        assert!(
+            !code.uses_i32_fast_path(),
+            "signed code must use the i64 encode path"
+        );
+        let poly_size = 1usize << num_vars;
+        let pp = ZipPlus::<Zt, Code>::setup(poly_size, code);
+
+        let mut rng = StdRng::seed_from_u64(0x5169_64ed);
+        let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+            .map(|_| {
+                let evaluations: Vec<BinaryPoly<16>> = (0..poly_size)
+                    .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                    .collect();
+                DenseMultilinearExtension::<BinaryPoly<16>> { num_vars, evaluations }
+            })
+            .collect();
+
+        let (hint, comm) = ZipPlus::<Zt, Code>::commit(&pp, &polys).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        let field_cfg = ();
+        let point: Vec<Bit4Poly16> = (0..num_vars).map(|i| Bit4Poly16(2 + i as i64)).collect();
+
+        let eval_f = ZipPlus::<Zt, Code>::prove::<F, CHECKED>(
+            &mut transcript, &pp, &polys, &point, &hint, &field_cfg,
+        )
+        .expect("prove succeeds");
+
+        let point_f: Vec<F> = point
+            .iter()
+            .map(|v| <F as crypto_primitives::FromWithConfig<&Bit4Poly16>>::from_with_cfg(v, &field_cfg))
+            .collect();
+        let mut transcript = transcript.into_verification_transcript();
+        transcript.fs_transcript.absorb_slice(&comm.root.0);
+
+        let result = ZipPlus::<Zt, Code>::verify::<F, CHECKED>(
+            &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
+        );
+        assert!(result.is_ok(), "signed polychal batch verify failed: {result:?}");
     }
 
     /// The narrow-`i32` encode fast path must produce a codeword
