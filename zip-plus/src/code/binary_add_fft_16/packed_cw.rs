@@ -294,6 +294,16 @@ impl<const B: u32> FftRingElement16 for PackedI64Poly16<B> {
     fn fft_neg(&self) -> Self {
         Self(self.0.fft_neg())
     }
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        <DensePolynomial<i64, 16> as FftRingElement16>::fft_acc_mul_signed_lifted_gf16(
+            &input.0, twiddle, signs, acc,
+        );
+    }
 }
 
 // --- Packed Transcribable encoding ---

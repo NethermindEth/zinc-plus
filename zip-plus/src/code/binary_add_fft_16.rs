@@ -587,6 +587,7 @@ mod linear_code_tests {
         for &log_row in &[10usize, 11] {
             let row_len = 1usize << log_row;
             let code = Code::new(row_len).expect("valid radix-8 params");
+            let code_signed = Code::new_signed(row_len).expect("valid radix-8 params");
             let cw_len = row_len * REP;
             let mut rng = StdRng::seed_from_u64(0xa11ce);
             let row: Vec<BinaryPoly<16>> = (0..row_len)
@@ -609,25 +610,36 @@ mod linear_code_tests {
             };
 
             let iters = 400;
-            let (mut t64, mut t32) = (Duration::MAX, Duration::MAX);
+            let (mut t32, mut t64, mut t64s) = (Duration::MAX, Duration::MAX, Duration::MAX);
             for _ in 0..iters {
+                // unsigned i32 fast path (the commit-2 baseline)
+                let mut d32 = build_i32();
+                let s = Instant::now();
+                mixed_radix::additive_fft_mixed_radix_16(&mut d32, code.params());
+                t32 = t32.min(s.elapsed());
+                std::hint::black_box(&d32);
+
+                // unsigned i64
                 let mut d64 = build_i64();
                 let s = Instant::now();
                 mixed_radix::additive_fft_mixed_radix_16(&mut d64, code.params());
                 t64 = t64.min(s.elapsed());
                 std::hint::black_box(&d64);
 
-                let mut d32 = build_i32();
+                // signed i64 (the shipped polychal encode path)
+                let mut d64s = build_i64();
                 let s = Instant::now();
-                mixed_radix::additive_fft_mixed_radix_16(&mut d32, code.params());
-                t32 = t32.min(s.elapsed());
-                std::hint::black_box(&d32);
+                mixed_radix::additive_fft_mixed_radix_16(&mut d64s, code_signed.params());
+                t64s = t64s.min(s.elapsed());
+                std::hint::black_box(&d64s);
             }
             println!(
-                "single-row FFT m={} (codeword {cw_len}) : i64={t64:?}  i32={t32:?}  \
-                 speedup={:.2}x",
+                "single-row FFT m={} (codeword {cw_len}) : \
+                 i32={t32:?}  i64={t64:?}  i64-signed={t64s:?}  \
+                 (signed-vs-i32 {:.2}x slower, signed-vs-i64 {:.2}x)",
                 log_row + 2,
-                t64.as_secs_f64() / t32.as_secs_f64(),
+                t64s.as_secs_f64() / t32.as_secs_f64(),
+                t64s.as_secs_f64() / t64.as_secs_f64(),
             );
         }
     }

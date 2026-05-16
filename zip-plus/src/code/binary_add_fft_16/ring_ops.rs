@@ -274,6 +274,31 @@ impl<const N: usize> FftRingElement16 for DensePolynomial<Int<N>, REDUCED_LEN_16
         }
         Self { coeffs }
     }
+
+    #[inline]
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        let x = &input.coeffs;
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            if (signs >> i) & 1 == 0 {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = *d + xj;
+                }
+            } else {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = *d - xj;
+                }
+            }
+        }
+    }
 }
 
 /// Native-`i128`-coefficient variant.
@@ -331,6 +356,31 @@ impl FftRingElement16 for DensePolynomial<i128, REDUCED_LEN_16> {
             coeffs[i] = self.coeffs[i].wrapping_neg();
         }
         Self { coeffs }
+    }
+
+    #[inline]
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        let x = &input.coeffs;
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            if (signs >> i) & 1 == 0 {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_add(xj);
+                }
+            } else {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_sub(xj);
+                }
+            }
+        }
     }
 }
 
@@ -391,6 +441,31 @@ impl FftRingElement16 for DensePolynomial<i64, REDUCED_LEN_16> {
         }
         Self { coeffs }
     }
+
+    #[inline]
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        let x = &input.coeffs;
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            if (signs >> i) & 1 == 0 {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_add(xj);
+                }
+            } else {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_sub(xj);
+                }
+            }
+        }
+    }
 }
 
 /// Narrow native-`i32` variant. Only sound when the whole transform
@@ -450,6 +525,31 @@ impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
             coeffs[i] = self.coeffs[i].wrapping_neg();
         }
         Self { coeffs }
+    }
+
+    #[inline]
+    fn fft_acc_mul_signed_lifted_gf16(
+        input: &Self,
+        twiddle: Gf2_16,
+        signs: u16,
+        acc: &mut Self::UnreducedAcc,
+    ) {
+        let x = &input.coeffs;
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            if (signs >> i) & 1 == 0 {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_add(xj);
+                }
+            } else {
+                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                    *d = d.wrapping_sub(xj);
+                }
+            }
+        }
     }
 }
 
