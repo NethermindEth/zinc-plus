@@ -248,27 +248,51 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
-        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys
-            .iter()
-            .map(|poly| {
-                let alphas = if degree_bound.is_zero() {
-                    vec![Zt::Chal::ONE]
-                } else {
-                    transcript.fs_transcript.get_challenges(degree_bound + 1)
-                };
-
-                cfg_iter!(poly.evaluations)
-                    .map(|eval| {
-                        Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
-                            eval,
-                            &alphas,
-                            Zt::CombR::ZERO,
-                        )
-                        .map_err(ZipError::from)
-                    })
-                    .collect()
-            })
-            .try_collect()?;
+        let polys_as_comb_r: Vec<Vec<Zt::CombR>> = if degree_bound.is_zero() {
+            // `degree_bound == 0`: `alphas = [ONE]` for every polynomial,
+            // so there is no per-poly transcript draw and the batch
+            // carries no sequential dependency. Parallelise across the
+            // whole batch — the old shape parallelised only the inner
+            // per-evaluation loop, whose work is too cheap for rayon to
+            // split, while the outer poly loop ran serially.
+            let alphas = vec![Zt::Chal::ONE];
+            cfg_iter!(polys)
+                .map(|poly| -> Result<Vec<Zt::CombR>, ZipError> {
+                    poly.evaluations
+                        .iter()
+                        .map(|eval| {
+                            Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                                eval,
+                                &alphas,
+                                Zt::CombR::ZERO,
+                            )
+                            .map_err(ZipError::from)
+                        })
+                        .collect()
+                })
+                .collect::<Result<_, _>>()?
+        } else {
+            // `degree_bound > 0`: `alphas` are drawn per polynomial from
+            // the transcript, a sequential dependency, so the poly loop
+            // stays serial and only the per-evaluation loop parallelises.
+            polys
+                .iter()
+                .map(|poly| -> Result<Vec<Zt::CombR>, ZipError> {
+                    let alphas =
+                        transcript.fs_transcript.get_challenges(degree_bound + 1);
+                    cfg_iter!(poly.evaluations)
+                        .map(|eval| {
+                            Zt::EvalDotChal::inner_product::<CHECK_FOR_OVERFLOW>(
+                                eval,
+                                &alphas,
+                                Zt::CombR::ZERO,
+                            )
+                            .map_err(ZipError::from)
+                        })
+                        .collect()
+                })
+                .collect::<Result<_, _>>()?
+        };
 
         let zero_f = F::zero_with_cfg(field_cfg);
 
