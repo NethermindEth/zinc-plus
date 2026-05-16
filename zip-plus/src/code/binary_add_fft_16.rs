@@ -37,6 +37,15 @@ use ring_ops::{FftRingElement16, I32FftConvert};
 /// `certified_worst_case_bound` test in `mixed_radix`.
 pub(crate) const SIGN_SEED: u64 = 3;
 
+/// Codeword lengths for which the signed-lift encode is certified to
+/// stay within the `i32` fast path — *every* intermediate FFT stage,
+/// not only the final codeword (the `i32` path's element array holds
+/// the intermediates). Verified by the `certified_worst_case_bound`
+/// test in `mixed_radix`; other lengths fall back to the `i64` path.
+fn signed_lift_i32_safe(codeword_len: usize) -> bool {
+    matches!(codeword_len, 4096 | 8192)
+}
+
 
 /// Reed-Solomon linear code whose encoder is a **mixed-radix** additive
 /// FFT over `GF(2^16)` lifted structurally to `Z[X]/(f̃)`. Each stage
@@ -97,13 +106,16 @@ impl<Zt: ZipTypes, C: Config16, const REP: usize, const CHECK: bool>
     /// choice is a valid lift (`±1 ≡ 1 mod 2`), so the code reduced mod
     /// 2 is unchanged.
     ///
-    /// The signed encode runs on the `i64` element type: the `i32`
-    /// fast path's cheap uniform-input probe is not sound for signed
-    /// twiddles (it would see the cancelled, not the worst-case, sum).
+    /// The `i32` encode fast path is used when the codeword length is
+    /// one for which the signed lift is *certified* to keep every FFT
+    /// stage within `i32` ([`signed_lift_i32_safe`]) — the cheap
+    /// uniform-input probe `new` runs is not sound for signed twiddles
+    /// (it sees the cancelled, not the worst-case, sum). Other lengths
+    /// fall back to the `i64` path.
     pub fn new_signed(row_len: usize) -> Result<Self, ZipError> {
         let mut code = Self::new(row_len)?;
         code.params.randomize_signs(SIGN_SEED);
-        code.i32_safe = false;
+        code.i32_safe = signed_lift_i32_safe(code.params.codeword_len());
         Ok(code)
     }
 
@@ -471,8 +483,8 @@ mod linear_code_tests {
         let batch = 11usize;
         let code = Code::new_signed(row_len).expect("valid radix-8 params");
         assert!(
-            !code.uses_i32_fast_path(),
-            "signed code must use the i64 encode path"
+            code.uses_i32_fast_path(),
+            "signed m=12 is certified i32-safe, so it must use the i32 encode path"
         );
         let poly_size = 1usize << num_vars;
         let pp = ZipPlus::<Zt, Code>::setup(poly_size, code);
@@ -610,7 +622,8 @@ mod linear_code_tests {
             };
 
             let iters = 400;
-            let (mut t32, mut t64, mut t64s) = (Duration::MAX, Duration::MAX, Duration::MAX);
+            let (mut t32, mut t64) = (Duration::MAX, Duration::MAX);
+            let (mut t32s, mut t64s) = (Duration::MAX, Duration::MAX);
             for _ in 0..iters {
                 // unsigned i32 fast path (the commit-2 baseline)
                 let mut d32 = build_i32();
@@ -626,7 +639,14 @@ mod linear_code_tests {
                 t64 = t64.min(s.elapsed());
                 std::hint::black_box(&d64);
 
-                // signed i64 (the shipped polychal encode path)
+                // signed i32 (the shipped polychal encode path for m=12/13)
+                let mut d32s = build_i32();
+                let s = Instant::now();
+                mixed_radix::additive_fft_mixed_radix_16(&mut d32s, code_signed.params());
+                t32s = t32s.min(s.elapsed());
+                std::hint::black_box(&d32s);
+
+                // signed i64
                 let mut d64s = build_i64();
                 let s = Instant::now();
                 mixed_radix::additive_fft_mixed_radix_16(&mut d64s, code_signed.params());
@@ -635,11 +655,10 @@ mod linear_code_tests {
             }
             println!(
                 "single-row FFT m={} (codeword {cw_len}) : \
-                 i32={t32:?}  i64={t64:?}  i64-signed={t64s:?}  \
-                 (signed-vs-i32 {:.2}x slower, signed-vs-i64 {:.2}x)",
+                 i32={t32:?}  i64={t64:?}  signed-i32={t32s:?}  signed-i64={t64s:?}  \
+                 (signed-i32-vs-unsigned-i32 {:.2}x)",
                 log_row + 2,
-                t64s.as_secs_f64() / t32.as_secs_f64(),
-                t64s.as_secs_f64() / t64.as_secs_f64(),
+                t32s.as_secs_f64() / t32.as_secs_f64(),
             );
         }
     }

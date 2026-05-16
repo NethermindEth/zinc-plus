@@ -14,7 +14,7 @@
 //! `BinaryAddFft16Code::new` (see [`I32FftConvert`]).
 
 use crypto_primitives::crypto_bigint_int::Int;
-use num_traits::ConstZero;
+use num_traits::{ConstZero, WrappingAdd, WrappingSub};
 use std::ops::Add;
 use zinc_poly::univariate::dense::DensePolynomial;
 
@@ -150,6 +150,44 @@ fn is_odd<const N: usize>(c: &Int<N>) -> bool {
     let halved = *c >> 1;
     let doubled = halved + halved;
     *c != doubled
+}
+
+/// Signed-twiddle accumulation for a native integer element type:
+/// `acc[i..] += x` for every positive-signed twiddle bit `i`, and
+/// `acc[i..] -= x` for every negative-signed one.
+///
+/// The twiddle is split into a positive and a negative bit-mask once,
+/// so each inner loop is *uniform* (a pure add-pass then a pure
+/// sub-pass) — no per-element branch and no conditional-negate
+/// arithmetic, both inner loops vectorise exactly like the unsigned
+/// `fft_acc_mul_lifted_gf16`.
+#[inline]
+fn acc_mul_signed_native<T>(
+    x: &[T; REDUCED_LEN_16],
+    twiddle: Gf2_16,
+    signs: u16,
+    acc: &mut [T; PRODUCT_LEN_16],
+) where
+    T: Copy + WrappingAdd + WrappingSub,
+{
+    let mut pos = twiddle.0 & !signs;
+    while pos != 0 {
+        let i = pos.trailing_zeros() as usize;
+        pos &= pos - 1;
+        let dst = &mut acc[i..i + REDUCED_LEN_16];
+        for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+            *d = d.wrapping_add(&xj);
+        }
+    }
+    let mut neg = twiddle.0 & signs;
+    while neg != 0 {
+        let i = neg.trailing_zeros() as usize;
+        neg &= neg - 1;
+        let dst = &mut acc[i..i + REDUCED_LEN_16];
+        for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+            *d = d.wrapping_sub(&xj);
+        }
+    }
 }
 
 /// The arithmetic interface the additive-FFT kernel needs from a
@@ -365,22 +403,7 @@ impl FftRingElement16 for DensePolynomial<i128, REDUCED_LEN_16> {
         signs: u16,
         acc: &mut Self::UnreducedAcc,
     ) {
-        let x = &input.coeffs;
-        let mut bits = twiddle.0;
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let dst = &mut acc[i..i + REDUCED_LEN_16];
-            if (signs >> i) & 1 == 0 {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_add(xj);
-                }
-            } else {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_sub(xj);
-                }
-            }
-        }
+        acc_mul_signed_native(&input.coeffs, twiddle, signs, acc);
     }
 }
 
@@ -449,22 +472,7 @@ impl FftRingElement16 for DensePolynomial<i64, REDUCED_LEN_16> {
         signs: u16,
         acc: &mut Self::UnreducedAcc,
     ) {
-        let x = &input.coeffs;
-        let mut bits = twiddle.0;
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let dst = &mut acc[i..i + REDUCED_LEN_16];
-            if (signs >> i) & 1 == 0 {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_add(xj);
-                }
-            } else {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_sub(xj);
-                }
-            }
-        }
+        acc_mul_signed_native(&input.coeffs, twiddle, signs, acc);
     }
 }
 
@@ -494,6 +502,12 @@ impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
         Self { coeffs }
     }
 
+    // The accumulator stays `i32` — keeping it narrow is the whole
+    // point of the fast path (the matvec streams it hard). The matvec
+    // sum is bounded (`≤ radix·16·stage_bound`, certified `< 2^31` by
+    // `signed_lift_i32_safe` / `probe_i32_safe`), so the accumulation
+    // cannot overflow. Only the mod-f̃ reduction's cascade could, so
+    // `fft_finalize_acc` widens to `i64` for that one step.
     type UnreducedAcc = [i32; PRODUCT_LEN_16];
     #[inline]
     fn fft_unreduced_zero() -> Self::UnreducedAcc {
@@ -514,7 +528,19 @@ impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
     }
     #[inline]
     fn fft_finalize_acc(acc: Self::UnreducedAcc) -> Self {
-        let coeffs = reduce_mod_ftilde_16(&acc);
+        // Reduce in `i64`: the mod-f̃ fold cascade sums accumulator
+        // entries and its partial sums can transiently exceed `i32`
+        // even when the finished coefficients fit.
+        let wide: [i64; PRODUCT_LEN_16] = core::array::from_fn(|i| i64::from(acc[i]));
+        let reduced = reduce_mod_ftilde_16(&wide);
+        let mut coeffs = [0i32; REDUCED_LEN_16];
+        for (c, &w) in coeffs.iter_mut().zip(reduced.iter()) {
+            debug_assert!(
+                i32::try_from(w).is_ok(),
+                "i32 encode path: stage output {w} exceeds i32"
+            );
+            *c = w as i32;
+        }
         Self { coeffs }
     }
 
@@ -534,22 +560,7 @@ impl FftRingElement16 for DensePolynomial<i32, REDUCED_LEN_16> {
         signs: u16,
         acc: &mut Self::UnreducedAcc,
     ) {
-        let x = &input.coeffs;
-        let mut bits = twiddle.0;
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let dst = &mut acc[i..i + REDUCED_LEN_16];
-            if (signs >> i) & 1 == 0 {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_add(xj);
-                }
-            } else {
-                for (d, &xj) in dst.iter_mut().zip(x.iter()) {
-                    *d = d.wrapping_sub(xj);
-                }
-            }
-        }
+        acc_mul_signed_native(&input.coeffs, twiddle, signs, acc);
     }
 }
 

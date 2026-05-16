@@ -359,6 +359,28 @@ pub fn worst_case_binary_coeff_bound<C: Config16>(
         .unwrap_or(0)
 }
 
+/// Like [`worst_case_binary_coeff_bound`], but the maximum over *every*
+/// FFT stage's output, not only the final codeword.
+///
+/// The `i32` encode fast path must hold the intermediate stage values
+/// too, not just the codeword. The FFT applies stages top-down, so the
+/// intermediate after the first `j` stages is the output of the FFT
+/// restricted to the top `j` stages — computed by running the probe on
+/// a stage-truncated copy of the parameters.
+pub fn worst_case_binary_coeff_bound_all_stages<C: Config16>(
+    params: &MixedRadixFftParams16<C>,
+    row_len: usize,
+) -> u128 {
+    let num_stages = params.stages.len();
+    let mut bound = 0u128;
+    for j in 1..=num_stages {
+        let mut truncated = params.clone();
+        truncated.stages = params.stages[num_stages - j..].to_vec();
+        bound = bound.max(worst_case_binary_coeff_bound(&truncated, row_len));
+    }
+    bound
+}
+
 /// Apply the mixed-radix additive FFT in place over a fully-dense
 /// input. Thin wrapper over [`additive_fft_mixed_radix_16_padded`].
 pub fn additive_fft_mixed_radix_16<C: Config16, T: FftRingElement16>(
@@ -814,21 +836,41 @@ mod tests {
             )
             .expect("valid radix decomposition");
             signed.randomize_signs(sign_seed);
+            // Codeword bound (final stage) — gates the 24-bit pack.
             let s = worst_case_binary_coeff_bound(&signed, row_len);
+            // Max over every stage — gates the i32 encode path, which
+            // must hold the intermediate stage values too.
+            let s_all = worst_case_binary_coeff_bound_all_stages(&signed, row_len);
 
             eprintln!("  {label}");
-            eprintln!("    unsigned {{0,1}}        : certified bound = {u} (~2^{:.1})", log2(u));
+            eprintln!("    unsigned {{0,1}}        : codeword bound = {u} (~2^{:.1})", log2(u));
             eprintln!(
-                "    signed(SIGN_SEED={sign_seed}) : certified bound = {s} (~2^{:.1}, {:.1}x smaller)",
+                "    signed(SIGN_SEED={sign_seed}) : codeword bound = {s} (~2^{:.1}, {:.1}x smaller)",
                 log2(s),
                 u as f64 / s as f64,
+            );
+            // The i32 encode path needs the matvec accumulator to fit
+            // i32. An accumulator entry is an L1 sum of ≤ radix·16 = 128
+            // stage coefficients, so it is safe when
+            // `128 · all_stages_bound < 2^31`, i.e. bound < 2^24.
+            let i32_acc_limit: u128 = 1 << 24;
+            eprintln!(
+                "    signed all-stages      : bound = {s_all} (~2^{:.1}){}",
+                log2(s_all),
+                if s_all < i32_acc_limit { "  [i32-safe]" } else { "  [needs i64]" },
             );
 
             assert!(
                 s < pack_limit,
-                "{label}: certified signed bound {s} (~2^{:.1}) does not fit a \
+                "{label}: certified signed codeword bound {s} (~2^{:.1}) does not fit a \
                  signed 24-bit pack (limit 2^23 = {pack_limit})",
                 log2(s),
+            );
+            assert!(
+                s_all < i32_acc_limit,
+                "{label}: certified signed all-stages bound {s_all} (~2^{:.1}) — the i32 \
+                 matvec accumulator (≤ radix·16·bound) would exceed i32 (limit 2^24)",
+                log2(s_all),
             );
         }
     }
