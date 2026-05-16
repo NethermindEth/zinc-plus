@@ -731,10 +731,11 @@ mod tests {
         use zinc_poly::univariate::dense::DensePolynomial;
 
         // (label, row_len, codeword_len, radix_logs).
-        let configs: [(&str, usize, usize, Vec<usize>); 3] = [
-            ("m=12 radix-8 (shipped 1/4)", 1024, 4096, vec![3, 3, 3, 3]),
-            ("m=13 radix-4+8 (shipped 1/8)", 1024, 8192, vec![2, 2, 3, 3, 3]),
-            ("m=16 radix-4+8 (nvars=13 1/4)", 16384, 65536, vec![2, 2, 3, 3, 3, 3]),
+        let configs: [(&str, usize, usize, Vec<usize>); 4] = [
+            ("m=12 radix-8  (num_vars=10, rate 1/4)", 1024, 4096, vec![3, 3, 3, 3]),
+            ("m=13 radix-4+8 (num_vars=11, rate 1/4)", 2048, 8192, vec![2, 2, 3, 3, 3]),
+            ("m=15 radix-8  (num_vars=13, rate 1/4)", 8192, 32768, vec![3, 3, 3, 3, 3]),
+            ("m=16 radix-4+8 (num_vars=14, rate 1/4)", 16384, 65536, vec![2, 2, 3, 3, 3, 3]),
         ];
 
         let build_input = |row_len: usize, codeword_len: usize| -> Vec<DensePolynomial<i64, 16>> {

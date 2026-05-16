@@ -322,15 +322,16 @@ mod linear_code_tests {
     }
 
     /// Polychal `ZipTypes` with the production *packed* codeword:
-    /// `Cw = PackedI64Poly16<24>` (the 24-bit pack enabled by the
-    /// signed lift). `CombR` keeps an 8-bit pack (combined-row coefs
-    /// are tiny at `num_rows = 1`).
+    /// `Cw = PackedI64Poly16<B>`. The signed lift makes `B = 24`
+    /// lossless at the folded-lane sizes; larger `m` needs a wider `B`.
+    /// `CombR` keeps an 8-bit pack (combined-row coefs are tiny at
+    /// `num_rows = 1`).
     #[derive(Debug, Clone)]
-    struct PolyChalZt16Packed24;
-    impl ZipTypes for PolyChalZt16Packed24 {
+    struct PolyChalZt16PackedB<const B: u32>;
+    impl<const B: u32> ZipTypes for PolyChalZt16PackedB<B> {
         const NUM_COLUMN_OPENINGS: usize = 147;
         type Eval = BinaryPoly<16>;
-        type Cw = PackedI64Poly16<24>;
+        type Cw = PackedI64Poly16<B>;
         type Fmod = Uint<16>;
         type PrimeTest = zinc_primality::MillerRabin;
         type Chal = Bit4Poly16;
@@ -351,7 +352,7 @@ mod linear_code_tests {
     #[test]
     fn commit_prove_verify_polychal_signed_packed24() {
         const REP: usize = 4;
-        type Zt = PolyChalZt16Packed24;
+        type Zt = PolyChalZt16PackedB<24>;
         type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
         type F = Gf2_16Ext<P_16_DEFAULT>;
 
@@ -726,6 +727,84 @@ mod linear_code_tests {
                 pct(mt_min),
             );
         }
+    }
+
+    /// End-to-end commit/prove/verify times and proof size for the
+    /// shipped signed-lift polychal config across problem sizes.
+    /// Ignored; run with `cargo test -p zip-plus --release --features
+    /// parallel bench_polychal_e2e -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing + size measurement"]
+    fn bench_polychal_e2e() {
+        use std::time::{Duration, Instant};
+
+        fn run<const B: u32>(num_vars: usize, batch: usize) {
+            const REP: usize = 4;
+            type Code<const B: u32> =
+                BinaryAddFft16Code<PolyChalZt16PackedB<B>, AddFftConfigGF2_16, REP, false>;
+            type F = Gf2_16Ext<P_16_DEFAULT>;
+
+            let poly_size = 1usize << num_vars;
+            let row_len = poly_size; // num_rows = 1
+            let code = Code::<B>::new_signed(row_len).expect("valid radix-8 params");
+            let i32_path = code.uses_i32_fast_path();
+            let m = (row_len * REP).ilog2();
+            let pp = ZipPlus::<PolyChalZt16PackedB<B>, Code<B>>::setup(poly_size, code);
+
+            let mut rng = StdRng::seed_from_u64(0x0b00_c0de ^ num_vars as u64);
+            let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+                .map(|_| {
+                    let evaluations: Vec<BinaryPoly<16>> = (0..poly_size)
+                        .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                        .collect();
+                    DenseMultilinearExtension::<BinaryPoly<16>> { num_vars, evaluations }
+                })
+                .collect();
+            let point: Vec<Bit4Poly16> =
+                (0..num_vars).map(|i| Bit4Poly16(2 + i as i64)).collect();
+            let point_f: Vec<F> = point
+                .iter()
+                .map(|v| {
+                    <F as crypto_primitives::FromWithConfig<&Bit4Poly16>>::from_with_cfg(v, &())
+                })
+                .collect();
+
+            let iters = 5;
+            let (mut ct, mut pt, mut vt) = (Duration::MAX, Duration::MAX, Duration::MAX);
+            let mut proof_size = 0usize;
+            for _ in 0..iters {
+                let s = Instant::now();
+                let (hint, comm) =
+                    ZipPlus::<PolyChalZt16PackedB<B>, Code<B>>::commit(&pp, &polys).unwrap();
+                ct = ct.min(s.elapsed());
+
+                let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+                let s = Instant::now();
+                let eval_f = ZipPlus::<PolyChalZt16PackedB<B>, Code<B>>::prove::<F, CHECKED>(
+                    &mut transcript, &pp, &polys, &point, &hint, &(),
+                )
+                .expect("prove succeeds");
+                pt = pt.min(s.elapsed());
+                proof_size = transcript.stream.get_ref().len();
+
+                let mut vtr = transcript.into_verification_transcript();
+                vtr.fs_transcript.absorb_slice(&comm.root.0);
+                let s = Instant::now();
+                let res = ZipPlus::<PolyChalZt16PackedB<B>, Code<B>>::verify::<F, CHECKED>(
+                    &mut vtr, &pp, &comm, &(), &point_f, &eval_f,
+                );
+                vt = vt.min(s.elapsed());
+                assert!(res.is_ok(), "verify failed at num_vars={num_vars}: {res:?}");
+            }
+            println!(
+                "num_vars={num_vars} m={m} batch={batch} B={B} i32_path={i32_path} : \
+                 commit={ct:?}  prove={pt:?}  verify={vt:?}  proof={:.1} KiB ({proof_size} B)",
+                proof_size as f64 / 1024.0,
+            );
+        }
+
+        run::<24>(10, 11);
+        run::<28>(13, 11);
     }
 
     /// Measure the empirical max |coefficient| of the radix-8 codeword
