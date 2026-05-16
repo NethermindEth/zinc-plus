@@ -1213,6 +1213,72 @@ fn do_bench_e2e_folded<ZtF, U, BinF, IdealOverF>(
     });
 
     eprint_proof_size(&params, &proof);
+
+    // Re-run the prover once more to harvest the per-lane Zip+ byte
+    // breakdown (discard the proof, keep only the breakdown). The proof
+    // is bit-identical to the one benched above.
+    let (_proof_for_bd, zip_breakdown) =
+        zinc_protocol::prover::prove_folded_with_zip_breakdown::<
+            ZtF,
+            U,
+            F,
+            BinF,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            false,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("zip-breakdown prove failed");
+
+    eprint_folded_proof_size_breakdown(&params, &proof);
+    eprint_folded_zip_substep_breakdown(&params, &proof, &zip_breakdown);
+
+    // Per-region prove / verify wall-time breakdown — a criterion-bypassing
+    // diagnostic averaged over `TIMING_RUNS` independent runs.
+    const TIMING_RUNS: u32 = 100;
+
+    let mut prove_sum = zinc_protocol::prover::FoldedProveTimings::default();
+    for _ in 0..TIMING_RUNS {
+        let (_proof, t) = zinc_protocol::prover::prove_folded_with_timings::<
+            ZtF,
+            U,
+            F,
+            BinF,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            false,
+            PERFORM_CHECKS,
+        >(pp, trace, num_vars, project_scalar)
+        .expect("timed folded prove failed");
+        prove_sum.add_assign(&t);
+    }
+    prove_sum.divide_by(TIMING_RUNS);
+    eprint_folded_prove_timings(&params, &prove_sum, TIMING_RUNS);
+
+    let mut verify_sum = zinc_protocol::verifier::FoldedVerifyTimings::default();
+    for _ in 0..TIMING_RUNS {
+        let t = zinc_protocol::verifier::verify_folded_with_timings::<
+            ZtF,
+            U,
+            F,
+            BinF,
+            IdealOverF,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            PERFORM_CHECKS,
+        >(
+            pp,
+            proof.clone(),
+            &public_trace,
+            num_vars,
+            project_scalar,
+            project_ideal,
+        )
+        .expect("timed folded verify failed");
+        verify_sum.add_assign(&t);
+    }
+    verify_sum.divide_by(TIMING_RUNS);
+    eprint_folded_verify_timings(&params, &verify_sum, TIMING_RUNS);
 }
 
 //
@@ -1388,8 +1454,8 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
         >(pp, trace, num_vars, project_scalar)
         .expect("zip-breakdown prove failed");
 
-    eprint_folded_4x_proof_size_breakdown(&label_full, &proof);
-    eprint_folded_4x_zip_substep_breakdown(&label_full, &proof, &zip_breakdown);
+    eprint_folded_proof_size_breakdown(&label_full, &proof);
+    eprint_folded_zip_substep_breakdown(&label_full, &proof, &zip_breakdown);
 
     if count_effective_max_degree::<U>() <= 1 {
         eprint_folded_4x_per_region_prove_timings::<ZtF, U, _, true>(
@@ -1706,12 +1772,63 @@ fn eprint_folded_4x_per_region_verify_timings<ZtF, U, IdealOverF, S, I>(
 }
 
 
+/// Print a per-region prover wall-time table from an averaged
+/// [`FoldedProveTimings`]. Shared by the 1× folded benches.
+fn eprint_folded_prove_timings(
+    label: &str,
+    sum: &zinc_protocol::prover::FoldedProveTimings,
+    n: u32,
+) {
+    let total = sum.total();
+    let pct = |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    eprintln!("    Folded per-region prove timings ({label}, mean of N={n} runs):");
+    eprintln!("      step 0  commit            {:>9.3} ms ({:>4.1}%)", ms(sum.step0_commit), pct(sum.step0_commit));
+    eprintln!("      step 1  prime projection  {:>9.3} ms ({:>4.1}%)", ms(sum.step1_prime_projection), pct(sum.step1_prime_projection));
+    eprintln!("      step 2  ideal check       {:>9.3} ms ({:>4.1}%)", ms(sum.step2_ideal_check), pct(sum.step2_ideal_check));
+    eprintln!("      step 3  eval projection   {:>9.3} ms ({:>4.1}%)", ms(sum.step3_eval_projection), pct(sum.step3_eval_projection));
+    eprintln!("      step 4  sumcheck          {:>9.3} ms ({:>4.1}%)", ms(sum.step4_sumcheck), pct(sum.step4_sumcheck));
+    eprintln!("      step 5  multipoint eval   {:>9.3} ms ({:>4.1}%)", ms(sum.step5_multipoint_eval), pct(sum.step5_multipoint_eval));
+    eprintln!("      step 6  lift-and-project  {:>9.3} ms ({:>4.1}%)", ms(sum.step6_lift_and_project), pct(sum.step6_lift_and_project));
+    eprintln!("      step 7  pcs open          {:>9.3} ms ({:>4.1}%)", ms(sum.step7_pcs_open), pct(sum.step7_pcs_open));
+    eprintln!(
+        "      step 8  compress (zstd-{}){:>9.3} ms ({:>4.1}%)",
+        zip_plus::utils::ZSTD_LEVEL,
+        ms(sum.step8_compress),
+        pct(sum.step8_compress)
+    );
+    eprintln!("      assembly                  {:>9.3} ms ({:>4.1}%)", ms(sum.assembly), pct(sum.assembly));
+    eprintln!("      total                     {:>9.3} ms", ms(total));
+}
+
+/// Print a per-region verifier wall-time table from an averaged
+/// [`FoldedVerifyTimings`]. Shared by the 1× folded benches.
+fn eprint_folded_verify_timings(
+    label: &str,
+    sum: &zinc_protocol::verifier::FoldedVerifyTimings,
+    n: u32,
+) {
+    let total = sum.total();
+    let pct = |d: std::time::Duration| (d.as_secs_f64() / total.as_secs_f64()) * 100.0;
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    eprintln!("    Folded per-region verify timings ({label}, mean of N={n} runs):");
+    eprintln!("      step 0  reconstruct trans {:>9.3} ms ({:>4.1}%)", ms(sum.step0_reconstruct_transcript), pct(sum.step0_reconstruct_transcript));
+    eprintln!("      step 1  prime projection  {:>9.3} ms ({:>4.1}%)", ms(sum.step1_prime_projection), pct(sum.step1_prime_projection));
+    eprintln!("      step 2  ideal check       {:>9.3} ms ({:>4.1}%)", ms(sum.step2_ideal_check), pct(sum.step2_ideal_check));
+    eprintln!("      step 3  eval projection   {:>9.3} ms ({:>4.1}%)", ms(sum.step3_eval_projection), pct(sum.step3_eval_projection));
+    eprintln!("      step 4  sumcheck verify   {:>9.3} ms ({:>4.1}%)", ms(sum.step4_sumcheck_verify), pct(sum.step4_sumcheck_verify));
+    eprintln!("      step 5  multipoint eval   {:>9.3} ms ({:>4.1}%)", ms(sum.step5_multipoint_eval), pct(sum.step5_multipoint_eval));
+    eprintln!("      step 6  lifted evals      {:>9.3} ms ({:>4.1}%)", ms(sum.step6_lifted_evals), pct(sum.step6_lifted_evals));
+    eprintln!("      step 7  pcs verify        {:>9.3} ms ({:>4.1}%)", ms(sum.step7_pcs_verify), pct(sum.step7_pcs_verify));
+    eprintln!("      total                     {:>9.3} ms", ms(total));
+}
+
 /// Serialize each `Proof<F>` component into its own byte buffer and report
 /// per-part raw + zstd-compressed sizes, so we can see how much each part
 /// of the proof contributes to the total size. Sizes match the per-field
 /// encoding used in `Proof::write_transcription_bytes_exact` (no extra
 /// length prefixes).
-fn eprint_folded_4x_proof_size_breakdown<F>(label: &str, proof: &Proof<F>)
+fn eprint_folded_proof_size_breakdown<F>(label: &str, proof: &Proof<F>)
 where
     F: PrimeField,
     F::Inner: ConstTranscribable,
@@ -1758,7 +1875,7 @@ where
 /// the Merkle authentication paths. The trailing total should match
 /// the raw size of `proof.zip` exactly (the only u32 length prefix
 /// outside this block belongs to the outer `Proof` envelope).
-fn eprint_folded_4x_zip_substep_breakdown<F>(
+fn eprint_folded_zip_substep_breakdown<F>(
     label: &str,
     proof: &Proof<F>,
     breakdown: &zinc_protocol::prover::FoldedProveZipBreakdown,
@@ -2285,6 +2402,31 @@ fn bench_real_sha_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_var
     );
 }
 
+/// Polychal variant of `bench_real_sha_ecdsa_e2e_folded`: the binary
+/// lane is committed via the degree-16 binary-additive-FFT PCS, with
+/// `BinF = PolyExt16<FIELD_LIMBS>` as the binary-lane PCS field. The
+/// arbitrary and int lanes stay on IPRS.
+fn bench_real_sha_ecdsa_e2e_folded_polychal(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_pp_polychal(num_vars);
+
+    do_bench_e2e_folded::<BenchFoldedPolyChalZincTypes, U, PolyExt16<FIELD_LIMBS>, _>(
+        group,
+        "ShaEcdsaPolychal",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
 
 /// ShaEcdsa 4× folded: binary AND int both quartered
 /// (BinaryPoly<8> / Int<2>) and committed under one Merkle tree
@@ -2321,6 +2463,7 @@ fn e2e_folded_benches(c: &mut Criterion) {
     bench_real_sha256_e2e_folded(&mut group, 9);
     bench_real_sha256_e2e_folded_polychal(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
+    bench_real_sha_ecdsa_e2e_folded_polychal(&mut group, 9);
 
     group.finish();
 }

@@ -1084,11 +1084,154 @@ pub fn verify_folded<
         ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
         ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
     ),
+    proof: Proof<F>,
+    public_trace: &UairTrace<ZtF::Int, ZtF::Int, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+) -> Result<(), ProtocolError<F, IdealOverF>>
+where
+    ZtF: crate::FoldedZincTypes<D, HALF_D>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b ZtF::Int>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b BinF>
+        + FromRef<BinF>
+        + for<'b> FromWithConfig<&'b F>
+        + crate::BinaryFoldEval<F, ZtF::Chal>,
+    BinF::Inner: Transcribable,
+    BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    verify_folded_inner::<ZtF, U, F, BinF, IdealOverF, D, HALF_D, CHECK_FOR_OVERFLOW>(
+        vp,
+        proof,
+        public_trace,
+        num_vars,
+        project_scalar,
+        project_ideal,
+        None,
+    )
+}
+
+/// [`verify_folded`] that, on success, returns a per-region wall-time
+/// breakdown of the verifier run (mirrors
+/// [`verify_folded_4x_with_timings`]).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn verify_folded_with_timings<
+    ZtF,
+    U,
+    F,
+    BinF,
+    IdealOverF,
+    const D: usize,
+    const HALF_D: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    vp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    proof: Proof<F>,
+    public_trace: &UairTrace<ZtF::Int, ZtF::Int, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+) -> Result<FoldedVerifyTimings, ProtocolError<F, IdealOverF>>
+where
+    ZtF: crate::FoldedZincTypes<D, HALF_D>,
+    ZtF::Int: ProjectableToField<F> + num_traits::Zero,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b ZtF::Int>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b BinF>
+        + FromRef<BinF>
+        + for<'b> FromWithConfig<&'b F>
+        + crate::BinaryFoldEval<F, ZtF::Chal>,
+    BinF::Inner: Transcribable,
+    BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    let mut timings = FoldedVerifyTimings::default();
+    verify_folded_inner::<ZtF, U, F, BinF, IdealOverF, D, HALF_D, CHECK_FOR_OVERFLOW>(
+        vp,
+        proof,
+        public_trace,
+        num_vars,
+        project_scalar,
+        project_ideal,
+        Some(&mut timings),
+    )?;
+    Ok(timings)
+}
+
+/// Inner folded verifier. With `timings = None` this is the plain
+/// [`verify_folded`]; with `Some(..)` each of the eight verifier
+/// regions is wall-timed into a [`FoldedVerifyTimings`].
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn verify_folded_inner<
+    ZtF,
+    U,
+    F,
+    BinF,
+    IdealOverF,
+    const D: usize,
+    const HALF_D: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    vp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
     mut proof: Proof<F>,
     public_trace: &UairTrace<ZtF::Int, ZtF::Int, D>,
     num_vars: usize,
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+    mut timings: Option<&mut FoldedVerifyTimings>,
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
     ZtF: crate::FoldedZincTypes<D, HALF_D>,
@@ -1135,6 +1278,7 @@ where
         .map_err(ProtocolError::PublicStructure)?;
 
     // ── Step 0: Reconstruct transcript ──────────────────────────────────
+    let _t_step0 = std::time::Instant::now();
     let zip_proof = std::mem::take(&mut proof.zip);
     let (vp_bin_split, vp_arb, vp_int) = vp;
     let uair_signature = U::signature();
@@ -1156,14 +1300,24 @@ where
     );
     absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
 
+    if let Some(t) = timings.as_mut() {
+        t.step0_reconstruct_transcript = _t_step0.elapsed();
+    }
+
     // ── Step 1: Prime projection ────────────────────────────────────────
+    let _t_step1 = std::time::Instant::now();
     // `fixed-prime` branch: match the non-folded path and use the
     // secp256k1 base prime as the projecting prime. See the prover-side
     // comment in `prove_folded` for why UAIRs with EC arithmetic need
     // the fixed prime here.
     let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
 
+    if let Some(t) = timings.as_mut() {
+        t.step1_prime_projection = _t_step1.elapsed();
+    }
+
     // ── Step 2: Ideal check ─────────────────────────────────────────────
+    let _t_step2 = std::time::Instant::now();
     let num_constraints = count_constraints::<U>();
     let ic_subclaim = U::verify_as_subprotocol::<_, IdealOverF, _>(
         &mut pcs_transcript.fs_transcript,
@@ -1174,7 +1328,12 @@ where
         &field_cfg,
     )?;
 
+    if let Some(t) = timings.as_mut() {
+        t.step2_ideal_check = _t_step2.elapsed();
+    }
+
     // ── Step 3: Eval projection ─────────────────────────────────────────
+    let _t_step3 = std::time::Instant::now();
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
@@ -1183,7 +1342,12 @@ where
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
+    if let Some(t) = timings.as_mut() {
+        t.step3_eval_projection = _t_step3.elapsed();
+    }
+
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let _t_step4 = std::time::Instant::now();
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
     let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
     let bool_skip = uair_signature.booleanity_skip_indices();
@@ -1335,7 +1499,12 @@ where
     )
     .map_err(ProtocolError::Booleanity)?;
 
+    if let Some(t) = timings.as_mut() {
+        t.step4_sumcheck_verify = _t_step4.elapsed();
+    }
+
     // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let _t_step5 = std::time::Instant::now();
     let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
     let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
     up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
@@ -1351,7 +1520,12 @@ where
     )?;
     let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
 
+    if let Some(t) = timings.as_mut() {
+        t.step5_multipoint_eval = _t_step5.elapsed();
+    }
+
     // ── Step 6: Lifted evals ────────────────────────────────────────────
+    let _t_step6 = std::time::Instant::now();
     let pub_cols = uair_signature.public_cols();
     let num_pub_bin = pub_cols.num_binary_poly_cols();
     let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
@@ -1429,7 +1603,12 @@ where
     let mut r0_ext = r_0.clone();
     r0_ext.push(gamma.clone());
 
+    if let Some(t) = timings.as_mut() {
+        t.step6_lifted_evals = _t_step6.elapsed();
+    }
+
     // ── Step 7: PCS verify ──────────────────────────────────────────────
+    let _t_step7 = std::time::Instant::now();
     let total = uair_signature.total_cols();
     let num_total_bin = total.num_binary_poly_cols();
     let num_total_arb = total.num_arbitrary_poly_cols();
@@ -1578,6 +1757,9 @@ where
         }
     }
 
+    if let Some(t) = timings.as_mut() {
+        t.step7_pcs_verify = _t_step7.elapsed();
+    }
     Ok(())
 }
 
