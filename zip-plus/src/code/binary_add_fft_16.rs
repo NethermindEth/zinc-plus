@@ -1,9 +1,9 @@
 //! Binary additive RS-FFT code over `GF(2^16) = F_2[X]/(X^16 + X^5 + X^3
 //! + X^2 + 1)` lifted structurally to `Z[X]/f̃` with `f̃ = X^16 + X^5 +
 //! X^3 + X^2 + 1`, using a **mixed-radix** evaluator: each stage applies
-//! a radix-8 (8×8) or radix-16 (16×16) `GF(2^16)` Vandermonde matvec
+//! a radix-8 (8×8) or radix-4 (4×4) `GF(2^16)` Vandermonde matvec
 //! whose entries are precomputed in GF and lifted to 0/1-coef
-//! polynomials in `Z[X]/f̃`. Radix-16 stages sit at the base.
+//! polynomials in `Z[X]/f̃`. Radix-4 stages sit at the base.
 //!
 //! Intended use: the "1× folded" Zip+ variant for the binary lane that
 //! commits `BinaryPoly<16>` rows, as the protocol's `FoldedZincTypes`
@@ -31,13 +31,13 @@ use ring_ops::FftRingElement16;
 
 /// Reed-Solomon linear code whose encoder is a **mixed-radix** additive
 /// FFT over `GF(2^16)` lifted structurally to `Z[X]/(f̃)`. Each stage
-/// covers three (radix-8) or four (radix-16) subspace polynomials and
-/// is applied as an 8×8 or 16×16 `GF(2^16)` Vandermonde matvec carried
+/// covers three (radix-8) or two (radix-4) subspace polynomials and
+/// is applied as an 8×8 or 4×4 `GF(2^16)` Vandermonde matvec carried
 /// out in `Z[X]/f̃` (per-entry twiddles are 0/1-coef GF-lifted).
 ///
-/// Requires `m = log2(row_len * REP)` to be expressible as `3a + 4b`
-/// with non-negative `a, b` — every `m` except `{1, 2, 5}`. Pure
-/// radix-8 (`m % 3 == 0`) uses no radix-16 stages.
+/// Requires `m = log2(row_len * REP)` to be expressible as `3a + 2b`
+/// with non-negative `a, b` — every `m` except `m = 1`. Pure
+/// radix-8 (`m % 3 == 0`) uses no radix-4 stages.
 pub struct BinaryAddFft16Code<
     Zt: ZipTypes,
     C: Config16,
@@ -131,10 +131,11 @@ where
 
     fn params_string(&self) -> String {
         format!(
-            "row_len={}, rate=1/{REP}, log2_codeword_len={} (mixed-radix, {} radix-16 stage(s))",
+            "row_len={}, rate=1/{REP}, log2_codeword_len={} (mixed-radix: {} radix-8 + {} radix-4)",
             self.row_len(),
             self.params.log2_codeword_len(),
-            self.params.num_radix16_stages(),
+            self.params.radix_stage_counts().1,
+            self.params.radix_stage_counts().0,
         )
     }
 
@@ -337,17 +338,18 @@ mod linear_code_tests {
     /// Measure the empirical max |coefficient| of the codeword at the
     /// rate-1/8 SHA dims (`row_len = 1024`, `REP = 8`, `codeword_len =
     /// 8192`, `m = 13`). This `m` is not divisible by 3, so the encoder
-    /// runs one radix-16 base stage plus three radix-8 stages. The
+    /// runs two radix-4 base stages plus three radix-8 stages. The
     /// result must stay under `2^32` for `BITS_CW = 32` to be lossless.
     #[test]
-    fn codeword_coef_bits_rep8_radix16() {
+    fn codeword_coef_bits_rep8_radix4() {
         const REP: usize = 8;
         type Zt = PolyChalZt16I64;
         type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
 
         let row_len = 1024usize;
         let code = Code::new(row_len).expect("valid mixed-radix params");
-        assert_eq!(code.params().num_radix16_stages(), 1);
+        // m = 13 → two radix-4 + three radix-8 stages.
+        assert_eq!(code.params().radix_stage_counts(), (2, 3));
 
         let mut rng = StdRng::seed_from_u64(0xdead_b00f);
         let row: Vec<BinaryPoly<16>> = (0..row_len)

@@ -3,7 +3,7 @@
 //! Generalises the radix-8 evaluator: the `m`-bit FFT
 //! (`m = log2(codeword_len)`) is decomposed into a sequence of stages,
 //! each consuming either three bits (a radix-8, 8×8 Vandermonde matvec)
-//! or four bits (a radix-16, 16×16 matvec). Radix-16 stages are placed
+//! or two bits (a radix-4, 4×4 matvec). Radix-4 stages are placed
 //! at the base — the lowest bit positions, smallest stride.
 //!
 //! A stage covering subspace polynomials `s_{off}, …, s_{off+r-1}`
@@ -19,11 +19,18 @@
 //! the matvec is carried out in `Z[X]/f̃` via the [`FftRingElement16`]
 //! trait. Z-carries propagate across stages.
 //!
-//! Pure radix-8 (`m % 3 == 0`) is the special case with no radix-16
+//! Pure radix-8 (`m % 3 == 0`) is the special case with no radix-4
 //! stages, and is bit-for-bit identical to the historic radix-8 kernel.
-//! Allowing one or two radix-16 base stages lifts the `m % 3 == 0`
-//! constraint: an `m`-bit FFT is feasible whenever `m = 3a + 4b` for
-//! non-negative `a, b`, i.e. for every `m` except `{1, 2, 5}`.
+//! Allowing one or two radix-4 base stages lifts the `m % 3 == 0`
+//! constraint: an `m`-bit FFT is feasible whenever `m = 3a + 2b` for
+//! non-negative `a, b`, i.e. for every `m` except `m = 1`.
+//!
+//! Radix-4 (not radix-16) fills the gap because it is the cheapest
+//! radix per bit: a radix-`r` matvec costs `r / log2(r)` twiddle
+//! multiplications per output per bit — `2` for radix-4, `2.67` for
+//! radix-8, `4` for radix-16. Two radix-4 stages cover the same four
+//! bits as one radix-16 stage at half the multiplications, with
+//! essentially the same lifted-coefficient growth.
 
 use super::basis::Gf2_16;
 use super::params::{Config16, Radix2AddFftParams16, evaluate_subspace_poly_at_gf16};
@@ -38,7 +45,8 @@ use rayon::prelude::*;
 /// One stage of the mixed-radix evaluator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadixStage {
-    /// `log2` of this stage's radix: `3` (radix-8) or `4` (radix-16).
+    /// `log2` of this stage's radix: `2` (radix-4) or `3` (radix-8);
+    /// `1` (radix-2) is also supported via [`MixedRadixFftParams16::new_with_radix_logs`].
     pub radix_log: usize,
 
     /// Bit offset of the lowest subspace polynomial this stage covers;
@@ -55,8 +63,8 @@ pub struct RadixStage {
 ///
 /// We require `codeword_len.is_power_of_two()`,
 /// `row_len.is_power_of_two()`, `row_len ≤ codeword_len ≤ 2^16`, and
-/// that `m = log2(codeword_len)` is expressible as `3a + 4b` with
-/// non-negative `a, b` (every `m` except `{1, 2, 5}`).
+/// that `m = log2(codeword_len)` is expressible as `3a + 2b` with
+/// non-negative `a, b` (every `m` except `m = 1`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MixedRadixFftParams16<C: Config16> {
     /// Underlying radix-2 parameters (Cantor basis, subspace polys,
@@ -69,37 +77,65 @@ pub struct MixedRadixFftParams16<C: Config16> {
     _phantom: PhantomData<C>,
 }
 
-/// Decompose an `m`-bit FFT into stage radices, base → top.
+/// Decompose an `m`-bit FFT into stage radix-logs, base → top.
 ///
-/// Returns the `log2`-radices (`3` or `4`) of each stage. Radix-16
-/// stages (`4`) come first (at the base). Errors if `m` cannot be
-/// written as `3a + 4b`, i.e. `m ∈ {1, 2, 5}`.
+/// Radix-8 (`log` = `3`) is the workhorse — fewest stages, so the
+/// smallest lifted-coefficient growth. Radix-4 (`log` = `2`) fills the
+/// gap when `m` is not a multiple of `3`, and the radix-4 stages sit at
+/// the base. `m = 2·(num4) + 3·(num8)`; only `m = 1` is infeasible.
 pub fn decompose_radices(m: usize) -> Result<Vec<usize>, ZipError> {
-    let (num16, num8) = match m % 3 {
+    let (num4, num8) = match m % 3 {
         0 => (0usize, m / 3),
-        1 if m >= 4 => (1usize, (m - 4) / 3),
-        2 if m >= 8 => (2usize, (m - 8) / 3),
+        1 if m >= 4 => (2usize, (m - 4) / 3),
+        2 => (1usize, (m - 2) / 3),
         _ => {
             return Err(ZipError::InvalidPcsParam(format!(
-                "MixedRadixFftParams16: log2(codeword_len) ({m}) is not expressible \
-                 as 3a+4b (only m ∈ {{1, 2, 5}} are excluded)"
+                "MixedRadixFftParams16: log2(codeword_len) ({m}) must be ≥ 2 \
+                 (only m = 1 is unsupported)"
             )));
         }
     };
-    let mut radices = vec![4usize; num16];
+    let mut radices = vec![2usize; num4];
     radices.extend(std::iter::repeat(3usize).take(num8));
     Ok(radices)
 }
 
 impl<C: Config16> MixedRadixFftParams16<C> {
-    /// Construct precomputed parameters. Validates the radix-2
-    /// preconditions plus the `3a + 4b` representability of
-    /// `log2(codeword_len)`.
+    /// Construct precomputed parameters with the shipped radix
+    /// decomposition ([`decompose_radices`]: radix-8 workhorse, radix-4
+    /// filler). Validates the radix-2 preconditions plus
+    /// `m = log2(codeword_len) ≥ 2`.
     pub fn new(row_len: usize, codeword_len: usize) -> Result<Self, ZipError> {
         let base = Radix2AddFftParams16::<C>::new(row_len, codeword_len)?;
-        let m = base.log2_codeword_len;
-        let radix_logs = decompose_radices(m)?;
+        let radix_logs = decompose_radices(base.log2_codeword_len)?;
+        Ok(Self::from_base_and_radices(base, radix_logs))
+    }
 
+    /// Construct with an explicit per-stage radix decomposition:
+    /// `radix_logs[k]` is `log2` of stage `k`'s radix, ordered base →
+    /// top, and the entries must sum to `log2(codeword_len)`. Intended
+    /// for experiments and coefficient-size measurement; [`Self::new`]
+    /// picks the shipped decomposition.
+    pub fn new_with_radix_logs(
+        row_len: usize,
+        codeword_len: usize,
+        radix_logs: Vec<usize>,
+    ) -> Result<Self, ZipError> {
+        let base = Radix2AddFftParams16::<C>::new(row_len, codeword_len)?;
+        let sum: usize = radix_logs.iter().sum();
+        if sum != base.log2_codeword_len {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "MixedRadixFftParams16: radix_logs sum to {sum}, expected \
+                 log2(codeword_len) = {}",
+                base.log2_codeword_len
+            )));
+        }
+        Ok(Self::from_base_and_radices(base, radix_logs))
+    }
+
+    /// Build the precomputed stages from a base and a base→top list of
+    /// radix-logs (assumed to sum to `base.log2_codeword_len`).
+    fn from_base_and_radices(base: Radix2AddFftParams16<C>, radix_logs: Vec<usize>) -> Self {
         let mut stages = Vec::with_capacity(radix_logs.len());
         let mut bit_offset = 0usize;
         for &radix_log in &radix_logs {
@@ -111,13 +147,13 @@ impl<C: Config16> MixedRadixFftParams16<C> {
             });
             bit_offset += radix_log;
         }
-        debug_assert_eq!(bit_offset, m);
+        debug_assert_eq!(bit_offset, base.log2_codeword_len);
 
-        Ok(Self {
+        Self {
             base,
             stages,
             _phantom: PhantomData,
-        })
+        }
     }
 
     #[inline]
@@ -135,10 +171,12 @@ impl<C: Config16> MixedRadixFftParams16<C> {
         self.base.log2_codeword_len
     }
 
-    /// Number of radix-16 stages (`0`, `1`, or `2`).
+    /// Count of stages by radix: `(radix-4 count, radix-8 count)`.
     #[inline]
-    pub fn num_radix16_stages(&self) -> usize {
-        self.stages.iter().filter(|s| s.radix_log == 4).count()
+    pub fn radix_stage_counts(&self) -> (usize, usize) {
+        let r4 = self.stages.iter().filter(|s| s.radix_log == 2).count();
+        let r8 = self.stages.iter().filter(|s| s.radix_log == 3).count();
+        (r4, r8)
     }
 }
 
@@ -256,8 +294,11 @@ fn mixed_radix_stage_block<T: FftRingElement16>(
     radix: usize,
     matrix: &[Gf2_16],
 ) {
-    // Snapshot buffer for the `radix` inputs at a given offset `t`.
-    let mut inputs: Vec<T> = (0..radix).map(|_| T::fft_zero()).collect();
+    debug_assert!(radix <= 8, "mixed-radix kernel supports radix ≤ 8");
+    // Stack-allocated snapshot of the `radix` inputs at offset `t` —
+    // radix is at most 8 (radix-8 is the largest shipped stage), so
+    // this avoids a per-block heap allocation.
+    let mut inputs: [T; 8] = std::array::from_fn(|_| T::fft_zero());
 
     for t in 0..stride {
         for i in 0..radix {
@@ -265,16 +306,24 @@ fn mixed_radix_stage_block<T: FftRingElement16>(
         }
 
         // outputs[j] = Σ_i matrix[j][i] · inputs[i] in Z[X]/f̃.
-        for j in 0..radix {
-            let mut acc = T::fft_unreduced_zero();
-            for i in 0..radix {
+        //
+        // Iterate `i` outermost: each input is touched once per `j`, so
+        // keeping it in the outer loop lets its 16 coefficients stay
+        // resident while it is scattered into all `radix` accumulators.
+        let mut accs: [T::UnreducedAcc; 8] =
+            std::array::from_fn(|_| T::fft_unreduced_zero());
+        for i in 0..radix {
+            let input_i = &inputs[i];
+            for j in 0..radix {
                 let tw = matrix[j * radix + i];
                 if tw == Gf2_16::ZERO {
                     continue;
                 }
-                T::fft_acc_mul_lifted_gf16(&inputs[i], tw, &mut acc);
+                T::fft_acc_mul_lifted_gf16(input_i, tw, &mut accs[j]);
             }
-            block_data[j * stride + t] = T::fft_finalize_acc(acc);
+        }
+        for j in 0..radix {
+            block_data[j * stride + t] = T::fft_finalize_acc(accs[j].clone());
         }
     }
 }
@@ -288,6 +337,7 @@ mod tests {
 
     #[test]
     fn decompose_pure_radix8() {
+        // m % 3 == 0: no radix-4 stages.
         assert_eq!(decompose_radices(0).unwrap(), Vec::<usize>::new());
         assert_eq!(decompose_radices(3).unwrap(), vec![3]);
         assert_eq!(decompose_radices(6).unwrap(), vec![3, 3]);
@@ -295,50 +345,60 @@ mod tests {
     }
 
     #[test]
-    fn decompose_one_radix16_base() {
-        // m % 3 == 1: one radix-16 stage at the base.
-        assert_eq!(decompose_radices(4).unwrap(), vec![4]);
-        assert_eq!(decompose_radices(7).unwrap(), vec![4, 3]);
-        assert_eq!(decompose_radices(13).unwrap(), vec![4, 3, 3, 3]);
-        assert_eq!(decompose_radices(16).unwrap(), vec![4, 3, 3, 3, 3]);
+    fn decompose_two_radix4_base() {
+        // m % 3 == 1: two radix-4 stages at the base.
+        assert_eq!(decompose_radices(4).unwrap(), vec![2, 2]);
+        assert_eq!(decompose_radices(7).unwrap(), vec![2, 2, 3]);
+        assert_eq!(decompose_radices(13).unwrap(), vec![2, 2, 3, 3, 3]);
+        assert_eq!(decompose_radices(16).unwrap(), vec![2, 2, 3, 3, 3, 3]);
     }
 
     #[test]
-    fn decompose_two_radix16_base() {
-        // m % 3 == 2: two radix-16 stages at the base.
-        assert_eq!(decompose_radices(8).unwrap(), vec![4, 4]);
-        assert_eq!(decompose_radices(11).unwrap(), vec![4, 4, 3]);
-        assert_eq!(decompose_radices(14).unwrap(), vec![4, 4, 3, 3]);
+    fn decompose_one_radix4_base() {
+        // m % 3 == 2: one radix-4 stage at the base.
+        assert_eq!(decompose_radices(2).unwrap(), vec![2]);
+        assert_eq!(decompose_radices(5).unwrap(), vec![2, 3]);
+        assert_eq!(decompose_radices(8).unwrap(), vec![2, 3, 3]);
+        assert_eq!(decompose_radices(11).unwrap(), vec![2, 3, 3, 3]);
+        assert_eq!(decompose_radices(14).unwrap(), vec![2, 3, 3, 3, 3]);
     }
 
     #[test]
-    fn decompose_rejects_unrepresentable() {
-        for m in [1usize, 2, 5] {
-            assert!(decompose_radices(m).is_err(), "m={m} should be rejected");
+    fn decompose_rejects_only_m_equals_one() {
+        assert!(decompose_radices(1).is_err(), "m=1 should be rejected");
+        for m in [0usize, 2, 3, 4, 5, 6, 7, 8] {
+            assert!(decompose_radices(m).is_ok(), "m={m} should be accepted");
         }
     }
 
     #[test]
     fn params_reject_unrepresentable_codeword_len() {
-        // m = 1, 2, 5 → codeword_len 2, 4, 32.
+        // Only m = 1 (codeword_len 2) is unsupported.
         assert!(P::new(2, 2).is_err());
-        assert!(P::new(2, 4).is_err());
-        assert!(P::new(2, 32).is_err());
     }
 
     #[test]
     fn params_accept_representable_codeword_len() {
-        assert!(P::new(8, 8).is_ok()); // m = 3
-        assert!(P::new(16, 16).is_ok()); // m = 4 (one radix-16)
-        assert!(P::new(8, 256).is_ok()); // m = 8 (two radix-16)
+        assert!(P::new(2, 4).is_ok()); // m = 2 (one radix-4)
+        assert!(P::new(8, 8).is_ok()); // m = 3 (pure radix-8)
+        assert!(P::new(16, 16).is_ok()); // m = 4 (two radix-4)
+        assert!(P::new(8, 32).is_ok()); // m = 5 (radix-4 + radix-8)
         assert!(P::new(8, 4096).is_ok()); // m = 12 (pure radix-8)
-        assert!(P::new(8, 8192).is_ok()); // m = 13 (radix-16 + radix-8)
+        assert!(P::new(8, 8192).is_ok()); // m = 13 (two radix-4 + radix-8)
+    }
+
+    #[test]
+    fn new_with_radix_logs_rejects_wrong_sum() {
+        // m = 12, but radix_logs sum to 11.
+        assert!(P::new_with_radix_logs(8, 4096, vec![3, 3, 3, 2]).is_err());
+        // Correct sum is accepted.
+        assert!(P::new_with_radix_logs(8, 4096, vec![2, 2, 2, 2, 2, 2]).is_ok());
     }
 
     /// The mixed-radix FFT computes the multipoint evaluation of the
     /// novel-basis polynomial: `data[k] = Σ_i input[i] · X_i(v_k)`. We
     /// check this against the explicit Vandermonde, for sizes that
-    /// exercise pure radix-8, one radix-16, and two radix-16 stages.
+    /// exercise pure radix-8, one radix-4, and two radix-4 stages.
     #[test]
     fn fft_matches_direct_evaluation() {
         for &m in &[3usize, 4, 6, 7, 8] {
@@ -374,7 +434,7 @@ mod tests {
     }
 
     /// The lifted (`i64`) FFT reduced mod 2 must equal the `Gf2_16`
-    /// FFT — the structural-lift invariant — across radix-16 stages.
+    /// FFT — the structural-lift invariant — across radix-4 stages.
     #[test]
     fn lifted_fft_reduces_to_gf16_fft() {
         use super::super::ring_ops::REDUCED_LEN_16;
@@ -418,6 +478,73 @@ mod tests {
                     "lifted FFT mod 2 mismatch at m={m}, k={k}"
                 );
             }
+        }
+    }
+
+    /// Measure the empirical max |codeword coefficient| of the lifted
+    /// (`i64`) FFT for different radix decompositions, on a real encode
+    /// (`row_len` random binary cells, zero-padded to `codeword_len`).
+    /// Lower-radix decompositions use more, shallower stages — fewer
+    /// multiplications, but more carry-accumulating depth, so larger
+    /// coefficients. This pins down whether an all-radix-4 encoder
+    /// still fits `BITS_CW = 32`.
+    #[test]
+    fn codeword_coef_bits_by_radix() {
+        use super::super::ring_ops::REDUCED_LEN_16;
+        use zinc_poly::univariate::dense::DensePolynomial;
+
+        // (label, row_len, codeword_len, radix_logs).
+        let configs: [(&str, usize, usize, Vec<usize>); 5] = [
+            ("m=12 radix-8 (shipped 1/4)", 1024, 4096, vec![3, 3, 3, 3]),
+            ("m=12 radix-4 only", 1024, 4096, vec![2, 2, 2, 2, 2, 2]),
+            ("m=13 radix-4+radix-8 (shipped 1/8)", 1024, 8192, vec![2, 2, 3, 3, 3]),
+            ("m=13 radix-2+radix-4", 1024, 8192, vec![1, 2, 2, 2, 2, 2, 2]),
+            ("m=16 radix-4+radix-8 (nvars=13 rate 1/4)", 16384, 65536, vec![2, 2, 3, 3, 3, 3]),
+        ];
+
+        for (label, row_len, codeword_len, radix_logs) in configs {
+            let params = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+                row_len,
+                codeword_len,
+                radix_logs,
+            )
+            .expect("valid radix decomposition");
+
+            // row_len random binary cells (bit j of a pseudo-random
+            // u16 → coefficient j), zero-padded to codeword_len.
+            let mut data: Vec<DensePolynomial<i64, REDUCED_LEN_16>> = (0..codeword_len)
+                .map(|i| {
+                    let mut coeffs = [0i64; REDUCED_LEN_16];
+                    if i < row_len {
+                        let g = (i as u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add(0xABCD) as u16;
+                        for (j, c) in coeffs.iter_mut().enumerate() {
+                            *c = ((g >> j) & 1) as i64;
+                        }
+                    }
+                    DensePolynomial { coeffs }
+                })
+                .collect();
+
+            additive_fft_mixed_radix_16(&mut data, &params);
+
+            let mut max_abs: i64 = 0;
+            for cell in &data {
+                for &c in &cell.coeffs {
+                    max_abs = max_abs.max(c.unsigned_abs() as i64);
+                }
+            }
+            let bits = if max_abs == 0 {
+                0
+            } else {
+                65 - (max_abs as u64).leading_zeros() as u64
+            };
+            eprintln!(
+                "  {label}: max |coef| = {max_abs} (~2^{:.2}), {bits} bits incl. sign{}",
+                if max_abs == 0 { 0.0 } else { (max_abs as f64).log2() },
+                if bits <= 32 { "  [fits BITS_CW=32]" } else { "  [EXCEEDS 32]" },
+            );
         }
     }
 }

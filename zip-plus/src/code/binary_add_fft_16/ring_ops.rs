@@ -98,11 +98,17 @@ pub fn mul_by_lifted_gf16<C: FftCoeff16>(
     twiddle: Gf2_16,
 ) -> [C; REDUCED_LEN_16] {
     let mut buf = [C::ZERO; PRODUCT_LEN_16];
-    for i in 0..D_16 {
-        if twiddle.coeff(i) {
-            for j in 0..REDUCED_LEN_16 {
-                buf[j + i] = buf[j + i] + x[j];
-            }
+    // Iterate the set bits of the twiddle directly (`trailing_zeros` +
+    // clear-lowest-bit) rather than branching on all 16 bit positions:
+    // the twiddle bits are pseudo-random, so a per-bit `if` mispredicts
+    // ~half the time. The slice form lets the add autovectorise.
+    let mut bits = twiddle.0;
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        let dst = &mut buf[i..i + REDUCED_LEN_16];
+        for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+            *d = *d + xj;
         }
     }
     reduce_mod_ftilde_16(&buf)
@@ -208,11 +214,13 @@ impl<const N: usize> FftRingElement16 for DensePolynomial<Int<N>, REDUCED_LEN_16
     #[inline]
     fn fft_acc_mul_lifted_gf16(input: &Self, twiddle: Gf2_16, acc: &mut Self::UnreducedAcc) {
         let x = &input.coeffs;
-        for i in 0..D_16 {
-            if twiddle.coeff(i) {
-                for j in 0..REDUCED_LEN_16 {
-                    acc[j + i] = acc[j + i] + x[j];
-                }
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                *d = *d + xj;
             }
         }
     }
@@ -256,11 +264,13 @@ impl FftRingElement16 for DensePolynomial<i128, REDUCED_LEN_16> {
     #[inline]
     fn fft_acc_mul_lifted_gf16(input: &Self, twiddle: Gf2_16, acc: &mut Self::UnreducedAcc) {
         let x = &input.coeffs;
-        for i in 0..D_16 {
-            if twiddle.coeff(i) {
-                for j in 0..REDUCED_LEN_16 {
-                    acc[j + i] = acc[j + i].wrapping_add(x[j]);
-                }
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                *d = d.wrapping_add(xj);
             }
         }
     }
@@ -304,11 +314,13 @@ impl FftRingElement16 for DensePolynomial<i64, REDUCED_LEN_16> {
     #[inline]
     fn fft_acc_mul_lifted_gf16(input: &Self, twiddle: Gf2_16, acc: &mut Self::UnreducedAcc) {
         let x = &input.coeffs;
-        for i in 0..D_16 {
-            if twiddle.coeff(i) {
-                for j in 0..REDUCED_LEN_16 {
-                    acc[j + i] = acc[j + i].wrapping_add(x[j]);
-                }
+        let mut bits = twiddle.0;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let dst = &mut acc[i..i + REDUCED_LEN_16];
+            for (d, &xj) in dst.iter_mut().zip(x.iter()) {
+                *d = d.wrapping_add(xj);
             }
         }
     }
