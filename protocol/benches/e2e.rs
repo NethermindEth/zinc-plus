@@ -21,7 +21,7 @@ use zinc_poly::{
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{
-    FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
+    FoldedZincTypes, IntFoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
@@ -2175,6 +2175,281 @@ fn setup_folded_pp_polychal(num_vars: usize) -> FoldedPp1x<BenchFoldedPolyChalZi
 }
 
 //
+// 1× int-fold variant of the polychal bench Zinc-types. Implements
+// `IntFoldedZincTypes`: the binary lane folds once
+// (`BinaryPoly<DEGREE_PLUS_ONE> → BinaryPoly<HALF_DEGREE_PLUS_ONE>`,
+// committed via the degree-16 binary-additive-FFT PCS) AND the int
+// lane folds once (`Int<EC_FP_INT_LIMBS> → Int<INT_HALF_LIMBS_BENCH>`
+// halves via `split_int_column`, `v = lo + 2^128·hi`). Both commit at
+// length `2n` and open at `(r_0 ‖ γ)`. This is the
+// `bench_real_sha_ecdsa_e2e_folded_polychal` counterpart that also
+// shrinks the int (ECDSA) lane — the lane the ShaEcdsaPolychal
+// investigation flagged as ~35 % of PCS bytes.
+//
+// `INT_HALF_LIMBS_BENCH = 3`: `split_int_column` zero-extends the low
+// 128 magnitude bits into the half, so the half needs a spare high
+// limb to keep `lo` non-negative — `Int<2>` would push bit 127 into
+// the sign position. `Int<3>` (one spare limb) is the minimum.
+//
+
+const INT_HALF_LIMBS_BENCH: usize = 3;
+
+/// Half-int Zip+ types for the 1× int fold: `Eval = Int<3>`,
+/// `Cw = Int<4>`. Mirrors `IntZipTypesShaEcdsaHalf` from the protocol
+/// crate's round-trip test (`CombR = Int<8>`, scalar inner products).
+type PolyChalIntZt = GenericBenchZipTypes<
+    Int<INT_HALF_LIMBS_BENCH>,
+    Int<{ INT_HALF_LIMBS_BENCH + 1 }>,
+    Uint<FIELD_LIMBS>,
+    MillerRabin,
+    i128,
+    i128,
+    Int<8>,
+    Int<8>,
+    ScalarProduct,
+    ScalarProduct,
+    MBSInnerProduct,
+>;
+
+#[derive(Clone, Debug)]
+struct BenchFoldedPolyChalIntZincTypes;
+
+impl
+    IntFoldedZincTypes<
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        EC_FP_INT_LIMBS,
+        INT_HALF_LIMBS_BENCH,
+    > for BenchFoldedPolyChalIntZincTypes
+{
+    type Chal = i128;
+    type Pt = i128;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+
+    type BinaryZt = PolyChalBinaryZt;
+    type ArbitraryZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
+    type IntZt = PolyChalIntZt;
+
+    type BinaryLc =
+        BinaryAddFft16Code<Self::BinaryZt, AddFftConfigGF2_16, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+}
+
+/// PCS params for the 1× int-fold polychal path: binary AND int both
+/// commit at `split_size = 2n`; arbitrary stays at `normal_size = n`.
+/// Binary uses the signed mixed-radix additive FFT; arbitrary / int
+/// use IPRS.
+#[allow(clippy::type_complexity, clippy::unwrap_used)]
+fn setup_folded_pp_polychal_int(
+    num_vars: usize,
+) -> (
+    ZipPlusParams<
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::BinaryZt,
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::BinaryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::ArbitraryZt,
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::ArbitraryLc,
+    >,
+    ZipPlusParams<
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::IntZt,
+        <BenchFoldedPolyChalIntZincTypes as IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >>::IntLc,
+    >,
+) {
+    let split_size = 1 << (num_vars + 1);
+    let normal_size = 1 << num_vars;
+    (
+        ZipPlus::setup(
+            split_size,
+            BinaryAddFft16Code::new_signed(split_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            normal_size,
+            IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+        ),
+        ZipPlus::setup(
+            split_size,
+            IprsCode::new_with_optimal_depth(split_size).unwrap(),
+        ),
+    )
+}
+
+/// Lean total prove/verify benchmark for the 1× int-fold path. Unlike
+/// `do_bench_e2e_folded` there are no `prove_folded_int_with_timings` /
+/// `_with_zip_breakdown` variants, so this reports only the criterion
+/// prove/verify wall-times plus the proof-size breakdown.
+#[allow(clippy::type_complexity)]
+fn do_bench_e2e_folded_int<ZtF, U, BinF, IdealOverF>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    trace: &UairTrace<'static, Int<EC_FP_INT_LIMBS>, Int<EC_FP_INT_LIMBS>, DEGREE_PLUS_ONE>,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    ZtF: IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_BENCH,
+        >,
+    Int<EC_FP_INT_LIMBS>: ProjectableToField<F> + num_traits::Zero,
+    Int<INT_HALF_LIMBS_BENCH>: ProjectableToField<F>,
+    BinaryPoly<HALF_DEGREE_PLUS_ONE>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: for<'a> FromWithConfig<&'a Int<EC_FP_INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a Int<INT_HALF_LIMBS_BENCH>>
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> FromWithConfig<&'a ZtF::Pt>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    U: Uair<
+            Scalar = zinc_poly::univariate::dense::DensePolynomial<
+                Int<EC_FP_INT_LIMBS>,
+                DEGREE_PLUS_ONE,
+            >,
+        > + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + crypto_primitives::FromPrimitiveWithConfig
+        + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a ZtF::Chal>
+        + for<'a> MulByScalar<&'a BinF>
+        + FromRef<BinF>
+        + for<'a> FromWithConfig<&'a F>
+        + zinc_protocol::BinaryFoldEval<F, ZtF::Chal>,
+    <BinF as Field>::Inner: Transcribable,
+    <BinF as Field>::Modulus: FromRef<ZtF::Fmod> + Transcribable,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    macro_rules! bench_prove_folded_int {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(zinc_protocol::prover::prove_folded_int::<
+                        ZtF,
+                        U,
+                        F,
+                        BinF,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        EC_FP_INT_LIMBS,
+                        INT_HALF_LIMBS_BENCH,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(pp, trace, num_vars, project_scalar))
+                    .expect("Folded int prover failed");
+                });
+            });
+        };
+    }
+
+    bench_prove_folded_int!("Prove (folded int)", false);
+
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove_folded_int!("Prove (folded int MLE-first)", true);
+    }
+
+    let proof: Proof<F> = zinc_protocol::prover::prove_folded_int::<
+        ZtF,
+        U,
+        F,
+        BinF,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        EC_FP_INT_LIMBS,
+        INT_HALF_LIMBS_BENCH,
+        false,
+        PERFORM_CHECKS,
+    >(pp, trace, num_vars, project_scalar)
+    .expect("proof generation for folded int verifier bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(
+        BenchmarkId::new("Verify (folded int)", &params),
+        |bench| {
+            bench.iter_batched(
+                || proof.clone(),
+                |proof| {
+                    black_box(zinc_protocol::verifier::verify_folded_int::<
+                        ZtF,
+                        U,
+                        F,
+                        BinF,
+                        IdealOverF,
+                        DEGREE_PLUS_ONE,
+                        HALF_DEGREE_PLUS_ONE,
+                        EC_FP_INT_LIMBS,
+                        INT_HALF_LIMBS_BENCH,
+                        PERFORM_CHECKS,
+                    >(
+                        pp,
+                        proof,
+                        &public_trace,
+                        num_vars,
+                        project_scalar,
+                        project_ideal,
+                    ))
+                    .expect("Folded int verifier failed");
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    let label_full = format!("Folded int/{params}");
+    eprint_proof_size(&label_full, &proof);
+    eprint_folded_proof_size_breakdown(&label_full, &proof);
+}
+
+//
 // 4× int-fold variant of the bench Zinc-types. Implements
 // `IntFoldedZincTypes4x` so that `prove_folded_4x` /
 // `verify_folded_4x` route the int Zip+ commitments
@@ -2434,6 +2709,31 @@ fn bench_real_sha_ecdsa_e2e_folded_polychal(
     );
 }
 
+/// Polychal 1× int-fold variant of `bench_real_sha_ecdsa_e2e_folded`:
+/// the binary lane is committed via the degree-16 binary-additive-FFT
+/// PCS AND the int (ECDSA) lane folds once into `Int<3>` halves
+/// committed at length `2n`. Targets the ECDSA proof-size contribution
+/// the ShaEcdsaPolychal investigation flagged.
+fn bench_real_sha_ecdsa_e2e_folded_polychal_int(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+) {
+    type U = ShaEcdsaUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_folded_pp_polychal_int(num_vars);
+
+    do_bench_e2e_folded_int::<BenchFoldedPolyChalIntZincTypes, U, PolyExt16<FIELD_LIMBS>, _>(
+        group,
+        "ShaEcdsaPolychalInt",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
 
 /// ShaEcdsa 4× folded: binary AND int both quartered
 /// (BinaryPoly<8> / Int<2>) and committed under one Merkle tree
@@ -2471,6 +2771,7 @@ fn e2e_folded_benches(c: &mut Criterion) {
     bench_real_sha256_e2e_folded_polychal(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_polychal(&mut group, 9);
+    bench_real_sha_ecdsa_e2e_folded_polychal_int(&mut group, 9);
 
     group.finish();
 }
