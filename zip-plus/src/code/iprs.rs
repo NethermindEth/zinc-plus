@@ -267,6 +267,95 @@ mod tests {
         ZipPlus::<Zt, _>::encode_rows(&pp, &mle.evaluations);
     }
 
+    /// Measure IPRS codeword coefficient growth for the protocol's
+    /// "int lane" (`Eval = Int<4>` — secp256k1-width ECDSA witness).
+    /// Tells whether the shipped `Cw = Int<6>` (384-bit) and
+    /// `CombR = Int<8>` (512-bit) are wider than the radix-8 encoding
+    /// actually needs. Ignored — informational; run with
+    /// `cargo test -p zip-plus --release iprs_int_lane_coef_bits
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "coefficient-growth measurement"]
+    fn iprs_int_lane_coef_bits() {
+        use crate::code::LinearCode;
+        use crypto_bigint::Random;
+        use rand::{SeedableRng, rngs::StdRng};
+
+        // Wide Cw/CombR so the measurement itself never overflows.
+        type WideZt = TestZipTypes<4, 12, 16>;
+        type WideCode = IprsCode<WideZt, PnttConfigF65537, REP_FACTOR, false>;
+
+        for &num_vars in &[9usize, 13] {
+            let poly_size = 1usize << num_vars;
+            let code = WideCode::new_with_optimal_depth(poly_size).expect("valid IPRS params");
+            let row_len = LinearCode::<WideZt>::row_len(&code);
+            let codeword_len = LinearCode::<WideZt>::codeword_len(&code);
+
+            let mut rng = StdRng::seed_from_u64(0xecd5a_5eed ^ num_vars as u64);
+            let row: Vec<Int<4>> = (0..row_len).map(|_| Int::<4>::random(&mut rng)).collect();
+            let cw = LinearCode::<WideZt>::encode(&code, &row);
+
+            // Smallest signed `Int<L>` that holds every codeword
+            // coefficient (limb granularity — `Cw` is itself an `Int<L>`).
+            let fits = |l: usize| -> bool {
+                macro_rules! all_fit {
+                    ($lim:literal) => {
+                        cw.iter().all(|c| c.checked_resize::<$lim>().is_some())
+                    };
+                }
+                match l {
+                    5 => all_fit!(5),
+                    6 => all_fit!(6),
+                    7 => all_fit!(7),
+                    8 => all_fit!(8),
+                    9 => all_fit!(9),
+                    _ => unreachable!(),
+                }
+            };
+            let needed = (5..=9).find(|&l| fits(l)).unwrap_or(10);
+
+            // encode_wide path (the verifier re-encodes the combined
+            // row). Probe it at the combined row's worst plausible
+            // input width: a batched, i128-challenge-weighted sum of
+            // `Int<4>` evals ≈ 256 + 128 + log2(batch) bits — model it
+            // as random `Int<7>` (448-bit) inputs.
+            let wide_in: Vec<Int<16>> = (0..row_len)
+                .map(|_| Int::<7>::random(&mut rng).resize::<16>())
+                .collect();
+            let encoded = LinearCode::<WideZt>::encode_wide(&code, &wide_in);
+            let fits_w = |l: usize| -> bool {
+                macro_rules! all_fit {
+                    ($lim:literal) => {
+                        encoded.iter().all(|c| c.checked_resize::<$lim>().is_some())
+                    };
+                }
+                match l {
+                    7 => all_fit!(7),
+                    8 => all_fit!(8),
+                    9 => all_fit!(9),
+                    10 => all_fit!(10),
+                    _ => unreachable!(),
+                }
+            };
+            let needed_combr = (7..=10).find(|&l| fits_w(l)).unwrap_or(11);
+
+            eprintln!(
+                "  IPRS int lane num_vars={num_vars} (row_len {row_len}, codeword \
+                 {codeword_len}):",
+            );
+            eprintln!(
+                "    encode:      Int<4> input -> codeword fits Int<{needed}> ({} b) | \
+                 shipped Cw=Int<6> (384 b)",
+                needed * 64,
+            );
+            eprintln!(
+                "    encode_wide: Int<7> combined-row -> fits Int<{needed_combr}> ({} b) | \
+                 shipped CombR=Int<8> (512 b)",
+                needed_combr * 64,
+            );
+        }
+    }
+
     /// Test the widest integer encoding used in benchmarks
     #[test]
     fn encode_bench_int() {

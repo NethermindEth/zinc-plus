@@ -377,16 +377,18 @@ fn setup_pp(num_vars: usize) -> Pp<BenchZincTypes> {
 //
 // Real-UAIR bench types — wired for the EcdsaUair / Sha256CompressionSliceUair
 // / ShaEcdsaUair ports from main-gamma. Cell type is `Int<EC_FP_INT_LIMBS>`
-// (= `Int<5>`, 320-bit); CwR and CombR scale 2× and 4× respectively. F is
-// shared with `BenchZincTypes` (256-bit MontyField, holds the secp256k1
-// base prime used by `fixed_prime::secp256k1_field_cfg`).
+// (`EC_FP_INT_LIMBS = 4`, 256-bit secp256k1 field element). `CwR = Int<5>`:
+// the radix-8 IPRS encoding of an `Int<4>` row was measured to land inside
+// `Int<5>` (320-bit) — see the `iprs_int_lane_coef_bits` test in zip-plus.
+// F is shared with `BenchZincTypes` (256-bit MontyField, holds the
+// secp256k1 base prime used by `fixed_prime::secp256k1_field_cfg`).
 //
 
 type RealEcdsaInt = Int<EC_FP_INT_LIMBS>;
 
 type RealEcdsaBenchZincTypes = GenericBenchZincTypes<
     /* Int         = */ RealEcdsaInt,
-    /* CwR         = */ Int<6>,
+    /* CwR         = */ Int<5>,
     /* Chal        = */ i128,
     /* Pt          = */ i128,
     /* BinaryCombR = */ Int<5>,
