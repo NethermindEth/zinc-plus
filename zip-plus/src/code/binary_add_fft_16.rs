@@ -803,8 +803,10 @@ mod linear_code_tests {
             );
         }
 
+        // B per size: m=12 certified to fit a 24-bit pack; m=15
+        // certified at ~2^27.1, needing a 29-bit pack (see `certify_m15`).
         run::<24>(10, 11);
-        run::<28>(13, 11);
+        run::<29>(13, 11);
     }
 
     /// Measure the empirical max |coefficient| of the radix-8 codeword

@@ -314,49 +314,93 @@ pub fn worst_case_binary_coeff_bound<C: Config16>(
     params: &MixedRadixFftParams16<C>,
     row_len: usize,
 ) -> u128 {
-    use super::ring_ops::{REDUCED_LEN_16, mul_by_lifted_gf16};
-    use zinc_poly::univariate::dense::DensePolynomial;
+    use super::ring_ops::REDUCED_LEN_16;
 
     let n = params.codeword_len();
-    // pos / neg [k * 16 + p]: running Σ of the positive (resp. |negative|)
-    // contributions to codeword coefficient (k, p).
-    let mut pos = vec![0i128; n * REDUCED_LEN_16];
-    let mut neg = vec![0i128; n * REDUCED_LEN_16];
+    let len = n * REDUCED_LEN_16;
 
-    for j in 0..row_len {
-        // Transform the unit ring element `1` at input cell j → the
-        // j-th transform column M_{·,j}.
-        let mut data: Vec<DensePolynomial<i64, REDUCED_LEN_16>> = vec![
-            DensePolynomial {
-                coeffs: [0i64; REDUCED_LEN_16]
-            };
-            n
-        ];
-        data[j].coeffs[0] = 1;
-        additive_fft_mixed_radix_16(&mut data, params);
-
-        for (k, m_kj) in data.iter().enumerate() {
-            // Bit q of input cell j contributes X^q · M_{k,j} to
-            // codeword_k; accumulate each coefficient's signed parts.
-            for q in 0..REDUCED_LEN_16 {
-                let shifted = mul_by_lifted_gf16(&m_kj.coeffs, Gf2_16(1u16 << q));
-                for (p, &c) in shifted.iter().enumerate() {
-                    let c = i128::from(c);
-                    if c > 0 {
-                        pos[k * REDUCED_LEN_16 + p] += c;
-                    } else {
-                        neg[k * REDUCED_LEN_16 + p] -= c;
+    // pos / neg [k * 16 + p]: Σ of the positive (resp. |negative|)
+    // contributions to codeword coefficient (k, p), over the unit
+    // input cells. The cells are independent, so the per-cell work
+    // parallelises with a fold (per-thread accumulators) + reduce.
+    #[cfg(feature = "parallel")]
+    let (pos, neg) = {
+        use rayon::prelude::*;
+        (0..row_len)
+            .into_par_iter()
+            .fold(
+                || (vec![0i128; len], vec![0i128; len]),
+                |mut acc, j| {
+                    accumulate_unit_cell(j, params, n, &mut acc.0, &mut acc.1);
+                    acc
+                },
+            )
+            .reduce(
+                || (vec![0i128; len], vec![0i128; len]),
+                |mut a, b| {
+                    for (x, &y) in a.0.iter_mut().zip(b.0.iter()) {
+                        *x += y;
                     }
-                }
-            }
+                    for (x, &y) in a.1.iter_mut().zip(b.1.iter()) {
+                        *x += y;
+                    }
+                    a
+                },
+            )
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (pos, neg) = {
+        let mut pos = vec![0i128; len];
+        let mut neg = vec![0i128; len];
+        for j in 0..row_len {
+            accumulate_unit_cell(j, params, n, &mut pos, &mut neg);
         }
-    }
+        (pos, neg)
+    };
 
     pos.iter()
         .zip(&neg)
         .map(|(&p, &q)| p.max(q) as u128)
         .max()
         .unwrap_or(0)
+}
+
+/// Accumulate the signed per-output contributions of input cell `j`
+/// (a unit ring element) into the running `pos` / `neg` sums.
+fn accumulate_unit_cell<C: Config16>(
+    j: usize,
+    params: &MixedRadixFftParams16<C>,
+    n: usize,
+    pos: &mut [i128],
+    neg: &mut [i128],
+) {
+    use super::ring_ops::{REDUCED_LEN_16, mul_by_lifted_gf16};
+    use zinc_poly::univariate::dense::DensePolynomial;
+
+    // Transform the unit ring element `1` at cell j → column M_{·,j}.
+    let mut data: Vec<DensePolynomial<i64, REDUCED_LEN_16>> = vec![
+        DensePolynomial {
+            coeffs: [0i64; REDUCED_LEN_16]
+        };
+        n
+    ];
+    data[j].coeffs[0] = 1;
+    additive_fft_mixed_radix_16(&mut data, params);
+
+    for (k, m_kj) in data.iter().enumerate() {
+        // Bit q of cell j contributes X^q · M_{k,j} to codeword_k.
+        for q in 0..REDUCED_LEN_16 {
+            let shifted = mul_by_lifted_gf16(&m_kj.coeffs, Gf2_16(1u16 << q));
+            for (p, &c) in shifted.iter().enumerate() {
+                let c = i128::from(c);
+                if c > 0 {
+                    pos[k * REDUCED_LEN_16 + p] += c;
+                } else {
+                    neg[k * REDUCED_LEN_16 + p] -= c;
+                }
+            }
+        }
+    }
 }
 
 /// Like [`worst_case_binary_coeff_bound`], but the maximum over *every*
@@ -874,6 +918,44 @@ mod tests {
                 log2(s_all),
             );
         }
+    }
+
+    /// Exact certification for m=15 (num_vars=13, codeword 32768) — the
+    /// next size up from the shipped folded lane. Reports the signed
+    /// all-stages worst-case bound, the pack width `B` it implies, and
+    /// whether the i32 fast path is sound there. No assertion (m=15 is
+    /// expected outside the 24-bit / i32 regime). Ignored — the probe
+    /// runs `row_len = 8192` FFTs per stage; build with `--features
+    /// parallel` (it folds over the cells).
+    #[test]
+    #[ignore = "exact worst-case bound for m=15: minutes even parallel"]
+    fn certify_m15() {
+        let sign_seed = crate::code::binary_add_fft_16::SIGN_SEED;
+        let (row_len, codeword_len) = (8192usize, 32768usize);
+        let mut signed = MixedRadixFftParams16::<AddFftConfigGF2_16>::new_with_radix_logs(
+            row_len,
+            codeword_len,
+            vec![3, 3, 3, 3, 3],
+        )
+        .expect("valid radix decomposition");
+        signed.randomize_signs(sign_seed);
+
+        let all_stages = worst_case_binary_coeff_bound_all_stages(&signed, row_len);
+        let bit_len = 128 - all_stages.leading_zeros();
+        let pack_b = bit_len + 1; // magnitude bits + sign
+        let i32_acc_limit: u128 = 1 << 24;
+
+        eprintln!("m=15 (num_vars=13, codeword 32768), SIGN_SEED={sign_seed}:");
+        eprintln!(
+            "  certified signed all-stages bound = {all_stages} (~2^{:.1})",
+            (all_stages as f64).log2(),
+        );
+        eprintln!("  lossless codeword pack: B = {pack_b} bits");
+        eprintln!(
+            "  i32 fast path: {} (all-stages {} 2^24)",
+            if all_stages < i32_acc_limit { "SOUND" } else { "not sound" },
+            if all_stages < i32_acc_limit { "<" } else { ">=" },
+        );
     }
 
     /// Measure the empirical max |codeword coefficient| of the lifted
