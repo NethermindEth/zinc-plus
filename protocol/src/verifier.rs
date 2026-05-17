@@ -1763,6 +1763,533 @@ where
     Ok(())
 }
 
+/// 1×-int-fold verifier: counterpart of [`verify_folded`] for the
+/// [`prove_folded_int`](crate::prover::prove_folded_int) path. Both the
+/// binary lane (`BinaryPoly<HALF_D>`) and the int lane
+/// (`Int<INT_HALF_LIMBS>` halves) are folded once and opened at the
+/// single extended point `r_0 ‖ γ`; the int lifted-eval `bar_u` carries
+/// two coefficients `[q0, q1]` and the int PCS `eval_f` uses the
+/// 2-block algebra `(1−γ)·α·q0 + γ·α·q1`.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn verify_folded_int<
+    ZtF,
+    U,
+    F,
+    BinF,
+    IdealOverF,
+    const D: usize,
+    const HALF_D: usize,
+    const INT_LIMBS: usize,
+    const INT_HALF_LIMBS: usize,
+    const CHECK_FOR_OVERFLOW: bool,
+>(
+    vp: &(
+        ZipPlusParams<ZtF::BinaryZt, ZtF::BinaryLc>,
+        ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
+        ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
+    ),
+    mut proof: Proof<F>,
+    public_trace: &UairTrace<Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    num_vars: usize,
+    project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+) -> Result<(), ProtocolError<F, IdealOverF>>
+where
+    ZtF: crate::IntFoldedZincTypes<D, HALF_D, INT_LIMBS, INT_HALF_LIMBS>,
+    Int<INT_LIMBS>: ProjectableToField<F> + num_traits::Zero,
+    Int<INT_HALF_LIMBS>: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <ZtF::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
+        + for<'b> FromWithConfig<&'b Int<INT_HALF_LIMBS>>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    BinF: PrimeField<Config = <F as PrimeField>::Config>
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> MulByScalar<&'b BinF>
+        + FromRef<BinF>
+        + for<'b> FromWithConfig<&'b F>
+        + crate::BinaryFoldEval<F, ZtF::Chal>,
+    BinF::Inner: Transcribable,
+    BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+{
+    U::verify_public_structure(public_trace, num_vars)
+        .map_err(ProtocolError::PublicStructure)?;
+
+    // ── Step 0: Reconstruct transcript ──────────────────────────────────
+    let zip_proof = std::mem::take(&mut proof.zip);
+    let (vp_bin_split, vp_arb, vp_int) = vp;
+    let uair_signature = U::signature();
+    let mut pcs_transcript = PcsVerifierTranscript {
+        fs_transcript: Blake3Transcript::default(),
+        stream: Cursor::new(zip_proof),
+    };
+    for comm in [
+        &proof.commitments.0,
+        &proof.commitments.1,
+        &proof.commitments.2,
+    ] {
+        pcs_transcript.fs_transcript.absorb_slice(&comm.root);
+    }
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
+    absorb_public_columns(
+        &mut pcs_transcript.fs_transcript,
+        &public_trace.arbitrary_poly,
+    );
+    absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.int);
+
+    // ── Step 1: Prime projection ────────────────────────────────────────
+    let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, ZtF::Fmod>();
+
+    // ── Step 2: Ideal check ─────────────────────────────────────────────
+    let num_constraints = count_constraints::<U>();
+    let ic_subclaim = U::verify_as_subprotocol::<_, IdealOverF, _>(
+        &mut pcs_transcript.fs_transcript,
+        proof.ideal_check,
+        num_constraints,
+        num_vars,
+        |ideal| project_ideal(ideal, &field_cfg),
+        &field_cfg,
+    )?;
+
+    // ── Step 3: Eval projection ─────────────────────────────────────────
+    let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+    let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
+
+    let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
+    let projected_scalars_f =
+        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+    // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
+    let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
+    let num_total_bin = uair_signature.total_cols().num_binary_poly_cols();
+    let bool_skip = uair_signature.booleanity_skip_indices();
+    let num_int_bit_cols = uair_signature.int_witness_bit_cols().len();
+    let num_virtual_cols = uair_signature.virtual_booleanity_cols().len();
+    let num_virtual_bp_cols = uair_signature.virtual_binary_poly_cols().len();
+    let num_bit_slices = ((num_total_bin - num_pub_bin) - bool_skip.len()) * D
+        + num_virtual_bp_cols * D
+        + num_int_bit_cols
+        + num_virtual_cols;
+    let num_shifted_bit_slices = uair_signature.shifted_bit_slice_specs().len() * D;
+    let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
+        &mut pcs_transcript.fs_transcript,
+        &proof.resolver,
+        proof.combined_sumcheck.claimed_sums()[0].clone(),
+        &ic_subclaim,
+        num_constraints,
+        num_bit_slices,
+        num_shifted_bit_slices,
+        num_vars,
+        &projecting_element_f,
+        &field_cfg,
+    )?;
+
+    let bool_verifier_ancillary_opt = if num_bit_slices > 0 {
+        let bool_claimed_sum = proof.combined_sumcheck.claimed_sums()[1].clone();
+        prepare_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            bool_claimed_sum,
+            num_bit_slices,
+            &ic_subclaim.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?
+    } else {
+        None
+    };
+
+    let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        num_vars,
+        &proof.combined_sumcheck,
+        &field_cfg,
+    )
+    .map_err(combined_poly_resolver::CombinedPolyResolverError::SumcheckError)?;
+    let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
+        &mut pcs_transcript.fs_transcript,
+        proof.resolver,
+        md_subclaims.point().to_vec(),
+        md_subclaims.expected_evaluations()[0].clone(),
+        cpr_verifier_ancillary,
+        &projected_scalars_f,
+        &field_cfg,
+    )?;
+
+    let int_offset = uair_signature.total_cols().num_binary_poly_cols()
+        + uair_signature.total_cols().num_arbitrary_poly_cols();
+    let num_pub_int = uair_signature.public_cols().num_int_cols();
+    let num_wit_int = uair_signature.witness_cols().num_int_cols();
+    let num_binary_bit_slices = (num_total_bin - num_pub_bin) * D;
+    let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
+    let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let public_bit_slice_evals: Vec<F> =
+        if !virtual_bp_specs.is_empty() || !virtual_specs.is_empty() {
+            let public_bit_slice_mles =
+                compute_bit_slices_flat::<F, D>(&public_trace.binary_poly, &field_cfg);
+            public_bit_slice_mles
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &field_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        } else {
+            Vec::new()
+        };
+    let mut closing_overrides_tail: Vec<F> = Vec::new();
+    if !virtual_bp_specs.is_empty() {
+        let virtual_bp_overrides = compute_virtual_binary_poly_closing_overrides::<F, D>(
+            virtual_bp_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_bp_overrides);
+    }
+    closing_overrides_tail.extend(
+        uair_signature
+            .int_witness_bit_cols()
+            .iter()
+            .map(|&idx| cpr_subclaim.up_evals[int_offset + idx].clone()),
+    );
+    if !virtual_specs.is_empty() {
+        let int_witness_up_evals: Vec<F> = (0..num_wit_int)
+            .map(|i| cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone())
+            .collect();
+        let virtual_overrides = compute_virtual_closing_overrides::<F, D>(
+            virtual_specs,
+            &cpr_subclaim.bit_slice_evals[..num_binary_bit_slices],
+            &cpr_subclaim.shifted_bit_slice_evals,
+            &public_bit_slice_evals,
+            &int_witness_up_evals,
+            &field_cfg,
+        );
+        closing_overrides_tail.extend(virtual_overrides);
+    }
+    if let Some(ba) = bool_verifier_ancillary_opt {
+        finalize_booleanity_verifier::<F>(
+            &mut pcs_transcript.fs_transcript,
+            &cpr_subclaim.bit_slice_evals,
+            &closing_overrides_tail,
+            md_subclaims.point(),
+            md_subclaims.expected_evaluations()[1].clone(),
+            ba,
+            &field_cfg,
+        )
+        .map_err(ProtocolError::Booleanity)?;
+    }
+
+    let parent_evals_for_bool = filter_skipped_parent_evals(
+        &cpr_subclaim.up_evals[num_pub_bin..num_total_bin],
+        bool_skip,
+    );
+    let num_kept_binary_bit_slices = parent_evals_for_bool.len() * D;
+    verify_bit_decomposition_consistency(
+        &parent_evals_for_bool,
+        &cpr_subclaim.bit_slice_evals[..num_kept_binary_bit_slices],
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    let shifted_down_indices = uair_signature.shifted_bit_slice_down_indices();
+    let shifted_parent_evals: Vec<F> = shifted_down_indices
+        .iter()
+        .map(|&i| cpr_subclaim.down_evals[i].clone())
+        .collect();
+    verify_bit_decomposition_consistency(
+        &shifted_parent_evals,
+        &cpr_subclaim.shifted_bit_slice_evals,
+        &projecting_element_f,
+        D,
+    )
+    .map_err(ProtocolError::Booleanity)?;
+
+    // ── Step 5: Multipoint eval ─────────────────────────────────────────
+    let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
+    let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
+    up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
+    let mp_subclaim = MultipointEval::verify_as_subprotocol(
+        &mut pcs_transcript.fs_transcript,
+        proof.multipoint_eval,
+        &cpr_eval_point,
+        &up_evals_with_bit_op,
+        &cpr_subclaim.down_evals,
+        uair_signature.shifts(),
+        num_vars,
+        &field_cfg,
+    )?;
+    let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+    // ── Step 6: Lifted evals — int section uses 2-coeff bar_us ──────────
+    let pub_cols = uair_signature.public_cols();
+    let num_pub_bin = pub_cols.num_binary_poly_cols();
+    let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+    let num_pub_int = pub_cols.num_int_cols();
+    let wit_cols = uair_signature.witness_cols();
+    let num_wit_bin = wit_cols.num_binary_poly_cols();
+    let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
+    let num_total_arb = uair_signature.total_cols().num_arbitrary_poly_cols();
+
+    let mut public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
+        let projected_public = project_trace_coeffs_row_major::<F, Int<INT_LIMBS>, Int<INT_LIMBS>, D>(
+            public_trace,
+            &field_cfg,
+        );
+        crate::compute_lifted_evals::<F, D>(
+            &r_0,
+            &public_trace.binary_poly,
+            &ProjectedTrace::RowMajor(projected_public),
+            &field_cfg,
+        )
+    } else {
+        Vec::new()
+    };
+    // Replace the int section with the 2-coeff fold lifted-evals so it
+    // matches the prover's `compute_int_fold_2x_lifted_evals`.
+    if num_pub_int > 0 {
+        let int_2coeff = crate::compute_int_fold_2x_lifted_evals::<F, INT_LIMBS, INT_HALF_LIMBS>(
+            &r_0,
+            &public_trace.int,
+            &field_cfg,
+        );
+        let int_off = add!(num_pub_bin, num_pub_arb);
+        for (i, bar_u) in int_2coeff.into_iter().enumerate() {
+            public_lifted[int_off + i] = bar_u;
+        }
+    }
+
+    let witness_lifted_evals = &proof.witness_lifted_evals;
+    let all_lifted_evals: Vec<_> = public_lifted[..num_pub_bin]
+        .iter()
+        .chain(&witness_lifted_evals[..num_wit_bin])
+        .chain(&public_lifted[num_pub_bin..add!(num_pub_bin, num_pub_arb)])
+        .chain(&witness_lifted_evals[num_wit_bin..add!(num_wit_bin, num_wit_arb)])
+        .chain(&public_lifted[add!(num_pub_bin, num_pub_arb)..])
+        .chain(&witness_lifted_evals[add!(num_wit_bin, num_wit_arb)..])
+        .cloned()
+        .collect();
+
+    // open_evals: for int columns the 2-coeff bar_u `[q0, q1]`
+    // reconstructs the unfolded eval as `q0 + 2^128·q1`.
+    let int_section_offset = add!(num_total_bin, num_total_arb);
+    let two_pow_128: F = {
+        let mut acc = F::one_with_cfg(&field_cfg);
+        for _ in 0..128 {
+            let p = acc.clone();
+            acc += &p;
+        }
+        acc
+    };
+    let mut open_evals: Vec<F> = Vec::with_capacity(all_lifted_evals.len());
+    for (idx, bar_u) in all_lifted_evals.iter().enumerate() {
+        if idx >= int_section_offset {
+            let z = || F::zero_with_cfg(&field_cfg);
+            let q0 = bar_u.coeffs.first().cloned().unwrap_or_else(z);
+            let q1 = bar_u.coeffs.get(1).cloned().unwrap_or_else(z);
+            let mut v = q0;
+            let mut t = two_pow_128.clone();
+            t *= &q1;
+            v += &t;
+            open_evals.push(v);
+        } else {
+            open_evals.push(
+                bar_u
+                    .evaluate_at_point(&projecting_element_f)
+                    .map_err(ProtocolError::LiftedEvalProjection)?,
+            );
+        }
+    }
+    for spec in uair_signature.bit_op_specs() {
+        let bar_u_src = &all_lifted_evals[spec.source_col()];
+        let op_e_src = match spec.op() {
+            BitOp::Rot(c) => bar_u_src.rot_c(c),
+            BitOp::ShiftR(c) => bar_u_src.shift_r_c(c),
+        };
+        let psi = op_e_src
+            .evaluate_at_point(&projecting_element_f)
+            .map_err(ProtocolError::LiftedEvalProjection)?;
+        open_evals.push(psi);
+    }
+
+    MultipointEval::verify_subclaim(
+        &mp_subclaim,
+        &open_evals,
+        uair_signature.shifts(),
+        &field_cfg,
+    )?;
+
+    let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+    for bar_u in &all_lifted_evals {
+        pcs_transcript
+            .fs_transcript
+            .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+    }
+
+    // Sample γ — shared by binary and int — matching the prover order.
+    let gamma: F = {
+        let g_chal: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
+        F::from_with_cfg(&g_chal, &field_cfg)
+    };
+    let mut r0_ext = r_0.clone();
+    r0_ext.push(gamma.clone());
+
+    // ── Step 7: PCS verify ──────────────────────────────────────────────
+    let total = uair_signature.total_cols();
+    let num_total_bin = total.num_binary_poly_cols();
+    let num_total_arb = total.num_arbitrary_poly_cols();
+
+    // Binary: split commitment, opening at r_0 ‖ γ — identical algebra
+    // to `verify_folded` (`(1−γ)·c1 + γ·c2`).
+    {
+        let comm = &proof.commitments.0;
+        if comm.batch_size > 0 {
+            let per_poly_alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                comm.batch_size,
+            );
+            let one_minus_gamma: BinF = {
+                let g_binf: BinF = BinF::from_with_cfg(&gamma, &field_cfg);
+                BinF::one_with_cfg(&field_cfg) - g_binf
+            };
+            let gamma_binf: BinF = BinF::from_with_cfg(&gamma, &field_cfg);
+            let mut eval_f: BinF = BinF::zero_with_cfg(&field_cfg);
+
+            for (bar_u, alphas) in all_lifted_evals[num_pub_bin..num_total_bin]
+                .iter()
+                .zip(per_poly_alphas.iter())
+            {
+                debug_assert_eq!(alphas.len(), HALF_D);
+                let lo = bar_u.coeffs.get(..HALF_D).unwrap_or(&bar_u.coeffs);
+                let hi = bar_u.coeffs.get(HALF_D..).unwrap_or(&[]);
+                let c1: BinF =
+                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(lo, alphas, &field_cfg);
+                let c2: BinF =
+                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(hi, alphas, &field_cfg);
+                let mut folded = one_minus_gamma.clone();
+                folded *= &c1;
+                let mut g_c2 = gamma_binf.clone();
+                g_c2 *= &c2;
+                folded += &g_c2;
+                eval_f += &folded;
+            }
+
+            let r0_ext_binf: Vec<BinF> = r0_ext
+                .iter()
+                .map(|f| BinF::from_with_cfg(f, &field_cfg))
+                .collect();
+
+            ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<BinF, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_bin_split,
+                comm,
+                &field_cfg,
+                &r0_ext_binf,
+                &eval_f,
+                &per_poly_alphas,
+            )
+            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        }
+    }
+
+    // Arbitrary: standard verify at r_0 (unfolded).
+    {
+        let comm = &proof.commitments.1;
+        if comm.batch_size > 0 {
+            let per_poly_alphas = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                comm.batch_size,
+            );
+            let mut eval_f = F::zero_with_cfg(&field_cfg);
+            for (bar_u, alphas) in all_lifted_evals
+                [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
+                .iter()
+                .zip(per_poly_alphas.iter())
+            {
+                for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                    let mut term = F::from_with_cfg(alpha, &field_cfg);
+                    term *= coeff;
+                    eval_f += &term;
+                }
+            }
+            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_arb,
+                comm,
+                &field_cfg,
+                &r_0,
+                &eval_f,
+                &per_poly_alphas,
+            )
+            .map_err(|e| ProtocolError::PcsVerification(1, e))?;
+        }
+    }
+
+    // Int: split commitment, opening at r_0 ‖ γ. The int Eval is scalar
+    // (alpha vector length 1); the 2-coeff bar_u `[q0, q1]` folds as
+    // `eval_f = Σ_j (1−γ)·α·q0_j + γ·α·q1_j`.
+    {
+        let comm = &proof.commitments.2;
+        if comm.batch_size > 0 {
+            let per_poly_alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                comm.batch_size,
+            );
+            let one_minus_gamma = F::one_with_cfg(&field_cfg) - gamma.clone();
+            let mut eval_f = F::zero_with_cfg(&field_cfg);
+            for (bar_u, alphas) in all_lifted_evals
+                [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
+                .iter()
+                .zip(per_poly_alphas.iter())
+            {
+                debug_assert_eq!(alphas.len(), 1);
+                let a0: F = F::from_with_cfg(&alphas[0], &field_cfg);
+                let z = || F::zero_with_cfg(&field_cfg);
+                let mut c0 = a0.clone();
+                c0 *= &bar_u.coeffs.first().cloned().unwrap_or_else(z);
+                let mut c1 = a0;
+                c1 *= &bar_u.coeffs.get(1).cloned().unwrap_or_else(z);
+                let mut folded = one_minus_gamma.clone();
+                folded *= &c0;
+                let mut g_c1 = gamma.clone();
+                g_c1 *= &c1;
+                folded += &g_c1;
+                eval_f += &folded;
+            }
+            ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
+                &mut pcs_transcript,
+                vp_int,
+                comm,
+                &field_cfg,
+                &r0_ext,
+                &eval_f,
+                &per_poly_alphas,
+            )
+            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+        }
+    }
+
+    Ok(())
+}
+
 //
 // Folded verifier (4× fold counterpart of `verify_folded`).
 //

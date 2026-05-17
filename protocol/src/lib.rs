@@ -752,6 +752,27 @@ where
         .collect()
 }
 
+/// 2× int-fold lifted-eval helper (named alias of
+/// [`compute_int_fold_lifted_evals`]). Produces 2-coeff bar_us per int
+/// column `[q0, q1]`, where `q0` is the eq(point)-weighted sum of the
+/// LOW 128 bits (limbs 0–1, unsigned) and `q1` the eq(point)-weighted
+/// sum of `(entry >> 128)` (arithmetic/signed shift) resized to
+/// `Int<HALF_H>`. This matches `split_int_column`'s decomposition
+/// `v = lo + 2^128 · hi` exactly. The original column's lifted eval at
+/// `point` is recoverable as `q0 + 2^128 · q1` in F.
+#[inline]
+pub fn compute_int_fold_2x_lifted_evals<F, const H: usize, const HALF_H: usize>(
+    point: &[F],
+    int_trace: &[DenseMultilinearExtension<crypto_primitives::crypto_bigint_int::Int<H>>],
+    field_cfg: &F::Config,
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<HALF_H>>,
+{
+    compute_int_fold_lifted_evals::<F, H, HALF_H>(point, int_trace, field_cfg)
+}
+
 /// 4× int-fold lifted-eval helper. Produces 4-coeff bar_us per int
 /// column: `[q0_eval, q1_eval, q2_eval, q3_eval]` where each coeff is
 /// the MLE eval at `point` of the corresponding 64-bit quarter.
@@ -1785,6 +1806,152 @@ mod tests {
         )
     }
 
+    // ── 1×-int-fold variant of the ShaEcdsa types ──────────────────────
+    //
+    // Binary folded once (`BinaryPoly<16>`) and int folded once
+    // (`Int<4>` → two `Int<2>` halves, `v = lo + 2^128·hi`). Both lanes
+    // commit at length `2n` and open at `(r_0 ‖ γ)`. Reuses
+    // `IntZipTypesShaEcdsaQuarter` — its `Eval = Int<2>` is exactly the
+    // 1×-fold half — and `ArbPolyZipTypesShaEcdsa`.
+
+    #[derive(Debug, Clone)]
+    pub struct BinPolyZipTypesShaEcdsaHalf {}
+    impl ZipTypes for BinPolyZipTypesShaEcdsaHalf {
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
+        type Eval = BinaryPoly<HALF_DEGREE_PLUS_ONE_TEST>;
+        type Cw = DensePolynomial<i64, HALF_DEGREE_PLUS_ONE_TEST>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<{ EC_FP_INT_LIMBS * 4 }>;
+        type Comb = DensePolynomial<Self::CombR, HALF_DEGREE_PLUS_ONE_TEST>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, HALF_DEGREE_PLUS_ONE_TEST>;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            HALF_DEGREE_PLUS_ONE_TEST,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    // The 1× int fold splits `Int<4>` into two `Int<INT_HALF_LIMBS_TEST>`
+    // halves via `split_int_column` (`v = lo + 2^128·hi`, lo = low 128
+    // bits *zero-extended*). For `lo` to stay non-negative the half must
+    // have a spare high limb, i.e. `INT_HALF_LIMBS_TEST >= 3` — `Int<2>`
+    // would push the 128th bit into the sign position.
+    const INT_HALF_LIMBS_TEST: usize = 3;
+
+    #[derive(Debug, Clone)]
+    pub struct IntZipTypesShaEcdsaHalf {}
+    impl ZipTypes for IntZipTypesShaEcdsaHalf {
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
+        type Eval = Int<INT_HALF_LIMBS_TEST>;
+        type Cw = Int<{ INT_HALF_LIMBS_TEST + 1 }>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<8>;
+        type Comb = Self::CombR;
+        type EvalDotChal = ScalarProduct;
+        type CombDotChal = ScalarProduct;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestShaEcdsaFoldedIntZincTypes;
+
+    impl
+        IntFoldedZincTypes<
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_TEST,
+        > for TestShaEcdsaFoldedIntZincTypes
+    {
+        type Chal = i128;
+        type Pt = i128;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+
+        type BinaryZt = BinPolyZipTypesShaEcdsaHalf;
+        type ArbitraryZt = ArbPolyZipTypesShaEcdsa;
+        type IntZt = IntZipTypesShaEcdsaHalf;
+
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_folded_int_pp_sha_ecdsa(
+        num_vars: usize,
+    ) -> (
+        ZipPlusParams<
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::BinaryZt,
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::BinaryLc,
+        >,
+        ZipPlusParams<
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::ArbitraryZt,
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::ArbitraryLc,
+        >,
+        ZipPlusParams<
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::IntZt,
+            <TestShaEcdsaFoldedIntZincTypes as IntFoldedZincTypes<
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE_TEST,
+                EC_FP_INT_LIMBS,
+                INT_HALF_LIMBS_TEST,
+            >>::IntLc,
+        >,
+    ) {
+        // Binary AND int fold once → both commit at length 2n.
+        let split_size = 1 << (num_vars + 1);
+        let normal_size = 1 << num_vars;
+        (
+            ZipPlus::setup(
+                split_size,
+                IprsCode::new_with_optimal_depth(split_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                normal_size,
+                IprsCode::new_with_optimal_depth(normal_size).unwrap(),
+            ),
+            ZipPlus::setup(
+                split_size,
+                IprsCode::new_with_optimal_depth(split_size).unwrap(),
+            ),
+        )
+    }
+
     /// `ZincTypes` bundle wiring SHA-ECDSA's `Int<5>` cells through
     /// IPRS-coded Zip+ commitments. Mirrors `RealEcdsaBenchZincTypes`
     /// from `protocol/benches/e2e.rs` (which already exercises this
@@ -1999,6 +2166,72 @@ mod tests {
             sha256_test_project_ideal,
         )
         .expect("Verifier rejected an honest 4× folded ShaEcdsa proof");
+    }
+
+    /// 1×-int-fold ShaEcdsa round-trip — binary folded once
+    /// (`BinaryPoly<16>`) and int folded once (`Int<4>` → two `Int<2>`
+    /// halves), both committed at length `2n` and opened at the single
+    /// extended point `(r_0 ‖ γ)`. Prints the serialized proof size.
+    #[test]
+    fn test_e2e_sha_ecdsa_folded_int_round_trip() {
+        use crate::prover::prove_folded_int;
+        use crate::verifier::verify_folded_int;
+
+        type ZtF = TestShaEcdsaFoldedIntZincTypes;
+        type U = ShaEcdsaUair<ShaEcdsaInt>;
+
+        let mut rng = rng();
+        let pp = setup_folded_int_pp_sha_ecdsa(SHA_ECDSA_NUM_VARS);
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let sig = <U as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = prove_folded_int::<
+            ZtF,
+            U,
+            F,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_TEST,
+            false,
+            CHECKED,
+        >(&pp, &trace, SHA_ECDSA_NUM_VARS, project_scalar_fn)
+        .expect("1×-int-fold prover failed");
+
+        let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
+        transcript.write(&proof).expect("Failed to serialize proof");
+        let serialized_len = transcript.stream.get_ref().len();
+        println!(
+            "1×-int-fold ShaEcdsa proof size: {} bytes ({} KiB)",
+            serialized_len,
+            serialized_len.div_ceil(1024),
+        );
+        let mut transcript = transcript.into_verification_transcript();
+        let proof_2 = transcript.read().expect("Failed to deserialize proof");
+        assert_eq!(proof, proof_2);
+
+        verify_folded_int::<
+            ZtF,
+            U,
+            F,
+            F,
+            Sha256Ideal<F>,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE_TEST,
+            EC_FP_INT_LIMBS,
+            INT_HALF_LIMBS_TEST,
+            CHECKED,
+        >(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest 1×-int-fold ShaEcdsa proof");
     }
 
     /// No-tamper SHA-ECDSA round-trip + structural-shape pins. Prints
