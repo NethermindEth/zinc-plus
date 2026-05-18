@@ -2695,19 +2695,32 @@ fn bench_real_sha256_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: 
 /// Polychal variant of `bench_real_sha256_e2e_folded`: the binary lane
 /// is committed via the degree-16 binary-additive-FFT PCS, with
 /// `BinF = PolyExt16<FIELD_LIMBS>` as the binary-lane PCS field.
-fn bench_real_sha256_e2e_folded_polychal(
+fn bench_real_sha256_e2e_folded_polychal<const NC: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     num_vars: usize,
 ) {
-    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
-
     let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace =
+        Sha256CompressionSliceUair::<RealEcdsaInt, NC>::generate_random_trace(num_vars, &mut rng);
     let pp = setup_folded_pp_polychal(num_vars);
 
-    do_bench_e2e_folded::<BenchFoldedPolyChalZincTypes, U, PolyExt16<FIELD_LIMBS>, _>(
+    // NC = 7 is the standard 7-compression circuit; a smaller NC (e.g.
+    // the single-compression NC = 1, which fits num_vars = 7) takes a
+    // distinct label so the bench IDs stay unambiguous.
+    let label = if NC == 7 {
+        "RealSha256Polychal".to_string()
+    } else {
+        format!("RealSha256Polychal-{NC}comp")
+    };
+
+    do_bench_e2e_folded::<
+        BenchFoldedPolyChalZincTypes,
+        Sha256CompressionSliceUair<RealEcdsaInt, NC>,
+        PolyExt16<FIELD_LIMBS>,
+        _,
+    >(
         group,
-        "RealSha256Polychal",
+        &label,
         num_vars,
         &pp,
         &trace,
@@ -2824,8 +2837,11 @@ fn e2e_folded_benches(c: &mut Criterion) {
     // still use IPRS over the ~2^16-element field F_65537, whose
     // codeword ceiling is hit at num_vars = 15.
     for nv in 9..=14 {
-        bench_real_sha256_e2e_folded_polychal(&mut group, nv);
+        bench_real_sha256_e2e_folded_polychal::<7>(&mut group, nv);
     }
+    // Smallest real SHA-256: a single compression (NC = 1) fits
+    // num_vars = 7 — one 68-row compression + a 4-row output prefix.
+    bench_real_sha256_e2e_folded_polychal::<1>(&mut group, 7);
     bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_polychal(&mut group, 9);
     bench_real_sha_ecdsa_e2e_folded_polychal_int(&mut group, 9);
@@ -2859,7 +2875,7 @@ fn e2e_rate_1_2_benches(c: &mut Criterion) {
 
     for nv in [9, 12] {
         bench_real_sha256_e2e_folded(&mut group, nv);
-        bench_real_sha256_e2e_folded_polychal(&mut group, nv);
+        bench_real_sha256_e2e_folded_polychal::<7>(&mut group, nv);
         bench_real_sha_ecdsa_e2e_folded(&mut group, nv);
         bench_real_sha_ecdsa_e2e_folded_polychal(&mut group, nv);
     }

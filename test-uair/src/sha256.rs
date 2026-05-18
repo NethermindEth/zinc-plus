@@ -246,8 +246,15 @@ where
 /// SHA-256 compression UAIR (slice). See module docs for the full list of
 /// constraint families, the `F_2[X] → Q[X]` lifting convention, and the
 /// in-scope public-input wiring.
+///
+/// `NC` is the number of chained compressions a generated trace holds
+/// (default 7 = [`cols::NUM_COMPRESSIONS`]). The constraint families are
+/// selector-driven; `NC` only sets how many per-compression windows
+/// `verify_public_structure` checks and how many compressions
+/// `generate_random_trace` fills (and hence the `num_vars` floor).
+/// `NC = 1` is the smallest real SHA-256 trace and fits `num_vars = 7`.
 #[derive(Clone, Debug)]
-pub struct Sha256CompressionSliceUair<R>(PhantomData<R>);
+pub struct Sha256CompressionSliceUair<R, const NC: usize = 7>(PhantomData<R>);
 
 /// Column indices within the flat trace (binary || arbitrary || int).
 ///
@@ -433,7 +440,7 @@ pub mod cols {
     pub const FLAT_W_MU_PACKED: usize = W_MU_PACKED;
 }
 
-impl<R> Uair for Sha256CompressionSliceUair<R>
+impl<R, const NC: usize> Uair for Sha256CompressionSliceUair<R, NC>
 where
     R: ConstSemiring + 'static,
 {
@@ -1022,7 +1029,7 @@ where
         let pa_r_maj_comp = &public_trace.binary_poly[cols::PA_R_MAJ_COMP].evaluations;
 
         // Per-compression active windows. start = ROWS_PER_COMP·i.
-        for i in 0..cols::NUM_COMPRESSIONS {
+        for i in 0..NC {
             let start = i * cols::ROWS_PER_COMP;
 
             // Schedule-active anchors: k ∈ [start, start + ROUNDS_PER_COMP - 16),
@@ -1295,7 +1302,7 @@ fn lsig1_overflow(w_val: u32, lsig1_val: u32) -> u32 {
 // GenerateRandomTrace for the slice.
 // ---------------------------------------------------------------------------
 
-impl<R> GenerateRandomTrace<32> for Sha256CompressionSliceUair<R>
+impl<R, const NC: usize> GenerateRandomTrace<32> for Sha256CompressionSliceUair<R, NC>
 where
     R: ConstSemiring + From<u32> + 'static,
 {
@@ -1307,11 +1314,15 @@ where
         rng: &mut Rng,
     ) -> UairTrace<'static, R, R, 32> {
         let n = 1usize << num_vars;
+        // Smallest num_vars holding NC chained compressions: enough rows
+        // for NC·ROWS_PER_COMP + 4 active rows (the +4 = H_N output
+        // prefix). NC = 7 → 9 (= cols::MIN_NUM_VARS); NC = 1 → 7.
+        let min_num_vars =
+            (NC * cols::ROWS_PER_COMP + 4).next_power_of_two().trailing_zeros() as usize;
         assert!(
-            num_vars >= cols::MIN_NUM_VARS,
-            "trace too small for {} chained compressions: need num_vars ≥ {}, got {num_vars}",
-            cols::NUM_COMPRESSIONS,
-            cols::MIN_NUM_VARS,
+            num_vars >= min_num_vars,
+            "trace too small for {NC} chained compressions: \
+             need num_vars ≥ {min_num_vars}, got {num_vars}",
         );
 
         // ===== Chained-compression layout =====
@@ -1336,7 +1347,7 @@ where
         // Slack rows [N·RPC + 4, n) are zero-padded; all SHA constraints
         // are inactive there (compensators absorb C7/C8/C9; selectors
         // gate off C13–C15 and the boundary/junction families).
-        let big_n = cols::NUM_COMPRESSIONS;
+        let big_n = NC;
         let rpc = cols::ROWS_PER_COMP;
         let rounds = cols::ROUNDS_PER_COMP;
 
