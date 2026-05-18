@@ -386,8 +386,7 @@ fn batched_booleanity_sum<F: PrimeField>(
     debug_assert_eq!(bit_slice_values.len(), mul!(n, d));
 
     let mut sum = zero.clone();
-    for j in 0..n {
-        let delta_j = &delta_powers[j];
+    for (j, delta_j) in delta_powers.iter().enumerate().take(n) {
         let jd = mul!(j, d);
         for i in 0..d {
             let v = &bit_slice_values[add!(i, jd)];
