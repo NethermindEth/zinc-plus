@@ -77,6 +77,11 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
             c > 0 && c < D,
             "rotate_right count {c} out of range (must satisfy 0 < c < {D})",
         );
+        assert!(
+            self.coeffs.len() <= D,
+            "rotate_right coefficient length {} exceeds width {D}",
+            self.coeffs.len(),
+        );
 
         let mut coeffs = self.coeffs.clone();
         coeffs.resize(D, F::zero_with_cfg(field_cfg));
@@ -96,6 +101,11 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
         assert!(
             c > 0 && c < D,
             "shr count {c} out of range (must satisfy 0 < c < {D})",
+        );
+        assert!(
+            self.coeffs.len() <= D,
+            "shr coefficient length {} exceeds width {D}",
+            self.coeffs.len(),
         );
 
         let zero = F::zero_with_cfg(field_cfg);
@@ -898,6 +908,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "rotate_right coefficient length 3 exceeds width 2")]
+    fn rotate_right_panics_when_coefficients_exceed_width() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1), f(2), f(3)]).rotate_right::<2>(1, &field_cfg);
+    }
+
+    #[test]
     #[should_panic(expected = "shr count 0 out of range")]
     fn shr_panics_on_zero() {
         let field_cfg = test_config();
@@ -909,6 +926,13 @@ mod tests {
     fn shr_panics_on_full_width() {
         let field_cfg = test_config();
         let _ = DynamicPolynomialF::new([f(1)]).shr::<5>(5, &field_cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "shr coefficient length 3 exceeds width 2")]
+    fn shr_panics_when_coefficients_exceed_width() {
+        let field_cfg = test_config();
+        let _ = DynamicPolynomialF::new([f(1), f(2), f(3)]).shr::<2>(1, &field_cfg);
     }
 
     #[test]

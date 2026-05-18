@@ -13,9 +13,12 @@ use zinc_poly::{
     univariate::dynamic::over_field::DynamicPolynomialF,
     utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
-use zinc_uair::{ColumnLayout, ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_uair::{
+    BitOp, BitOpSpec, ColumnLayout, ConstraintBuilder, ShiftSpec, TraceRow, Uair, UairSignature,
+    ideal::ImpossibleIdeal,
+};
 use zinc_utils::{
-    cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    add, cfg_into_iter, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
 };
 
 /// Evaluate combined polynomial MLEs at `evaluation_point` for a selected
@@ -30,7 +33,7 @@ use zinc_utils::{
 ///
 /// `trace_matrix` is row-indexed: `trace_matrix[row][col]`.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_for_constraints<F, U>(
+pub fn evaluate_for_constraints<F, U, const DEGREE_PLUS_ONE: usize>(
     trace_matrix: &RowMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
@@ -57,21 +60,35 @@ where
     // `all_rows[row_idx][constraint_idx]` is a `DynamicPolynomialF<F>`:
     // the combined polynomial value of constraint `constraint_idx` at
     // trace row `row_idx`.
+    let bit_op_down_offset = bit_op_down_offset(&uair_sig);
     let mut all_rows: Vec<Vec<DynamicPolynomialF<F>>> = cfg_into_iter!(0..num_rows - 1)
         .map(|row_idx| {
             let up = &trace_matrix[row_idx];
 
-            let down: Vec<DynamicPolynomialF<F>> = uair_sig
-                .shifts()
-                .iter()
-                .map(|spec| {
-                    if row_idx + spec.shift_amount() < num_rows {
-                        trace_matrix[row_idx + spec.shift_amount()][spec.source_col()].clone()
-                    } else {
-                        DynamicPolynomialF::zero() // zero padding
-                    }
-                })
-                .collect();
+            // Build the down row in the canonical order:
+            //   [shifted_binary, bit_op_binary, shifted_arbitrary, shifted_int]
+            // (cf. `UairSignature::with_bit_op_specs`). Splicing bit-op
+            // virtuals into the binary_poly slice keeps `down` consistent
+            // with `down_layout`; appending at the tail would misalign
+            // constraints on mixed-type shift UAIRs.
+            let mut down: Vec<DynamicPolynomialF<F>> =
+                Vec::with_capacity(uair_sig.shifts().len() + uair_sig.bit_op_specs().len());
+
+            let shifts = uair_sig.shifts();
+            for spec in &shifts[..bit_op_down_offset] {
+                push_shifted_down_entry(&mut down, trace_matrix, row_idx, num_rows, spec);
+            }
+
+            for spec in uair_sig.bit_op_specs() {
+                let source = &trace_matrix[row_idx][spec.source_col()];
+                down.push(apply_bit_op_to_poly::<F, DEGREE_PLUS_ONE>(
+                    source, spec, field_cfg,
+                ));
+            }
+
+            for spec in &shifts[bit_op_down_offset..] {
+                push_shifted_down_entry(&mut down, trace_matrix, row_idx, num_rows, spec);
+            }
 
             evaluate_constraints_for_row::<F, U>(
                 up,
@@ -207,7 +224,7 @@ where
 /// Does `(num_columns + num_shifted_columns) * max_num_coeffs` evaluations of
 /// MLEs.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_combined_polynomials<F, U>(
+pub fn evaluate_combined_polynomials<F, U, const DEGREE_PLUS_ONE: usize>(
     trace_matrix: &ColumnMajorTrace<F>,
     projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
     num_constraints: usize,
@@ -276,7 +293,7 @@ where
 
     // Evaluate down (only shifted columns, per-spec shift amount).
     let sorted_shifts = uair_sig.shifts();
-    let down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
+    let shift_down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(sorted_shifts)
         .map(|spec| {
             let col = &trace_matrix[spec.source_col()];
             let coeffs: Vec<F> = (0..max_num_coeffs)
@@ -285,6 +302,29 @@ where
             Ok(DynamicPolynomialF::new_trimmed(coeffs))
         })
         .collect::<Result<Vec<_>, EvaluationError>>()?;
+
+    // Evaluate bit-op virtuals from the already-computed up evaluations:
+    // bit-ops act coefficient-wise, so MLE-eval-of-op at the same point is
+    // op-of-MLE-eval on the source coefficient vector.
+    let bit_op_down_offset = bit_op_down_offset(&uair_sig);
+    let bit_op_down_evals: Vec<DynamicPolynomialF<F>> = uair_sig
+        .bit_op_specs()
+        .iter()
+        .map(|spec| {
+            apply_bit_op_to_poly::<F, DEGREE_PLUS_ONE>(
+                &up_evals[spec.source_col()],
+                spec,
+                field_cfg,
+            )
+        })
+        .collect();
+
+    // Splice into the canonical down ordering; see UairSignature docs.
+    let mut down_evals: Vec<DynamicPolynomialF<F>> =
+        Vec::with_capacity(shift_down_evals.len() + bit_op_down_evals.len());
+    down_evals.extend_from_slice(&shift_down_evals[..bit_op_down_offset]);
+    down_evals.extend(bit_op_down_evals);
+    down_evals.extend_from_slice(&shift_down_evals[bit_op_down_offset..]);
 
     // Apply UAIR constraints to the evaluated trace values
     let mut constraint_builder = CombinedPolyRowBuilder::new(num_constraints);
@@ -309,6 +349,41 @@ where
     combined_evaluations.iter_mut().for_each(|eval| eval.trim());
 
     Ok(combined_evaluations)
+}
+
+fn bit_op_down_offset(uair_sig: &UairSignature) -> usize {
+    let binary_poly_end = uair_sig.total_cols().num_binary_poly_cols();
+    uair_sig
+        .shifts()
+        .iter()
+        .take_while(|spec| spec.source_col() < binary_poly_end)
+        .count()
+}
+
+fn push_shifted_down_entry<F: PrimeField>(
+    down: &mut Vec<DynamicPolynomialF<F>>,
+    trace_matrix: &RowMajorTrace<F>,
+    row_idx: usize,
+    num_rows: usize,
+    spec: &ShiftSpec,
+) {
+    let shifted_row_idx = add!(row_idx, spec.shift_amount());
+    if shifted_row_idx < num_rows {
+        down.push(trace_matrix[shifted_row_idx][spec.source_col()].clone());
+    } else {
+        down.push(DynamicPolynomialF::zero());
+    }
+}
+
+fn apply_bit_op_to_poly<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
+    source: &DynamicPolynomialF<F>,
+    spec: &BitOpSpec,
+    field_cfg: &F::Config,
+) -> DynamicPolynomialF<F> {
+    match spec.op() {
+        BitOp::Rot(c) => source.rotate_right::<DEGREE_PLUS_ONE>(c, field_cfg),
+        BitOp::ShR(c) => source.shr::<DEGREE_PLUS_ONE>(c, field_cfg),
+    }
 }
 
 pub struct CombinedPolyRowBuilder<F: PrimeField> {

@@ -51,7 +51,7 @@ pub trait IdealCheckProtocol: Uair {
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    fn prove_mle_first<F>(
+    fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
@@ -80,7 +80,7 @@ pub trait IdealCheckProtocol: Uair {
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    fn prove_combined<F>(
+    fn prove_combined<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
         projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
@@ -139,7 +139,7 @@ where
     U: Uair,
 {
     #[allow(clippy::type_complexity)]
-    fn prove_mle_first<F>(
+    fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -181,13 +181,14 @@ where
         // out correct.
         // Non-linear entries are garbage and get replaced below.
         let mut combined_mle_values: Vec<DynamicPolynomialF<F>> = if has_linear_nonzero {
-            let mut res = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
-                trace_matrix,
-                projected_scalars,
-                num_constraints,
-                &evaluation_point,
-                field_cfg,
-            )?;
+            let mut res =
+                combined_poly_builder::evaluate_combined_polynomials::<_, U, DEGREE_PLUS_ONE>(
+                    trace_matrix,
+                    projected_scalars,
+                    num_constraints,
+                    &evaluation_point,
+                    field_cfg,
+                )?;
 
             // Scrub garbage left by `evaluate_combined_polynomials` at non-linear
             // zero-ideal indices.
@@ -205,7 +206,7 @@ where
             // transpose here.
             // TODO(alex): Can/should we avoid the transposition?
             let row_major = column_major_to_row_major(trace_matrix);
-            let values = combined_poly_builder::evaluate_for_constraints::<_, U>(
+            let values = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 &row_major,
                 projected_scalars,
                 num_constraints,
@@ -234,7 +235,7 @@ where
     }
 
     #[allow(clippy::type_complexity)]
-    fn prove_combined<F>(
+    fn prove_combined<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
         projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -262,7 +263,7 @@ where
 
         let mut combined_mle_values = vec![DynamicPolynomialF::ZERO; num_constraints];
         if !non_zero_indices.is_empty() {
-            let computed = combined_poly_builder::evaluate_for_constraints::<_, U>(
+            let computed = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 trace_matrix,
                 projected_scalars,
                 num_constraints,
@@ -357,7 +358,8 @@ mod tests {
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
-        GenerateRandomTrace, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        GenerateRandomTrace, TestUairBitOpsMixedSplice, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
     use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
@@ -456,6 +458,11 @@ mod tests {
         // Non-linear UAIR with all-zero ideals
         do_test::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(num_vars, |_ideal_over_ring| {
             IdealOrZero::<DegreeOneIdeal<_>>::zero()
+        });
+
+        // Linear UAIR with bit-op virtuals and mixed down-row splicing.
+        do_test::<TestUairBitOpsMixedSplice<Int<5>>, _, _, 32>(num_vars, |ideal_over_ring| {
+            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
         });
     }
 }

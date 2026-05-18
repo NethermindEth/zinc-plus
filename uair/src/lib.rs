@@ -332,10 +332,9 @@ impl UairSignature {
 
     /// Attach bit-op virtual column specs to the signature.
     ///
-    /// Each spec must reference a binary_poly source column; bit-ops are only
-    /// defined on bit-polynomial cells. `cell_width` is the shared coefficient
-    /// width `W` of those cells, and every bit-op count must satisfy
-    /// `0 < count < W`.
+    /// Each spec must reference a binary_poly source column. The bit-op count
+    /// must be less than the binary-poly cell width `W`; materialization sites
+    /// check that bound with their const `DEGREE_PLUS_ONE` parameter.
     ///
     /// # Down-row ordering invariant
     ///
@@ -355,7 +354,7 @@ impl UairSignature {
     ///
     /// Insertion order of `bit_op_specs` determines the position of each
     /// bit-op virtual within its sub-slice.
-    pub fn with_bit_op_specs(mut self, cell_width: usize, bit_op_specs: Vec<BitOpSpec>) -> Self {
+    pub fn with_bit_op_specs(mut self, bit_op_specs: Vec<BitOpSpec>) -> Self {
         let binary_poly_end = self.total_cols.num_binary_poly_cols();
         for spec in &bit_op_specs {
             assert!(
@@ -365,12 +364,6 @@ impl UairSignature {
                  cell ring F_2[X]/(X^W).",
                 spec.source_col(),
                 binary_poly_end,
-            );
-            assert!(
-                spec.op().count() < cell_width,
-                "BitOpSpec count {} out of range (must satisfy 0 < count < {})",
-                spec.op().count(),
-                cell_width,
             );
         }
         self.bit_op_specs = bit_op_specs;
@@ -630,7 +623,7 @@ mod tests {
             BitOpSpec::new(1, BitOp::ShR(3)),
             BitOpSpec::new(0, BitOp::Rot(2)),
         ];
-        let sig = signature_with_mixed_shifts().with_bit_op_specs(8, specs.clone());
+        let sig = signature_with_mixed_shifts().with_bit_op_specs(specs.clone());
 
         assert_eq!(sig.bit_op_specs(), specs);
         assert_eq!(sig.bit_op_specs()[0].source_col(), 1);
@@ -643,7 +636,7 @@ mod tests {
 
     #[test]
     fn empty_bit_op_specs_keep_shift_only_down_layout() {
-        let sig = signature_with_mixed_shifts().with_bit_op_specs(8, vec![]);
+        let sig = signature_with_mixed_shifts().with_bit_op_specs(vec![]);
 
         assert!(sig.bit_op_specs().is_empty());
         assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
@@ -660,14 +653,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is not a binary_poly column")]
     fn bit_op_specs_reject_non_binary_source() {
-        let _ = signature_with_mixed_shifts()
-            .with_bit_op_specs(8, vec![BitOpSpec::new(2, BitOp::ShR(1))]);
-    }
-
-    #[test]
-    #[should_panic(expected = "out of range")]
-    fn bit_op_specs_reject_count_at_cell_width() {
-        let _ = signature_with_mixed_shifts()
-            .with_bit_op_specs(8, vec![BitOpSpec::new(0, BitOp::Rot(8))]);
+        let _ =
+            signature_with_mixed_shifts().with_bit_op_specs(vec![BitOpSpec::new(2, BitOp::ShR(1))]);
     }
 }

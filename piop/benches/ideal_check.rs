@@ -70,7 +70,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         // Even though this UAIR is linear, using prove_combined yields much better
         // prover performance for it.
-        TestUairNoMultiplication::prove_combined(
+        TestUairNoMultiplication::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
@@ -162,7 +162,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        TestUairSimpleMultiplication::prove_combined(
+        TestUairSimpleMultiplication::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
@@ -254,7 +254,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                     .collect()
             });
 
-        BinaryDecompositionUair::prove_combined(
+        BinaryDecompositionUair::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
@@ -333,7 +333,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                         .collect()
                 });
 
-            BigLinearUair::$prove_fn(
+            BigLinearUair::$prove_fn::<_, DEGREE_PLUS_ONE>(
                 $transcript,
                 &trace,
                 &projected_scalars,

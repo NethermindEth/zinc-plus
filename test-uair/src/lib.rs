@@ -19,8 +19,8 @@ use zinc_poly::{
     },
 };
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
+    BitOp, BitOpSpec, ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout,
+    TraceRow, Uair, UairSignature, UairTrace,
     ideal::{DegreeOneIdeal, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -858,6 +858,109 @@ where
     }
 }
 
+/// Mixed-splice UAIR for bit-op virtual columns.
+///
+/// It populates three slots of the canonical down-row ordering at once:
+/// shifted binary, bit-op binary, and shifted arbitrary. This catches
+/// materialization code that appends bit-op virtuals at the tail instead of
+/// inserting them into the binary down slice.
+#[derive(Clone, Debug)]
+pub struct TestUairBitOpsMixedSplice<R>(PhantomData<R>);
+
+impl<R> Uair for TestUairBitOpsMixedSplice<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        let total = TotalColumnLayout::new(3, 2, 0);
+        let shifts = vec![ShiftSpec::new(0, 1), ShiftSpec::new(3, 1)];
+        let bit_op_specs = vec![BitOpSpec::new(0, BitOp::ShR(3))];
+        let sig = UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
+            .with_bit_op_specs(bit_op_specs);
+        debug_assert_eq!(sig.down_cols().num_binary_poly_cols(), 2);
+        debug_assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
+        debug_assert_eq!(sig.down_cols().num_int_cols(), 0);
+        sig
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        let one_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
+        b.assert_in_ideal(down.binary_poly[0].clone() - &up.binary_poly[2], &one_ideal);
+        b.assert_in_ideal(down.binary_poly[1].clone() - &up.binary_poly[1], &one_ideal);
+        b.assert_in_ideal(
+            down.arbitrary_poly[0].clone() - &up.arbitrary_poly[1],
+            &one_ideal,
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for TestUairBitOpsMixedSplice<R>
+where
+    R: ConstSemiring + FixedSemiring + From<i8> + 'static,
+    StandardUniform: Distribution<R>,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32, 32> {
+        let n = 1usize << num_vars;
+
+        let w_u32: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
+        let w_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            w_u32.iter().map(|w| BinaryPoly::from(*w)).collect();
+        let s_shr_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            w_u32.iter().map(|w| BinaryPoly::from(w >> 3)).collect();
+        let t_col: DenseMultilinearExtension<BinaryPoly<32>> = (0..n)
+            .map(|i| {
+                if i + 1 < n {
+                    BinaryPoly::from(w_u32[i + 1])
+                } else {
+                    BinaryPoly::from(0u32)
+                }
+            })
+            .collect();
+
+        let a_cells: Vec<DensePolynomial<R, 32>> = (0..n)
+            .map(|_| DensePolynomial::new([R::from(rng.random::<i8>())]))
+            .collect();
+        let a_next_cells: Vec<DensePolynomial<R, 32>> = (0..n)
+            .map(|i| {
+                if i + 1 < n {
+                    a_cells[i + 1].clone()
+                } else {
+                    DensePolynomial::<R, 32>::zero()
+                }
+            })
+            .collect();
+
+        UairTrace {
+            binary_poly: vec![w_col, s_shr_col, t_col].into(),
+            arbitrary_poly: vec![
+                a_cells.into_iter().collect(),
+                a_next_cells.into_iter().collect(),
+            ]
+            .into(),
+            int: vec![].into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -888,6 +991,7 @@ mod tests {
         assert_uair_shape::<BinaryDecompositionUair<u32>>(&[1]);
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
+        assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>>>(&[1, 1, 1]);
     }
 
     #[test]

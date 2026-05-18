@@ -11,7 +11,6 @@ use crate::{
 };
 use crypto_bigint::{Odd, modular::MontyParams};
 use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-use num_traits::Zero;
 use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
 use zinc_test_uair::GenerateRandomTrace;
 use zinc_transcript::traits::Transcript;
@@ -48,15 +47,9 @@ where
         + IdealCheckProtocol,
     F: FromWithConfig<Int<5>>,
 {
-    assert!(
-        U::signature()
-            .witness_cols()
-            .num_binary_poly_cols()
-            .is_zero()
-            && U::signature().witness_cols().num_int_cols().is_zero(),
-        "the signature should be single typed"
-    );
-
+    // These helpers intentionally accept mixed-type signatures. The projection
+    // layer handles binary_poly, arbitrary_poly, and int columns uniformly, and
+    // mixed fixtures are needed to regression-test down-row splicing.
     let field_cfg = test_config();
 
     let num_constraints = count_constraints::<U>();
@@ -70,7 +63,7 @@ where
 
     let trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(trace, &field_cfg);
 
-    let (proof, state) = U::prove_mle_first(
+    let (proof, state) = U::prove_mle_first::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
@@ -102,15 +95,9 @@ where
         + IdealCheckProtocol,
     F: FromWithConfig<Int<5>>,
 {
-    assert!(
-        U::signature()
-            .witness_cols()
-            .num_binary_poly_cols()
-            .is_zero()
-            && U::signature().witness_cols().num_int_cols().is_zero(),
-        "the signature should be single typed"
-    );
-
+    // These helpers intentionally accept mixed-type signatures. The projection
+    // layer handles binary_poly, arbitrary_poly, and int columns uniformly, and
+    // mixed fixtures are needed to regression-test down-row splicing.
     let field_cfg = test_config();
 
     let num_constraints = count_constraints::<U>();
@@ -124,7 +111,7 @@ where
 
     let trace: RowMajorTrace<F> = project_trace_coeffs_row_major(trace, &field_cfg);
 
-    let (proof, state) = U::prove_combined(
+    let (proof, state) = U::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,

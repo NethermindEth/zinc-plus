@@ -69,7 +69,10 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             });
 
         let (ic_proof, ic_prover_state) =
-            <TestUairNoMultiplication<_> as IdealCheckProtocol>::prove_combined(
+            <TestUairNoMultiplication<_> as IdealCheckProtocol>::prove_combined::<
+                _,
+                DEGREE_PLUS_ONE,
+            >(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
@@ -250,7 +253,10 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         });
 
         let (ic_proof, ic_prover_state) =
-            <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::prove_combined(
+            <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::prove_combined::<
+                _,
+                DEGREE_PLUS_ONE,
+            >(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
