@@ -44,6 +44,10 @@ iprs-rate-1-8 = []
 # Switch the IPRS bench code to inverse-rate 16 (rate 1/16). Takes precedence
 # over `iprs-rate-1-8` if both are enabled.
 iprs-rate-1-16 = []
+# Switch the IPRS bench code to inverse-rate 2 (rate 1/2), using 300 column
+# openings. `iprs-rate-1-16` and `iprs-rate-1-8` take precedence if also
+# enabled. Intended for the `e2e_rate_1_2` bench group in `benches/e2e.rs`.
+iprs-rate-1-2 = []
 
 [[bench]]
 name = "e2e"
