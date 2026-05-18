@@ -435,19 +435,39 @@ pub fn additive_fft_mixed_radix_16<C: Config16, T: FftRingElement16>(
     additive_fft_mixed_radix_16_padded(data, params, len);
 }
 
+/// Sub-arrays at or below this log-size are transformed breadth-first —
+/// the base case of the depth-first recursion. Sized so the working set
+/// stays L1-resident: `2^9` cells is 64 KiB at 128-byte `i64` cells,
+/// 32 KiB on the `i32` fast path. A value `≥ log2(codeword_len)` makes
+/// the whole transform breadth-first (the base case triggers at once).
+const FFT_LOG_BASE_LEN: usize = 9;
+
+/// Codewords of at least this many cells use the depth-first kernel;
+/// smaller ones use the flat breadth-first pass. The crossover is
+/// measured by `fft_timing_by_size`: depth-first cache-blocking pays
+/// off once the codeword overflows L2 (~`2^14` cells / 2 MiB at
+/// 128-byte `i64` cells), and below that its recursion overhead is a
+/// slight net loss.
+const DEPTH_FIRST_MIN_LEN: usize = 1 << 14;
+
 /// Apply the mixed-radix additive FFT in place, exploiting zero
 /// padding. `num_nonzero` is the count of nonzero leading cells of
 /// `data`; the rest are zero — the Reed-Solomon rate-`1/REP` padding
 /// added by `encode` / `encode_wide`.
 ///
-/// Stages run from top (highest `bit_offset`) down to the base. The
-/// top stage runs first and is the only one that sees the zero
-/// padding: it spans the whole array as a single outer block, and its
-/// later sub-blocks lie entirely in `[num_nonzero, len)`. So its
-/// `radix × radix` matvec sums only the `⌈num_nonzero / stride⌉`
-/// non-zero input sub-blocks instead of all `radix` — a `1 − 1/REP`
-/// saving on that stage. Every later stage operates on already-dense
-/// data and processes all `radix` inputs.
+/// Large codewords run **depth-first** ([`fft_depth_first`]): after the
+/// top stage the codeword splits into independent sub-arrays, and each
+/// is finished completely before the next is touched. Once a sub-array
+/// is small enough to stay L1-resident ([`FFT_LOG_BASE_LEN`]) its
+/// remaining stages are swept breadth-first, all hitting L1 — versus a
+/// flat breadth-first FFT, which streams the whole codeword from L2
+/// once per stage. Below [`DEPTH_FIRST_MIN_LEN`] the flat
+/// [`fft_breadth_first`] pass is used instead.
+///
+/// Zero padding: the top stage spans the whole array as a single outer
+/// block, and its later sub-blocks lie entirely in `[num_nonzero, len)`.
+/// Its `radix × radix` matvec sums only the `⌈num_nonzero / stride⌉`
+/// non-zero input sub-blocks — a `1 − 1/REP` saving on that stage.
 pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
     data: &mut [T],
     params: &MixedRadixFftParams16<C>,
@@ -460,32 +480,36 @@ pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
         data.len(),
         params.base.codeword_len
     );
+    if data.len() >= DEPTH_FIRST_MIN_LEN {
+        fft_depth_first(data, params, 0, 0, num_nonzero);
+    } else {
+        fft_breadth_first(data, params, num_nonzero);
+    }
+}
 
+/// Flat breadth-first FFT — one parallel pass per stage over the whole
+/// codeword. Used for codewords below [`DEPTH_FIRST_MIN_LEN`], where
+/// the depth-first recursion overhead would outweigh its (absent)
+/// cache benefit. Produces a result identical to [`fft_depth_first`].
+fn fft_breadth_first<C: Config16, T: FftRingElement16>(
+    data: &mut [T],
+    params: &MixedRadixFftParams16<C>,
+    num_nonzero: usize,
+) {
     let mut is_first_stage = true;
     for stage in params.stages.iter().rev() {
         let radix = 1usize << stage.radix_log;
         let outer_block_size = 1usize << (stage.bit_offset + stage.radix_log);
         let stride = 1usize << stage.bit_offset;
         let matrices = &stage.vandermondes;
-
-        // The first stage processed is the top stage — a single outer
-        // block spanning all of `data`. Sub-blocks lying entirely in
-        // the zero-padding region `[num_nonzero, len)` contribute
-        // nothing to the matvec and are skipped. Skipping a zero input
-        // is exact: `twiddle · 0 = 0`. Later stages see dense data.
         let nonzero_inputs = if is_first_stage {
-            debug_assert_eq!(outer_block_size, data.len());
             num_nonzero.div_ceil(stride).min(radix)
         } else {
             radix
         };
         is_first_stage = false;
-
-        // Empty `stage.signs` ⇒ the plain `{0,1}` lift; otherwise the
-        // randomized signed lift (Approach 1).
         let stage_signs: Option<&[Vec<u16>]> =
             (!stage.signs.is_empty()).then_some(stage.signs.as_slice());
-
         cfg_chunks_mut!(data, outer_block_size)
             .enumerate()
             .for_each(|(block_idx, block_data)| {
@@ -498,6 +522,100 @@ pub fn additive_fft_mixed_radix_16_padded<C: Config16, T: FftRingElement16>(
                     nonzero_inputs,
                 );
             });
+    }
+}
+
+/// Depth-first traversal of the FFT's independent sub-problems.
+///
+/// Processes the top-`t` stage's `radix × radix` matvec on `data` (one
+/// outer block), then recurses into each of the `radix` now-independent
+/// sub-blocks. A sub-array small enough to stay L1-resident is finished
+/// breadth-first instead. `global_offset` is the sub-array's start in
+/// the full codeword — it yields the stage's block index.
+fn fft_depth_first<C: Config16, T: FftRingElement16>(
+    data: &mut [T],
+    params: &MixedRadixFftParams16<C>,
+    t: usize,
+    global_offset: usize,
+    num_nonzero: usize,
+) {
+    let num_stages = params.stages.len();
+    if t >= num_stages {
+        return;
+    }
+    if data.len() <= (1usize << FFT_LOG_BASE_LEN) {
+        fft_breadth_first_base(data, params, t, global_offset, num_nonzero);
+        return;
+    }
+
+    // `params.stages` is ordered base → top; `t` counts top → base.
+    let stage = &params.stages[num_stages - 1 - t];
+    let radix = 1usize << stage.radix_log;
+    let stride = 1usize << stage.bit_offset;
+    let block_idx = global_offset >> (stage.bit_offset + stage.radix_log);
+    // The zero-padding skip applies only to the top stage (`t == 0`);
+    // after it the data is dense.
+    let nonzero_inputs = if t == 0 {
+        num_nonzero.div_ceil(stride).min(radix)
+    } else {
+        radix
+    };
+    let signs = (!stage.signs.is_empty()).then(|| stage.signs[block_idx].as_slice());
+    mixed_radix_stage_block::<T>(
+        data,
+        stride,
+        radix,
+        &stage.vandermondes[block_idx],
+        signs,
+        nonzero_inputs,
+    );
+
+    // Recurse into the `radix` now-independent sub-blocks. Running them
+    // in parallel hands each sub-array — and its whole sub-tree — to one
+    // worker, so it stays in that core's L1; when the caller already
+    // saturates the pool (the batched commit), the chunks run inline,
+    // still depth-first.
+    cfg_chunks_mut!(data, stride)
+        .enumerate()
+        .for_each(|(i, child)| {
+            fft_depth_first::<C, T>(child, params, t + 1, global_offset + i * stride, num_nonzero);
+        });
+}
+
+/// Breadth-first base case: sweep stages `t_start ..` over `data`, which
+/// is small enough to stay L1-resident, so every stage hits L1. Serial
+/// — parallelism comes from sibling sub-arrays in [`fft_depth_first`].
+fn fft_breadth_first_base<C: Config16, T: FftRingElement16>(
+    data: &mut [T],
+    params: &MixedRadixFftParams16<C>,
+    t_start: usize,
+    global_offset: usize,
+    num_nonzero: usize,
+) {
+    let num_stages = params.stages.len();
+    for t in t_start..num_stages {
+        let stage = &params.stages[num_stages - 1 - t];
+        let radix = 1usize << stage.radix_log;
+        let outer_block_size = 1usize << (stage.bit_offset + stage.radix_log);
+        let stride = 1usize << stage.bit_offset;
+        let base_block = global_offset >> (stage.bit_offset + stage.radix_log);
+        let nonzero_inputs = if t == 0 {
+            num_nonzero.div_ceil(stride).min(radix)
+        } else {
+            radix
+        };
+        for (local_block, chunk) in data.chunks_mut(outer_block_size).enumerate() {
+            let block_idx = base_block + local_block;
+            let signs = (!stage.signs.is_empty()).then(|| stage.signs[block_idx].as_slice());
+            mixed_radix_stage_block::<T>(
+                chunk,
+                stride,
+                radix,
+                &stage.vandermondes[block_idx],
+                signs,
+                nonzero_inputs,
+            );
+        }
     }
 }
 
@@ -1021,6 +1139,120 @@ mod tests {
                 "  {label}: max |coef| = {max_abs} (~2^{:.2}), {bits} bits incl. sign{}",
                 if max_abs == 0 { 0.0 } else { (max_abs as f64).log2() },
                 if bits <= 32 { "  [fits BITS_CW=32]" } else { "  [EXCEEDS 32]" },
+            );
+        }
+    }
+
+    /// Wall-time of the encode FFT across codeword sizes — gauges the
+    /// depth-first cache-blocking. The codeword (`i64` cells, 128 B
+    /// each) is `2^log_n · 128` bytes; once it overflows fast cache,
+    /// depth-first should pull ahead of breadth-first. Run explicitly:
+    /// `cargo test -p zip-plus … fft_timing_by_size -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn fft_timing_by_size() {
+        use super::super::ring_ops::REDUCED_LEN_16;
+        use std::time::{Duration, Instant};
+        use zinc_poly::univariate::dense::DensePolynomial;
+
+        type Cell = DensePolynomial<i64, REDUCED_LEN_16>;
+
+        eprintln!("  FFT_LOG_BASE_LEN = {FFT_LOG_BASE_LEN}");
+        for &log_n in &[12usize, 14, 15, 16] {
+            let codeword_len = 1usize << log_n;
+            let row_len = codeword_len / 4; // REP = 4
+            let params = MixedRadixFftParams16::<AddFftConfigGF2_16>::new(row_len, codeword_len)
+                .expect("valid params");
+
+            // Zero-padded random binary input (row_len nonzero cells).
+            let template: Vec<Cell> = (0..codeword_len)
+                .map(|i| {
+                    let mut coeffs = [0i64; REDUCED_LEN_16];
+                    if i < row_len {
+                        let g = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as u16;
+                        for (j, c) in coeffs.iter_mut().enumerate() {
+                            *c = i64::from((g >> j) & 1);
+                        }
+                    }
+                    DensePolynomial { coeffs }
+                })
+                .collect();
+
+            // Time one FFT kernel: warm up, then average `n` runs on a
+            // fresh clone of the zero-padded input (clone untimed).
+            let time_kernel = |kernel: &dyn Fn(&mut [Cell])| -> f64 {
+                for _ in 0..3 {
+                    let mut d = template.clone();
+                    kernel(&mut d);
+                    std::hint::black_box(&d);
+                }
+                let n = 30u32;
+                let mut total = Duration::ZERO;
+                for _ in 0..n {
+                    let mut d = template.clone();
+                    let t = Instant::now();
+                    kernel(&mut d);
+                    total += t.elapsed();
+                    std::hint::black_box(&d);
+                }
+                (total.as_secs_f64() / f64::from(n)) * 1e3
+            };
+
+            // Call the kernels directly (not the size-gated
+            // `_padded`) so each size measures both regardless of the
+            // `DEPTH_FIRST_MIN_LEN` threshold.
+            let depth = time_kernel(&|d| fft_depth_first(d, &params, 0, 0, row_len));
+            let breadth = time_kernel(&|d| fft_breadth_first(d, &params, row_len));
+
+            // Cross-check: the two kernels must agree exactly.
+            let mut d_depth = template.clone();
+            fft_depth_first(&mut d_depth, &params, 0, 0, row_len);
+            let mut d_breadth = template.clone();
+            fft_breadth_first(&mut d_breadth, &params, row_len);
+            assert!(
+                d_depth.iter().zip(&d_breadth).all(|(a, b)| a.coeffs == b.coeffs),
+                "depth-first and breadth-first FFT disagree at 2^{log_n}"
+            );
+
+            eprintln!(
+                "  codeword 2^{log_n} ({} KiB i64): breadth-first {breadth:.3} ms, \
+                 depth-first {depth:.3} ms  ({:.2}x)",
+                codeword_len * 128 / 1024,
+                breadth / depth,
+            );
+        }
+    }
+
+    /// Exact signed-lift worst-case codeword bound at the
+    /// `RealSha256Polychal` folded-lane dimensions (REP = 4:
+    /// `row_len = 2^(num_vars+1)`, `codeword = 2^(num_vars+3)`), for
+    /// `num_vars = 9..=13`. Tells the minimum `BITS_CW` needed to pack
+    /// the codeword losslessly at each size. Run explicitly:
+    /// `cargo test -p zip-plus --release … signed_bound_by_num_vars
+    /// -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "worst-case bound probe: row_len FFTs per size"]
+    fn signed_bound_by_num_vars() {
+        let sign_seed = crate::code::binary_add_fft_16::SIGN_SEED;
+        eprintln!("RealSha256Polychal folded lane (REP=4), signed lift SIGN_SEED={sign_seed}:");
+        for num_vars in 9..=13usize {
+            let row_len = 1usize << (num_vars + 1); // split_size
+            let codeword_len = row_len << 2; // REP = 4
+            let mut signed =
+                MixedRadixFftParams16::<AddFftConfigGF2_16>::new(row_len, codeword_len)
+                    .expect("valid params");
+            signed.randomize_signs(sign_seed);
+            let s = worst_case_binary_coeff_bound(&signed, row_len);
+            let bits = if s == 0 {
+                0
+            } else {
+                (128 - s.leading_zeros()) as usize + 1 // + sign bit
+            };
+            eprintln!(
+                "  num_vars={num_vars}: codeword 2^{}, signed worst-case bound = {s} \
+                 (~2^{:.1}) — needs BITS_CW ≥ {bits}",
+                num_vars + 3,
+                if s == 0 { 0.0 } else { (s as f64).log2() },
             );
         }
     }
