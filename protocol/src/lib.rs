@@ -294,10 +294,15 @@ pub trait FoldedZincTypes<const D: usize, const HALF_D: usize>: Clone + Debug {
 
     /// Zip+ types for the **split** binary trace columns.
     /// `Eval = BinaryPoly<HALF_D>` — one round of 2× folding.
-    /// `CombR` is independent per witness type.
+    /// `CombR` is independent per witness type. `Chal` is also
+    /// independent: the additive-FFT binary lane needs a
+    /// small-coefficient polynomial-valued row-batching challenge
+    /// (`Bit4Poly16`) so it can run a balanced multi-row matrix
+    /// without the codeword-coefficient blow-up a scalar `i128`
+    /// challenge would cause, while the arbitrary / int lanes keep the
+    /// scalar `Self::Chal`.
     type BinaryZt: ZipTypes<
             Eval = BinaryPoly<HALF_D>,
-            Chal = Self::Chal,
             Pt = Self::Pt,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
@@ -373,7 +378,10 @@ where
 }
 
 /// Polynomial-valued binary-lane case: `BinF = PolyExt16<LIMBS>`,
-/// `F = MontyField<LIMBS>`, `Chal = i128`.
+/// `F = MontyField<LIMBS>`. Generic over the row-batching challenge
+/// `Chal` (`i128` for the scalar-chal path, `Bit4Poly16` for the
+/// balanced multi-row polychal path) — the parameter is irrelevant
+/// here because `alphas` is ignored (see below).
 ///
 /// Unlike the scalar case, this is the "no alpha-collapse, keep
 /// polynomial-valued" path: rather than contracting the `HALF_D = 16`
@@ -384,16 +392,16 @@ where
 /// `PolyExt16` evaluation decomposes coordinate-wise into 16
 /// independent `F_p` evaluations, and the per-coordinate folding is
 /// recovered structurally without the alpha contraction.
-impl<const LIMBS: usize>
+impl<const LIMBS: usize, Chal>
     BinaryFoldEval<
         crypto_primitives::crypto_bigint_monty::MontyField<LIMBS>,
-        i128,
+        Chal,
     > for zip_plus::code::binary_add_fft_16::poly_ext::PolyExt16<LIMBS>
 {
     #[inline]
     fn fold_half(
         coeffs: &[crypto_primitives::crypto_bigint_monty::MontyField<LIMBS>],
-        _alphas: &[i128],
+        _alphas: &[Chal],
         cfg: &<crypto_primitives::crypto_bigint_monty::MontyField<LIMBS> as PrimeField>::Config,
     ) -> Self {
         use crypto_primitives::crypto_bigint_monty::MontyField;

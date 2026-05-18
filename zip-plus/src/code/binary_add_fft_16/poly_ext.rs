@@ -69,6 +69,7 @@ use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
 use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
 
 use super::basis::{D_16, F_TILDE_LOWER_DEGREES_16};
+use super::ext_field::Bit4Poly16;
 use super::packed_cw::PackedI64Poly16;
 
 /// Coefficient field of `PolyExt16<LIMBS>`.
@@ -867,6 +868,26 @@ impl<const LIMBS: usize> FromWithConfig<&DensePolynomial<i64, 16>> for PolyExt16
 impl<const LIMBS: usize, const B: u32> FromWithConfig<&PackedI64Poly16<B>> for PolyExt16<LIMBS> {
     fn from_with_cfg(value: &PackedI64Poly16<B>, cfg: &Self::Config) -> Self {
         <Self as FromWithConfig<&DensePolynomial<i64, 16>>>::from_with_cfg(&value.0, cfg)
+    }
+}
+
+/// `Bit4Poly16` → `PolyExt16`: lifts the 16 nibbles (each in `0..16`)
+/// into the extension as polynomial coefficients `0..16`. This is the
+/// `Chal → F` lift the binary lane's coherence check `⟨coeffs, b⟩`
+/// applies to each row-batching coefficient. It agrees with
+/// `PackedI64Poly16: MulByScalar<&Bit4Poly16>` (the action that builds
+/// `combined_row`): both read `Bit4Poly16` as the nibble polynomial in
+/// `Z[X]/f̃`, and the codeword→F lift is a ring homomorphism, so the
+/// coherence identity `⟨combined_row, q_1⟩ = ⟨coeffs, b⟩` holds.
+/// `Bit4Poly16` is already degree `< 16`, so no mod-f̃ reduction is
+/// needed.
+impl<const LIMBS: usize> FromWithConfig<&Bit4Poly16> for PolyExt16<LIMBS> {
+    fn from_with_cfg(value: &Bit4Poly16, cfg: &Self::Config) -> Self {
+        let nibbles = value.nibbles();
+        let coeffs: [Coef<LIMBS>; D_16] = core::array::from_fn(|i| {
+            <MontyField<LIMBS> as FromWithConfig<u8>>::from_with_cfg(nibbles[i], cfg)
+        });
+        Self::from_coef_array(coeffs, *cfg)
     }
 }
 

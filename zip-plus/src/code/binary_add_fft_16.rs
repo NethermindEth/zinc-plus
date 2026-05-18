@@ -467,6 +467,62 @@ mod linear_code_tests {
         assert!(result.is_ok(), "radix-8 polychal batch verify failed: {result:?}");
     }
 
+    /// `num_rows > 1` roundtrip — the balanced-matrix path. With
+    /// `poly_size = 4 * row_len` the commitment matrix has 4 rows, so
+    /// prover and verifier draw genuine `Bit4Poly16` row-batching
+    /// coefficients from Fiat-Shamir (at `num_rows = 1` they are
+    /// hardcoded to `Bit4Poly16::ONE`). This exercises
+    /// `MulByScalar<&Bit4Poly16>` on `CombR` and the coherence check
+    /// `<combined_row, q_1> == <coeffs, b>` with non-trivial `coeffs` —
+    /// the path the balanced-shape polychal PCS depends on.
+    #[test]
+    fn commit_prove_verify_polychal_multirow_16() {
+        const REP: usize = 4;
+        type Zt = PolyChalZt16I64;
+        type Code = BinaryAddFft16Code<Zt, AddFftConfigGF2_16, REP, false>;
+        type F = Gf2_16Ext<P_16_DEFAULT>;
+
+        let num_vars = 12usize; // poly_size = 4096
+        let row_len = 1024usize; // codeword_len = 4096, num_rows = 4
+        let batch = 3usize;
+        let code = Code::new_signed(row_len).expect("valid radix-8 params");
+        let poly_size = 1usize << num_vars;
+        let pp = ZipPlus::<Zt, Code>::setup(poly_size, code);
+        assert_eq!(pp.num_rows, 4, "expected a 4-row (balanced) matrix");
+
+        let mut rng = StdRng::seed_from_u64(0x6a1b_c0de);
+        let polys: Vec<DenseMultilinearExtension<BinaryPoly<16>>> = (0..batch)
+            .map(|_| {
+                let evaluations: Vec<BinaryPoly<16>> = (0..poly_size)
+                    .map(|_| BinaryPoly::<16>::from(rng.random::<u16>() as u64))
+                    .collect();
+                DenseMultilinearExtension::<BinaryPoly<16>> { num_vars, evaluations }
+            })
+            .collect();
+
+        let (hint, comm) = ZipPlus::<Zt, Code>::commit(&pp, &polys).unwrap();
+        let mut transcript = PcsProverTranscript::new_from_commitment(&comm);
+        let field_cfg = ();
+        let point: Vec<Bit4Poly16> = (0..num_vars).map(|i| Bit4Poly16(2 + i as i64)).collect();
+
+        let eval_f = ZipPlus::<Zt, Code>::prove::<F, CHECKED>(
+            &mut transcript, &pp, &polys, &point, &hint, &field_cfg,
+        )
+        .expect("prove succeeds");
+
+        let point_f: Vec<F> = point
+            .iter()
+            .map(|v| <F as crypto_primitives::FromWithConfig<&Bit4Poly16>>::from_with_cfg(v, &field_cfg))
+            .collect();
+        let mut transcript = transcript.into_verification_transcript();
+        transcript.fs_transcript.absorb_slice(&comm.root.0);
+
+        let result = ZipPlus::<Zt, Code>::verify::<F, CHECKED>(
+            &mut transcript, &pp, &comm, &field_cfg, &point_f, &eval_f,
+        );
+        assert!(result.is_ok(), "num_rows>1 polychal verify failed: {result:?}");
+    }
+
     /// Commit→prove→verify roundtrip with the **signed** `{-1,0,1}`
     /// twiddle lift (`new_signed`): exercises the signed FFT end to end
     /// through the PCS. The signed lift changes the integer codeword

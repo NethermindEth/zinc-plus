@@ -1116,10 +1116,11 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::Chal>
         + for<'b> MulByScalar<&'b BinF>
         + FromRef<BinF>
         + for<'b> FromWithConfig<&'b F>
-        + crate::BinaryFoldEval<F, ZtF::Chal>,
+        + crate::BinaryFoldEval<F, <ZtF::BinaryZt as ZipTypes>::Chal>,
     BinF::Inner: Transcribable,
     BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
@@ -1186,10 +1187,11 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::Chal>
         + for<'b> MulByScalar<&'b BinF>
         + FromRef<BinF>
         + for<'b> FromWithConfig<&'b F>
-        + crate::BinaryFoldEval<F, ZtF::Chal>,
+        + crate::BinaryFoldEval<F, <ZtF::BinaryZt as ZipTypes>::Chal>,
     BinF::Inner: Transcribable,
     BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
@@ -1263,10 +1265,11 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b ZtF::Chal>
+        + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::Chal>
         + for<'b> MulByScalar<&'b BinF>
         + FromRef<BinF>
         + for<'b> FromWithConfig<&'b F>
-        + crate::BinaryFoldEval<F, ZtF::Chal>,
+        + crate::BinaryFoldEval<F, <ZtF::BinaryZt as ZipTypes>::Chal>,
     BinF::Inner: Transcribable,
     BinF::Modulus: FromRef<ZtF::Fmod> + Transcribable,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
@@ -1649,14 +1652,14 @@ where
                 let lo = bar_u.coeffs.get(..HALF_D).unwrap_or(&bar_u.coeffs);
                 let hi = bar_u.coeffs.get(HALF_D..).unwrap_or(&[]);
 
-                let c1: BinF =
-                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(
-                        lo, alphas, &field_cfg,
-                    );
-                let c2: BinF =
-                    <BinF as crate::BinaryFoldEval<F, ZtF::Chal>>::fold_half(
-                        hi, alphas, &field_cfg,
-                    );
+                let c1: BinF = <BinF as crate::BinaryFoldEval<
+                    F,
+                    <ZtF::BinaryZt as ZipTypes>::Chal,
+                >>::fold_half(lo, alphas, &field_cfg);
+                let c2: BinF = <BinF as crate::BinaryFoldEval<
+                    F,
+                    <ZtF::BinaryZt as ZipTypes>::Chal,
+                >>::fold_half(hi, alphas, &field_cfg);
 
                 let mut folded = one_minus_gamma.clone();
                 folded *= &c1;
@@ -1818,6 +1821,8 @@ where
         + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<ZtF::Fmod>,
+    // `verify_folded_int` uses `IntFoldedZincTypes`, whose `BinaryZt::Chal`
+    // is still equated to `ZtF::Chal` — no decoupling here.
     BinF: PrimeField<Config = <F as PrimeField>::Config>
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
