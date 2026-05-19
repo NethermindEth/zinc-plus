@@ -1,5 +1,10 @@
+[files]
+extend-exclude = [
+    "*.svg", # SVG files, produced by flamegraph
+]
+
 [default]
 extend-ignore-re = [
     "0x[0-9a-fA-F]+", # Hexadecimal numbers
+    "anc", # Short for "ancillary"
 ]
-
