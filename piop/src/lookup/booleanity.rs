@@ -1,37 +1,42 @@
 //! Booleanity (binary-polynomial lookup) argument.
 //!
 //! Proves that every coefficient of every witness binary-polynomial column is
-//! a bit `\in {0,1}`. The argument is structured as a single
+//! a bit $\in \\{0,1\\}$. The argument is structured as a single
 //! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
 //! CPR group with shared randomness, and discharges its bit-slice claims for
 //! free against the existing `lifted_evals` payload.
 //!
 //! # Relation
 //!
-//! For each witness binary-poly column `u_j \in (F_q^{<D}[X])^n` with
-//! `n = 2^\mu`, decompose row-wise as
-//! `u_j[b](X) = \sum_{i=0}^{D-1} v_{j,i,b} * X^i`. The booleanity claim is:
+//! For each witness binary-poly column $u_j \in (F_q^{<D}[X])^n$ with
+//! $n = 2^\mu$, decompose row-wise as
 //!
-//! ```text
-//!   \forall j, i, b:  v_{j,i,b} \in {0,1}
-//! ```
+//! $$
+//! {u_j}[b](X) = \sum_{i=0}^{D-1} v_{j,i,b} * X^i
+//! $$
+//!
+//! The booleanity claim is:
+//!
+//! $$
+//!   \forall j, i, b:  v_{j,i,b} \in \\{0,1\\}
+//! $$
 //!
 //! Equivalently, the MLE statement
-//! `\widetilde{v_{j,i}}(b)*(\widetilde{v_{j,i}}(b)-1) = 0` for all
-//! `b \in {0,1}^\mu`. The protocol reduces this to a single batched sumcheck
+//! $\widetilde{v_{j,i}}(b)*(\widetilde{v_{j,i}}(b)-1) = 0$ for all
+//! $b \in {0,1}^\mu$. The protocol reduces this to a single batched sumcheck
 //!
-//! ```text
-//!   \sum_{b in {0,1}^\mu} eq(r, b) *
-//!     \sum_{j=0}^{N-1} \sum_{i=0}^{D-1} delta^j * gamma^i *
-//!       \widetilde{v_{j,i}}(b) * (\widetilde{v_{j,i}}(b) - 1)  =  0
-//! ```
+//! $$
+//! \sum_{b in {0,1}^\mu} eq(r, b) *
+//!   \sum_{j=0}^{N-1} \sum_{i=0}^{D-1} \delta^j * \gamma^i *
+//!     \widetilde{v_{j,i}}(b) * (\widetilde{v_{j,i}}(b) - 1)  =  0
+//! $$
 //!
-//! with batching challenges `gamma` (over the `D` bit-slices) and `delta`
-//! (over the `N` witness binary-poly columns), and zerocheck point `r`.
-//! After the sumcheck reaches `r*`, the prover sends `bit_slice_evals` =
-//! `(\widetilde{v_{j,i}}(r*))` to the verifier; these are then folded by
-//! `MultipointEval` into the standard evaluation point `r_0` together with
-//! the CPR up/down evals. At `r_0` the bit-slice MLE evaluations are exactly
+//! with batching challenges $\gamma$ (over the `D` bit-slices) and $\delta$
+//! (over the `N` witness binary-poly columns), and zerocheck point $r$.
+//! After the sumcheck reaches $r*$, the prover sends `bit_slice_evals` =
+//! $(\widetilde{v_{j,i}}(r*))$ to the verifier; these are then folded by
+//! `MultipointEval` into the standard evaluation point $r_0$ together with
+//! the CPR up/down evals. At $r_0$ the bit-slice MLE evaluations are exactly
 //! the coefficients of the polynomial-valued `lifted_evals` (by the
 //! MLE-commutes-with-coefficient-extraction identity), so the verifier
 //! discharges them for free.
@@ -68,7 +73,7 @@ pub struct BooleanityChecker<F: InnerTransparentField>(PhantomData<F>);
 
 /// Proof produced by the booleanity prover. Carries only the flat list of
 /// bit-slice MLE evaluations at the multi-degree sumcheck output point
-/// `r*`. The remaining open-eval consistency check at `r_0` is discharged
+/// $r*$. The remaining open-eval consistency check at $r_0$ is discharged
 /// by the protocol-layer caller against `lifted_evals.coeffs`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BooleanityProof<F: PrimeField> {
@@ -364,9 +369,10 @@ pub enum BooleanityError<F: PrimeField> {
 
 /// Compute the booleanity residue
 ///
-/// ```text
-///   sum_{j=0}^{N-1} sum_{i=0}^{D-1} delta^j * gamma^i * v_{j,i} * (v_{j,i} - 1)
-/// ```
+/// $$
+/// sum_{j=0}^{N-1} sum_{i=0}^{D-1}
+///   \delta^j * \gamma^i * v_{j,i} * (v_{j,i} - 1)
+/// $$
 ///
 /// over a flat `(j-major, i-minor)` slice of bit-slice values
 /// (`N = delta_powers.len()`, `D = gamma_powers.len()`,
@@ -401,7 +407,7 @@ fn batched_booleanity_sum<F: PrimeField>(
 /// Build per-bit-slice MLEs for a set of binary-poly columns.
 ///
 /// Returns `N * D` MLEs in `(j-major, i-minor)` order:
-/// `[v_{0,0}, v_{0,1}, ..., v_{0,D-1}, v_{1,0}, ...]`. The j-th column,
+/// $[v_{0,0}, v_{0,1}, ..., v_{0,D-1}, v_{1,0}, ...]$. The j-th column,
 /// i-th bit MLE evaluates at hypercube point `b` to the i-th bit of the
 /// row entry `trace_bin_poly[j][b]`.
 ///
