@@ -1020,12 +1020,10 @@ mod tests {
     // verifier errors.
     //
 
-    /// Swapping two entries of `booleanity_proof.bit_slice_evals` breaks
-    /// the recomputed booleanity residue at `r*`, which the verifier's
-    /// `finalize_verifier` catches against the sumcheck's
-    /// `expected_evaluation`. (With overwhelming probability over the
-    /// random transcript, two distinct bit-slice MLE evaluations at `r*`
-    /// produce different `v*(v-1)` residues.)
+    /// Perturbing one entry of `booleanity_proof.bit_slice_evals` by a
+    /// non-trivial additive constant breaks the recomputed booleanity
+    /// residue at `r*`, which the verifier's `finalize_verifier` catches
+    /// against the sumcheck's `expected_evaluation`.
     #[test]
     fn test_big_linear_tamper_booleanity_evals() {
         use zinc_piop::lookup::booleanity::BooleanityError;
@@ -1043,11 +1041,12 @@ mod tests {
                     .booleanity_proof
                     .as_mut()
                     .expect("BigLinearUair has binary-poly witnesses");
-                // Double one entry: x -> 2x. The booleanity residue at x is
-                // x*(x-1); at 2x it is 2x*(2x-1). For random F_q-valued x
-                // these differ with overwhelming probability.
-                let dup = bp.bit_slice_evals[0].clone();
-                bp.bit_slice_evals[0] += dup;
+                let two = {
+                    let cfg = bp.bit_slice_evals[0].cfg();
+                    let one = F::one_with_cfg(cfg);
+                    one.clone() + one
+                };
+                bp.bit_slice_evals[0] += two;
             },
             |res| {
                 assert!(matches!(
