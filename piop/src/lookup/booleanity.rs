@@ -3,8 +3,9 @@
 //! Proves that every coefficient of every witness binary-polynomial column is
 //! a bit $\in \\{0,1\\}$. The argument is structured as a single
 //! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
-//! CPR group with shared randomness, and discharges its bit-slice claims for
-//! free against the existing `lifted_evals` payload.
+//! CPR group with shared randomness, and verifies its bit-slice claims at
+//! the multi-degree sumcheck output point $r^\star$ against the projected
+//! parent column evaluations (CPR `up_evals`) using the $\psi_a$ identity.
 //!
 //! # Relation
 //!
@@ -27,19 +28,39 @@
 //!
 //! $$
 //! \sum_{b in {0,1}^\mu} eq(r, b) *
-//!   \sum_{j=0}^{N-1} \sum_{i=0}^{D-1} \delta^j * \gamma^i *
-//!     \widetilde{v_{j,i}}(b) * (\widetilde{v_{j,i}}(b) - 1)  =  0
+//!   \sum_{k=0}^{N*D-1} \alpha^k *
+//!     \widetilde{v_k}(b) * (\widetilde{v_k}(b) - 1)  =  0
 //! $$
 //!
-//! with batching challenges $\gamma$ (over the `D` bit-slices) and $\delta$
-//! (over the `N` witness binary-poly columns), and zerocheck point $r$.
-//! After the sumcheck reaches $r*$, the prover sends `bit_slice_evals` =
-//! $(\widetilde{v_{j,i}}(r*))$ to the verifier; these are then folded by
-//! `MultipointEval` into the standard evaluation point $r_0$ together with
-//! the CPR up/down evals. At $r_0$ the bit-slice MLE evaluations are exactly
-//! the coefficients of the polynomial-valued `lifted_evals` (by the
-//! MLE-commutes-with-coefficient-extraction identity), so the verifier
-//! discharges them for free.
+//! with a single batching challenge $\alpha$ over the flat
+//! $(j\text{-major}, i\text{-minor})$ index $k = j \cdot D + i$, and
+//! zerocheck point $r$. After the sumcheck reaches $r^\star$, the prover
+//! sends `bit_slice_evals` $= (\widetilde{v_{j,i}}(r^\star))$ to the
+//! verifier.
+//!
+//! # Bit-decomposition consistency check at $r^\star$
+//!
+//! The bit-slice claims at $r^\star$ are tied back to the committed parent
+//! columns via the $\psi_a$ identity at the MLE level: for every binary-poly
+//! column $u_j$,
+//!
+//! $$
+//!   \psi_a\bigl(\widetilde{u_j}(r^\star)\bigr)
+//!     = \sum_{i=0}^{D-1} a^i \cdot \widetilde{v_{j,i}}(r^\star).
+//! $$
+//!
+//! The left-hand side is already available to the verifier as
+//! `cpr_subclaim.up_evals[num_pub_bin + j]` (the projected MLE evaluation of
+//! the $j$-th witness binary-poly column at $r^\star$, coming out of the
+//! CPR group). The right-hand side is rebuilt from the prover-supplied
+//! `bit_slice_evals`. With overwhelming probability over the random $a$
+//! used by $\psi_a$, this linear pin-down forces the `bit_slice_evals` to
+//! be the true bit decomposition of $u_j$ at $r^\star$.
+//!
+//! Because the consistency check closes at $r^\star$, the bit-slice MLEs
+//! are **not** routed through `MultipointEval`: they participate only in
+//! the booleanity sumcheck group and then vanish from the rest of the
+//! protocol.
 
 use crate::{
     CombFn,
@@ -62,7 +83,7 @@ use zinc_transcript::{
     delegate_transcribable,
     traits::{ConstTranscribable, Transcript},
 };
-use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, powers};
+use zinc_utils::{add, inner_transparent_field::InnerTransparentField, powers};
 
 //
 // Structs
@@ -73,8 +94,9 @@ pub struct BooleanityChecker<F: InnerTransparentField>(PhantomData<F>);
 
 /// Proof produced by the booleanity prover. Carries only the flat list of
 /// bit-slice MLE evaluations at the multi-degree sumcheck output point
-/// $r*$. The remaining open-eval consistency check at $r_0$ is discharged
-/// by the protocol-layer caller against `lifted_evals.coeffs`.
+/// $r*$. The bit-decomposition consistency at $r^\star$ is verified by
+/// the protocol-layer caller against the CPR `up_evals` of the witness
+/// binary-poly columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BooleanityProof<F: PrimeField> {
     /// Flat list of `\widetilde{v_{j,i}}(r*)`, ordered `(j-major, i-minor)`.
@@ -99,12 +121,9 @@ pub struct BoolProverAncillary {
 /// Ancillary data produced by [`BooleanityChecker::prepare_verifier`] and
 /// consumed by [`BooleanityChecker::finalize_verifier`].
 pub struct BoolVerifierAncillary<F: PrimeField> {
-    /// Powers of the bit-slice batching challenge:
-    /// `[1, gamma, ..., gamma^{D-1}]`.
-    pub gamma_powers: Vec<F>,
-    /// Powers of the column batching challenge:
-    /// `[1, delta, ..., delta^{N-1}]`.
-    pub delta_powers: Vec<F>,
+    /// Powers of the single batching challenge over the flat
+    /// `(j-major, i-minor)` index: `[1, alpha, ..., alpha^{N*D - 1}]`.
+    pub alpha_powers: Vec<F>,
     /// The zerocheck point `r` sampled before the multi-degree sumcheck.
     pub zerocheck_point: Vec<F>,
     /// Number of witness binary-poly columns (`N`).
@@ -118,17 +137,15 @@ pub struct BoolVerifierAncillary<F: PrimeField> {
 /// Subclaim emitted by [`BooleanityChecker::finalize_verifier`].
 ///
 /// Carries the (now-validated against the sumcheck residue)
-/// `bit_slice_evals` at the shared multi-degree sumcheck point `r*`. The
-/// protocol-layer caller threads these as additional `up_evals` into
-/// [`crate::multipoint_eval::MultipointEval`], whose final consistency
-/// check at `r_0` is discharged against the coefficients of the existing
-/// `lifted_evals` polynomials.
+/// `bit_slice_evals` at the shared multi-degree sumcheck point `r*``.
+/// The protocol-layer caller passes these into
+/// [`BooleanityChecker::verify_bit_decomposition_consistency`] together
+/// with the CPR `up_evals` for the witness binary-poly columns to close
+/// the booleanity argument entirely inside step 4.
 #[derive(Clone, Debug)]
 pub struct BoolVerifierSubclaim<F: PrimeField> {
     /// Bit-slice MLE evaluations at `r*`, in `(j-major, i-minor)` order.
     pub bit_slice_evals: Vec<F>,
-    /// Shared evaluation point `r*` from the multi-degree sumcheck.
-    pub evaluation_point: Vec<F>,
 }
 
 //
@@ -158,18 +175,15 @@ where
         // 1. Zerocheck point r.
         let r: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
 
-        // 2. Slice batching challenge gamma and its powers.
-        let gamma: F = transcript.get_field_challenge(field_cfg);
-        let gamma_powers: Vec<F> = powers(gamma, one.clone(), D);
+        // 2. Single batching challenge alpha over the flat (j-major, i-minor) index.
+        //    Powers vector has length N*D.
+        let alpha: F = transcript.get_field_challenge(field_cfg);
+        let alpha_powers: Vec<F> = powers(alpha, one.clone(), n.saturating_mul(D));
 
-        // 3. Column batching challenge delta and its powers.
-        let delta: F = transcript.get_field_challenge(field_cfg);
-        let delta_powers: Vec<F> = powers(delta, one.clone(), n);
-
-        // 4. Build eq(r, *) MLE.
+        // 3. Build eq(r, *) MLE.
         let eq_r = build_eq_x_r_inner(&r, field_cfg)?;
 
-        // 5. Build N*D bit-slice MLEs in canonical (j-major, i-minor) order.
+        // 4. Build N*D bit-slice MLEs in canonical (j-major, i-minor) order.
         let mut mles = Vec::with_capacity(add!(n.saturating_mul(D), 1));
         mles.push(eq_r);
         mles.extend(build_witness_bit_slice_mles::<F, D>(
@@ -177,12 +191,11 @@ where
             field_cfg,
         ));
 
-        // 6. Build comb_fn (degree 3 in the variables):
-        //   eq_r(b) * sum_{j,i} delta^j * gamma^i * v_{j,i}(b) * (v_{j,i}(b) - 1)
+        // 5. Build comb_fn (degree 3 in the variables):
+        //   eq_r(b) * sum_k alpha^k * v_k(b) * (v_k(b) - 1)
         let comb_fn: CombFn<F> = Box::new(move |mle_values: &[F]| {
             let eq_r_val = &mle_values[0];
-            let sum =
-                batched_booleanity_sum(&mle_values[1..], &delta_powers, &gamma_powers, &zero, &one);
+            let sum = batched_booleanity_sum(&mle_values[1..], &alpha_powers, &zero, &one);
             sum * eq_r_val
         });
 
@@ -270,14 +283,11 @@ where
 
         // Re-squeeze in the same order as the prover.
         let zerocheck_point: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
-        let gamma: F = transcript.get_field_challenge(field_cfg);
-        let gamma_powers: Vec<F> = powers(gamma, one.clone(), bit_width);
-        let delta: F = transcript.get_field_challenge(field_cfg);
-        let delta_powers: Vec<F> = powers(delta, one, num_wit_bin_cols);
+        let alpha: F = transcript.get_field_challenge(field_cfg);
+        let alpha_powers: Vec<F> = powers(alpha, one, num_wit_bin_cols.saturating_mul(bit_width));
 
         Ok(BoolVerifierAncillary {
-            gamma_powers,
-            delta_powers,
+            alpha_powers,
             zerocheck_point,
             num_wit_bin_cols,
             bit_width,
@@ -290,14 +300,14 @@ where
     /// Validates the length of `bit_slice_evals`, recomputes the expected
     /// combination-function evaluation at the shared sumcheck point `r*`
     /// using the received `bit_slice_evals`, and compares it against the
-    /// sumcheck's `expected_evaluation`. On success, absorbs
-    /// `bit_slice_evals` into the transcript (mirroring the prover's
-    /// final absorption in `finalize_prover`).
+    /// sumcheck's `expected_eval`. On success, absorbs `bit_slice_evals` into
+    /// the transcript (mirroring the prover's final absorption in
+    /// `finalize_prover`).
     pub fn finalize_verifier(
         transcript: &mut impl Transcript,
         proof: BooleanityProof<F>,
         shared_point: Vec<F>,
-        expected_evaluation: &F,
+        expected_eval: &F,
         ancillary: BoolVerifierAncillary<F>,
         field_cfg: &F::Config,
     ) -> Result<BoolVerifierSubclaim<F>, BooleanityError<F>> {
@@ -318,19 +328,14 @@ where
         let eq_r_val = eq_eval(&shared_point, &ancillary.zerocheck_point, one.clone())?;
 
         // Recompute the comb_fn body at r* using the received bit-slice evals.
-        let sum = batched_booleanity_sum(
-            &proof.bit_slice_evals,
-            &ancillary.delta_powers,
-            &ancillary.gamma_powers,
-            &zero,
-            &one,
-        );
+        let sum =
+            batched_booleanity_sum(&proof.bit_slice_evals, &ancillary.alpha_powers, &zero, &one);
         let expected_claim_value = sum * eq_r_val;
 
-        if expected_claim_value != *expected_evaluation {
+        if expected_claim_value != *expected_eval {
             return Err(BooleanityError::ClaimValueDoesNotMatch {
                 expected: expected_claim_value,
-                got: expected_evaluation.clone(),
+                got: expected_eval.clone(),
             });
         }
 
@@ -339,8 +344,74 @@ where
 
         Ok(BoolVerifierSubclaim {
             bit_slice_evals: proof.bit_slice_evals,
-            evaluation_point: shared_point,
         })
+    }
+
+    /// Verify the bit-slice claims at $r^\star$ against the projected
+    /// parent column evaluations (CPR `up_evals`) using the $\psi_a$
+    /// identity.
+    ///
+    /// For each witness binary-poly column $j$, checks
+    ///
+    /// $$
+    ///   \texttt{parent\_evals}[j] \;=\; \sum_{i=0}^{D-1} a^i \cdot
+    ///     \texttt{bit\_slice\_evals}[j \cdot D + i]
+    /// $$
+    ///
+    /// where $a$ is the random projection element used by $\psi_a$ to send
+    /// $F_q[X] \to F_q$. The left-hand side is the MLE evaluation at $r^\star$
+    /// of the projected parent column (i.e. `cpr_subclaim.up_evals[..]`
+    /// restricted to the witness binary-poly slice). The right-hand side is
+    /// the linear recombination of the prover-supplied bit-slice evals.
+    ///
+    /// With overwhelming probability over the random $a$, agreement forces
+    /// `bit_slice_evals` to be the true bit decomposition of the committed
+    /// parent column at $r^\star$.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn verify_bit_decomposition_consistency(
+        bit_slice_evals: &[F],
+        parent_evals: &[F],
+        projecting_element: &F,
+        bits_per_col: usize,
+        field_cfg: &F::Config,
+    ) -> Result<(), BooleanityError<F>> {
+        let expected_len = parent_evals.len().saturating_mul(bits_per_col);
+        if bit_slice_evals.len() != expected_len {
+            return Err(BooleanityError::WrongBitSliceEvalsNumber {
+                expected: expected_len,
+                got: bit_slice_evals.len(),
+            });
+        }
+
+        if bits_per_col == 0 || parent_evals.is_empty() {
+            return Ok(());
+        }
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        let a_powers: Vec<F> = powers(projecting_element.clone(), one, bits_per_col);
+
+        for (col_idx, parent_eval) in parent_evals.iter().enumerate() {
+            let base = col_idx.saturating_mul(bits_per_col);
+            let mut recombined = zero.clone();
+            for (a_pow, bit_eval) in a_powers
+                .iter()
+                .zip(&bit_slice_evals[base..base + bits_per_col])
+            {
+                recombined += a_pow.clone() * bit_eval;
+            }
+
+            if &recombined != parent_eval {
+                return Err(BooleanityError::ConsistencyMismatch {
+                    col_idx,
+                    got: recombined,
+                    expected: parent_eval.clone(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -357,6 +428,11 @@ pub enum BooleanityError<F: PrimeField> {
     WrongBitSliceEvalsNumber { expected: usize, got: usize },
     #[error("booleanity claim value does not match: expected {expected}, got {got}")]
     ClaimValueDoesNotMatch { expected: F, got: F },
+    #[error(
+        "bit-decomposition consistency mismatch on witness binary-poly column {col_idx}: \
+         recombined Sum_i a^i * bit_slice = {got}, expected parent eval {expected}"
+    )]
+    ConsistencyMismatch { col_idx: usize, got: F, expected: F },
     #[error("error evaluating MLE: {0}")]
     MleEvaluationError(#[from] EvaluationError),
     #[error("arithmetic error: {0}")]
@@ -370,36 +446,27 @@ pub enum BooleanityError<F: PrimeField> {
 /// Compute the booleanity residue
 ///
 /// $$
-/// sum_{j=0}^{N-1} sum_{i=0}^{D-1}
-///   \delta^j * \gamma^i * v_{j,i} * (v_{j,i} - 1)
+/// sum_{k=0}^{N*D - 1} \alpha^k * v_k * (v_k - 1)
 /// $$
 ///
-/// over a flat `(j-major, i-minor)` slice of bit-slice values
-/// (`N = delta_powers.len()`, `D = gamma_powers.len()`,
-/// `bit_slice_values.len() == N * D`).
+/// over a flat $(j\text{-major}, i\text{-minor})$ slice of bit-slice
+/// values with $k = j \cdot D + i$. `alpha_powers.len() ==
+/// bit_slice_values.len() == N * D`.
 ///
 /// This is the body of the booleanity sumcheck's combination function
 /// (without the leading `eq_r` factor).
 fn batched_booleanity_sum<F: PrimeField>(
     bit_slice_values: &[F],
-    delta_powers: &[F],
-    gamma_powers: &[F],
+    alpha_powers: &[F],
     zero: &F,
     one: &F,
 ) -> F {
-    let n = delta_powers.len();
-    let d = gamma_powers.len();
-    debug_assert_eq!(bit_slice_values.len(), mul!(n, d));
+    debug_assert_eq!(bit_slice_values.len(), alpha_powers.len());
 
     let mut sum = zero.clone();
-    for (j, delta_j) in delta_powers.iter().enumerate().take(n) {
-        let jd = mul!(j, d);
-        for i in 0..d {
-            let v = &bit_slice_values[add!(i, jd)];
-            let gamma_i = &gamma_powers[i];
-            let booleanity = (v.clone() - one) * v;
-            sum += booleanity * delta_j * gamma_i;
-        }
+    for (v, alpha_k) in bit_slice_values.iter().zip(alpha_powers.iter()) {
+        let booleanity = (v.clone() - one) * v;
+        sum += booleanity * alpha_k;
     }
     sum
 }
@@ -653,6 +720,114 @@ mod tests {
             },
             |err| matches!(err, BooleanityError::WrongBitSliceEvalsNumber { .. }),
             false,
+        );
+    }
+
+    /// Honest `bit_slice_evals` recombine to the parent eval via $\psi_a$.
+    #[test]
+    fn consistency_check_happy_path() {
+        let cfg = &();
+        let one = F::one_with_cfg(cfg);
+        let two = one + one;
+        let three = two + one;
+        let a = three; // arbitrary nonzero projection element
+
+        // Two columns, D bit-slices each, populated with arbitrary field
+        // values. The "true" parent eval is the linear recombination via
+        // a^i, so we recompute it directly.
+        let n = 2usize;
+        let bit_slice_evals: Vec<F> = (0..n * D)
+            .map(|k| F::from(((k as u32) * 7 + 11) % 13))
+            .collect();
+
+        let mut parent_evals: Vec<F> = Vec::with_capacity(n);
+        let zero = F::zero_with_cfg(cfg);
+        for j in 0..n {
+            let mut acc = zero;
+            let mut a_pow = one;
+            for i in 0..D {
+                acc += a_pow * bit_slice_evals[j * D + i];
+                a_pow *= &a;
+            }
+            parent_evals.push(acc);
+        }
+
+        BooleanityChecker::<F>::verify_bit_decomposition_consistency(
+            &bit_slice_evals,
+            &parent_evals,
+            &a,
+            D,
+            cfg,
+        )
+        .expect("honest recombination should match");
+    }
+
+    /// Tampered `bit_slice_evals[k]` triggers `ConsistencyMismatch` with
+    /// `col_idx = k / D`.
+    #[test]
+    fn consistency_check_tampered_bit_slice_rejected() {
+        let cfg = &();
+        let one = F::one_with_cfg(cfg);
+        let two = one + one;
+        let a = two + one; // 3
+
+        let n = 2usize;
+        let mut bit_slice_evals: Vec<F> = (0..n * D)
+            .map(|k| F::from(((k as u32) * 7 + 11) % 13))
+            .collect();
+
+        let zero = F::zero_with_cfg(cfg);
+        let mut parent_evals: Vec<F> = Vec::with_capacity(n);
+        for j in 0..n {
+            let mut acc = zero;
+            let mut a_pow = one;
+            for i in 0..D {
+                acc += a_pow * bit_slice_evals[j * D + i];
+                a_pow *= a;
+            }
+            parent_evals.push(acc);
+        }
+
+        let tamper_idx = D + 1; // column j = 1, bit i = 1
+        bit_slice_evals[tamper_idx] += &two;
+
+        let err = BooleanityChecker::<F>::verify_bit_decomposition_consistency(
+            &bit_slice_evals,
+            &parent_evals,
+            &a,
+            D,
+            cfg,
+        )
+        .expect_err("tamper should be rejected");
+
+        assert!(
+            matches!(err, BooleanityError::ConsistencyMismatch { col_idx, .. } if col_idx == 1),
+            "expected ConsistencyMismatch on column 1, got {err:?}"
+        );
+    }
+
+    /// Length mismatch is reported as `WrongBitSliceEvalsNumber`.
+    #[test]
+    fn consistency_check_wrong_length_rejected() {
+        let cfg = &();
+        let one = F::one_with_cfg(cfg);
+        let a = one + one;
+
+        let parent_evals = vec![F::zero_with_cfg(cfg); 2];
+        let bit_slice_evals = vec![F::zero_with_cfg(cfg); 2 * D - 1];
+
+        let err = BooleanityChecker::<F>::verify_bit_decomposition_consistency(
+            &bit_slice_evals,
+            &parent_evals,
+            &a,
+            D,
+            cfg,
+        )
+        .expect_err("length mismatch should be rejected");
+
+        assert!(
+            matches!(err, BooleanityError::WrongBitSliceEvalsNumber { .. }),
+            "expected WrongBitSliceEvalsNumber, got {err:?}"
         );
     }
 }

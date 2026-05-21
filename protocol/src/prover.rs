@@ -5,7 +5,7 @@ use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
-    lookup::booleanity::{self, BooleanityChecker, BooleanityProof},
+    lookup::booleanity::{BooleanityChecker, BooleanityProof},
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, evaluate_trace_to_column_mles,
@@ -535,6 +535,10 @@ impl_with_type_bounds!(ProverEvalProjected
     /// single sumcheck sharing one evaluation point `r*`. Produces
     /// `up_evals`/`down_evals` (CPR), `bit_slice_evals` (booleanity), and
     /// lookup auxiliary witnesses at `r*`.
+    ///
+    /// The booleanity bit-slice claims are checked at `r*` by the verifier
+    /// against the CPR `up_evals` for witness binary-poly columns using the
+    /// $\psi_a$ identity.
     pub fn step5_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
@@ -633,45 +637,17 @@ impl_with_type_bounds!(ProverEvalProjected
 impl_with_type_bounds!(ProverSumchecked
 {
     /// Step 6: Multi-point evaluation sumcheck. Combines `up_evals` and
-    /// `down_evals` at `r'` into a single evaluation point `r_0`.
+    /// `down_evals` at `r*` into a single evaluation point `r_0`.
     /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
-    /// polynomial-valued `lifted_evals` in Step 7. When the booleanity argument
-    /// is present, its bit-slice MLEs and `bit_slice_evals` are appended to
-    /// the `trace_mles` / `up_evals` passed to `MultipointEval`; the
-    /// corresponding `r_0`-side scalar claims are discharged for free by the
-    /// verifier against `lifted_evals.coeffs` in step 6.
+    /// polynomial-valued `lifted_evals` in Step 7.
     pub fn step6_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
-        // Build extended trace_mles and up_evals: append witness bit-slice
-        // MLEs and their evaluations at r*, in the canonical order produced
-        // by `build_witness_bit_slice_mles` (j-major, i-minor).
-        let (extended_trace_mles, extended_up_evals) = if let Some(bp) = &self.booleanity_proof {
-            let trace_wit_bin_poly = {
-                let sig = &self.base.uair_signature;
-                let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-                let num_total_bin = sig.total_cols().num_binary_poly_cols();
-                &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin]
-            };
-
-            let mut trace_mles = self.projected_trace_f.clone();
-            trace_mles.extend(booleanity::build_witness_bit_slice_mles::<F, D>(
-                trace_wit_bin_poly,
-                &self.field_cfg,
-            ));
-
-            let mut up_evals = self.cpr_proof.up_evals.clone();
-            up_evals.extend_from_slice(&bp.bit_slice_evals);
-            (trace_mles, up_evals)
-        } else {
-            (self.projected_trace_f.clone(), self.cpr_proof.up_evals.clone())
-        };
-
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &extended_trace_mles,
+            &self.projected_trace_f,
             &self.cpr_eval_point,
-            &extended_up_evals,
+            &self.cpr_proof.up_evals,
             &self.cpr_proof.down_evals,
             self.base.uair_signature.shifts(),
             &self.field_cfg,

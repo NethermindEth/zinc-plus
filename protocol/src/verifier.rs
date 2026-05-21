@@ -6,7 +6,7 @@ use std::{collections::HashMap, io::Cursor};
 use zinc_piop::{
     combined_poly_resolver::{self, CombinedPolyResolver},
     ideal_check::{self, IdealCheckProtocol},
-    lookup::booleanity::{BoolVerifierSubclaim, BooleanityChecker, BooleanityProof},
+    lookup::booleanity::{BooleanityChecker, BooleanityProof},
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, project_scalars, project_scalars_to_field, project_trace_coeffs_row_major,
@@ -174,7 +174,6 @@ pub struct VerifierSumchecked<
     field_cfg: F::Config,
     projecting_element_f: F,
     cpr_subclaim: combined_poly_resolver::VerifierSubclaim<F>,
-    bool_subclaim: Option<BoolVerifierSubclaim<F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -198,10 +197,6 @@ pub struct VerifierMultipointEvaled<
     field_cfg: F::Config,
     projecting_element_f: F,
     mp_subclaim: multipoint_eval::Subclaim<F>,
-    /// Indicates the booleanity argument participated in the sumcheck,
-    /// so step 6 must append D coefficients per witness binary-poly col
-    /// to `open_evals`.
-    booleanity_present: bool,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -480,8 +475,7 @@ where
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
-    /// Step 4: Sumcheck verification (CPR + optional booleanity + lookup
-    /// groups).
+    /// Step 4: Sumcheck verification (CPR + booleanity lookup).
     pub fn step4_sumcheck_verify(
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
@@ -506,9 +500,9 @@ where
         let sig = self.base.uair_signature.clone();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_total_bin = sig.total_cols().num_binary_poly_cols();
-        let bool_present = num_total_bin > num_pub_bin;
+        let bin_wit_present = num_total_bin > num_pub_bin;
 
-        let bool_verifier_ancillary = if bool_present {
+        let bool_verifier_ancillary = if bin_wit_present {
             // booleanity is group index 1 (right after CPR)
             let bool_claimed_sum = self
                 .proof_combined_sumcheck
@@ -548,29 +542,42 @@ where
             &self.field_cfg,
         )?;
 
-        let bool_subclaim = if let Some(anc) = bool_verifier_ancillary {
+        if let Some(anc) = bool_verifier_ancillary {
             let booleanity_proof = self
                 .proof_booleanity
                 .take()
                 .ok_or(ProtocolError::BooleanityProofMissing)?;
-            let expected_evaluation = md_subclaims
+            let expected_eval = md_subclaims
                 .expected_evaluations()
                 .get(1)
                 .ok_or(ProtocolError::BooleanityProofMissing)?;
-            Some(
-                BooleanityChecker::<F>::finalize_verifier(
-                    &mut self.base.pcs_transcript.fs_transcript,
-                    booleanity_proof,
-                    md_subclaims.point().to_vec(),
-                    expected_evaluation,
-                    anc,
-                    &self.field_cfg,
-                )
-                .map_err(ProtocolError::Booleanity)?,
+
+            // 4a: sumcheck residue check at r* against the bit-slice evals.
+            let bool_subclaim = BooleanityChecker::<F>::finalize_verifier(
+                &mut self.base.pcs_transcript.fs_transcript,
+                booleanity_proof,
+                md_subclaims.point().to_vec(),
+                expected_eval,
+                anc,
+                &self.field_cfg,
             )
-        } else {
-            None
-        };
+            .map_err(ProtocolError::Booleanity)?;
+
+            // 4b: bit-decomposition consistency check at r* against the
+            // CPR up_evals of the witness binary-poly columns via the
+            // psi_a identity. Parent evals live at indices [num_pub_bin,
+            // num_total_bin) of `cpr_subclaim.up_evals`.
+            let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
+            let parent_evals = &cpr_subclaim.up_evals[num_pub_bin..add!(num_pub_bin, num_wit_bin)];
+            BooleanityChecker::<F>::verify_bit_decomposition_consistency(
+                &bool_subclaim.bit_slice_evals,
+                parent_evals,
+                &self.projecting_element_f,
+                D,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+        }
 
         let _ = &self.proof_lookup_proof;
 
@@ -579,7 +586,6 @@ where
             field_cfg: self.field_cfg,
             projecting_element_f: self.projecting_element_f,
             cpr_subclaim,
-            bool_subclaim,
             proof_commitments: self.proof_commitments,
             proof_multipoint_eval: self.proof_multipoint_eval,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
@@ -603,24 +609,11 @@ where
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
     {
-        // When the booleanity argument is present, the bit-slice claims
-        // produced by [`BooleanityChecker::finalize_verifier`] at `r*` are
-        // appended to `up_evals` and folded into the same `r_0` as the CPR
-        // claims. The corresponding scalar evaluations at `r_0` are
-        // discharged for free in step 6 against `lifted_evals.coeffs`.
-        let extended_up_evals: Vec<F> = if let Some(ref bs) = self.bool_subclaim {
-            let mut v = self.cpr_subclaim.up_evals;
-            v.extend_from_slice(&bs.bit_slice_evals);
-            v
-        } else {
-            self.cpr_subclaim.up_evals
-        };
-
         let mp_subclaim = MultipointEval::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_multipoint_eval,
             &self.cpr_subclaim.evaluation_point,
-            &extended_up_evals,
+            &self.cpr_subclaim.up_evals,
             &self.cpr_subclaim.down_evals,
             self.base.uair_signature.shifts(),
             self.base.num_vars,
@@ -632,7 +625,6 @@ where
             field_cfg: self.field_cfg,
             projecting_element_f: self.projecting_element_f,
             mp_subclaim,
-            booleanity_present: self.bool_subclaim.is_some(),
             proof_commitments: self.proof_commitments,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
@@ -706,25 +698,11 @@ where
             .cloned()
             .collect();
 
-        let mut open_evals: Vec<F> = all_lifted_evals
+        let open_evals: Vec<F> = all_lifted_evals
             .iter()
             .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_element_f))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
-
-        // When the booleanity argument was active, the extended `up_evals`
-        // passed to MultipointEval included one entry per (witness bin-poly
-        // column, bit position). Their corresponding `open_evals` at r_0
-        // are precisely `lifted_evals[j].coeffs[i]` (already a scalar in
-        // F_q, not a polynomial).
-        if self.booleanity_present {
-            let zero = F::zero_with_cfg(&self.field_cfg);
-            for bar_u in all_lifted_evals.iter().skip(num_pub_bin).take(num_wit_bin) {
-                for i in 0..D {
-                    open_evals.push(bar_u.coeffs.get(i).cloned().unwrap_or_else(|| zero.clone()));
-                }
-            }
-        }
 
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
