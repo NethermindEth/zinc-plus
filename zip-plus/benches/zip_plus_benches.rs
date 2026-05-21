@@ -69,10 +69,25 @@ where
 /// `ZipTypes` for the `F_2`-RAA binary commit lane. Mirrors
 /// `BenchZipPlusTypes` but uses `Cw = BinaryPoly<D_PLUS_ONE>` — the
 /// codeword stays in `F_2[X]/<X^D>` (no integer widening) because
-/// accumulation runs in `F_2`. `Comb`/`CombR` still live in a wide
-/// integer ring; the random linear combination of codewords lifts the
-/// `F_2` cells to `CombR` (multi-poly addition with integer
-/// challenges does not fit back in `F_2`).
+/// accumulation runs in `F_2`.
+///
+/// **`Chal`/`CombR`/`Comb` here are placeholders.** The intended F_2
+/// design has challenges in `F_2[X]<128>` (`BinaryF2Poly<2>`) and
+/// combined-row entries in `F_2[X]<128 + D_PLUS_ONE>` (e.g.
+/// `BinaryF2Poly<3>` ≈ `F_2[X]<160>` for `D_PLUS_ONE = 32`) — see
+/// the standalone [`crate::code::f2_lin_comb`] primitive — but the
+/// `ZipTypes::CombR: ConstIntRing` and `Chal: ConstIntRing` bounds
+/// require integer-ring semantics (PartialOrd / Pow / From<i8> /
+/// IntRing::is_positive / …) that `BinaryF2Poly<W>` does not
+/// satisfy. So we fall back to `Chal = i128`, `CombR = Int<5>`,
+/// `Comb = DensePolynomial<Int<5>, D_PLUS_ONE>` here, mirroring the
+/// integer-RAA template. **None of these placeholders are exercised
+/// by the commit-only bench in this binary** (`commit` only touches
+/// `Eval` → `Cw` via the linear code; `Chal`/`CombR`/`Comb` enter
+/// only at prove/verify time, which `do_bench_commit_only` does not
+/// run). Plumbing the real F_2 types through `ZipTypes` requires
+/// loosening the `ConstIntRing` bound — that's the
+/// "Refactor `ZipTypes::CombR/Chal` bound" follow-up.
 #[derive(Debug, Clone)]
 struct BenchZipPlusTypesF2<const D_PLUS_ONE: usize>;
 
@@ -82,9 +97,14 @@ impl<const D_PLUS_ONE: usize> ZipTypes for BenchZipPlusTypesF2<D_PLUS_ONE> {
     type Cw = BinaryPoly<D_PLUS_ONE>;
     type Fmod = Uint<{ INT_LIMBS * 4 }>;
     type PrimeTest = MillerRabin;
+    // Placeholder — real F_2 design wants `BinaryF2Poly<2>` (F_2[X]<128>).
     type Chal = i128;
     type Pt = i128;
+    // Placeholder — real F_2 design wants `BinaryF2Poly<3>` (F_2[X]<160>).
     type CombR = Int<{ INT_LIMBS * 5 }>;
+    // Placeholder — real F_2 design wants `BinaryF2Poly<3>` (F_2[X]<160>),
+    // i.e. a single bit-packed binary polynomial per combined-row entry,
+    // not a Z[X] polynomial-of-polynomials.
     type Comb = DensePolynomial<Self::CombR, D_PLUS_ONE>;
     type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, D_PLUS_ONE>;
     type CombDotChal =
