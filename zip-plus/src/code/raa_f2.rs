@@ -234,8 +234,7 @@ fn f2_accumulate_u64(input: &mut [u64]) {
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
     for RaaF2Code<Zt, Config, REP>
 where
-    Zt::Eval: F2PackU64,
-    Zt::Cw: F2PackU64 + F2AddAssign,
+    Zt::Cw: F2AddAssign,
 {
     const REPETITION_FACTOR: usize = REP;
 
@@ -255,10 +254,19 @@ where
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         // The `Eval -> Cw` map is the only path that runs in `F_2`:
         // cells start as `F_2[X]/<X^D>`-typed and the accumulator must
-        // collapse `1 + 1` to `0`, not panic on overflow. Use the
-        // packed-u64 fast path (cells fit in `u64`, asserted by the
-        // F2PackU64 impl at construction).
-        self.encode_f2_packed(row)
+        // collapse `1 + 1` to `0`, not panic on overflow.
+        //
+        // We use [`Self::encode_f2`] (which dispatches `f2_add_assign`
+        // per cell) rather than [`Self::encode_f2_packed`]. Under the
+        // `simd` feature `BinaryPoly` is already `BinaryU64Poly`
+        // (`#[repr(transparent)] struct(u64)`), so the two paths do
+        // the same XOR ops on the same in-memory representation —
+        // but `encode_f2_packed` adds an extra pack pass on input and
+        // an extra masked-unpack pass on the codeword, which is pure
+        // overhead in that case. For non-simd builds (`BinaryRefPoly`)
+        // the packed path is the faster choice; callers in that
+        // regime should invoke it directly.
+        self.encode_f2(row)
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
