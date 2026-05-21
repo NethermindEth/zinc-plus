@@ -46,38 +46,41 @@ pub fn do_bench_commit_only<Zt: ZipTypes, Lc: LinearCode<Zt>>(
 ) where
     StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
 {
-    encode_rows::<Zt, Lc, 12>(group, make_linear_code);
-    encode_rows::<Zt, Lc, 13>(group, make_linear_code);
-    encode_rows::<Zt, Lc, 14>(group, make_linear_code);
-    encode_rows::<Zt, Lc, 15>(group, make_linear_code);
-    encode_rows::<Zt, Lc, 16>(group, make_linear_code);
+    // encode_rows::<Zt, Lc, 12>(group, make_linear_code);
+    // encode_rows::<Zt, Lc, 13>(group, make_linear_code);
+    // encode_rows::<Zt, Lc, 14>(group, make_linear_code);
+    // encode_rows::<Zt, Lc, 15>(group, make_linear_code);
+    // encode_rows::<Zt, Lc, 16>(group, make_linear_code);
+// 
+    // for lc in (8..=16)
+    //     .filter_map(|row_len_ilog2| {
+    //         let row_len = 1 << row_len_ilog2;
+    //         make_linear_code(row_len)
+    //     })
+    //     .dedup()
+    // {
+    //     encode_single_row::<Zt, Lc>(group, lc)
+    // }
 
-    for lc in (8..=16)
-        .filter_map(|row_len_ilog2| {
-            let row_len = 1 << row_len_ilog2;
-            make_linear_code(row_len)
-        })
-        .dedup()
-    {
-        encode_single_row::<Zt, Lc>(group, lc)
-    }
+    // merkle_root::<Zt, 12>(group);
+    // merkle_root::<Zt, 13>(group);
+    // merkle_root::<Zt, 14>(group);
+    // merkle_root::<Zt, 15>(group);
+    // merkle_root::<Zt, 16>(group);
+// 
+    // commit::<Zt, Lc, 12, 1>(group, make_linear_code);
+    // commit::<Zt, Lc, 13, 1>(group, make_linear_code);
+    // commit::<Zt, Lc, 14, 1>(group, make_linear_code);
+    // commit::<Zt, Lc, 15, 1>(group, make_linear_code);
+    // commit::<Zt, Lc, 16, 1>(group, make_linear_code);
 
-    merkle_root::<Zt, 12>(group);
-    merkle_root::<Zt, 13>(group);
-    merkle_root::<Zt, 14>(group);
-    merkle_root::<Zt, 15>(group);
-    merkle_root::<Zt, 16>(group);
+    commit::<Zt, Lc, 14, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 17, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 18, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 19, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 20, 20>(group, make_linear_code);
 
-    commit::<Zt, Lc, 12, 1>(group, make_linear_code);
-    commit::<Zt, Lc, 13, 1>(group, make_linear_code);
-    commit::<Zt, Lc, 14, 1>(group, make_linear_code);
-    commit::<Zt, Lc, 15, 1>(group, make_linear_code);
-    commit::<Zt, Lc, 16, 1>(group, make_linear_code);
-
-    commit::<Zt, Lc, 14, 2>(group, make_linear_code);
-    commit::<Zt, Lc, 14, 5>(group, make_linear_code);
-    commit::<Zt, Lc, 16, 2>(group, make_linear_code);
-    commit::<Zt, Lc, 16, 5>(group, make_linear_code);
 }
 
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(

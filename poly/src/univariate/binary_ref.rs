@@ -176,6 +176,39 @@ impl<const DEGREE_PLUS_ONE: usize> F2AddAssign for BinaryRefPoly<DEGREE_PLUS_ONE
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> crate::univariate::F2PackU64
+    for BinaryRefPoly<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn pack_u64(&self) -> u64 {
+        assert!(
+            DEGREE_PLUS_ONE <= 64,
+            "F2PackU64 requires DEGREE_PLUS_ONE <= 64; got {DEGREE_PLUS_ONE}",
+        );
+        let mut v: u64 = 0;
+        for (i, c) in self.0.coeffs.iter().enumerate() {
+            if c.inner() {
+                #[allow(clippy::arithmetic_side_effects)]
+                {
+                    v |= 1u64 << i;
+                }
+            }
+        }
+        v
+    }
+
+    #[inline(always)]
+    fn unpack_u64(value: u64) -> Self {
+        assert!(
+            DEGREE_PLUS_ONE <= 64,
+            "F2PackU64 requires DEGREE_PLUS_ONE <= 64; got {DEGREE_PLUS_ONE}",
+        );
+        Self(DensePolynomial {
+            coeffs: array::from_fn(|i| Boolean::new((value & (1u64 << i)) != 0)),
+        })
+    }
+}
+
 impl<'a, const DEGREE_PLUS_ONE: usize> SubAssign<&'a Self> for BinaryRefPoly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn sub_assign(&mut self, rhs: &'a Self) {

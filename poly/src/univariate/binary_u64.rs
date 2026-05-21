@@ -200,6 +200,30 @@ impl<const DEGREE_PLUS_ONE: usize> F2AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> crate::univariate::F2PackU64
+    for BinaryU64Poly<DEGREE_PLUS_ONE>
+{
+    #[inline(always)]
+    fn pack_u64(&self) -> u64 {
+        // BinaryU64Poly already stores the bit pattern as a `u64`.
+        self.0
+    }
+
+    #[inline(always)]
+    fn unpack_u64(value: u64) -> Self {
+        if DEGREE_PLUS_ONE >= 64 {
+            Self(value)
+        } else {
+            // Mask off bits at or above DEGREE_PLUS_ONE so the result is
+            // representable as `F_2[X]<DEGREE_PLUS_ONE>` exactly.
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                Self(value & ((1u64 << DEGREE_PLUS_ONE) - 1))
+            }
+        }
+    }
+}
+
 impl<const DEGREE_PLUS_ONE: usize> AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {

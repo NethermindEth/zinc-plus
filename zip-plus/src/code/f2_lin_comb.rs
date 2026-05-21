@@ -23,8 +23,9 @@
 //! RAA path.
 
 use zinc_poly::univariate::{
+    F2PackU64,
     binary::BinaryPoly,
-    binary_f2_wide::{BinaryF2Poly, f2_poly_mul},
+    binary_f2_wide::BinaryF2Poly,
 };
 
 /// `F_2[X]<32>`. Alias for clarity inside this module.
@@ -43,15 +44,24 @@ pub type F2X160 = BinaryF2Poly<3>;
 ///
 /// `out.len() == row_len`. Each entry is in `F_2[X]<160>`.
 ///
-/// Complexity: `O(num_rows * row_len * mul_cost(32, 128))`, where
-/// each multiplication is a 32-bit-by-128-bit carryless product
-/// (~32 word ops in the inner loop of `f2_poly_mul`).
+/// Implementation notes:
+/// - Cells are bit-packed to `u32` once up front (one Boolean walk
+///   per cell amortized across all the row's multiplies), avoiding
+///   per-`BinaryPoly` Boolean-array iteration in the inner loop.
+/// - The output accumulator is kept as `Vec<[u64; 3]>` raw words for
+///   the duration; it's converted back to `F2X160` at the very end.
+/// - The 32×128 carryless multiplication is inlined via
+///   [`xor_clmul_32x128`], which walks set bits of the 32-bit cell
+///   with `trailing_zeros` — `O(popcount(cell))` shifted XORs per
+///   multiplication. Zero cells short-circuit before the bit walk.
+/// - Loop order is `j` (row) outer, `col` inner. Each pass reads a
+///   contiguous slice of `cells_packed` and writes to a contiguous
+///   slice of the accumulator — cache-friendly. Inverting the loops
+///   to parallelise per-column gave a strided-read pattern on the
+///   `cells_packed` array and ~50% slowdown in practice.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2X160> {
-    assert!(
-        row_len > 0,
-        "f2_lin_comb: row_len must be > 0"
-    );
+    assert!(row_len > 0, "f2_lin_comb: row_len must be > 0");
     assert_eq!(
         cells.len(),
         coeffs.len() * row_len,
@@ -62,45 +72,70 @@ pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2
         coeffs.len() * row_len,
     );
 
-    let mut out = vec![F2X160::zero(); row_len];
-    for (j, &coeff) in coeffs.iter().enumerate() {
+    // Pack each cell to its 32-bit pattern once. The `F2PackU64` impls
+    // for `BinaryRefPoly<D ≤ 64>` walk Booleans here; this is the only
+    // place that cost is paid.
+    let cells_packed: Vec<u32> = cells.iter().map(|c| c.pack_u64() as u32).collect();
+
+    // Accumulator in raw words: 3 × u64 per column, contiguous.
+    let mut acc: Vec<[u64; 3]> = vec![[0u64; 3]; row_len];
+
+    for (j, coeff) in coeffs.iter().enumerate() {
+        let cw = coeff.words();
+        let (lo, hi) = (cw[0], cw[1]);
         let row_start = j * row_len;
-        let row = &cells[row_start..row_start + row_len];
+        let row = &cells_packed[row_start..row_start + row_len];
         for (col, &cell) in row.iter().enumerate() {
-            // Lift the F_2[X]<32> cell to the wide layout. The
-            // `BinaryPoly` alias is feature-gated, so do this via the
-            // ConstTranscribable round-trip (write to bytes, read into
-            // a u64). Since the cell stores ≤ 32 bits, the low word
-            // captures the full coefficient pattern.
-            let cell_wide = f2x32_to_wide_low_word(&cell);
-            let prod: F2X160 = f2_poly_mul(&cell_wide, &coeff);
-            out[col] += &prod;
+            if cell == 0 {
+                continue;
+            }
+            xor_clmul_32x128(&mut acc[col], cell, lo, hi);
         }
     }
-    out
+
+    acc.into_iter().map(F2X160::from_words).collect()
 }
 
-/// Lift an `F_2[X]<32>` value into a `BinaryF2Poly<1>` (single u64
-/// word). Works regardless of whether `BinaryPoly` resolves to the
-/// `BinaryRefPoly` or `BinaryU64Poly` variant.
-fn f2x32_to_wide_low_word(p: &F2X32) -> BinaryF2Poly<1> {
-    let mut w: u64 = 0;
-    for (i, c) in p.iter().enumerate() {
-        if c.inner() {
-            // i ≤ 31, never overflows.
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                w |= 1u64 << i;
-            }
+/// XOR `cell * (hi:lo)` into the 3-word accumulator `acc`, where:
+/// - `cell` is an `F_2[X]<32>` value bit-packed in a `u32` (bit `i`
+///   = coefficient of `X^i`),
+/// - `(lo, hi)` is an `F_2[X]<128>` value bit-packed in two `u64`s
+///   (bit `i` of `lo` = coefficient of `X^i`; bit `i` of `hi` =
+///   coefficient of `X^{64+i}`).
+///
+/// The product has degree ≤ 31 + 127 = 158, so it fits in `acc`
+/// (the high 2 bits of `acc[2]` are always zero — bits 159..192).
+///
+/// Inner loop: O(popcount(cell)) shifted XORs. Each shifted XOR
+/// touches all 3 words of `acc`.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn xor_clmul_32x128(acc: &mut [u64; 3], cell: u32, lo: u64, hi: u64) {
+    let mut bits = cell;
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize; // 0..=31
+        // XOR (lo, hi, 0) << i into acc.
+        if i == 0 {
+            acc[0] ^= lo;
+            acc[1] ^= hi;
+        } else {
+            // Bit i in [1, 31]: shift the 128-bit coefficient left by
+            // i bits and XOR into acc[0..3]. For 32-bit `cell`, `i`
+            // never reaches 64 so there are no zero-shift edge cases.
+            acc[0] ^= lo << i;
+            acc[1] ^= (lo >> (64 - i)) ^ (hi << i);
+            acc[2] ^= hi >> (64 - i);
         }
+        // Clear the LSB.
+        bits &= bits - 1;
     }
-    BinaryF2Poly::<1>::from_words([w])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crypto_primitives::boolean::Boolean;
+    use zinc_poly::univariate::binary_f2_wide::f2_poly_mul;
 
     fn bp32(bits: u32) -> F2X32 {
         F2X32::from(bits)
@@ -130,18 +165,47 @@ mod tests {
         let c = bp128(0x9E37_79B1_DEAD_BEEF, 0xCAFE_F00D_F00D_BAAD);
         let out = f2_lin_comb(&cells, &[c], row_len);
 
-        // Reproduce by hand: out[col] = lift32(cells[col]) · c.
+        // Reproduce by hand: out[col] = lift32(cells[col]) · c, using
+        // the generic `f2_poly_mul` as a reference oracle.
         for (col, &cell) in cells.iter().enumerate() {
-            let cell_wide = f2x32_to_wide_low_word(&cell);
+            let cell_wide: BinaryF2Poly<1> =
+                BinaryF2Poly::from_words([cell.pack_u64()]);
             let expected: F2X160 = f2_poly_mul(&cell_wide, &c);
             assert_eq!(out[col], expected);
         }
     }
 
     #[test]
+    fn matches_reference_generic_mul() {
+        // Compare against the generic schoolbook multiplier for a
+        // wider workload — catches any drift between the inlined
+        // 32×128 path and the reference 32×128 oracle.
+        let row_len = 5;
+        let num_rows = 7;
+        let cells: Vec<F2X32> = (0..(row_len * num_rows) as u32)
+            .map(|i| bp32(i.wrapping_mul(0xA5A5_A5A5).wrapping_add(0x12345)))
+            .collect();
+        let coeffs: Vec<F2X128> = (0..num_rows as u64)
+            .map(|j| bp128(j.wrapping_mul(0x9E37_79B1), j.wrapping_mul(0xDEAD_BEEF)))
+            .collect();
+
+        let got = f2_lin_comb(&cells, &coeffs, row_len);
+
+        let mut expected = vec![F2X160::zero(); row_len];
+        for (j, &coeff) in coeffs.iter().enumerate() {
+            for (col, cell) in cells[j * row_len..(j + 1) * row_len].iter().enumerate() {
+                let cell_wide: BinaryF2Poly<1> =
+                    BinaryF2Poly::from_words([cell.pack_u64()]);
+                let prod: F2X160 = f2_poly_mul(&cell_wide, &coeff);
+                expected[col] += &prod;
+            }
+        }
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
     fn linearity_in_cells() {
-        // f2_lin_comb is F_2-linear in `cells`. Build A and B and check
-        // f2_lin_comb(A XOR B, c) == f2_lin_comb(A, c) XOR f2_lin_comb(B, c).
         let row_len = 3;
         let num_rows = 4;
         let n = row_len * num_rows;
@@ -149,23 +213,14 @@ mod tests {
         let b: Vec<F2X32> = (0..n as u32).map(|i| bp32(i.wrapping_mul(0xDEAD_BEEF))).collect();
         let c: Vec<F2X128> = (0..num_rows as u64).map(|j| bp128(j ^ 0xC0FFEE, j ^ 0xBEEFCAFE)).collect();
 
+        // F_2 XOR of a and b via the cell pack.
         let a_xor_b: Vec<F2X32> = a
             .iter()
             .zip(b.iter())
             .map(|(x, y)| {
-                // XOR via bit-pattern reconstruction.
-                let mut bits = 0u32;
-                for (i, ci) in x.iter().enumerate() {
-                    if ci.inner() {
-                        bits |= 1u32 << i;
-                    }
-                }
-                for (i, ci) in y.iter().enumerate() {
-                    if ci.inner() {
-                        bits ^= 1u32 << i;
-                    }
-                }
-                let coeffs: Vec<Boolean> = (0..32).map(|i| ((bits >> i) & 1 == 1).into()).collect();
+                let bits = (x.pack_u64() ^ y.pack_u64()) as u32;
+                let coeffs: Vec<Boolean> =
+                    (0..32).map(|i| ((bits >> i) & 1 == 1).into()).collect();
                 F2X32::new(coeffs)
             })
             .collect();
@@ -189,8 +244,6 @@ mod tests {
 
     #[test]
     fn linearity_in_coefficients() {
-        // f2_lin_comb is also F_2-linear in `coeffs`:
-        // f2_lin_comb(cells, c1 XOR c2) == f2_lin_comb(cells, c1) XOR f2_lin_comb(cells, c2).
         let row_len = 3;
         let num_rows = 4;
         let n = row_len * num_rows;
@@ -232,9 +285,6 @@ mod tests {
         let c = vec![bp128(u64::MAX, u64::MAX)]; // all 128 bits set
         let out = f2_lin_comb(&cells, &c, row_len);
         for entry in &out {
-            // Word 2 of the output should have bit 31..63 clear (since
-            // word index 2 starts at bit 128; max set bit is 158, so
-            // only bits 0..=30 of word 2 may be set).
             let high_word = entry.words()[2];
             assert_eq!(
                 high_word >> 31,

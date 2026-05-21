@@ -23,7 +23,7 @@ use crate::{
 };
 use crypto_primitives::PrimeField;
 use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
-use zinc_poly::univariate::F2AddAssign;
+use zinc_poly::univariate::{F2AddAssign, F2PackU64};
 use zinc_utils::{from_ref::FromRef, mul};
 
 /// RAA code over `F_2` (XOR accumulator, no codeword widening).
@@ -109,6 +109,13 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, RE
 
     /// Encode using `F_2` (XOR) addition: `1 + 1 = 0`. Used for the
     /// `encode` path where `Eval = Cw` are `F_2[X]/<X^D>`-typed cells.
+    ///
+    /// Generic fallback that operates directly on `Out` values via the
+    /// [`F2AddAssign`] trait. For `D ≤ 64` cells, prefer
+    /// [`Self::encode_f2_packed`] — it stays in `u64`-space throughout
+    /// the repeat / permute / accumulate steps, avoiding per-cell
+    /// Boolean-array work and 32-byte cell clones.
+    #[allow(dead_code)]
     fn encode_f2<In, Out>(&self, row: &[In]) -> Vec<Out>
     where
         Out: F2AddAssign + FromRef<In> + Clone,
@@ -135,6 +142,55 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, RE
         debug_assert_eq!(result.len(), mul!(self.row_len, REP));
         result
     }
+
+    /// Packed-u64 fast path for the F_2 encode. Each input/output cell
+    /// must fit in a single `u64` (D ≤ 64), in which case repeat /
+    /// permute / accumulate become straight `u64` ops: XOR for the
+    /// prefix-sum, `Vec<u64>` clone-shuffle for the permutations,
+    /// `Vec::cycle`-style fill for the repeat.
+    ///
+    /// On a 32-coefficient cell this avoids ~32 Boolean-iterator
+    /// touches per `f2_add_assign` and replaces 32-byte cell clones
+    /// with single 8-byte word copies — the dominant cost in the
+    /// generic path.
+    fn encode_f2_packed<In, Out>(&self, row: &[In]) -> Vec<Out>
+    where
+        In: F2PackU64,
+        Out: F2PackU64,
+    {
+        debug_assert_eq!(
+            row.len(),
+            self.row_len,
+            "Row length must match the code's row length"
+        );
+
+        // Pack the input row once. Subsequent passes work on `u64`.
+        let packed_row: Vec<u64> = row.iter().map(F2PackU64::pack_u64).collect();
+
+        // Repeat.
+        let codeword_len = mul!(self.row_len, REP);
+        let mut buf: Vec<u64> = Vec::with_capacity(codeword_len);
+        for _ in 0..REP {
+            buf.extend_from_slice(&packed_row);
+        }
+
+        // First permutation + prefix XOR + second permutation + prefix XOR.
+        if Config::PERMUTE_IN_PLACE {
+            shuffle_seeded(&mut buf, self.perm_1_seed);
+        } else {
+            buf = self.perm_1.iter().map(|&i| buf[i]).collect();
+        }
+        f2_accumulate_u64(&mut buf);
+        if Config::PERMUTE_IN_PLACE {
+            shuffle_seeded(&mut buf, self.perm_2_seed);
+        } else {
+            buf = self.perm_2.iter().map(|&i| buf[i]).collect();
+        }
+        f2_accumulate_u64(&mut buf);
+
+        debug_assert_eq!(buf.len(), codeword_len);
+        buf.into_iter().map(Out::unpack_u64).collect()
+    }
 }
 
 /// `F_2` cumulative-XOR. Same prefix-sum structure as
@@ -157,10 +213,29 @@ where
     }
 }
 
+/// `F_2` cumulative-XOR specialized to `u64` cells. Single-instruction
+/// XOR per step, no virtual dispatch, no Boolean-iterator walks.
+#[inline]
+fn f2_accumulate_u64(input: &mut [u64]) {
+    let n = input.len();
+    if n < 2 {
+        return;
+    }
+    let mut acc = input[0];
+    // SAFETY: `i` is bounded by `n = input.len()`.
+    unsafe {
+        for i in 1..n {
+            acc ^= *input.get_unchecked(i);
+            *input.get_unchecked_mut(i) = acc;
+        }
+    }
+}
+
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
     for RaaF2Code<Zt, Config, REP>
 where
-    Zt::Cw: F2AddAssign,
+    Zt::Eval: F2PackU64,
+    Zt::Cw: F2PackU64 + F2AddAssign,
 {
     const REPETITION_FACTOR: usize = REP;
 
@@ -180,8 +255,10 @@ where
     fn encode(&self, row: &[Zt::Eval]) -> Vec<Zt::Cw> {
         // The `Eval -> Cw` map is the only path that runs in `F_2`:
         // cells start as `F_2[X]/<X^D>`-typed and the accumulator must
-        // collapse `1 + 1` to `0`, not panic on overflow.
-        self.encode_f2(row)
+        // collapse `1 + 1` to `0`, not panic on overflow. Use the
+        // packed-u64 fast path (cells fit in `u64`, asserted by the
+        // F2PackU64 impl at construction).
+        self.encode_f2_packed(row)
     }
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {

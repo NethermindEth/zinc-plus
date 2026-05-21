@@ -20,6 +20,24 @@ pub trait F2AddAssign {
     fn f2_add_assign(&mut self, rhs: &Self);
 }
 
+/// Reversible packing of an `F_2[X]<D>` cell (`D ≤ 64`) into a single
+/// `u64`. Bit `i` of the packed value holds the coefficient of `X^i`.
+///
+/// `BinaryRefPoly<D>` stores its 32-or-fewer coefficients as a
+/// `[Boolean; D]` array — touching it iterates over `Boolean` values.
+/// `BinaryU64Poly<D>` already stores a `u64`. This trait lets hot
+/// loops convert once at the boundary and work in raw bits between
+/// the conversion (where XOR is a single instruction) without
+/// committing to either variant of `BinaryPoly`.
+///
+/// Requires `D ≤ 64`. Impls panic if the type is constructed with
+/// larger `D`. (We do not currently target the F_2-RAA fast path
+/// for wider cells.)
+pub trait F2PackU64: Sized {
+    fn pack_u64(&self) -> u64;
+    fn unpack_u64(value: u64) -> Self;
+}
+
 /// Shared projection helper for binary polynomials.
 /// `get_coeff` should return true if the i-th coefficient is 1.
 fn prepare_projection<F, P, GetCoeff, const N: usize>(
