@@ -731,6 +731,151 @@ mod tests {
         assert_ne!(hint.cw_matrices[0], hint.cw_matrices[1]);
     }
 
+    // ------------------------------------------------------------------
+    // F_2 RAA commit path: `Cw = BinaryPoly<D>` (no widening). The
+    // codeword type matches the eval type and accumulation in the RAA
+    // matrix runs over `F_2[X]`. The Merkle tree leaves are thus
+    // `BinaryPoly<D>` entries, transcribed as 8 bytes each (same as
+    // the `i64` codewords in the integer-RAA path, by coincidence of
+    // `D ≤ 64`).
+    mod raa_f2 {
+        use super::*;
+        use crate::code::raa::RaaConfig;
+        use crate::code::raa_f2::RaaF2Code;
+
+        const F2_DEG: usize = 32;
+
+        #[derive(Copy, Clone)]
+        struct F2Cfg;
+        impl RaaConfig for F2Cfg {
+            const PERMUTE_IN_PLACE: bool = false;
+            const CHECK_FOR_OVERFLOWS: bool = false;
+        }
+
+        type F2Zt = TestBinPolyF2ZipTypes<F2_DEG>;
+        type F2Lc = RaaF2Code<F2Zt, F2Cfg, REP_FACTOR>;
+        type F2Zip = ZipPlus<F2Zt, F2Lc>;
+
+        fn make_bin_polys(
+            num_vars: usize,
+            batch_size: usize,
+            row_len: usize,
+        ) -> Vec<DenseMultilinearExtension<BinaryPoly<F2_DEG>>> {
+            let poly_size: usize = 1usize << num_vars;
+            // round poly_size up to the row_len so the MLE evaluation
+            // vector divides evenly into rows (commit() requires this).
+            let padded: usize = poly_size.div_ceil(row_len) * row_len;
+            (0..batch_size)
+                .map(|b| {
+                    let evals: Vec<BinaryPoly<F2_DEG>> = (0..padded)
+                        .map(|i| {
+                            let i32_i = i as u32;
+                            let b32 = b as u32;
+                            let v = i32_i.wrapping_mul(0x9E37_79B1).wrapping_add(b32.wrapping_mul(0xDEAD_BEEF));
+                            BinaryPoly::from(v)
+                        })
+                        .collect();
+                    DenseMultilinearExtension {
+                        num_vars,
+                        evaluations: evals,
+                    }
+                })
+                .collect()
+        }
+
+        #[test]
+        fn commit_with_f2_raa_codeword_is_binary_poly() {
+            let row_len = 8usize;
+            let num_vars = 5; // poly_size = 32, fits in 4 rows of 8
+            let lc = F2Lc::new(row_len);
+            let num_rows = (1usize << num_vars).div_ceil(row_len);
+            let pp = ZipPlusParams::new(num_vars, num_rows, lc);
+
+            let polys = make_bin_polys(num_vars, 1, row_len);
+            let (hint, comm) = F2Zip::commit_single(&pp, &polys[0]).unwrap();
+
+            assert_eq!(hint.cw_matrices.len(), 1);
+            let cw = &hint.cw_matrices[0];
+            assert_eq!(cw.num_rows, num_rows);
+            assert_eq!(cw.num_cols, pp.linear_code.codeword_len());
+            assert_eq!(comm.batch_size, 1);
+        }
+
+        #[test]
+        fn commit_with_f2_raa_is_deterministic() {
+            let row_len = 8usize;
+            let num_vars = 5;
+            let lc = F2Lc::new(row_len);
+            let num_rows = (1usize << num_vars).div_ceil(row_len);
+            let pp = ZipPlusParams::new(num_vars, num_rows, lc);
+
+            let polys = make_bin_polys(num_vars, 2, row_len);
+            let (_, comm_a) = F2Zip::commit(&pp, &polys).unwrap();
+            let (_, comm_b) = F2Zip::commit(&pp, &polys).unwrap();
+            assert_eq!(comm_a.root, comm_b.root);
+        }
+
+        #[test]
+        fn commit_with_f2_raa_zero_poly_gives_zero_codeword() {
+            let row_len = 8usize;
+            let num_vars = 5;
+            let lc = F2Lc::new(row_len);
+            let num_rows = (1usize << num_vars).div_ceil(row_len);
+            let pp = ZipPlusParams::new(num_vars, num_rows, lc);
+
+            let zero_poly = DenseMultilinearExtension {
+                num_vars,
+                evaluations: vec![BinaryPoly::<F2_DEG>::zero(); num_rows * row_len],
+            };
+            let (hint, _) = F2Zip::commit_single(&pp, &zero_poly).unwrap();
+            assert!(
+                hint.cw_matrices[0]
+                    .as_rows()
+                    .all(|row| row.iter().all(|cw| cw.is_zero())),
+                "all-zero polynomial must encode to all-zero codeword under F_2 RAA",
+            );
+        }
+
+        /// `F_2` linearity at commit level: the F_2 (XOR) sum of two
+        /// committed polys' codewords equals the codeword of their F_2
+        /// sum. If accumulation were instead over `Z`, codeword entries
+        /// would carry-grow and this identity would fail.
+        #[test]
+        fn commit_with_f2_raa_is_linear_over_f2() {
+            use zinc_poly::univariate::F2AddAssign;
+
+            let row_len = 8usize;
+            let num_vars = 5;
+            let lc = F2Lc::new(row_len);
+            let num_rows = (1usize << num_vars).div_ceil(row_len);
+            let pp = ZipPlusParams::new(num_vars, num_rows, lc);
+
+            let polys = make_bin_polys(num_vars, 2, row_len);
+            let mut sum_evals = polys[0].evaluations.clone();
+            for (a, b) in sum_evals.iter_mut().zip(polys[1].evaluations.iter()) {
+                a.f2_add_assign(b);
+            }
+            let sum_poly = DenseMultilinearExtension {
+                num_vars,
+                evaluations: sum_evals,
+            };
+
+            let (hint0, _) = F2Zip::commit_single(&pp, &polys[0]).unwrap();
+            let (hint1, _) = F2Zip::commit_single(&pp, &polys[1]).unwrap();
+            let (hint_sum, _) = F2Zip::commit_single(&pp, &sum_poly).unwrap();
+
+            let cw0 = &hint0.cw_matrices[0].data;
+            let cw1 = &hint1.cw_matrices[0].data;
+            let cw_sum = &hint_sum.cw_matrices[0].data;
+
+            for ((a, b), s) in cw0.iter().zip(cw1.iter()).zip(cw_sum.iter()) {
+                let mut xor = *a;
+                xor.f2_add_assign(b);
+                assert_eq!(&xor, s, "F_2 linearity broken at commit level");
+            }
+        }
+    }
+
     #[test]
     fn proof_size_is_correct_for_parameters() {
         use std::mem::size_of;

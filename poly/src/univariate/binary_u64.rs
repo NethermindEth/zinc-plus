@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{dense::DensePolynomial, prepare_projection},
+    univariate::{F2AddAssign, dense::DensePolynomial, prepare_projection},
 };
 use core::mem::MaybeUninit;
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
@@ -23,7 +23,7 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 
-#[derive(AsRef, Clone, Debug, Default, Display, Hash, PartialEq, Eq)]
+#[derive(AsRef, Clone, Copy, Debug, Default, Display, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct BinaryU64Poly<const DEGREE_PLUS_ONE: usize>(u64); // we can fit up to degree 64, which is ok for now
 
@@ -191,6 +191,15 @@ impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryU64Poly<DEG
     }
 }
 
+impl<const DEGREE_PLUS_ONE: usize> F2AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    /// XOR the bit-packed representations — natively `F_2` arithmetic.
+    #[inline(always)]
+    #[allow(clippy::suspicious_op_assign_impl)]
+    fn f2_add_assign(&mut self, rhs: &Self) {
+        self.0 ^= rhs.0;
+    }
+}
+
 impl<const DEGREE_PLUS_ONE: usize> AddAssign for BinaryU64Poly<DEGREE_PLUS_ONE> {
     #[inline(always)]
     fn add_assign(&mut self, rhs: Self) {
@@ -274,6 +283,26 @@ impl<'a, const DEGREE_PLUS_ONE: usize> Product<&'a Self> for BinaryU64Poly<DEGRE
     #[inline(always)]
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.product()
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Sum for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        // XOR-fold; `0` is the additive identity.
+        iter.fold(Self::zero(), |acc, x| {
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                acc + x
+            }
+        })
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> Product for BinaryU64Poly<DEGREE_PLUS_ONE> {
+    #[inline(always)]
+    fn product<I: Iterator<Item = Self>>(_iter: I) -> Self {
+        unimplemented!("Product for BinaryU64Poly relies on multiplication, which is unimplemented");
     }
 }
 

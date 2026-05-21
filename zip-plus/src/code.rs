@@ -1,5 +1,7 @@
+pub mod f2_lin_comb;
 pub mod iprs;
 pub mod raa;
+pub mod raa_f2;
 pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;

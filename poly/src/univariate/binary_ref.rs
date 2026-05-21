@@ -1,6 +1,6 @@
 use crate::{
     ConstCoeffBitWidth, EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{dense::DensePolynomial, prepare_projection},
+    univariate::{F2AddAssign, dense::DensePolynomial, prepare_projection},
 };
 use crypto_primitives::{PrimeField, Semiring, semiring::boolean::Boolean};
 use derive_more::{
@@ -29,6 +29,7 @@ use zinc_utils::{
     AddAssign,
     AsRef,
     Clone,
+    Copy,
     Debug,
     From,
     Default,
@@ -161,6 +162,17 @@ impl<'a, const DEGREE_PLUS_ONE: usize> AddAssign<&'a Self> for BinaryRefPoly<DEG
     #[inline(always)]
     fn add_assign(&mut self, rhs: &'a Self) {
         self.0.add_assign(&rhs.0);
+    }
+}
+
+impl<const DEGREE_PLUS_ONE: usize> F2AddAssign for BinaryRefPoly<DEGREE_PLUS_ONE> {
+    /// XOR each coefficient — bypasses `Boolean::AddAssign`'s overflow
+    /// check so that `1 + 1 = 0` rather than panicking.
+    #[inline(always)]
+    fn f2_add_assign(&mut self, rhs: &Self) {
+        for (a, b) in self.0.coeffs.iter_mut().zip(rhs.0.coeffs.iter()) {
+            *a = Boolean::new(a.inner() ^ b.inner());
+        }
     }
 }
 

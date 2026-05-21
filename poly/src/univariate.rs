@@ -1,11 +1,24 @@
 use crypto_primitives::PrimeField;
 use zinc_utils::from_ref::FromRef;
 
+pub mod binary_f2_wide;
 pub mod binary_ref;
 pub mod binary_u64;
 pub mod dense;
 pub mod dynamic;
 pub mod nat_evaluation;
+
+/// In-place `F_2` addition for `F_2[X]`-typed values. Unlike `AddAssign`
+/// on the binary-poly types — which models the coefficients as the
+/// integers `{0, 1}` and panics in debug mode on `1 + 1` because the
+/// sum overflows `{0, 1}` — `F2AddAssign` performs the modular
+/// `F_2`-style XOR with no overflow notion (`1 + 1 = 0`).
+///
+/// Use this trait wherever the intended arithmetic is `F_2` (e.g. an
+/// RAA encoder operating over `F_2[X]/<X^D>`).
+pub trait F2AddAssign {
+    fn f2_add_assign(&mut self, rhs: &Self);
+}
 
 /// Shared projection helper for binary polynomials.
 /// `get_coeff` should return true if the i-th coefficient is 1.

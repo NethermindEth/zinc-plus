@@ -34,6 +34,52 @@ use zip_plus::{
 const INT_LIMBS: usize = U64::LIMBS;
 type F = MontyField<{ INT_LIMBS * 4 }>;
 
+/// Run only the encode/merkle/commit benches — no prove/verify. Use this
+/// for `ZipTypes` configurations whose proximity check isn't wired up
+/// to the integer-RAA verifier yet (e.g. the `F_2`-RAA binary lane:
+/// codeword accumulation is in `F_2` but the existing verifier expects
+/// integer-arithmetic codewords).
+#[allow(dead_code)] // used only by `zip_plus_benches`, not `zip_benches`
+pub fn do_bench_commit_only<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+    group: &mut BenchmarkGroup<WallTime>,
+    make_linear_code: impl Fn(/* poly_size: */ usize) -> Option<Lc> + Copy,
+) where
+    StandardUniform: Distribution<Zt::Eval> + Distribution<Zt::Cw>,
+{
+    encode_rows::<Zt, Lc, 12>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 13>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 14>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 15>(group, make_linear_code);
+    encode_rows::<Zt, Lc, 16>(group, make_linear_code);
+
+    for lc in (8..=16)
+        .filter_map(|row_len_ilog2| {
+            let row_len = 1 << row_len_ilog2;
+            make_linear_code(row_len)
+        })
+        .dedup()
+    {
+        encode_single_row::<Zt, Lc>(group, lc)
+    }
+
+    merkle_root::<Zt, 12>(group);
+    merkle_root::<Zt, 13>(group);
+    merkle_root::<Zt, 14>(group);
+    merkle_root::<Zt, 15>(group);
+    merkle_root::<Zt, 16>(group);
+
+    commit::<Zt, Lc, 12, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 13, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 14, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 15, 1>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 1>(group, make_linear_code);
+
+    commit::<Zt, Lc, 14, 2>(group, make_linear_code);
+    commit::<Zt, Lc, 14, 5>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 2>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 5>(group, make_linear_code);
+}
+
 pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: bool>(
     group: &mut BenchmarkGroup<WallTime>,
     make_linear_code: impl Fn(/* poly_size: */ usize) -> Option<Lc> + Copy,

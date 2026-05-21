@@ -807,6 +807,7 @@ mod tests {
         code::{
             iprs::{IprsCode, PnttConfigF65537},
             raa::{RaaCode, RaaConfig},
+            raa_f2::RaaF2Code,
         },
         pcs::structs::{ZipPlus, ZipPlusParams},
         pcs_transcript::PcsProverTranscript,
@@ -857,6 +858,44 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
         type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
         type Cw = DensePolynomial<i64, DEGREE_PLUS_ONE>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+        type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    /// `ZipTypes` for the **`F_2` RAA** binary-commit lane.
+    ///
+    /// Differs from [`BinPolyZipTypes`] only in `Cw`: codewords stay in
+    /// `BinaryPoly<DEGREE_PLUS_ONE>` (no integer widening) because the
+    /// linear-code accumulation runs over `F_2[X]` (`1 + 1 = 0`). The
+    /// committed leaves are therefore `D`-bit binary polynomials, not
+    /// widened integer polynomials.
+    ///
+    /// NOTE: pairing this `ZipTypes` with the existing
+    /// `verify_column_testing_batched` proximity check requires
+    /// reconciling the `F_2`-vs-`Z` accumulator gap on the verifier
+    /// side (e.g. mod-2 reduction of the integer linear combination
+    /// before comparison, or a redesigned proximity test). The types
+    /// here are the commit-side building block; the matching
+    /// verification path is left to the caller.
+    #[derive(Debug, Clone)]
+    pub struct BinPolyZipTypesF2 {}
+    impl ZipTypes for BinPolyZipTypesF2 {
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
+        type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
+        type Cw = BinaryPoly<DEGREE_PLUS_ONE>;
         type Fmod = Uint<FIELD_LIMBS>;
         type PrimeTest = MillerRabin;
         type Chal = i128;
@@ -1097,6 +1136,47 @@ mod tests {
         // runtime to MLE-first (all-linear), Combined (all-non-linear), or
         // Hybrid (mixed). Always exercise it.
         run_protocol!(true);
+    }
+
+    /// Commit-only sanity check: the `F_2`-RAA binary-commit lane
+    /// produces well-shaped codeword matrices and survives
+    /// MerkleTree construction.
+    ///
+    /// Pairs `BinPolyZipTypesF2` (`Cw = BinaryPoly<DEGREE_PLUS_ONE>`)
+    /// with `RaaF2Code` and a single `BinaryPoly<32>` MLE batch. We
+    /// don't run the prover/verifier here because the existing
+    /// proximity test was designed for integer-RAA codewords (see
+    /// note on `BinPolyZipTypesF2`); this test exercises the new
+    /// commit pathway in isolation.
+    #[test]
+    fn test_commit_with_f2_raa_binary_lane() {
+        use crypto_primitives::boolean::Boolean;
+        use itertools::Itertools;
+        use num_traits::Zero;
+        use zinc_poly::mle::DenseMultilinearExtension;
+
+        const ROW_LEN: usize = 16;
+        let num_vars = 6; // poly_size = 64, so 4 rows of 16
+        let num_rows = (1usize << num_vars).div_ceil(ROW_LEN);
+
+        let lc = RaaF2Code::<BinPolyZipTypesF2, TestRaaConfig, REP>::new(ROW_LEN);
+        let pp = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let d = DEGREE_PLUS_ONE - 1; // 31 — leave the high bit free
+        let poly_size = 1usize << num_vars;
+        let coeffs: Vec<Boolean> = (0..poly_size * d)
+            .map(|i| (i % 5 != 0).into())
+            .collect();
+        let evals: Vec<BinaryPoly<DEGREE_PLUS_ONE>> =
+            coeffs.chunks_exact(d).map(BinaryPoly::new).collect_vec();
+        let poly = DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, Zero::zero());
+
+        let (hint, comm) =
+            ZipPlus::<BinPolyZipTypesF2, _>::commit_single(&pp, &poly).unwrap();
+        assert_eq!(hint.cw_matrices.len(), 1);
+        assert_eq!(hint.cw_matrices[0].num_rows, num_rows);
+        assert_eq!(hint.cw_matrices[0].num_cols, ROW_LEN * REP);
+        assert_eq!(comm.batch_size, 1);
     }
 
     /// End-to-end test: TestUairNoMultiplication.

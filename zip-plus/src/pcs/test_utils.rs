@@ -87,6 +87,35 @@ impl<const K: usize, const M: usize, const DEGREE_PLUS_ONE: usize> ZipTypes
     type ArrCombRDotChal = MBSInnerProduct;
 }
 
+/// `ZipTypes` for committing to `BinaryPoly<D>`-valued MLEs with an
+/// `F_2`-only codeword: `Cw = BinaryPoly<D>` (no widening). The
+/// combined-row arithmetic (`Comb`, `CombR`) still lives in a wide
+/// integer ring, because the random linear combination of codewords
+/// has integer challenge coefficients and so cannot fit back into
+/// `F_2`.
+#[derive(Debug, Clone)]
+pub struct TestBinPolyF2ZipTypes<const DEGREE_PLUS_ONE: usize> {}
+impl<const DEGREE_PLUS_ONE: usize> ZipTypes for TestBinPolyF2ZipTypes<DEGREE_PLUS_ONE> {
+    const NUM_COLUMN_OPENINGS: usize = 147;
+    type Eval = BinaryPoly<DEGREE_PLUS_ONE>;
+    type Cw = BinaryPoly<DEGREE_PLUS_ONE>;
+    type Fmod = Uint<{ crypto_bigint::U64::LIMBS * 4 }>;
+    type PrimeTest = MillerRabin;
+    type Chal = i128;
+    type Pt = i128;
+    type CombR = Int<{ crypto_bigint::U64::LIMBS * 8 }>;
+    type Comb = DensePolynomial<Self::CombR, DEGREE_PLUS_ONE>;
+    type EvalDotChal = BinaryPolyInnerProduct<Self::Chal, DEGREE_PLUS_ONE>;
+    type CombDotChal = DensePolyInnerProduct<
+        Self::CombR,
+        Self::Chal,
+        Self::CombR,
+        MBSInnerProduct,
+        DEGREE_PLUS_ONE,
+    >;
+    type ArrCombRDotChal = MBSInnerProduct;
+}
+
 /// Helper function to set up common parameters for tests.
 pub fn setup_test_params<const N: usize, const K: usize, const M: usize>(
     num_vars: usize,
