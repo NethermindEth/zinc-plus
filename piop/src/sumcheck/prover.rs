@@ -64,10 +64,8 @@ pub struct ProverState<F: PrimeField> {
     pub asserted_sum: Option<F>,
     /// When `true`, the next [`prove_round`] invocation pushes the verifier
     /// challenge into `randomness` but skips the `fix_variables_with_config`
-    /// fold of `mles`. Used by round-1 fast paths (see
-    /// [`crate::sumcheck::multi_degree::Round1FastPath`]) that pre-fold the
-    /// MLEs as part of their setup, so the standard prover must not fold
-    /// them a second time.
+    /// fold of `mles`. Used by round-1 fast paths (see that pre-fold the
+    /// MLEs as part of their setup.
     /// The flag is reset to `false` after the skipped fold.
     pub skip_next_fold: bool,
 }
@@ -99,7 +97,8 @@ where
     /// Receive message from verifier, generate prover message, and proceed to
     /// next round.
     ///
-    /// Adapted Jolt's sumcheck implementation.
+    /// Adapted Jolt's sumcheck implementation, with some additions like round 1
+    /// fast path.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn prove_round(
         &mut self,
@@ -114,8 +113,7 @@ where
             self.randomness.push(msg.clone());
 
             if self.skip_next_fold {
-                // A round-1 fast path already produced the post-fold MLEs;
-                // the standard fold would double-apply the challenge.
+                // A fast path already produced the post-fold MLEs
                 self.skip_next_fold = false;
             } else {
                 // fix the next variable at the verifier randomness for this round

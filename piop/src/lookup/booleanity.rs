@@ -401,7 +401,6 @@ where
     /// With overwhelming probability over the random $a$, agreement forces
     /// `bit_slice_evals` to be the true bit decomposition of the committed
     /// parent column at $r^\star$.
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_bit_decomposition_consistency(
         bit_slice_evals: &[F],
         parent_evals: &[F],
@@ -431,7 +430,7 @@ where
             let mut recombined = zero.clone();
             for (a_pow, bit_eval) in a_powers
                 .iter()
-                .zip(&bit_slice_evals[base..base + bits_per_col])
+                .zip(&bit_slice_evals[base..add!(base, bits_per_col)])
             {
                 recombined += a_pow.clone() * bit_eval;
             }
