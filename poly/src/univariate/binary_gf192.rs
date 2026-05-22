@@ -36,7 +36,20 @@ use num_traits::{
 
 use crate::univariate::{
     binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_u64::BinaryU64Poly,
+    dense::DensePolynomial,
 };
+
+/// A `GF(2^192)[X]<D>` polynomial — degree-`<D` univariate with
+/// `GF(2^192)`-valued coefficients. The natural target of the
+/// `F_2[X] → GF(2^192)[X]` coefficient lift used in step 2 of the
+/// F_2 proving path (see `protocol/src/f2_prove_plan.md`).
+///
+/// Built on top of the existing [`DensePolynomial`] machinery:
+/// `BinaryFieldGF192` already implements `Semiring` (via the
+/// degenerate `PrimeField` impl), so addition / negation /
+/// `EvaluatablePolynomial<R, R>` (Horner at a point) all come
+/// for free.
+pub type GF192Poly<const D: usize> = DensePolynomial<BinaryFieldGF192, D>;
 
 /// Low bits of the reduction polynomial — `g(X) = X^7 + X^2 + X + 1`,
 /// stored as the bit pattern `0b 1000_0111 = 0x87`. (The `X^192` term
@@ -594,6 +607,50 @@ fn word_times_g(w: u64) -> (u64, u64) {
     (lo, hi)
 }
 
+// -- F_2[X]<D> → GF(2^192)[X]<D> coefficient lift --------------------
+//
+// Every `F_2` element is canonically a `GF(2^192)` element via the
+// inclusion `F_2 ⊂ GF(2^192)`: `Boolean::ZERO → GF192::zero()` and
+// `Boolean::ONE → GF192::one()`. Applied per-coefficient, this
+// extends an `F_2[X]<D>`-typed cell to a `GF(2^192)[X]<D>` value
+// the IC can then combine with `GF(2^192)`-valued challenges.
+//
+// The lift is the identity-on-cells composed with the trivial
+// embedding of the coefficient ring — no randomness involved. By
+// construction `eval_after_lift(p, α) = eval_f2(p, α)` (proved in
+// `lift_then_eval_equals_direct_eval`).
+
+/// Lift `F_2[X]<D>` (a [`BinaryPoly<D>`]) to `GF(2^192)[X]<D>`.
+/// Each `Boolean` coefficient maps to `GF192::zero()` or
+/// `GF192::one()`.
+pub fn lift_f2_poly_to_gf192<const D: usize>(p: &BinaryPoly<D>) -> GF192Poly<D> {
+    let mut coeffs: [BinaryFieldGF192; D] = [BinaryFieldGF192::zero(); D];
+    for (i, c) in p.iter().enumerate() {
+        if c.inner() {
+            coeffs[i] = BinaryFieldGF192::one();
+        }
+    }
+    DensePolynomial { coeffs }
+}
+
+/// Lift `F_2[X]<D>` (a [`BinaryU64Poly<D>`], `D ≤ 64`) to
+/// `GF(2^192)[X]<D>`. Same per-coefficient embedding as
+/// [`lift_f2_poly_to_gf192`], but reading from the bit-packed
+/// representation directly.
+pub fn lift_f2_u64_poly_to_gf192<const D: usize>(p: &BinaryU64Poly<D>) -> GF192Poly<D> {
+    assert!(D <= 64, "lift_f2_u64_poly_to_gf192: D ({D}) must be ≤ 64");
+    let bits = *p.inner();
+    let mut coeffs: [BinaryFieldGF192; D] = [BinaryFieldGF192::zero(); D];
+    for (i, slot) in coeffs.iter_mut().enumerate().take(D) {
+        #[allow(clippy::arithmetic_side_effects)]
+        let bit = (bits >> i) & 1;
+        if bit == 1 {
+            *slot = BinaryFieldGF192::one();
+        }
+    }
+    DensePolynomial { coeffs }
+}
+
 // -- evaluation: F_2[X]<D> → GF(2^192) at X = α ----------------------
 
 /// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell. Each set bit
@@ -868,6 +925,76 @@ mod tests {
         // field. The panic documents that misuse.
         let a = BinaryFieldGF192::one();
         let _ = a.modulus_minus_one_div_two();
+    }
+
+    /// Lifting then Horner-evaluating must agree with the direct
+    /// `eval_f2_poly_d32_at` shortcut — both compute the same ring
+    /// homomorphism `F_2[X] → GF(2^192)` (substitute X = α, with the
+    /// F_2 → GF(2^192) coefficient embedding).
+    #[test]
+    fn lift_then_eval_equals_direct_eval() {
+        use crate::EvaluatablePolynomial;
+
+        let alpha = gf(0xDEAD_BEEF_CAFE_F00D, 0xA5A5, 0xBEEF);
+        for bits in [0u32, 1, 0xA5A5_A5A5, 0xDEAD_BEEF, u32::MAX] {
+            let p: BinaryPoly<32> = BinaryPoly::from(bits);
+            let direct = eval_f2_poly_d32_at(&p, &alpha);
+            let lifted: GF192Poly<32> = lift_f2_poly_to_gf192(&p);
+            let horner = lifted.evaluate_at_point(&alpha).unwrap();
+            assert_eq!(
+                direct, horner,
+                "lift-then-eval should equal direct eval for bits = {bits:#x}",
+            );
+        }
+    }
+
+    /// The lift is `F_2`-linear: `lift(p1 + p2) = lift(p1) + lift(p2)`.
+    /// This is the algebraic statement that the F_2 → GF(2^192)
+    /// coefficient embedding is a ring homomorphism on the coefficient
+    /// ring; both `p1 + p2` (in `F_2[X]<32>`, XOR-based) and
+    /// `lift(p1) + lift(p2)` (in `GF(2^192)[X]<32>`, coefficient-wise
+    /// `GF(2^192)` addition) must produce the same polynomial.
+    #[test]
+    fn lift_is_linear_over_f2() {
+        let p1: BinaryPoly<32> = BinaryPoly::from(0xA5A5_A5A5u32);
+        let p2: BinaryPoly<32> = BinaryPoly::from(0xDEAD_BEEFu32);
+        let p_sum: BinaryPoly<32> = BinaryPoly::from(0xA5A5_A5A5u32 ^ 0xDEAD_BEEFu32);
+
+        let l1: GF192Poly<32> = lift_f2_poly_to_gf192(&p1);
+        let l2: GF192Poly<32> = lift_f2_poly_to_gf192(&p2);
+        let l_sum: GF192Poly<32> = lift_f2_poly_to_gf192(&p_sum);
+
+        // GF(2^192)[X] addition is char-2 ⇒ also XOR-style, so the
+        // `+` here ends up matching `p1 ^ p2` at the bit level.
+        let sum_of_lifts = l1 + l2;
+        assert_eq!(sum_of_lifts, l_sum);
+    }
+
+    /// `lift_f2_u64_poly_to_gf192` agrees with `lift_f2_poly_to_gf192`
+    /// for matching bit patterns — they're two routes to the same
+    /// lift, dispatched on the input representation.
+    #[test]
+    fn lift_u64_and_lift_general_agree() {
+        let bits: u32 = 0xCAFE_F00D;
+        let p_general: BinaryPoly<32> = BinaryPoly::from(bits);
+        let p_u64: BinaryU64Poly<32> = BinaryU64Poly::<32>::from(bits);
+        let l_general: GF192Poly<32> = lift_f2_poly_to_gf192(&p_general);
+        let l_u64: GF192Poly<32> = lift_f2_u64_poly_to_gf192(&p_u64);
+        assert_eq!(l_general, l_u64);
+    }
+
+    /// Sanity: the lifted polynomial's coefficients are all 0 or 1
+    /// in GF(2^192), never anything else.
+    #[test]
+    fn lift_coefficients_are_zero_or_one() {
+        let p: BinaryPoly<32> = BinaryPoly::from(0xDEAD_BEEFu32);
+        let lifted: GF192Poly<32> = lift_f2_poly_to_gf192(&p);
+        for c in lifted.coeffs.iter() {
+            assert!(
+                c.is_zero() || c.is_one(),
+                "lifted coefficient must be 0 or 1 in GF(2^192); got {c}",
+            );
+        }
     }
 
     #[test]
