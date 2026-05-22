@@ -493,7 +493,7 @@ struct BooleanityRound1FastPath<F: PrimeField, const D: usize> {
 impl<F, const D: usize> Round1FastPath<F> for BooleanityRound1FastPath<F, D>
 where
     F: InnerTransparentField + Send + Sync + 'static,
-    F::Inner: Clone + Send + Sync,
+    F::Inner: Zero + Clone + Send + Sync,
 {
     fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
         let zero = F::zero_with_cfg(config);
@@ -547,6 +547,26 @@ where
         r_1: &F,
         config: &F::Config,
     ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        // Edge case: when the sumcheck has only one round, the standard prover never
+        // performs the folding.
+        //
+        // The post-round-1 state expected by `finalize_prover` is the un-folded
+        // 1-variable MLE bundle (it then evaluates each MLE at `r_1`). Return that
+        // directly without applying the fold.
+        if self.num_vars <= 1 {
+            let r = [self.r_first_coord.clone()];
+            let eq_r = build_eq_x_r_inner(&r, config)
+                .expect("num_vars == 1 implies a single-coordinate r");
+            let mut out: Vec<DenseMultilinearExtension<F::Inner>> =
+                Vec::with_capacity(self.binary_cols.len().saturating_mul(D).saturating_add(1));
+            out.push(eq_r);
+            out.extend(build_witness_bit_slice_mles::<F, D>(
+                &self.binary_cols,
+                config,
+            ));
+            return out;
+        }
+
         let n_cols = self.binary_cols.len();
         let total_bit_slices = n_cols.saturating_mul(D);
         let new_num_vars = self.num_vars.saturating_sub(1);
@@ -680,7 +700,7 @@ fn batched_booleanity_sum<F: PrimeField>(
 /// This helper is the single source of truth for MLE ordering. Both the
 /// booleanity sumcheck group and the `MultipointEval` extension call it
 /// to guarantee identical ordering between prover and verifier.
-pub fn build_witness_bit_slice_mles<F, const D: usize>(
+fn build_witness_bit_slice_mles<F, const D: usize>(
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     field_cfg: &F::Config,
 ) -> Vec<DenseMultilinearExtension<F::Inner>>
@@ -854,6 +874,19 @@ mod tests {
             [true, false, false, true],
         ]);
         run_roundtrip(&[c0, c1], 2, |_| {}, |_| false, true);
+    }
+
+    /// Exercises the fast-path edge case where `eq_other_table = [1]`
+    // (empty product) and `fold_with_r1` produces 0-variable MLEs,
+    // after which the rounds-2..num_vars loop runs zero times.
+    #[test]
+    fn happy_path_num_vars_one() {
+        // Two columns, two rows each. Mixed bit patterns so the bit-slice
+        // MLEs are not all-zero (exercises every branch of the 4-way
+        // bit-fold table in `fold_with_r1`).
+        let c0 = build_col(vec![[true, false, true, false], [false, true, true, true]]);
+        let c1 = build_col(vec![[false, false, true, true], [true, true, false, false]]);
+        run_roundtrip(&[c0, c1], 1, |_| {}, |_| false, true);
     }
 
     #[test]
