@@ -688,4 +688,155 @@ mod tests {
 
         assert_eq!(subclaims.expected_evaluations[0], eq_eval * a_eval);
     }
+
+    /// Compile-time integration check: `MultiDegreeSumcheck::<F>`'s
+    /// `prove_as_subprotocol` / `verify_as_subprotocol` methods
+    /// satisfy their `where` bounds for `F = BinaryFieldGF192`. The
+    /// degenerate-`PrimeField` impl on GF(2^192) (with `Modulus =
+    /// Uint<3>` carrying the FIPS 186-2 reduction polynomial's low
+    /// bits) plus the bit-pattern `From<u8..u128>` lifts together
+    /// satisfy `FromPrimitiveWithConfig + InnerTransparentField +
+    /// F::Inner: ConstTranscribable + Zero + F::Modulus:
+    /// ConstTranscribable`.
+    ///
+    /// Pure compile-time check: a *runtime* end-to-end sumcheck
+    /// against GF(2^192) was attempted, but the existing sumcheck
+    /// machinery uses Lagrange-style boundary-point interpolation
+    /// keyed off `F::from(0u64), F::from(1u64), F::from(2u64), …`,
+    /// which in GF(2^192) hits the F_2 collision
+    /// `F::from(1u64) + F::from(1u64) = 0 ≠ F::from(2u64) = X`. The
+    /// boundary-point semantics encoded into the prover-state and
+    /// verifier-state interpolation code therefore would need an
+    /// audit before claiming the runtime path is sound in
+    /// characteristic 2. That audit + any necessary fixes are out of
+    /// scope for this slice; this test guards against a *trait-
+    /// surface* regression and documents the remaining work.
+    #[test]
+    fn multi_degree_compiles_against_gf192() {
+        use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;
+
+        #[allow(unused)]
+        fn _check_bounds<F>()
+        where
+            F: FromPrimitiveWithConfig
+                + InnerTransparentField
+                + Send
+                + Sync,
+            F::Inner: ConstTranscribable + Zero,
+            F::Modulus: ConstTranscribable,
+        {
+        }
+        _check_bounds::<BinaryFieldGF192>();
+    }
+
+    // -- Reference attempt (kept for posterity / audit) ----------------
+    //
+    // The block below tries to run a degree-2 multi-degree sumcheck
+    // end-to-end against `F = BinaryFieldGF192`. It currently fails
+    // because the sumcheck's Lagrange-style boundary interpolation
+    // assumes prime-field semantics on the points `F::from(0u64),
+    // F::from(1u64), F::from(2u64), …` — in characteristic 2 these
+    // collide (`F::from(1) + F::from(1) = 0`, but `F::from(2u64)`
+    // under our bit-pattern lift gives the field element `X ≠ 0`).
+    // Resolving this requires either:
+    //   (i)   audit the sumcheck interpolation code and switch its
+    //         boundary points to a basis that's always distinct in
+    //         characteristic 2 (e.g. fixed irreducible-derived
+    //         elements rather than `F::from(k)`), or
+    //   (ii)  change `From<u64>` on `BinaryFieldGF192` to a different
+    //         convention that matches the sumcheck's expectations
+    //         (probably hostile to the F_2 design).
+    //
+    // Path (i) is the right answer but a non-trivial undertaking; we
+    // leave the runtime test ignored until then.
+    #[test]
+    #[ignore = "GF(2^192) end-to-end sumcheck blocked on characteristic-2 boundary-point audit"]
+    fn multi_degree_against_gf192_runtime() {
+        use crypto_primitives::Field;
+        use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;
+
+        type Gf192 = BinaryFieldGF192;
+        let num_vars = 3;
+        let cfg = &();
+
+        // Random-ish GF(2^192) MLEs. Hand-picked words to avoid any
+        // suspicion of structure on a 2³-row hypercube.
+        let a_vals: Vec<Gf192> = [
+            (0xDEAD_BEEF_CAFE_F00Du64, 0x12345u64, 0u64),
+            (0x9E37_79B1u64, 0x6789u64, 0u64),
+            (0xA5A5_A5A5u64, 0u64, 0xBEEFu64),
+            (0u64, 0xDEAD_BEEFu64, 0u64),
+            (0xFFFF_FFFFu64, 0xFFFFu64, 0u64),
+            (0x1u64, 0u64, 0u64),
+            (0xCAFE_F00Du64, 0xBAADu64, 0xF00Du64),
+            (0u64, 0u64, 0xDEAD_BEEFu64),
+        ]
+        .iter()
+        .map(|&(lo, mid, hi)| Gf192::from_words([lo, mid, hi]))
+        .collect();
+        let b_vals: Vec<Gf192> = [
+            (0x1u64, 0u64, 0u64),
+            (0xABCDu64, 0u64, 0u64),
+            (0u64, 0x4321u64, 0u64),
+            (0xFFFF_FFFF_FFFF_FFFFu64, 0u64, 0u64),
+            (0x12345_6789u64, 0xDEADu64, 0u64),
+            (0x1u64, 0u64, 0x1u64),
+            (0u64, 0u64, 0xBEEFu64),
+            (0xC0FF_EEu64, 0xCAFEu64, 0u64),
+        ]
+        .iter()
+        .map(|&(lo, mid, hi)| Gf192::from_words([lo, mid, hi]))
+        .collect();
+
+        let inner_zero = *Gf192::zero().inner();
+
+        let a_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            a_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+        let b_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            b_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+
+        // Group of degree 2: a(y) · b(y).
+        let g = MultiDegreeSumcheckGroup::new(
+            2,
+            vec![a_mle.clone(), b_mle.clone()],
+            Box::new(|v: &[Gf192]| v[0] * v[1]),
+        );
+
+        // Prove
+        let mut pt = Blake3Transcript::new();
+        let (proof, _) =
+            MultiDegreeSumcheck::<Gf192>::prove_as_subprotocol(&mut pt, vec![g], num_vars, cfg);
+
+        // Verify
+        let mut vt = Blake3Transcript::new();
+        let subclaims =
+            MultiDegreeSumcheck::<Gf192>::verify_as_subprotocol(&mut vt, num_vars, &proof, cfg)
+                .expect("verification should succeed against GF(2^192)");
+
+        assert_eq!(subclaims.expected_evaluations.len(), 1);
+        assert_eq!(subclaims.point.len(), num_vars);
+
+        // Cross-check: the prover's claimed subclaim must equal what
+        // the verifier would compute from per-MLE Horner-evaluation
+        // at the shared point.
+        let point = &subclaims.point;
+        let a_at_pt = a_mle.evaluate_with_config(point, cfg).unwrap();
+        let b_at_pt = b_mle.evaluate_with_config(point, cfg).unwrap();
+        assert_eq!(subclaims.expected_evaluations[0], a_at_pt * b_at_pt);
+
+        // Sanity: the claimed sum equals the actual sum over the
+        // boolean hypercube.
+        let expected_sum: Gf192 = a_vals
+            .iter()
+            .zip(b_vals.iter())
+            .map(|(a, b)| *a * b)
+            .fold(Gf192::zero(), |acc, x| acc + x);
+        assert_eq!(proof.claimed_sums()[0], expected_sum);
+    }
 }

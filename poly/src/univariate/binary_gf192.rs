@@ -59,6 +59,12 @@ pub type GF192Poly<const D: usize> = DensePolynomial<BinaryFieldGF192, D>;
 /// is implicit in the reduction map below.)
 pub const REDUCTION_LOW: u64 = 0x87;
 
+/// `Field::Modulus`-shaped representation of the reduction polynomial:
+/// the same low-bit pattern as [`REDUCTION_LOW`], promoted to a
+/// `Uint<3>` so the byte width matches `Field::Inner` (a requirement
+/// of `Transcript::absorb_random_field`).
+pub const MODULUS_LOW_BITS: Uint<3> = Uint::<3>::from_words([REDUCTION_LOW, 0, 0]);
+
 /// An element of `GF(2^192) = F_2[X] / <X^192 + X^7 + X^2 + X + 1>`.
 ///
 /// Stored as a [`Uint<3>`] (3 × `u64` = 192 bits). Bit `64*w + b`
@@ -427,6 +433,71 @@ impl From<bool> for BinaryFieldGF192 {
     }
 }
 
+// -- From<{u8..u128, i8..i128}> --------------------------------------
+//
+// `FromPrimitiveWithConfig` (used by `MultiDegreeSumcheck::prove_*`
+// to inject `num_vars`, `degree`, etc. into the transcript) is the
+// umbrella trait `FromWithConfig<u8> + ... + FromWithConfig<i128>`.
+// `FromWithConfig` has a blanket impl over `PrimeField + From<T>`, so
+// we get the whole bundle by providing the 10 `From` impls below.
+//
+// Semantics: interpret the primitive's bit pattern as the low
+// coefficients of a GF(2^192) element — i.e., `from(n: u64) = n`
+// stored as bit-pattern words `[n, 0, 0]`. This is the only
+// deterministic, reversible map from primitives to GF(2^192) that
+// makes sense in characteristic 2 (there's no integer modulus to
+// reduce against). Signed types use their two's-complement bit
+// pattern, sign-extended to `u128`. The transcript only uses this
+// map for hash absorption / challenge derivation, so any
+// deterministic injection works; it just needs to be the same on
+// prover and verifier (which it trivially is, being purely
+// arithmetic-free bit copies).
+
+macro_rules! impl_from_unsigned {
+    ($($t:ty),*) => {
+        $(
+            impl From<$t> for BinaryFieldGF192 {
+                #[inline]
+                fn from(v: $t) -> Self {
+                    Self::from_words([v as u64, 0, 0])
+                }
+            }
+        )*
+    };
+}
+
+impl_from_unsigned!(u8, u16, u32, u64);
+
+impl From<u128> for BinaryFieldGF192 {
+    #[inline]
+    fn from(v: u128) -> Self {
+        Self::from_words([v as u64, (v >> 64) as u64, 0])
+    }
+}
+
+macro_rules! impl_from_signed {
+    ($($t:ty),*) => {
+        $(
+            impl From<$t> for BinaryFieldGF192 {
+                #[inline]
+                fn from(v: $t) -> Self {
+                    // Two's-complement bit pattern, sign-extended to u128.
+                    Self::from(v as i128 as u128)
+                }
+            }
+        )*
+    };
+}
+
+impl_from_signed!(i8, i16, i32, i64);
+
+impl From<i128> for BinaryFieldGF192 {
+    #[inline]
+    fn from(v: i128) -> Self {
+        Self::from(v as u128)
+    }
+}
+
 // -- Semiring / Ring marker traits ----------------------------------
 
 impl Semiring for BinaryFieldGF192 {}
@@ -442,9 +513,17 @@ impl Field for BinaryFieldGF192 {
     /// challenge representation).
     type Inner = Uint<3>;
     /// The reduction polynomial is hardcoded
-    /// (`X^192 + X^7 + X^2 + X + 1`); there is no runtime-configurable
-    /// modulus, so `Modulus = ()`.
-    type Modulus = ();
+    /// (`X^192 + X^7 + X^2 + X + 1`). Stored as the **low 192 bits**
+    /// of `f(X)` — the `X^192` term is implicit, so the representable
+    /// pattern is just `g(X) = X^7 + X^2 + X + 1` = `0x87`.
+    ///
+    /// We use `Uint<3>` rather than `()` so that
+    /// `F::Modulus` shares the byte length of `F::Inner`. The
+    /// transcript's `absorb_random_field` interleaves `(modulus,
+    /// inner)` bytes and asserts the two byte lengths match — `()`
+    /// would break that invariant. The actual bit value is fixed; any
+    /// non-`MODULUS_LOW_BITS` value handed to `make_cfg` is rejected.
+    type Modulus = Uint<3>;
 
     #[inline(always)]
     fn inner(&self) -> &Self::Inner {
@@ -500,7 +579,9 @@ impl PrimeField for BinaryFieldGF192 {
     }
 
     #[inline(always)]
-    fn modulus(&self) -> Self::Modulus {}
+    fn modulus(&self) -> Self::Modulus {
+        MODULUS_LOW_BITS
+    }
 
     fn modulus_minus_one_div_two(&self) -> Self::Inner {
         panic!(
@@ -510,9 +591,12 @@ impl PrimeField for BinaryFieldGF192 {
         );
     }
 
-    #[inline(always)]
-    fn make_cfg(_modulus: &Self::Modulus) -> Result<Self::Config, FieldError> {
-        Ok(())
+    fn make_cfg(modulus: &Self::Modulus) -> Result<Self::Config, FieldError> {
+        if modulus == &MODULUS_LOW_BITS {
+            Ok(())
+        } else {
+            Err(FieldError::InvalidModulus)
+        }
     }
 
     #[inline(always)]

@@ -162,6 +162,54 @@ Recommendation: do (A) first to unblock end-to-end, with a
 `#[cfg(debug_assertions)] panic!` in any unused-but-required method.
 Convert to (B) when the F_2 path becomes load-bearing.
 
+**STATUS (after commit `fb037a1` + sumcheck integration):**
+(A) chosen, `BinaryFieldGF192: PrimeField` implemented. Trait
+bounds resolve — `multi_degree_compiles_against_gf192` passes.
+**But the runtime end-to-end sumcheck fails**, and the failure is
+a real protocol-level problem, not a trait-bound issue.
+
+Root cause: the existing sumcheck's Lagrange interpolation
+([`nat_evaluation.rs`](../poly/src/univariate/nat_evaluation.rs))
+constructs boundary points as `F::from(0u64), F::from(1u64),
+F::from(2u64), ...` and assumes integer arithmetic on the natural
+numbers carries through the `F::from` map — i.e., that
+`F::from(a) * F::from(b) = F::from(a * b)`. For a prime field this
+holds. For `GF(2^192)` it does **not**: the only ring homomorphism
+`Z → GF(2^192)` factors through `Z/2Z`, so
+`F::from(0) = 0, F::from(1) = 1, F::from(2) = 0`, ..., and the
+boundary points collapse — Lagrange division by zero. Our
+deliberate bit-pattern convention for `From<u64>` avoids the
+collapse (each natural number gets a distinct `F_2[X]` bit pattern)
+but breaks the `F::from(a) * F::from(b) = F::from(a · b)` identity
+for `a · b ≥ 2` (e.g. `F::from(3) · F::from(3) = X^2 + 1 ≠
+F::from(9) = X^3 + 1`).
+
+This is a **fundamental incompatibility between the existing
+sumcheck algorithm and any characteristic-2 field**, not specific
+to GF(2^192) or to our `From<u64>` choice. Resolving it requires
+either:
+
+(i)   **Rewriting the Lagrange interpolation** to use boundary
+       points that are always distinct in characteristic 2 (e.g.
+       `{α^k}` for a fixed generator, or a hard-coded basis derived
+       from the irreducible). The combinatorial structure of the
+       sumcheck protocol is unchanged; only the evaluation-point
+       set differs.
+
+(ii)  **Switching to a char-2-native sumcheck algorithm** (e.g.
+       sumcheck variants designed for binary fields à la Binius).
+
+(i) is the smaller change. It does not impact any existing
+prime-field sumcheck call site — those keep using natural-number
+boundary points which work fine for prime fields. The change is
+local to the boundary-point construction in
+`nat_evaluation::evaluate` and the matching prover-side polynomial
+sampling.
+
+The runtime test `multi_degree_against_gf192_runtime` in
+`piop/src/sumcheck/multi_degree.rs` is `#[ignore]`'d with a pointer
+to this section.
+
 ### Step 5+ — Out of scope for this iteration
 
 The user said: "After that, we are left with MLE evaluation claims of
