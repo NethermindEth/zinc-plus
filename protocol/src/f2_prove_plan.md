@@ -67,46 +67,77 @@ Add/Sub/Mul/Inv/Pow and `a^{2^192} = a` verified by test. Plus
 
 ## Pieces remaining
 
-### Step 2 — Ideal check over F_2[X]
+### Step 2 — Ideal check over GF(2^192)[X]
 
 The existing `IdealCheckProtocol::prove_{combined,linear,hybrid}`
 ([`piop/src/ideal_check.rs`](../piop/src/ideal_check.rs)) bind `F:
-PrimeField` and produce claims in `F`. For F_2[X] we need a parallel
-implementation that operates directly on `F_2[X]<32>`-typed values.
-The IC structure (per-row inner products, batch-of-sumcheck-like
-folds) carries over, but every arithmetic primitive switches:
+PrimeField` and operate on `F[X]`-typed polynomial witnesses (so
+challenges and witnesses share the same coefficient field). The F_2
+analogue follows the same shape:
 
-- Random challenges drawn from `GF(2^192)` (not a prime field).
-- Per-row dot products evaluated in `F_2[X]` and then mapped to
-  `GF(2^192)` after `α` is sampled.
-- The IC output point lives in `GF(2^192)^{num_vars}` (not `F^...`).
+- **Coefficient field**: `GF(2^192)`. Random challenges are drawn
+  from `GF(2^192)`.
+- **Polynomial ring for the IC**: `GF(2^192)[X]`. The constraint
+  polynomial expressions, ideal generators, and IC intermediate
+  polynomials all live here.
+- **Lifting the trace**: every committed cell starts in `F_2[X]`
+  (specifically `F_2[X]<32>`). `F_2 ⊂ GF(2^192)` is the trivial
+  inclusion, so each `F_2[X]<32>` cell embeds canonically into
+  `GF(2^192)[X]` — coefficient 0 stays `GF(2^192)::zero()`,
+  coefficient 1 stays `GF(2^192)::one()`. No randomness is used in
+  this lift; it's a representation change.
+- **IC output point**: lives in `GF(2^192)^{num_vars}` (the MLE
+  hypercube of the witnesses, but with GF(2^192)-valued challenges).
 
-The naive interpretation of "the ideal check part happens in the same
-way" needs care: the random challenges in F_q ideal-check come from
-the SAME prime field where the constraints live. In F_2[X] the
-constraints live in F_2[X] but the random challenges have to come
-from somewhere — most naturally `GF(2^192)` (matching where step 3
-lands us). This means step 2 in the F_2 path is *effectively running
-already in `GF(2^192)`*: the IC's polynomial witnesses are projected
-to `GF(2^192)` via `ψ_α` on the fly, and the IC's claim is a
-`GF(2^192)` claim.
+Steps 2 and 3 are *not* the same step and do not commute: step 2's
+output is still in `GF(2^192)[X]` (polynomials in `X`), step 3 then
+specializes `X = α` to land in `GF(2^192)`. This mirrors the original
+protocol structure (`F_q[X] → F_q` is the same kind of `X → α`
+substitution), just with `F_q` replaced by `GF(2^192)` and the prior
+`Z[X] → F_q[X]` step muted because we never had `Z` to begin with.
 
-Equivalently: step 2 and step 3 partially commute. We can sample `α`
-early (right after the commitment), project everything to
-`GF(2^192)`, and run the IC there. The user's description matches
-this: "the ideal check happens in the same way" but operates over
-`GF(2^192)`-projected witnesses.
+The arithmetic primitives the IC needs in this regime:
+- `GF(2^192) + GF(2^192) → GF(2^192)`: have it (XOR).
+- `GF(2^192) × GF(2^192) → GF(2^192)`: have it (clmul + reduce mod
+  pentanomial).
+- `F_2[X]<32> · GF(2^192) → GF(2^192)[X]<32>`: scalar multiply a
+  binary cell by a `GF(2^192)` coefficient — a 32-element vector of
+  `GF(2^192)` values (zero where the bit is unset, the scalar where
+  it's set). Cheap.
+- `GF(2^192)[X] + GF(2^192)[X]` and `GF(2^192)[X] × GF(2^192)`: bag
+  of `GF(2^192)` ops. Need a representation, probably a thin
+  `DensePolynomial<GF(2^192), D>` — or `DynamicPolynomialF<...>`
+  with the existing infrastructure generalised over `Field` rather
+  than `PrimeField`.
 
-### Step 3 — Evaluation projection
+Concretely: a sound port reuses the IC's combinatorial structure
+(per-constraint folding, the sumcheck-style reduction over the row
+axis) but swaps every `F::*` primitive for the `GF(2^192)` equivalent
+and every `DynamicPolynomialF<F>` for a polynomial type over
+`GF(2^192)`.
 
-Sample `α ← Transcript::get_challenge() ∈ GF(2^192)`, then for every
-trace cell `cell ∈ F_2[X]<32>` apply `eval_f2_poly_d32_at(&cell,
-&α)`. Output: column-wise `DenseMultilinearExtension<GF(2^192)>`.
+### Step 3 — Evaluation projection (X → α)
 
-(Already implemented at the per-cell level. Integration into the
-prover state-machine is the missing piece — needs a new "projected
-trace" type analogous to
-[`piop/src/projections.rs::ColumnMajorTrace`](../piop/src/projections.rs).)
+Sample `α ← Transcript::get_challenge() ∈ GF(2^192)` and substitute
+`X = α` in every `GF(2^192)[X]`-valued object that survived step 2:
+
+- Each trace cell (originally `F_2[X]<32>`, used by step 2 via the
+  trivial `F_2 ⊂ GF(2^192)` coefficient lift) → a single
+  `GF(2^192)` value. Already implemented per-cell as
+  `eval_f2_poly_d32_at` / `eval_f2_u64_poly_at` /
+  `eval_f2_wide_poly_at`; integration into the prover
+  state-machine is the missing piece (a new "projected trace"
+  type analogous to
+  [`piop/src/projections.rs::ColumnMajorTrace<F>`](../piop/src/projections.rs),
+  but with `F = GF(2^192)` and dense MLEs over `GF(2^192)`).
+- The IC's emitted `GF(2^192)[X]` polynomials (constraint claims,
+  evaluation-point coordinates, etc.) → `GF(2^192)` values via
+  ordinary polynomial-at-a-point evaluation. The existing
+  `EvaluatablePolynomial::evaluate_at_point` machinery should fit
+  once the coefficient type is `GF(2^192)`.
+
+After step 3, every value the verifier and prover are reasoning about
+is a single `GF(2^192)` element — no polynomial-in-X anywhere.
 
 ### Step 4 — Sumcheck over GF(2^192)
 
@@ -139,22 +170,45 @@ those in a next iteration of our work."
 
 ## Implementation order
 
-1. Wire the trace projection into a new
-   `ProverEvalProjectedF2` type-state, parallel to
-   `ProverEvalProjected`.
-2. Either (A) — implement degenerate `PrimeField` for
-   `BinaryFieldGF192` — or (B) — narrow the trait bound to
-   `ProtocolField`. Decision needed before step 3.
-3. Port `IdealCheckProtocol::prove_*` to a parallel
-   `prove_*_f2` variant operating in `F_2[X]` with `GF(2^192)`
-   challenges.
-4. Hook the existing sumcheck to `BinaryFieldGF192` (assuming step 2
-   chose (A) or (B) appropriately).
-5. Define an `F_2 ZincTypes` that uses `BinaryZt = ZipTypes` with
+1. **Decide (A) vs (B)** for the `PrimeField` trait-bound question.
+   Everything downstream is shaped by this choice. (A) = synthetic
+   `PrimeField` impl on `BinaryFieldGF192`; (B) = carve out a
+   `ProtocolField` trait and narrow piop's bound. See "Step 4" above.
+
+2. **`GF(2^192)[X]` polynomial type.** A `DensePolynomial<GF(2^192),
+   D>` (or `DynamicPolynomialF<GF(2^192)>` if the dynamic-degree
+   variant is needed for the IC). Should fall out of (A)/(B)
+   automatically once `GF(2^192)` satisfies the necessary trait
+   surface; if not, add a concrete impl block.
+
+3. **F_2[X] → GF(2^192)[X] coefficient lift.** Trivial map: each
+   `Boolean` coefficient becomes `GF(2^192)::zero()` or
+   `GF(2^192)::one()`. Small helper `lift_f2_poly_to_gf192_poly`.
+
+4. **Port `IdealCheckProtocol::prove_{combined,linear,hybrid}` to a
+   `_f2` variant** that takes lifted-trace and `GF(2^192)`
+   challenges. Mirrors the existing combinatorial structure;
+   every `F`-typed primitive becomes `GF(2^192)` and every
+   `DynamicPolynomialF<F>` becomes the corresponding
+   `GF(2^192)[X]` type from step 2.
+
+5. **Wire trace projection** (the eval-at-α already implemented
+   per-cell) into a new prover `ProverEvalProjectedF2` type-state,
+   parallel to `ProverEvalProjected`. Apply it to both the lifted
+   trace cells and any `GF(2^192)[X]` objects the IC emitted.
+
+6. **Hook the existing sumcheck to `GF(2^192)`** — assuming step 1
+   chose (A) or (B) appropriately. The sumcheck's internal `F::*`
+   primitives map onto `GF(2^192)` field ops.
+
+7. **Define an `F_2 ZincTypes`** that uses `BinaryZt = ZipTypes` with
    `Cw = BinaryPoly<32>` and `RaaF2Code` as the binary lane. The
    arbitrary/int lanes are dead in the all-F_2 UAIR — either elide
-   them entirely from this UAIR's `UairSignature` or wire to no-op
-   `ZipTypes`. (The trait shape currently requires three lanes.)
-6. End-to-end test: a tiny UAIR with all-F_2 columns, single linear
-   constraint, all-zero trace → prover produces a proof; verifier
-   accepts. Stop at "have an MLE eval claim".
+   them from this UAIR's `UairSignature` or wire them to no-op
+   `ZipTypes`. (The current trait shape requires three lanes; a
+   small `ZincTypes`-trait tweak would let us drop them.)
+
+8. **End-to-end test**: a tiny UAIR with all-F_2 columns and a
+   single linear constraint over an all-zero trace. Prover produces
+   a proof; verifier accepts up to the MLE eval claims. (Proving
+   the MLE eval claims themselves is the user's next iteration.)

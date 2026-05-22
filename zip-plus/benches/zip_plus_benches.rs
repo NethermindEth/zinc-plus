@@ -159,14 +159,19 @@ fn zip_plus_benchmarks_iprs(c: &mut Criterion) {
 /// not exercised because the existing proximity test was designed for
 /// integer-RAA codewords; see `BenchZipPlusTypesF2` and the
 /// `RaaF2Code` notes.
+///
+/// Matrix shape: `num_rows = 2`, so `row_len = poly_size / 2` and
+/// `codeword_len = row_len × REP = 2 × poly_size`. This keeps every
+/// dimension a power of two (required by `RaaF2Code::new`) and gives
+/// a very tall codeword matrix (many Merkle leaves, each narrow).
 fn zip_plus_benchmarks_raa_f2(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zip+ RAA F_2");
 
     do_bench_commit_only::<BenchZipPlusTypesF2<32>, _>(&mut group, |poly_size| {
-        Some(BenchRaaF2Code::new(poly_size.isqrt().next_power_of_two()))
+        Some(BenchRaaF2Code::new(poly_size / 2))
     });
     do_bench_commit_only::<BenchZipPlusTypesF2<64>, _>(&mut group, |poly_size| {
-        Some(BenchRaaF2Code::new(poly_size.isqrt().next_power_of_two()))
+        Some(BenchRaaF2Code::new(poly_size / 2))
     });
 
     group.finish();

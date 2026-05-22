@@ -74,12 +74,12 @@ pub fn do_bench_commit_only<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     // commit::<Zt, Lc, 15, 1>(group, make_linear_code);
     // commit::<Zt, Lc, 16, 1>(group, make_linear_code);
 
-    commit::<Zt, Lc, 14, 20>(group, make_linear_code);
-    commit::<Zt, Lc, 16, 20>(group, make_linear_code);
-    commit::<Zt, Lc, 17, 20>(group, make_linear_code);
-    commit::<Zt, Lc, 18, 20>(group, make_linear_code);
-    commit::<Zt, Lc, 19, 20>(group, make_linear_code);
-    commit::<Zt, Lc, 20, 20>(group, make_linear_code);
+    commit::<Zt, Lc, 14, 10>(group, make_linear_code);
+    commit::<Zt, Lc, 16, 10>(group, make_linear_code);
+    commit::<Zt, Lc, 17, 10>(group, make_linear_code);
+    commit::<Zt, Lc, 18, 10>(group, make_linear_code);
+    commit::<Zt, Lc, 19, 10>(group, make_linear_code);
+    commit::<Zt, Lc, 20, 10>(group, make_linear_code);
 
 }
 
