@@ -578,4 +578,45 @@ mod tests {
             |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
         );
     }
+
+    /// Compile-time integration check: the `IdealCheckProtocol`
+    /// blanket impl resolves against `F = BinaryFieldGF192`, i.e. the
+    /// synthetic `PrimeField` + `InnerTransparentField` impls on the
+    /// `GF(2^192)` field satisfy every bound the three IC entry
+    /// points demand:
+    /// - `F: InnerTransparentField` (impl on `BinaryFieldGF192`).
+    /// - `F::Inner: ConstTranscribable` (via `Uint<3>` from
+    ///   `crypto_primitives::crypto_bigint_uint`).
+    /// - `F::Modulus: ConstTranscribable` (via the `()` impl added
+    ///   to `zinc_transcript`).
+    ///
+    /// We take the method function pointers without invoking them.
+    /// If any of the trait bounds fail to resolve, this stops
+    /// compiling — which is the real assertion. Building a
+    /// `GF(2^192)`-projected trace from an `F_2[X]`-typed UAIR is
+    /// the next plumbing step in the F_2 prove-path plan.
+    #[test]
+    fn ic_compiles_for_gf192() {
+        use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;
+
+        // Helper with the same trait bounds as the IC prover methods.
+        // Instantiating it with `F = BinaryFieldGF192` asserts at
+        // compile time that all three IC `prove_*` bounds resolve:
+        //   - F: InnerTransparentField
+        //   - F::Inner: ConstTranscribable
+        //   - F::Modulus: ConstTranscribable
+        //
+        // Plus `U: IdealCheckProtocol`, which holds for every Uair via
+        // the blanket impl above.
+        #[allow(unused)]
+        fn _check_bounds<F, U>()
+        where
+            F: zinc_utils::inner_transparent_field::InnerTransparentField,
+            F::Inner: ConstTranscribable,
+            F::Modulus: ConstTranscribable,
+            U: IdealCheckProtocol,
+        {
+        }
+        _check_bounds::<BinaryFieldGF192, TestUairNoMultiplication<Int<5>>>();
+    }
 }

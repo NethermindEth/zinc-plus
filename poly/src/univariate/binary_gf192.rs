@@ -29,7 +29,10 @@ use core::{
     iter::{Product, Sum},
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use crypto_primitives::{Field, FieldError, PrimeField, Ring, Semiring};
+use crypto_primitives::{
+    Field, FieldError, PrimeField, Ring, Semiring, crypto_bigint_uint::Uint,
+};
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 use num_traits::{
     CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, Inv, One, Pow, Zero,
 };
@@ -58,23 +61,30 @@ pub const REDUCTION_LOW: u64 = 0x87;
 
 /// An element of `GF(2^192) = F_2[X] / <X^192 + X^7 + X^2 + X + 1>`.
 ///
-/// Bit `64*w + b` (LSB-first within each `u64`) holds the coefficient
-/// of `X^{64*w + b}`; bits `0..192` carry the value, no bits at or
+/// Stored as a [`Uint<3>`] (3 × `u64` = 192 bits). Bit `64*w + b`
+/// (LSB-first within each `u64` limb) holds the coefficient of
+/// `X^{64*w + b}`; bits `0..192` carry the value, no bits at or
 /// above 192 are ever set in a reduced element.
+///
+/// The choice of `Uint<3>` for storage is load-bearing for the
+/// transcript / `Field::Inner` plumbing: `Uint<L>` already
+/// implements `ConstTranscribable`, which is what the IC's
+/// `transcript.get_field_challenge::<F>` API requires of
+/// `F::Inner`.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct BinaryFieldGF192 {
-    words: [u64; 3],
+    uint: Uint<3>,
 }
 
 impl BinaryFieldGF192 {
     pub const fn zero() -> Self {
-        Self { words: [0u64; 3] }
+        Self { uint: Uint::<3>::ZERO }
     }
 
     pub const fn one() -> Self {
         Self {
-            words: [1u64, 0, 0],
+            uint: Uint::<3>::from_words([1u64, 0, 0]),
         }
     }
 
@@ -82,20 +92,25 @@ impl BinaryFieldGF192 {
     /// ensuring the value is already reduced (no bits ≥ 192 set; here
     /// that's the natural invariant since the array only has 192 bits).
     pub const fn from_words(words: [u64; 3]) -> Self {
-        Self { words }
+        Self {
+            uint: Uint::<3>::from_words(words),
+        }
     }
 
+    /// Borrow the bit-packed representation. Bit `i` of word `i / 64`
+    /// holds the coefficient of `X^i`.
     pub const fn words(&self) -> &[u64; 3] {
-        &self.words
+        self.uint.as_words()
     }
 
     pub fn is_zero(&self) -> bool {
-        self.words[0] == 0 && self.words[1] == 0 && self.words[2] == 0
+        let w = self.uint.as_words();
+        w[0] == 0 && w[1] == 0 && w[2] == 0
     }
 
     /// `a^2` — Frobenius squaring. Composite of carryless square + reduce.
     pub fn square(&self) -> Self {
-        let product = clmul_192x192(&self.words, &self.words);
+        let product = clmul_192x192(self.uint.as_words(), self.uint.as_words());
         Self::from_words(reduce_384_to_192(product))
     }
 
@@ -159,17 +174,15 @@ impl One for BinaryFieldGF192 {
         Self::one()
     }
     fn is_one(&self) -> bool {
-        self.words[0] == 1 && self.words[1] == 0 && self.words[2] == 0
+        let w = self.uint.as_words();
+        w[0] == 1 && w[1] == 0 && w[2] == 0
     }
 }
 
 impl Display for BinaryFieldGF192 {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(
-            f,
-            "GF192[{:016x}_{:016x}_{:016x}]",
-            self.words[2], self.words[1], self.words[0]
-        )
+        let w = self.uint.as_words();
+        write!(f, "GF192[{:016x}_{:016x}_{:016x}]", w[2], w[1], w[0])
     }
 }
 
@@ -179,9 +192,11 @@ impl<'a> AddAssign<&'a Self> for BinaryFieldGF192 {
     #[inline]
     #[allow(clippy::arithmetic_side_effects, clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: &'a Self) {
-        for i in 0..3 {
-            self.words[i] ^= rhs.words[i];
-        }
+        // `Uint<3>` doesn't directly expose word-level mutation, so we
+        // read both operand word arrays out, XOR, and rebuild.
+        let lw = *self.uint.as_words();
+        let rw = rhs.uint.as_words();
+        self.uint = Uint::<3>::from_words([lw[0] ^ rw[0], lw[1] ^ rw[1], lw[2] ^ rw[2]]);
     }
 }
 
@@ -254,8 +269,8 @@ impl Neg for BinaryFieldGF192 {
 impl<'a> MulAssign<&'a Self> for BinaryFieldGF192 {
     #[inline]
     fn mul_assign(&mut self, rhs: &'a Self) {
-        let product = clmul_192x192(&self.words, &rhs.words);
-        self.words = reduce_384_to_192(product);
+        let product = clmul_192x192(self.uint.as_words(), rhs.uint.as_words());
+        self.uint = Uint::<3>::from_words(reduce_384_to_192(product));
     }
 }
 impl MulAssign<Self> for BinaryFieldGF192 {
@@ -420,8 +435,12 @@ impl Ring for BinaryFieldGF192 {}
 // -- Field ----------------------------------------------------------
 
 impl Field for BinaryFieldGF192 {
-    /// Bit-packed `[u64; 3]` (192 bits, LSB-first within each word).
-    type Inner = [u64; 3];
+    /// Bit-packed `Uint<3>` (192 bits, LSB-first within each `u64` limb).
+    /// We use `Uint<3>` rather than `[u64; 3]` so that
+    /// `F::Inner: ConstTranscribable` is satisfied directly (the
+    /// transcript / Fiat-Shamir API uses `Inner` as the byte-level
+    /// challenge representation).
+    type Inner = Uint<3>;
     /// The reduction polynomial is hardcoded
     /// (`X^192 + X^7 + X^2 + X + 1`); there is no runtime-configurable
     /// modulus, so `Modulus = ()`.
@@ -429,17 +448,17 @@ impl Field for BinaryFieldGF192 {
 
     #[inline(always)]
     fn inner(&self) -> &Self::Inner {
-        &self.words
+        &self.uint
     }
 
     #[inline(always)]
     fn inner_mut(&mut self) -> &mut Self::Inner {
-        &mut self.words
+        &mut self.uint
     }
 
     #[inline(always)]
     fn into_inner(self) -> Self::Inner {
-        self.words
+        self.uint
     }
 }
 
@@ -498,14 +517,13 @@ impl PrimeField for BinaryFieldGF192 {
 
     #[inline(always)]
     fn new_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
-        // Input is assumed to be a 192-bit packed value; no high bits
-        // exist to reduce since `[u64; 3]` carries exactly 192 bits.
-        Self { words: inner }
+        // Input is a 192-bit `Uint<3>`; no high bits to reduce.
+        Self { uint: inner }
     }
 
     #[inline(always)]
     fn new_unchecked_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
-        Self { words: inner }
+        Self { uint: inner }
     }
 
     #[inline(always)]
@@ -516,6 +534,46 @@ impl PrimeField for BinaryFieldGF192 {
     #[inline(always)]
     fn one_with_cfg(_cfg: &Self::Config) -> Self {
         Self::one()
+    }
+}
+
+// -- InnerTransparentField -------------------------------------------
+//
+// `InnerTransparentField` requires field-arithmetic methods that
+// operate directly on the inner-representation type. For
+// `BinaryFieldGF192`, the inner repr IS the field-element repr
+// (`Uint<3>` = bit-packed F_2[X]/<f>) — there's no Montgomery
+// reinterpretation needed. Each method below just delegates to the
+// regular F_2 field ops.
+
+impl InnerTransparentField for BinaryFieldGF192 {
+    #[inline]
+    fn add_inner(
+        lhs: &Self::Inner,
+        rhs: &Self::Inner,
+        _config: &Self::Config,
+    ) -> Self::Inner {
+        let lw = lhs.as_words();
+        let rw = rhs.as_words();
+        Uint::<3>::from_words([lw[0] ^ rw[0], lw[1] ^ rw[1], lw[2] ^ rw[2]])
+    }
+
+    #[inline]
+    fn sub_inner(
+        lhs: &Self::Inner,
+        rhs: &Self::Inner,
+        config: &Self::Config,
+    ) -> Self::Inner {
+        // Characteristic 2: subtraction is XOR, same as addition.
+        Self::add_inner(lhs, rhs, config)
+    }
+
+    #[inline]
+    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
+        // The inner representation is just the field element; lift to
+        // `BinaryFieldGF192` and reuse the regular `MulAssign<&Self>`.
+        let r = Self { uint: *rhs };
+        *self *= &r;
     }
 }
 
@@ -904,8 +962,10 @@ mod tests {
             BinaryFieldGF192::one(),
         );
         let words = [0xDEAD_BEEFu64, 0xCAFEu64, 0x12345u64];
-        let v: BinaryFieldGF192 =
-            <BinaryFieldGF192 as PrimeField>::new_with_cfg(words, &cfg);
+        let v: BinaryFieldGF192 = <BinaryFieldGF192 as PrimeField>::new_with_cfg(
+            Uint::<3>::from_words(words),
+            &cfg,
+        );
         assert_eq!(*v.words(), words);
     }
 

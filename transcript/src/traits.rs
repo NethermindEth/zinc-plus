@@ -468,6 +468,21 @@ impl ConstTranscribable for Boolean {
     const NUM_BITS: usize = 1;
 }
 
+/// The unit type is trivially transcribable: zero bytes,
+/// `read_transcription_bytes_exact` returns `()` for any input,
+/// `write_transcription_bytes_exact` is a no-op. Used as
+/// `Field::Modulus` for fields whose modulus is fixed at compile time
+/// and so has no runtime data to serialize (e.g. binary extension
+/// fields where the "modulus" is a hardcoded irreducible polynomial).
+impl GenTranscribable for () {
+    fn read_transcription_bytes_exact(_bytes: &[u8]) -> Self {}
+    fn write_transcription_bytes_exact(&self, _buf: &mut [u8]) {}
+}
+impl ConstTranscribable for () {
+    const NUM_BYTES: usize = 0;
+    const NUM_BITS: usize = 0;
+}
+
 impl<const LIMBS: usize> GenTranscribable for Uint<LIMBS> {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         // crypto_bigint::Uint stores limbs in least-to-most significant order.
