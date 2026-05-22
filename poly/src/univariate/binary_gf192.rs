@@ -795,12 +795,20 @@ pub fn lift_f2_u64_poly_to_gf192<const D: usize>(p: &BinaryU64Poly<D>) -> GF192P
 
 // -- evaluation: F_2[X]<D> → GF(2^192) at X = α ----------------------
 
-/// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell. Each set bit
-/// `i` of `p` adds `alpha^i` to the running accumulator. Computed via
-/// `(α^0, α^1, α^2, …)` Horner-style: scan bits of `p`'s 32-bit-or-
-/// smaller pattern and XOR in the current power of α whenever a bit
-/// is set. Total cost: `D - 1` field squarings + `popcount(p)` adds.
+/// Substitute `X = alpha` in an `F_2[X]<32>`-typed cell. See
+/// [`eval_f2_poly_d_at`] for the `D`-generic version.
 pub fn eval_f2_poly_d32_at(p: &BinaryPoly<32>, alpha: &BinaryFieldGF192) -> BinaryFieldGF192 {
+    eval_f2_poly_d_at::<32>(p, alpha)
+}
+
+/// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell. Each set bit
+/// `i` of `p` adds `alpha^i` to the running accumulator. Requires
+/// `D ≤ 64`.
+pub fn eval_f2_poly_d_at<const D: usize>(
+    p: &BinaryPoly<D>,
+    alpha: &BinaryFieldGF192,
+) -> BinaryFieldGF192 {
+    assert!(D <= 64, "eval_f2_poly_d_at: D ({D}) must be ≤ 64");
     let mut bits: u64 = 0;
     for (i, c) in p.iter().enumerate() {
         if c.inner() {
@@ -810,7 +818,7 @@ pub fn eval_f2_poly_d32_at(p: &BinaryPoly<32>, alpha: &BinaryFieldGF192) -> Bina
             }
         }
     }
-    eval_bits_at(bits, 32, alpha)
+    eval_bits_at(bits, D, alpha)
 }
 
 /// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell stored in

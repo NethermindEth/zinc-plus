@@ -17,6 +17,7 @@
 //! - Step 6: lift-and-project (unprojected MLE evaluations at r_0)
 //! - Step 7: Zip+ PCS open/verify at r_0
 
+pub mod f2_prove;
 pub mod fixed_prime;
 pub mod prover;
 pub mod verifier;
