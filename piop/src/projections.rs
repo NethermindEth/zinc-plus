@@ -391,6 +391,142 @@ where
     result
 }
 
+/// `F_2`-only trace projection (row-major): every cell is an
+/// `F_2[X]<D>`-typed binary polynomial, every coefficient is lifted to
+/// `F: PrimeField` via the trivial `F_2 ⊂ F` embedding
+/// (`Boolean::ZERO ↦ F::zero`, `Boolean::ONE ↦ F::one`). Produces a
+/// `RowMajorTrace<F>` whose cells are `DynamicPolynomialF<F>`
+/// representations of the same `F[X]<D>` value.
+///
+/// Distinct from [`project_trace_coeffs_row_major`] because this
+/// version doesn't require `F: FromWithConfig<&PolyCoeff>` /
+/// `FromWithConfig<&Int>` — the arbitrary-poly and int lanes are
+/// dead in an all-`F_2` UAIR, and demanding those bounds would
+/// force every caller to also impl them on the target field even
+/// when the lanes carry no data. Used for the F_2 prove path with
+/// `F = BinaryFieldGF192`.
+///
+/// Panics if the trace has any arbitrary-poly or int columns —
+/// asserts the all-F_2 contract at construction time so a
+/// silent shape mismatch in the projected trace can't happen.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn project_f2_trace_row_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
+    field_cfg: &F::Config,
+) -> RowMajorTrace<F>
+where
+    F: PrimeField + Send + Sync,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
+{
+    assert!(
+        trace.arbitrary_poly.is_empty(),
+        "project_f2_trace_row_major: arbitrary_poly lane must be empty for an all-F_2 UAIR",
+    );
+    assert!(
+        trace.int.is_empty(),
+        "project_f2_trace_row_major: int lane must be empty for an all-F_2 UAIR",
+    );
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+
+    let num_cols = trace.binary_poly.len();
+    let num_rows = trace
+        .binary_poly
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
+
+    let mut result: RowMajorTrace<F> = iter::repeat_with(|| Vec::with_capacity(num_cols))
+        .take(num_rows)
+        .collect();
+
+    cfg_iter_mut!(result)
+        .enumerate()
+        .for_each(|(row_idx, row)| {
+            let spare = row.spare_capacity_mut();
+            cfg_iter_mut!(spare[..num_cols])
+                .zip(cfg_iter!(trace.binary_poly))
+                .for_each(|(slot, col)| {
+                    let binary_poly = &col.evaluations[row_idx];
+                    slot.write(
+                        binary_poly
+                            .iter()
+                            .map(|coeff| {
+                                if coeff.into_inner() {
+                                    one.clone()
+                                } else {
+                                    zero.clone()
+                                }
+                            })
+                            .collect(),
+                    );
+                });
+            // SAFETY: all `num_cols` slots above were written.
+            unsafe { row.set_len(num_cols) };
+        });
+    result
+}
+
+/// Column-major counterpart of [`project_f2_trace_row_major`]. Same
+/// trace shape, same per-cell lift; produces a
+/// `ColumnMajorTrace<F>` for the MLE-first lane of the IC.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn project_f2_trace_column_major<F, PolyCoeff, Int, const DEGREE_PLUS_ONE: usize>(
+    trace: &UairTrace<PolyCoeff, Int, DEGREE_PLUS_ONE>,
+    field_cfg: &F::Config,
+) -> ColumnMajorTrace<F>
+where
+    F: PrimeField + Send + Sync,
+    PolyCoeff: Clone + Send + Sync,
+    Int: Clone + Send + Sync,
+{
+    assert!(
+        trace.arbitrary_poly.is_empty(),
+        "project_f2_trace_column_major: arbitrary_poly lane must be empty for an all-F_2 UAIR",
+    );
+    assert!(
+        trace.int.is_empty(),
+        "project_f2_trace_column_major: int lane must be empty for an all-F_2 UAIR",
+    );
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let num_vars = trace
+        .binary_poly
+        .first()
+        .map(|c| c.num_vars)
+        .unwrap_or(0);
+
+    let mut result = Vec::with_capacity(trace.binary_poly.len());
+    cfg_extend!(
+        result,
+        cfg_iter!(trace.binary_poly).map(|column| {
+            let evaluations: Vec<DynamicPolynomialF<F>> = column
+                .iter()
+                .map(|binary_poly| {
+                    binary_poly
+                        .iter()
+                        .map(|coeff| {
+                            if coeff.into_inner() {
+                                one.clone()
+                            } else {
+                                zero.clone()
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            DenseMultilinearExtension {
+                evaluations,
+                num_vars,
+            }
+        })
+    );
+    result
+}
+
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F> + Sync,

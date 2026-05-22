@@ -619,4 +619,168 @@ mod tests {
         }
         _check_bounds::<BinaryFieldGF192, TestUairNoMultiplication<Int<5>>>();
     }
+
+    // -- All-F_2 IC integration test --------------------------------
+    //
+    // A minimal `Uair` whose trace is all-`F_2[X]`-typed (two
+    // `binary_poly` columns, no `arbitrary_poly` or `int`). The
+    // single constraint is `col_0 - col_1 ∈ <0>` — i.e., the two
+    // columns must be identical. We choose `assert_zero` (zero
+    // ideal) so the IC's per-constraint loop short-circuits and we
+    // can verify the prove-path runs end-to-end without needing a
+    // full verifier round-trip.
+    //
+    // `Scalar = BinaryPoly<32>` keeps the scalar type purely F_2.
+    // `Ideal = ImpossibleIdeal` is unused (`assert_zero` doesn't
+    // touch the ideal machinery).
+
+    use std::marker::PhantomData;
+    use zinc_poly::univariate::binary::BinaryPoly;
+    use zinc_uair::{
+        ConstraintBuilder, TraceRow, UairSignature, ideal::ImpossibleIdeal,
+        PublicColumnLayout, TotalColumnLayout,
+    };
+
+    #[derive(Clone, Debug, Default)]
+    pub struct MinimalF2Uair(PhantomData<()>);
+
+    impl Uair for MinimalF2Uair {
+        type Ideal = ImpossibleIdeal;
+        type Scalar = BinaryPoly<32>;
+
+        fn signature() -> UairSignature {
+            UairSignature::new(
+                TotalColumnLayout::new(/* binary */ 2, /* arb */ 0, /* int */ 0),
+                PublicColumnLayout::default(),
+                vec![],
+                vec![],
+                vec![],
+            )
+        }
+
+        fn constrain_general<B, FromR, MulByScalar, IFromR>(
+            b: &mut B,
+            up: TraceRow<B::Expr>,
+            _down: TraceRow<B::Expr>,
+            _from_ref: FromR,
+            _mbs: MulByScalar,
+            _ideal_from_ref: IFromR,
+        ) where
+            B: ConstraintBuilder,
+            FromR: Fn(&Self::Scalar) -> B::Expr,
+            MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+            IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        {
+            // The single zero-ideal constraint: col_0 = col_1.
+            // Subtracting is XOR in F_2; the IC sees this as
+            // `is_zero_ideal[0] = true` and emits a ZERO claim.
+            b.assert_zero(up.binary_poly[0].clone() - &up.binary_poly[1]);
+        }
+    }
+
+    /// End-to-end smoke test: `IdealCheckProtocol::prove_combined`
+    /// runs against `F = BinaryFieldGF192` on a properly-shaped
+    /// `GF(2^192)`-projected all-`F_2` trace. The trace is built
+    /// from two identical `BinaryPoly<32>` columns (satisfying the
+    /// UAIR's `col_0 = col_1` constraint), projected via
+    /// `project_f2_trace_row_major`, and fed into the IC.
+    #[test]
+    fn ic_runs_against_gf192_with_f2_trace() {
+        use crate::projections::{project_f2_trace_row_major, project_scalars};
+        use ahash::AHasher;
+        use rand::{Rng, rng};
+        use std::{collections::HashMap, hash::BuildHasherDefault};
+        use zinc_poly::{
+            mle::DenseMultilinearExtension,
+            univariate::binary_gf192::BinaryFieldGF192,
+        };
+        use zinc_uair::UairTrace;
+
+        type Gf192 = BinaryFieldGF192;
+
+        let num_vars: usize = 4;
+        let poly_size = 1usize << num_vars; // 16 rows
+        let mut r = rng();
+
+        // Build column 0 with random F_2[X]<32> values, column 1
+        // identical (so the constraint `col_0 - col_1 = 0` holds).
+        let col0_vals: Vec<BinaryPoly<32>> =
+            (0..poly_size).map(|_| BinaryPoly::from(r.random::<u32>())).collect();
+        let col1_vals = col0_vals.clone();
+
+        let col0 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col0_vals,
+            BinaryPoly::default(),
+        );
+        let col1 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col1_vals,
+            BinaryPoly::default(),
+        );
+        let trace: UairTrace<'static, BinaryPoly<32>, BinaryPoly<32>, 32> = UairTrace {
+            binary_poly: vec![col0, col1].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        // Project the trace to GF(2^192).
+        let row_major_trace =
+            project_f2_trace_row_major::<Gf192, BinaryPoly<32>, BinaryPoly<32>, 32>(
+                &trace,
+                &(),
+            );
+
+        // Scalars: `MinimalF2Uair` has only an `assert_zero`
+        // constraint, so `collect_scalars` returns an empty set. The
+        // resulting map is empty; the per-scalar projection closure
+        // is never called.
+        let scalars: ScalarMap<<MinimalF2Uair as Uair>::Scalar, DynamicPolynomialF<Gf192>> =
+            project_scalars::<Gf192, MinimalF2Uair>(|scalar| {
+                // Lift `BinaryPoly<32>` → `DynamicPolynomialF<GF(2^192)>`
+                // via the per-coefficient F_2 ⊂ GF(2^192) embedding.
+                let coeffs: Vec<Gf192> = scalar
+                    .iter()
+                    .map(|b| if b.into_inner() { Gf192::one() } else { Gf192::zero() })
+                    .collect();
+                DynamicPolynomialF { coeffs }
+            });
+        // The MinimalF2Uair has zero non-trivial scalars (only assert_zero
+        // is used), so this map is expected to be empty.
+        assert!(scalars.is_empty(), "MinimalF2Uair should collect no scalars; got {:?}", scalars.len());
+
+        let mut transcript = Blake3Transcript::new();
+        let num_constraints = count_constraints::<MinimalF2Uair>();
+        let field_cfg = ();
+
+        let result = <MinimalF2Uair as IdealCheckProtocol>::prove_combined::<Gf192>(
+            &mut transcript,
+            &row_major_trace,
+            &scalars,
+            num_constraints,
+            num_vars,
+            &field_cfg,
+        )
+        .expect("prove_combined should succeed on a satisfied F_2 trace");
+        let (proof, prover_state) = result;
+
+        // The single constraint is a zero-ideal, so its combined-MLE
+        // value is `DynamicPolynomialF::ZERO`.
+        assert_eq!(proof.combined_mle_values.len(), num_constraints);
+        for v in &proof.combined_mle_values {
+            assert_eq!(
+                v,
+                &DynamicPolynomialF::<Gf192>::ZERO,
+                "zero-ideal constraint should emit DynamicPolynomialF::ZERO",
+            );
+        }
+        // The prover state's evaluation point is `num_vars` field
+        // elements; that's all we can sensibly assert without
+        // re-deriving it from the transcript.
+        assert_eq!(prover_state.evaluation_point.len(), num_vars);
+
+        // Silence unused warnings if `MinimalF2Uair` doesn't use its
+        // generic parameter (the PhantomData<()>).
+        let _: HashMap<_, _, BuildHasherDefault<AHasher>> = scalars;
+    }
 }
