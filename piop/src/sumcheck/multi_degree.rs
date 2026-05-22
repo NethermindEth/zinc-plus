@@ -750,7 +750,6 @@ mod tests {
     // Path (i) is the right answer but a non-trivial undertaking; we
     // leave the runtime test ignored until then.
     #[test]
-    #[ignore = "GF(2^192) end-to-end sumcheck blocked on characteristic-2 boundary-point audit"]
     fn multi_degree_against_gf192_runtime() {
         use crypto_primitives::Field;
         use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;

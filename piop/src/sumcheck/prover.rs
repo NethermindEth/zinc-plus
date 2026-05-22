@@ -2,7 +2,7 @@
 
 use std::slice;
 
-use crypto_primitives::PrimeField;
+use crypto_primitives::{FromWithConfig, PrimeField};
 #[cfg(feature = "parallel")]
 use rayon::iter::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
@@ -92,7 +92,7 @@ impl<F: PrimeField> ProverState<F> {
 
 impl<F> ProverState<F>
 where
-    F: InnerTransparentField,
+    F: InnerTransparentField + FromWithConfig<u64>,
 {
     /// Receive message from verifier, generate prover message, and proceed to
     /// next round.
@@ -167,20 +167,36 @@ where
         #[cfg(feature = "parallel")]
         let zeros = scratch;
 
+        // Precompute the boundary points `F::from(k)` for k = 2..=degree.
+        // The existing code used integer-step extrapolation
+        // (`vals[i] += step` per advancement), which is fast but
+        // implicitly assumes `F::from(k)` is the integer `k` —
+        // i.e. that there's a ring homomorphism `Z → F`. That holds
+        // for prime fields (`From<u64>` is the canonical
+        // reduction-mod-p) but **fails for binary extension fields**:
+        // in characteristic 2 the only such map factors through F_2,
+        // so `F::from(2)` is either 0 (collapsing boundary points and
+        // breaking Lagrange via zero denominators) or — under our
+        // bit-pattern convention — equals the field element `X` (not
+        // the integer 2), so integer-step extrapolation no longer
+        // hits `F::from(2)`.
+        //
+        // Fix: extrapolate field-honestly via
+        // `M(F::from(k)) = M(0) + F::from(k) · slope`
+        // where `slope = M(1) − M(0)`. For prime fields this gives
+        // the exact same values the integer-step path produced
+        // (since `F::from(k) = k`); for char-2 fields it's
+        // correct by construction. Performance: one field
+        // multiplication per (point, MLE) instead of one addition,
+        // i.e. roughly `degree − 1` extra field-mul per hypercube
+        // slot. For sumcheck-shaped `degree ≤ 5` workloads this is
+        // a negligible constant.
+        let boundary_points_above_one: Vec<F> = (2..=degree)
+            .map(|k| F::from_with_cfg(k as u64, config))
+            .collect();
+
         let summer = cfg_into_iter!(0..1 << (nv - i)).fold(zeros, |mut s, b| {
             let index = b << 1;
-
-            // TODO(Alex): Once you have benches set,
-            //             could please try getting rid of vals0 and vals1 fields in the
-            // structs, replacing them with
-            //
-            //             ```rust
-            //             let vals0: Vec<_> = polys.iter().map(|poly|
-            // poly[index].clone()).collect();             let vals1: Vec<_> =
-            // polys.iter().map(|poly| poly[index + 1].clone()).collect();
-            //             ```
-            //             My bet is that it won't affect running time, but better safe than
-            // sorry.
 
             s.vals0
                 .iter_mut()
@@ -195,16 +211,28 @@ where
                     .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
                 s.levals[1] = comb_fn(&s.vals1);
 
+                // `steps[i] = M_i(1) − M_i(0)` — the linear-MLE slope.
                 for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
                     s.steps[i] = v1.clone() - v0.clone();
-                    s.vals[i] = v1.clone();
                 }
 
-                for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
+                // For each boundary point `point = F::from(k)` with
+                // k = 2..=degree, evaluate the round polynomial
+                // contribution as `comb_fn(M_0(point), …, M_k(point))`
+                // where `M_i(point) = M_i(0) + point · slope_i`.
+                for (kth_eval, point) in s
+                    .levals
+                    .iter_mut()
+                    .take(degree + 1)
+                    .skip(2)
+                    .zip(boundary_points_above_one.iter())
+                {
                     for poly_i in 0..polys.len() {
-                        s.vals[poly_i] += &s.steps[poly_i];
+                        // s.vals[poly_i] = M_i(0) + point * step_i
+                        s.vals[poly_i] = s.vals0[poly_i].clone();
+                        s.vals[poly_i] += point.clone() * &s.steps[poly_i];
                     }
-                    *eval_point = comb_fn(&s.vals);
+                    *kth_eval = comb_fn(&s.vals);
                 }
             }
 
