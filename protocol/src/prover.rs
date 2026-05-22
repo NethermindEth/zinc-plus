@@ -14,15 +14,17 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
-use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+use zinc_poly::{
+    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
     degree_counter::count_max_degree,
 };
 use zinc_utils::{
-    add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    add, cfg_iter, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, powers, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
@@ -175,6 +177,12 @@ pub struct ProverSumchecked<
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
+    /// Trace MLEs at the original $\psi_a$ projecting element, as built
+    /// by `evaluate_trace_to_column_mles` in a previous step.
+    ///
+    /// Carried forward so that the next step can prepend them when assembling
+    /// the multipoint-eval inputs (and optionally append $\alpha'$-projected
+    /// witness-bin MLEs as the Schwartz-Zippel bridge).
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
 
     // New
@@ -183,6 +191,15 @@ pub struct ProverSumchecked<
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
+    /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
+    /// booleanity's `finalize_prover`. Used by the next step to (a) build the
+    /// extra $\alpha'$-projected witness-bin trace MLEs and (b) compute
+    /// the per-column bridge scalars $c_j = \sum_i (\alpha')^i b_{j,i}$
+    /// appended to multipoint-eval's `up_evals`.
+    ///
+    /// `None` iff there are no witness binary-poly columns (no booleanity
+    /// argument).
+    alpha_prime_f: Option<F>,
 }
 
 /// After step 6 (multipoint eval).
@@ -536,9 +553,23 @@ impl_with_type_bounds!(ProverEvalProjected
     /// `up_evals`/`down_evals` (CPR), `bit_slice_evals` (booleanity), and
     /// lookup auxiliary witnesses at `r*`.
     ///
-    /// The booleanity bit-slice claims are checked at `r*` by the verifier
-    /// against the CPR `up_evals` for witness binary-poly columns using the
-    /// $\psi_a$ identity.
+    /// After booleanity's `finalize_prover` absorbs `bit_slice_evals` into
+    /// the transcript, this step squeezes a fresh challenge $\alpha'$ and
+    /// stores it on `ProverSumchecked`. The actual Schwartz-Zippel bridge
+    /// is installed in `step6_multipoint_eval`, which appends one extra
+    /// $\alpha'$-projected witness-bin column MLE (and matching up_eval
+    /// $c_j = \sum_i b_{j,i} (\alpha')^i$) per witness binary-poly column
+    /// to the multipoint-eval inputs. Shifts continue to reference the
+    /// original $\psi_a$-projected witness-bin slot, so `down_evals` are
+    /// untouched: shifted booleanity is inherited from un-shifted
+    /// booleanity (same committed column).
+    ///
+    /// The PCS chain (`step6_multipoint_eval` + lifted-evals + Zip+ open)
+    /// closes the bridge: at the random sumcheck output $r_0$,
+    /// $\overline{u_j}(\alpha') = \widetilde{g_j}(r_0)$ pins the appended
+    /// column's multilinear extension to the true $\alpha'$-projection
+    /// $g_j$ of the committed $u_j$, replacing the previous
+    /// underconstrained $\psi_a$ linear pin-down (sound only for $D=1$).
     pub fn step5_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
@@ -559,12 +590,10 @@ impl_with_type_bounds!(ProverEvalProjected
         let mut groups = vec![cpr_group];
 
         // Booleanity: prepare optional group over witness binary-poly cols.
-        let trace_wit_bin_poly = {
-            let sig = &self.base.uair_signature;
-            let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-            let num_total_bin = sig.total_cols().num_binary_poly_cols();
-            &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin]
-        };
+        let sig = &self.base.uair_signature;
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_total_bin = sig.total_cols().num_binary_poly_cols();
+        let trace_wit_bin_poly = &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin];
 
         let bool_ancillary = if !trace_wit_bin_poly.is_empty() {
             let (bool_group, anc) = BooleanityChecker::prepare_sumcheck_group::<D>(
@@ -619,6 +648,19 @@ impl_with_type_bounds!(ProverEvalProjected
         // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
         let lookup_proof = None;
 
+        // Booleanity -> multipoint-eval `alpha_prime` bridge: squeeze
+        // \alpha' after `bit_slice_evals` were absorbed by `finalize_prover`.
+        // The challenge is consumed in `step6_multipoint_eval` to build the
+        // extra appended trace MLEs / up_evals (one per witness binary-poly
+        // column). `cpr_proof.up_evals` / `cpr_proof.down_evals` and
+        // `projected_trace_f` are carried through unmodified.
+        let alpha_prime_f: Option<F> = booleanity_proof.as_ref().map(|_| {
+            self.base
+                .pcs_transcript
+                .fs_transcript
+                .get_field_challenge(&self.field_cfg)
+        });
+
         Ok(ProverSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
@@ -630,6 +672,7 @@ impl_with_type_bounds!(ProverEvalProjected
             combined_sumcheck,
             lookup_proof,
             booleanity_proof,
+            alpha_prime_f,
         })
     }
 });
@@ -640,14 +683,64 @@ impl_with_type_bounds!(ProverSumchecked
     /// `down_evals` at `r*` into a single evaluation point `r_0`.
     /// Only the sumcheck proof is sent; scalar evaluations at `r_0` are derived from the
     /// polynomial-valued `lifted_evals` in Step 7.
+    ///
+    /// When the booleanity argument ran (witness binary-poly columns
+    /// present), the multipoint-eval inputs are *extended* with one extra
+    /// $\alpha'$-projected column MLE and one extra scalar up_eval
+    /// $c_j = \sum_i b_{j,i}\,(\alpha')^{i}$ per witness binary-poly column.
+    /// The appended columns are placed at indices
+    /// `[num_total_cols, num_total_cols + num_wit_bin)`; no `ShiftSpec`
+    /// references those indices, so `down_evals`/`shifts` are untouched and
+    /// shifted booleanity is inherited from the un-shifted column (which
+    /// continues to live at its original $\psi_a$-projected slot).
+    /// See the module-level `BooleanityChecker` docs for the soundness
+    /// argument (Schwartz-Zippel at $\alpha'$ + MP/PCS chain at $r_0$).
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step6_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+        let (trace_mles, up_evals) = if let Some(alpha_prime) = &self.alpha_prime_f {
+            let sig = &self.base.uair_signature;
+            let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+            let num_total_bin = sig.total_cols().num_binary_poly_cols();
+            let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
+
+            // Project the witness binary-poly columns at \alpha' directly from the
+            // committed BinaryPoly<D> data:
+            // More efficient that generic `evaluate_trace_to_column_mles` path.
+            let one = F::one_with_cfg(&self.field_cfg);
+            let alpha_powers: Vec<F> = powers(alpha_prime.clone(), one, D);
+            let bin_cols = &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin];
+            let extra_trace_mles: Vec<DenseMultilinearExtension<F::Inner>> = cfg_iter!(bin_cols)
+                .map(|col| project_binary_col_at_field::<F, D>(col, &alpha_powers, &self.field_cfg))
+                .collect();
+            debug_assert_eq!(extra_trace_mles.len(), num_wit_bin);
+
+            let bp = self
+                .booleanity_proof
+                .as_ref()
+                .expect("booleanity_proof present iff alpha_prime_f is Some");
+            let extra_up_evals = alpha_prime_bridge_up_evals::<F, D>(
+                &bp.bit_slice_evals,
+                num_wit_bin,
+                alpha_prime,
+                &self.field_cfg,
+            );
+
+            let mut trace_mles = self.projected_trace_f;
+            trace_mles.extend(extra_trace_mles);
+            let mut up_evals = self.cpr_proof.up_evals.clone();
+            up_evals.extend(extra_up_evals);
+            (trace_mles, up_evals)
+        } else {
+            (self.projected_trace_f, self.cpr_proof.up_evals.clone())
+        };
+
         let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &self.projected_trace_f,
+            &trace_mles,
             &self.cpr_eval_point,
-            &self.cpr_proof.up_evals,
+            &up_evals,
             &self.cpr_proof.down_evals,
             self.base.uair_signature.shifts(),
             &self.field_cfg,
@@ -807,7 +900,7 @@ impl_with_type_bounds!(ProverPcsOpened
         Ok(Proof {
             commitments,
             ideal_check: self.ic_proof,
-            resolver: self.cpr_proof,
+            cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             multipoint_eval: self.mp_proof,
             zip: zip_proof,
@@ -897,5 +990,47 @@ fn commit_optionally<Zt: ZipTypes, Lc: LinearCode<Zt>>(
     } else {
         let (hint, commitment) = ZipPlus::commit(pp, trace)?;
         Ok((Some(hint), commitment))
+    }
+}
+
+/// Project a single witness binary-poly column at a field element by
+/// evaluating each bit-packed cell $\sum_i \text{bit}_i \cdot X^i$ at
+/// $X = \alpha$.
+///
+/// Used to build the appended $\alpha'$-projected witness-binary-poly MLEs that
+/// participate in `MultipointEval` as the Schwartz-Zippel bridge from
+/// booleanity into the PCS chain.
+#[allow(clippy::arithmetic_side_effects)]
+fn project_binary_col_at_field<F, const D: usize>(
+    col: &DenseMultilinearExtension<BinaryPoly<D>>,
+    alpha_powers: &[F],
+    field_cfg: &F::Config,
+) -> DenseMultilinearExtension<F::Inner>
+where
+    F: PrimeField,
+    F::Inner: Clone + Send + Sync,
+{
+    debug_assert_eq!(alpha_powers.len(), D);
+    let zero = F::zero_with_cfg(field_cfg);
+
+    // Sequential row loop: per-row work is at most `D` conditional adds,
+    // The caller parallelizes the outer loop over witness binary-poly columns.
+    let evaluations: Vec<F::Inner> = col
+        .evaluations
+        .iter()
+        .map(|entry| {
+            let mut acc = zero.clone();
+            for (i, bit) in entry.iter().enumerate() {
+                if bit.into_inner() {
+                    acc += &alpha_powers[i];
+                }
+            }
+            acc.into_inner()
+        })
+        .collect();
+
+    DenseMultilinearExtension {
+        num_vars: col.num_vars,
+        evaluations,
     }
 }

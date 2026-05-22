@@ -51,7 +51,7 @@ use zinc_poly::{
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
+use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named, powers};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -72,7 +72,7 @@ pub struct Proof<F: PrimeField> {
     /// Randomized ideal check proof.
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof (up_evals + down_evals).
-    pub resolver: CombinedPolyResolverProof<F>,
+    pub cpr_proof: CombinedPolyResolverProof<F>,
     /// Multi-degree sumcheck proof (CPR group + future lookup groups).
     pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
     /// Multi-point evaluation sumcheck proof (combines up_evals and
@@ -138,7 +138,7 @@ where
             commitments: (commit0, commit1, commit2),
             zip,
             ideal_check,
-            resolver,
+            cpr_proof: resolver,
             combined_sumcheck,
             multipoint_eval,
             witness_lifted_evals,
@@ -164,7 +164,7 @@ where
         buf = self.ideal_check.write_transcription_bytes_subset(buf);
 
         // resolver: u32 length prefix + data
-        buf = self.resolver.write_transcription_bytes_subset(buf);
+        buf = self.cpr_proof.write_transcription_bytes_subset(buf);
 
         // combined_sumcheck: u32 length prefix + data
         buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
@@ -214,7 +214,7 @@ where
             + IdealCheckProof::<F>::LENGTH_NUM_BYTES
             + self.ideal_check.get_num_bytes()
             + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
-            + self.resolver.get_num_bytes()
+            + self.cpr_proof.get_num_bytes()
             + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
             + self.combined_sumcheck.get_num_bytes()
             + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
@@ -446,6 +446,43 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
     }
 
     result
+}
+
+/// Compute the $\alpha'$ Schwartz-Zippel bridge scalars for the witness
+/// binary-poly columns:
+///
+/// $$
+///   c_j \;=\; \sum_{i=0}^{D-1} (\alpha')^{i} \cdot
+///     \text{bit\_slice\_evals}[j \cdot D + i].
+/// $$
+///
+/// One $c_j$ is produced per witness binary-poly column (in column-major
+/// order, matching `BooleanityProof::bit_slice_evals`). The result is
+/// appended to `MultipointEval`'s `up_evals` and bound to the committed
+/// witness column by the MP sumcheck + PCS chain at a fresh random
+/// $\alpha'$, replacing the previous (underconstrained for $D > 1$)
+/// $\psi_a$ linear pin-down.
+#[allow(clippy::arithmetic_side_effects)]
+fn alpha_prime_bridge_up_evals<F: PrimeField, const D: usize>(
+    bit_slice_evals: &[F],
+    num_wit_bin: usize,
+    alpha_prime: &F,
+    field_cfg: &F::Config,
+) -> Vec<F> {
+    debug_assert_eq!(bit_slice_evals.len(), num_wit_bin * D);
+    let one = F::one_with_cfg(field_cfg);
+    let alpha_powers: Vec<F> = powers(alpha_prime.clone(), one, D);
+    bit_slice_evals
+        .chunks_exact(D)
+        .map(|slice| {
+            slice
+                .iter()
+                .zip(&alpha_powers)
+                .fold(F::zero_with_cfg(field_cfg), |acc, (b, alpha_pow)| {
+                    acc + b.clone() * alpha_pow
+                })
+        })
+        .collect()
 }
 
 /// Project a DensePolynomial scalar to DynamicPolynomialF by projecting each
@@ -956,7 +993,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.resolver.up_evals.swap(0, 1),
+            |proof| proof.cpr_proof.up_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -979,7 +1016,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
-            |proof| proof.resolver.down_evals.swap(0, 1),
+            |proof| proof.cpr_proof.down_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1110,6 +1147,149 @@ mod tests {
                     ProtocolError::BooleanityProofMissing
                 ));
             },
+        );
+    }
+
+    /// Soundness regression: tamper $(\delta_0, \delta_1)$ on flat
+    /// positions $(0, 1)$ of `bit_slice_evals` (witness column 0) that
+    /// preserves both the booleanity residue at $r^\star$ and the OLD
+    /// $\psi_a$ linear pin-down $\delta_0 + a \delta_1 = 0$ at the
+    /// $\psi_a$ projecting element $a$ — caught by the $\alpha'$ bridge
+    /// via the MP + PCS chain.
+    ///
+    /// Closed form ($\alpha$ = booleanity batching challenge):
+    /// $$
+    ///   \delta_0 = -\frac{(2 b_0 - 1) - (\alpha / a)(2 b_1 - 1)}
+    ///                    {1 + \alpha / a^2}, \quad
+    ///   \delta_1 = -\delta_0 / a.
+    /// $$
+    /// $a$ and $\alpha$ are recovered by replaying steps 0..=3 and
+    /// driving the transcript through CPR + booleanity
+    /// `prepare_verifier`.
+    #[test]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn test_big_linear_alpha_prime_bridge_catches_pin_down_preserving_tamper() {
+        use num_traits::Inv;
+        use zinc_piop::{
+            combined_poly_resolver::CombinedPolyResolver, lookup::booleanity::BooleanityChecker,
+        };
+        use zinc_uair::constraint_counter::count_constraints;
+
+        type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt>, F, D, QUARTER_D>;
+        type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
+
+        let num_vars = 8;
+        let iprs = (
+            make_iprs(num_vars),
+            make_iprs(num_vars),
+            make_iprs(num_vars),
+        );
+        let pp = setup_pp::<TestZincTypesIprs>(num_vars, iprs);
+        let trace = BigLinearUair::<ZtInt>::generate_random_trace(num_vars, &mut rng());
+        let public_trace = trace.public(&BigLinearUair::<ZtInt>::signature());
+        let mut proof =
+            Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn).expect("prove");
+
+        // Recover `a` and `\alpha` by replaying steps 0..=3 on a proof
+        // clone, then advancing the transcript through CPR + booleanity
+        // `prepare_verifier`.
+        let (cfg, a, alpha) = {
+            let mut v3 = Piop::step0_reconstruct_transcript::<Ideal>(
+                &pp,
+                proof.clone(),
+                &public_trace,
+                num_vars,
+            )
+            .and_then(|s| s.step1_prime_projection())
+            .and_then(|s| s.step2_ideal_check(default_project_ideal!()))
+            .and_then(|s| s.step3_eval_projection(project_scalar_fn))
+            .expect("steps 0..=3");
+
+            let cfg = *v3.field_cfg();
+            let a = v3.projecting_element_f().clone();
+            let nv = v3.num_vars();
+            let claimed_sums = v3.proof_combined_sumcheck().claimed_sums().to_vec();
+            let proof_cpr = v3.proof_cpr().clone();
+            let ic_subclaim = v3.ic_subclaim().clone();
+
+            let sig = v3.uair_signature().clone();
+            let num_wit_bin =
+                sig.total_cols().num_binary_poly_cols() - sig.public_cols().num_binary_poly_cols();
+            let transcript = v3.fs_transcript_mut();
+
+            CombinedPolyResolver::<F>::prepare_verifier::<BigLinearUair<ZtInt>>(
+                transcript,
+                &proof_cpr,
+                claimed_sums[0].clone(),
+                &ic_subclaim,
+                count_constraints::<BigLinearUair<ZtInt>>(),
+                nv,
+                &a,
+                &cfg,
+            )
+            .expect("CPR prepare_verifier");
+
+            let bool_anc = BooleanityChecker::<F>::prepare_verifier(
+                transcript,
+                &claimed_sums[1],
+                num_wit_bin,
+                D,
+                nv,
+                &cfg,
+            )
+            .expect("booleanity prepare_verifier");
+
+            (cfg, a, bool_anc.alpha_powers[1].clone())
+        };
+
+        // Build (\delta_0, \delta_1) from the closed form (see doc-comment).
+        let one = F::one_with_cfg(&cfg);
+        let zero = F::zero_with_cfg(&cfg);
+        let two = one.clone() + &one;
+
+        let a_inv: F = Inv::inv(a.clone()).expect("a != 0");
+        let alpha_over_a: F = alpha.clone() * &a_inv;
+        let alpha_over_a_sq: F = alpha_over_a.clone() * &a_inv;
+
+        let bp = proof
+            .booleanity_proof
+            .as_mut()
+            .expect("BigLinearUair has binary-poly witnesses");
+        let s0: F = two.clone() * &bp.bit_slice_evals[0] - &one; // 2 b_0 - 1
+        let s1: F = two * &bp.bit_slice_evals[1] - &one; // 2 b_1 - 1
+
+        let denom_inv: F = Inv::inv(one + &alpha_over_a_sq).expect("1 + α/a² != 0");
+        let delta_0: F = zero.clone() - (s0.clone() - alpha_over_a * &s1) * &denom_inv;
+        let delta_1: F = zero - a_inv * &delta_0;
+
+        // Sanity: tamper is non-trivial and preserves both OLD checks.
+        assert!(!F::is_zero(&delta_0), "tamper must be non-zero");
+        assert!(
+            F::is_zero(&(delta_0.clone() + a * &delta_1)),
+            "must preserve OLD ψ_a linear pin-down"
+        );
+        let residue = (delta_0.clone() * &s0 + delta_0.clone() * &delta_0)
+            + alpha * &(delta_1.clone() * &s1 + delta_1.clone() * &delta_1);
+        assert!(F::is_zero(&residue), "must preserve booleanity residue");
+
+        bp.bit_slice_evals[0] += delta_0;
+        bp.bit_slice_evals[1] += delta_1;
+
+        let err = Piop::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            project_scalar_fn,
+            default_project_ideal!(),
+        )
+        .expect_err("verifier must reject alpha-prime-tampered proof");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::MultipointEval(_) | ProtocolError::PcsVerification(..)
+            ),
+            "expected MultipointEval / PCS-chain error, got: {err:?}"
         );
     }
 

@@ -3,9 +3,10 @@
 //! Proves that every coefficient of every witness binary-polynomial column is
 //! a bit $\in \\{0,1\\}$. The argument is structured as a single
 //! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
-//! CPR group with shared randomness, and verifies its bit-slice claims at
-//! the multi-degree sumcheck output point $r^\star$ against the projected
-//! parent column evaluations (CPR `up_evals`) using the $\psi_a$ identity.
+//! CPR group with shared randomness, and emits bit-slice claims at the
+//! multi-degree sumcheck output point $r^\star$ for the protocol layer's
+//! $\alpha'$ substitution into multipoint-eval (see "Soundness bridge"
+//! below).
 //!
 //! # Relation
 //!
@@ -38,29 +39,30 @@
 //! sends `bit_slice_evals` $= (\widetilde{v_{j,i}}(r^\star))$ to the
 //! verifier.
 //!
-//! # Bit-decomposition consistency check at $r^\star$
+//! # Soundness bridge to multipoint-eval ($\alpha'$)
 //!
-//! The bit-slice claims at $r^\star$ are tied back to the committed parent
-//! columns via the $\psi_a$ identity at the MLE level: for every binary-poly
-//! column $u_j$,
+//! Booleanity does **not** itself close the bit-decomposition consistency
+//! at $r^\star$. The protocol-layer caller squeezes a fresh challenge
+//! $\alpha'$ from the transcript **after** `bit_slice_evals` are absorbed
+//! (the absorption is performed by [`BooleanityChecker::finalize_prover`] /
+//! `finalize_verifier`), then substitutes the multipoint-eval input value
+//! for each witness binary-poly column $u_j$ with
 //!
 //! $$
-//!   \psi_a\bigl(\widetilde{u_j}(r^\star)\bigr)
-//!     = \sum_{i=0}^{D-1} a^i \cdot \widetilde{v_{j,i}}(r^\star).
+//!   c'_j \;:=\; \sum_{i=0}^{D-1} b_{j,i}\,\alpha'^{\,i}.
 //! $$
 //!
-//! The left-hand side is already available to the verifier as
-//! `cpr_subclaim.up_evals[num_pub_bin + j]` (the projected MLE evaluation of
-//! the $j$-th witness binary-poly column at $r^\star$, coming out of the
-//! CPR group). The right-hand side is rebuilt from the prover-supplied
-//! `bit_slice_evals`. With overwhelming probability over the random $a$
-//! used by $\psi_a$, this linear pin-down forces the `bit_slice_evals` to
-//! be the true bit decomposition of $u_j$ at $r^\star$.
+//! Multipoint-eval / PCS is $\psi$-oblivious, so swapping the value at
+//! the multipoint-eval boundary and evaluating each $\bar u_j$ at
+//! $\alpha'$ in the lifted-evals step enforces
+//! $\widetilde{\psi_{\alpha'}(u_j)}(r^\star) = c'_j$ via the PCS chain.
+//! By Schwartz–Zippel on the indeterminate $X$, if `bit_slice_evals` are
+//! not the true bit-decomposition then equality fails with probability
+//! $\le (D-1)/|F|$, so the verifier rejects.
 //!
-//! Because the consistency check closes at $r^\star$, the bit-slice MLEs
-//! are **not** routed through `MultipointEval`: they participate only in
-//! the booleanity sumcheck group and then vanish from the rest of the
-//! protocol.
+//! Row-shifted projections of witness binary-poly columns (used when a
+//! UAIR `ShiftSpec` sources from such a column) are bound implicitly by
+//! the multipoint-eval sumcheck's through original columns.
 
 use crate::{
     CombFn,
@@ -94,11 +96,14 @@ use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, power
 /// Booleanity sumcheck group constructor / verifier.
 pub struct BooleanityChecker<F: InnerTransparentField>(PhantomData<F>);
 
-/// Proof produced by the booleanity prover. Carries only the flat list of
-/// bit-slice MLE evaluations at the multi-degree sumcheck output point
-/// $r*$. The bit-decomposition consistency at $r^\star$ is verified by
-/// the protocol-layer caller against the CPR `up_evals` of the witness
-/// binary-poly columns.
+/// Proof produced by the booleanity prover.
+///
+/// Carries `bit_slice_evals`: per-column bit-slice MLE evaluations at the
+/// multi-degree sumcheck output point $r^\star$, flat in
+/// `(j-major, i-minor)` order with length `num_wit_bin_cols * D`. It is
+/// absorbed into the transcript by `finalize_prover` / `finalize_verifier`,
+/// after which the protocol layer squeezes the $\alpha'$ challenge
+/// used to bind the bit-decomposition into the multipoint-eval boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BooleanityProof<F: PrimeField> {
     /// Flat list of `\widetilde{v_{j,i}}(r*)`, ordered `(j-major, i-minor)`.
@@ -138,12 +143,11 @@ pub struct BoolVerifierAncillary<F: PrimeField> {
 
 /// Subclaim emitted by [`BooleanityChecker::finalize_verifier`].
 ///
-/// Carries the (now-validated against the sumcheck residue)
-/// `bit_slice_evals` at the shared multi-degree sumcheck point `r*``.
-/// The protocol-layer caller passes these into
-/// [`BooleanityChecker::verify_bit_decomposition_consistency`] together
-/// with the CPR `up_evals` for the witness binary-poly columns to close
-/// the booleanity argument entirely inside step 4.
+/// Carries the (sumcheck-residue-validated) bit-slice evaluations at the
+/// shared multi-degree sumcheck point $r^\star$. The protocol-layer
+/// caller squeezes $\alpha'$ from the transcript (after this struct
+/// is produced) and uses it together with these values to substitute the
+/// multipoint-eval inputs for witness binary-poly columns.
 #[derive(Clone, Debug)]
 pub struct BoolVerifierSubclaim<F: PrimeField> {
     /// Bit-slice MLE evaluations at `r*`, in `(j-major, i-minor)` order.
@@ -194,7 +198,7 @@ where
         //       eq_r(b) * sum_k alpha^k * v_k(b) * (v_k(b) - 1)
         //
         //    The fast path emits the round-1 message and the post-round-1
-        //    folded MLEs directly; this closure is *not* invoked in round 1.
+        //    folded MLEs directly, so this closure is *not* invoked in round 1.
         let comb_fn: CombFn<F> = {
             let alpha_powers = alpha_powers.clone();
             let one = one.clone();
@@ -270,11 +274,13 @@ where
             .expect("sumcheck cannot have had 0 rounds")
             .clone();
 
-        let expected_len = ancillary
+        let active_len = ancillary
             .num_wit_bin_cols
             .saturating_mul(ancillary.bit_width);
 
         let mut mles = sumcheck_prover_state.mles;
+        debug_assert_eq!(mles.len(), add!(1, active_len));
+
         // Skip MLE 0 = eq_r (verifier recomputes it).
         let bit_slice_evals: Vec<F> = mles
             .drain(1..)
@@ -283,7 +289,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        debug_assert_eq!(bit_slice_evals.len(), expected_len);
+        debug_assert_eq!(bit_slice_evals.len(), active_len);
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
         transcript.absorb_random_field_slice(&bit_slice_evals, &mut transcription_buf);
@@ -331,12 +337,14 @@ where
 
     /// Post-sumcheck half of the booleanity verifier.
     ///
-    /// Validates the length of `bit_slice_evals`, recomputes the expected
-    /// combination-function evaluation at the shared sumcheck point `r*`
-    /// using the received `bit_slice_evals`, and compares it against the
-    /// sumcheck's `expected_eval`. On success, absorbs `bit_slice_evals` into
-    /// the transcript (mirroring the prover's final absorption in
-    /// `finalize_prover`).
+    /// Validates the length of `bit_slice_evals`, recomputes the
+    /// booleanity residue at the shared sumcheck point $r^\star$, and
+    /// compares it against the sumcheck's `expected_eval`. On success,
+    /// absorbs `bit_slice_evals` into the transcript.
+    ///
+    /// The bit-decomposition consistency at $r^\star$ is **not** checked
+    /// here; the protocol layer squeezes $\alpha'$ and substitutes
+    /// the multipoint-eval inputs against `bit_slice_evals`.
     pub fn finalize_verifier(
         transcript: &mut impl Transcript,
         proof: BooleanityProof<F>,
@@ -379,72 +387,6 @@ where
         Ok(BoolVerifierSubclaim {
             bit_slice_evals: proof.bit_slice_evals,
         })
-    }
-
-    /// Verify the bit-slice claims at $r^\star$ against the projected
-    /// parent column evaluations (CPR `up_evals`) using the $\psi_a$
-    /// identity.
-    ///
-    /// For each witness binary-poly column $j$, checks
-    ///
-    /// $$
-    ///   \texttt{parent\_evals}[j] \;=\; \sum_{i=0}^{D-1} a^i \cdot
-    ///     \texttt{bit\_slice\_evals}[j \cdot D + i]
-    /// $$
-    ///
-    /// where $a$ is the random projection element used by $\psi_a$ to send
-    /// $F_q[X] \to F_q$. The left-hand side is the MLE evaluation at $r^\star$
-    /// of the projected parent column (i.e. `cpr_subclaim.up_evals[..]`
-    /// restricted to the witness binary-poly slice). The right-hand side is
-    /// the linear recombination of the prover-supplied bit-slice evals.
-    ///
-    /// With overwhelming probability over the random $a$, agreement forces
-    /// `bit_slice_evals` to be the true bit decomposition of the committed
-    /// parent column at $r^\star$.
-    pub fn verify_bit_decomposition_consistency(
-        bit_slice_evals: &[F],
-        parent_evals: &[F],
-        projecting_element: &F,
-        bits_per_col: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(), BooleanityError<F>> {
-        let expected_len = parent_evals.len().saturating_mul(bits_per_col);
-        if bit_slice_evals.len() != expected_len {
-            return Err(BooleanityError::WrongBitSliceEvalsNumber {
-                expected: expected_len,
-                got: bit_slice_evals.len(),
-            });
-        }
-
-        if bits_per_col == 0 || parent_evals.is_empty() {
-            return Ok(());
-        }
-
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
-
-        let a_powers: Vec<F> = powers(projecting_element.clone(), one, bits_per_col);
-
-        for (col_idx, parent_eval) in parent_evals.iter().enumerate() {
-            let base = col_idx.saturating_mul(bits_per_col);
-            let mut recombined = zero.clone();
-            for (a_pow, bit_eval) in a_powers
-                .iter()
-                .zip(&bit_slice_evals[base..add!(base, bits_per_col)])
-            {
-                recombined += a_pow.clone() * bit_eval;
-            }
-
-            if &recombined != parent_eval {
-                return Err(BooleanityError::ConsistencyMismatch {
-                    col_idx,
-                    got: recombined,
-                    expected: parent_eval.clone(),
-                });
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -647,11 +589,6 @@ pub enum BooleanityError<F: PrimeField> {
     WrongBitSliceEvalsNumber { expected: usize, got: usize },
     #[error("booleanity claim value does not match: expected {expected}, got {got}")]
     ClaimValueDoesNotMatch { expected: F, got: F },
-    #[error(
-        "bit-decomposition consistency mismatch on witness binary-poly column {col_idx}: \
-         recombined Sum_i a^i * bit_slice = {got}, expected parent eval {expected}"
-    )]
-    ConsistencyMismatch { col_idx: usize, got: F, expected: F },
     #[error("error evaluating MLE: {0}")]
     MleEvaluationError(#[from] EvaluationError),
     #[error("arithmetic error: {0}")]
@@ -744,6 +681,7 @@ where
 
 #[cfg(test)]
 #[allow(
+    clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
@@ -957,111 +895,6 @@ mod tests {
         );
     }
 
-    /// Honest `bit_slice_evals` recombine to the parent eval via $\psi_a$.
-    #[test]
-    fn consistency_check_happy_path() {
-        let zero = F::zero();
-        let one = F::one();
-        let two = one + one;
-        let three = two + one;
-        let a = three; // arbitrary nonzero projection element
-
-        // Two columns, D bit-slices each, populated with arbitrary field
-        // values. The "true" parent eval is the linear recombination via
-        // a^i, so we recompute it directly.
-        let n = 2usize;
-        let bit_slice_evals: Vec<F> = (0..n * D)
-            .map(|k| F::from(((k as u32) * 7 + 11) % 13))
-            .collect();
-
-        let mut parent_evals: Vec<F> = Vec::with_capacity(n);
-        for j in 0..n {
-            let mut acc = zero;
-            let mut a_pow = one;
-            for i in 0..D {
-                acc += a_pow * bit_slice_evals[j * D + i];
-                a_pow *= &a;
-            }
-            parent_evals.push(acc);
-        }
-
-        BooleanityChecker::<F>::verify_bit_decomposition_consistency(
-            &bit_slice_evals,
-            &parent_evals,
-            &a,
-            D,
-            &(),
-        )
-        .expect("honest recombination should match");
-    }
-
-    /// Tampered `bit_slice_evals[k]` triggers `ConsistencyMismatch` with
-    /// `col_idx = k / D`.
-    #[test]
-    fn consistency_check_tampered_bit_slice_rejected() {
-        let zero = F::zero();
-        let one = F::one();
-        let two = one + one;
-        let a = two + one; // arbitrary nonzero projection element
-
-        let n = 2usize;
-        let mut bit_slice_evals: Vec<F> = (0..n * D)
-            .map(|k| F::from(((k as u32) * 7 + 11) % 13))
-            .collect();
-
-        let mut parent_evals: Vec<F> = Vec::with_capacity(n);
-        for j in 0..n {
-            let mut acc = zero;
-            let mut a_pow = one;
-            for i in 0..D {
-                acc += a_pow * bit_slice_evals[j * D + i];
-                a_pow *= a;
-            }
-            parent_evals.push(acc);
-        }
-
-        let tamper_idx = D + 1; // column j = 1, bit i = 1
-        bit_slice_evals[tamper_idx] += &two;
-
-        let err = BooleanityChecker::<F>::verify_bit_decomposition_consistency(
-            &bit_slice_evals,
-            &parent_evals,
-            &a,
-            D,
-            &(),
-        )
-        .expect_err("tamper should be rejected");
-
-        assert!(
-            matches!(err, BooleanityError::ConsistencyMismatch { col_idx, .. } if col_idx == 1),
-            "expected ConsistencyMismatch on column 1, got {err:?}"
-        );
-    }
-
-    /// Length mismatch is reported as `WrongBitSliceEvalsNumber`.
-    #[test]
-    fn consistency_check_wrong_length_rejected() {
-        let one = F::one();
-        let a = one + one;
-
-        let parent_evals = vec![F::zero(); 2];
-        let bit_slice_evals = vec![F::zero(); 2 * D - 1];
-
-        let err = BooleanityChecker::<F>::verify_bit_decomposition_consistency(
-            &bit_slice_evals,
-            &parent_evals,
-            &a,
-            D,
-            &(),
-        )
-        .expect_err("length mismatch should be rejected");
-
-        assert!(
-            matches!(err, BooleanityError::WrongBitSliceEvalsNumber { .. }),
-            "expected WrongBitSliceEvalsNumber, got {err:?}"
-        );
-    }
-
     //
     // Round-1 fast path cross-validation.
     //
@@ -1081,7 +914,6 @@ mod tests {
         one: F,
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn cross_validation_inputs() -> FastPathHarness {
         // Three columns, eight rows, mixed bit patterns. nvars = 3 exercises
         // both round-1 (closed form) and rounds 2..num_vars (standard path).
@@ -1149,7 +981,6 @@ mod tests {
         mles
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn make_comb_fn(alpha_powers: Vec<F>, zero: F, one: F) -> CombFn<F> {
         Box::new(move |mle_values: &[F]| {
             let eq_r_val = &mle_values[0];
