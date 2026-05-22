@@ -2,6 +2,7 @@ use crypto_primitives::PrimeField;
 use zinc_utils::from_ref::FromRef;
 
 pub mod binary_f2_wide;
+pub mod binary_gf192;
 pub mod binary_ref;
 pub mod binary_u64;
 pub mod dense;
