@@ -26,9 +26,13 @@
 use core::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     hash::Hash,
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    iter::{Product, Sum},
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use num_traits::{One, Zero};
+use crypto_primitives::{Field, FieldError, PrimeField, Ring, Semiring};
+use num_traits::{
+    CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstOne, ConstZero, Inv, One, Pow, Zero,
+};
 
 use crate::univariate::{
     binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_u64::BinaryU64Poly,
@@ -261,6 +265,244 @@ impl Mul<Self> for BinaryFieldGF192 {
     fn mul(mut self, rhs: Self) -> Self::Output {
         self *= &rhs;
         self
+    }
+}
+
+// -- division (multiply by inverse) ----------------------------------
+
+impl<'a> DivAssign<&'a Self> for BinaryFieldGF192 {
+    /// `self /= rhs` ≡ `self *= rhs.inverse()`. Panics if `rhs` is zero.
+    #[inline]
+    fn div_assign(&mut self, rhs: &'a Self) {
+        *self *= rhs.inverse();
+    }
+}
+impl DivAssign<Self> for BinaryFieldGF192 {
+    #[inline]
+    fn div_assign(&mut self, rhs: Self) {
+        *self /= &rhs;
+    }
+}
+impl<'a> Div<&'a Self> for BinaryFieldGF192 {
+    type Output = Self;
+    #[inline]
+    fn div(mut self, rhs: &'a Self) -> Self::Output {
+        self /= rhs;
+        self
+    }
+}
+impl Div<Self> for BinaryFieldGF192 {
+    type Output = Self;
+    #[inline]
+    fn div(mut self, rhs: Self) -> Self::Output {
+        self /= &rhs;
+        self
+    }
+}
+
+// -- num_traits checked-* (degenerate in a field — never fail) -------
+//
+// `Semiring` requires `CheckedAdd + CheckedSub + CheckedMul` and
+// `Ring` adds `CheckedNeg`. In characteristic 2 there is no integer-
+// style overflow at any of these, so every checked op returns `Some`.
+
+impl CheckedAdd for BinaryFieldGF192 {
+    #[inline]
+    fn checked_add(&self, rhs: &Self) -> Option<Self> {
+        Some(*self + rhs)
+    }
+}
+impl CheckedSub for BinaryFieldGF192 {
+    #[inline]
+    fn checked_sub(&self, rhs: &Self) -> Option<Self> {
+        Some(*self - rhs)
+    }
+}
+impl CheckedMul for BinaryFieldGF192 {
+    #[inline]
+    fn checked_mul(&self, rhs: &Self) -> Option<Self> {
+        Some(*self * rhs)
+    }
+}
+impl CheckedNeg for BinaryFieldGF192 {
+    #[inline]
+    fn checked_neg(&self) -> Option<Self> {
+        Some(-*self)
+    }
+}
+
+// -- Sum / Product folds ---------------------------------------------
+
+impl Sum<Self> for BinaryFieldGF192 {
+    #[inline]
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, x| acc + x)
+    }
+}
+impl<'a> Sum<&'a Self> for BinaryFieldGF192 {
+    #[inline]
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |acc, x| acc + *x)
+    }
+}
+impl Product<Self> for BinaryFieldGF192 {
+    #[inline]
+    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::one(), |acc, x| acc * x)
+    }
+}
+impl<'a> Product<&'a Self> for BinaryFieldGF192 {
+    #[inline]
+    fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Self::one(), |acc, x| acc * *x)
+    }
+}
+
+// -- Inv ------------------------------------------------------------
+
+impl Inv for BinaryFieldGF192 {
+    type Output = Option<Self>;
+    #[inline]
+    fn inv(self) -> Self::Output {
+        if self.is_zero() {
+            None
+        } else {
+            Some(self.inverse())
+        }
+    }
+}
+
+// -- Pow<u32> -------------------------------------------------------
+
+impl Pow<u32> for BinaryFieldGF192 {
+    type Output = Self;
+    #[inline]
+    fn pow(self, exp: u32) -> Self::Output {
+        self.pow_u32(exp)
+    }
+}
+
+// -- ConstZero / ConstOne / From<bool> ------------------------------
+
+impl ConstZero for BinaryFieldGF192 {
+    const ZERO: Self = Self::zero();
+}
+
+impl ConstOne for BinaryFieldGF192 {
+    const ONE: Self = Self::one();
+}
+
+impl From<bool> for BinaryFieldGF192 {
+    #[inline]
+    fn from(b: bool) -> Self {
+        if b { Self::one() } else { Self::zero() }
+    }
+}
+
+// -- Semiring / Ring marker traits ----------------------------------
+
+impl Semiring for BinaryFieldGF192 {}
+impl Ring for BinaryFieldGF192 {}
+
+// -- Field ----------------------------------------------------------
+
+impl Field for BinaryFieldGF192 {
+    /// Bit-packed `[u64; 3]` (192 bits, LSB-first within each word).
+    type Inner = [u64; 3];
+    /// The reduction polynomial is hardcoded
+    /// (`X^192 + X^7 + X^2 + X + 1`); there is no runtime-configurable
+    /// modulus, so `Modulus = ()`.
+    type Modulus = ();
+
+    #[inline(always)]
+    fn inner(&self) -> &Self::Inner {
+        &self.words
+    }
+
+    #[inline(always)]
+    fn inner_mut(&mut self) -> &mut Self::Inner {
+        &mut self.words
+    }
+
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        self.words
+    }
+}
+
+// -- PrimeField (degenerate impl) -----------------------------------
+//
+// `BinaryFieldGF192` is a binary extension field, NOT a prime field.
+// The codebase's `PrimeField` abstraction predates the F_2 work and is
+// the central bound throughout `piop/` and `protocol/`. To reuse that
+// machinery without a wide refactor, we implement `PrimeField`
+// degenerately:
+//
+// - `Config = ()`: the field has no runtime-configurable data (the
+//   reduction polynomial is compile-time-fixed).
+// - `Modulus = ()` (inherited from `Field`): same reason.
+// - `modulus()` / `make_cfg()`: return `()` / `Ok(())`.
+// - `modulus_minus_one_div_two()`: **panics**. This method has no
+//   meaningful analogue in characteristic 2 (no integer modulus, no
+//   notion of "half the modulus minus one"); it is used by prime-field
+//   square-root / Legendre-symbol code paths that are nonsense for
+//   `GF(2^192)`. A panic is preferable to a silent wrong answer if a
+//   downstream call site reaches it.
+//
+// The semantic mismatch is documented at the call-site level: any
+// generic protocol code parameterised over `F: PrimeField` will compile
+// against `BinaryFieldGF192`, but `modulus_minus_one_div_two`-shaped
+// paths must be audited before claiming soundness.
+
+impl PrimeField for BinaryFieldGF192 {
+    type Config = ();
+
+    #[inline(always)]
+    fn cfg(&self) -> &Self::Config {
+        &()
+    }
+
+    #[inline(always)]
+    fn is_zero(value: &Self) -> bool {
+        Self::is_zero(value)
+    }
+
+    #[inline(always)]
+    fn modulus(&self) -> Self::Modulus {}
+
+    fn modulus_minus_one_div_two(&self) -> Self::Inner {
+        panic!(
+            "BinaryFieldGF192::modulus_minus_one_div_two: GF(2^192) has no \
+             prime modulus; this method is degenerate. Audit the call site \
+             before using it with a binary extension field."
+        );
+    }
+
+    #[inline(always)]
+    fn make_cfg(_modulus: &Self::Modulus) -> Result<Self::Config, FieldError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn new_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
+        // Input is assumed to be a 192-bit packed value; no high bits
+        // exist to reduce since `[u64; 3]` carries exactly 192 bits.
+        Self { words: inner }
+    }
+
+    #[inline(always)]
+    fn new_unchecked_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
+        Self { words: inner }
+    }
+
+    #[inline(always)]
+    fn zero_with_cfg(_cfg: &Self::Config) -> Self {
+        Self::zero()
+    }
+
+    #[inline(always)]
+    fn one_with_cfg(_cfg: &Self::Config) -> Self {
+        Self::one()
     }
 }
 
@@ -577,6 +819,55 @@ mod tests {
         let ep = eval_f2_poly_d32_at(&p, &alpha);
         let exp = eval_f2_poly_d32_at(&xp, &alpha);
         assert_eq!(exp, alpha * ep);
+    }
+
+    #[test]
+    fn implements_field_and_prime_field_traits() {
+        // Compile-time check: the synthetic `Field` and `PrimeField`
+        // impls on `BinaryFieldGF192` actually satisfy the trait
+        // hierarchy. (If a required bound regresses — e.g. someone
+        // removes a `CheckedAdd` impl — this assertion fails to
+        // compile, which is the point.)
+        fn assert_field<F: crypto_primitives::Field>() {}
+        fn assert_prime_field<F: crypto_primitives::PrimeField>() {}
+        assert_field::<BinaryFieldGF192>();
+        assert_prime_field::<BinaryFieldGF192>();
+    }
+
+    #[test]
+    fn cfg_keyed_constructors_match_const_constructors() {
+        use crypto_primitives::PrimeField;
+        let cfg = ();
+        assert_eq!(
+            <BinaryFieldGF192 as PrimeField>::zero_with_cfg(&cfg),
+            BinaryFieldGF192::zero(),
+        );
+        assert_eq!(
+            <BinaryFieldGF192 as PrimeField>::one_with_cfg(&cfg),
+            BinaryFieldGF192::one(),
+        );
+        let words = [0xDEAD_BEEFu64, 0xCAFEu64, 0x12345u64];
+        let v: BinaryFieldGF192 =
+            <BinaryFieldGF192 as PrimeField>::new_with_cfg(words, &cfg);
+        assert_eq!(*v.words(), words);
+    }
+
+    #[test]
+    fn division_by_self_yields_one() {
+        let a = gf(0xDEAD_BEEF, 0xCAFE_F00D, 0x12345);
+        let b = a / a;
+        assert!(b.is_one(), "a / a should be 1; got {b}");
+    }
+
+    #[test]
+    #[should_panic(expected = "GF(2^192) has no prime modulus")]
+    fn modulus_minus_one_div_two_panics() {
+        use crypto_primitives::PrimeField;
+        // This codepath would be reached by prime-field square-root /
+        // Legendre-symbol logic — meaningless for a characteristic-2
+        // field. The panic documents that misuse.
+        let a = BinaryFieldGF192::one();
+        let _ = a.modulus_minus_one_div_two();
     }
 
     #[test]
