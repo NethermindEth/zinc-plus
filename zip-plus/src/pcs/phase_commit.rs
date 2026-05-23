@@ -10,8 +10,7 @@ use crate::{
     },
 };
 use crypto_primitives::DenseRowMatrix;
-use uninit::out_ref::Out;
-use zinc_utils::{cfg_chunks, cfg_chunks_mut, cfg_iter};
+use zinc_utils::cfg_iter;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -163,21 +162,19 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// A `Vec<Int<K>>` containing all the encoded rows concatenated together.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn encode_rows(pp: &ZipPlusParams<Zt, Lc>, evals: &[Zt::Eval]) -> DenseRowMatrix<Zt::Cw> {
-        let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
 
         // Performance: Using DenseRowMatrix's linearized row in an uninit form
         // is much more performant that using Vec<Vec<_>>.
         let mut encoded_matrix = DenseRowMatrix::<Zt::Cw>::uninit(pp.num_rows, codeword_len);
 
-        cfg_chunks_mut!(encoded_matrix.data, codeword_len)
-            .zip(cfg_chunks!(evals, row_len))
-            .for_each(|(row, evals)| {
-                let encoded: Vec<Zt::Cw> = pp.linear_code.encode(evals);
-                Out::from(row).copy_from_slice(encoded.as_slice());
-            });
+        // Delegate to the linear code: it can override the default
+        // chunked per-row loop with a cross-row vectorised kernel
+        // (e.g. RaaF2Code's K-row packed kernel).
+        pp.linear_code
+            .encode_rows_batched(evals, pp.num_rows, &mut encoded_matrix);
 
-        // Safe because we have just initialized all elements.
+        // Safe because `encode_rows_batched` initialises every slot.
         unsafe { encoded_matrix.init() }
     }
 }

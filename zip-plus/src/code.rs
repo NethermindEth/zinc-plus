@@ -5,10 +5,15 @@ pub mod raa_f2;
 pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
-use crypto_primitives::FromPrimitiveWithConfig;
+use crypto_primitives::{DenseRowMatrix, FromPrimitiveWithConfig};
+use num_traits::Zero;
 use std::fmt::Debug;
+use std::mem::MaybeUninit;
 use zinc_poly::univariate::binary_f2_wide::BinaryF2Poly;
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{cfg_chunks, cfg_chunks_mut, from_ref::FromRef};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Extension trait providing an `F_2[X]`-linear encoder over arbitrary
 /// `BinaryF2Poly<W>` widths. Used by the F_2[X] MLE-opening protocol's
@@ -91,4 +96,73 @@ pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
         F: FromPrimitiveWithConfig + FromRef<F>;
+
+    /// Encode `row` directly into the (uninitialised) destination slot
+    /// `dst`, optionally reusing `scratch` as intermediate storage. Lets
+    /// the caller pre-allocate the destination row of the codeword matrix
+    /// and a thread-local scratch buffer once per task block, avoiding
+    /// the per-row `Vec` allocation pattern of [`Self::encode`].
+    ///
+    /// `dst.len()` must equal `self.codeword_len()`. `scratch.len()` must
+    /// be at least `self.codeword_len()`; its initial contents are not
+    /// observed. On return every slot of `dst` is initialised.
+    ///
+    /// The default implementation calls [`Self::encode`] and writes the
+    /// returned `Vec` slot-by-slot. Codes with an efficient in-place kernel
+    /// (e.g. [`super::raa_f2::RaaF2Code`]) should override to drop the
+    /// intermediate `Vec`.
+    fn encode_into_with_scratch(
+        &self,
+        row: &[Zt::Eval],
+        _scratch: &mut [Zt::Cw],
+        dst: &mut [MaybeUninit<Zt::Cw>],
+    ) {
+        let encoded = self.encode(row);
+        debug_assert_eq!(dst.len(), encoded.len());
+        for (slot, val) in dst.iter_mut().zip(encoded.into_iter()) {
+            slot.write(val);
+        }
+    }
+
+    /// Batched encoder: encode `num_rows` consecutive rows from `evals`
+    /// into the (uninitialised) destination matrix `out`. Lets codes
+    /// with a cross-row-vectorisable kernel (e.g.
+    /// [`super::raa_f2::RaaF2Code`]) override with a packed
+    /// implementation; the default loops over rows with per-task
+    /// scratch reuse.
+    ///
+    /// `evals.len()` must equal `num_rows * self.row_len()`. `out` must
+    /// be sized `num_rows × self.codeword_len()`. On return every slot
+    /// of `out.data` is initialised.
+    fn encode_rows_batched(
+        &self,
+        evals: &[Zt::Eval],
+        num_rows: usize,
+        out: &mut DenseRowMatrix<MaybeUninit<Zt::Cw>>,
+    ) {
+        let row_len = self.row_len();
+        let codeword_len = self.codeword_len();
+        debug_assert_eq!(evals.len(), num_rows * row_len);
+        debug_assert_eq!(out.data.len(), num_rows * codeword_len);
+
+        // Chunk row-encodes per task so each rayon task amortises (a) its
+        // scratch buffer over many encodes and (b) the per-task scheduling
+        // overhead.
+        const ROWS_PER_TASK: usize = 64;
+        let task_rows = ROWS_PER_TASK.min(num_rows.max(1));
+        let dst_block_stride = codeword_len * task_rows;
+        let src_block_stride = row_len * task_rows;
+
+        cfg_chunks_mut!(out.data, dst_block_stride)
+            .zip(cfg_chunks!(evals, src_block_stride))
+            .for_each(|(dst_block, src_block)| {
+                let mut scratch: Vec<Zt::Cw> = vec![Zt::Cw::zero(); codeword_len];
+                for (dst_row, src_row) in dst_block
+                    .chunks_mut(codeword_len)
+                    .zip(src_block.chunks(row_len))
+                {
+                    self.encode_into_with_scratch(src_row, &mut scratch, dst_row);
+                }
+            });
+    }
 }
