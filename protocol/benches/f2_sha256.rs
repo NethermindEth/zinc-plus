@@ -34,7 +34,7 @@ use criterion::{
     measurement::WallTime,
 };
 use crypto_bigint::U64;
-use crypto_primitives::{Field, FromWithConfig, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
+use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_uint::Uint};
 use rand::rng;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
@@ -46,7 +46,7 @@ use zinc_poly::{
 };
 use zinc_primality::MillerRabin;
 use zinc_protocol::f2_prove::{
-    F2VirtualBpSpec, F2ZincTypes, ZincPlusPiopF2, eq_dot_column_groups,
+    F2FullProof, F2VirtualBpSpec, F2ZincTypes, ZincPlusPiopF2, eq_dot_column_groups,
     extract_column_evals_eq_dot_col,
 };
 use zinc_test_uair::{
@@ -117,6 +117,128 @@ impl<const D: usize> F2ZincTypes<D> for BenchF2Types<D> {
 type R = Int<4>;
 type U = Sha256F2Uair<R>;
 const D: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Proof-size measurement.
+//
+// Serialises an `F2FullProof<D>` into a flat byte stream matching the
+// natural wire format of each component (no length-prefixing or
+// versioning — the bench only needs an apples-to-apples raw byte
+// count + zstd-3 compressed count), then reports both sizes.
+// ---------------------------------------------------------------------------
+
+/// zstd compression level for the bench's compressed-size column.
+/// Matches `zip_plus::utils::ZSTD_LEVEL` so the F_2 numbers are
+/// directly comparable with the integer pipeline's printed sizes.
+const ZSTD_LEVEL: i32 = 3;
+
+#[allow(clippy::arithmetic_side_effects)]
+fn f2_full_proof_to_bytes(proof: &F2FullProof<D>) -> Vec<u8> {
+    use crypto_primitives::Field;
+    use zinc_poly::univariate::F2PackU64;
+    use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
+
+    let mut buf = Vec::with_capacity(2 * 1024 * 1024);
+
+    // -- commitment.root (32-byte Blake3 Merkle root) --
+    buf.extend_from_slice(&*proof.commitment.root);
+
+    // -- uair.alpha (BinaryFieldGF192::Inner = Uint<3>, 24 bytes) --
+    const ALPHA_BYTES: usize = <<BinaryFieldGF192 as Field>::Inner as ConstTranscribable>::NUM_BYTES;
+    let mut tmp = [0u8; ALPHA_BYTES];
+    proof.uair.alpha.inner().write_transcription_bytes_exact(&mut tmp);
+    buf.extend_from_slice(&tmp);
+
+    // -- uair.ic_proof (Transcribable: combined_mle_values) --
+    let ic_size = proof.uair.ic_proof.get_num_bytes();
+    let mut ic_buf = vec![0u8; ic_size];
+    proof.uair.ic_proof.write_transcription_bytes_exact(&mut ic_buf);
+    buf.extend_from_slice(&ic_buf);
+
+    // -- uair.sumcheck_proof (Transcribable) --
+    let sc_size = proof.uair.sumcheck_proof.get_num_bytes();
+    let mut sc_buf = vec![0u8; sc_size];
+    proof
+        .uair
+        .sumcheck_proof
+        .write_transcription_bytes_exact(&mut sc_buf);
+    buf.extend_from_slice(&sc_buf);
+
+    // -- open.lifted_claim (BinaryF2Poly<10> = 10 × u64 = 80 bytes) --
+    for w in proof.open.lifted_claim.words() {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+
+    // -- open.b_vector (Vec<BinaryF2Poly<7>>, 7 × u64 each) --
+    for v in &proof.open.b_vector {
+        for w in v.words() {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    // -- open.combined_row (Vec<BinaryF2Poly<7>>) --
+    for v in &proof.open.combined_row {
+        for w in v.words() {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    // -- open.opened_columns --
+    //
+    // Per opened col: column_idx (u64) + column_values (packed bit-
+    // poly per cell, `ceil(D/8)` bytes) + merkle_proof (two u64
+    // header words + `siblings.len()` × 32-byte hashes).
+    let bytes_per_cell = D.div_ceil(8);
+    for col in &proof.open.opened_columns {
+        buf.extend_from_slice(&(col.column_idx as u64).to_le_bytes());
+        for c in &col.column_values {
+            let packed = c.pack_u64();
+            buf.extend_from_slice(&packed.to_le_bytes()[..bytes_per_cell]);
+        }
+        buf.extend_from_slice(&(col.merkle_proof.leaf_index as u64).to_le_bytes());
+        buf.extend_from_slice(&(col.merkle_proof.leaf_count as u64).to_le_bytes());
+        for sib in &col.merkle_proof.siblings {
+            buf.extend_from_slice(&**sib);
+        }
+    }
+
+    buf
+}
+
+fn fmt_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::new();
+    let first_chunk = bytes.len() % 3;
+    if first_chunk > 0 {
+        out.push_str(std::str::from_utf8(&bytes[..first_chunk]).unwrap());
+        if bytes.len() > first_chunk {
+            out.push(' ');
+        }
+    }
+    let rest = &bytes[first_chunk..];
+    for (i, chunk) in rest.chunks(3).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(std::str::from_utf8(chunk).unwrap());
+    }
+    out
+}
+
+fn eprint_f2_proof_size(label: &str, proof: &F2FullProof<D>) {
+    let raw = f2_full_proof_to_bytes(proof);
+    let compressed =
+        zstd::encode_all(&raw[..], ZSTD_LEVEL).expect("zstd compression failed");
+    eprintln!(
+        "    Proof size ({label}): raw = {} bytes ({} KiB), zstd-{} = {} bytes ({} KiB)",
+        fmt_thousands(raw.len()),
+        raw.len().div_ceil(1024),
+        ZSTD_LEVEL,
+        fmt_thousands(compressed.len()),
+        compressed.len().div_ceil(1024),
+    );
+}
 
 struct ProverFixture {
     trace: zinc_uair::UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
@@ -606,65 +728,86 @@ fn bench_micro_verifier_uair(
 // Criterion entry points.
 // ---------------------------------------------------------------------------
 
+/// `num_vars` values the e2e bench sweeps: odd from 9 to 21
+/// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
+/// fit in 2^9 = 512); larger values zero-pad and measure how the
+/// prover/verifier scale with the hypercube size.
+const NVARS_SWEEP: &[usize] = &[9, 11, 13, 15, 17, 19, 21];
+
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
-    let fx = setup_prover(9);
-    let id = format!("nvars={}", fx.num_vars);
+    // Large hypercubes (2^21 ≈ 2.1M rows × 41 cols of bit-poly cells +
+    // O(num_rows) GF(2^192) eq-table during prove + per-row IC
+    // workspace) push the per-iteration time into the multi-second
+    // range. Criterion auto-reduces sample count when iter time is
+    // long, but cap it explicitly to keep the run from blowing past
+    // the wall-clock budget.
+    group.sample_size(10);
 
-    group.bench_function(BenchmarkId::new("WitnessGen", &id), |bench| {
-        let mut rng_local = rng();
-        bench.iter(|| {
-            black_box(U::generate_random_trace(fx.num_vars, &mut rng_local));
+    for &num_vars in NVARS_SWEEP {
+        let fx = setup_prover(num_vars);
+        let id = format!("nvars={num_vars}");
+
+        group.bench_function(BenchmarkId::new("WitnessGen", &id), |bench| {
+            let mut rng_local = rng();
+            bench.iter(|| {
+                black_box(U::generate_random_trace(num_vars, &mut rng_local));
+            });
         });
-    });
 
-    group.bench_function(BenchmarkId::new("Prove", &id), |bench| {
-        bench.iter(|| {
+        group.bench_function(BenchmarkId::new("Prove", &id), |bench| {
+            bench.iter(|| {
+                let mut transcript = Blake3Transcript::new();
+                let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+                    &mut transcript,
+                    &fx.pp,
+                    &fx.trace,
+                    &[],
+                    num_vars,
+                    sha256_f2_project_scalar::<R>,
+                    recommended_num_column_openings(REP),
+                )
+                .expect("prove_f2_full should succeed");
+                black_box(proof);
+            });
+        });
+
+        let proof = {
             let mut transcript = Blake3Transcript::new();
-            let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+            ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
                 &mut transcript,
                 &fx.pp,
                 &fx.trace,
                 &[],
-                fx.num_vars,
+                num_vars,
                 sha256_f2_project_scalar::<R>,
                 recommended_num_column_openings(REP),
             )
-            .expect("prove_f2_full should succeed");
-            black_box(proof);
-        });
-    });
+            .expect("prove for verifier bench should succeed")
+        };
 
-    let proof = {
-        let mut transcript = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
-            &mut transcript,
-            &fx.pp,
-            &fx.trace,
-            &[],
-            fx.num_vars,
-            sha256_f2_project_scalar::<R>,
-            recommended_num_column_openings(REP),
-        )
-        .expect("prove for verifier bench should succeed")
-    };
+        // Report proof size: raw + zstd-3 compressed. Printed once
+        // per `nvars`. Criterion captures stdout but lets stderr
+        // through, so `eprintln!` shows up next to the timings.
+        eprint_f2_proof_size(&id, &proof);
 
-    group.bench_function(BenchmarkId::new("Verify", &id), |bench| {
-        bench.iter(|| {
-            let mut transcript = Blake3Transcript::new();
-            let subclaim = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full(
-                &mut transcript,
-                &fx.pp,
-                &proof,
-                &[],
-                fx.num_vars,
-                fx.num_primary,
-                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
-            )
-            .expect("verify_f2_full should succeed");
-            black_box(subclaim);
+        group.bench_function(BenchmarkId::new("Verify", &id), |bench| {
+            bench.iter(|| {
+                let mut transcript = Blake3Transcript::new();
+                let subclaim = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full(
+                    &mut transcript,
+                    &fx.pp,
+                    &proof,
+                    &[],
+                    num_vars,
+                    fx.num_primary,
+                    |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+                )
+                .expect("verify_f2_full should succeed");
+                black_box(subclaim);
+            });
         });
-    });
+    }
 
     group.finish();
 }
