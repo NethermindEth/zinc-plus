@@ -464,41 +464,50 @@ where
 
         // -- Step 2: Ideal check over GF(2^192)[X] -----------------
         //
-        // We use `prove_combined` (row-major path) unconditionally
-        // here, even for MLE-first eligible UAIRs that the integer
-        // pipeline would route through `prove_linear`. The reason is
-        // F_2-specific: trace cells are dense `BinaryPoly<32>` (32
-        // coeffs each), and `evaluate_combined_polynomials_unchecked`
-        // allocates a `Vec<F::Inner>` of size `num_rows` for every
-        // (column, coefficient-index) pair when projecting to a
-        // per-coefficient MLE — i.e., `num_cols × max_num_coeffs`
-        // allocations. For SHA F_2 (41 cols × 32 coeffs × 24-byte
-        // GF(2^192) elements × 512 rows ≈ 16 MB allocation churn per
-        // call), this dominates and makes `prove_linear` ~1.5× slower
-        // than `prove_combined` despite the asymptotic advantage. The
-        // integer pipeline avoids this because its cell coefficient
-        // type already lives in F and no per-coefficient MLE
-        // construction is needed at the linear-eval step.
+        // F_2-native path: skip the per-cell lift to
+        // `DynamicPolynomialF<GF(2^192)>` and evaluate constraint
+        // expressions row-by-row in 64-bit bit-poly arithmetic
+        // (XORs and carryless shifts of `u64`s). The combined
+        // polynomial's per-coefficient MLE-evaluation at the IC
+        // point r is a sum-of-eqs over the rows where that bit is
+        // set — no DynamicPolynomial allocation per cell. See
+        // [`crate::f2_native_ic`] for the algorithm + scope.
         //
-        // A proper fix would teach the IC subprotocol to evaluate
-        // F_2 trace columns directly (no DynamicPolynomialF lift) —
-        // see the "deeper F_2-native IC" TODO.
-        let row_major_trace = project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(
-            &extended_trace,
-            &field_cfg,
-        );
-        let scalars =
-            zinc_piop::projections::project_scalars::<BinaryFieldGF192, U>(|s| project_scalar(s));
+        // The caller still supplies `project_scalar` for the
+        // sumcheck path below (and for completeness if a fallback
+        // is needed). For the IC, we use the bit-pack form of the
+        // same scalar: bit `i` set iff the scalar's i-th coefficient
+        // is non-zero — for SHA-F_2 where scalars have F_2-coefficient
+        // (0/1) values, this matches the `project_scalar` output
+        // exactly (coefficient 0 ↔ GF(2^192) zero ↔ bit 0;
+        // coefficient 1 ↔ GF(2^192) one ↔ bit 1).
+        let project_scalar_to_bits =
+            |s: &U::Scalar| -> u64 {
+                let projected = project_scalar(s);
+                let mut bits: u64 = 0;
+                for (i, c) in projected.coeffs.iter().enumerate() {
+                    if i >= 64 {
+                        break;
+                    }
+                    if !<BinaryFieldGF192 as crypto_primitives::PrimeField>::is_zero(c) {
+                        #[allow(clippy::arithmetic_side_effects)]
+                        {
+                            bits |= 1u64 << i;
+                        }
+                    }
+                }
+                bits
+            };
 
-        let (ic_proof, ic_state) = <U as IdealCheckProtocol>::prove_combined::<BinaryFieldGF192>(
-            transcript,
-            &row_major_trace,
-            &scalars,
-            num_constraints,
-            num_vars,
-            &field_cfg,
-        )
-        .map_err(F2ProveError::IdealCheck)?;
+        let (ic_proof, ic_state) =
+            crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
+                transcript,
+                &extended_trace.binary_poly,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+                project_scalar_to_bits,
+            );
 
         // -- Step 3: Evaluation projection (X = α) -----------------
         let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
