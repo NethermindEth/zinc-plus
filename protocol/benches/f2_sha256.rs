@@ -58,6 +58,7 @@ use zinc_uair::{ideal_collector::IdealOrZero, Uair, constraint_counter::count_co
 use zinc_utils::inner_product::MBSInnerProduct;
 use zip_plus::{
     code::{
+        LinearCode,
         raa::RaaConfig,
         raa_f2::{RaaF2Code, recommended_num_column_openings},
     },
@@ -66,7 +67,6 @@ use zip_plus::{
 
 use zinc_piop::{
     ideal_check::IdealCheckProtocol,
-    projections::project_f2_trace_row_major,
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
 
@@ -436,46 +436,49 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
 //   e. Sumcheck         — `MultiDegreeSumcheck::prove_as_subprotocol`
 // ---------------------------------------------------------------------------
 
+/// Project a SHA-F_2 UAIR scalar to its 64-bit `F_2[X]` bit-pack —
+/// the closure the F_2-native IC adapter builds inside
+/// `prove_f2_uair_with_groups`. Replicated here so the micro bench
+/// can drive `F2NativeIc::prove_combined` directly.
+fn sha_f2_scalar_to_bits(
+    s: &DensePolynomial<R, D>,
+) -> u64 {
+    use crypto_primitives::PrimeField;
+    let projected = sha256_f2_project_scalar::<R>(s);
+    let mut bits: u64 = 0;
+    for (i, c) in projected.coeffs.iter().enumerate() {
+        if i >= 64 {
+            break;
+        }
+        if !<BinaryFieldGF192 as PrimeField>::is_zero(c) {
+            bits |= 1u64 << i;
+        }
+    }
+    bits
+}
+
 fn bench_micro_prover_uair(
     group: &mut BenchmarkGroup<WallTime>,
     id: &str,
     fx: &ProverFixture,
 ) {
-    use zinc_piop::projections::project_scalars;
+    use zinc_poly::univariate::binary_gf192::{
+        alpha_powers, eval_f2_poly_d_at_with_powers,
+    };
+    use zinc_protocol::f2_native_ic::F2NativeIc;
 
     let num_constraints = count_constraints::<U>();
     let field_cfg = ();
 
-    // a) RowMajorProject
-    group.bench_function(BenchmarkId::new("UAIR-a-RowMajorProject", id), |bench| {
-        bench.iter(|| {
-            let row_major =
-                project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(&fx.trace, &field_cfg);
-            black_box(row_major);
-        });
-    });
-
-    // b) ProjectScalars
-    group.bench_function(BenchmarkId::new("UAIR-b-ProjectScalars", id), |bench| {
-        bench.iter(|| {
-            let scalars = project_scalars::<BinaryFieldGF192, U>(|s| {
-                sha256_f2_project_scalar::<R>(s)
-            });
-            black_box(scalars);
-        });
-    });
-
-    // c) ICProveCombined
-    group.bench_function(BenchmarkId::new("UAIR-c-ICProveCombined", id), |bench| {
-        let row_major =
-            project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(&fx.trace, &field_cfg);
-        let scalars = project_scalars::<BinaryFieldGF192, U>(|s| {
-            sha256_f2_project_scalar::<R>(s)
-        });
+    // ---- a) F_2-native IC ----
+    //
+    // The current code path: per-row bit-poly arithmetic + per-bit
+    // MLE eval at the IC point. Replaces the old
+    // RowMajorProject + ProjectScalars + ICProveCombined trio that
+    // earlier versions of this bench measured.
+    group.bench_function(BenchmarkId::new("UAIR-a-F2NativeIC", id), |bench| {
         bench.iter_batched(
             || {
-                // Pre-prime transcript with the commit-absorb so the
-                // IC's challenge draws are realistic.
                 let mut transcript = Blake3Transcript::new();
                 let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
                     ::commit_and_absorb_f2_trace(
@@ -485,32 +488,34 @@ fn bench_micro_prover_uair(
                 transcript
             },
             |mut transcript| {
-                let (proof, state) = <U as IdealCheckProtocol>
-                    ::prove_combined::<BinaryFieldGF192>(
-                        &mut transcript,
-                        &row_major,
-                        &scalars,
-                        num_constraints,
-                        fx.num_vars,
-                        &field_cfg,
-                    )
-                    .expect("IC prove");
+                let (proof, state) = F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
+                    &mut transcript,
+                    &fx.trace.binary_poly,
+                    num_constraints,
+                    fx.num_vars,
+                    &field_cfg,
+                    sha_f2_scalar_to_bits,
+                );
                 black_box((proof, state));
             },
             criterion::BatchSize::PerIteration,
         );
     });
 
-    // d) AlphaProject
-    group.bench_function(BenchmarkId::new("UAIR-d-AlphaProject", id), |bench| {
+    // ---- b) AlphaProject (precomputed α-powers) ----
+    //
+    // Matches the current `prove_f2_uair_with_groups` body:
+    // compute `α^0..α^{D-1}` once, then per-cell bit-selected XOR-add.
+    group.bench_function(BenchmarkId::new("UAIR-b-AlphaProject", id), |bench| {
         bench.iter_batched(
             || {
-                // Draw a fresh α each iteration.
                 let mut transcript = Blake3Transcript::new();
-                let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+                let alpha: BinaryFieldGF192 =
+                    transcript.get_field_challenge(&field_cfg);
                 alpha
             },
             |alpha| {
+                let pows = alpha_powers(&alpha, D);
                 let projected: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = fx
                     .trace
                     .binary_poly
@@ -520,9 +525,7 @@ fn bench_micro_prover_uair(
                             .evaluations
                             .iter()
                             .map(|cell| {
-                                zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
-                                    cell, &alpha,
-                                )
+                                eval_f2_poly_d_at_with_powers::<D>(cell, &pows)
                             })
                             .collect();
                         DenseMultilinearExtension::from_evaluations_vec(
@@ -538,13 +541,16 @@ fn bench_micro_prover_uair(
         );
     });
 
-    // e) Sumcheck
-    group.bench_function(BenchmarkId::new("UAIR-e-Sumcheck", id), |bench| {
-        // Build the projected trace + groups once outside the timed loop.
+    // ---- c) Sumcheck ----
+    //
+    // `MultiDegreeSumcheck::prove_as_subprotocol` on the
+    // α-projected trace under the standard `eq · col` groups.
+    group.bench_function(BenchmarkId::new("UAIR-c-Sumcheck", id), |bench| {
         let alpha: BinaryFieldGF192 = {
             let mut t = Blake3Transcript::new();
             t.get_field_challenge(&field_cfg)
         };
+        let pows = alpha_powers(&alpha, D);
         let projected: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = fx
             .trace
             .binary_poly
@@ -553,11 +559,7 @@ fn bench_micro_prover_uair(
                 let evals_at_alpha: Vec<BinaryFieldGF192> = col
                     .evaluations
                     .iter()
-                    .map(|cell| {
-                        zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
-                            cell, &alpha,
-                        )
-                    })
+                    .map(|cell| eval_f2_poly_d_at_with_powers::<D>(cell, &pows))
                     .collect();
                 DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
@@ -585,6 +587,189 @@ fn bench_micro_prover_uair(
                         &field_cfg,
                     );
                 black_box((proof, states));
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// MICRO breakdown: timing each sub-step inside `prove_f2_open`.
+//
+// Five sub-steps, in body order:
+//   a. AlphaBasis     — `AlphaPolyBasis::new(α)` (192×192 F_2 Gauss–
+//                       Jordan).
+//   b. LiftedEqTensor — `build_lifted_eq_tensor` for q_0, q_1.
+//   c. Folds          — parallel per-column γ-folds producing the
+//                       `b_g_scaled` / `a_scaled` partials that merge
+//                       into `b'` / `a'`.
+//   d. CombinedRow    — parallel per-column `combined_row` build.
+//   e. MerkleOpens    — `t` column-index samples + Merkle-path proofs.
+// ---------------------------------------------------------------------------
+
+fn bench_micro_prover_open(
+    group: &mut BenchmarkGroup<WallTime>,
+    id: &str,
+    fx: &ProverFixture,
+) {
+    use zinc_poly::univariate::binary_f2_wide::{f2_inner_product, f2_poly_mul};
+    use zinc_poly::univariate::binary_gf192::{AlphaPolyBasis, lift_bp_to_f2_poly_1};
+    use zinc_protocol::f2_prove::build_lifted_eq_tensor;
+    use zinc_poly::univariate::binary_f2_wide::BinaryF2Poly;
+
+    let field_cfg = ();
+
+    // Set up a (hint, subclaim, alpha) once — these are inputs the
+    // open phase takes from the earlier prove steps.
+    let (hint, subclaim) = {
+        let mut t = Blake3Transcript::new();
+        let (h, _) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace(
+            &mut t,
+            &fx.pp,
+            &fx.trace.binary_poly,
+        )
+        .expect("commit");
+        let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+            ::prove_f2_uair_with_groups(
+                &mut t,
+                &fx.trace,
+                &[],
+                fx.num_vars,
+                sha256_f2_project_scalar::<R>,
+                eq_dot_column_groups,
+            )
+            .expect("uair");
+        (h, sub)
+    };
+    let alpha = subclaim.alpha;
+    let sumcheck_point = subclaim.sumcheck_point.clone();
+    let num_rows = fx.pp.num_rows;
+    let row_len = fx.pp.linear_code.row_len();
+    let num_cols = fx.trace.binary_poly.len();
+    let num_open = recommended_num_column_openings(REP);
+    let codeword_len = fx.pp.linear_code.codeword_len();
+
+    // ---- a) AlphaBasis ----
+    group.bench_function(BenchmarkId::new("Open-a-AlphaBasis", id), |bench| {
+        bench.iter(|| {
+            let basis = AlphaPolyBasis::new(&alpha);
+            black_box(basis);
+        });
+    });
+
+    // ---- b) LiftedEqTensor ----
+    group.bench_function(BenchmarkId::new("Open-b-LiftedEqTensor", id), |bench| {
+        let basis = AlphaPolyBasis::new(&alpha);
+        bench.iter(|| {
+            let (q0, q1) = build_lifted_eq_tensor(num_rows, &sumcheck_point, &basis);
+            black_box((q0, q1));
+        });
+    });
+
+    // Precompute basis + (q0, q1) once for the heavier benches below.
+    let basis = AlphaPolyBasis::new(&alpha);
+    let (q0, q1) = build_lifted_eq_tensor(num_rows, &sumcheck_point, &basis);
+
+    // Build a deterministic γ vector (matching what the real open
+    // draws after committing b'/a' — we just need representative
+    // dense GF(2^192) values lifted to BinaryF2Poly<3>).
+    let gamma: Vec<BinaryF2Poly<3>> = {
+        let mut t = Blake3Transcript::new();
+        let g: Vec<BinaryFieldGF192> = t.get_field_challenges(num_cols, &field_cfg);
+        g.iter().map(|x| basis.lift(x)).collect()
+    };
+    let coeffs: Vec<BinaryF2Poly<3>> = {
+        let mut t = Blake3Transcript::new();
+        let c: Vec<BinaryFieldGF192> = t.get_field_challenges(num_rows, &field_cfg);
+        c.iter().map(|x| basis.lift(x)).collect()
+    };
+
+    // ---- c) Folds — per-column γ-folds (parallel) ----
+    group.bench_function(BenchmarkId::new("Open-c-Folds", id), |bench| {
+        bench.iter(|| {
+            #[cfg(feature = "parallel")]
+            use rayon::prelude::*;
+            #[cfg(feature = "parallel")]
+            let it = fx.trace.binary_poly.par_iter().enumerate();
+            #[cfg(not(feature = "parallel"))]
+            let it = fx.trace.binary_poly.iter().enumerate();
+            let per_col_results: Vec<(Vec<BinaryF2Poly<7>>, BinaryF2Poly<10>)> = it
+                .map(|(g, col)| {
+                    let mut b_g_scaled: Vec<BinaryF2Poly<7>> = Vec::with_capacity(num_rows);
+                    let mut b_g: Vec<BinaryF2Poly<4>> = Vec::with_capacity(num_rows);
+                    for i in 0..num_rows {
+                        let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
+                        let row_lifted: Vec<BinaryF2Poly<1>> =
+                            row_slice.iter().map(lift_bp_to_f2_poly_1::<D>).collect();
+                        let entry: BinaryF2Poly<4> =
+                            f2_inner_product::<1, 3, 4>(&row_lifted, &q1);
+                        let scaled: BinaryF2Poly<7> =
+                            f2_poly_mul::<3, 4, 7>(&gamma[g], &entry);
+                        b_g_scaled.push(scaled);
+                        b_g.push(entry);
+                    }
+                    let a_g_prime: BinaryF2Poly<7> =
+                        f2_inner_product::<3, 4, 7>(&q0, &b_g);
+                    let a_scaled: BinaryF2Poly<10> =
+                        f2_poly_mul::<3, 7, 10>(&gamma[g], &a_g_prime);
+                    (b_g_scaled, a_scaled)
+                })
+                .collect();
+            black_box(per_col_results);
+        });
+    });
+
+    // ---- d) CombinedRow — per-column combined_row contributions (parallel) ----
+    group.bench_function(BenchmarkId::new("Open-d-CombinedRow", id), |bench| {
+        bench.iter(|| {
+            #[cfg(feature = "parallel")]
+            use rayon::prelude::*;
+            #[cfg(feature = "parallel")]
+            let it = fx.trace.binary_poly.par_iter().enumerate();
+            #[cfg(not(feature = "parallel"))]
+            let it = fx.trace.binary_poly.iter().enumerate();
+            let per_col: Vec<Vec<BinaryF2Poly<7>>> = it
+                .map(|(g, col)| {
+                    let mut col_contrib: Vec<BinaryF2Poly<7>> = Vec::with_capacity(row_len);
+                    for j in 0..row_len {
+                        let column_j_lifted: Vec<BinaryF2Poly<1>> = (0..num_rows)
+                            .map(|i| lift_bp_to_f2_poly_1::<D>(&col.evaluations[i * row_len + j]))
+                            .collect();
+                        let per_col_entry: BinaryF2Poly<4> =
+                            f2_inner_product::<1, 3, 4>(&column_j_lifted, &coeffs);
+                        let scaled: BinaryF2Poly<7> =
+                            f2_poly_mul::<3, 4, 7>(&gamma[g], &per_col_entry);
+                        col_contrib.push(scaled);
+                    }
+                    col_contrib
+                })
+                .collect();
+            black_box(per_col);
+        });
+    });
+
+    // ---- e) MerkleOpens — t = 987 sample + path generations ----
+    group.bench_function(BenchmarkId::new("Open-e-MerkleOpens", id), |bench| {
+        bench.iter_batched(
+            || {
+                // Each iteration drives the loop on a fresh transcript
+                // so the sampled column indices look like real ones.
+                Blake3Transcript::new()
+            },
+            |mut transcript| {
+                let mut paths = Vec::with_capacity(num_open);
+                for _ in 0..num_open {
+                    let column_idx = zinc_protocol::f2_prove::sample_column_idx(
+                        &mut transcript,
+                        codeword_len,
+                    );
+                    let merkle_proof = hint
+                        .merkle_tree
+                        .prove(column_idx)
+                        .expect("Merkle prove");
+                    paths.push(merkle_proof);
+                }
+                black_box(paths);
             },
             criterion::BatchSize::PerIteration,
         );
@@ -721,7 +906,7 @@ fn bench_micro_verifier_uair(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[16];
+const NVARS_SWEEP: &[usize] = &[9,16];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
@@ -815,6 +1000,7 @@ fn micro_benches(c: &mut Criterion) {
     let fx = setup_prover(9);
     let id = format!("nvars={}", fx.num_vars);
     bench_micro_prover_uair(&mut group, &id, &fx);
+    bench_micro_prover_open(&mut group, &id, &fx);
     bench_micro_verifier_uair(&mut group, &id, &fx);
     group.finish();
 }
