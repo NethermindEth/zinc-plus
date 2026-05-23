@@ -116,15 +116,49 @@ pub enum F2ProveError<U: Uair> {
 /// `eq`-randomness for the zerocheck-shaped sumcheck). `alpha` is the
 /// evaluation-projection challenge drawn between the IC and the
 /// sumcheck. `sumcheck_point` is the sumcheck's shared final point
-/// `r*`. `column_mle_evals[g]` is the verifier-derived expected
-/// evaluation of column `g`'s projected MLE at `r*`. Those are the MLE
-/// evaluation claims to be opened via PCS in the next slice.
+/// `r*`.
+///
+/// `primary_column_evals[g]` is the verifier-derived expected
+/// evaluation of *primary* (committed) column `g`'s projected MLE at
+/// `r*`. These feed into the F_2[X] PCS open
+/// ([`ZincPlusPiopF2::verify_f2_open`]).
+///
+/// `virtual_column_evals[k]` is the analogous evaluation for a
+/// *virtual* binary_poly column — an F_2-linear combination of
+/// primary columns declared at protocol time. Virtual columns are
+/// not committed; the verifier derives their evals at `r*` from
+/// `primary_column_evals` and the
+/// [`F2VirtualBpSpec`] linear-combo definition.
 #[derive(Clone, Debug)]
 pub struct F2VerifierSubclaim {
     pub ic_evaluation_point: Vec<BinaryFieldGF192>,
     pub alpha: BinaryFieldGF192,
     pub sumcheck_point: Vec<BinaryFieldGF192>,
-    pub column_mle_evals: Vec<BinaryFieldGF192>,
+    pub primary_column_evals: Vec<BinaryFieldGF192>,
+    pub virtual_column_evals: Vec<BinaryFieldGF192>,
+}
+
+/// One virtual binary_poly column for an F_2 UAIR: an
+/// `F_2[X]`-linear (= XOR) combination of primary witness
+/// binary_poly columns.
+///
+/// Virtual columns are never committed. The UAIR's
+/// `constrain_general` can index them as ordinary binary_poly
+/// columns *after* the primary witness columns (so primary cols
+/// `0..num_primary` and virtual cols
+/// `num_primary..num_primary + num_virtual`). The prover
+/// materialises each virtual column from the primary trace before
+/// running the IC + sumcheck; the verifier derives its MLE
+/// evaluation at `r*` from `primary_column_evals` and the spec.
+///
+/// Coefficients are implicitly `1 ∈ F_2` — listing a primary col
+/// index in `primary_col_indices` XORs that column into the virtual
+/// column. Omitting an index means coefficient `0`. The order of
+/// indices is irrelevant (XOR is commutative); duplicates cancel
+/// pairwise.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct F2VirtualBpSpec {
+    pub primary_col_indices: Vec<usize>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_uair`].
@@ -146,6 +180,14 @@ where
     DegenerateEq,
     #[error("expected {expected} sumcheck groups, got {actual}")]
     GroupCountMismatch { expected: usize, actual: usize },
+    #[error(
+        "virtual column eval mismatch at index {virtual_idx}: sumcheck-extracted ({sumcheck:?}) ≠ derived from primary evals ({derived:?})"
+    )]
+    VirtualEvalMismatch {
+        virtual_idx: usize,
+        sumcheck: BinaryFieldGF192,
+        derived: BinaryFieldGF192,
+    },
     #[error("internal: U::Uair phantom")]
     _Uair(std::marker::PhantomData<U>),
 }
@@ -182,6 +224,89 @@ pub struct ZincPlusPiopF2<Zt, U, const DEGREE_PLUS_ONE: usize>(PhantomData<(Zt, 
 where
     Zt: F2ZincTypes<DEGREE_PLUS_ONE>,
     U: Uair;
+
+/// Materialize the virtual binary_poly columns from a primary
+/// witness trace and a list of [`F2VirtualBpSpec`]s.
+///
+/// Each virtual column is the XOR (= F_2 sum) of the listed primary
+/// witness columns, evaluated row-by-row. The output ordering
+/// matches `virtual_specs`. Asserts the primary trace's columns are
+/// well-shaped (same length); panics if a spec references an
+/// out-of-range primary column.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn materialize_f2_virtual_bp_cols<const D: usize>(
+    primary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    virtual_specs: &[F2VirtualBpSpec],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<D>>> {
+    if virtual_specs.is_empty() {
+        return Vec::new();
+    }
+    let num_rows = primary_trace
+        .first()
+        .map(|m| m.evaluations.len())
+        .unwrap_or(0);
+    let num_vars = primary_trace
+        .first()
+        .map(|m| m.num_vars)
+        .unwrap_or(0);
+    for col in primary_trace {
+        assert_eq!(
+            col.evaluations.len(),
+            num_rows,
+            "materialize_f2_virtual_bp_cols: primary columns must share length",
+        );
+        assert_eq!(
+            col.num_vars,
+            num_vars,
+            "materialize_f2_virtual_bp_cols: primary columns must share num_vars",
+        );
+    }
+    let num_primary = primary_trace.len();
+
+    virtual_specs
+        .iter()
+        .map(|spec| {
+            let mut evals: Vec<BinaryPoly<D>> = vec![BinaryPoly::default(); num_rows];
+            for &col_idx in &spec.primary_col_indices {
+                assert!(
+                    col_idx < num_primary,
+                    "F2VirtualBpSpec: primary col idx {col_idx} out of range (num_primary = {num_primary})",
+                );
+                let primary_col = &primary_trace[col_idx];
+                for (i, slot) in evals.iter_mut().enumerate() {
+                    use zinc_poly::univariate::F2AddAssign;
+                    slot.f2_add_assign(&primary_col.evaluations[i]);
+                }
+            }
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                evals,
+                BinaryPoly::default(),
+            )
+        })
+        .collect()
+}
+
+/// Derive virtual binary_poly column MLE evaluations at `r*` from
+/// the primary column evals at `r*` and the F_2-linear combo specs.
+/// Mirrors [`materialize_f2_virtual_bp_cols`]'s arithmetic at the
+/// MLE-evaluation level: F_2 addition (= GF(2^192) addition) of the
+/// referenced primary evals.
+pub fn derive_f2_virtual_evals_at(
+    primary_evals: &[BinaryFieldGF192],
+    virtual_specs: &[F2VirtualBpSpec],
+) -> Vec<BinaryFieldGF192> {
+    virtual_specs
+        .iter()
+        .map(|spec| {
+            let mut acc = BinaryFieldGF192::zero();
+            for &col_idx in &spec.primary_col_indices {
+                acc += &primary_evals[col_idx];
+            }
+            acc
+        })
+        .collect()
+}
 
 /// Default sumcheck-group builder for the F_2 prove path.
 ///
@@ -275,14 +400,15 @@ where
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
-    ) -> Result<F2Proof, F2ProveError<U>> {
-        // Default composition: one degree-2 `eq · col` group per
-        // projected trace column. Full constraints would supply a
-        // CPR-style group builder via
-        // [`Self::prove_f2_uair_with_groups`].
+    ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
+        // Default composition + no virtual columns. Use
+        // [`Self::prove_f2_uair_with_groups`] with explicit
+        // `virtual_specs` for UAIRs that declare virtual binary_poly
+        // columns.
         Self::prove_f2_uair_with_groups(
             transcript,
             trace,
+            &[],
             num_vars,
             project_scalar,
             eq_dot_column_groups,
@@ -296,13 +422,20 @@ where
     /// group composition. Use [`eq_dot_column_groups`] for the
     /// per-column zerocheck shape; richer UAIRs can pass a closure
     /// that produces per-degree groups matching the CPR layout.
+    ///
+    /// Returns both the wire `F2Proof` and the prover-side
+    /// `F2VerifierSubclaim` — the latter mirrors what the verifier
+    /// would derive from the same transcript, and lets the caller
+    /// chain into [`Self::prove_f2_open`] without re-running the
+    /// IC + sumcheck on a verifier shim.
     pub fn prove_f2_uair_with_groups<G>(
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
         build_groups: G,
-    ) -> Result<F2Proof, F2ProveError<U>>
+    ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>>
     where
         G: FnOnce(
             &[BinaryFieldGF192],
@@ -312,13 +445,48 @@ where
     {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
+        let num_primary = trace.binary_poly.len();
+
+        // -- Materialise virtual binary_poly columns ----------
+        // Appended after the primary witness columns; the UAIR's
+        // constraint code references them by their (extended)
+        // absolute index.
+        let virtual_cols =
+            materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
+        let mut all_binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+            trace.binary_poly.iter().cloned().collect();
+        all_binary_poly_cols.extend(virtual_cols);
+        let extended_trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: all_binary_poly_cols.into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
 
         // -- Step 2: Ideal check over GF(2^192)[X] -----------------
+        //
+        // We use `prove_combined` (row-major path) unconditionally
+        // here, even for MLE-first eligible UAIRs that the integer
+        // pipeline would route through `prove_linear`. The reason is
+        // F_2-specific: trace cells are dense `BinaryPoly<32>` (32
+        // coeffs each), and `evaluate_combined_polynomials_unchecked`
+        // allocates a `Vec<F::Inner>` of size `num_rows` for every
+        // (column, coefficient-index) pair when projecting to a
+        // per-coefficient MLE — i.e., `num_cols × max_num_coeffs`
+        // allocations. For SHA F_2 (41 cols × 32 coeffs × 24-byte
+        // GF(2^192) elements × 512 rows ≈ 16 MB allocation churn per
+        // call), this dominates and makes `prove_linear` ~1.5× slower
+        // than `prove_combined` despite the asymptotic advantage. The
+        // integer pipeline avoids this because its cell coefficient
+        // type already lives in F and no per-coefficient MLE
+        // construction is needed at the linear-eval step.
+        //
+        // A proper fix would teach the IC subprotocol to evaluate
+        // F_2 trace columns directly (no DynamicPolynomialF lift) —
+        // see the "deeper F_2-native IC" TODO.
         let row_major_trace = project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(
-            trace,
+            &extended_trace,
             &field_cfg,
         );
-
         let scalars =
             zinc_piop::projections::project_scalars::<BinaryFieldGF192, U>(|s| project_scalar(s));
 
@@ -335,16 +503,22 @@ where
         // -- Step 3: Evaluation projection (X = α) -----------------
         let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
 
+        // Precompute α^0, α^1, ..., α^{D-1} once outside the per-cell
+        // loop. With ~21K cells per SHA F_2 trace (41 cols × 512 rows),
+        // this drops the per-cell cost from D=32 GF(2^192)
+        // multiplications to just bit-selected XOR-adds — saving ~670K
+        // field multiplications across the whole projection.
+        let alpha_pows: Vec<BinaryFieldGF192> =
+            zinc_poly::univariate::binary_gf192::alpha_powers(&alpha, D);
         let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> =
-            cfg_iter!(trace.binary_poly)
+            cfg_iter!(extended_trace.binary_poly)
                 .map(|col| {
                     let evals_at_alpha: Vec<BinaryFieldGF192> = col
                         .evaluations
                         .iter()
                         .map(|cell| {
-                            zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
-                                cell, &alpha,
-                            )
+                            zinc_poly::univariate::binary_gf192
+                                ::eval_f2_poly_d_at_with_powers::<D>(cell, &alpha_pows)
                         })
                         .collect();
                     DenseMultilinearExtension::from_evaluations_vec(
@@ -362,7 +536,7 @@ where
             &field_cfg,
         );
 
-        let (sumcheck_proof, _prover_states) =
+        let (sumcheck_proof, prover_states) =
             MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
                 transcript,
                 groups,
@@ -370,11 +544,46 @@ where
                 &field_cfg,
             );
 
-        Ok(F2Proof {
-            ic_proof,
-            sumcheck_proof,
+        // -- Derive the prover-side subclaim --------------------
+        let sumcheck_point = prover_states[0].randomness.clone();
+        // Per-column (primary + virtual) MLE evals at r*.
+        let all_col_evals: Vec<BinaryFieldGF192> = projected_trace
+            .iter()
+            .map(|col| {
+                let zero_inner = *BinaryFieldGF192::zero().inner();
+                let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
+                    col.num_vars,
+                    col.evaluations.iter().map(|x| *x.inner()).collect(),
+                    zero_inner,
+                );
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF192,
+                >>::evaluate_with_config(
+                    inner_mle, &sumcheck_point, &field_cfg
+                )
+                .expect("MLE evaluation on r* should succeed")
+            })
+            .collect();
+        // Split: first `num_primary` are committed; the rest are
+        // virtual. The verifier reconstructs the virtual side from
+        // the primary side and `virtual_specs`.
+        let (primary_evals, virtual_evals) = all_col_evals.split_at(num_primary);
+        let subclaim = F2VerifierSubclaim {
+            ic_evaluation_point: ic_state.evaluation_point,
             alpha,
-        })
+            sumcheck_point,
+            primary_column_evals: primary_evals.to_vec(),
+            virtual_column_evals: virtual_evals.to_vec(),
+        };
+
+        Ok((
+            F2Proof {
+                ic_proof,
+                sumcheck_proof,
+                alpha,
+            },
+            subclaim,
+        ))
     }
 
     /// Verify a proof emitted by [`Self::prove_f2_uair`].
@@ -394,8 +603,9 @@ where
     pub fn verify_f2_uair<IdealOverF>(
         transcript: &mut impl Transcript,
         proof: &F2Proof,
+        virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
-        num_columns: usize,
+        num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     ) -> Result<F2VerifierSubclaim, F2VerifyError<U, IdealOverF>>
     where
@@ -405,8 +615,9 @@ where
         Self::verify_f2_uair_with_groups(
             transcript,
             proof,
+            virtual_specs,
             num_vars,
-            num_columns,
+            num_primary_columns,
             project_ideal,
             |ic_eval_point, md_subclaims| {
                 extract_column_evals_eq_dot_col(ic_eval_point, md_subclaims)
@@ -421,14 +632,23 @@ where
     /// Result<Vec<MLE eval claim>, F2VerifyError>` is the
     /// composition-specific inversion: from per-group expected
     /// evaluations + the IC point, recover the per-column MLE
-    /// evaluation claims at `r*` that downstream PCS opening will
-    /// discharge. Pair with [`Self::prove_f2_uair_with_groups`] —
-    /// the closure must invert whatever `build_groups` composed.
+    /// evaluation claims at `r*` (covering both primary and virtual
+    /// columns, in that order) that downstream PCS opening will
+    /// discharge for primary cols. Pair with
+    /// [`Self::prove_f2_uair_with_groups`] — the closure must invert
+    /// whatever `build_groups` composed.
+    ///
+    /// After extraction, the verifier checks each virtual column's
+    /// extracted eval against the F_2-linear combo of primary col
+    /// evals — soundness for the verifier's "virtual = linear combo"
+    /// derivation. Mismatch surfaces as
+    /// [`F2VerifyError::VirtualEvalMismatch`].
     pub fn verify_f2_uair_with_groups<IdealOverF, E>(
         transcript: &mut impl Transcript,
         proof: &F2Proof,
+        virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
-        num_columns: usize,
+        num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
         extract_subclaims: E,
     ) -> Result<F2VerifierSubclaim, F2VerifyError<U, IdealOverF>>
@@ -442,6 +662,7 @@ where
     {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
+        let num_total = num_primary_columns + virtual_specs.len();
 
         let ic_subclaim: IcVerifierSubclaim<BinaryFieldGF192> =
             <U as IdealCheckProtocol>::verify_as_subprotocol::<_, IdealOverF, _>(
@@ -471,21 +692,44 @@ where
         )
         .map_err(F2VerifyError::Sumcheck)?;
 
-        if md_subclaims.expected_evaluations().len() != num_columns {
+        if md_subclaims.expected_evaluations().len() != num_total {
             return Err(F2VerifyError::GroupCountMismatch {
-                expected: num_columns,
+                expected: num_total,
                 actual: md_subclaims.expected_evaluations().len(),
             });
         }
 
         let sumcheck_point = md_subclaims.point().to_vec();
-        let column_mle_evals = extract_subclaims(&ic_evaluation_point, &md_subclaims)?;
+        let all_col_evals = extract_subclaims(&ic_evaluation_point, &md_subclaims)?;
+        let (primary_evals, virtual_evals_from_sumcheck) =
+            all_col_evals.split_at(num_primary_columns);
+        let primary_evals = primary_evals.to_vec();
+
+        // Virtual-eval consistency: each virtual col eval extracted
+        // from the sumcheck must equal the F_2-linear combo of
+        // primary evals defined by the spec.
+        let virtual_evals_derived =
+            derive_f2_virtual_evals_at(&primary_evals, virtual_specs);
+        for (k, (from_sumcheck, derived)) in virtual_evals_from_sumcheck
+            .iter()
+            .zip(virtual_evals_derived.iter())
+            .enumerate()
+        {
+            if from_sumcheck != derived {
+                return Err(F2VerifyError::VirtualEvalMismatch {
+                    virtual_idx: k,
+                    sumcheck: *from_sumcheck,
+                    derived: *derived,
+                });
+            }
+        }
 
         Ok(F2VerifierSubclaim {
             ic_evaluation_point,
             alpha,
             sumcheck_point,
-            column_mle_evals,
+            primary_column_evals: primary_evals,
+            virtual_column_evals: virtual_evals_derived,
         })
     }
 
@@ -579,34 +823,46 @@ where
 // loop and the `F_2[X]`-lifted re-encoding check at sampled columns.
 // See `f2_open_plan.md` § "Piece 4" for the shape.
 
-/// Per-column data emitted by [`ZincPlusPiopF2::prove_f2_open`].
+/// γ-batched data emitted by [`ZincPlusPiopF2::prove_f2_open`].
 ///
-/// `lifted_claims[g]` is the F_2[X] polynomial `a_g' = q_0'^T ·
-/// M_{w_g} · q_1'` (without modular reduction); the verifier
-/// discharges the corresponding `GF(2^192)` claim by checking
-/// `ψ_α(a_g') = a_g`.
+/// **Single-open semantics.** Instead of sending per-column
+/// `(a_g', b_g, combined_row_g)` triples, the prover draws a
+/// transcript-fresh GF(2^192) challenge `γ_g` for each committed
+/// primary column and folds the per-column data into a **single**
+/// `(a', b', combined_row')` bundle:
 ///
-/// `b_vectors[g]` is the row-folded vector `b_g[i] = Σ_j M_{w_g}[i,
-/// j] · q_1'[j]`; the verifier checks `Σ_i q_0'[i] · b_g[i] = a_g'`
-/// in F_2[X].
+/// ```text
+/// a'             := Σ_g γ_g · a_g'              ∈ F_2[X]<≈608>
+/// b'[i]          := Σ_g γ_g · b_g[i]            ∈ F_2[X]<≈416>
+/// combined_row'  := Σ_g γ_g · combined_row_g    ∈ F_2[X]<≈416>
+/// ```
 ///
-/// Both are sized to the worst-case product width derived from
-/// `D = 32` and `μ_eq = 192`: `b_vectors` entries live in
-/// `BinaryF2Poly<4>` (≥ D + 192 = 224 bits) and `lifted_claims` in
-/// `BinaryF2Poly<7>` (≥ D + 2·192 - 1 = 415 bits). Tighter packings
-/// are possible but require feature-gated const-generic expressions;
-/// see `f2_open_plan.md` § "Risks".
+/// The verifier reconstructs the same `γ_g` from the transcript,
+/// checks `Σ_i q_0'[i] · b'[i] = a'` (eval consistency),
+/// `ψ_α(a') = Σ_g γ_g · a_g` (lift discharge, where each `a_g` is
+/// the per-column MLE claim from the sumcheck subclaim),
+/// `<combined_row', q_1'> = <coeffs, b'>` (coherence), and the
+/// γ-weighted encoding consistency at each opened column. Soundness
+/// against per-column tampering follows from Schwartz-Zippel over
+/// the random γ_g.
+///
+/// Widths: `a' ∈ BinaryF2Poly<10>` (≥ D + 2·192 - 1 + 192 - 1 =
+/// 606 bits for D=32); `b'` and `combined_row'` entries in
+/// `BinaryF2Poly<7>` (≥ D + 2·192 - 1 = 414 bits).
+//
+// TODO: when `feature(generic_const_exprs)` stabilises, parameterise
+// these widths over `D` and `μ_eq` so the BinaryF2Poly<W> sizes
+// shrink to the true bit bounds. Until then the slight
+// over-allocation costs ~10% extra transcription bytes per opening;
+// not on a hot path for any current workload.
 #[derive(Clone, Debug)]
 pub struct F2OpenProof<const D: usize> {
-    /// `a_g' ∈ F_2[X]` per column.
-    pub lifted_claims: Vec<BinaryF2Poly<7>>,
-    /// `b_g = M_{w_g} · q_1'` per column. `num_rows` entries each.
-    pub b_vectors: Vec<Vec<BinaryF2Poly<4>>>,
-    /// `combined_row_g = Σ_i coeffs[i] · M_{w_g}[i, *]` per column,
-    /// where `coeffs ∈ BinaryF2Poly<3>^{num_rows}` are
-    /// transcript-fresh challenges drawn *after* the prover commits
-    /// to `b_vectors` and `lifted_claims`. `row_len` entries each.
-    pub combined_rows: Vec<Vec<BinaryF2Poly<4>>>,
+    /// `a' = Σ_g γ_g · a_g' ∈ F_2[X]`.
+    pub lifted_claim: BinaryF2Poly<10>,
+    /// `b'[i] = Σ_g γ_g · b_g[i]`. `num_rows` entries.
+    pub b_vector: Vec<BinaryF2Poly<7>>,
+    /// `combined_row'[j] = Σ_g γ_g · combined_row_g[j]`. `row_len` entries.
+    pub combined_row: Vec<BinaryF2Poly<7>>,
     /// One entry per opened codeword column. Each entry holds the
     /// column's `batch_size · num_rows` codeword cells (concatenated
     /// per-poly in commit order) plus a Merkle proof.
@@ -629,44 +885,31 @@ pub struct F2OpenedColumn<const D: usize> {
 #[derive(Debug, thiserror::Error)]
 pub enum F2OpenError {
     #[error(
-        "evaluation-consistency check failed at column {col}: \
-         Σ_i q_0'[i] · b_g[i] ≠ a_g' in F_2[X]"
+        "evaluation-consistency check failed: Σ_i q_0'[i] · b'[i] ≠ a' in F_2[X]"
     )]
-    EvalConsistency { col: usize },
+    EvalConsistency,
     #[error(
-        "lift discharge failed at column {col}: ψ_α(a_g') ({computed:?}) ≠ a_g ({expected:?})"
+        "lift discharge failed: ψ_α(a') ({computed:?}) ≠ Σ_g γ_g · a_g ({expected:?})"
     )]
     LiftDischarge {
-        col: usize,
         computed: BinaryFieldGF192,
         expected: BinaryFieldGF192,
     },
-    #[error("F2OpenProof has {got} entries, expected {expected}")]
-    GroupCountMismatch { expected: usize, got: usize },
-    #[error("F2OpenProof.b_vectors[{col}] has length {got}, expected {expected}")]
-    BvecLenMismatch {
-        col: usize,
-        expected: usize,
-        got: usize,
-    },
+    #[error("F2OpenProof.b_vector has length {got}, expected {expected}")]
+    BvecLenMismatch { expected: usize, got: usize },
     #[error(
-        "coherence check failed at column {col}: \
-         <combined_row, q_1'> ≠ <coeffs, b_g> in F_2[X]"
+        "coherence check failed: <combined_row', q_1'> ≠ <coeffs, b'> in F_2[X]"
     )]
-    Coherence { col: usize },
-    #[error("F2OpenProof.combined_rows[{col}] has length {got}, expected {expected}")]
-    CombinedRowLenMismatch {
-        col: usize,
-        expected: usize,
-        got: usize,
-    },
+    Coherence,
+    #[error("F2OpenProof.combined_row has length {got}, expected {expected}")]
+    CombinedRowLenMismatch { expected: usize, got: usize },
     #[error("Merkle path verification failed for opened column {column_idx}: {reason}")]
     MerkleVerify { column_idx: usize, reason: String },
     #[error(
-        "encoding consistency check failed at column g={col}, opened idx j={column_idx}: \
-         encode(combined_row_g)[j] ≠ Σ_i coeffs[i] · cw_M^g[i, j]"
+        "encoding consistency check failed at opened col idx j={column_idx}: \
+         encode(combined_row')[j] ≠ Σ_i coeffs[i] · Σ_g γ_g · cw_M^g[i, j]"
     )]
-    EncodingConsistency { col: usize, column_idx: usize },
+    EncodingConsistency { column_idx: usize },
     #[error("F2OpenedColumn has {got} entries, expected {expected}")]
     ColumnValuesLenMismatch { expected: usize, got: usize },
 }
@@ -760,21 +1003,23 @@ where
     Zt: F2ZincTypes<D>,
     U: Uair + 'static,
 {
-    /// Step 7 (prove): lift each committed F_2 column's MLE
-    /// evaluation claim from `GF(2^192)` to `F_2[X]` and produce the
-    /// per-column lifted claim `a_g'` and the eval-consistency b-vector.
+    /// Step 7 (prove) — γ-batched lift-and-project open.
+    ///
+    /// Reduces the per-column MLE evaluation claims emitted by the
+    /// sumcheck to a single F_2[X] opening: the prover folds each
+    /// per-column `(a_g', b_g, combined_row_g)` triple by random
+    /// challenges `γ_g ∈ GF(2^192)` into the bundled
+    /// `(a', b', combined_row')` carried in [`F2OpenProof`]. The
+    /// verifier discharges every column's claim via a single
+    /// `ψ_α(a') = Σ_g γ_g · a_g` check; soundness over per-column
+    /// tampering follows by Schwartz-Zippel over the γ_g.
     ///
     /// `trace_binary_cols` provides direct witness access (the
-    /// `M_{w_g}` matrices), `num_rows` and `row_len` define the
-    /// matrix reshape (matching the commit's `pp.num_rows` /
-    /// `pp.linear_code.row_len()`), and `sumcheck_point` is `r*` from
-    /// the sumcheck output (`F2VerifierSubclaim::sumcheck_point`).
-    ///
-    /// **Trust model**: the b-vectors land in the proof unbound to
-    /// the PCS — a tampering prover could send any consistent
-    /// `(b, a')` pair. Soundness for the full Step 7 requires the
-    /// proximity check (Merkle column openings) that ties `b_g` to
-    /// the committed codeword matrix; see the module-level comment.
+    /// `M_{w_g}` matrices); `pp` defines the commit shape (matching
+    /// the codeword matrix stored in `commit_hint`); `sumcheck_point`
+    /// is `r*` from the sumcheck output. `num_column_openings`
+    /// controls the proximity soundness — see
+    /// [`zip_plus::code::raa_f2::recommended_num_column_openings`].
     pub fn prove_f2_open(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -787,6 +1032,7 @@ where
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
         let codeword_len = pp.linear_code.codeword_len();
+        let num_cols = trace_binary_cols.len();
         assert!(num_rows.is_power_of_two());
 
         let basis = zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(alpha);
@@ -794,84 +1040,148 @@ where
         debug_assert_eq!(q1.len(), row_len);
         debug_assert_eq!(q0.len(), num_rows);
 
-        // -- Step 7.1: per-column b_g and a_g' ---------------------
-        let mut lifted_claims = Vec::with_capacity(trace_binary_cols.len());
-        let mut b_vectors = Vec::with_capacity(trace_binary_cols.len());
+        // -- Step 7.1: γ_g challenges (one per committed column) ---
+        // Drawn early so a', b', combined_row' depend on γ. (γ is
+        // the only cross-column entropy in the open; coeffs comes
+        // later for proximity.)
+        let gamma_gf: Vec<BinaryFieldGF192> =
+            transcript.get_field_challenges(num_cols, &());
+        let gamma: Vec<BinaryF2Poly<3>> =
+            gamma_gf.iter().map(|g| basis.lift(g)).collect();
 
-        for col in trace_binary_cols {
-            assert_eq!(
-                col.evaluations.len(),
-                num_rows * row_len,
-                "trace column evaluation count must equal num_rows × row_len"
-            );
-
-            let mut b_g: Vec<BinaryF2Poly<4>> = Vec::with_capacity(num_rows);
-            for i in 0..num_rows {
-                let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
-                let row_lifted: Vec<BinaryF2Poly<1>> = row_slice
-                    .iter()
-                    .map(zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>)
-                    .collect();
-                let entry: BinaryF2Poly<4> =
-                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 3, 4>(
-                        &row_lifted, &q1,
+        // -- Step 7.2: per-column intermediates, folded into b'/a'.
+        //
+        // For each committed column g:
+        //   b_g[i] := Σ_j q_1'[j] · M_w_g[i, j]      (BinaryF2Poly<4>)
+        //   a_g'   := Σ_i q_0'[i] · b_g[i]           (BinaryF2Poly<7>)
+        //   b'[i] += γ_g · b_g[i]                    (BinaryF2Poly<7>)
+        //   a'    += γ_g · a_g'                      (BinaryF2Poly<10>)
+        //
+        // Parallel structure: each (column, row) pair contributes
+        // independently to `b'` and (via `a_g'`) to `a'`. We
+        // parallelise across columns, producing per-column
+        // partial `(b_g, a_g_scaled)` results, then merge serially.
+        // The per-row work within a column stays sequential (row_len
+        // is small in the deployed shape).
+        let per_col_results: Vec<(Vec<BinaryF2Poly<7>>, BinaryF2Poly<10>)> =
+            cfg_iter!(trace_binary_cols)
+                .enumerate()
+                .map(|(g, col)| {
+                    assert_eq!(
+                        col.evaluations.len(),
+                        num_rows * row_len,
+                        "trace column evaluation count must equal num_rows × row_len"
                     );
-                b_g.push(entry);
+
+                    let mut b_g_scaled: Vec<BinaryF2Poly<7>> =
+                        Vec::with_capacity(num_rows);
+                    let mut b_g: Vec<BinaryF2Poly<4>> = Vec::with_capacity(num_rows);
+                    for i in 0..num_rows {
+                        let row_slice =
+                            &col.evaluations[i * row_len..(i + 1) * row_len];
+                        let row_lifted: Vec<BinaryF2Poly<1>> = row_slice
+                            .iter()
+                            .map(
+                                zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>,
+                            )
+                            .collect();
+                        let entry: BinaryF2Poly<4> =
+                            zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 3, 4>(
+                                &row_lifted, &q1,
+                            );
+                        // γ_g · b_g[i], to be merged into b'[i].
+                        let scaled: BinaryF2Poly<7> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
+                                &gamma[g], &entry,
+                            );
+                        b_g_scaled.push(scaled);
+                        b_g.push(entry);
+                    }
+
+                    let a_g_prime: BinaryF2Poly<7> =
+                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
+                            &q0, &b_g,
+                        );
+                    // γ_g · a_g', to be merged into a'.
+                    let a_scaled: BinaryF2Poly<10> =
+                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                            &gamma[g], &a_g_prime,
+                        );
+                    (b_g_scaled, a_scaled)
+                })
+                .collect();
+
+        // Serial merge: ~`num_cols` u64 XORs per row. Cheap.
+        let mut b_prime: Vec<BinaryF2Poly<7>> =
+            vec![BinaryF2Poly::<7>::zero(); num_rows];
+        let mut a_prime: BinaryF2Poly<10> = BinaryF2Poly::<10>::zero();
+        for (b_g_scaled, a_scaled) in per_col_results {
+            for i in 0..num_rows {
+                b_prime[i] += b_g_scaled[i].clone();
             }
-
-            let a_g_prime: BinaryF2Poly<7> =
-                zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(&q0, &b_g);
-
-            lifted_claims.push(a_g_prime);
-            b_vectors.push(b_g);
+            a_prime += a_scaled;
         }
 
-        // Absorb (b_vectors, lifted_claims) into the transcript so
-        // subsequent challenges depend on them.
-        absorb_f2_poly_slice::<4, _>(transcript, b_vectors.iter().flat_map(|v| v.iter()));
-        absorb_f2_poly_slice::<7, _>(transcript, lifted_claims.iter());
+        // Absorb (b', a') into the transcript so subsequent challenges
+        // depend on them.
+        absorb_f2_poly_slice::<7, _>(transcript, b_prime.iter());
+        absorb_f2_poly_slice::<10, _>(transcript, core::iter::once(&a_prime));
 
-        // -- Step 7.2: proximity coefficients ----------------------
-        // Fresh GF(2^192) challenges of length num_rows, lifted to
-        // BinaryF2Poly<3> via the α-dependent basis (same lift used
-        // for q_0, q_1).
+        // -- Step 7.3: proximity coefficients ----------------------
         let coeffs_gf: Vec<BinaryFieldGF192> =
             transcript.get_field_challenges(num_rows, &());
         let coeffs: Vec<BinaryF2Poly<3>> =
             coeffs_gf.iter().map(|g| basis.lift(g)).collect();
 
-        // -- Step 7.3: combined rows per committed column ----------
-        // combined_rows[g][j] = Σ_i coeffs[i] · M_w_g[i, j] (in F_2[X]).
-        let mut combined_rows: Vec<Vec<BinaryF2Poly<4>>> =
-            Vec::with_capacity(trace_binary_cols.len());
-        for col in trace_binary_cols {
-            let mut row_combined: Vec<BinaryF2Poly<4>> = Vec::with_capacity(row_len);
+        // -- Step 7.4: combined_row' = Σ_g γ_g · (Σ_i coeffs[i] · M_w_g[i, *])
+        //
+        // Parallelise across the outer (g) loop: each column produces
+        // an independent length-`row_len` contribution to
+        // `combined_row`. Merge serially.
+        let per_col_combined: Vec<Vec<BinaryF2Poly<7>>> = cfg_iter!(trace_binary_cols)
+            .enumerate()
+            .map(|(g, col)| {
+                let mut col_contrib: Vec<BinaryF2Poly<7>> =
+                    Vec::with_capacity(row_len);
+                for j in 0..row_len {
+                    let column_j_lifted: Vec<BinaryF2Poly<1>> = (0..num_rows)
+                        .map(|i| {
+                            zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
+                                &col.evaluations[i * row_len + j],
+                            )
+                        })
+                        .collect();
+                    // Cells (W=1, ~16 set bits avg) are far sparser
+                    // than `coeffs` (W=3, ~96 set bits avg); pass the
+                    // lifted cells as `a` so the schoolbook in
+                    // `f2_poly_mul` iterates over the sparser operand.
+                    let per_col_entry: BinaryF2Poly<4> =
+                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 3, 4>(
+                            &column_j_lifted,
+                            &coeffs,
+                        );
+                    let scaled: BinaryF2Poly<7> =
+                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
+                            &gamma[g],
+                            &per_col_entry,
+                        );
+                    col_contrib.push(scaled);
+                }
+                col_contrib
+            })
+            .collect();
+
+        let mut combined_row: Vec<BinaryF2Poly<7>> =
+            vec![BinaryF2Poly::<7>::zero(); row_len];
+        for col_contrib in per_col_combined {
             for j in 0..row_len {
-                let column_j_lifted: Vec<BinaryF2Poly<1>> = (0..num_rows)
-                    .map(|i| {
-                        zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
-                            &col.evaluations[i * row_len + j],
-                        )
-                    })
-                    .collect();
-                let entry: BinaryF2Poly<4> =
-                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 1, 4>(
-                        &coeffs,
-                        &column_j_lifted,
-                    );
-                row_combined.push(entry);
+                combined_row[j] += col_contrib[j].clone();
             }
-            combined_rows.push(row_combined);
         }
 
-        absorb_f2_poly_slice::<4, _>(
-            transcript,
-            combined_rows.iter().flat_map(|v| v.iter()),
-        );
+        absorb_f2_poly_slice::<7, _>(transcript, combined_row.iter());
 
-        // -- Step 7.4: sample column indices + Merkle opens --------
-        // The `F2ZincTypes` contract pins `Cw = BinaryPoly<D>`, so
-        // we can use the commit hint's codeword cells directly.
+        // -- Step 7.5: sample column indices + Merkle opens --------
         let opened_columns: Vec<F2OpenedColumn<D>> = (0..num_column_openings)
             .map(|_| {
                 let column_idx = sample_column_idx(transcript, codeword_len);
@@ -895,23 +1205,21 @@ where
             .collect();
 
         F2OpenProof {
-            lifted_claims,
-            b_vectors,
-            combined_rows,
+            lifted_claim: a_prime,
+            b_vector: b_prime,
+            combined_row,
             opened_columns,
         }
     }
 
-    /// Step 7 (verify): discharge the per-column MLE evaluation
-    /// claims via the F_2[X] eval-consistency check and the ψ_α
-    /// lift discharge.
+    /// Step 7 (verify) — γ-batched lift-and-project verifier.
     ///
-    /// `subclaim` carries the prover-side `r*`, `α`, and the
-    /// per-column GF(2^192) MLE evaluation claims. The verifier
-    /// rebuilds `(q_0, q_1)` over GF(2^192) (matching the prover's
-    /// construction) and runs the two-step check per column. Returns
-    /// `Ok(())` iff every column verifies; the first failure short-
-    /// circuits with a structured error.
+    /// Re-derives the γ_g challenges (one per primary committed
+    /// column), runs the four core checks (eval-consistency, ψ_α
+    /// discharge, coherence, encoding consistency), and verifies the
+    /// Merkle paths for each opened column. Returns `Ok(())` iff all
+    /// checks pass; the first failure short-circuits with a
+    /// structured error.
     pub fn verify_f2_open(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -921,219 +1229,353 @@ where
     ) -> Result<(), F2OpenError> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
-        let num_cols = subclaim.column_mle_evals.len();
+        // The F_2[X] open binds only the primary (committed) columns —
+        // virtual columns are derived locally and never opened.
+        let num_cols = subclaim.primary_column_evals.len();
         let batch_size = commitment.batch_size;
+        let codeword_len = pp.linear_code.codeword_len();
 
         // -- Shape checks -----------------------------------------
-        if proof.lifted_claims.len() != num_cols {
-            return Err(F2OpenError::GroupCountMismatch {
-                expected: num_cols,
-                got: proof.lifted_claims.len(),
+        if proof.b_vector.len() != num_rows {
+            return Err(F2OpenError::BvecLenMismatch {
+                expected: num_rows,
+                got: proof.b_vector.len(),
             });
         }
-        if proof.b_vectors.len() != num_cols {
-            return Err(F2OpenError::GroupCountMismatch {
-                expected: num_cols,
-                got: proof.b_vectors.len(),
+        if proof.combined_row.len() != row_len {
+            return Err(F2OpenError::CombinedRowLenMismatch {
+                expected: row_len,
+                got: proof.combined_row.len(),
             });
-        }
-        if proof.combined_rows.len() != num_cols {
-            return Err(F2OpenError::GroupCountMismatch {
-                expected: num_cols,
-                got: proof.combined_rows.len(),
-            });
-        }
-        for g in 0..num_cols {
-            if proof.b_vectors[g].len() != num_rows {
-                return Err(F2OpenError::BvecLenMismatch {
-                    col: g,
-                    expected: num_rows,
-                    got: proof.b_vectors[g].len(),
-                });
-            }
-            if proof.combined_rows[g].len() != row_len {
-                return Err(F2OpenError::CombinedRowLenMismatch {
-                    col: g,
-                    expected: row_len,
-                    got: proof.combined_rows[g].len(),
-                });
-            }
         }
 
-        // -- Step 7.1: eval-consistency + ψ_α discharge ------------
+        // -- Re-derive γ_g ----------------------------------------
         let basis =
             zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(&subclaim.alpha);
         let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
+        let gamma_gf: Vec<BinaryFieldGF192> =
+            transcript.get_field_challenges(num_cols, &());
+        let gamma: Vec<BinaryF2Poly<3>> =
+            gamma_gf.iter().map(|g| basis.lift(g)).collect();
 
-        for g in 0..num_cols {
-            let b_g = &proof.b_vectors[g];
+        // Absorb (b', a') as the prover did.
+        absorb_f2_poly_slice::<7, _>(transcript, proof.b_vector.iter());
+        absorb_f2_poly_slice::<10, _>(
+            transcript,
+            core::iter::once(&proof.lifted_claim),
+        );
 
-            let recomputed: BinaryF2Poly<7> =
-                zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(&q0, b_g);
-            if recomputed != proof.lifted_claims[g] {
-                return Err(F2OpenError::EvalConsistency { col: g });
+        // -- Check 1: evaluation consistency in F_2[X] -------------
+        //    Σ_i q_0[i] · b'[i]  =  a'.
+        let recomputed_a_prime: BinaryF2Poly<10> = {
+            let mut acc = BinaryF2Poly::<10>::zero();
+            for i in 0..num_rows {
+                let prod: BinaryF2Poly<10> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                        &q0[i],
+                        &proof.b_vector[i],
+                    );
+                acc += prod;
             }
-
-            let psi = zinc_poly::univariate::binary_gf192::eval_f2_wide_poly_at::<7>(
-                &proof.lifted_claims[g],
-                &subclaim.alpha,
-            );
-            if psi != subclaim.column_mle_evals[g] {
-                return Err(F2OpenError::LiftDischarge {
-                    col: g,
-                    computed: psi,
-                    expected: subclaim.column_mle_evals[g],
-                });
-            }
+            acc
+        };
+        if recomputed_a_prime != proof.lifted_claim {
+            return Err(F2OpenError::EvalConsistency);
         }
 
-        // -- Step 7.2: re-derive proximity coeffs ------------------
-        absorb_f2_poly_slice::<4, _>(transcript, proof.b_vectors.iter().flat_map(|v| v.iter()));
-        absorb_f2_poly_slice::<7, _>(transcript, proof.lifted_claims.iter());
+        // -- Check 2: lift discharge in GF(2^192) ------------------
+        //    ψ_α(a')  =  Σ_g γ_g_gf · a_g.
+        let psi = zinc_poly::univariate::binary_gf192::eval_f2_wide_poly_at::<10>(
+            &proof.lifted_claim,
+            &subclaim.alpha,
+        );
+        let mut expected = BinaryFieldGF192::zero();
+        for g in 0..num_cols {
+            let mut term = gamma_gf[g];
+            term *= &subclaim.primary_column_evals[g];
+            expected += &term;
+        }
+        if psi != expected {
+            return Err(F2OpenError::LiftDischarge {
+                computed: psi,
+                expected,
+            });
+        }
+
+        // -- Re-derive coeffs + absorb combined_row ---------------
         let coeffs_gf: Vec<BinaryFieldGF192> =
             transcript.get_field_challenges(num_rows, &());
         let coeffs: Vec<BinaryF2Poly<3>> =
             coeffs_gf.iter().map(|g| basis.lift(g)).collect();
+        absorb_f2_poly_slice::<7, _>(transcript, proof.combined_row.iter());
 
-        // Absorb combined_rows (matching prover ordering) before
-        // sampling column indices.
-        absorb_f2_poly_slice::<4, _>(
-            transcript,
-            proof.combined_rows.iter().flat_map(|v| v.iter()),
-        );
-
-        // -- Step 7.3: coherence check per column ------------------
-        // <combined_row_g, q_1'> == <coeffs, b_g> in F_2[X]<7>.
-        for g in 0..num_cols {
-            let lhs: BinaryF2Poly<7> =
-                zinc_poly::univariate::binary_f2_wide::f2_inner_product::<4, 3, 7>(
-                    &proof.combined_rows[g],
-                    &q1,
-                );
-            let rhs: BinaryF2Poly<7> =
-                zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
-                    &coeffs,
-                    &proof.b_vectors[g],
-                );
-            if lhs != rhs {
-                return Err(F2OpenError::Coherence { col: g });
+        // -- Check 3: coherence ------------------------------------
+        //    <combined_row', q_1>  =  <coeffs, b'>  in F_2[X]<10>.
+        // `q1` (W=3) is ~96 set bits vs `combined_row` (W=7) at ~224
+        // — pass the smaller as `a` to minimise schoolbook iterations.
+        let lhs: BinaryF2Poly<10> = {
+            let mut acc = BinaryF2Poly::<10>::zero();
+            for j in 0..row_len {
+                let prod: BinaryF2Poly<10> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                        &q1[j],
+                        &proof.combined_row[j],
+                    );
+                acc += prod;
             }
+            acc
+        };
+        let rhs: BinaryF2Poly<10> = {
+            let mut acc = BinaryF2Poly::<10>::zero();
+            for i in 0..num_rows {
+                let prod: BinaryF2Poly<10> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                        &coeffs[i],
+                        &proof.b_vector[i],
+                    );
+                acc += prod;
+            }
+            acc
+        };
+        if lhs != rhs {
+            return Err(F2OpenError::Coherence);
         }
 
-        // -- Step 7.4: per-column encoding consistency + Merkle ----
-        //
-        // For each prover-supplied column opening:
-        //   (a) Merkle path verifies the column values against the
-        //       commitment root.
-        //   (b) For each committed-poly g:
-        //          encode(combined_row_g)[column_idx]
-        //              == Σ_i coeffs[i] · cw_M^g[i, column_idx].
-        let codeword_len = pp.linear_code.codeword_len();
+        // -- Check 4: per-column-opening encoding + Merkle ---------
+        //   For each j ∈ opened cols:
+        //     (a) Merkle verify column values against root.
+        //     (b) encode(combined_row')[j] = Σ_i coeffs[i] · Σ_g γ_g · cw_M^g[i, j].
+        // The encoding is F_2[X]-linear, so encoding combined_row'
+        // once (cost O(codeword_len)) lets us index at each sampled
+        // column. Same encoding for every opened col — cache it.
+        let encoded: Vec<BinaryF2Poly<7>> = pp
+            .linear_code
+            .encode_f2_lin_open::<7>(&proof.combined_row);
+        debug_assert_eq!(encoded.len(), codeword_len);
+
         let expected_column_values_len = batch_size * num_rows;
-        for opened in &proof.opened_columns {
-            // Verify the prover-claimed column index matches what
-            // the transcript would have produced. We squeeze a fresh
-            // index from the transcript and compare.
-            let expected_idx = sample_column_idx(transcript, codeword_len);
-            if opened.column_idx != expected_idx {
-                return Err(F2OpenError::MerkleVerify {
-                    column_idx: opened.column_idx,
-                    reason: format!(
-                        "column index mismatch: prover sent {}, transcript yields {}",
-                        opened.column_idx, expected_idx,
-                    ),
-                });
-            }
-            if opened.column_values.len() != expected_column_values_len {
-                return Err(F2OpenError::ColumnValuesLenMismatch {
-                    expected: expected_column_values_len,
-                    got: opened.column_values.len(),
-                });
-            }
 
-            // (a) Merkle verification — leaves the path's
-            //     leaf-hash matching `hash_column(column_values)`.
-            opened
-                .merkle_proof
-                .verify(&commitment.root, &opened.column_values, opened.column_idx)
-                .map_err(|e| F2OpenError::MerkleVerify {
-                    column_idx: opened.column_idx,
-                    reason: format!("{e}"),
-                })?;
+        // The column-opening loop is the single dominant cost of
+        // `verify_f2_open` (~656 F_2[X]<3>·<1> mults per opened
+        // column × `num_column_openings = 987` for rate-1/4 RAA).
+        // Each iteration is independent of the others *except* for
+        // the sequential `sample_column_idx` transcript draws. We
+        // therefore pre-sample all expected indices serially first,
+        // then parallelise the per-opening verification work.
+        let expected_indices: Vec<usize> = (0..proof.opened_columns.len())
+            .map(|_| sample_column_idx(transcript, codeword_len))
+            .collect();
 
-            // (b) F_2[X] encoding consistency per poly.
-            for g in 0..num_cols {
-                let encoded: Vec<BinaryF2Poly<4>> = pp
-                    .linear_code
-                    .encode_f2_lin_open::<4>(&proof.combined_rows[g]);
-                debug_assert_eq!(encoded.len(), codeword_len);
-                let expected_at_j: &BinaryF2Poly<4> = &encoded[opened.column_idx];
+        cfg_iter!(proof.opened_columns)
+            .zip(cfg_iter!(expected_indices))
+            .try_for_each(|(opened, expected_idx)| {
+                if opened.column_idx != *expected_idx {
+                    return Err(F2OpenError::MerkleVerify {
+                        column_idx: opened.column_idx,
+                        reason: format!(
+                            "column index mismatch: prover sent {}, transcript yields {}",
+                            opened.column_idx, expected_idx,
+                        ),
+                    });
+                }
+                if opened.column_values.len() != expected_column_values_len {
+                    return Err(F2OpenError::ColumnValuesLenMismatch {
+                        expected: expected_column_values_len,
+                        got: opened.column_values.len(),
+                    });
+                }
 
-                // Σ_i coeffs[i] · cw_M^g[i, column_idx]
-                let cw_col_g: Vec<BinaryF2Poly<1>> = (0..num_rows)
-                    .map(|i| {
-                        zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
+                // (a) Merkle path
+                opened
+                    .merkle_proof
+                    .verify(&commitment.root, &opened.column_values, opened.column_idx)
+                    .map_err(|e| F2OpenError::MerkleVerify {
+                        column_idx: opened.column_idx,
+                        reason: format!("{e}"),
+                    })?;
+
+                // (b) γ-weighted encoding consistency.
+                //
+                //  weighted_col[i] = Σ_g γ_g · cw_M^g[i, j]  ∈ F_2[X]<4>
+                //  actual_at_j     = Σ_i coeffs[i] · weighted_col[i]  ∈ F_2[X]<7>
+                //  expected_at_j   = encoded[j]  ∈ F_2[X]<7>
+                //
+                // Inner-loop optimisation: `f2_poly_mul` is schoolbook
+                // and iterates over the SET bits of operand `a`. The
+                // lifted cell is a 32-bit `BinaryF2Poly<1>` (~16 set
+                // bits average), while γ is a 192-bit
+                // `BinaryF2Poly<3>` (~96 set bits average). Passing
+                // the cell as `a` gives ~6× fewer XOR-shifts vs. the
+                // natural `γ · cell` ordering. The product is
+                // commutative in `F_2[X]`.
+                let mut weighted_col: Vec<BinaryF2Poly<4>> =
+                    vec![BinaryF2Poly::<4>::zero(); num_rows];
+                for g in 0..num_cols {
+                    for i in 0..num_rows {
+                        let cell = zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
                             &opened.column_values[g * num_rows + i],
-                        )
-                    })
-                    .collect();
-                let actual_at_j: BinaryF2Poly<4> =
-                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 1, 4>(
-                        &coeffs, &cw_col_g,
+                        );
+                        let prod: BinaryF2Poly<4> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                &cell, &gamma[g],
+                            );
+                        weighted_col[i] += prod;
+                    }
+                }
+                let actual_at_j: BinaryF2Poly<7> =
+                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
+                        &coeffs,
+                        &weighted_col,
                     );
-                if &actual_at_j != expected_at_j {
+                if actual_at_j != encoded[opened.column_idx] {
                     return Err(F2OpenError::EncodingConsistency {
-                        col: g,
                         column_idx: opened.column_idx,
                     });
                 }
-            }
-        }
+                Ok(())
+            })?;
 
         Ok(())
     }
+
+    // -- Bundled commit + prove + open / verify entry points -----------
+    //
+    // [`Self::prove_f2_full`] / [`Self::verify_f2_full`] are the
+    // single-call public API. They wrap Step 0 (commit + absorb) →
+    // Steps 2-4 (IC + α + sumcheck) → Step 7 (γ-batched open) on a
+    // single shared transcript, returning / consuming a single
+    // [`F2FullProof`].
+
+    /// Run the full F_2 prove pipeline on a single transcript.
+    ///
+    /// Composes commit → IC → α → sumcheck → open. The same
+    /// transcript carries all Fiat-Shamir state across the four
+    /// phases; the verifier mirror is [`Self::verify_f2_full`].
+    ///
+    /// `pp` defines the commit shape (`num_vars`, row layout,
+    /// linear code). `num_vars` is the MLE arity for the witness
+    /// trace. `project_scalar` lifts UAIR scalars from `U::Scalar`
+    /// to `DynamicPolynomialF<GF(2^192)>` (typically the
+    /// per-coefficient F_2 ⊂ GF(2^192) embedding).
+    /// `num_column_openings` controls the proximity-check
+    /// soundness — see
+    /// [`zip_plus::code::raa_f2::recommended_num_column_openings`].
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        num_column_openings: usize,
+    ) -> Result<F2FullProof<D>, F2ProveError<U>> {
+        // Step 0: commit primary cols + absorb root. Virtual cols
+        // are *not* committed; they're materialised inside the
+        // IC + sumcheck and reconstructed by the verifier from
+        // `virtual_specs` + the primary col MLE evals at `r*`.
+        let (hint, commitment) =
+            Self::commit_and_absorb_f2_trace(transcript, pp, &trace.binary_poly)
+                .expect("F_2 commit should succeed for a well-shaped trace");
+
+        // Steps 2-4: IC + α + sumcheck on the primary+virtual
+        // extended trace. Returns both the wire proof and a
+        // prover-side subclaim equivalent to what the verifier will
+        // derive (including `virtual_column_evals` for the virtual
+        // cols).
+        let (uair_proof, subclaim) = Self::prove_f2_uair_with_groups(
+            transcript,
+            trace,
+            virtual_specs,
+            num_vars,
+            project_scalar,
+            eq_dot_column_groups,
+        )?;
+
+        // Step 7: γ-batched open on the primary cols only.
+        let open_proof = Self::prove_f2_open(
+            transcript,
+            pp,
+            &hint,
+            &trace.binary_poly,
+            &subclaim.sumcheck_point,
+            &subclaim.alpha,
+            num_column_openings,
+        );
+
+        Ok(F2FullProof {
+            commitment,
+            uair: uair_proof,
+            open: open_proof,
+        })
+    }
+
+    /// Verifier mirror of [`Self::prove_f2_full`]: absorbs the
+    /// commitment, runs the IC + sumcheck verifier, then the
+    /// γ-batched open verifier — all on a single shared transcript.
+    /// `virtual_specs` must match what the prover used; the
+    /// verifier derives virtual column MLE evals at `r*` from
+    /// `primary_column_evals` via those specs and checks them
+    /// against the sumcheck-extracted virtual evals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_f2_full<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2FullProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        num_vars: usize,
+        num_primary_columns: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<F2VerifierSubclaim, F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+    {
+        // Step 0: absorb the commitment exactly as the prover did.
+        Self::absorb_commitment(transcript, &proof.commitment);
+
+        // Steps 2-4: IC + α + sumcheck verifier (with virtual-col
+        // consistency check baked in).
+        let subclaim = Self::verify_f2_uair(
+            transcript,
+            &proof.uair,
+            virtual_specs,
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+        )
+        .map_err(F2FullVerifyError::Uair)?;
+
+        // Step 7: γ-batched open verifier (primary cols only).
+        Self::verify_f2_open(transcript, pp, &proof.commitment, &proof.open, &subclaim)
+            .map_err(F2FullVerifyError::Open)?;
+
+        Ok(subclaim)
+    }
 }
 
-/// Step 7 (open) — *legacy trait-gap notice* (superseded by
-/// [`ZincPlusPiopF2::prove_f2_open`] above).
-///
-/// Opening the F_2 trace columns at the sumcheck's final point `r*`
-/// via `ZipPlus::prove_single::<BinaryFieldGF192, _>` would require:
-///
-/// ```ignore
-/// F: PrimeField
-///     + for<'a> FromWithConfig<&'a Zt::CombR>   // Zt::CombR = Int<32>
-///     + for<'a> FromWithConfig<&'a Zt::Chal>     // Zt::Chal  = i128
-///     + for<'a> FromWithConfig<&'a Zt::Pt>       // Zt::Pt    = i128
-///     + for<'a> MulByScalar<&'a F>
-///     + FromRef<F>,
-/// F::Inner: Transcribable,
-/// F::Modulus: FromRef<Zt::Fmod> + Transcribable,
-/// ```
-///
-/// Today `BinaryFieldGF192` satisfies `FromWithConfig<&i128>` (via
-/// the `From<i128>` impl + the `PrimeField + From<T>` blanket), but
-/// it does **not** satisfy `FromWithConfig<&Int<32>>` (no
-/// `From<Int<32>>` impl), nor `MulByScalar<&Self>` /
-/// `FromRef<Self>` / `<Uint<3> as FromRef<Uint<4>>>`.
-///
-/// Closing those gaps is intentionally not done in this slice — the
-/// `Int<32> -> GF(2^192)` projection is the F_2 analogue of the
-/// `Int<M> -> F_q` lift that the integer-prove path uses (Section
-/// "Zip+ Combined-R" in the paper), and it needs its own design
-/// pass: GF(2^192) has no integer-modulus reduction, so the
-/// projection must be a deterministic bit-pattern injection chosen
-/// to preserve the linearity Zip+ relies on. Once the projection is
-/// fixed, the missing `From<Int<32>>` / `MulByScalar` / `FromRef`
-/// impls become mechanical to add.
-///
-/// In the interim, callers can run Steps 0, 2, 3, 4 of the protocol
-/// (commit + IC + α + sumcheck) and stop at the per-column MLE
-/// evaluation claims emitted by [`F2VerifierSubclaim`]. Discharging
-/// those claims against the commitment is the work this notice
-/// describes.
-#[allow(dead_code)]
-const _OPEN_TRAIT_GAP_NOTE: () = ();
+/// The complete F_2 proof: commitment + IC/sumcheck proof + Step 7
+/// γ-batched open. Produced by [`ZincPlusPiopF2::prove_f2_full`] and
+/// consumed by [`ZincPlusPiopF2::verify_f2_full`].
+#[derive(Clone, Debug)]
+pub struct F2FullProof<const D: usize> {
+    pub commitment: ZipPlusCommitment,
+    pub uair: F2Proof,
+    pub open: F2OpenProof<D>,
+}
+
+/// Errors emitted by [`ZincPlusPiopF2::verify_f2_full`].
+#[derive(Debug, thiserror::Error)]
+pub enum F2FullVerifyError<U: Uair, IdealOverF>
+where
+    IdealOverF: zinc_uair::ideal::Ideal,
+{
+    #[error("IC + sumcheck verification failed: {0}")]
+    Uair(F2VerifyError<U, IdealOverF>),
+    #[error("F_2[X] open verification failed: {0}")]
+    Open(F2OpenError),
+}
 
 #[cfg(test)]
 mod tests {
@@ -1464,11 +1906,15 @@ mod tests {
             .map(|expected| (*expected) * eq_inv)
             .collect();
 
+        // Tests use the shim with virtual-spec-free UAIRs only;
+        // mirror the real `verify_f2_uair`'s primary/virtual split
+        // by treating all extracted evals as primary.
         Ok(F2VerifierSubclaim {
             ic_evaluation_point,
             alpha,
             sumcheck_point,
-            column_mle_evals,
+            primary_column_evals: column_mle_evals,
+            virtual_column_evals: Vec::new(),
         })
     }
 
@@ -1535,7 +1981,7 @@ mod tests {
         // Cross-check: column_mle_evals should match each column's
         // projected MLE evaluated at `r*` directly.
         let zero_inner = *BinaryFieldGF192::zero().inner();
-        for (g, expected) in subclaim.column_mle_evals.iter().enumerate() {
+        for (g, expected) in subclaim.primary_column_evals.iter().enumerate() {
             let projected_col_inner_evals: Vec<_> = trace.binary_poly[g]
                 .evaluations
                 .iter()
@@ -1564,7 +2010,7 @@ mod tests {
         assert_eq!(subclaim.alpha, proof.alpha);
         assert_eq!(subclaim.sumcheck_point.len(), num_vars);
         assert_eq!(subclaim.ic_evaluation_point.len(), num_vars);
-        assert_eq!(subclaim.column_mle_evals.len(), 2);
+        assert_eq!(subclaim.primary_column_evals.len(), 2);
     }
 
     /// Tampering with the proof's α should yield an AlphaMismatch
@@ -1830,13 +2276,10 @@ mod tests {
 
     // -- Step 0 (PCS commit) wiring + roundtrip ----------------------
     //
-    // The verify path of the PCS (open at `r*`) is gated on missing
-    // trait impls for `BinaryFieldGF192` documented at
-    // `_OPEN_TRAIT_GAP_NOTE` above. This test exercises the
-    // commit-only portion, plus the full IC + sumcheck pipeline, to
-    // demonstrate that the `F2ZincTypes` trait can be implemented
-    // against the real `RaaF2Code` / Zip+ commit primitives and used
-    // to gate Step 0 of the protocol.
+    // Exercises the commit phase plus the IC + sumcheck pipeline
+    // against a concrete `F2ZincTypes` impl. The follow-on Step 7
+    // (open) is exercised by `prove_then_verify_f2_open_roundtrips`
+    // below; the two together cover the full F_2 prove/verify cycle.
 
     use crypto_primitives::crypto_bigint_int::Int;
     use crypto_primitives::crypto_bigint_uint::Uint;
@@ -1896,8 +2339,8 @@ mod tests {
     /// subclaim matches direct MLE evaluations of the projected
     /// columns at `r*`.
     ///
-    /// Open at `r*` is intentionally not exercised — see
-    /// `_OPEN_TRAIT_GAP_NOTE` above for the gap.
+    /// Open at `r*` is exercised separately by
+    /// `prove_then_verify_f2_open_roundtrips`.
     #[test]
     fn commit_prove_verify_f2_roundtrip() {
         const D: usize = 32;
@@ -1977,7 +2420,7 @@ mod tests {
 
         // Sanity: column MLE claims at r* match direct evaluation.
         let zero_inner = *BinaryFieldGF192::zero().inner();
-        for (g, expected) in subclaim.column_mle_evals.iter().enumerate() {
+        for (g, expected) in subclaim.primary_column_evals.iter().enumerate() {
             let projected_inner: Vec<_> = trace.binary_poly[g]
                 .evaluations
                 .iter()
@@ -2096,11 +2539,8 @@ mod tests {
             &subclaim.alpha,
             num_column_openings,
         );
-        assert_eq!(open_proof.lifted_claims.len(), 2);
-        assert_eq!(open_proof.b_vectors.len(), 2);
-        assert_eq!(open_proof.b_vectors[0].len(), num_rows);
-        assert_eq!(open_proof.combined_rows.len(), 2);
-        assert_eq!(open_proof.combined_rows[0].len(), row_len);
+        assert_eq!(open_proof.b_vector.len(), num_rows);
+        assert_eq!(open_proof.combined_row.len(), row_len);
         assert_eq!(open_proof.opened_columns.len(), num_column_openings);
 
         // -- Step 7 verifier: full check (eval + ψ_α + coherence + Merkle).
@@ -2192,10 +2632,10 @@ mod tests {
             4,
         );
 
-        // Flip the lowest bit of column 0's lifted claim.
-        let mut tampered_words = *open_proof.lifted_claims[0].words();
+        // Flip the lowest bit of the (γ-batched) lifted claim a'.
+        let mut tampered_words = *open_proof.lifted_claim.words();
         tampered_words[0] ^= 1;
-        open_proof.lifted_claims[0] = BinaryF2Poly::<7>::from_words(tampered_words);
+        open_proof.lifted_claim = BinaryF2Poly::<10>::from_words(tampered_words);
 
         let mut open_vt = Blake3Transcript::new();
         ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::absorb_commitment(&mut open_vt, &comm);
@@ -2211,9 +2651,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                F2OpenError::EvalConsistency { col: 0 } | F2OpenError::LiftDischarge { col: 0, .. }
+                F2OpenError::EvalConsistency | F2OpenError::LiftDischarge { .. }
             ),
-            "expected EvalConsistency or LiftDischarge on col 0, got {err:?}",
+            "expected EvalConsistency or LiftDischarge, got {err:?}",
         );
     }
 
@@ -2288,34 +2728,40 @@ mod tests {
             4,
         );
 
-        // Flip one bit in b_vectors[0][0] and re-derive lifted_claims[0]
-        // so the eval-consistency check still passes (= verifier
-        // recomputes Σ q_0 · b = a' identically). Then coherence
-        // <combined_row, q_1> = <coeffs, b> should fail because
-        // combined_row is bound to M_w (via Merkle) but b is now
-        // inconsistent with M_w.
-        let mut tampered_b = *open_proof.b_vectors[0][0].words();
+        // Flip one bit in b_vector[0] and re-derive lifted_claim so
+        // the eval-consistency check still passes (verifier recomputes
+        // Σ q_0 · b' = a' identically). Then either:
+        //   - coherence <combined_row', q_1> = <coeffs, b'> fails, because
+        //     combined_row' is bound (via Merkle + encoding consistency) to
+        //     the genuine M_w while b' now isn't; or
+        //   - the lift discharge ψ_α(a') = Σ_g γ_g · a_g fails, because
+        //     the rebased a' projects to a different GF(2^192) value.
+        let mut tampered_b = *open_proof.b_vector[0].words();
         tampered_b[0] ^= 1;
-        open_proof.b_vectors[0][0] = BinaryF2Poly::<4>::from_words(tampered_b);
-        // Re-derive lifted_claims[0] to satisfy eval-consistency:
-        // a_g' = Σ_i q_0[i] · b_g[i] for the tampered b_g.
+        open_proof.b_vector[0] = BinaryF2Poly::<7>::from_words(tampered_b);
+        // Re-derive a' = Σ_i q_0[i] · b'[i] over F_2[X]<10>.
         let basis = zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(&subclaim.alpha);
         let (q0, _q1) = {
             let split = subclaim.sumcheck_point.len() - (num_rows.ilog2() as usize);
             let (hi, lo) = subclaim.sumcheck_point.split_at(split);
-            let q0_gf =
-                zinc_poly::utils::build_eq_x_r_vec(lo, &()).unwrap();
-            let q1_gf =
-                zinc_poly::utils::build_eq_x_r_vec(hi, &()).unwrap();
+            let q0_gf = zinc_poly::utils::build_eq_x_r_vec(lo, &()).unwrap();
+            let q1_gf = zinc_poly::utils::build_eq_x_r_vec(hi, &()).unwrap();
             let q0: Vec<BinaryF2Poly<3>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
             let q1: Vec<BinaryF2Poly<3>> = q1_gf.iter().map(|g| basis.lift(g)).collect();
             (q0, q1)
         };
-        open_proof.lifted_claims[0] =
-            zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
-                &q0,
-                &open_proof.b_vectors[0],
-            );
+        open_proof.lifted_claim = {
+            let mut acc = BinaryF2Poly::<10>::zero();
+            for i in 0..num_rows {
+                let prod: BinaryF2Poly<10> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                        &q0[i],
+                        &open_proof.b_vector[i],
+                    );
+                acc += prod;
+            }
+            acc
+        };
 
         let mut open_vt = Blake3Transcript::new();
         ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::absorb_commitment(&mut open_vt, &comm);
@@ -2328,16 +2774,482 @@ mod tests {
         )
         .expect_err("tampered b-vector must trip a downstream check");
 
-        // The tampering may surface as LiftDischarge (most common —
-        // the recomputed a' projects to a different GF(2^192) value)
-        // or Coherence (if by coincidence the tampered b still maps
-        // to the correct ψ_α(a')). Both are correct rejections.
         assert!(
             matches!(
                 err,
-                F2OpenError::LiftDischarge { col: 0, .. } | F2OpenError::Coherence { col: 0 }
+                F2OpenError::LiftDischarge { .. } | F2OpenError::Coherence
             ),
-            "expected LiftDischarge or Coherence on col 0, got {err:?}",
+            "expected LiftDischarge or Coherence, got {err:?}",
         );
+    }
+
+    /// End-to-end roundtrip through the *bundled* prove/verify entry
+    /// points. Exercises commit + IC + sumcheck + γ-batched open on a
+    /// single shared transcript per side.
+    #[test]
+    fn prove_then_verify_f2_full_roundtrips() {
+        const D: usize = 32;
+        let num_vars: usize = 6;
+        let row_len: usize = 8;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        let mut rng_local = rng();
+        let col0_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let col1_vals = col0_vals.clone();
+        let col0 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col0_vals,
+            BinaryPoly::default(),
+        );
+        let col1 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col1_vals,
+            BinaryPoly::default(),
+        );
+        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![col0, col1].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // -- Prove (single transcript across commit + uair + open) -
+        let mut prover_transcript = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::prove_f2_full(
+            &mut prover_transcript,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            num_vars,
+            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            /* num_column_openings */ 4,
+        )
+        .expect("prove_f2_full should succeed");
+
+        // Shape sanity.
+        assert_eq!(proof.commitment.batch_size, 2);
+        assert_eq!(proof.uair.alpha, proof.uair.alpha); // alpha plumbed
+        assert_eq!(proof.open.b_vector.len(), num_rows);
+        assert_eq!(proof.open.combined_row.len(), row_len);
+        assert_eq!(proof.open.opened_columns.len(), 4);
+
+        // -- Verify (single fresh transcript) ---------------------
+        let mut verifier_transcript = Blake3Transcript::new();
+        let subclaim = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::verify_f2_full(
+            &mut verifier_transcript,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            num_vars,
+            /* num_primary_columns */ 2,
+            |_ideal| ImpossibleIdeal,
+        )
+        .expect("verify_f2_full should succeed");
+
+        assert_eq!(subclaim.alpha, proof.uair.alpha);
+        assert_eq!(subclaim.sumcheck_point.len(), num_vars);
+        assert_eq!(subclaim.primary_column_evals.len(), 2);
+    }
+
+    /// Mutating the bundled proof's open phase (here: flipping a bit
+    /// in `lifted_claim`) must surface as a structured `Open(...)`
+    /// error from `verify_f2_full`.
+    #[test]
+    fn verify_f2_full_rejects_tampered_open() {
+        const D: usize = 32;
+        let num_vars: usize = 4;
+        let row_len: usize = 4;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        let mut rng_local = rng();
+        let col0_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let col1_vals = col0_vals.clone();
+        let col0 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col0_vals,
+            BinaryPoly::default(),
+        );
+        let col1 = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col1_vals,
+            BinaryPoly::default(),
+        );
+        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![col0, col1].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let mut pt = Blake3Transcript::new();
+        let mut proof = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::prove_f2_full(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            num_vars,
+            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            4,
+        )
+        .expect("prove should succeed");
+
+        // Flip a bit in a'.
+        let mut tampered = *proof.open.lifted_claim.words();
+        tampered[0] ^= 1;
+        proof.open.lifted_claim = BinaryF2Poly::<10>::from_words(tampered);
+
+        let mut vt = Blake3Transcript::new();
+        let err = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::verify_f2_full(
+            &mut vt,
+            &pp,
+            &proof,
+            &[],
+            num_vars,
+            2,
+            |_| ImpossibleIdeal,
+        )
+        .expect_err("tampered open must be rejected");
+
+        assert!(
+            matches!(
+                err,
+                F2FullVerifyError::Open(
+                    F2OpenError::EvalConsistency | F2OpenError::LiftDischarge { .. }
+                )
+            ),
+            "expected Open(EvalConsistency | LiftDischarge), got {err:?}",
+        );
+    }
+
+    // -- Virtual binary_poly column support ---------------------------
+    //
+    // `VirtualF2Uair` declares 3 binary_poly columns in its signature:
+    //   primary col 0 = `a`            (committed)
+    //   primary col 1 = `b`            (committed)
+    //   virtual col 2 = `a XOR b`     (computed by both prover + verifier)
+    //
+    // The constraint asserts col_2 == col_0 XOR col_1, which holds by
+    // construction since the virtual col IS the XOR. Practically this
+    // exercises:
+    //   - Prover materialises the virtual column from primary cols.
+    //   - IC + sumcheck see 3 columns (2 primary + 1 virtual).
+    //   - Verifier derives the virtual eval at r* from primary evals.
+    //   - F_2[X] open only opens 2 primary cols.
+    //
+    // The `assert_zero(col_2 - (col_0 + col_1))` is automatically
+    // satisfied by the materialisation; this lets us focus on the
+    // wiring rather than the constraint mechanics.
+
+    #[derive(Clone, Debug, Default)]
+    struct VirtualF2Uair;
+
+    impl Uair for VirtualF2Uair {
+        type Ideal = ImpossibleIdeal;
+        type Scalar = BinaryPoly<32>;
+
+        fn signature() -> UairSignature {
+            // total binary_poly = 2 primary + 1 virtual = 3.
+            // The virtual col index inside `binary_poly` is the next
+            // available slot (= 2). The signature counts the virtual
+            // col in `total_cols.num_binary_poly_cols` so the IC sees
+            // it; the trace itself only holds the 2 primary cols
+            // (the prove path materialises col 2 inline).
+            UairSignature::new(
+                TotalColumnLayout::new(/* binary */ 3, 0, 0),
+                PublicColumnLayout::default(),
+                vec![],
+                vec![],
+                vec![],
+            )
+        }
+
+        fn constrain_general<B, FromR, MulByScalar, IFromR>(
+            b: &mut B,
+            up: TraceRow<B::Expr>,
+            _down: TraceRow<B::Expr>,
+            _from_ref: FromR,
+            _mbs: MulByScalar,
+            _ideal_from_ref: IFromR,
+        ) where
+            B: ConstraintBuilder,
+            FromR: Fn(&Self::Scalar) -> B::Expr,
+            MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+            IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        {
+            // assert_zero(virtual - (a + b)) ≡ virtual = a XOR b.
+            // In F_2 addition IS XOR, so this is a sum.
+            let a = up.binary_poly[0].clone();
+            let b_col = up.binary_poly[1].clone();
+            let v = up.binary_poly[2].clone();
+            b.assert_zero(v - (a + b_col));
+        }
+    }
+
+    /// Build a satisfied trace for `VirtualF2Uair` and run the full
+    /// pipeline (commit + IC + sumcheck + γ-batched open) on a
+    /// single transcript, verifying both end-to-end and the
+    /// virtual-col-derivation consistency.
+    #[test]
+    fn prove_then_verify_f2_full_with_virtual_column() {
+        const D: usize = 32;
+        let num_vars: usize = 6;
+        let row_len: usize = 8;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        let mut rng_local = rng();
+
+        // Two arbitrary primary columns `a` and `b`. The virtual col
+        // `v = a XOR b` is materialised inside `prove_f2_full`.
+        let a_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let b_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let a = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            a_vals,
+            BinaryPoly::default(),
+        );
+        let b = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            b_vals,
+            BinaryPoly::default(),
+        );
+        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![a.clone(), b.clone()].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        // `v = a XOR b`. Primary col idx 0 and 1.
+        let virtual_specs = vec![F2VirtualBpSpec {
+            primary_col_indices: vec![0, 1],
+        }];
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // -- Prove (full pipeline) --------------------------------
+        let mut prover_transcript = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, VirtualF2Uair, D>::prove_f2_full(
+            &mut prover_transcript,
+            &pp,
+            &trace,
+            &virtual_specs,
+            num_vars,
+            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            4,
+        )
+        .expect("prove_f2_full with virtual col should succeed");
+
+        // Only the 2 primary cols are committed.
+        assert_eq!(proof.commitment.batch_size, 2);
+
+        // -- Verify (full pipeline) -------------------------------
+        let mut verifier_transcript = Blake3Transcript::new();
+        let subclaim = ZincPlusPiopF2::<F2Types<D>, VirtualF2Uair, D>::verify_f2_full(
+            &mut verifier_transcript,
+            &pp,
+            &proof,
+            &virtual_specs,
+            num_vars,
+            /* num_primary_columns */ 2,
+            |_ideal| ImpossibleIdeal,
+        )
+        .expect("verify_f2_full with virtual col should succeed");
+
+        assert_eq!(subclaim.primary_column_evals.len(), 2);
+        assert_eq!(subclaim.virtual_column_evals.len(), 1);
+
+        // Sanity: the derived virtual eval matches XOR of primary evals.
+        let xor =
+            subclaim.primary_column_evals[0] + subclaim.primary_column_evals[1];
+        assert_eq!(subclaim.virtual_column_evals[0], xor);
+    }
+
+    /// A prover supplying mismatched virtual_specs (or none) on a
+    /// trace whose IC + sumcheck expected the materialised virtual
+    /// column must be rejected. Here we let the prover succeed with
+    /// correct specs but feed the verifier *empty* specs — the
+    /// verifier should fail (either group-count mismatch from the
+    /// sumcheck's extra group, or a downstream check).
+    #[test]
+    fn verify_f2_full_rejects_missing_virtual_spec() {
+        const D: usize = 32;
+        let num_vars: usize = 4;
+        let row_len: usize = 4;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        let mut rng_local = rng();
+        let a_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let b_vals: Vec<BinaryPoly<D>> = (0..poly_size)
+            .map(|_| BinaryPoly::from(rng_local.random::<u32>()))
+            .collect();
+        let a = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            a_vals,
+            BinaryPoly::default(),
+        );
+        let b = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            b_vals,
+            BinaryPoly::default(),
+        );
+        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![a, b].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        let virtual_specs = vec![F2VirtualBpSpec {
+            primary_col_indices: vec![0, 1],
+        }];
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, VirtualF2Uair, D>::prove_f2_full(
+            &mut pt,
+            &pp,
+            &trace,
+            &virtual_specs,
+            num_vars,
+            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            4,
+        )
+        .expect("prove should succeed with correct specs");
+
+        // Verifier passes empty specs. The sumcheck proof has 3
+        // groups (primary 0, primary 1, virtual 0); we'd claim 2
+        // primary cols + 0 virtual = 2 total. Mismatch.
+        let mut vt = Blake3Transcript::new();
+        let err = ZincPlusPiopF2::<F2Types<D>, VirtualF2Uair, D>::verify_f2_full(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            num_vars,
+            2,
+            |_| ImpossibleIdeal,
+        )
+        .expect_err("verifier must reject when virtual_specs don't match the prover's");
+
+        // Any rejection is fine — the structural mismatch can
+        // surface as GroupCountMismatch (sumcheck has 3 groups but
+        // verifier expected 2) or a downstream check that fails
+        // because the sumcheck challenges diverge.
+        let _ = err;
+    }
+
+    // ---------------------------------------------------------------
+    // SHA-256 F_2[X] UAIR — full prove/verify roundtrip.
+    //
+    // Exercises the real F_2 SHA-256 arithmetisation
+    // (`zinc_test_uair::Sha256F2Uair`) through the bundled
+    // `prove_f2_full` / `verify_f2_full` entry points. With
+    // `NUM_COMPRESSIONS = 7`, the trace fits in `num_vars = 9` =
+    // 2^9 = 512 rows (480 active + 32 slack).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn prove_then_verify_sha256_f2_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        // Trace parameters from the SHA F_2 UAIR spec.
+        let num_vars: usize = 9; // 2^9 = 512 ≥ 7·68 + 4 = 480
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        // Generate honest trace.
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        // Set up PCS params with rate-1/4 RAA code.
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // Prove.
+        let mut prover_transcript = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full(
+            &mut prover_transcript,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            // Small num_column_openings to keep the test snappy; the
+            // soundness-critical bench uses
+            // `recommended_num_column_openings(4) = 987`.
+            /* num_column_openings */ 4,
+        )
+        .expect("prove_f2_full on SHA F_2 UAIR should succeed");
+
+        // Sanity-check the proof shape.
+        assert_eq!(
+            proof.commitment.batch_size,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN
+        );
+
+        // Verify on a fresh transcript.
+        let mut verifier_transcript = Blake3Transcript::new();
+        let subclaim = ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full(
+            &mut verifier_transcript,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            num_vars,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify_f2_full on SHA F_2 UAIR should succeed");
+
+        // Sanity: subclaim is well-shaped.
+        assert_eq!(subclaim.sumcheck_point.len(), num_vars);
+        assert_eq!(
+            subclaim.primary_column_evals.len(),
+            zinc_test_uair::sha256_f2::cols::NUM_BIN
+        );
+        assert_eq!(subclaim.virtual_column_evals.len(), 0);
     }
 }

@@ -40,6 +40,30 @@ pub struct RaaF2Code<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     phantom: PhantomData<(Zt, Config)>,
 }
 
+/// Recommended number of column openings for the proximity check
+/// when using `RaaF2Code` at a given repetition factor (= inverse
+/// rate). These are the values that drive the per-column-opening
+/// soundness error below cryptographic thresholds; pass the result
+/// to the F_2[X] open's `num_column_openings` argument in
+/// `protocol::f2_prove`.
+///
+/// Currently only rate `1/4` (`REP = 4`) is calibrated, since
+/// that's the configuration the F_2 protocol targets. Adding new
+/// rates requires re-running the proximity-error analysis for the
+/// new `(REP, code distance)` pair.
+pub const fn recommended_num_column_openings(rep: usize) -> usize {
+    match rep {
+        // RAA, rate 1/4 (REP = 4): 987 openings give a soundness
+        // error well below 2^{-100} for the protocol's distance
+        // bound.
+        4 => 987,
+        _ => panic!(
+            "recommended_num_column_openings: unsupported repetition factor; \
+             only REP = 4 (rate 1/4) is currently calibrated"
+        ),
+    }
+}
+
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, REP> {
     pub fn new(row_len: usize) -> Self {
         assert!(

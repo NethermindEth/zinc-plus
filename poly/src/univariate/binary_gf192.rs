@@ -821,6 +821,53 @@ pub fn eval_f2_poly_d_at<const D: usize>(
     eval_bits_at(bits, D, alpha)
 }
 
+/// Precompute the powers `α^0, α^1, ..., α^{D-1}` in `GF(2^192)`.
+///
+/// Pair with [`eval_f2_poly_d_at_with_powers`] to evaluate many
+/// `F_2[X]<D>`-typed cells at a shared `α` without redoing the
+/// `D` field multiplications per cell. For a column of `n` cells,
+/// total cost drops from `n × D` multiplications to `D + n × k`
+/// XOR-adds, where `k` is the average Hamming weight of each cell
+/// (`k ≈ D/2` for random bit-polys, so the saving is ~`n` field
+/// multiplications per cell).
+pub fn alpha_powers(alpha: &BinaryFieldGF192, d: usize) -> Vec<BinaryFieldGF192> {
+    let mut powers = Vec::with_capacity(d);
+    if d == 0 {
+        return powers;
+    }
+    powers.push(BinaryFieldGF192::one());
+    for _ in 1..d {
+        let mut next = powers[powers.len() - 1].clone();
+        next *= alpha;
+        powers.push(next);
+    }
+    powers
+}
+
+/// Evaluate an `F_2[X]<D>`-typed cell at α using precomputed powers
+/// (`alpha_powers[i] = α^i`). For each set bit `i` of the cell, the
+/// accumulator XORs in `alpha_powers[i]` — no field multiplications
+/// in the inner loop.
+///
+/// The caller must ensure `alpha_powers.len() >= D`.
+pub fn eval_f2_poly_d_at_with_powers<const D: usize>(
+    p: &BinaryPoly<D>,
+    alpha_powers: &[BinaryFieldGF192],
+) -> BinaryFieldGF192 {
+    debug_assert!(
+        alpha_powers.len() >= D,
+        "eval_f2_poly_d_at_with_powers: powers slice ({}) shorter than D ({D})",
+        alpha_powers.len(),
+    );
+    let mut acc = BinaryFieldGF192::zero();
+    for (i, c) in p.iter().enumerate() {
+        if c.inner() {
+            acc += &alpha_powers[i];
+        }
+    }
+    acc
+}
+
 /// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell stored in
 /// [`BinaryU64Poly`] form. `D` must be ≤ 64.
 pub fn eval_f2_u64_poly_at<const D: usize>(
@@ -903,6 +950,16 @@ pub struct AlphaPolyBasis {
 impl AlphaPolyBasis {
     /// Build the lift table for a given α. Panics if α's minimal
     /// polynomial over F_2 has degree < 192.
+    //
+    // TODO (perf): the basis construction runs ~191 sequential
+    // GF(2^192) multiplications by α, each invoking the naive
+    // squaring-chain `BinaryFieldGF192::inverse` route in adjacent
+    // call sites. An addition-chain optimisation for `inverse`
+    // (Itoh-Tsujii style: c_{2k} = c_k^{2^k} · c_k) would cut
+    // inverse-cost mults ~20× and is the natural follow-up if the
+    // F_2 protocol becomes a bench target. Same shape as the
+    // `BinaryFieldGF192::inverse` TODO. Not on a hot path today —
+    // basis is built once per α per protocol run.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn new(alpha: &BinaryFieldGF192) -> Self {
         // M_α has columns α^0, α^1, …, α^{191}. We store it

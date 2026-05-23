@@ -1,7 +1,7 @@
 //! Verifier
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
+use zinc_poly::univariate::nat_evaluation::NatEvaluatedPoly;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::add;
 
@@ -118,6 +118,22 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
         if self.polynomials_received.len() != self.nv {
             panic!("insufficient rounds");
         }
+
+        // Hot-path optimisation: every round reconstructs a polynomial
+        // with the same length `len = max_multiplicands + 1` (or 1 for
+        // the degenerate `max_multiplicands == 0` case), so the
+        // Lagrange-aux only depends on `(len, self.config)` and can
+        // be computed once and reused across all `nv` rounds. This
+        // hoists the field inversion that's hidden in
+        // `evaluate_at_point`'s denominator computation outside the
+        // per-round loop — see [`NatEvaluatedPoly::prepare_eval_aux`].
+        let aux_len = if self.max_multiplicands == 0 {
+            1
+        } else {
+            add!(self.max_multiplicands, 1)
+        };
+        let aux = NatEvaluatedPoly::<F>::prepare_eval_aux(aux_len, &self.config);
+
         for (i, evaluations_without_constant) in self.polynomials_received.iter().enumerate() {
             let expected_len = if self.max_multiplicands == 0 {
                 0
@@ -142,7 +158,7 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
             reconstructed_evaluations.extend_from_slice(evaluations_without_constant);
 
             let reconstructed_poly = NatEvaluatedPoly::new(reconstructed_evaluations);
-            expected = reconstructed_poly.evaluate_at_point(&self.randomness[i])?;
+            expected = reconstructed_poly.evaluate_at_point_with_aux(&self.randomness[i], &aux)?;
         }
 
         Ok(Subclaim {

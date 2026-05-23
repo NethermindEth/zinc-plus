@@ -49,3 +49,12 @@ iprs-rate-1-16 = []
 [[bench]]
 name = "e2e"
 harness = false
+
+[[bench]]
+name = "f2_sha256"
+harness = false
+# This bench is always run with the full perf-tuned feature set; running
+# it without these would yield numbers that don't reflect deployable
+# performance. Pair with `cargo bench -p zinc-protocol --bench f2_sha256
+# --features parallel,simd,unchecked`.
+required-features = ["parallel", "simd", "unchecked"]
