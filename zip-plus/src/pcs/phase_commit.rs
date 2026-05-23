@@ -90,12 +90,18 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             Self::encode_rows(pp, poly)
         }).collect();
 
-        let all_rows: Vec<&[Zt::Cw]> = cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
-        let merkle_tree = MerkleTree::new(&all_rows);
+        // Build the column-major mirror once, then hash the Merkle
+        // leaves directly from those columns. This fuses what used
+        // to be two independent column-major scans (a transpose for
+        // `cw_columns` + a per-column reader inside `hash_leaves`)
+        // into a single scan whose output is shared.
+        let cw_columns = transpose_to_columns(&cw_matrices, pp.num_rows, pp.linear_code.codeword_len());
+        let column_refs: Vec<&[Zt::Cw]> = cw_columns.iter().map(|c| c.as_slice()).collect();
+        let merkle_tree = MerkleTree::new_from_columns(&column_refs);
         let root = merkle_tree.root();
 
         Ok((
-            ZipPlusHint::new(cw_matrices, merkle_tree),
+            ZipPlusHint::new(cw_matrices, cw_columns, merkle_tree),
             ZipPlusCommitment { root, batch_size },
         ))
     }
@@ -174,6 +180,99 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // Safe because we have just initialized all elements.
         unsafe { encoded_matrix.init() }
     }
+}
+
+/// Build the column-major mirror of `cw_matrices`.
+///
+/// `result[j]` has length `cw_matrices.len() * num_rows` and contains
+/// `cw_matrices[m].data[r * codeword_len + j]` at position
+/// `m * num_rows + r`.
+///
+/// Layout choice: scan each matrix in row-major order (the natural
+/// layout it's already stored in) and scatter each cell to its
+/// destination column. Reads are sequential within a row (free in
+/// cache), writes hit `codeword_len` distinct column tails — small
+/// enough that the L1 store buffer absorbs them. The previous
+/// column-major scan was reads-scattered with `codeword_len * sizeof`
+/// stride and ran at ~5 % of memory bandwidth.
+///
+/// Parallelism: across matrices. Each matrix writes to its own
+/// disjoint `[m * num_rows, (m + 1) * num_rows)` slot inside each
+/// column, so threads never overlap. Uses `MaybeUninit` to skip the
+/// per-element `Default::default()` initialisation Vec would
+/// otherwise demand.
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn transpose_to_columns<R: Clone + Send + Sync>(
+    cw_matrices: &[DenseRowMatrix<R>],
+    num_rows: usize,
+    codeword_len: usize,
+) -> Vec<Vec<R>> {
+    use std::mem::MaybeUninit;
+
+    let batch_size = cw_matrices.len();
+    let col_len = batch_size * num_rows;
+
+    // Allocate `codeword_len` column buffers in one slab, sized
+    // `col_len` each. `MaybeUninit` lets us skip `R: Default`; we
+    // fill every cell below.
+    let mut columns: Vec<Vec<MaybeUninit<R>>> = (0..codeword_len)
+        .map(|_| {
+            let mut v = Vec::with_capacity(col_len);
+            // SAFETY: we set len equal to capacity and write every
+            // slot before returning; `MaybeUninit<R>` is valid for
+            // any bit pattern.
+            unsafe {
+                v.set_len(col_len);
+            }
+            v
+        })
+        .collect();
+
+    // Per-matrix work scatters into disjoint column slots so we can
+    // parallelise across matrices safely. To express "&mut each
+    // column's [m_offset, m_offset + num_rows) slice" we hand each
+    // thread a raw pointer + length and offset by `m * num_rows`.
+    // SAFETY: the column slots are disjoint across `m`; threads
+    // never alias the same slot.
+    struct ColPtrs<R>(*mut MaybeUninit<R>, usize); // (ptr, stride = col_len)
+    unsafe impl<R> Send for ColPtrs<R> {}
+    unsafe impl<R> Sync for ColPtrs<R> {}
+
+    let col_ptrs: Vec<ColPtrs<R>> = columns
+        .iter_mut()
+        .map(|c| ColPtrs(c.as_mut_ptr(), col_len))
+        .collect();
+
+    zinc_utils::cfg_iter!(cw_matrices)
+        .enumerate()
+        .for_each(|(m, mat)| {
+            debug_assert_eq!(mat.num_rows, num_rows);
+            debug_assert_eq!(mat.num_cols, codeword_len);
+            let m_offset = m * num_rows;
+            // Row-major scan of `mat.data`: reads are sequential.
+            for r in 0..num_rows {
+                let row_start = r * codeword_len;
+                let row = &mat.data[row_start..row_start + codeword_len];
+                for (j, cell) in row.iter().enumerate() {
+                    // SAFETY: j < codeword_len = col_ptrs.len();
+                    // m_offset + r < col_len; no aliasing across m.
+                    unsafe {
+                        let dst = col_ptrs[j].0.add(m_offset + r);
+                        std::ptr::write(dst, MaybeUninit::new(cell.clone()));
+                    }
+                }
+            }
+        });
+
+    // SAFETY: every slot written exactly once above.
+    columns
+        .into_iter()
+        .map(|c| {
+            let mut c = std::mem::ManuallyDrop::new(c);
+            let (ptr, len, cap) = (c.as_mut_ptr() as *mut R, c.len(), c.capacity());
+            unsafe { Vec::from_raw_parts(ptr, len, cap) }
+        })
+        .collect()
 }
 
 //TODO. Review and add proper test

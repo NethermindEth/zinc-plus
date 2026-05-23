@@ -39,7 +39,7 @@
 //!    Proving the MLE evaluation claims themselves is a follow-up.
 
 use core::marker::PhantomData;
-use crypto_primitives::Field;
+use crypto_primitives::{Field, FromWithConfig, PrimeField};
 use std::fmt::Debug;
 use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof as IcProof, VerifierSubclaim as IcVerifierSubclaim},
@@ -47,8 +47,8 @@ use zinc_piop::{
     sumcheck::{
         SumCheckError,
         multi_degree::{
-            MultiDegreeSubClaims, MultiDegreeSumcheck, MultiDegreeSumcheckGroup,
-            MultiDegreeSumcheckProof,
+            MultiDegreeSumcheck, MultiDegreeSumcheckGroup,
+            MultiDegreeSumcheckProof, Round1FastPath, Round1Output,
         },
     },
 };
@@ -79,17 +79,21 @@ use rayon::prelude::*;
 ///
 /// `ic_proof` is the ideal-check proof over `GF(2^192)[X]`.
 /// `sumcheck_proof` is the multi-degree sumcheck proof over
-/// `GF(2^192)`. `alpha` is the evaluation-projection challenge.
+/// `GF(2^192)` — γ-batched into a single degree-2 group, so the
+/// proof contains exactly one round-polynomial sequence (versus
+/// one per primary+virtual column in the pre-batched layout).
+/// `alpha` is the evaluation-projection challenge. `gamma` is the
+/// per-column γ-batching challenge drawn after α (recorded as a
+/// convenience — the verifier could re-derive it).
 ///
-/// The MLE evaluation claims (sumcheck's final point r* +
-/// expected per-MLE evaluations) are derived by the verifier from
-/// `sumcheck_proof` via `MultiDegreeSumcheck::verify_as_subprotocol`.
-/// They're not stored here because (a) the verifier reconstructs
-/// them from the proof anyway, (b) `MultiDegreeSubClaims` is not
-/// `Clone`, and (c) the IC's evaluation point (the eq-randomness
-/// the sumcheck consumes) lives inside the IC's prover state, not
-/// the proof itself — the verifier re-derives it from the
-/// transcript identically.
+/// `column_evals_at_rstar` holds the prover-supplied per-column
+/// MLE evaluations at the sumcheck's final point `r*` (primary
+/// columns first, then virtual columns). In the pre-batched layout
+/// the verifier extracted these from the per-group sumcheck
+/// subclaims; with γ-batching the sumcheck only exposes
+/// `Σ_g γ^g · col_g(r*)`, so the per-column values must travel
+/// in the proof and are checked by the verifier against the
+/// sumcheck's batched expected evaluation.
 #[derive(Clone, Debug)]
 pub struct F2Proof {
     pub ic_proof: IcProof<BinaryFieldGF192>,
@@ -98,6 +102,18 @@ pub struct F2Proof {
     /// from the transcript after the IC. Recorded here as a
     /// convenience; the verifier could equivalently re-derive it.
     pub alpha: BinaryFieldGF192,
+    /// `γ ∈ GF(2^192)` — the per-column batching challenge, drawn
+    /// from the transcript after α (and after the α-projected
+    /// trace is conceptually fixed via the IC's earlier absorbs).
+    /// The sumcheck reduces a single degree-2 group whose
+    /// `weighted_col(y) = Σ_g γ^g · col_g(y)`.
+    pub gamma: BinaryFieldGF192,
+    /// Per-column MLE evaluations at `r*` (primary cols first,
+    /// then virtual cols). Sent in the proof so the γ-batched
+    /// sumcheck output (`eq(r*, r) · Σ_g γ^g · col_g(r*)`) can be
+    /// checked against `Σ_g γ^g · column_evals_at_rstar[g]` after
+    /// dividing by `eq(r*, r)`.
+    pub column_evals_at_rstar: Vec<BinaryFieldGF192>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::prove_f2_uair`].
@@ -180,6 +196,13 @@ where
     DegenerateEq,
     #[error("expected {expected} sumcheck groups, got {actual}")]
     GroupCountMismatch { expected: usize, actual: usize },
+    #[error(
+        "γ-batched sumcheck mismatch: expected {expected:?}, got eq(r*, r)·Σ γ^g·col_g(r*) = {got:?}"
+    )]
+    BatchedSumcheckMismatch {
+        expected: BinaryFieldGF192,
+        got: BinaryFieldGF192,
+    },
     #[error(
         "virtual column eval mismatch at index {virtual_idx}: sumcheck-extracted ({sumcheck:?}) ≠ derived from primary evals ({derived:?})"
     )]
@@ -308,69 +331,208 @@ pub fn derive_f2_virtual_evals_at(
         .collect()
 }
 
-/// Default sumcheck-group builder for the F_2 prove path.
+/// Build the γ-batched `weighted_col` MLE from the α-projected
+/// trace: `weighted_col(y) = Σ_g γ^g · col_g(y)`.
 ///
-/// Emits one degree-2 group per projected trace column with the
-/// combination function `comb_fn(eq(y, r), col(y)) = eq · col`. The
-/// claimed sum is the column MLE evaluated at the IC point `r`,
-/// giving a zerocheck-shaped reduction whose final point `r*` lets
-/// the verifier interpret each group's expected evaluation as
-/// `eq(r*, r) · col(r*)`.
-///
-/// This is the simplest viable composition; full UAIRs with
-/// constraint-shaped degree groups would use a CPR-style builder
-/// (see [`ZincPlusPiopF2::prove_f2_uair_with_groups`]).
-pub fn eq_dot_column_groups(
-    ic_eval_point: &[BinaryFieldGF192],
+/// Materialised once before the sumcheck so the single-group
+/// degree-2 sumcheck's `comb_fn` reduces to `eq · weighted_col`
+/// (one multiplication per slot). Computed in parallel by row.
+fn build_gamma_weighted_col(
     projected_trace: &[DenseMultilinearExtension<BinaryFieldGF192>],
-    field_cfg: &(),
-) -> Vec<MultiDegreeSumcheckGroup<BinaryFieldGF192>> {
-    let eq_r = zinc_poly::utils::build_eq_x_r_inner(ic_eval_point, field_cfg)
-        .expect("eq table construction must succeed for valid IC point");
+    gamma: &BinaryFieldGF192,
+) -> DenseMultilinearExtension<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> {
+    debug_assert!(!projected_trace.is_empty(), "expected ≥1 projected column");
+    let num_vars = projected_trace[0].num_vars;
+    let num_rows = projected_trace[0].evaluations.len();
     let zero_inner = *BinaryFieldGF192::zero().inner();
-    projected_trace
-        .iter()
-        .map(|col| {
-            let col_inner_mle = DenseMultilinearExtension::from_evaluations_vec(
-                col.num_vars,
-                col.evaluations.iter().map(|x| *x.inner()).collect(),
-                zero_inner,
-            );
-            MultiDegreeSumcheckGroup::new(
-                2,
-                vec![eq_r.clone(), col_inner_mle],
-                Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
-            )
+
+    // Precompute γ^0, γ^1, …, γ^{G-1}.
+    let mut gamma_pows: Vec<BinaryFieldGF192> = Vec::with_capacity(projected_trace.len());
+    let mut acc = BinaryFieldGF192::one();
+    for _ in 0..projected_trace.len() {
+        gamma_pows.push(acc);
+        acc *= gamma;
+    }
+
+    // Row-major fold: each row sums γ^g · col_g[i] across g. Parallel
+    // over rows so the inner per-row dot product stays in cache.
+    let row_indices: Vec<usize> = (0..num_rows).collect();
+    let evals: Vec<_> = cfg_iter!(row_indices)
+        .map(|&i| {
+            let mut sum = BinaryFieldGF192::zero();
+            for (g, col) in projected_trace.iter().enumerate() {
+                let cell = col.evaluations[i];
+                sum += gamma_pows[g] * cell;
+            }
+            *sum.inner()
         })
-        .collect()
+        .collect();
+
+    DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
 }
 
-/// Default subclaim extractor matching [`eq_dot_column_groups`].
+/// Round-1 fast path for the γ-batched `eq · weighted_col` group.
 ///
-/// Each group's expected evaluation is `eq(r*, r) · col(r*)`;
-/// dividing by `eq(r*, r)` recovers the per-column MLE evaluation
-/// claim. Returns `Err(())` when `eq(r*, r) == 0`, which only
-/// happens when the IC and sumcheck transcript challenges collide
-/// (probability ~`2^{-192}` per round for an honest Fiat-Shamir
-/// hash).
-#[allow(clippy::result_unit_err)]
-pub fn extract_column_evals_eq_dot_col(
-    ic_eval_point: &[BinaryFieldGF192],
-    md_subclaims: &MultiDegreeSubClaims<BinaryFieldGF192>,
-) -> Result<Vec<BinaryFieldGF192>, ()> {
-    let one = BinaryFieldGF192::one();
-    let eq_at_rstar_r =
-        zinc_poly::utils::eq_eval(md_subclaims.point(), ic_eval_point, one)
-            .expect("matching length (num_vars) by construction");
-    if eq_at_rstar_r.is_zero() {
-        return Err(());
+/// Round-1 standard cost: ~5 GF(2^192) multiplications per slot
+/// (three `comb_fn` calls plus boundary extrapolation for two
+/// MLEs). This fast path reduces that to ~2 multiplications per
+/// slot by exploiting two structural facts:
+///
+/// 1. **eq factoring.** `eq_table[2b'] = (1 + r₀) · E[b']` and
+///    `eq_table[2b'+1] = r₀ · E[b']` where `E[b'] = eq(b', r_high)`.
+///    In characteristic 2 the difference identity collapses to
+///    `E[b'] = eq_table[2b'] + eq_table[2b'+1]` — a single XOR per
+///    slot, no field multiplication.
+/// 2. **Closed-form round message.** Once `S_A = Σ E[b'] · A[b']`
+///    and `S_B = Σ E[b'] · B[b']` are accumulated (one multiply
+///    per slot per sum), the three round-1 evaluation points are
+///    computed from a fixed scalar template:
+///
+///    ```text
+///    p₁(0) = (1 + r₀) · S_A
+///    p₁(1) =  r₀     · S_B
+///    p₁(2) = eq(2, r₀) · ((1 + 2) · S_A + 2 · S_B)
+///    ```
+///
+///    where `2 = F::from(2)` in GF(2^192) (NOT zero — the
+///    bit-pattern convention makes `F::from(2)` the field element
+///    `X`, not the integer 2, which is `0` in characteristic 2).
+///
+/// **Total fast-path cost** (per round-1 invocation): `2 · 2^{n-1}`
+/// GF(2^192) multiplications plus O(1) scalar arithmetic, versus
+/// `5 · 2^{n-1}` for the standard path — a ~60 % per-slot saving
+/// at round 1.
+///
+/// `fold_with_r1` produces the round-2-ready MLEs in the standard
+/// fold convention `(1 − r₁) · low + r₁ · high`, leaving the sumcheck
+/// framework's rounds 2..n untouched. The framework's
+/// `skip_next_fold` flag then prevents a double-fold in round 2.
+pub struct F2EqColRound1FastPath {
+    pub eq_table: Vec<<BinaryFieldGF192 as Field>::Inner>,
+    pub weighted_col: Vec<<BinaryFieldGF192 as Field>::Inner>,
+    pub r_0: BinaryFieldGF192,
+    pub num_vars: usize,
+}
+
+impl Round1FastPath<BinaryFieldGF192> for F2EqColRound1FastPath {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn round_1_message(
+        &self,
+        config: &<BinaryFieldGF192 as PrimeField>::Config,
+    ) -> Round1Output<BinaryFieldGF192> {
+        let half = 1usize << (self.num_vars - 1);
+        debug_assert_eq!(self.eq_table.len(), 2 * half);
+        debug_assert_eq!(self.weighted_col.len(), 2 * half);
+
+        // E[b'] = eq_table[2b'] + eq_table[2b'+1] (char-2 identity).
+        // S_A = Σ E[b'] · weighted_col[2b'], S_B = Σ E[b'] · weighted_col[2b'+1].
+        //
+        // Pair-iterate over (b' → 2b', 2b'+1) so the cache line for
+        // each pair is touched once. Parallel over b' with a
+        // reduce-add — the inner loop is two `*` + two `+=` per pair.
+        let row_indices: Vec<usize> = (0..half).collect();
+        let (s_a, s_b) = cfg_iter!(row_indices)
+            .map(|&b_prime| {
+                // Wrap into BinaryFieldGF192 so `+` is GF(2^192) XOR,
+                // not raw Uint integer-add (which would overflow).
+                let eq_lo = BinaryFieldGF192::new_unchecked_with_cfg(
+                    self.eq_table[2 * b_prime].clone(),
+                    config,
+                );
+                let eq_hi = BinaryFieldGF192::new_unchecked_with_cfg(
+                    self.eq_table[2 * b_prime + 1].clone(),
+                    config,
+                );
+                let e = eq_lo + eq_hi;
+                let a = BinaryFieldGF192::new_unchecked_with_cfg(
+                    self.weighted_col[2 * b_prime].clone(),
+                    config,
+                );
+                let b = BinaryFieldGF192::new_unchecked_with_cfg(
+                    self.weighted_col[2 * b_prime + 1].clone(),
+                    config,
+                );
+                (e * a, e * b)
+            })
+            .reduce(
+                || (BinaryFieldGF192::zero(), BinaryFieldGF192::zero()),
+                |acc, x| (acc.0 + x.0, acc.1 + x.1),
+            );
+
+        let one = BinaryFieldGF192::one();
+        // F::from(2) under the bit-pattern convention is the field
+        // element "X" (the second power-of-X basis element) — NOT
+        // zero. Critical: integer-2 in characteristic 2 is 0, but
+        // F::from(2) is non-zero by convention so Lagrange-style
+        // boundary points work.
+        let two = BinaryFieldGF192::from_with_cfg(2u64, config);
+        let r_0 = self.r_0.clone();
+
+        let p1_at_0 = (one.clone() + r_0.clone()) * s_a.clone();
+        let p1_at_1 = r_0.clone() * s_b.clone();
+
+        // eq(2, r₀) = 1 + 2 + r₀  (char-2 multilinear eq)
+        let eq_at_2 = one.clone() + two.clone() + r_0;
+        // weighted_col evaluated at X₀ = 2:
+        //   col(2, b') = A[b'] + 2 · (B[b'] - A[b']) = (1 + 2) · A + 2 · B  (char-2: − = +)
+        // Aggregated: S_col_at_2 = (1 + 2) · S_A + 2 · S_B.
+        let s_col_at_2 = (one + two.clone()) * s_a + two * s_b;
+        let p1_at_2 = eq_at_2 * s_col_at_2;
+
+        Round1Output {
+            asserted_sum: p1_at_0 + p1_at_1.clone(),
+            tail_evaluations: vec![p1_at_1, p1_at_2],
+        }
     }
-    let eq_inv = eq_at_rstar_r.inverse();
-    Ok(md_subclaims
-        .expected_evaluations()
-        .iter()
-        .map(|expected| (*expected) * eq_inv)
-        .collect())
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fold_with_r1(
+        self: Box<Self>,
+        r_1: &BinaryFieldGF192,
+        config: &<BinaryFieldGF192 as PrimeField>::Config,
+    ) -> Vec<DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>> {
+        let half = 1usize << (self.num_vars - 1);
+        let zero_inner = *BinaryFieldGF192::zero().inner();
+
+        // MLE fold at variable 0: folded[b'] = (1 - r_1) · low[b'] + r_1 · high[b'].
+        // In char-2, equivalently: folded[b'] = low + r_1 · (high + low).
+        let fold = |table: &[<BinaryFieldGF192 as Field>::Inner]|
+            -> Vec<<BinaryFieldGF192 as Field>::Inner>
+        {
+            let row_indices: Vec<usize> = (0..half).collect();
+            cfg_iter!(row_indices)
+                .map(|&i| {
+                    let lo = BinaryFieldGF192::new_unchecked_with_cfg(
+                        table[2 * i].clone(),
+                        config,
+                    );
+                    let hi = BinaryFieldGF192::new_unchecked_with_cfg(
+                        table[2 * i + 1].clone(),
+                        config,
+                    );
+                    let diff = hi + lo.clone();
+                    let folded = lo + r_1.clone() * diff;
+                    folded.into_inner()
+                })
+                .collect()
+        };
+
+        let eq_folded = fold(&self.eq_table);
+        let weighted_folded = fold(&self.weighted_col);
+
+        vec![
+            DenseMultilinearExtension::from_evaluations_vec(
+                self.num_vars - 1,
+                eq_folded,
+                zero_inner,
+            ),
+            DenseMultilinearExtension::from_evaluations_vec(
+                self.num_vars - 1,
+                weighted_folded,
+                zero_inner,
+            ),
+        ]
+    }
 }
 
 impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
@@ -401,48 +563,34 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
     ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
-        // Default composition + no virtual columns. Use
-        // [`Self::prove_f2_uair_with_groups`] with explicit
-        // `virtual_specs` for UAIRs that declare virtual binary_poly
-        // columns.
+        // No virtual columns. Use [`Self::prove_f2_uair_with_groups`]
+        // with explicit `virtual_specs` for UAIRs that declare virtual
+        // binary_poly columns.
         Self::prove_f2_uair_with_groups(
             transcript,
             trace,
             &[],
             num_vars,
             project_scalar,
-            eq_dot_column_groups,
         )
     }
 
-    /// Generic-group variant of [`Self::prove_f2_uair`].
-    ///
-    /// `build_groups(ic_eval_point, projected_trace, field_cfg) ->
-    /// Vec<MultiDegreeSumcheckGroup>` is the user-supplied sumcheck
-    /// group composition. Use [`eq_dot_column_groups`] for the
-    /// per-column zerocheck shape; richer UAIRs can pass a closure
-    /// that produces per-degree groups matching the CPR layout.
+    /// Virtual-column variant of [`Self::prove_f2_uair`]. Identical
+    /// to the default entry point but accepts user-declared virtual
+    /// binary_poly columns via `virtual_specs`.
     ///
     /// Returns both the wire `F2Proof` and the prover-side
     /// `F2VerifierSubclaim` — the latter mirrors what the verifier
     /// would derive from the same transcript, and lets the caller
     /// chain into [`Self::prove_f2_open`] without re-running the
     /// IC + sumcheck on a verifier shim.
-    pub fn prove_f2_uair_with_groups<G>(
+    pub fn prove_f2_uair_with_groups(
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
-        build_groups: G,
-    ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>>
-    where
-        G: FnOnce(
-            &[BinaryFieldGF192],
-            &[DenseMultilinearExtension<BinaryFieldGF192>],
-            &(),
-        ) -> Vec<MultiDegreeSumcheckGroup<BinaryFieldGF192>>,
-    {
+    ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
         let num_primary = trace.binary_poly.len();
@@ -538,17 +686,53 @@ where
                 })
                 .collect();
 
-        // -- Step 4: Sumcheck over GF(2^192) -----------------------
-        let groups = build_groups(
-            &ic_state.evaluation_point,
-            &projected_trace,
-            &field_cfg,
+        // -- Step 4a: γ-batching challenge ------------------------
+        //
+        // Sample γ ∈ GF(2^192) AFTER the IC + α absorbs so it can
+        // depend on the trace and the projection point but not on
+        // the sumcheck transcript. Build the single batched MLE
+        // `weighted_col(y) = Σ_g γ^g · col_g(y)` over the full
+        // primary+virtual projected trace, then run ONE degree-2
+        // sumcheck on `[eq_r, weighted_col]` with comb_fn `v[0]*v[1]`
+        // instead of 41 separate per-column sumchecks. The savings
+        // come from (i) one set of round-message bytes instead of
+        // num_total, (ii) one comb_fn / MLE-fold pass per round
+        // instead of num_total. Cost added by materialising
+        // weighted_col is `num_total · 2^num_vars` field mults,
+        // dominated by the per-round savings as soon as num_total
+        // exceeds a small constant.
+        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+
+        let eq_r =
+            zinc_poly::utils::build_eq_x_r_inner(&ic_state.evaluation_point, &field_cfg)
+                .expect("eq table construction must succeed for valid IC point");
+        let weighted_col = build_gamma_weighted_col(&projected_trace, &gamma);
+
+        // Round-1 fast path: skips ~60% of round-1's per-slot work
+        // by exploiting eq's char-2 factoring (`E[b'] = eq[2b'] +
+        // eq[2b'+1]`) and closed-form round-1 message construction.
+        // See [`F2EqColRound1FastPath`]. The fast path also supplies
+        // the post-round-1 folded MLEs so the framework can skip
+        // the round-2 entry fold.
+        let fast_path = Box::new(F2EqColRound1FastPath {
+            eq_table: eq_r.evaluations.clone(),
+            weighted_col: weighted_col.evaluations.clone(),
+            r_0: ic_state.evaluation_point[0],
+            num_vars,
+        });
+        let group = MultiDegreeSumcheckGroup::with_round_1_fast(
+            2,
+            // `poly` is empty — fold_with_r1 supplies the round-2
+            // MLEs and the framework sets `skip_next_fold`.
+            Vec::new(),
+            Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+            fast_path,
         );
 
         let (sumcheck_proof, prover_states) =
             MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
                 transcript,
-                groups,
+                vec![group],
                 num_vars,
                 &field_cfg,
             );
@@ -573,6 +757,16 @@ where
                 .expect("MLE evaluation on r* should succeed")
             })
             .collect();
+
+        // Absorb the per-column evals so any downstream PCS-open
+        // challenges depend on them — guards against a malicious
+        // prover swapping the per-column values after sumcheck.
+        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+            as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+        for v in &all_col_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
         // Split: first `num_primary` are committed; the rest are
         // virtual. The verifier reconstructs the virtual side from
         // the primary side and `virtual_specs`.
@@ -590,6 +784,8 @@ where
                 ic_proof,
                 sumcheck_proof,
                 alpha,
+                gamma,
+                column_evals_at_rstar: all_col_evals,
             },
             subclaim,
         ))
@@ -628,46 +824,30 @@ where
             num_vars,
             num_primary_columns,
             project_ideal,
-            |ic_eval_point, md_subclaims| {
-                extract_column_evals_eq_dot_col(ic_eval_point, md_subclaims)
-                    .map_err(|_| F2VerifyError::DegenerateEq)
-            },
         )
     }
 
-    /// Generic-group variant of [`Self::verify_f2_uair`].
-    ///
-    /// `extract_subclaims(ic_eval_point, md_subclaims) ->
-    /// Result<Vec<MLE eval claim>, F2VerifyError>` is the
-    /// composition-specific inversion: from per-group expected
-    /// evaluations + the IC point, recover the per-column MLE
-    /// evaluation claims at `r*` (covering both primary and virtual
-    /// columns, in that order) that downstream PCS opening will
-    /// discharge for primary cols. Pair with
-    /// [`Self::prove_f2_uair_with_groups`] — the closure must invert
-    /// whatever `build_groups` composed.
+    /// Virtual-column variant of [`Self::verify_f2_uair`]. Verifies
+    /// the γ-batched IC + sumcheck pipeline and reconstructs the
+    /// per-column MLE evaluation claims at `r*` from the prover-sent
+    /// `proof.column_evals_at_rstar`.
     ///
     /// After extraction, the verifier checks each virtual column's
     /// extracted eval against the F_2-linear combo of primary col
     /// evals — soundness for the verifier's "virtual = linear combo"
     /// derivation. Mismatch surfaces as
     /// [`F2VerifyError::VirtualEvalMismatch`].
-    pub fn verify_f2_uair_with_groups<IdealOverF, E>(
+    pub fn verify_f2_uair_with_groups<IdealOverF>(
         transcript: &mut impl Transcript,
         proof: &F2Proof,
         virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
-        extract_subclaims: E,
     ) -> Result<F2VerifierSubclaim, F2VerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
-        E: FnOnce(
-            &[BinaryFieldGF192],
-            &MultiDegreeSubClaims<BinaryFieldGF192>,
-        ) -> Result<Vec<BinaryFieldGF192>, F2VerifyError<U, IdealOverF>>,
     {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
@@ -693,6 +873,14 @@ where
             });
         }
 
+        // γ is sampled BEFORE the sumcheck, mirroring the prover's
+        // order. The verifier checks the round-by-round sumcheck
+        // first (against the single batched group's claimed sum +
+        // round polys), then closes the chain by computing
+        // `Σ_g γ^g · column_evals_at_rstar[g]` and checking
+        // `eq(r*, r_IC) · that_sum == sumcheck_expected_eval`.
+        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+
         let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
             transcript,
             num_vars,
@@ -701,33 +889,74 @@ where
         )
         .map_err(F2VerifyError::Sumcheck)?;
 
-        if md_subclaims.expected_evaluations().len() != num_total {
+        if md_subclaims.expected_evaluations().len() != 1 {
             return Err(F2VerifyError::GroupCountMismatch {
-                expected: num_total,
+                expected: 1,
                 actual: md_subclaims.expected_evaluations().len(),
             });
         }
 
         let sumcheck_point = md_subclaims.point().to_vec();
-        let all_col_evals = extract_subclaims(&ic_evaluation_point, &md_subclaims)?;
-        let (primary_evals, virtual_evals_from_sumcheck) =
-            all_col_evals.split_at(num_primary_columns);
+
+        if proof.column_evals_at_rstar.len() != num_total {
+            return Err(F2VerifyError::GroupCountMismatch {
+                expected: num_total,
+                actual: proof.column_evals_at_rstar.len(),
+            });
+        }
+
+        // Check the γ-batched sumcheck output against the
+        // prover-supplied per-column evals.
+        // expected_eval == eq(r*, r_IC) · Σ_g γ^g · col_g(r*)
+        let one = BinaryFieldGF192::one();
+        let eq_at_rstar_r = zinc_poly::utils::eq_eval(
+            &sumcheck_point,
+            &ic_evaluation_point,
+            one,
+        )
+        .expect("matching length (num_vars) by construction");
+        if eq_at_rstar_r.is_zero() {
+            return Err(F2VerifyError::DegenerateEq);
+        }
+        // Horner-fold: Σ_g γ^g · col_g(r*) = col_0(r*) + γ·(col_1(r*) + γ·(...))
+        let mut batched = BinaryFieldGF192::zero();
+        for v in proof.column_evals_at_rstar.iter().rev() {
+            batched = batched * gamma + *v;
+        }
+        let expected = md_subclaims.expected_evaluations()[0];
+        if eq_at_rstar_r * batched != expected {
+            return Err(F2VerifyError::BatchedSumcheckMismatch {
+                expected,
+                got: eq_at_rstar_r * batched,
+            });
+        }
+
+        // Absorb per-column evals into the transcript (mirror of
+        // prover) so subsequent PCS-open challenges depend on them.
+        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+            as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+        for v in &proof.column_evals_at_rstar {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        let (primary_evals, virtual_evals_from_proof) =
+            proof.column_evals_at_rstar.split_at(num_primary_columns);
         let primary_evals = primary_evals.to_vec();
 
-        // Virtual-eval consistency: each virtual col eval extracted
-        // from the sumcheck must equal the F_2-linear combo of
-        // primary evals defined by the spec.
+        // Virtual-eval consistency: each virtual col eval claimed
+        // by the prover must equal the F_2-linear combo of primary
+        // evals defined by the spec.
         let virtual_evals_derived =
             derive_f2_virtual_evals_at(&primary_evals, virtual_specs);
-        for (k, (from_sumcheck, derived)) in virtual_evals_from_sumcheck
+        for (k, (from_proof, derived)) in virtual_evals_from_proof
             .iter()
             .zip(virtual_evals_derived.iter())
             .enumerate()
         {
-            if from_sumcheck != derived {
+            if from_proof != derived {
                 return Err(F2VerifyError::VirtualEvalMismatch {
                     virtual_idx: k,
-                    sumcheck: *from_sumcheck,
+                    sumcheck: *from_proof,
                     derived: *derived,
                 });
             }
@@ -1200,16 +1429,27 @@ where
         absorb_f2_poly_slice::<7, _>(transcript, combined_row.iter());
 
         // -- Step 7.5: sample column indices + Merkle opens --------
-        let opened_columns: Vec<F2OpenedColumn<D>> = (0..num_column_openings)
-            .map(|_| {
-                let column_idx = sample_column_idx(transcript, codeword_len);
-                let mut column_values: Vec<BinaryPoly<D>> =
-                    Vec::with_capacity(commit_hint.cw_matrices.len() * num_rows);
-                for cw_matrix in &commit_hint.cw_matrices {
-                    for row in cw_matrix.as_rows() {
-                        column_values.push(row[column_idx].clone());
-                    }
-                }
+        //
+        // Two-phase to expose parallelism. `sample_column_idx` is
+        // transcript-driven and must run serially so its output
+        // matches the verifier's mirror exactly. The per-opening
+        // cell extraction + Merkle prove are independent of each
+        // other, so once indices are pinned we `cfg_iter!` the
+        // heavy work. Mirrors `verify_f2_open`'s structure.
+        let column_indices: Vec<usize> = (0..num_column_openings)
+            .map(|_| sample_column_idx(transcript, codeword_len))
+            .collect();
+
+        let opened_columns: Vec<F2OpenedColumn<D>> = cfg_iter!(column_indices)
+            .map(|&column_idx| {
+                // Column-major mirror: `cw_columns[column_idx]` already
+                // holds `(matrix, row)` cells in the exact layout the
+                // verifier expects (`[m * num_rows + r]`). One clone
+                // replaces the previous `batch_size × num_rows`
+                // cache-line-strided reads through each
+                // `cw_matrix.as_rows()[..][column_idx]`.
+                let column_values: Vec<BinaryPoly<D>> =
+                    commit_hint.cw_columns[column_idx].clone();
                 let merkle_proof = commit_hint
                     .merkle_tree
                     .prove(column_idx)
@@ -1426,6 +1666,12 @@ where
                 // the cell as `a` gives ~6× fewer XOR-shifts vs. the
                 // natural `γ · cell` ordering. The product is
                 // commutative in `F_2[X]`.
+                //
+                // Byte-tabulated γ-mults were attempted but regressed
+                // at ν=16: the 1.3 MB table (41 cols × 4 byte
+                // positions × 256 entries × 32 B) doesn't fit in L2,
+                // and L3-miss latency outweighed the saved
+                // schoolbook ops. Stayed with the on-the-fly mult.
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
                 for g in 0..num_cols {
@@ -1508,7 +1754,6 @@ where
             virtual_specs,
             num_vars,
             project_scalar,
-            eq_dot_column_groups,
         )?;
 
         // Step 7: γ-batched open on the primary cols only.
@@ -1732,14 +1977,17 @@ mod tests {
             assert_eq!(v, &DynamicPolynomialF::<BinaryFieldGF192>::ZERO);
         }
 
-        // The sumcheck proof has `num_cols` groups (one per
-        // projected trace column), each of `num_vars` round
-        // messages. Each round message carries `degree = 2` tail
-        // evaluations (Karatsuba {0, 1, ∞}-style — see
-        // `nat_evaluation::evaluate_at_point` for the
-        // reconstruction).
+        // γ-batched: a SINGLE degree-2 group `[eq_r, weighted_col]`
+        // regardless of the number of trace columns. Per-column
+        // evals at r* are carried separately in
+        // `column_evals_at_rstar`.
         let claimed = proof.sumcheck_proof.claimed_sums();
-        assert_eq!(claimed.len(), 2, "two trace columns → two groups");
+        assert_eq!(claimed.len(), 1, "γ-batched protocol has one sumcheck group");
+        assert_eq!(
+            proof.column_evals_at_rstar.len(),
+            2,
+            "two trace columns → two per-column evals at r*",
+        );
         // Each col is identically itself; on the boolean hypercube
         // the sum of `eq(y, r) · col(y)` equals the MLE evaluated
         // at `r` (= IC's evaluation point). That value is finite
@@ -1817,41 +2065,60 @@ mod tests {
             })
             .collect();
 
+        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+
         let eq_r = zinc_poly::utils::build_eq_x_r_inner(
             &ic_state.evaluation_point,
             &field_cfg,
         )
         .expect("eq table construction must succeed for valid IC point");
+        let weighted_col = build_gamma_weighted_col(&projected_trace, &gamma);
 
-        let zero_inner = *BinaryFieldGF192::zero().inner();
-        let groups: Vec<MultiDegreeSumcheckGroup<BinaryFieldGF192>> = projected_trace
+        let group = MultiDegreeSumcheckGroup::new(
+            2,
+            vec![eq_r, weighted_col],
+            Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+        );
+
+        let (sumcheck_proof, prover_states) =
+            MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
+                transcript,
+                vec![group],
+                num_vars,
+                &field_cfg,
+            );
+
+        let sumcheck_point = prover_states[0].randomness.clone();
+        let column_evals_at_rstar: Vec<BinaryFieldGF192> = projected_trace
             .iter()
             .map(|col| {
-                let col_inner_mle = DenseMultilinearExtension::from_evaluations_vec(
+                let zero_inner = *BinaryFieldGF192::zero().inner();
+                let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     col.evaluations.iter().map(|x| *x.inner()).collect(),
                     zero_inner,
                 );
-                MultiDegreeSumcheckGroup::new(
-                    2,
-                    vec![eq_r.clone(), col_inner_mle],
-                    Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF192,
+                >>::evaluate_with_config(
+                    inner_mle, &sumcheck_point, &field_cfg
                 )
+                .expect("MLE evaluation on r* should succeed")
             })
             .collect();
 
-        let (sumcheck_proof, _prover_states) =
-            MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
-                transcript,
-                groups,
-                num_vars,
-                &field_cfg,
-            );
+        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+            as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+        for v in &column_evals_at_rstar {
+            transcript.absorb_random_field(v, &mut buf);
+        }
 
         Ok(F2Proof {
             ic_proof,
             sumcheck_proof,
             alpha,
+            gamma,
+            column_evals_at_rstar,
         })
     }
 
@@ -1891,6 +2158,8 @@ mod tests {
             });
         }
 
+        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+
         let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
             transcript,
             num_vars,
@@ -1900,11 +2169,17 @@ mod tests {
         .map_err(F2VerifyError::Sumcheck)?;
 
         let sumcheck_point = md_subclaims.point().to_vec();
-        let group_expected = md_subclaims.expected_evaluations();
-        if group_expected.len() != num_columns {
+        if md_subclaims.expected_evaluations().len() != 1 {
+            return Err(F2VerifyError::GroupCountMismatch {
+                expected: 1,
+                actual: md_subclaims.expected_evaluations().len(),
+            });
+        }
+
+        if proof.column_evals_at_rstar.len() != num_columns {
             return Err(F2VerifyError::GroupCountMismatch {
                 expected: num_columns,
-                actual: group_expected.len(),
+                actual: proof.column_evals_at_rstar.len(),
             });
         }
 
@@ -1918,11 +2193,23 @@ mod tests {
         if eq_at_rstar_r.is_zero() {
             return Err(F2VerifyError::DegenerateEq);
         }
-        let eq_inv = eq_at_rstar_r.inverse();
-        let column_mle_evals: Vec<BinaryFieldGF192> = group_expected
-            .iter()
-            .map(|expected| (*expected) * eq_inv)
-            .collect();
+        let mut batched = BinaryFieldGF192::zero();
+        for v in proof.column_evals_at_rstar.iter().rev() {
+            batched = batched * gamma + *v;
+        }
+        let expected = md_subclaims.expected_evaluations()[0];
+        if eq_at_rstar_r * batched != expected {
+            return Err(F2VerifyError::BatchedSumcheckMismatch {
+                expected,
+                got: eq_at_rstar_r * batched,
+            });
+        }
+
+        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+            as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+        for v in &proof.column_evals_at_rstar {
+            transcript.absorb_random_field(v, &mut buf);
+        }
 
         // Tests use the shim with virtual-spec-free UAIRs only;
         // mirror the real `verify_f2_uair`'s primary/virtual split
@@ -1931,7 +2218,7 @@ mod tests {
             ic_evaluation_point,
             alpha,
             sumcheck_point,
-            primary_column_evals: column_mle_evals,
+            primary_column_evals: proof.column_evals_at_rstar.clone(),
             virtual_column_evals: Vec::new(),
         })
     }
@@ -2089,208 +2376,10 @@ mod tests {
         );
     }
 
-    /// Exercises [`ZincPlusPiopF2::prove_f2_uair_with_groups`] and
-    /// [`ZincPlusPiopF2::verify_f2_uair_with_groups`] with a
-    /// non-default composition: a single degree-2 group
-    /// `eq(y, r) · (col_0(y) + col_1(y))`. The verifier-side
-    /// extractor returns the *combined* expected `col_0 + col_1`
-    /// evaluation at `r*`, which downstream PCS opening could
-    /// discharge by opening each column separately.
-    ///
-    /// This is the minimum non-trivial demonstration that the
-    /// builder/extractor abstraction supports a composition outside
-    /// the default `eq · col`-per-column shape.
-    #[test]
-    fn prove_then_verify_with_custom_groups() {
-        const D: usize = 32;
-        let num_vars: usize = 4;
-        let poly_size = 1usize << num_vars;
-        let mut r = rng();
-
-        let col0_vals: Vec<BinaryPoly<D>> =
-            (0..poly_size).map(|_| BinaryPoly::from(r.random::<u32>())).collect();
-        let col1_vals = col0_vals.clone();
-        let col0 = DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            col0_vals,
-            BinaryPoly::default(),
-        );
-        let col1 = DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            col1_vals,
-            BinaryPoly::default(),
-        );
-        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
-            binary_poly: vec![col0, col1].into(),
-            arbitrary_poly: vec![].into(),
-            int: vec![].into(),
-        };
-
-        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
-
-        // Single combined group: comb_fn(eq, c0, c1) = eq · (c0 + c1).
-        let custom_groups =
-            |ic_eval_point: &[BinaryFieldGF192],
-             projected_trace: &[DenseMultilinearExtension<BinaryFieldGF192>],
-             field_cfg: &()| {
-                let eq_r =
-                    zinc_poly::utils::build_eq_x_r_inner(ic_eval_point, field_cfg).unwrap();
-                let zero_inner = *BinaryFieldGF192::zero().inner();
-                let mles_inner: Vec<DenseMultilinearExtension<_>> = projected_trace
-                    .iter()
-                    .map(|col| {
-                        DenseMultilinearExtension::from_evaluations_vec(
-                            col.num_vars,
-                            col.evaluations.iter().map(|x| *x.inner()).collect(),
-                            zero_inner,
-                        )
-                    })
-                    .collect();
-                let mut mles_with_eq = vec![eq_r];
-                mles_with_eq.extend(mles_inner);
-                vec![MultiDegreeSumcheckGroup::new(
-                    2,
-                    mles_with_eq,
-                    Box::new(|v: &[BinaryFieldGF192]| v[0] * (v[1] + v[2])),
-                )]
-            };
-
-        // Prove with the custom builder. Use the test shim's
-        // `prove_f2_uair_with_groups_for_tests` — we route through
-        // the actual generic entry point by invoking the same logic
-        // inline.
-        let mut prover_transcript = Blake3Transcript::new();
-        let num_constraints = count_constraints::<TinyF2Uair>();
-        let field_cfg = ();
-
-        let row_major_trace =
-            project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(&trace, &field_cfg);
-        let scalars = zinc_piop::projections::project_scalars::<BinaryFieldGF192, TinyF2Uair>(
-            project_scalar,
-        );
-        let (ic_proof, ic_state) =
-            <TinyF2Uair as IdealCheckProtocol>::prove_combined::<BinaryFieldGF192>(
-                &mut prover_transcript,
-                &row_major_trace,
-                &scalars,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-            )
-            .unwrap();
-        let alpha: BinaryFieldGF192 = prover_transcript.get_field_challenge(&field_cfg);
-        let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = trace
-            .binary_poly
-            .iter()
-            .map(|col| {
-                let evals_at_alpha: Vec<BinaryFieldGF192> = col
-                    .evaluations
-                    .iter()
-                    .map(|cell| {
-                        zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(cell, &alpha)
-                    })
-                    .collect();
-                DenseMultilinearExtension::from_evaluations_vec(
-                    col.num_vars,
-                    evals_at_alpha,
-                    BinaryFieldGF192::zero(),
-                )
-            })
-            .collect();
-        let groups = custom_groups(&ic_state.evaluation_point, &projected_trace, &field_cfg);
-        let (sumcheck_proof, _) = MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
-            &mut prover_transcript,
-            groups,
-            num_vars,
-            &field_cfg,
-        );
-        let proof = F2Proof {
-            ic_proof,
-            sumcheck_proof,
-            alpha,
-        };
-
-        // Verify with a matching custom extractor: one group with
-        // expected_evaluations[0] = eq(r*, r) · (col_0(r*) + col_1(r*)).
-        let mut verifier_transcript = Blake3Transcript::new();
-        let extract = |ic_eval_point: &[BinaryFieldGF192],
-                       md_subclaims: &MultiDegreeSubClaims<BinaryFieldGF192>|
-         -> Result<Vec<BinaryFieldGF192>, F2VerifyError<TinyF2Uair, ImpossibleIdeal>> {
-            let one = BinaryFieldGF192::one();
-            let eq_at_rstar_r =
-                zinc_poly::utils::eq_eval(md_subclaims.point(), ic_eval_point, one).unwrap();
-            if eq_at_rstar_r.is_zero() {
-                return Err(F2VerifyError::DegenerateEq);
-            }
-            let combined = md_subclaims.expected_evaluations()[0] * eq_at_rstar_r.inverse();
-            Ok(vec![combined])
-        };
-
-        // Inline the verifier shim with custom extract.
-        let ic_subclaim = <TinyF2Uair as IdealCheckProtocol>::verify_as_subprotocol::<
-            _,
-            ImpossibleIdeal,
-            _,
-        >(
-            &mut verifier_transcript,
-            proof.ic_proof.clone(),
-            num_constraints,
-            num_vars,
-            |_ideal| ImpossibleIdeal,
-            &field_cfg,
-        )
-        .unwrap();
-        let alpha_v: BinaryFieldGF192 = verifier_transcript.get_field_challenge(&field_cfg);
-        assert_eq!(alpha_v, proof.alpha);
-        let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
-            &mut verifier_transcript,
-            num_vars,
-            &proof.sumcheck_proof,
-            &field_cfg,
-        )
-        .unwrap();
-        assert_eq!(
-            md_subclaims.expected_evaluations().len(),
-            1,
-            "custom builder produced a single group",
-        );
-        let combined_claim = extract(&ic_subclaim.evaluation_point, &md_subclaims).unwrap();
-        assert_eq!(combined_claim.len(), 1);
-
-        // Cross-check the combined claim against the column MLEs
-        // evaluated directly at `r*` in their projected form.
-        let zero_inner = *BinaryFieldGF192::zero().inner();
-        let col_evals_at_rstar: Vec<BinaryFieldGF192> = trace
-            .binary_poly
-            .iter()
-            .map(|col| {
-                let projected_inner: Vec<_> = col
-                    .evaluations
-                    .iter()
-                    .map(|cell| {
-                        *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
-                            cell,
-                            &proof.alpha,
-                        )
-                        .inner()
-                    })
-                    .collect();
-                let projected_mle = DenseMultilinearExtension::from_evaluations_vec(
-                    num_vars,
-                    projected_inner,
-                    zero_inner,
-                );
-                projected_mle
-                    .evaluate_with_config(md_subclaims.point(), &field_cfg)
-                    .unwrap()
-            })
-            .collect();
-        let direct_combined = col_evals_at_rstar[0] + col_evals_at_rstar[1];
-        assert_eq!(
-            combined_claim[0], direct_combined,
-            "custom-extractor combined claim disagrees with direct MLE evaluation",
-        );
-    }
+    // [Removed] `prove_then_verify_with_custom_groups`: the F_2
+    // prove path no longer exposes a build_groups/extract_subclaims
+    // generic — γ-batching consolidates the per-column sumchecks
+    // into a single degree-2 group whose composition is fixed.
 
     // -- Step 0 (PCS commit) wiring + roundtrip ----------------------
     //

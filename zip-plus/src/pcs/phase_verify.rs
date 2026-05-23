@@ -818,7 +818,17 @@ mod tests {
         }
 
         let corrupted_merkle_tree = MerkleTree::new(&corrupted_data.to_rows_slices());
-        let corrupted_hint = ZipPlusHint::new(vec![corrupted_data], corrupted_merkle_tree);
+        let corrupted_cw_matrices = vec![corrupted_data];
+        let corrupted_cw_columns = crate::pcs::phase_commit::transpose_to_columns(
+            &corrupted_cw_matrices,
+            pp.num_rows,
+            pp.linear_code.codeword_len(),
+        );
+        let corrupted_hint = ZipPlusHint::new(
+            corrupted_cw_matrices,
+            corrupted_cw_columns,
+            corrupted_merkle_tree,
+        );
 
         let point: Vec<<Zt as ZipTypes>::Pt> =
             (0..num_vars).map(|i| Int::from(i as i32 + 2)).collect();

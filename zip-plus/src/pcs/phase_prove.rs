@@ -667,7 +667,8 @@ mod tests {
             let all_rows: Vec<&[_]> = hint.cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
             MerkleTree::new(&all_rows)
         };
-        let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
+        let corrupted_hint =
+            ZipPlusHint::new(hint.cw_matrices, hint.cw_columns, corrupted_tree);
 
         let point = test_point(num_vars);
 
@@ -804,7 +805,8 @@ mod tests {
             let all_rows: Vec<&[_]> = hint.cw_matrices.iter().flat_map(|m| m.as_rows()).collect();
             MerkleTree::new(&all_rows)
         };
-        let corrupted_hint = ZipPlusHint::new(hint.cw_matrices, corrupted_tree);
+        let corrupted_hint =
+            ZipPlusHint::new(hint.cw_matrices, hint.cw_columns, corrupted_tree);
 
         let point = test_point(num_vars);
 
