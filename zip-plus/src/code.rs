@@ -7,7 +7,27 @@ pub mod raa_sign_flip;
 use crate::pcs::structs::ZipTypes;
 use crypto_primitives::FromPrimitiveWithConfig;
 use std::fmt::Debug;
+use zinc_poly::univariate::binary_f2_wide::BinaryF2Poly;
 use zinc_utils::from_ref::FromRef;
+
+/// Extension trait providing an `F_2[X]`-linear encoder over arbitrary
+/// `BinaryF2Poly<W>` widths. Used by the F_2[X] MLE-opening protocol's
+/// proximity check (see `protocol/src/f2_open_plan.md`), which encodes
+/// a width-4 combined row and checks consistency against committed
+/// codeword cells at sampled columns.
+///
+/// The encoder must agree with `LinearCode::encode` on
+/// `Cw = BinaryPoly<D>` rows when those rows are lifted to
+/// `BinaryF2Poly<W>` — i.e., it implements the *same* linear map,
+/// just over the wider F_2[X] cell type. The natural fit is
+/// `RaaF2Code`, whose Repeat / Permute / XOR-Accumulate kernel is
+/// uniformly F_2[X]-linear.
+pub trait F2LinearOpener {
+    fn encode_f2_lin_open<const W: usize>(
+        &self,
+        row: &[BinaryF2Poly<W>],
+    ) -> Vec<BinaryF2Poly<W>>;
+}
 
 pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     /// Repetition factor, a.k.a. inverse rate, the ratio of codeword length to

@@ -15,7 +15,7 @@
 
 use crate::{
     code::{
-        LinearCode,
+        F2LinearOpener, LinearCode,
         raa::{RaaConfig, accumulate_unchecked, clone_shuffled, repeat},
     },
     pcs::structs::ZipTypes,
@@ -23,7 +23,7 @@ use crate::{
 };
 use crypto_primitives::PrimeField;
 use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
-use zinc_poly::univariate::{F2AddAssign, F2PackU64};
+use zinc_poly::univariate::{F2AddAssign, F2PackU64, binary_f2_wide::BinaryF2Poly};
 use zinc_utils::{from_ref::FromRef, mul};
 
 /// RAA code over `F_2` (XOR accumulator, no codeword widening).
@@ -143,6 +143,26 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, RE
         result
     }
 
+    /// Public F_2-linear encoder over any type implementing
+    /// `F2AddAssign + FromRef<In> + Clone`. Same kernel as
+    /// [`Self::encode_f2`] (Repeat → Permute → XOR-accumulate →
+    /// Permute → XOR-accumulate), exposed for downstream callers
+    /// (e.g. the F_2[X] MLE-opening protocol) that need to encode a
+    /// row whose entries live in a wider F_2[X]-polynomial type than
+    /// `Zt::Cw` while reusing the same code permutations.
+    ///
+    /// This is sound because the encoder is F_2[X]-linear: the
+    /// permutations are coordinate moves (commute with F_2[X]-scalar
+    /// multiplication), and XOR-accumulate IS F_2 addition (which
+    /// distributes over F_2[X]-scalar multiplication coordinate-by-
+    /// coordinate within each cell).
+    pub fn encode_f2_lin<In, Out>(&self, row: &[In]) -> Vec<Out>
+    where
+        Out: F2AddAssign + FromRef<In> + Clone,
+    {
+        self.encode_f2(row)
+    }
+
     /// Packed-u64 fast path for the F_2 encode. Each input/output cell
     /// must fit in a single `u64` (D ≤ 64), in which case repeat /
     /// permute / accumulate become straight `u64` ops: XOR for the
@@ -228,6 +248,19 @@ fn f2_accumulate_u64(input: &mut [u64]) {
             acc ^= *input.get_unchecked(i);
             *input.get_unchecked_mut(i) = acc;
         }
+    }
+}
+
+impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> F2LinearOpener
+    for RaaF2Code<Zt, Config, REP>
+{
+    fn encode_f2_lin_open<const W: usize>(
+        &self,
+        row: &[BinaryF2Poly<W>],
+    ) -> Vec<BinaryF2Poly<W>> {
+        // BinaryF2Poly<W> implements F2AddAssign + FromRef<Self> + Clone,
+        // so the F_2-linear encoder kernel works directly.
+        self.encode_f2_lin::<BinaryF2Poly<W>, BinaryF2Poly<W>>(row)
     }
 }
 

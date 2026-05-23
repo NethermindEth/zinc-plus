@@ -319,6 +319,47 @@ impl<const W: usize> FromRef<Boolean> for BinaryF2Poly<W> {
     }
 }
 
+// -----------------------------------------------------------------
+// F_2[X] inner products.
+//
+// Used by the F_2[X] MLE-opening protocol to compute combined-row
+// values and the final lifted claim `a' = q_1'^T · M_w · q_2'` over
+// `F_2[X]` (no reduction). See `f2_open_plan.md` for the protocol
+// context and `lift_gf192_to_f2_poly_3` for the GF(2^192) → F_2[X]
+// representative embedding.
+//
+// Output width `W_OUT` must be at least `W_A + W_B` so the
+// carryless product can fit (same bound as `f2_poly_mul`). The
+// helpers accumulate per-pair products via in-place XOR — no degree
+// growth on summation in characteristic 2.
+// -----------------------------------------------------------------
+
+/// `Σ_k a[k] · b[k]` in `F_2[X]`. Both slices must have the same
+/// length. Panics if `W_OUT < W_A + W_B`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn f2_inner_product<const W_A: usize, const W_B: usize, const W_OUT: usize>(
+    a: &[BinaryF2Poly<W_A>],
+    b: &[BinaryF2Poly<W_B>],
+) -> BinaryF2Poly<W_OUT> {
+    assert!(
+        W_OUT >= W_A + W_B,
+        "f2_inner_product: W_OUT ({W_OUT}) must be >= W_A + W_B ({W_A} + {W_B})"
+    );
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "f2_inner_product: slice lengths differ (a={}, b={})",
+        a.len(),
+        b.len(),
+    );
+    let mut acc = BinaryF2Poly::<W_OUT>::zero();
+    for k in 0..a.len() {
+        let prod: BinaryF2Poly<W_OUT> = f2_poly_mul::<W_A, W_B, W_OUT>(&a[k], &b[k]);
+        acc += prod;
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +444,56 @@ mod tests {
         let z128: BinaryF2Poly<2> = BinaryF2Poly::zero();
         let c2: BinaryF2Poly<3> = f2_poly_mul(&a, &z128);
         assert!(c2.is_zero());
+    }
+
+    #[test]
+    fn f2_inner_product_matches_manual_xor_sum() {
+        // a, b ∈ BinaryF2Poly<2>^3. Compute Σ_k a[k] · b[k] in
+        // F_2[X], expected width 4.
+        let a: [BinaryF2Poly<2>; 3] = [
+            BinaryF2Poly::from_words([0x1u64, 0]),
+            BinaryF2Poly::from_words([0x3u64, 0]),
+            BinaryF2Poly::from_words([0x5u64, 0]),
+        ];
+        let b: [BinaryF2Poly<2>; 3] = [
+            BinaryF2Poly::from_words([0x7u64, 0]),
+            BinaryF2Poly::from_words([0x11u64, 0]),
+            BinaryF2Poly::from_words([0x1Fu64, 0]),
+        ];
+
+        let got: BinaryF2Poly<4> = f2_inner_product::<2, 2, 4>(&a, &b);
+
+        // Reference: XOR-sum of per-pair products.
+        let mut expected: BinaryF2Poly<4> = BinaryF2Poly::zero();
+        for k in 0..3 {
+            let prod: BinaryF2Poly<4> = f2_poly_mul::<2, 2, 4>(&a[k], &b[k]);
+            expected += prod;
+        }
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn f2_inner_product_is_bilinear() {
+        // <a + a', b> = <a, b> + <a', b>
+        let a1: [BinaryF2Poly<1>; 2] = [
+            BinaryF2Poly::from_words([0x13]),
+            BinaryF2Poly::from_words([0x42]),
+        ];
+        let a2: [BinaryF2Poly<1>; 2] = [
+            BinaryF2Poly::from_words([0xCAFE]),
+            BinaryF2Poly::from_words([0xBEEF]),
+        ];
+        let b: [BinaryF2Poly<3>; 2] = [
+            BinaryF2Poly::from_words([0x1, 0x2, 0x3]),
+            BinaryF2Poly::from_words([0x4, 0x5, 0x6]),
+        ];
+        let a_sum: [BinaryF2Poly<1>; 2] =
+            [a1[0] + a2[0], a1[1] + a2[1]];
+
+        let lhs: BinaryF2Poly<4> = f2_inner_product::<1, 3, 4>(&a_sum, &b);
+        let r1: BinaryF2Poly<4> = f2_inner_product::<1, 3, 4>(&a1, &b);
+        let r2: BinaryF2Poly<4> = f2_inner_product::<1, 3, 4>(&a2, &b);
+        assert_eq!(lhs, r1 + r2);
     }
 
     #[test]

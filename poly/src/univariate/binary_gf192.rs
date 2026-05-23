@@ -858,6 +858,198 @@ pub fn eval_f2_wide_poly_at<const W: usize>(
     acc
 }
 
+// -- F_2[X] ↔ GF(2^192) representative lifts ------------------------
+
+// -- α-dependent inverse lift ---------------------------------------
+//
+// The "lift" that makes the F_2[X] open work for a transcript-fresh
+// α is **not** the bit-identical canonical representative — see the
+// note in `f2_open_plan.md` § Risks. Bit-identical only satisfies
+// `ψ_α(lift(g)) = g` when α is the field's quotient generator `X`;
+// for generic α, we need the unique polynomial in `F_2[X]<192>`
+// whose evaluation at α equals g.
+//
+// Concretely: writing g ∈ GF(2^192) as a 192-bit vector g_bits, and
+// noting that {1, α, α^2, …, α^{191}} forms an F_2-basis of
+// GF(2^192) precisely when α has minimal polynomial of degree 192
+// over F_2 (probability ≥ 1 − 2^{-95} for transcript-fresh α), the
+// lift solves the linear system
+//
+//   Σ_j c_j · α^j  =  g       (in GF(2^192) arithmetic),
+//
+// for the coefficient vector c = (c_0, …, c_{191}) ∈ F_2^{192}.
+// `q' = Σ_j c_j X^j ∈ F_2[X]<192>` is then the unique element with
+// `ψ_α(q') = g`.
+//
+// The basis matrix `M_α` (192×192 over F_2, columns = α^j as 192-bit
+// vectors) and its inverse are computed once per α; lifting an
+// individual `g` is then a single matrix-vector product over F_2.
+
+/// Precomputed lift table for a fixed α. Building it costs ~192
+/// GF(2^192) multiplications + one 192×192 F_2 matrix inversion;
+/// individual lifts then cost 192 word XORs each.
+///
+/// Panics during construction if α has minimal polynomial of degree
+/// strictly less than 192 over F_2 (the basis `{α^j}` is not
+/// invertible). For transcript-fresh α this happens with negligible
+/// probability.
+pub struct AlphaPolyBasis {
+    /// `inverse[i]` is row i of `M_α^{-1}` packed as a 192-bit
+    /// vector (3 × `u64`, LSB-first per limb). Used to compute the
+    /// lift coefficient `c_i = <inverse[i], g_bits>` over F_2.
+    inverse: [[u64; 3]; 192],
+}
+
+impl AlphaPolyBasis {
+    /// Build the lift table for a given α. Panics if α's minimal
+    /// polynomial over F_2 has degree < 192.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn new(alpha: &BinaryFieldGF192) -> Self {
+        // M_α has columns α^0, α^1, …, α^{191}. We store it
+        // row-by-row so the inversion routine can pivot on rows.
+        // (Row i of M_α = bit i of α^j across columns j.) The map
+        // c ↦ M_α · c (column-vector product) gives Σ_j c_j · α^j.
+        let mut m_rows = [[0u64; 3]; 192];
+        let mut cur = BinaryFieldGF192::one(); // α^0 = 1
+        for j in 0..192 {
+            let cw = cur.words();
+            // Bit i of α^j contributes to row i, column j.
+            for i in 0..192 {
+                let bit = (cw[i / 64] >> (i % 64)) & 1;
+                if bit == 1 {
+                    m_rows[i][j / 64] |= 1u64 << (j % 64);
+                }
+            }
+            if j + 1 < 192 {
+                cur *= alpha;
+            }
+        }
+        let inverse = invert_f2_matrix_192(&m_rows);
+        Self { inverse }
+    }
+
+    /// Lift `g ∈ GF(2^192)` to `BinaryF2Poly<3>`. The result `q'`
+    /// satisfies `ψ_α(q') = g`, i.e. `Σ_i q'_i · α^i = g`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn lift(&self, g: &BinaryFieldGF192) -> BinaryF2Poly<3> {
+        let g_bits = *g.words();
+        let mut out = [0u64; 3];
+        for i in 0..192 {
+            // F_2 inner product of `inverse[i]` (a 192-bit row) and
+            // `g_bits` (a 192-bit vector).
+            let mut acc = 0u64;
+            for w in 0..3 {
+                acc ^= self.inverse[i][w] & g_bits[w];
+            }
+            let bit = (acc.count_ones() & 1) as u64;
+            out[i / 64] |= bit << (i % 64);
+        }
+        BinaryF2Poly::<3>::from_words(out)
+    }
+}
+
+/// Invert a 192×192 F_2 matrix stored row-by-row (each row as 3 ×
+/// `u64`). Uses Gauss-Jordan with an augmented `[A | I]` matrix.
+/// Panics if `A` is singular over F_2.
+#[allow(clippy::arithmetic_side_effects)]
+fn invert_f2_matrix_192(rows: &[[u64; 3]; 192]) -> [[u64; 3]; 192] {
+    // Augmented: 6 u64 per row — left 3 = A, right 3 = I (initially).
+    let mut m: [[u64; 6]; 192] = [[0u64; 6]; 192];
+    for i in 0..192 {
+        m[i][0] = rows[i][0];
+        m[i][1] = rows[i][1];
+        m[i][2] = rows[i][2];
+        // Right half = identity: bit i of row i in the right block.
+        m[i][3 + i / 64] = 1u64 << (i % 64);
+    }
+
+    for col in 0..192 {
+        // Find a pivot row at or below `col` with bit `col` set in
+        // the left block.
+        let mut piv = None;
+        for r in col..192 {
+            if (m[r][col / 64] >> (col % 64)) & 1 == 1 {
+                piv = Some(r);
+                break;
+            }
+        }
+        let piv = piv.expect(
+            "alpha basis is singular: α has minimal polynomial of degree < 192 over F_2",
+        );
+        if piv != col {
+            m.swap(piv, col);
+        }
+        // Eliminate `col` in every other row.
+        for r in 0..192 {
+            if r == col {
+                continue;
+            }
+            if (m[r][col / 64] >> (col % 64)) & 1 == 1 {
+                for w in 0..6 {
+                    m[r][w] ^= m[col][w];
+                }
+            }
+        }
+    }
+
+    let mut inv = [[0u64; 3]; 192];
+    for i in 0..192 {
+        inv[i][0] = m[i][3];
+        inv[i][1] = m[i][4];
+        inv[i][2] = m[i][5];
+    }
+    inv
+}
+
+/// Lift a `BinaryPoly<D>` (`D ≤ 64`) into `BinaryF2Poly<1>` by
+/// packing its bits into a single `u64`.
+///
+/// Inverse of "read the bottom `D` bits and treat as a
+/// `BinaryPoly<D>`": `lift_bp_to_f2_poly_1(p).words()[0] & ((1 << D)
+/// - 1)` matches the bit pattern of `p`. Required for the F_2[X]
+/// inner-product helpers, which operate on `BinaryF2Poly<W>` so the
+/// product widths can grow with `W`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn lift_bp_to_f2_poly_1<const D: usize>(p: &BinaryPoly<D>) -> BinaryF2Poly<1> {
+    assert!(D <= 64, "lift_bp_to_f2_poly_1: D ({D}) must be ≤ 64");
+    let mut bits: u64 = 0;
+    for (i, c) in p.iter().enumerate() {
+        if c.inner() {
+            bits |= 1u64 << i;
+        }
+    }
+    BinaryF2Poly::<1>::from_words([bits])
+}
+
+/// Bit-pattern (canonical-representative) embedding `GF(2^192) →
+/// F_2[X]<192>` as `BinaryF2Poly<3>`.
+///
+/// **Caveat**: `ψ_α(lift_gf192_to_f2_poly_3(g)) = g` holds **only**
+/// when α is the field's quotient generator `X` (mod `P`). For a
+/// transcript-fresh α, use [`AlphaPolyBasis::lift`] instead, which
+/// solves the linear system to produce the unique `q' ∈
+/// F_2[X]<192>` with `ψ_α(q') = g`.
+///
+/// This helper is kept for completeness and for callers that
+/// genuinely want the canonical representative (e.g., interpreting
+/// a field element's word storage as a `BinaryF2Poly` for transcript
+/// serialisation). The F_2[X] MLE-opening protocol does **not** use
+/// this lift — see `f2_open_plan.md` § "Risks" for the analysis.
+#[inline]
+pub fn lift_gf192_to_f2_poly_3(g: &BinaryFieldGF192) -> BinaryF2Poly<3> {
+    BinaryF2Poly::<3>::from_words(*g.words())
+}
+
+/// Project a `BinaryF2Poly<3>` back into `GF(2^192)` by reading its
+/// bits as the canonical degree-<192 representative. The inverse of
+/// [`lift_gf192_to_f2_poly_3`] when the input has no bits set at or
+/// above position 192 (which is the natural invariant for
+/// `BinaryF2Poly<3>`).
+#[inline]
+pub fn f2_poly_3_to_gf192(p: &BinaryF2Poly<3>) -> BinaryFieldGF192 {
+    BinaryFieldGF192::from_words(*p.words())
+}
+
 /// Inner kernel for `eval_*` variants whose `<D>` polynomial fits in a
 /// `u64`. Walks bits of `bits` from LSB up, multiplying a running
 /// `pow = α^i` by `alpha` at each step.
@@ -1158,5 +1350,121 @@ mod tests {
         let e_d32 = eval_f2_poly_d32_at(&p, &alpha);
         let e_wide = eval_f2_wide_poly_at(&pw, &alpha);
         assert_eq!(e_d32, e_wide);
+    }
+
+    // -- ψ_α(lift(g)) = g round-trip ----------------------------------
+    //
+    // The lift `GF(2^192) → BinaryF2Poly<3>` takes a field element's
+    // canonical degree-<192 representative. Evaluating that
+    // representative at `X = α` (where `α` itself is the field
+    // generator viewed as `X` of the underlying `F_2[X]` quotient) is
+    // *not* the round-trip the lift-and-project protocol cares about.
+    // What matters is: for the lift to be sound, evaluating the
+    // representative at a *fresh* transcript-sampled `α` must give
+    // the *same* GF(2^192) value the lift came from when the
+    // representative came from the `X = α` projection of that same
+    // value (tautology). More usefully: ψ_α(lift(g)) gives back the
+    // value of `g` *if we interpret bits as field elements directly*
+    // — but the bits encode `g` as a polynomial in `X`, and `X` only
+    // becomes `α` after ψ_α. So strictly speaking, `ψ_α(lift(g))` is
+    // a *new* field element, namely `Σ_i g_i · α^i` where `g_i` is
+    // the i-th bit of `g`. We test only:
+    //  (a) the bit-pattern lifts/projects identically (no info loss).
+    //  (b) `ψ_α` over `BinaryF2Poly<3>` matches `eval_bits_at` on the
+    //      same bits.
+    //
+    // These are the load-bearing invariants for the F_2[X] open: the
+    // lift is information-preserving, and evaluation at α is the
+    // natural homomorphism applied bit-by-bit.
+
+    #[test]
+    fn lift_and_project_are_bit_identical() {
+        let g = gf(0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 0xDEAD_BEEF);
+        let lifted = lift_gf192_to_f2_poly_3(&g);
+        assert_eq!(lifted.words(), g.words());
+        let back = f2_poly_3_to_gf192(&lifted);
+        assert_eq!(back, g);
+    }
+
+    #[test]
+    fn lift_and_project_zero_and_one() {
+        let zero = BinaryFieldGF192::zero();
+        let one = BinaryFieldGF192::one();
+        assert_eq!(f2_poly_3_to_gf192(&lift_gf192_to_f2_poly_3(&zero)), zero);
+        assert_eq!(f2_poly_3_to_gf192(&lift_gf192_to_f2_poly_3(&one)), one);
+    }
+
+    #[test]
+    fn inverse_alpha_lift_round_trips() {
+        // α is a transcript-fresh-style value (high entropy across
+        // all 3 limbs). For any g ∈ GF(2^192), the inverse lift
+        // must satisfy ψ_α(lift(g)) = g.
+        let alpha = gf(0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210, 0xDEAD_BEEF);
+        let basis = AlphaPolyBasis::new(&alpha);
+        for g in [
+            BinaryFieldGF192::zero(),
+            BinaryFieldGF192::one(),
+            gf(0x1, 0x0, 0x0),
+            gf(0xAAAA_BBBB_CCCC_DDDD, 0x1122_3344_5566_7788, 0x99AA_BBCC),
+            alpha,
+        ] {
+            let lifted = basis.lift(&g);
+            let recovered = eval_f2_wide_poly_at(&lifted, &alpha);
+            assert_eq!(
+                recovered, g,
+                "inverse lift round-trip failed for g = {g:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_alpha_lift_is_f2_linear() {
+        // ψ_α is F_2-linear, so the inverse lift must also be
+        // F_2-linear: lift(a + b) = lift(a) + lift(b).
+        let alpha = gf(0xCAFE_BABE, 0xDEAD_BEEF, 0x1234_5678);
+        let basis = AlphaPolyBasis::new(&alpha);
+        let a = gf(0x1111_2222_3333_4444, 0x5555_6666_7777_8888, 0x9999_AAAA);
+        let b = gf(0xFEDC_BA98_7654_3210, 0xAAAA_BBBB_CCCC_DDDD, 0xCAFE_F00D);
+        let sum = gf(
+            0x1111_2222_3333_4444 ^ 0xFEDC_BA98_7654_3210,
+            0x5555_6666_7777_8888 ^ 0xAAAA_BBBB_CCCC_DDDD,
+            0x9999_AAAA ^ 0xCAFE_F00D,
+        );
+        let la = basis.lift(&a);
+        let lb = basis.lift(&b);
+        let lsum = basis.lift(&sum);
+        let la_plus_lb = la + lb;
+        assert_eq!(lsum, la_plus_lb);
+    }
+
+    #[test]
+    fn psi_alpha_on_lifted_matches_eval_bits_at_alpha() {
+        // For any g ∈ GF(2^192) viewed as a polynomial `Σ g_i · X^i`,
+        // ψ_α(lift(g)) = Σ g_i · α^i.
+        let alpha = gf(0x1, 0x2, 0x3);
+        // Use a non-trivial g with bits set across all three words.
+        let g = gf(0xAAAA_5555_AAAA_5555, 0x1234_5678_9ABC_DEF0, 0xCAFE_BABE);
+        let lifted = lift_gf192_to_f2_poly_3(&g);
+        let via_lift = eval_f2_wide_poly_at(&lifted, &alpha);
+
+        // Reference: walk g's 192 bits, add α^i for each set bit.
+        let mut ref_acc = BinaryFieldGF192::zero();
+        let mut pow = BinaryFieldGF192::one();
+        for word_idx in 0..3 {
+            let mut w = g.words()[word_idx];
+            let mut bit_in_word = 0usize;
+            while bit_in_word < 64 {
+                let _ = word_idx * 64 + bit_in_word;
+                if (w & 1) == 1 {
+                    ref_acc += &pow;
+                }
+                w >>= 1;
+                bit_in_word += 1;
+                if word_idx * 64 + bit_in_word < 192 {
+                    pow *= &alpha;
+                }
+            }
+        }
+        assert_eq!(via_lift, ref_acc);
     }
 }
