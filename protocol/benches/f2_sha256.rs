@@ -121,123 +121,112 @@ const D: usize = 32;
 // ---------------------------------------------------------------------------
 // Proof-size measurement.
 //
-// Serialises an `F2FullProof<D>` into a flat byte stream matching the
-// natural wire format of each component (no length-prefixing or
-// versioning — the bench only needs an apples-to-apples raw byte
-// count + zstd-3 compressed count), then reports both sizes.
+// Serialises an `F2FullProof<D>` into per-region byte buffers
+// (commitment + uair sub-parts + open sub-parts) and hands them to
+// `zip_plus::utils::eprint_bytes_size_breakdown`, which prints a
+// per-region table with raw + zstd-3 columns + percentages.
 // ---------------------------------------------------------------------------
 
-/// zstd compression level for the bench's compressed-size column.
-/// Matches `zip_plus::utils::ZSTD_LEVEL` so the F_2 numbers are
-/// directly comparable with the integer pipeline's printed sizes.
-const ZSTD_LEVEL: i32 = 3;
-
+/// Build the per-region byte serialisation of an `F2FullProof<D>`,
+/// returning one entry per component. The serialisation uses each
+/// component's natural wire format (no length prefixes or versioning)
+/// since the bench only needs apples-to-apples size accounting.
+///
+/// The `opened_columns` block — by far the dominant cost — is split
+/// into three sub-regions so the breakdown reveals where the bytes
+/// actually go: codeword cells, Merkle siblings, and per-opening
+/// headers (column index + leaf index/count).
 #[allow(clippy::arithmetic_side_effects)]
-fn f2_full_proof_to_bytes(proof: &F2FullProof<D>) -> Vec<u8> {
+fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
     use crypto_primitives::Field;
     use zinc_poly::univariate::F2PackU64;
     use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 
-    let mut buf = Vec::with_capacity(2 * 1024 * 1024);
-
     // -- commitment.root (32-byte Blake3 Merkle root) --
-    buf.extend_from_slice(&*proof.commitment.root);
+    let commitment: Vec<u8> = (*proof.commitment.root).to_vec();
 
     // -- uair.alpha (BinaryFieldGF192::Inner = Uint<3>, 24 bytes) --
-    const ALPHA_BYTES: usize = <<BinaryFieldGF192 as Field>::Inner as ConstTranscribable>::NUM_BYTES;
-    let mut tmp = [0u8; ALPHA_BYTES];
-    proof.uair.alpha.inner().write_transcription_bytes_exact(&mut tmp);
-    buf.extend_from_slice(&tmp);
+    const ALPHA_BYTES: usize =
+        <<BinaryFieldGF192 as Field>::Inner as ConstTranscribable>::NUM_BYTES;
+    let mut alpha = vec![0u8; ALPHA_BYTES];
+    proof.uair.alpha.inner().write_transcription_bytes_exact(&mut alpha);
 
     // -- uair.ic_proof (Transcribable: combined_mle_values) --
-    let ic_size = proof.uair.ic_proof.get_num_bytes();
-    let mut ic_buf = vec![0u8; ic_size];
-    proof.uair.ic_proof.write_transcription_bytes_exact(&mut ic_buf);
-    buf.extend_from_slice(&ic_buf);
+    let mut ic_proof = vec![0u8; proof.uair.ic_proof.get_num_bytes()];
+    proof.uair.ic_proof.write_transcription_bytes_exact(&mut ic_proof);
 
     // -- uair.sumcheck_proof (Transcribable) --
-    let sc_size = proof.uair.sumcheck_proof.get_num_bytes();
-    let mut sc_buf = vec![0u8; sc_size];
-    proof
-        .uair
-        .sumcheck_proof
-        .write_transcription_bytes_exact(&mut sc_buf);
-    buf.extend_from_slice(&sc_buf);
+    let mut sumcheck = vec![0u8; proof.uair.sumcheck_proof.get_num_bytes()];
+    proof.uair.sumcheck_proof.write_transcription_bytes_exact(&mut sumcheck);
 
-    // -- open.lifted_claim (BinaryF2Poly<10> = 10 × u64 = 80 bytes) --
+    // -- open.lifted_claim (BinaryF2Poly<10> = 80 bytes) --
+    let mut lifted_claim = Vec::with_capacity(80);
     for w in proof.open.lifted_claim.words() {
-        buf.extend_from_slice(&w.to_le_bytes());
+        lifted_claim.extend_from_slice(&w.to_le_bytes());
     }
 
-    // -- open.b_vector (Vec<BinaryF2Poly<7>>, 7 × u64 each) --
+    // -- open.b_vector (Vec<BinaryF2Poly<7>>, 7 × u64 = 56 bytes each) --
+    let mut b_vector = Vec::with_capacity(proof.open.b_vector.len() * 56);
     for v in &proof.open.b_vector {
         for w in v.words() {
-            buf.extend_from_slice(&w.to_le_bytes());
+            b_vector.extend_from_slice(&w.to_le_bytes());
         }
     }
 
     // -- open.combined_row (Vec<BinaryF2Poly<7>>) --
+    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * 56);
     for v in &proof.open.combined_row {
         for w in v.words() {
-            buf.extend_from_slice(&w.to_le_bytes());
+            combined_row.extend_from_slice(&w.to_le_bytes());
         }
     }
 
-    // -- open.opened_columns --
+    // -- open.opened_columns, split into three sub-regions --
     //
-    // Per opened col: column_idx (u64) + column_values (packed bit-
-    // poly per cell, `ceil(D/8)` bytes) + merkle_proof (two u64
-    // header words + `siblings.len()` × 32-byte hashes).
+    // For the deployed RAA-1/4 + 7-compression SHA F_2 shape this
+    // block is ~99% of the raw proof, so splitting it reveals which
+    // sub-region zstd compresses how much. `values` (raw cell bits)
+    // is sparse for random inputs and compresses heavily; `merkle`
+    // is essentially random Blake3 hashes (incompressible);
+    // `headers` is small.
     let bytes_per_cell = D.div_ceil(8);
+    let mut opened_values: Vec<u8> = Vec::new();
+    let mut opened_merkle: Vec<u8> = Vec::new();
+    let mut opened_headers: Vec<u8> = Vec::new();
     for col in &proof.open.opened_columns {
-        buf.extend_from_slice(&(col.column_idx as u64).to_le_bytes());
+        opened_headers.extend_from_slice(&(col.column_idx as u64).to_le_bytes());
+        opened_headers
+            .extend_from_slice(&(col.merkle_proof.leaf_index as u64).to_le_bytes());
+        opened_headers
+            .extend_from_slice(&(col.merkle_proof.leaf_count as u64).to_le_bytes());
         for c in &col.column_values {
             let packed = c.pack_u64();
-            buf.extend_from_slice(&packed.to_le_bytes()[..bytes_per_cell]);
+            opened_values.extend_from_slice(&packed.to_le_bytes()[..bytes_per_cell]);
         }
-        buf.extend_from_slice(&(col.merkle_proof.leaf_index as u64).to_le_bytes());
-        buf.extend_from_slice(&(col.merkle_proof.leaf_count as u64).to_le_bytes());
         for sib in &col.merkle_proof.siblings {
-            buf.extend_from_slice(&**sib);
+            opened_merkle.extend_from_slice(&**sib);
         }
     }
 
-    buf
-}
-
-fn fmt_thousands(n: usize) -> String {
-    let s = n.to_string();
-    let bytes = s.as_bytes();
-    let mut out = String::new();
-    let first_chunk = bytes.len() % 3;
-    if first_chunk > 0 {
-        out.push_str(std::str::from_utf8(&bytes[..first_chunk]).unwrap());
-        if bytes.len() > first_chunk {
-            out.push(' ');
-        }
-    }
-    let rest = &bytes[first_chunk..];
-    for (i, chunk) in rest.chunks(3).enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(std::str::from_utf8(chunk).unwrap());
-    }
-    out
+    vec![
+        ("commitment.root", commitment),
+        ("uair.alpha", alpha),
+        ("uair.ic_proof", ic_proof),
+        ("uair.sumcheck", sumcheck),
+        ("open.lifted_claim", lifted_claim),
+        ("open.b_vector", b_vector),
+        ("open.combined_row", combined_row),
+        ("open.opened/values", opened_values),
+        ("open.opened/merkle", opened_merkle),
+        ("open.opened/headers", opened_headers),
+    ]
 }
 
 fn eprint_f2_proof_size(label: &str, proof: &F2FullProof<D>) {
-    let raw = f2_full_proof_to_bytes(proof);
-    let compressed =
-        zstd::encode_all(&raw[..], ZSTD_LEVEL).expect("zstd compression failed");
-    eprintln!(
-        "    Proof size ({label}): raw = {} bytes ({} KiB), zstd-{} = {} bytes ({} KiB)",
-        fmt_thousands(raw.len()),
-        raw.len().div_ceil(1024),
-        ZSTD_LEVEL,
-        fmt_thousands(compressed.len()),
-        compressed.len().div_ceil(1024),
-    );
+    let parts = f2_full_proof_parts(proof);
+    let refs: Vec<(&str, &[u8])> =
+        parts.iter().map(|(name, b)| (*name, b.as_slice())).collect();
+    zip_plus::utils::eprint_bytes_size_breakdown(label, &refs);
 }
 
 struct ProverFixture {
@@ -732,7 +721,7 @@ fn bench_micro_verifier_uair(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[9, 11, 13, 15, 17, 19, 21];
+const NVARS_SWEEP: &[usize] = &[16];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
