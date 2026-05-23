@@ -5,6 +5,7 @@ pub mod ecdsa_affine;
 pub mod ecdsa_doubling;
 mod generate_trace;
 pub mod sha256;
+pub mod sha256_f2;
 pub mod sha_ecdsa;
 
 pub use ecdsa::EcdsaUair;
@@ -13,6 +14,9 @@ pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
+pub use sha256_f2::{
+    Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal, sha256_f2_project_scalar,
+};
 pub use sha_ecdsa::ShaEcdsaUair;
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
