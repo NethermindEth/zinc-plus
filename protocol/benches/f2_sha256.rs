@@ -470,6 +470,25 @@ fn bench_micro_prover_uair(
     let num_constraints = count_constraints::<U>();
     let field_cfg = ();
 
+    // ---- 0) Commit (PCS commit + Merkle root + transcript absorb) ----
+    //
+    // Without this entry the Micro group's prover sum would miss the
+    // pre-IC commit cost — `commit_and_absorb_f2_trace` runs the
+    // RAA-F_2 codeword encoder over every committed column and folds
+    // the Merkle tree. Belongs to the prover side of the protocol
+    // even though it lives outside the IC + sumcheck loop.
+    group.bench_function(BenchmarkId::new("Commit", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let (hint, comm) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                ::commit_and_absorb_f2_trace(
+                    &mut transcript, &fx.pp, &fx.trace.binary_poly,
+                )
+                .expect("commit");
+            black_box((hint, comm));
+        });
+    });
+
     // ---- a) F_2-native IC ----
     //
     // The current code path: per-row bit-poly arithmetic + per-bit
@@ -997,7 +1016,7 @@ fn step_benches(c: &mut Criterion) {
 
 fn micro_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Micro");
-    let fx = setup_prover(9);
+    let fx = setup_prover(16);
     let id = format!("nvars={}", fx.num_vars);
     bench_micro_prover_uair(&mut group, &id, &fx);
     bench_micro_prover_open(&mut group, &id, &fx);
