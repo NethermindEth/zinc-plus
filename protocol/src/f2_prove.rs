@@ -926,7 +926,10 @@ pub enum F2OpenError {
 /// Absorb a slice of `BinaryF2Poly<W>` into the transcript by
 /// writing each entry's `W × u64` words as little-endian bytes.
 /// Deterministic and prover/verifier-symmetric.
-fn absorb_f2_poly_slice<'a, const W: usize, I>(transcript: &mut impl Transcript, iter: I)
+///
+/// Public so per-region benches can exercise the open phase's
+/// sub-steps independently; not part of the verified protocol surface.
+pub fn absorb_f2_poly_slice<'a, const W: usize, I>(transcript: &mut impl Transcript, iter: I)
 where
     I: IntoIterator<Item = &'a BinaryF2Poly<W>>,
 {
@@ -942,7 +945,10 @@ where
 /// Squeeze a u64 challenge from the transcript and reduce modulo
 /// `codeword_len`. `codeword_len` is a power of two in all Zip+
 /// instantiations, so the modular reduction is bias-free.
-fn sample_column_idx(transcript: &mut impl Transcript, codeword_len: usize) -> usize {
+///
+/// Public so per-region benches can drive the per-opening loop in
+/// isolation; not part of the verified protocol surface.
+pub fn sample_column_idx(transcript: &mut impl Transcript, codeword_len: usize) -> usize {
     assert!(
         codeword_len.is_power_of_two(),
         "sample_column_idx requires power-of-two codeword length; got {codeword_len}",
@@ -980,8 +986,11 @@ fn sample_column_idx(transcript: &mut impl Transcript, codeword_len: usize) -> u
 ///
 /// `basis` is the precomputed lift table (one per α, shared across
 /// all `q_i[k]` entries to amortise the 192×192 F_2 matrix inverse).
+///
+/// Public so per-region benches can time `q0`/`q1` construction in
+/// isolation; not part of the verified protocol surface.
 #[allow(clippy::type_complexity)]
-fn build_lifted_eq_tensor(
+pub fn build_lifted_eq_tensor(
     num_rows: usize,
     point: &[BinaryFieldGF192],
     basis: &zinc_poly::univariate::binary_gf192::AlphaPolyBasis,
