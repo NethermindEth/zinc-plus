@@ -88,6 +88,37 @@ impl MerkleTree {
         build_merkle_tree_from_leaves(leaves)
     }
 
+    /// Build a Merkle tree directly from column-major leaf data.
+    ///
+    /// `columns[j]` is the slice of values that defines leaf `j`'s
+    /// pre-image — read sequentially and serialised to a single
+    /// Blake3 buffer. Equivalent to [`Self::new`] when
+    /// `columns[j][r] == rows[r][j]`, but reads each leaf's input
+    /// sequentially instead of as `num_rows` strided per-row
+    /// fetches. Used by [`crate::pcs::phase_commit`] after building
+    /// the column-major mirror of the encoded matrices, so the
+    /// commit phase's leaf-hash pass touches the same memory the
+    /// open phase later slices.
+    pub fn new_from_columns<S>(columns: &[&[S]]) -> Self
+    where
+        S: ConstTranscribable + Send + Sync,
+    {
+        assert!(!columns.is_empty());
+        let num_cols = columns.len();
+        assert!(num_cols.is_power_of_two());
+        // All columns must agree on length so the per-column buffer
+        // size is well-defined; otherwise the tree is malformed.
+        let col_len = columns[0].len();
+        assert!(col_len > 0);
+        assert!(
+            columns.iter().all(|c| c.len() == col_len),
+            "All columns must have the same length"
+        );
+
+        let leaves: Vec<MtHash> = cfg_iter!(columns).map(|col| hash_column(col)).collect();
+        build_merkle_tree_from_leaves(leaves)
+    }
+
     /// Build a Merkle tree over leaves derived from three groups of rows
     /// with potentially different element types. Any group may be empty,
     /// but at least one must be non-empty (and m_cols is taken from the
