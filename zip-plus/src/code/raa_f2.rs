@@ -340,6 +340,74 @@ where
         // the right accumulator. Not `F_2`-specific.
         self.encode_inner(row)
     }
+
+    /// Fused F_2 encoder that writes its result into a caller-provided
+    /// (uninitialised) destination, reusing `scratch` as the
+    /// post-first-accumulate intermediate. Zero allocations per call.
+    ///
+    /// Pipeline (PERMUTE_IN_PLACE = false path; in-place permutation is
+    /// not used by the F_2 protocol):
+    ///   1. write `repeat(row, REP)` into `dst` (initialising every slot)
+    ///   2. gather `perm_1` from `dst` into `scratch`
+    ///   3. F_2 prefix-XOR in place on `scratch`
+    ///   4. gather `perm_2` from `scratch` into `dst`
+    ///   5. F_2 prefix-XOR in place on `dst`
+    #[allow(clippy::arithmetic_side_effects)]
+    fn encode_into_with_scratch(
+        &self,
+        row: &[Zt::Eval],
+        scratch: &mut [Zt::Cw],
+        dst: &mut [std::mem::MaybeUninit<Zt::Cw>],
+    ) {
+        let codeword_len = self.row_len * REP;
+        debug_assert_eq!(row.len(), self.row_len);
+        debug_assert!(scratch.len() >= codeword_len);
+        debug_assert_eq!(dst.len(), codeword_len);
+
+        // Step 1: write `repeat(row, REP)` into `dst`, initialising every slot.
+        for r in 0..REP {
+            let offset = r * self.row_len;
+            for (i, x) in row.iter().enumerate() {
+                // SAFETY: `offset + i < REP * row_len = codeword_len = dst.len()`.
+                unsafe {
+                    dst.get_unchecked_mut(offset + i)
+                        .write(Zt::Cw::from_ref(x));
+                }
+            }
+        }
+
+        // After Step 1, all `codeword_len` slots of `dst` are initialised.
+        // SAFETY: every slot was written above via `MaybeUninit::write`; the
+        // layouts of `MaybeUninit<T>` and `T` match.
+        let dst_init: &mut [Zt::Cw] = unsafe {
+            std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<Zt::Cw>(), codeword_len)
+        };
+
+        // Step 2: gather perm_1 from `dst_init` into `scratch`.
+        // SAFETY: `perm_1` is a permutation of `0..codeword_len`, so every
+        // index is in bounds for both `dst_init` and `scratch[..codeword_len]`.
+        unsafe {
+            for i in 0..codeword_len {
+                let p = *self.perm_1.get_unchecked(i);
+                *scratch.get_unchecked_mut(i) = dst_init.get_unchecked(p).clone();
+            }
+        }
+
+        // Step 3: prefix-XOR on scratch[..codeword_len].
+        f2_accumulate(&mut scratch[..codeword_len]);
+
+        // Step 4: gather perm_2 from `scratch` into `dst_init`.
+        // SAFETY: same permutation invariant as Step 2.
+        unsafe {
+            for i in 0..codeword_len {
+                let p = *self.perm_2.get_unchecked(i);
+                *dst_init.get_unchecked_mut(i) = scratch.get_unchecked(p).clone();
+            }
+        }
+
+        // Step 5: prefix-XOR on `dst_init`.
+        f2_accumulate(dst_init);
+    }
 }
 
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Debug for RaaF2Code<Zt, Config, REP> {
