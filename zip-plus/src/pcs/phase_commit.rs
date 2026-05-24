@@ -71,9 +71,18 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// tall-thin codeword matrices (`num_rows` small) this can cut
     /// commit time multi-fold.
     ///
+    /// Builds the Merkle tree directly from `cw_matrices` (the fused
+    /// row-major leaf-hash path), skipping the column-major mirror
+    /// (`cw_columns`) entirely — that 44 MB-scale intermediate
+    /// allocation was previously the dominant commit-time cost. The
+    /// returned hint has an **empty** `cw_columns` field; callers that
+    /// need column-major access must materialise it from `cw_matrices`
+    /// themselves (e.g. via [`transpose_to_columns`]) or gather on the
+    /// fly (see the F_2 protocol's `prove_f2_open`).
+    ///
     /// `leaf_group_size` must be a power of two and divide
     /// `pp.linear_code.codeword_len()`. Pass `1` for the un-grouped
-    /// commit (matches [`Self::commit`]).
+    /// commit; this still uses the fused row-major leaf hash.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn commit_grouped(
         pp: &ZipPlusParams<Zt, Lc>,
@@ -112,20 +121,25 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             Self::encode_rows(pp, poly)
         }).collect();
 
-        // Build the column-major mirror once, then hash the Merkle
-        // leaves directly from those columns. This fuses what used
-        // to be two independent column-major scans (a transpose for
-        // `cw_columns` + a per-column reader inside `hash_leaves`)
-        // into a single scan whose output is shared.
-        let cw_columns = transpose_to_columns(&cw_matrices, pp.num_rows, pp.linear_code.codeword_len());
-        let column_refs: Vec<&[Zt::Cw]> = cw_columns.iter().map(|c| c.as_slice()).collect();
-        let merkle_tree = if leaf_group_size == 1 {
-            MerkleTree::new_from_columns(&column_refs)
-        } else {
-            MerkleTree::new_from_column_groups(&column_refs, leaf_group_size)
-        };
+        // Fused leaf hashing: build the Merkle tree directly from the
+        // row-major `cw_matrices`, hashing each leaf via small
+        // L1-resident scratch buffers. Avoids the ~44 MB
+        // write-allocate-amplified scatter that `transpose_to_columns`
+        // does when codeword_len is large (tall-thin codeword shape),
+        // and skips the second pass over the column slab that the
+        // Merkle hash would otherwise do. Callers wanting `cw_columns`
+        // build it lazily from `cw_matrices`.
+        let merkle_tree = MerkleTree::new_from_row_major_grouped(
+            &cw_matrices,
+            pp.num_rows,
+            pp.linear_code.codeword_len(),
+            leaf_group_size,
+        );
         let root = merkle_tree.root();
 
+        // `cw_columns` is left empty; the hint carries only the
+        // row-major `cw_matrices` plus the Merkle tree.
+        let cw_columns: Vec<Vec<Zt::Cw>> = Vec::new();
         Ok((
             ZipPlusHint::new(cw_matrices, cw_columns, merkle_tree),
             ZipPlusCommitment { root, batch_size },
@@ -226,7 +240,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
 /// per-element `Default::default()` initialisation Vec would
 /// otherwise demand.
 #[allow(clippy::arithmetic_side_effects)]
-pub(crate) fn transpose_to_columns<R: Clone + Send + Sync>(
+pub fn transpose_to_columns<R: Clone + Send + Sync>(
     cw_matrices: &[DenseRowMatrix<R>],
     num_rows: usize,
     codeword_len: usize,

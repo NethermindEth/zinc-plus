@@ -1,4 +1,4 @@
-mod phase_commit;
+pub mod phase_commit;
 mod phase_prove;
 mod phase_verify;
 
