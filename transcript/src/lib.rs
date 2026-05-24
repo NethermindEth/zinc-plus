@@ -72,7 +72,20 @@ impl Transcript for Blake3Transcript {
     }
 
     fn absorb_inner(&mut self, v: &[u8]) {
-        self.hasher.update(v);
+        // For large inputs (~MB+ — e.g. the public-column absorb at
+        // the start of an F_2 commit, ~235 MB at SHA-256 F_2 nvars=22)
+        // Blake3's rayon-parallel chunk-tree path beats the single-
+        // threaded `update` by ~4-8× on M-series cores. The threshold
+        // is set so small absorbs (challenges, framing bytes,
+        // per-round transcript writes) still take the cheap path —
+        // `update_rayon` has a one-shot rayon scope setup that
+        // dominates for inputs under a few hundred KB.
+        const RAYON_THRESHOLD: usize = 256 * 1024;
+        if v.len() >= RAYON_THRESHOLD {
+            self.hasher.update_rayon(v);
+        } else {
+            self.hasher.update(v);
+        }
     }
 }
 

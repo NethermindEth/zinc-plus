@@ -1326,6 +1326,60 @@ where
         Ok((hint, comm))
     }
 
+    /// Commit a **pre-paired** witness slice. Use this when the caller
+    /// has already applied [`pair_primary_witness_polys_pub`] to the
+    /// trace (e.g. in a benchmark fixture that amortises the pairing
+    /// across measurement iterations, or in a production driver that
+    /// runs witness generation once and many proofs from the same
+    /// trace).
+    ///
+    /// `paired_witness` is the output of `pair_primary_witness_polys_pub`,
+    /// i.e. the filtered + paired primary witness cols, ready to be
+    /// fed straight to `ZipPlus::commit_grouped` — no spec
+    /// translation, no `.clone()` of trace MLEs, no pairing pass.
+    /// Compared with [`Self::commit_f2_trace_with_virtuals`], this
+    /// shaves the ~50–150 ms at SHA-256 F_2 nvars=22 spent on
+    /// spec translation, MLE cloning, and `pair_trace_polys`.
+    pub fn commit_pre_paired_witness(
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        paired_witness: &[DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>],
+    ) -> Result<
+        (
+            ZipPlusHint<<Zt::BinaryZt as zip_plus::pcs::structs::ZipTypes>::Cw>,
+            ZipPlusCommitment,
+        ),
+        ZipError,
+    > {
+        ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit_grouped(
+            pp,
+            paired_witness,
+            LEAF_GROUP_SIZE,
+        )
+    }
+
+    /// `commit_and_absorb` variant for pre-paired callers. Mirrors
+    /// [`Self::commit_and_absorb_f2_trace_with_virtuals`] step-for-step
+    /// — root absorb followed by public-column absorb — so the
+    /// transcript state after this call is identical to the
+    /// trace-pairing variant.
+    pub fn commit_and_absorb_pre_paired_witness(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        paired_witness: &[DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    ) -> Result<
+        (
+            ZipPlusHint<<Zt::BinaryZt as zip_plus::pcs::structs::ZipTypes>::Cw>,
+            ZipPlusCommitment,
+        ),
+        ZipError,
+    > {
+        let (hint, comm) = Self::commit_pre_paired_witness(pp, paired_witness)?;
+        transcript.absorb_slice(&*comm.root);
+        crate::absorb_public_columns(transcript, public_binary_trace);
+        Ok((hint, comm))
+    }
+
     /// Verifier counterpart of [`Self::commit_and_absorb_f2_trace`]:
     /// absorbs a previously-published commitment into the verifier's
     /// transcript at the same point the prover did. Idempotent —
@@ -2523,6 +2577,91 @@ where
             pp,
             &hint,
             &trace.binary_poly[num_pub_bin..],
+            &subclaim.sumcheck_point,
+            &subclaim.alpha,
+            num_column_openings,
+        );
+
+        Ok(F2FullProof {
+            commitment,
+            uair: uair_proof,
+            open: open_proof,
+        })
+    }
+
+    /// `prove_f2_full_with_bit_ops` variant that takes a **pre-paired**
+    /// witness slice. Use this when pairing has been computed once
+    /// during witness generation (e.g. cached inside the prover
+    /// fixture) and amortised across multiple proves of the same
+    /// trace. The transcript trajectory is identical to
+    /// [`Self::prove_f2_full_with_bit_ops`] — same root absorb, same
+    /// public-column absorb, same downstream Fiat-Shamir state — so
+    /// proofs produced by either entry point verify against the same
+    /// `verify_f2_full_with_bit_ops`.
+    ///
+    /// `paired_primary_witness` must be the output of
+    /// [`pair_primary_witness_polys_pub`] applied to `trace.binary_poly`
+    /// with the same `bit_op_specs` / `k_specs` lists passed here; the
+    /// caller is responsible for keeping the two in sync (an
+    /// inconsistency would produce a commit over the wrong cols and
+    /// fail PCS spot-checks at verify time).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full_pre_paired_with_bit_ops(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        paired_primary_witness: &[DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>],
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        k_specs: &[F2KVirtualSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        num_column_openings: usize,
+    ) -> Result<F2FullProof<D>, F2ProveError<U>> {
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+
+        // Step 0: commit pre-paired witness + absorb root + public cols.
+        let (hint, commitment) = Self::commit_and_absorb_pre_paired_witness(
+            transcript,
+            pp,
+            paired_primary_witness,
+            &trace.binary_poly[..num_pub_bin],
+        )
+        .expect("F_2 pre-paired commit should succeed for a well-shaped trace");
+
+        // Steps 2-4: IC + α + sumcheck (unchanged from the trace-pairing variant).
+        let (uair_proof, subclaim) = Self::prove_f2_uair_with_groups(
+            transcript,
+            trace,
+            virtual_specs,
+            num_vars,
+            project_scalar,
+        )?;
+
+        // Step 7: γ-batched open over non-K witness slice (unchanged).
+        let num_k = k_specs.len();
+        let num_wit_bin_total = trace.binary_poly.len() - num_pub_bin;
+        let num_non_k = num_wit_bin_total - num_k;
+        let _ = bit_op_specs; // currently unused after the commit step;
+                              // kept in the signature to mirror the
+                              // trace-pairing variant.
+        for spec in k_specs {
+            let wit_local = spec
+                .col_idx
+                .checked_sub(num_pub_bin)
+                .expect("F2KVirtualSpec.col_idx must be in the witness range");
+            assert!(
+                wit_local >= num_non_k && wit_local < num_wit_bin_total,
+                "F2KVirtualSpec at witness-local idx {wit_local} is not in the \
+                 expected tail range [{num_non_k}, {num_wit_bin_total})",
+            );
+        }
+        let open_proof = Self::prove_f2_open(
+            transcript,
+            pp,
+            &hint,
+            &trace.binary_poly[num_pub_bin..num_pub_bin + num_non_k],
             &subclaim.sumcheck_point,
             &subclaim.alpha,
             num_column_openings,
