@@ -105,7 +105,11 @@ struct BenchF2Types<const D: usize>(PhantomData<()>);
 const REP: usize = 4;
 
 impl<const D: usize> F2ZincTypes<D> for BenchF2Types<D> {
-    type BinaryZt = BenchF2ZipTypes<D>;
+    // The commit-storage cell is `BinaryPoly<64>`: the protocol pairs
+    // two width-D trace cells into one packed storage cell to halve
+    // the cw_matrices count, transpose memory traffic, and Merkle
+    // leaf-hash input bytes.
+    type BinaryZt = BenchF2ZipTypes<64>;
     type BinaryLc = RaaF2Code<Self::BinaryZt, BenchRaaConfig, REP>;
 }
 
@@ -200,7 +204,11 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
     // is sparse for random inputs and compresses heavily; `merkle`
     // is essentially random Blake3 hashes (incompressible);
     // `headers` is small.
-    let bytes_per_cell = D.div_ceil(8);
+    // Each opened cell holds two paired trace columns (low / high u32
+    // halves), so its wire size is `2 · D.div_ceil(8)` bytes — same
+    // total bytes as the un-paired layout (`2 · 41/2 · 2048 · 4` =
+    // `41 · 2048 · 4`) but with half the cell count per opening.
+    let bytes_per_cell = 2 * D.div_ceil(8);
     let mut opened_values: Vec<u8> = Vec::new();
     let mut opened_merkle: Vec<u8> = Vec::new();
     let mut opened_headers: Vec<u8> = Vec::new();
@@ -499,6 +507,7 @@ fn bench_micro_prover_uair(
             black_box((hint, comm));
         });
     });
+
 
     // ---- a) F_2-native IC ----
     //
@@ -990,9 +999,9 @@ fn bench_micro_prover_open(
             let it = indices.par_iter();
             #[cfg(not(feature = "parallel"))]
             let it = indices.iter();
-            let all: Vec<(Vec<BinaryPoly<D>>, _)> = it
+            let all: Vec<(Vec<BinaryPoly<64>>, _)> = it
                 .map(|&column_idx| {
-                    let column_values: Vec<BinaryPoly<D>> =
+                    let column_values: Vec<BinaryPoly<64>> =
                         hint.cw_columns[column_idx].clone();
                     let merkle_proof = hint
                         .merkle_tree
@@ -1354,17 +1363,32 @@ fn bench_micro_verifier_open(
                     .verify(&proof.commitment.root, &opened.column_values, opened.column_idx)
                     .expect("Merkle verify");
 
-                // (b) γ-weighted encoding consistency.
+                // (b) γ-weighted encoding consistency. Lift each
+                //     packed cell straight from its raw u64 into two
+                //     `BinaryF2Poly<1>` halves without an intermediate
+                //     `BinaryPoly<D>` allocation. Mirrors the fast
+                //     path in `verify_f2_open`.
+                use zinc_poly::univariate::F2PackU64;
+                let paired_batch = num_cols.div_ceil(2);
+                let lo_mask: u64 = 0xFFFF_FFFFu64;
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
-                for g in 0..num_cols {
+                for p in 0..paired_batch {
+                    let g_lo = 2 * p;
+                    let g_hi = 2 * p + 1;
+                    let has_hi = g_hi < num_cols;
                     for i in 0..num_rows {
-                        let cell = lift_bp_to_f2_poly_1::<D>(
-                            &opened.column_values[g * num_rows + i],
-                        );
-                        let prod: BinaryF2Poly<4> =
-                            f2_poly_mul::<1, 3, 4>(&cell, &gamma_lifted[g]);
-                        weighted_col[i] += prod;
+                        let packed_bits = opened.column_values[p * num_rows + i].pack_u64();
+                        let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
+                        let prod_lo: BinaryF2Poly<4> =
+                            f2_poly_mul::<1, 3, 4>(&lo_lifted, &gamma_lifted[g_lo]);
+                        weighted_col[i] += prod_lo;
+                        if has_hi {
+                            let hi_lifted = BinaryF2Poly::<1>::from_words([packed_bits >> 32]);
+                            let prod_hi: BinaryF2Poly<4> =
+                                f2_poly_mul::<1, 3, 4>(&hi_lifted, &gamma_lifted[g_hi]);
+                            weighted_col[i] += prod_hi;
+                        }
                     }
                 }
                 let actual_at_j: BinaryF2Poly<7> =

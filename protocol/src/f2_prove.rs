@@ -215,22 +215,41 @@ where
     _Uair(std::marker::PhantomData<U>),
 }
 
+/// Storage cell width used inside the commitment layer.
+///
+/// Two consecutive trace columns of width `DEGREE_PLUS_ONE` are
+/// packed into one storage cell of width `PACKED_STORAGE_WIDTH`
+/// (low half = even column, high half = odd column). This halves
+/// the number of `cw_matrices`, the `transpose_to_columns` memory
+/// traffic, and the Merkle leaf-hash input bytes — the dominant
+/// costs of commit on F_2 traces. The pairing is F_2[X]-linear and
+/// transparent to the encoder / Merkle tree.
+///
+/// Fixed at `64` for the SHA-256 F_2 protocol (DEGREE_PLUS_ONE = 32).
+/// Other UAIRs would generalise via a separate `const STORAGE_WIDTH`
+/// generic; left fixed here while only this UAIR uses the F_2 path.
+pub const PACKED_STORAGE_WIDTH: usize = 64;
+
 /// All-`F_2` ZincTypes-like trait. Mirrors [`ZincTypes`](crate::ZincTypes)
 /// but drops the `ArbitraryZt`/`IntZt` lanes (an all-`F_2` UAIR has
 /// neither) and the prime-modulus / challenge / projecting-element
 /// machinery (`F_2[X]` doesn't get reduced via a random prime; the
 /// projecting element is sampled directly in `GF(2^192)`).
 pub trait F2ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
-    /// Zip+ types for the (single) binary polynomial trace columns.
+    /// Zip+ types for the (paired) binary polynomial trace columns.
+    /// Cells are `BinaryPoly<PACKED_STORAGE_WIDTH>`: the protocol
+    /// pairs two consecutive trace columns of width `DEGREE_PLUS_ONE`
+    /// into one storage cell before committing.
     type BinaryZt: zip_plus::pcs::structs::ZipTypes<
-            Eval = BinaryPoly<DEGREE_PLUS_ONE>,
-            Cw = BinaryPoly<DEGREE_PLUS_ONE>,
+            Eval = BinaryPoly<PACKED_STORAGE_WIDTH>,
+            Cw = BinaryPoly<PACKED_STORAGE_WIDTH>,
         >;
 
-    /// Linear code used in Zip+ for the binary polynomial trace
-    /// columns. Expected to be a flavour of
+    /// Linear code used in Zip+ for the (paired) binary polynomial
+    /// trace columns. Expected to be a flavour of
     /// [`RaaF2Code`](zip_plus::code::raa_f2::RaaF2Code) so that
-    /// codewords stay in `F_2[X]/<X^D>` (no integer widening).
+    /// codewords stay in `F_2[X]/<X^PACKED_STORAGE_WIDTH>` (no
+    /// integer widening).
     ///
     /// `F2LinearOpener` is additionally required so the F_2[X]
     /// MLE-opening protocol's proximity check can encode a width-`W`
@@ -998,7 +1017,11 @@ where
         ),
         ZipError,
     > {
-        ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit(pp, trace_binary_cols)
+        // Pair consecutive trace columns into packed storage cells of
+        // width `PACKED_STORAGE_WIDTH = 64`. Halves the cw_matrices count,
+        // transpose memory traffic, and Merkle-leaf input bytes.
+        let paired = pair_trace_polys::<D>(trace_binary_cols);
+        ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit(pp, &paired)
     }
 
     /// Convenience: commit + absorb the resulting commitment root
@@ -1108,15 +1131,98 @@ pub struct F2OpenProof<const D: usize> {
 }
 
 /// A single column opening: the column index, the concatenated
-/// codeword cells across all committed polynomials, and the Merkle
-/// proof tying those cells to the commitment root.
+/// codeword cells across all committed (paired) polynomials, and the
+/// Merkle proof tying those cells to the commitment root.
+///
+/// Cells are width-[`PACKED_STORAGE_WIDTH`] packed pairs: each holds
+/// two consecutive trace columns' codeword cells (low / high u32).
+/// `column_values.len() = paired_batch_size · num_rows`, where
+/// `paired_batch_size = ⌈primary_num_cols / 2⌉`. The verifier hashes
+/// these bytes directly for the Merkle leaf check and unpacks into
+/// `2 · paired_batch_size` per-original-column cells for the
+/// encoding-consistency / γ-discharge check.
 #[derive(Clone, Debug)]
 pub struct F2OpenedColumn<const D: usize> {
     pub column_idx: usize,
-    /// `batch_size · num_rows` entries — column `column_idx` of each
-    /// `cw_matrix` concatenated in commit order.
-    pub column_values: Vec<BinaryPoly<D>>,
+    /// `paired_batch_size · num_rows` packed cells.
+    pub column_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>>,
     pub merkle_proof: MerkleProof,
+    /// Marker: the trace-cell-width parameter the protocol is
+    /// configured with (used to validate D == PACKED_STORAGE_WIDTH / 2
+    /// when pairing).
+    #[doc(hidden)]
+    pub _trace_d: core::marker::PhantomData<[(); D]>,
+}
+
+/// Pack two `BinaryPoly<D>` cells (D ≤ 32) into one
+/// `BinaryPoly<PACKED_STORAGE_WIDTH>`: low u32 = `lo`, high u32 = `hi`.
+///
+/// The pairing is bit-parallel — XOR / permutation on the packed
+/// value separates the two halves coordinate-wise, so the F_2-linear
+/// encoder produces `(encode(lo), encode(hi))` packed identically.
+#[inline]
+pub fn pair_cells<const D: usize>(
+    lo: &BinaryPoly<D>,
+    hi: Option<&BinaryPoly<D>>,
+) -> BinaryPoly<PACKED_STORAGE_WIDTH> {
+    use zinc_poly::univariate::F2PackU64;
+    debug_assert!(D <= 32, "pair_cells requires trace D ≤ 32; got D = {D}");
+    debug_assert_eq!(
+        2 * D,
+        PACKED_STORAGE_WIDTH,
+        "pair_cells: trace D ({D}) must equal PACKED_STORAGE_WIDTH/2 ({})",
+        PACKED_STORAGE_WIDTH / 2,
+    );
+    let lo_u = lo.pack_u64() & 0xFFFF_FFFFu64;
+    let hi_u = hi.map(|h| h.pack_u64() & 0xFFFF_FFFFu64).unwrap_or(0);
+    BinaryPoly::<PACKED_STORAGE_WIDTH>::unpack_u64(lo_u | (hi_u << 32))
+}
+
+/// Split a packed `BinaryPoly<PACKED_STORAGE_WIDTH>` back into two
+/// `BinaryPoly<D>` cells (lo first, then hi).
+#[inline]
+pub fn unpair_cell<const D: usize>(
+    packed: &BinaryPoly<PACKED_STORAGE_WIDTH>,
+) -> (BinaryPoly<D>, BinaryPoly<D>) {
+    use zinc_poly::univariate::F2PackU64;
+    debug_assert!(D <= 32, "unpair_cell requires trace D ≤ 32; got D = {D}");
+    let p = packed.pack_u64();
+    let lo = BinaryPoly::<D>::unpack_u64(p & 0xFFFF_FFFFu64);
+    let hi = BinaryPoly::<D>::unpack_u64(p >> 32);
+    (lo, hi)
+}
+
+/// Pair an even-length-or-shorter slice of trace MLEs into half-as-many
+/// packed MLEs, each cell holding `(col_{2k}, col_{2k+1})` (low / high
+/// u32). If the input length is odd, the last packed MLE pairs the
+/// final column with zero in the high half.
+fn pair_trace_polys<const D: usize>(
+    trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> {
+    use zinc_poly::univariate::F2PackU64;
+    let n = trace_binary_cols.len();
+    let pairs = n.div_ceil(2);
+    let mut paired: Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> =
+        Vec::with_capacity(pairs);
+    for k in 0..pairs {
+        let lo_idx = 2 * k;
+        let hi_idx = 2 * k + 1;
+        let lo_poly = &trace_binary_cols[lo_idx];
+        let hi_poly_opt = trace_binary_cols.get(hi_idx);
+        let evals: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> = (0..lo_poly.evaluations.len())
+            .map(|i| {
+                let lo = &lo_poly.evaluations[i];
+                let hi = hi_poly_opt.map(|h| &h.evaluations[i]);
+                pair_cells::<D>(lo, hi)
+            })
+            .collect();
+        paired.push(DenseMultilinearExtension::from_evaluations_vec(
+            lo_poly.num_vars,
+            evals,
+            BinaryPoly::<PACKED_STORAGE_WIDTH>::unpack_u64(0),
+        ));
+    }
+    paired
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_open`].
@@ -1270,7 +1376,7 @@ where
     pub fn prove_f2_open(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-        commit_hint: &ZipPlusHint<BinaryPoly<D>>,
+        commit_hint: &ZipPlusHint<BinaryPoly<PACKED_STORAGE_WIDTH>>,
         trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
         sumcheck_point: &[BinaryFieldGF192],
         alpha: &BinaryFieldGF192,
@@ -1443,12 +1549,12 @@ where
         let opened_columns: Vec<F2OpenedColumn<D>> = cfg_iter!(column_indices)
             .map(|&column_idx| {
                 // Column-major mirror: `cw_columns[column_idx]` already
-                // holds `(matrix, row)` cells in the exact layout the
-                // verifier expects (`[m * num_rows + r]`). One clone
-                // replaces the previous `batch_size × num_rows`
-                // cache-line-strided reads through each
-                // `cw_matrix.as_rows()[..][column_idx]`.
-                let column_values: Vec<BinaryPoly<D>> =
+                // holds `(paired_matrix, row)` packed cells in the exact
+                // layout the verifier hashes for the Merkle leaf check
+                // (`[p * num_rows + r]`, paired_batch_size entries per
+                // row × num_rows rows). One clone replaces the previous
+                // `batch_size × num_rows` cache-line-strided reads.
+                let column_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> =
                     commit_hint.cw_columns[column_idx].clone();
                 let merkle_proof = commit_hint
                     .merkle_tree
@@ -1458,6 +1564,7 @@ where
                     column_idx,
                     column_values,
                     merkle_proof,
+                    _trace_d: core::marker::PhantomData,
                 }
             })
             .collect();
@@ -1611,7 +1718,19 @@ where
             .encode_f2_lin_open::<7>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
-        let expected_column_values_len = batch_size * num_rows;
+        // `batch_size` here is the *paired* batch size (the prover
+        // committed `paired_batch_size = ⌈num_cols / 2⌉` packed
+        // matrices). The Merkle leaf hashes `paired_batch_size *
+        // num_rows` packed cells; the γ-discharge unpacks each
+        // packed cell into two trace-cell-width halves.
+        let paired_batch_size = num_cols.div_ceil(2);
+        if batch_size != paired_batch_size {
+            return Err(F2OpenError::ColumnValuesLenMismatch {
+                expected: paired_batch_size,
+                got: batch_size,
+            });
+        }
+        let expected_column_values_len = paired_batch_size * num_rows;
 
         // The column-opening loop is the single dominant cost of
         // `verify_f2_open` (~656 F_2[X]<3>·<1> mults per opened
@@ -1643,7 +1762,8 @@ where
                     });
                 }
 
-                // (a) Merkle path
+                // (a) Merkle path — over the packed cells exactly as
+                //     committed.
                 opened
                     .merkle_proof
                     .verify(&commitment.root, &opened.column_values, opened.column_idx)
@@ -1652,7 +1772,16 @@ where
                         reason: format!("{e}"),
                     })?;
 
-                // (b) γ-weighted encoding consistency.
+                // (b) γ-weighted encoding consistency. Cells are
+                //     packed pairs (`BinaryPoly<PACKED_STORAGE_WIDTH>`):
+                //     lift each packed cell straight from its raw u64
+                //     into two `BinaryF2Poly<1>` halves (lo = col 2p,
+                //     hi = col 2p+1) without materialising an
+                //     intermediate `BinaryPoly<D>` — the canonical
+                //     bit-pattern lift on `BinaryU64Poly` is just a
+                //     u64 copy, and the iter-based
+                //     `lift_bp_to_f2_poly_1` would walk 64 bits per
+                //     packed cell to do the same work.
                 //
                 //  weighted_col[i] = Σ_g γ_g · cw_M^g[i, j]  ∈ F_2[X]<4>
                 //  actual_at_j     = Σ_i coeffs[i] · weighted_col[i]  ∈ F_2[X]<7>
@@ -1660,30 +1789,36 @@ where
                 //
                 // Inner-loop optimisation: `f2_poly_mul` is schoolbook
                 // and iterates over the SET bits of operand `a`. The
-                // lifted cell is a 32-bit `BinaryF2Poly<1>` (~16 set
-                // bits average), while γ is a 192-bit
+                // lifted half-cell is a ≤32-bit `BinaryF2Poly<1>`
+                // (~16 set bits average), while γ is a 192-bit
                 // `BinaryF2Poly<3>` (~96 set bits average). Passing
-                // the cell as `a` gives ~6× fewer XOR-shifts vs. the
-                // natural `γ · cell` ordering. The product is
+                // the cell half as `a` gives ~6× fewer XOR-shifts vs.
+                // the natural `γ · cell` ordering. The product is
                 // commutative in `F_2[X]`.
-                //
-                // Byte-tabulated γ-mults were attempted but regressed
-                // at ν=16: the 1.3 MB table (41 cols × 4 byte
-                // positions × 256 entries × 32 B) doesn't fit in L2,
-                // and L3-miss latency outweighed the saved
-                // schoolbook ops. Stayed with the on-the-fly mult.
+                use zinc_poly::univariate::F2PackU64;
+                let lo_mask: u64 = 0xFFFF_FFFFu64;
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
-                for g in 0..num_cols {
+                for p in 0..paired_batch_size {
+                    let g_lo = 2 * p;
+                    let g_hi = 2 * p + 1;
+                    let has_hi = g_hi < num_cols;
                     for i in 0..num_rows {
-                        let cell = zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
-                            &opened.column_values[g * num_rows + i],
-                        );
-                        let prod: BinaryF2Poly<4> =
+                        let packed_bits = opened.column_values[p * num_rows + i].pack_u64();
+                        let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
+                        let prod_lo: BinaryF2Poly<4> =
                             zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                &cell, &gamma[g],
+                                &lo_lifted, &gamma[g_lo],
                             );
-                        weighted_col[i] += prod;
+                        weighted_col[i] += prod_lo;
+                        if has_hi {
+                            let hi_lifted = BinaryF2Poly::<1>::from_words([packed_bits >> 32]);
+                            let prod_hi: BinaryF2Poly<4> =
+                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                    &hi_lifted, &gamma[g_hi],
+                                );
+                            weighted_col[i] += prod_hi;
+                        }
                     }
                 }
                 let actual_at_j: BinaryF2Poly<7> =
@@ -2435,7 +2570,8 @@ mod tests {
     const LOCAL_REP_FACTOR: usize = 4;
 
     impl<const D: usize> F2ZincTypes<D> for F2Types<D> {
-        type BinaryZt = LocalBinPolyF2ZipTypes<D>;
+        // BinaryZt stores paired trace cells (width 64).
+        type BinaryZt = LocalBinPolyF2ZipTypes<PACKED_STORAGE_WIDTH>;
         type BinaryLc = RaaF2Code<Self::BinaryZt, LocalRaaConfig, LOCAL_REP_FACTOR>;
     }
 
@@ -2494,7 +2630,8 @@ mod tests {
                 &trace.binary_poly,
             )
             .expect("commit should succeed");
-        assert_eq!(comm.batch_size, 2);
+        // 2 primary cols paired into 1 packed storage column.
+        assert_eq!(comm.batch_size, 2_usize.div_ceil(2));
 
         // Steps 2-4: IC + α + sumcheck (via the test shim, since
         // prove_f2_uair is gated on the F2ZincTypes bound which is
@@ -2943,7 +3080,8 @@ mod tests {
         .expect("prove_f2_full should succeed");
 
         // Shape sanity.
-        assert_eq!(proof.commitment.batch_size, 2);
+        // 2 primary cols paired into 1 packed storage column.
+        assert_eq!(proof.commitment.batch_size, 2_usize.div_ceil(2));
         assert_eq!(proof.uair.alpha, proof.uair.alpha); // alpha plumbed
         assert_eq!(proof.open.b_vector.len(), num_rows);
         assert_eq!(proof.open.combined_row.len(), row_len);
@@ -3172,7 +3310,8 @@ mod tests {
         .expect("prove_f2_full with virtual col should succeed");
 
         // Only the 2 primary cols are committed.
-        assert_eq!(proof.commitment.batch_size, 2);
+        // 2 primary cols paired into 1 packed storage column.
+        assert_eq!(proof.commitment.batch_size, 2_usize.div_ceil(2));
 
         // -- Verify (full pipeline) -------------------------------
         let mut verifier_transcript = Blake3Transcript::new();
@@ -3332,10 +3471,12 @@ mod tests {
         )
         .expect("prove_f2_full on SHA F_2 UAIR should succeed");
 
-        // Sanity-check the proof shape.
+        // Sanity-check the proof shape. `batch_size` is the paired
+        // batch size — half of NUM_BIN (rounded up), since two trace
+        // columns are packed into one storage cell at commit time.
         assert_eq!(
             proof.commitment.batch_size,
-            zinc_test_uair::sha256_f2::cols::NUM_BIN
+            zinc_test_uair::sha256_f2::cols::NUM_BIN.div_ceil(2)
         );
 
         // Verify on a fresh transcript.
