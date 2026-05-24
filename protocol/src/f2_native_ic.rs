@@ -107,19 +107,64 @@ impl F2RowExpr {
     /// Caller is responsible for ensuring the product never exceeds
     /// degree 63 — for the SHA F_2 UAIR this is enforced by the
     /// scalar-degree analysis (`cell × ρ_*` ≤ degree 61).
+    ///
+    /// Uses hardware PMULL (aarch64) / PCLMUL (x86_64) for one 64×64
+    /// carryless multiply, then keeps the low 64 bits. The previous
+    /// scalar bit-by-bit loop (`popcount(self.bits)` iterations of
+    /// shift+XOR) dominated the F_2-native IC's per-row constraint
+    /// evaluation at SHA scale; the hardware path drops it to ~1
+    /// instruction per call.
     #[inline]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn mul_truncated(self, rhs: Self) -> Self {
-        let mut acc: u64 = 0;
-        let mut a = self.bits;
-        while a != 0 {
-            let lo = a.trailing_zeros();
-            // `wrapping_shl` matches the truncation semantics: bits
-            // shifted past position 63 are discarded.
-            acc ^= rhs.bits.wrapping_shl(lo);
-            a &= a - 1;
+        let prod = clmul_64x64_truncated(self.bits, rhs.bits);
+        Self { bits: prod }
+    }
+}
+
+/// 64×64 → 64-bit carryless multiplication (low half only).
+///
+/// Mirror of the `clmul_64x64` helpers in `binary_gf128` / `binary_gf192`
+/// but specialised to the low-64-bit output — the high half is dropped
+/// because `mul_truncated` is `mod X^64` by contract.
+#[inline]
+fn clmul_64x64_truncated(a: u64, b: u64) -> u64 {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        unsafe {
+            use core::arch::aarch64::vmull_p64;
+            let prod: u128 = core::mem::transmute(vmull_p64(a, b));
+            prod as u64
         }
-        Self { bits: acc }
+    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    {
+        unsafe {
+            use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x};
+            let av = _mm_set_epi64x(0, a as i64);
+            let bv = _mm_set_epi64x(0, b as i64);
+            let prod: __m128i = _mm_clmulepi64_si128(av, bv, 0x00);
+            let bytes: [u64; 2] = core::mem::transmute(prod);
+            bytes[0]
+        }
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        all(target_arch = "x86_64", target_feature = "pclmulqdq"),
+    )))]
+    {
+        // Scalar fallback (kept identical to the original loop so the
+        // soft-CPU path stays bit-for-bit compatible). Iterates set
+        // bits of `a` and XORs `b << shift` into the truncated
+        // accumulator.
+        let mut acc: u64 = 0;
+        let mut a_word = a;
+        #[allow(clippy::arithmetic_side_effects)]
+        while a_word != 0 {
+            let lo = a_word.trailing_zeros();
+            acc ^= b.wrapping_shl(lo);
+            a_word &= a_word - 1;
+        }
+        acc
     }
 }
 
@@ -543,19 +588,18 @@ where
 
 /// Pack a `BinaryPoly<D>` into a u64 with bit `i` set iff coefficient
 /// `i` of the bit-poly is `1`. Requires `D ≤ 64`.
+///
+/// Delegates to [`zinc_poly::univariate::F2PackU64::pack_u64`]. Under
+/// the `simd` feature `BinaryPoly = BinaryU64Poly`, where storage IS
+/// already a `u64` and `pack_u64` is a single field read. The previous
+/// implementation iterated `D` times and rebuilt the same u64 bit by
+/// bit — at SHA F_2 scale (`num_rows × num_cols × D ≈ 86 M`
+/// iterations) it dominated Step 1 of `F2NativeIc::prove_combined`.
 #[inline]
 fn bp_to_u64<const D: usize>(
     p: &zinc_poly::univariate::binary::BinaryPoly<D>,
 ) -> u64 {
     debug_assert!(D <= 64);
-    let mut v: u64 = 0;
-    for (i, c) in p.iter().enumerate() {
-        if c.inner() {
-            #[allow(clippy::arithmetic_side_effects)]
-            {
-                v |= 1u64 << i;
-            }
-        }
-    }
-    v
+    use zinc_poly::univariate::F2PackU64;
+    p.pack_u64()
 }
