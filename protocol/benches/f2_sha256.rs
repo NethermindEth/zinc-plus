@@ -1096,6 +1096,47 @@ fn bench_micro_prover_uair(
             black_box(col_evals);
         });
     });
+
+    // ---- e) UAIR-FULL: the whole prove_f2_uair_with_groups ----
+    //
+    // Counterpart of summing UAIR-a + UAIR-b + UAIR-c + UAIR-d. The
+    // difference between this and the sum of the four kernel sub-
+    // benches is the per-iteration "wrap-up" work: trace-MLE clone
+    // into `extended_trace` (no virtuals here so it's just the copy),
+    // eq-table build, γ-weighted-col build, F2EqColRound1FastPath
+    // construction (with eq_table.clone + weighted_col.clone), and
+    // the per-col-eval transcript absorb after sumcheck. Without
+    // this entry the Micro sum understates the actual UAIR cost.
+    group.bench_function(BenchmarkId::new("UAIR-FULL", id), |bench| {
+        bench.iter_batched(
+            || {
+                let mut transcript = Blake3Transcript::new();
+                let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::commit_and_absorb_pre_paired_witness(
+                        &mut transcript,
+                        &fx.pp,
+                        &fx.paired_primary_witness,
+                        &fx.trace.binary_poly
+                            [..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+                    )
+                    .expect("commit");
+                transcript
+            },
+            |mut transcript| {
+                let (proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::prove_f2_uair_with_groups(
+                        &mut transcript,
+                        &fx.trace,
+                        &[] as &[F2VirtualBpSpec],
+                        fx.num_vars,
+                        sha256_f2_project_scalar::<R>,
+                    )
+                    .expect("UAIR prove should succeed");
+                black_box((proof, subclaim));
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1443,64 @@ fn bench_micro_prover_open(
                 .collect();
             black_box(all);
         });
+    });
+
+    // ---- h) Open-FULL: the whole prove_f2_open ----
+    //
+    // Counterpart of summing Open-a through Open-g. The difference
+    // accounts for `prove_f2_open`'s per-iteration wrap-up:
+    // γ_gf challenge draw, absorb (b', a') into the transcript,
+    // coeffs challenge draw, absorb combined_row, sample-and-Merkle-
+    // open the K column openings, and assemble the F2OpenProof
+    // struct. Without this entry the Micro sum understates the
+    // actual Open cost.
+    group.bench_function(BenchmarkId::new("Open-FULL", id), |bench| {
+        bench.iter_batched(
+            || {
+                // Rebuild a fresh (hint, subclaim, transcript) each
+                // iteration so prove_f2_open runs against
+                // protocol-consistent inputs and a fresh transcript
+                // state, mirroring how the e2e bench flows.
+                let mut t = Blake3Transcript::new();
+                let (h, _) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::commit_and_absorb_pre_paired_witness(
+                        &mut t,
+                        &fx.pp,
+                        &fx.paired_primary_witness,
+                        &fx.trace.binary_poly
+                            [..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+                    )
+                    .expect("commit");
+                let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::prove_f2_uair_with_groups(
+                        &mut t,
+                        &fx.trace,
+                        &[],
+                        fx.num_vars,
+                        sha256_f2_project_scalar::<R>,
+                    )
+                    .expect("UAIR");
+                (h, sub, t)
+            },
+            |(hint, subclaim, mut transcript)| {
+                let open_proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_open(
+                    &mut transcript,
+                    &fx.pp,
+                    &hint,
+                    &fx.trace.binary_poly[
+                        zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB..
+                        zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB
+                            + zinc_test_uair::sha256_f2::cols::NUM_BIN_WIT
+                            - sha_f2_k_virtuals().len()
+                    ],
+                    &subclaim.sumcheck_point,
+                    &subclaim.alpha,
+                    recommended_num_column_openings(REP),
+                );
+                black_box(open_proof);
+            },
+            criterion::BatchSize::PerIteration,
+        );
     });
 }
 
