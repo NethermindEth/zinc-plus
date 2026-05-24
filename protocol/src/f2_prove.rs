@@ -67,7 +67,7 @@ use zip_plus::{
     merkle::MerkleProof,
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusHint, ZipPlusParams},
 };
-use zinc_uair::{Uair, UairTrace, constraint_counter::count_constraints};
+use zinc_uair::{BitOp, Uair, UairTrace, constraint_counter::count_constraints};
 use zinc_utils::cfg_iter;
 
 #[cfg(feature = "parallel")]
@@ -175,6 +175,114 @@ pub struct F2VerifierSubclaim {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct F2VirtualBpSpec {
     pub primary_col_indices: Vec<usize>,
+}
+
+/// Spec for a **bit-op virtual** binary_poly column. The virtual
+/// column at protocol index `col_idx` in the full trace is the
+/// cell-wise [`BitOp`] applied to the cells of `source_col_idx`
+/// (which must be a *primary* — i.e. committed — column).
+///
+/// **Why this can skip commit / encoding / Merkle entirely**: the
+/// RAA-F_2 encoder is F_2[X]-linear at the cell level
+/// (`encode(a + b) = encode(a) + encode(b)`, plus the cells flow
+/// through repeats / perms / XOR-accumulates unchanged in their
+/// bit pattern). [`BitOp`] (`Rot(c)` / `ShiftR(c)`) is also
+/// F_2[X]-linear at the cell level — it permutes / zeroes
+/// bit positions within each cell. The two operations commute, so
+///
+/// ```text
+///   encode( op(source_row) )  =  op( encode(source_row) )
+/// ```
+///
+/// cell-wise. Equivalently: the codeword cell of the virtual
+/// column at `(row, codeword_col)` is just `op` applied to the
+/// source column's codeword cell at the same position. The
+/// prover never encodes or Merkle-commits the virtual column; per
+/// opening, the verifier derives the virtual column's cell from
+/// the source column's opened cell.
+///
+/// **Soundness**: both the source and the virtual column have
+/// their own MLE evaluation claims at `r*` (the verifier doesn't
+/// derive one from the other — they're proved separately via
+/// sumcheck + γ-batched discharge as for any committed column).
+/// The encoding-consistency check at sampled column positions
+/// closes the loop: the prover's claimed MLE evals are bound to
+/// the actual codeword cells, and for virtual columns the
+/// verifier reconstructs those cells from the source via `op`.
+/// A prover lying about the virtual column's MLE eval would fail
+/// the encoding-consistency check at some sampled position.
+///
+/// **What `BitOp` does NOT cover**: AND-style nonlinear ops
+/// (`W_UEF`, `W_UNEG_E_G`, `W_MAJ`) do not commute with the F_2-
+/// linear encoder; virtualising them needs a Hadamard-style
+/// product check on top, which is out of scope here.
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+pub struct F2BitOpVirtualSpec {
+    pub col_idx: usize,
+    pub source_col_idx: usize,
+    pub op: BitOp,
+}
+
+/// Apply a [`BitOp`] to the low 32 bits of `cell_bits` (treating it
+/// as a packed `BinaryPoly<32>`), returning the result in the low
+/// 32 bits of a `u64`. High 32 bits of the output are zero.
+///
+/// `BitOp::Rot(c)`: cyclic LEFT rotation by `c` of the low 32 bits
+/// (matches `BitOp`'s coefficient convention
+/// `coeffs_out[(i + c) mod 32] = coeffs_in[i]`).
+/// `BitOp::ShiftR(c)`: logical right shift by `c` of the low 32
+/// bits (zero-fill at top).
+#[inline]
+pub fn apply_bit_op_u32(cell_bits: u64, op: BitOp) -> u64 {
+    let v = cell_bits as u32;
+    let out = match op {
+        BitOp::Rot(c) => v.rotate_left(c),
+        BitOp::ShiftR(c) => v >> c,
+    };
+    out as u64
+}
+
+/// Compute the list of *primary* protocol column indices given the
+/// total column count and a slice of [`F2BitOpVirtualSpec`]s. The
+/// primary indices are sorted ascending and contain every index in
+/// `0..num_total_cols` that is **not** mentioned as a `col_idx` in
+/// any spec. Asserts that each virtual `col_idx` is in range and
+/// that no `col_idx` appears twice.
+pub fn primary_col_indices_from_virtuals(
+    num_total_cols: usize,
+    bit_op_specs: &[F2BitOpVirtualSpec],
+) -> Vec<usize> {
+    let mut is_virtual = vec![false; num_total_cols];
+    for spec in bit_op_specs {
+        assert!(
+            spec.col_idx < num_total_cols,
+            "F2BitOpVirtualSpec: col_idx {} out of range (num_total_cols = {})",
+            spec.col_idx,
+            num_total_cols,
+        );
+        assert!(
+            !is_virtual[spec.col_idx],
+            "F2BitOpVirtualSpec: col_idx {} listed twice",
+            spec.col_idx,
+        );
+        is_virtual[spec.col_idx] = true;
+    }
+    // Also assert each spec's source_col is primary (not itself
+    // virtual). The derivation chain has depth 1 by design.
+    for spec in bit_op_specs {
+        assert!(
+            spec.source_col_idx < num_total_cols,
+            "F2BitOpVirtualSpec: source_col_idx {} out of range",
+            spec.source_col_idx,
+        );
+        assert!(
+            !is_virtual[spec.source_col_idx],
+            "F2BitOpVirtualSpec: source_col_idx {} is itself virtual — \
+             cascaded bit-op virtuals are not supported",
+            spec.source_col_idx,
+        );
+    }
+    (0..num_total_cols).filter(|i| !is_virtual[*i]).collect()
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_uair`].
@@ -1031,12 +1139,43 @@ where
         ),
         ZipError,
     > {
-        // Pair consecutive trace columns into packed storage cells of
-        // width `PACKED_STORAGE_WIDTH = 64`. Halves the cw_matrices count,
-        // transpose memory traffic, and Merkle-leaf input bytes. Then
-        // group `LEAF_GROUP_SIZE` consecutive codeword columns per
-        // Merkle leaf so Blake3 setup amortises over the group.
-        let paired = pair_trace_polys::<D>(trace_binary_cols);
+        Self::commit_f2_trace_with_virtuals(pp, trace_binary_cols, &[])
+    }
+
+    /// Like [`Self::commit_f2_trace`] but skips committing the bit-op
+    /// virtual columns declared by `bit_op_specs`. Only primary
+    /// (non-virtual) columns are paired and committed. The full trace
+    /// (incl materialised virtuals) is still passed in so the
+    /// constraint system and downstream prove/open code can index by
+    /// the protocol's original column order; the spec is the bridge
+    /// between "the verifier sees N columns of MLE eval claims" and
+    /// "the prover only encodes & Merkle-commits the
+    /// `N - bit_op_specs.len()` primary columns".
+    ///
+    /// See [`F2BitOpVirtualSpec`] for the soundness argument.
+    pub fn commit_f2_trace_with_virtuals(
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+    ) -> Result<
+        (
+            ZipPlusHint<<Zt::BinaryZt as zip_plus::pcs::structs::ZipTypes>::Cw>,
+            ZipPlusCommitment,
+        ),
+        ZipError,
+    > {
+        // Filter to primary cols (those not declared virtual), then
+        // pair + commit. Order within the primary list follows the
+        // ascending protocol column index — stable so prove + verify
+        // agree on which storage matrix / lo-vs-hi slot each primary
+        // col lives in.
+        let primary_indices =
+            primary_col_indices_from_virtuals(trace_binary_cols.len(), bit_op_specs);
+        let primary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = primary_indices
+            .iter()
+            .map(|&i| trace_binary_cols[i].clone())
+            .collect();
+        let paired = pair_trace_polys::<D>(&primary_cols);
         ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit_grouped(pp, &paired, LEAF_GROUP_SIZE)
     }
 
@@ -1054,7 +1193,33 @@ where
         ),
         ZipError,
     > {
-        let (hint, comm) = Self::commit_f2_trace(pp, trace_binary_cols)?;
+        Self::commit_and_absorb_f2_trace_with_virtuals(
+            transcript,
+            pp,
+            trace_binary_cols,
+            &[],
+        )
+    }
+
+    /// `commit_and_absorb` variant aware of bit-op virtual columns.
+    /// See [`Self::commit_f2_trace_with_virtuals`].
+    pub fn commit_and_absorb_f2_trace_with_virtuals(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+    ) -> Result<
+        (
+            ZipPlusHint<<Zt::BinaryZt as zip_plus::pcs::structs::ZipTypes>::Cw>,
+            ZipPlusCommitment,
+        ),
+        ZipError,
+    > {
+        let (hint, comm) = Self::commit_f2_trace_with_virtuals(
+            pp,
+            trace_binary_cols,
+            bit_op_specs,
+        )?;
         // Mirror the integer protocol's commitment-absorption: write
         // the Merkle root bytes directly. (`ZipPlusCommitment`
         // implements `ConstTranscribable`; here we use the byte-level
@@ -1215,6 +1380,44 @@ pub fn pair_trace_polys_pub<const D: usize>(
     trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
 ) -> Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> {
     pair_trace_polys::<D>(trace_binary_cols)
+}
+
+/// Materialise the bit-op virtual columns from the primary trace.
+/// Each [`F2BitOpVirtualSpec`] produces one MLE column at the
+/// protocol index `col_idx`; the result is keyed by `col_idx` for
+/// easy splicing into the full trace order.
+///
+/// Used to verify the `trace_binary_cols` passed in by the caller
+/// is consistent with the declared specs (sanity test for protocol
+/// users that already materialised the full trace).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn materialize_f2_bit_op_virtual_cols<const D: usize>(
+    primary_or_full_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    bit_op_specs: &[F2BitOpVirtualSpec],
+) -> Vec<(usize, DenseMultilinearExtension<BinaryPoly<D>>)> {
+    use zinc_poly::univariate::F2PackU64;
+    bit_op_specs
+        .iter()
+        .map(|spec| {
+            let source = &primary_or_full_trace[spec.source_col_idx];
+            let evals: Vec<BinaryPoly<D>> = source
+                .evaluations
+                .iter()
+                .map(|c| {
+                    let v = apply_bit_op_u32(c.pack_u64(), spec.op);
+                    BinaryPoly::<D>::unpack_u64(v)
+                })
+                .collect();
+            (
+                spec.col_idx,
+                DenseMultilinearExtension::from_evaluations_vec(
+                    source.num_vars,
+                    evals,
+                    BinaryPoly::default(),
+                ),
+            )
+        })
+        .collect()
 }
 
 /// Pair an even-length-or-shorter slice of trace MLEs into half-as-many
@@ -1658,6 +1861,21 @@ where
         proof: &F2OpenProof<D>,
         subclaim: &F2VerifierSubclaim,
     ) -> Result<(), F2OpenError> {
+        Self::verify_f2_open_with_virtuals(transcript, pp, commitment, proof, subclaim, &[])
+    }
+
+    /// `verify_f2_open` variant aware of [`F2BitOpVirtualSpec`]s. The
+    /// `opened.column_values` slices carry primary cells only; the
+    /// verifier derives each virtual column's cell on the fly via the
+    /// declared bit-op on its source column's cell.
+    pub fn verify_f2_open_with_virtuals(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        commitment: &ZipPlusCommitment,
+        proof: &F2OpenProof<D>,
+        subclaim: &F2VerifierSubclaim,
+        bit_op_specs: &[F2BitOpVirtualSpec],
+    ) -> Result<(), F2OpenError> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
         // The F_2[X] open binds only the primary (committed) columns —
@@ -1784,22 +2002,35 @@ where
             .encode_f2_lin_open::<7>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
-        // `batch_size` here is the *paired* batch size (the prover
-        // committed `paired_batch_size = ⌈num_cols / 2⌉` packed
-        // matrices). Each Merkle leaf hashes `LEAF_GROUP_SIZE`
-        // consecutive codeword columns concatenated; per opening the
-        // prover sends all `LEAF_GROUP_SIZE` columns of the group so
-        // the verifier can recompute the leaf hash. The γ-discharge
-        // unpacks each packed cell into two trace-cell-width halves.
-        let paired_batch_size = num_cols.div_ceil(2);
-        if batch_size != paired_batch_size {
+        // The prover committed only *primary* (non-virtual) columns,
+        // paired two-at-a-time into storage matrices. The committed
+        // batch_size is therefore `⌈num_primary / 2⌉`, NOT
+        // `⌈num_cols / 2⌉`. Bit-op virtual columns share storage with
+        // their source column — their cells are derived on the fly
+        // from the source's primary cell via `apply_bit_op_u32`.
+        let primary_indices =
+            primary_col_indices_from_virtuals(num_cols, bit_op_specs);
+        let num_primary = primary_indices.len();
+        let paired_primary_count = num_primary.div_ceil(2);
+        if batch_size != paired_primary_count {
             return Err(F2OpenError::ColumnValuesLenMismatch {
-                expected: paired_batch_size,
+                expected: paired_primary_count,
                 got: batch_size,
             });
         }
-        let single_col_len = paired_batch_size * num_rows;
+        let single_col_len = paired_primary_count * num_rows;
         let expected_column_values_len = LEAF_GROUP_SIZE * single_col_len;
+
+        // Precompute the bit-op virtual specs grouped by source col
+        // index, so the encoding-consistency loop can fan out the
+        // virtual contributions in O(1) per primary cell.
+        // `virtuals_by_source[source_col_idx]` holds all virtual
+        // columns that derive from `source_col_idx`.
+        let mut virtuals_by_source: Vec<Vec<F2BitOpVirtualSpec>> =
+            vec![Vec::new(); num_cols];
+        for spec in bit_op_specs {
+            virtuals_by_source[spec.source_col_idx].push(*spec);
+        }
 
         // The column-opening loop is the single dominant cost of
         // `verify_f2_open` (~656 F_2[X]<3>·<1> mults per opened
@@ -1870,25 +2101,58 @@ where
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
-                for p in 0..paired_batch_size {
-                    let g_lo = 2 * p;
-                    let g_hi = 2 * p + 1;
-                    let has_hi = g_hi < num_cols;
+                for p in 0..paired_primary_count {
+                    // Recover the protocol col indices that paired into
+                    // storage slot `p`'s lo / hi halves. These are
+                    // primary cols by construction.
+                    let prot_col_lo = primary_indices[2 * p];
+                    let prot_col_hi_opt: Option<usize> =
+                        primary_indices.get(2 * p + 1).copied();
                     for i in 0..num_rows {
                         let packed_bits = local_col[p * num_rows + i].pack_u64();
-                        let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
+                        let lo_cell = packed_bits & lo_mask;
+
+                        // Primary lo contribution.
+                        let lo_lifted = BinaryF2Poly::<1>::from_words([lo_cell]);
                         let prod_lo: BinaryF2Poly<4> =
                             zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                &lo_lifted, &gamma[g_lo],
+                                &lo_lifted, &gamma[prot_col_lo],
                             );
                         weighted_col[i] += prod_lo;
-                        if has_hi {
-                            let hi_lifted = BinaryF2Poly::<1>::from_words([packed_bits >> 32]);
+
+                        // Virtual contributions sourced from this lo
+                        // primary cell.
+                        for spec in &virtuals_by_source[prot_col_lo] {
+                            let v_cell = apply_bit_op_u32(lo_cell, spec.op);
+                            let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
+                            let prod_v: BinaryF2Poly<4> =
+                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                    &v_lifted, &gamma[spec.col_idx],
+                                );
+                            weighted_col[i] += prod_v;
+                        }
+
+                        if let Some(prot_col_hi) = prot_col_hi_opt {
+                            let hi_cell = packed_bits >> 32;
+                            // Primary hi contribution.
+                            let hi_lifted = BinaryF2Poly::<1>::from_words([hi_cell]);
                             let prod_hi: BinaryF2Poly<4> =
                                 zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                    &hi_lifted, &gamma[g_hi],
+                                    &hi_lifted, &gamma[prot_col_hi],
                                 );
                             weighted_col[i] += prod_hi;
+
+                            // Virtual contributions sourced from this hi
+                            // primary cell.
+                            for spec in &virtuals_by_source[prot_col_hi] {
+                                let v_cell = apply_bit_op_u32(hi_cell, spec.op);
+                                let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
+                                let prod_v: BinaryF2Poly<4> =
+                                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                        &v_lifted, &gamma[spec.col_idx],
+                                    );
+                                weighted_col[i] += prod_v;
+                            }
                         }
                     }
                 }
@@ -1931,7 +2195,6 @@ where
     /// soundness — see
     /// [`zip_plus::code::raa_f2::recommended_num_column_openings`].
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn prove_f2_full(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -1941,19 +2204,55 @@ where
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
         num_column_openings: usize,
     ) -> Result<F2FullProof<D>, F2ProveError<U>> {
-        // Step 0: commit primary cols + absorb root. Virtual cols
-        // are *not* committed; they're materialised inside the
-        // IC + sumcheck and reconstructed by the verifier from
-        // `virtual_specs` + the primary col MLE evals at `r*`.
-        let (hint, commitment) =
-            Self::commit_and_absorb_f2_trace(transcript, pp, &trace.binary_poly)
-                .expect("F_2 commit should succeed for a well-shaped trace");
+        Self::prove_f2_full_with_bit_ops(
+            transcript,
+            pp,
+            trace,
+            virtual_specs,
+            &[],
+            num_vars,
+            project_scalar,
+            num_column_openings,
+        )
+    }
+
+    /// `prove_f2_full` variant aware of bit-op virtual columns.
+    /// `bit_op_specs` declares which trace columns are bit-op virtual
+    /// (derived from a primary source column via [`BitOp`] at the
+    /// cell level). Those columns are not committed; their codeword
+    /// cells are reconstructed by the verifier from the source's
+    /// opened cells. See [`F2BitOpVirtualSpec`] for the soundness
+    /// argument.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full_with_bit_ops(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        num_column_openings: usize,
+    ) -> Result<F2FullProof<D>, F2ProveError<U>> {
+        // Step 0: commit primary cols + absorb root. Bit-op virtual
+        // cols are skipped (their cells are derivable from the
+        // primary source). F_2 linear-combo virtual cols
+        // (`virtual_specs`) are materialised inline below for the
+        // IC + sumcheck pass and reconstructed by the verifier from
+        // primary col MLE evals at `r*`.
+        let (hint, commitment) = Self::commit_and_absorb_f2_trace_with_virtuals(
+            transcript,
+            pp,
+            &trace.binary_poly,
+            bit_op_specs,
+        )
+        .expect("F_2 commit should succeed for a well-shaped trace");
 
         // Steps 2-4: IC + α + sumcheck on the primary+virtual
-        // extended trace. Returns both the wire proof and a
-        // prover-side subclaim equivalent to what the verifier will
-        // derive (including `virtual_column_evals` for the virtual
-        // cols).
+        // extended trace. The trace passed in already has the
+        // materialised bit-op virtual columns (the caller built
+        // them); `virtual_specs` covers any additional XOR-style
+        // virtual cols.
         let (uair_proof, subclaim) = Self::prove_f2_uair_with_groups(
             transcript,
             trace,
@@ -1962,7 +2261,11 @@ where
             project_scalar,
         )?;
 
-        // Step 7: γ-batched open on the primary cols only.
+        // Step 7: γ-batched open. The `commit_hint`'s cw_matrices
+        // contain only primary columns (paired), so the cell-gather
+        // loop inside `prove_f2_open` naturally produces primary-only
+        // `column_values`. Bit-op virtual contributions are
+        // reconstructed verifier-side via `bit_op_specs`.
         let open_proof = Self::prove_f2_open(
             transcript,
             pp,
@@ -2001,10 +2304,39 @@ where
         IdealOverF: zinc_uair::ideal::Ideal
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
     {
+        Self::verify_f2_full_with_bit_ops(
+            transcript,
+            pp,
+            proof,
+            virtual_specs,
+            &[],
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+        )
+    }
+
+    /// `verify_f2_full` variant aware of bit-op virtual columns. See
+    /// [`Self::prove_f2_full_with_bit_ops`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_f2_full_with_bit_ops<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2FullProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        num_vars: usize,
+        num_primary_columns: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<F2VerifierSubclaim, F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+    {
         // Step 0: absorb the commitment exactly as the prover did.
         Self::absorb_commitment(transcript, &proof.commitment);
 
-        // Steps 2-4: IC + α + sumcheck verifier (with virtual-col
+        // Steps 2-4: IC + α + sumcheck verifier (with XOR-virtual-col
         // consistency check baked in).
         let subclaim = Self::verify_f2_uair(
             transcript,
@@ -2016,9 +2348,17 @@ where
         )
         .map_err(F2FullVerifyError::Uair)?;
 
-        // Step 7: γ-batched open verifier (primary cols only).
-        Self::verify_f2_open(transcript, pp, &proof.commitment, &proof.open, &subclaim)
-            .map_err(F2FullVerifyError::Open)?;
+        // Step 7: γ-batched open verifier — primary cols opened by
+        // Merkle, bit-op virtual cells derived from primary via `op`.
+        Self::verify_f2_open_with_virtuals(
+            transcript,
+            pp,
+            &proof.commitment,
+            &proof.open,
+            &subclaim,
+            bit_op_specs,
+        )
+        .map_err(F2FullVerifyError::Open)?;
 
         Ok(subclaim)
     }
