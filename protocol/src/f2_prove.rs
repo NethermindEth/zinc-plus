@@ -836,18 +836,29 @@ where
         let num_primary = trace.binary_poly.len();
 
         // -- Materialise virtual binary_poly columns ----------
-        // Appended after the primary witness columns; the UAIR's
-        // constraint code references them by their (extended)
-        // absolute index.
-        let virtual_cols =
-            materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
-        let mut all_binary_poly_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
-            trace.binary_poly.iter().cloned().collect();
-        all_binary_poly_cols.extend(virtual_cols);
-        let extended_trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
-            binary_poly: all_binary_poly_cols.into(),
-            arbitrary_poly: vec![].into(),
-            int: vec![].into(),
+        //
+        // XOR-virtual cols are appended after the primary witness
+        // cols; the UAIR's constraint code references them by their
+        // (extended) absolute index. When `virtual_specs.is_empty()`
+        // (the SHA-256 F_2 case, since BitOp and K virtuals don't
+        // go through this materialisation path), we skip the
+        // ~`num_cols × 2^num_vars × 4 B` trace clone entirely and
+        // hand the IC + projection loops a borrowed slice straight
+        // off `trace.binary_poly`. At nvars=22 that saves ~110 ms
+        // (35 cols × 16 MB ≈ 560 MB of memcpy).
+        let extended_binary_poly: std::borrow::Cow<
+            '_,
+            [DenseMultilinearExtension<BinaryPoly<D>>],
+        > = if virtual_specs.is_empty() {
+            std::borrow::Cow::Borrowed(&trace.binary_poly)
+        } else {
+            let virtual_cols =
+                materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
+            let mut all_binary_poly_cols: Vec<
+                DenseMultilinearExtension<BinaryPoly<D>>,
+            > = trace.binary_poly.iter().cloned().collect();
+            all_binary_poly_cols.extend(virtual_cols);
+            std::borrow::Cow::Owned(all_binary_poly_cols)
         };
 
         // -- Step 2: Ideal check over GF(2^192)[X] -----------------
@@ -898,7 +909,7 @@ where
         let (ic_proof, ic_state) = if effective_degree <= 1 {
             crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF192, _, D>(
                 transcript,
-                &extended_trace.binary_poly,
+                &extended_binary_poly,
                 num_constraints,
                 num_vars,
                 &field_cfg,
@@ -910,7 +921,7 @@ where
         } else {
             crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
                 transcript,
-                &extended_trace.binary_poly,
+                &extended_binary_poly,
                 num_constraints,
                 num_vars,
                 &field_cfg,
@@ -938,7 +949,7 @@ where
         // pattern isn't adversarial enough to recoup the cost. Revisit
         // if we benchmark on a UAIR whose cells are closer to uniform.
         let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> =
-            cfg_iter!(extended_trace.binary_poly)
+            cfg_iter!(&*extended_binary_poly)
                 .map(|col| {
                     let evals_at_alpha: Vec<BinaryFieldGF192> = col
                         .evaluations
@@ -984,9 +995,14 @@ where
         // See [`F2EqColRound1FastPath`]. The fast path also supplies
         // the post-round-1 folded MLEs so the framework can skip
         // the round-2 entry fold.
+        // Move the eq table and γ-weighted col into the fast path
+        // — both are large `Vec<<BinaryFieldGF192 as Field>::Inner>`s
+        // (~96 MB each at nvars=22) and the local bindings aren't
+        // used after this point, so cloning is pure waste. Saves
+        // ~75 ms at SHA-256 F_2 nvars=22.
         let fast_path = Box::new(F2EqColRound1FastPath {
-            eq_table: eq_r.evaluations.clone(),
-            weighted_col: weighted_col.evaluations.clone(),
+            eq_table: eq_r.evaluations,
+            weighted_col: weighted_col.evaluations,
             r_0: ic_state.evaluation_point[0],
             num_vars,
         });
