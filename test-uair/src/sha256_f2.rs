@@ -85,18 +85,32 @@ use zinc_utils::from_ref::FromRef;
 use crate::GenerateRandomTrace;
 
 // ---------------------------------------------------------------------------
-// Sha256F2Ideal — single `(X^32 − 1)` ideal used by C1–C11.
+// Sha256F2Ideal — the two F_2[X] ideals the UAIR's constraints live in.
 // ---------------------------------------------------------------------------
 
-/// The lone ideal used by the F_2[X] SHA-256 UAIR: `(X^32 − 1)` over
-/// the random extension field at sumcheck time. Carries no data — the
-/// generating polynomial is constant.
+/// Ideals used by the F_2[X] SHA-256 UAIR. Two variants:
+///
+/// - [`Cyclotomic`](Self::Cyclotomic) = `(X^32 − 1)`. Used by the
+///   rotation/shift constraints C1–C4: cyclic shifts on 32-bit cells
+///   are exactly `X·_ mod (X^32 − 1)`.
+/// - [`Power`](Self::Power) = `(X^32)`. Used by the modular-addition
+///   constraints C5–C11. Under `(X^32)` the addition equations cleanly
+///   express `target_i = a_i ⊕ b_i ⊕ k_{i-1}` for `i = 0..31` with the
+///   overflow bit `k_31` absorbed at bit 32 — no compensator column
+///   needed, and the carry word `k` becomes the simple shift
+///   `k = ShiftR(1)(target ⊕ Σ(other-summands))` (no cyclic wrap).
+///   See `protocol/src/f2_gkr_plan.md` for the derivation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sha256F2Ideal;
+pub enum Sha256F2Ideal {
+    /// `(X^32 − 1)` — for cyclic-shift / rotation constraints.
+    Cyclotomic,
+    /// `(X^32)` — for modular-addition constraints (no overflow wrap).
+    Power,
+}
 
 impl FromRef<Sha256F2Ideal> for Sha256F2Ideal {
-    fn from_ref(_: &Sha256F2Ideal) -> Self {
-        Sha256F2Ideal
+    fn from_ref(value: &Sha256F2Ideal) -> Self {
+        *value
     }
 }
 
@@ -110,18 +124,25 @@ where
         if value.coeffs.is_empty() {
             return Ok(true);
         }
-        let one = F::one_with_cfg(value.coeffs[0].cfg());
-        IdealOrZero::NonZero(RotationIdeal::<F, 32>::new(one)).contains(value)
+        let cfg = value.coeffs[0].cfg();
+        let root = match self {
+            Sha256F2Ideal::Cyclotomic => F::one_with_cfg(cfg),
+            Sha256F2Ideal::Power => F::zero_with_cfg(cfg),
+        };
+        IdealOrZero::NonZero(RotationIdeal::<F, 32>::new(root)).contains(value)
     }
 }
 
-/// Project an `IdealOrZero<Sha256F2Ideal>` into the verifier field
-/// (always the same `Sha256F2Ideal` since it carries no data). Drop
-/// the `Zero` arm; it is filtered upstream by the IC's per-constraint
-/// loop before any projection runs.
+/// Project an `IdealOrZero<Sha256F2Ideal>` into the verifier field —
+/// preserves the variant tag (the only data the ideal carries) and
+/// drops the `Zero` arm, which is filtered upstream by the IC's
+/// per-constraint loop before any projection runs.
 pub fn sha256_f2_project_ideal(ideal: &IdealOrZero<Sha256F2Ideal>) -> Sha256F2Ideal {
     match ideal {
-        IdealOrZero::NonZero(_) | IdealOrZero::Zero => Sha256F2Ideal,
+        IdealOrZero::NonZero(i) => *i,
+        // The `Zero` arm is filtered upstream; fall back to the
+        // cyclotomic ideal so this function is total.
+        IdealOrZero::Zero => Sha256F2Ideal::Cyclotomic,
     }
 }
 
@@ -331,8 +352,17 @@ where
         let down_w_t1_3 = &down.binary_poly[15];
         let down_w_t2_3 = &down.binary_poly[16];
 
-        // Ideals (just one for everything modular-flavoured).
-        let ideal_rot = ideal_from_ref(&Sha256F2Ideal);
+        // Ideals. `ideal_rot = (X^32 − 1)` for the rotation/shift
+        // constraints (C1–C4). `ideal_pow = (X^32)` for the modular-
+        // addition constraints (C5–C11): under this ideal the
+        // compensator columns are honest-zero and the carry word
+        // becomes a non-cyclic `ShiftR(1)` of the inputs — see
+        // `protocol/src/f2_gkr_plan.md`. Phase 2a switches the
+        // compensator-less feed-forward additions C10/C11 first;
+        // C5–C9 still use `ideal_rot` until the rest of the Phase 2a
+        // rollout swaps them too.
+        let ideal_rot = ideal_from_ref(&Sha256F2Ideal::Cyclotomic);
+        let ideal_pow = ideal_from_ref(&Sha256F2Ideal::Power);
 
         // Scalars.
         // rho polynomials — bit positions per Lemma 2.2 / 2.3.
@@ -397,7 +427,7 @@ where
             - &mbs(w_m_w2, &x_scalar).expect("X · m_W2 overflow")
             - &mbs(w_c_w, &x_scalar).expect("X · c_W overflow")
             + pa_c_w;
-        b.assert_in_ideal(lin_w, &ideal_rot);
+        b.assert_in_ideal(lin_w, &ideal_pow);
 
         // C6 (6-input T_1, anchor t = t' − 3): inputs are h[t'] (= e[t]
         // via the shift-register), Σ_1(e[t]), u_ef[t'], u_{¬e,g}[t'],
@@ -415,7 +445,7 @@ where
             - &mbs(w_m_t1_4, &x_scalar).expect("X · m_T1_4 overflow")
             - &mbs(w_c_t1, &x_scalar).expect("X · c_T1 overflow")
             + pa_c_t1;
-        b.assert_in_ideal(lin_t1, &ideal_rot);
+        b.assert_in_ideal(lin_t1, &ideal_pow);
 
         // C7 (2-input T_2, row-local):
         //   W_T2 − W_SIGMA0 − W_MAJ − X·c_T2 + PA_C_T2 ∈ (X^32 − 1).
@@ -424,7 +454,7 @@ where
             - w_maj
             - &mbs(w_c_t2, &x_scalar).expect("X · c_T2 overflow")
             + pa_c_t2;
-        b.assert_in_ideal(lin_t2, &ideal_rot);
+        b.assert_in_ideal(lin_t2, &ideal_pow);
 
         // C8 (a' = T_1 + T_2, anchor t = t' − 3, target a[t'+1] at
         // up.W_a^{↓4}):
@@ -434,7 +464,7 @@ where
             - down_w_t2_3
             - &mbs(w_c_a, &x_scalar).expect("X · c_A overflow")
             + pa_c_a;
-        b.assert_in_ideal(lin_a, &ideal_rot);
+        b.assert_in_ideal(lin_a, &ideal_pow);
 
         // C9 (e' = d + T_1, anchor t = t' − 3): d[t'] = a[t'−4] is
         // up.W_a; T_1[t'] is down.W_T1^{↓3}.
@@ -444,17 +474,22 @@ where
             - down_w_t1_3
             - &mbs(w_c_e, &x_scalar).expect("X · c_E overflow")
             + pa_c_e;
-        b.assert_in_ideal(lin_e, &ideal_rot);
+        b.assert_in_ideal(lin_e, &ideal_pow);
 
         // C10 (feed-forward a, junction-window): H_{i+1}[a] = H_i[a] +
-        // internal_final[a].
-        //   W_A^{↓4} − W_A − PA_A − X·c_FF_A + PA_C_FF_A ∈ (X^32 − 1).
+        // internal_final[a]. Phase-2a: uses `(X^32)` so the overflow
+        // bit `c_FF_A_31` falls off cleanly at bit 32 and PA_C_FF_A is
+        // honest-zero on every row. The `+ pa_c_ff_a` term stays in
+        // the expression for now (it XORs in zero, hence a no-op);
+        // removing the public column entirely happens once all C5–C11
+        // share the `Power` ideal.
+        //   W_A^{↓4} − W_A − PA_A − X·c_FF_A + PA_C_FF_A ∈ (X^32).
         let lin_ff_a = down_w_a_4.clone()
             - w_a
             - pa_a
             - &mbs(w_c_ff_a, &x_scalar).expect("X · c_FF_A overflow")
             + pa_c_ff_a;
-        b.assert_in_ideal(lin_ff_a, &ideal_rot);
+        b.assert_in_ideal(lin_ff_a, &ideal_pow);
 
         // C11 (feed-forward e):
         //   W_E^{↓4} − W_E − PA_E − X·c_FF_E + PA_C_FF_E ∈ (X^32 − 1).
@@ -463,7 +498,7 @@ where
             - pa_e
             - &mbs(w_c_ff_e, &x_scalar).expect("X · c_FF_E overflow")
             + pa_c_ff_e;
-        b.assert_in_ideal(lin_ff_e, &ideal_rot);
+        b.assert_in_ideal(lin_ff_e, &ideal_pow);
 
         // -----------------------------------------------------------
         // (D) Boundary pinning — C16, C17, C18.
@@ -742,7 +777,12 @@ where
                 debug_assert_eq!(s_final, w_vals[t]);
                 m_w1_vals[k] = m1;
                 m_w2_vals[k] = m2;
-                c_w_vals[k] = c_w;
+                // Mask bit 31: under `(X^32)` the carry word's top
+                // bit is unconstrained (it falls off at bit 32 of the
+                // LHS, absorbed by the ideal). Zeroing it makes
+                // `c_w = ShiftR(1)(target ⊕ a ⊕ b ⊕ comp)` an exact
+                // equality — required for Phase-2a virtualization.
+                c_w_vals[k] = c_w & 0x7FFF_FFFF;
             }
 
             // 3) Round constants.
@@ -808,7 +848,7 @@ where
                 m_t1_2_vals[k] = m2;
                 m_t1_3_vals[k] = m3;
                 m_t1_4_vals[k] = m4;
-                c_t1_vals[k] = c_t1;
+                c_t1_vals[k] = c_t1 & 0x7FFF_FFFF;
 
                 // T_2 = Σ_0(a) + Maj (2 inputs). W_T2 and W_C_T2 are
                 // both row-local at the SHA round t (= k+3): C7 is the
@@ -819,14 +859,14 @@ where
                 let c_t2_val = binius_carry(sig0_a, maj_t);
                 debug_assert_eq!(t2, sig0_a ^ maj_t ^ (c_t2_val << 1));
                 t2_vals[t] = t2;
-                c_t2_vals[t] = c_t2_val;
+                c_t2_vals[t] = c_t2_val & 0x7FFF_FFFF;
 
                 // a' = T_1 + T_2.
                 let a_next = t1.wrapping_add(t2);
                 let c_a_val = binius_carry(t1, t2);
                 debug_assert_eq!(a_next, t1 ^ t2 ^ (c_a_val << 1));
                 a_vals[k + 4] = a_next;
-                c_a_vals[k] = c_a_val;
+                c_a_vals[k] = c_a_val & 0x7FFF_FFFF;
 
                 // e' = d + T_1 = a[t-3] + T_1.
                 let d_val = a_vals[k];
@@ -834,7 +874,7 @@ where
                 let c_e_val = binius_carry(d_val, t1);
                 debug_assert_eq!(e_next, d_val ^ t1 ^ (c_e_val << 1));
                 e_vals[k + 4] = e_next;
-                c_e_vals[k] = c_e_val;
+                c_e_vals[k] = c_e_val & 0x7FFF_FFFF;
             }
 
             // 5) Feed-forward: H_{i+1} = internal_final + H_i.
@@ -862,8 +902,8 @@ where
                 );
                 h_a_next[j] = next_a;
                 h_e_next[j] = next_e;
-                c_ff_a_vals[start + 64 + j] = c_ff_a_val;
-                c_ff_e_vals[start + 64 + j] = c_ff_e_val;
+                c_ff_a_vals[start + 64 + j] = c_ff_a_val & 0x7FFF_FFFF;
+                c_ff_e_vals[start + 64 + j] = c_ff_e_val & 0x7FFF_FFFF;
             }
             h_a = h_a_next;
             h_e = h_e_next;
@@ -907,16 +947,20 @@ where
 
         // ---- Compensator columns (PA_C_*) ----------------------------
         // For each linear constraint Cℓ, the compensator carries the
-        // F_2[X] residue of the constraint's inner expression mod
-        // (X^32 − 1) on every row. On active rows with honest
-        // witnesses the residue is zero; on inactive rows it absorbs
-        // whatever the row's contents happen to imply, making the
-        // constraint hold unconditionally.
+        // F_2[X] residue of the constraint's inner expression mod the
+        // constraint's ideal on every row. On active rows with honest
+        // witnesses the residue is zero; on inactive boundary rows it
+        // absorbs whatever the row's contents happen to imply, making
+        // the constraint hold unconditionally.
         //
-        // Bit-poly XOR is exactly the F_2[X] sum in degree-<32 form.
-        // Terms multiplied by `X` (carries, majorities) get rotated:
-        // `X · p (mod X^32 − 1) = rotl1(p)`.
-        let rotl1 = |x: u32| -> u32 { (x << 1) | (x >> 31) };
+        // Phase 2a: C5–C11 use `Sha256F2Ideal::Power = (X^32)`, so the
+        // `X · _` terms (carries, majorities) shift NON-cyclically:
+        // `shiftl1(p) = p << 1`, with `p_31` falling off into bit 32
+        // (absorbed by the ideal's slack). The cyclic `rotl1` is no
+        // longer used here; kept-and-unused only to flag the change in
+        // diffs.
+        let _rotl1_legacy = |x: u32| -> u32 { (x << 1) | (x >> 31) };
+        let shiftl1 = |x: u32| -> u32 { x << 1 };
         let xor4 = |a: u32, b: u32, c: u32, d: u32| -> u32 { a ^ b ^ c ^ d };
 
         // C5 inner at row k (= 0 on schedule-active rows when honest):
@@ -935,9 +979,9 @@ where
                     load(&sig0_vals, k + 1),
                     load(&w_vals, k + 9),
                 ) ^ load(&sig1_vals, k + 14)
-                    ^ rotl1(load(&m_w1_vals, k))
-                    ^ rotl1(load(&m_w2_vals, k))
-                    ^ rotl1(load(&c_w_vals, k));
+                    ^ shiftl1(load(&m_w1_vals, k))
+                    ^ shiftl1(load(&m_w2_vals, k))
+                    ^ shiftl1(load(&c_w_vals, k));
                 inner
             })
             .collect();
@@ -956,11 +1000,11 @@ where
                     ^ load(&u_neg_e_g_vals, k + 3)
                     ^ load(&k_vals, k + 3)
                     ^ load(&w_vals, k + 3)
-                    ^ rotl1(load(&m_t1_1_vals, k))
-                    ^ rotl1(load(&m_t1_2_vals, k))
-                    ^ rotl1(load(&m_t1_3_vals, k))
-                    ^ rotl1(load(&m_t1_4_vals, k))
-                    ^ rotl1(load(&c_t1_vals, k))
+                    ^ shiftl1(load(&m_t1_1_vals, k))
+                    ^ shiftl1(load(&m_t1_2_vals, k))
+                    ^ shiftl1(load(&m_t1_3_vals, k))
+                    ^ shiftl1(load(&m_t1_4_vals, k))
+                    ^ shiftl1(load(&c_t1_vals, k))
             })
             .collect();
 
@@ -971,7 +1015,7 @@ where
                 load(&t2_vals, k)
                     ^ load(&sigma0_vals, k)
                     ^ load(&maj_vals, k)
-                    ^ rotl1(load(&c_t2_vals, k))
+                    ^ shiftl1(load(&c_t2_vals, k))
             })
             .collect();
 
@@ -982,7 +1026,7 @@ where
                 load(&a_vals, k + 4)
                     ^ load(&t1_vals, k + 3)
                     ^ load(&t2_vals, k + 3)
-                    ^ rotl1(load(&c_a_vals, k))
+                    ^ shiftl1(load(&c_a_vals, k))
             })
             .collect();
 
@@ -993,18 +1037,17 @@ where
                 load(&e_vals, k + 4)
                     ^ load(&a_vals, k)
                     ^ load(&t1_vals, k + 3)
-                    ^ rotl1(load(&c_e_vals, k))
+                    ^ shiftl1(load(&c_e_vals, k))
             })
             .collect();
 
-        // C10 inner at row k:
-        //   inner_FF_A = W_a[k+4] ^ W_a[k] ^ PA_A[k] ^ rotl1(c_FF_A).
+        // C10 under `Sha256F2Ideal::Power` = `(X^32)`.
         let pa_c_ff_a_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&a_vals, k + 4)
                     ^ load(&a_vals, k)
                     ^ load(&pa_a_vals, k)
-                    ^ rotl1(load(&c_ff_a_vals, k))
+                    ^ shiftl1(load(&c_ff_a_vals, k))
             })
             .collect();
 
@@ -1014,7 +1057,7 @@ where
                 load(&e_vals, k + 4)
                     ^ load(&e_vals, k)
                     ^ load(&pa_e_vals, k)
-                    ^ rotl1(load(&c_ff_e_vals, k))
+                    ^ shiftl1(load(&c_ff_e_vals, k))
             })
             .collect();
 

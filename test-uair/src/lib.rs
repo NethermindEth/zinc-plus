@@ -6,6 +6,7 @@ pub mod ecdsa_doubling;
 mod generate_trace;
 pub mod sha256;
 pub mod sha256_f2;
+pub mod sha256_f2_prefix;
 pub mod sha_ecdsa;
 
 pub use ecdsa::EcdsaUair;

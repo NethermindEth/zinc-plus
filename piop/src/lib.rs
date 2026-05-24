@@ -1,4 +1,5 @@
 pub mod combined_poly_resolver;
+pub mod gkr;
 pub mod ideal_check;
 pub mod lookup;
 pub mod multipoint_eval;
