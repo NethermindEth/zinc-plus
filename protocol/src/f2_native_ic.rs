@@ -62,21 +62,21 @@ use std::hash::Hash;
 use std::iter::{Product, Sum};
 use std::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
 
-use crypto_primitives::Semiring;
-use num_traits::{CheckedAdd, CheckedMul, CheckedSub, One, Zero};
+use crypto_primitives::{PrimeField, Semiring};
+use num_traits::{CheckedAdd, CheckedMul, CheckedSub, ConstZero, One, Zero};
 use zinc_piop::ideal_check::{Proof as IcProof, ProverState as IcProverState};
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
     ConstraintBuilder, Uair,
-    ideal::{Ideal, IdealCheck, IdealCheckError},
+    ideal::{Ideal, IdealCheck, IdealCheckError, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use zinc_utils::cfg_into_iter;
+use zinc_utils::{cfg_into_iter, cfg_iter};
 
 // ---------------------------------------------------------------------------
 // F2RowExpr: 64-bit bit-polynomial wrapper used as the IC builder's
@@ -583,6 +583,241 @@ where
             },
             IcProverState { evaluation_point },
         )
+    }
+
+    /// MLE-first IC variant for UAIRs whose effective max degree is 1
+    /// (i.e. every non-zero-ideal constraint is linear in the trace
+    /// MLEs). Mirrors the integer protocol's
+    /// `IdealCheckProtocol::prove_linear` but keeps the per-cell side
+    /// in F_2-bit-packed form — no per-row constraint evaluation, no
+    /// `F_2[X]<64>` arithmetic per row.
+    ///
+    /// ## Why this is faster than `prove_combined`
+    ///
+    /// `prove_combined` runs `U::constrain_general` once per row over
+    /// the whole hypercube — `2^num_vars` invocations × O(num_constraints)
+    /// per row. For SHA-256 F_2 at `num_vars = 16` that's ~3.3M
+    /// constraint-expression evaluations, dominating the IC time.
+    ///
+    /// For UAIRs with linear constraints,
+    ///   `Σ_{i} eq[i] · expr(row_i_cells) = expr(Σ_i eq[i] · row_i_cells)`
+    /// because `expr` is linear in the trace MLEs. So we can build
+    /// per-column MLE-evaluated polynomials once (one
+    /// `DynamicPolynomialF<F>` per column, D coefficients each) and
+    /// call `U::constrain_general` exactly ONCE on those column-level
+    /// values. The 3.3M expression evaluations collapse to ~50.
+    ///
+    /// Per-column MLE-eval cost: for each cell, the d-th coefficient
+    /// is `Σ_{i: bit d of cell_i is set} eq[i]`. Bit-pack u64 input →
+    /// XOR-only accumulation of GF(2^192) elements into the
+    /// coefficient slots. The d-th bit's contributions are summed
+    /// into `coeffs[d]` — same shape as the existing Step 2 in
+    /// `prove_combined`, but driven by trace bits rather than
+    /// per-row constraint output bits.
+    ///
+    /// ## Pre-conditions
+    ///
+    /// Caller is responsible for ensuring that
+    /// `count_effective_max_degree::<U>() == 1` (i.e. all non-zero-ideal
+    /// constraints are degree-1 in trace MLEs); routing a higher-degree
+    /// UAIR through this path produces meaningless combined polynomials.
+    /// The dispatch in `prove_f2_uair_with_groups` enforces that gate.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub fn prove_linear<F, ProjectScalar, const D: usize>(
+        transcript: &mut impl Transcript,
+        binary_trace: &[zinc_poly::mle::DenseMultilinearExtension<
+            zinc_poly::univariate::binary::BinaryPoly<D>,
+        >],
+        num_constraints: usize,
+        num_vars: usize,
+        field_cfg: &F::Config,
+        project_scalar: ProjectScalar,
+    ) -> (IcProof<F>, IcProverState<F>)
+    where
+        F: InnerTransparentField + Send + Sync,
+        F::Inner: ConstTranscribable + Send + Sync,
+        F::Modulus: ConstTranscribable,
+        ProjectScalar: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    {
+        const W_BITS: usize = 64;
+        debug_assert!(
+            D <= W_BITS,
+            "F2NativeIc::prove_linear: D ({D}) must fit in 64 bits",
+        );
+
+        let num_cols = binary_trace.len();
+        let num_rows = if num_cols > 0 {
+            binary_trace[0].evaluations.len()
+        } else {
+            0
+        };
+
+        // Sample IC eval point.
+        let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, field_cfg);
+        let eq_table: Vec<F> =
+            zinc_poly::utils::build_eq_x_r_vec(&evaluation_point, field_cfg)
+                .expect("eq-table build succeeds for num_vars > 0");
+
+        let sig = U::signature();
+        let total_cols_layout = sig.total_cols().as_column_layout().clone();
+        let down_cols_layout = sig.down_cols().as_column_layout().clone();
+        let bit_op_count = sig.bit_op_down_count();
+
+        // Number of rows that contribute to the MLE; the last row is
+        // explicitly zero-padded to match `prove_combined` (and the
+        // integer protocol's `evaluate_combined_polynomials`).
+        let usable_rows = num_rows.saturating_sub(1);
+
+        // ---- Per-column MLE-evals (up_evals[g] ∈ F[X]<D>) ----
+        //
+        // coeffs[d] = Σ_{i in [0, num_rows-1)} (bit d of cell[g, i]) · eq[i].
+        // Parallelise across columns; per column we walk usable_rows
+        // cells and XOR-add `eq[row]` into `coeffs[trailing_zeros(bits)]`
+        // for each set bit.
+        let up_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(binary_trace)
+            .map(|col| {
+                let mut coeffs: Vec<F> = (0..D)
+                    .map(|_| F::zero_with_cfg(field_cfg))
+                    .collect();
+                for row in 0..usable_rows {
+                    let cell = &col.evaluations[row];
+                    let mut bits = bp_to_u64::<D>(cell);
+                    while bits != 0 {
+                        let d = bits.trailing_zeros() as usize;
+                        #[allow(clippy::arithmetic_side_effects)]
+                        {
+                            bits &= bits - 1;
+                        }
+                        coeffs[d] += &eq_table[row];
+                    }
+                }
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect();
+
+        // ---- Shifted columns (down_evals) ----
+        //
+        // `down_col[i] = source_col[i + s]` for `i in [0, num_rows-1)`
+        // AND `i + s < num_rows`, else zero (mirrors the integer
+        // protocol's `eval_coeff_mle` zero-pad). Reindex by `j = i + s`:
+        //   coeffs[d] = Σ_{j in [s, max_j)} (bit d of source[j]) · eq[j - s]
+        // where `max_j = min(num_rows, s + num_rows - 1)`.
+        let shifts = sig.shifts();
+        let mut down_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(shifts)
+            .map(|spec| {
+                let source = &binary_trace[spec.source_col()];
+                let s = spec.shift_amount();
+                let mut coeffs: Vec<F> = (0..D)
+                    .map(|_| F::zero_with_cfg(field_cfg))
+                    .collect();
+                let max_j = std::cmp::min(
+                    num_rows,
+                    s.saturating_add(usable_rows),
+                );
+                for j in s..max_j {
+                    let cell = &source.evaluations[j];
+                    let mut bits = bp_to_u64::<D>(cell);
+                    while bits != 0 {
+                        let d = bits.trailing_zeros() as usize;
+                        #[allow(clippy::arithmetic_side_effects)]
+                        {
+                            bits &= bits - 1;
+                        }
+                        #[allow(clippy::arithmetic_side_effects)]
+                        let i = j - s;
+                        coeffs[d] += &eq_table[i];
+                    }
+                }
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect();
+
+        // Bit-op virtual columns: not supported in this F_2-native
+        // path yet (the SHA F_2 UAIR has zero by design); pad with
+        // zero polynomials so the down-row layout indexes correctly.
+        for _ in 0..bit_op_count {
+            down_evals.push(DynamicPolynomialF::ZERO);
+        }
+
+        // ---- Run constraints ONCE on column-evaluated values ----
+        //
+        // The constraint expressions are linear in the trace MLEs by
+        // pre-condition, so this single invocation produces each
+        // constraint's combined polynomial directly.
+        let project_local =
+            |scalar: &U::Scalar| -> DynamicPolynomialF<F> { project_scalar(scalar, field_cfg) };
+        let mbs_op = |expr: &DynamicPolynomialF<F>, scalar: &U::Scalar|
+         -> Option<DynamicPolynomialF<F>> {
+            let s_projected = project_scalar(scalar, field_cfg);
+            Some(expr.clone() * s_projected)
+        };
+        let ideal_from_ref = |_i: &U::Ideal| -> ImpossibleIdeal { ImpossibleIdeal };
+
+        let mut builder = F2NativeMleFirstBuilder::<F>::new(num_constraints);
+        let up_row = zinc_uair::TraceRow::from_slice_with_layout(
+            &up_evals,
+            &total_cols_layout,
+        );
+        let down_row = zinc_uair::TraceRow::from_slice_with_layout_and_bit_op(
+            &down_evals,
+            &down_cols_layout,
+            bit_op_count,
+        );
+        U::constrain_general(
+            &mut builder,
+            up_row,
+            down_row,
+            project_local,
+            mbs_op,
+            ideal_from_ref,
+        );
+
+        let mut combined_mle_values = builder.combined_evaluations;
+        combined_mle_values.iter_mut().for_each(|v| v.trim());
+
+        // Match the prove_combined / integer prove_linear absorb shape
+        // exactly: same trimmed coeff vectors → same transcript state.
+        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        combined_mle_values.iter().for_each(|v| {
+            transcript.absorb_random_field_slice(&v.coeffs, &mut transcription_buf);
+        });
+
+        (
+            IcProof { combined_mle_values },
+            IcProverState { evaluation_point },
+        )
+    }
+}
+
+/// Constraint builder used by [`F2NativeIc::prove_linear`].
+///
+/// Mirrors `zinc_piop::ideal_check::combined_poly_builder::CombinedPolyRowBuilder`
+/// (which is module-private). Both `assert_in_ideal` and `assert_zero`
+/// just collect the expression — for an honest prover, zero-ideal
+/// constraints will already evaluate to the zero polynomial through
+/// `U::constrain_general` and the per-constraint absorption matches.
+struct F2NativeMleFirstBuilder<F: PrimeField> {
+    combined_evaluations: Vec<DynamicPolynomialF<F>>,
+}
+
+impl<F: PrimeField> F2NativeMleFirstBuilder<F> {
+    fn new(num_constraints: usize) -> Self {
+        Self {
+            combined_evaluations: Vec::with_capacity(num_constraints),
+        }
+    }
+}
+
+impl<F: PrimeField> ConstraintBuilder for F2NativeMleFirstBuilder<F> {
+    type Expr = DynamicPolynomialF<F>;
+    type Ideal = ImpossibleIdeal;
+
+    fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
+        self.combined_evaluations.push(expr);
+    }
+
+    fn assert_zero(&mut self, expr: Self::Expr) {
+        self.combined_evaluations.push(expr);
     }
 }
 

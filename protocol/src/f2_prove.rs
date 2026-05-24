@@ -788,7 +788,27 @@ where
                 bits
             };
 
-        let (ic_proof, ic_state) =
+        // Dispatch: MLE-first lane when every non-zero-ideal
+        // constraint is degree-1 in the trace MLEs (collapses ~3.3M
+        // per-row constraint evaluations down to ~50 column-level
+        // ones); otherwise the row-major Combined path. The check
+        // is a `const`-fn-ish UAIR property — no runtime cost.
+        // SHA-256 F_2 is degree-1 and takes the MLE-first lane; the
+        // TinyF2Uair test fixtures may not be, hence the gate.
+        let effective_degree = zinc_uair::degree_counter::count_effective_max_degree::<U>();
+        let (ic_proof, ic_state) = if effective_degree <= 1 {
+            crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF192, _, D>(
+                transcript,
+                &extended_trace.binary_poly,
+                num_constraints,
+                num_vars,
+                &field_cfg,
+                |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF192> {
+                    let _ = cfg;
+                    project_scalar(s)
+                },
+            )
+        } else {
             crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
                 transcript,
                 &extended_trace.binary_poly,
@@ -796,7 +816,8 @@ where
                 num_vars,
                 &field_cfg,
                 project_scalar_to_bits,
-            );
+            )
+        };
 
         // -- Step 3: Evaluation projection (X = α) -----------------
         let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
