@@ -11,6 +11,8 @@ use crate::{
 };
 use crypto_primitives::DenseRowMatrix;
 use zinc_utils::cfg_iter;
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+use zinc_transcript::traits::ConstTranscribable;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -109,7 +111,12 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         )?;
 
         let expected_num_evals = pp.num_rows * row_len;
-        let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys).map(|poly| {
+        let codeword_len = pp.linear_code.codeword_len();
+
+        // Per-poly assert that the polynomial has the right shape for
+        // the configured matrix. Pulled out so both the GPU-inline and
+        // CPU-fused branches use the same check.
+        let check_poly = |poly: &DenseMultilinearExtension<Zt::Eval>| {
             assert_eq!(
                 poly.len(),
                 expected_num_evals,
@@ -117,24 +124,115 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                 poly.len(),
                 expected_num_evals
             );
+        };
 
-            Self::encode_rows(pp, poly)
-        }).collect();
+        // With `metal_gpu` enabled on macOS, the leaf hash is offloaded
+        // to a Metal Blake3 kernel for large enough shapes, and the
+        // leaf-slab is packed INLINE — each rayon worker scatters its
+        // matrix's contribution into the slab right after `encode_rows`
+        // returns, while that matrix's data is still hot in the
+        // worker's L1/L2. This avoids the dedicated pack pass that
+        // [`MerkleTree::new_from_row_major_grouped_gpu`] would otherwise
+        // do (it walks every cell of `cw_matrices` a second time).
+        //
+        // Two guards route back to the CPU fused path:
+        //   * `num_leaves < GPU_MIN_LEAVES`: GPU launch overhead
+        //     (~500 µs warm) exceeds the CPU work for tiny commits.
+        //     The SHA-256 F_2 bench at nvars=9 has 32 leaves and CPU
+        //     finishes in ~190 µs total, vs ~610 µs for GPU.
+        //   * `leaf_bytes > 64 KB`: kernel's multi-chunk path only
+        //     handles ≤ 64 chunks per leaf.
+        //
+        // Both paths produce the same Merkle root — verified by
+        // `merkle::tests::gpu_row_major_grouped_root_matches_cpu` and
+        // `merkle::tests::gpu_inline_packed_root_matches_cpu`.
+        #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+        let (cw_matrices, merkle_tree) = {
+            use crate::merkle::GpuSlabPtr;
+            const GPU_MIN_LEAVES: usize = 256;
+            let num_leaves = codeword_len / leaf_group_size;
+            let elem_bytes = <Zt::Cw as ConstTranscribable>::NUM_BYTES;
+            let leaf_bytes =
+                leaf_group_size * batch_size * pp.num_rows * elem_bytes;
+            let go_gpu = num_leaves >= GPU_MIN_LEAVES && leaf_bytes <= 64 * 1024;
 
-        // Fused leaf hashing: build the Merkle tree directly from the
-        // row-major `cw_matrices`, hashing each leaf via small
-        // L1-resident scratch buffers. Avoids the ~44 MB
-        // write-allocate-amplified scatter that `transpose_to_columns`
-        // does when codeword_len is large (tall-thin codeword shape),
-        // and skips the second pass over the column slab that the
-        // Merkle hash would otherwise do. Callers wanting `cw_columns`
-        // build it lazily from `cw_matrices`.
-        let merkle_tree = MerkleTree::new_from_row_major_grouped(
-            &cw_matrices,
-            pp.num_rows,
-            pp.linear_code.codeword_len(),
-            leaf_group_size,
-        );
+            if go_gpu {
+                let mut slab = vec![0u8; num_leaves * leaf_bytes];
+                let slab_ptr = GpuSlabPtr {
+                    ptr: slab.as_mut_ptr(),
+                    len: slab.len(),
+                };
+                let num_rows = pp.num_rows;
+                let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys)
+                    .enumerate()
+                    .map(|(m_idx, poly)| {
+                        check_poly(poly);
+                        let mat = Self::encode_rows(pp, poly);
+                        // SAFETY: each `m_idx` ∈ 0..batch_size writes to
+                        // a disjoint byte sub-range within every leaf
+                        // (see `scatter_matrix_into_gpu_slab` contract),
+                        // so concurrent rayon workers don't race.
+                        unsafe {
+                            MerkleTree::scatter_matrix_into_gpu_slab(
+                                slab_ptr,
+                                m_idx,
+                                &mat,
+                                num_rows,
+                                codeword_len,
+                                leaf_group_size,
+                                batch_size,
+                                leaf_bytes,
+                            );
+                        }
+                        mat
+                    })
+                    .collect();
+                let tree = MerkleTree::new_from_packed_slab_gpu(
+                    &slab,
+                    num_leaves,
+                    leaf_bytes,
+                );
+                (cw_matrices, tree)
+            } else {
+                let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys)
+                    .map(|poly| {
+                        check_poly(poly);
+                        Self::encode_rows(pp, poly)
+                    })
+                    .collect();
+                let tree = MerkleTree::new_from_row_major_grouped(
+                    &cw_matrices,
+                    pp.num_rows,
+                    codeword_len,
+                    leaf_group_size,
+                );
+                (cw_matrices, tree)
+            }
+        };
+
+        #[cfg(not(all(feature = "metal_gpu", target_os = "macos")))]
+        let (cw_matrices, merkle_tree) = {
+            let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys)
+                .map(|poly| {
+                    check_poly(poly);
+                    Self::encode_rows(pp, poly)
+                })
+                .collect();
+            // Fused leaf hashing: build the Merkle tree directly from
+            // row-major `cw_matrices`, hashing each leaf via small
+            // L1-resident scratch buffers. Avoids the ~44 MB
+            // write-allocate-amplified scatter that
+            // `transpose_to_columns` does when codeword_len is large,
+            // and skips the second pass over the column slab that the
+            // Merkle hash would otherwise do.
+            let tree = MerkleTree::new_from_row_major_grouped(
+                &cw_matrices,
+                pp.num_rows,
+                codeword_len,
+                leaf_group_size,
+            );
+            (cw_matrices, tree)
+        };
         let root = merkle_tree.root();
 
         // `cw_columns` is left empty; the hint carries only the

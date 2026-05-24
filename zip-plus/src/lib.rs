@@ -5,6 +5,9 @@ pub mod utils;
 
 pub mod merkle;
 
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+pub mod metal_gpu;
+
 use std::io::ErrorKind;
 
 use crypto_primitives::FieldError;

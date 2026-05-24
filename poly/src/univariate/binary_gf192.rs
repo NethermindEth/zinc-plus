@@ -38,7 +38,7 @@ use num_traits::{
 };
 
 use crate::univariate::{
-    binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_u64::BinaryU64Poly,
+    F2PackU64, binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_u64::BinaryU64Poly,
     dense::DensePolynomial,
 };
 
@@ -968,7 +968,17 @@ pub fn alpha_powers(alpha: &BinaryFieldGF192, d: usize) -> Vec<BinaryFieldGF192>
 /// accumulator XORs in `alpha_powers[i]` — no field multiplications
 /// in the inner loop.
 ///
-/// The caller must ensure `alpha_powers.len() >= D`.
+/// **Implementation note.** The hot loop uses the [`F2PackU64`] view of
+/// the cell and walks the *set bits only* via `trailing_zeros` +
+/// `bits &= bits - 1`. That skips zero bits (vs the textbook `for i in
+/// 0..D` form) and avoids the per-bit branch the textbook form pays
+/// even when the bit is zero. The accumulator is a raw `[u64; 3]` so
+/// the per-add work is three XORs and a triple load — no
+/// `BinaryFieldGF192`/`Uint<3>` rebuild per iteration.
+///
+/// Requires `D ≤ 64` (the `F2PackU64` contract) and
+/// `alpha_powers.len() >= D`.
+#[inline]
 pub fn eval_f2_poly_d_at_with_powers<const D: usize>(
     p: &BinaryPoly<D>,
     alpha_powers: &[BinaryFieldGF192],
@@ -978,13 +988,17 @@ pub fn eval_f2_poly_d_at_with_powers<const D: usize>(
         "eval_f2_poly_d_at_with_powers: powers slice ({}) shorter than D ({D})",
         alpha_powers.len(),
     );
-    let mut acc = BinaryFieldGF192::zero();
-    for (i, c) in p.iter().enumerate() {
-        if c.inner() {
-            acc += &alpha_powers[i];
-        }
+    let mut bits = p.pack_u64();
+    let mut acc = [0u64; 3];
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        let pw = alpha_powers[i].words();
+        acc[0] ^= pw[0];
+        acc[1] ^= pw[1];
+        acc[2] ^= pw[2];
+        bits &= bits - 1;
     }
-    acc
+    BinaryFieldGF192::from_words(acc)
 }
 
 /// Branchless variant of [`eval_f2_poly_d_at_with_powers`]: instead of
@@ -1214,16 +1228,19 @@ fn invert_f2_matrix_192(rows: &[[u64; 3]; 192]) -> [[u64; 3]; 192] {
 /// - 1)` matches the bit pattern of `p`. Required for the F_2[X]
 /// inner-product helpers, which operate on `BinaryF2Poly<W>` so the
 /// product widths can grow with `W`.
+///
+/// **Implementation note.** Reads the bit pattern via
+/// [`F2PackU64::pack_u64`] in one shot — no per-bit loop. The mask
+/// defends against any caller that constructed `p` with bits ≥ D set
+/// (the standard constructors don't, but the mask is a single AND so
+/// the safety is essentially free).
 #[allow(clippy::arithmetic_side_effects)]
+#[inline]
 pub fn lift_bp_to_f2_poly_1<const D: usize>(p: &BinaryPoly<D>) -> BinaryF2Poly<1> {
     assert!(D <= 64, "lift_bp_to_f2_poly_1: D ({D}) must be ≤ 64");
-    let mut bits: u64 = 0;
-    for (i, c) in p.iter().enumerate() {
-        if c.inner() {
-            bits |= 1u64 << i;
-        }
-    }
-    BinaryF2Poly::<1>::from_words([bits])
+    let bits = p.pack_u64();
+    let masked = if D == 64 { bits } else { bits & ((1u64 << D) - 1) };
+    BinaryF2Poly::<1>::from_words([masked])
 }
 
 /// Bit-pattern (canonical-representative) embedding `GF(2^192) →
@@ -1699,5 +1716,44 @@ mod tests {
             }
         }
         assert_eq!(via_lift, ref_acc);
+    }
+
+    /// Bit-counting `eval_f2_poly_d_at_with_powers` must agree with the
+    /// branchless variant (which is a straight `for i in 0..D` mask-XOR
+    /// — easy to audit) bit-for-bit across a range of patterns.
+    #[test]
+    fn eval_with_powers_matches_branchless() {
+        use crate::univariate::binary_u64::BinaryU64Poly;
+        const D: usize = 32;
+        // α with arbitrary bits across all three words.
+        let alpha = gf(
+            0x9E37_79B9_7F4A_7C15,
+            0xF39C_C060_5CEDC835,
+            0x4CF5_AD43,
+        );
+        let pows = alpha_powers(&alpha, D);
+
+        // Cover all-zeros, all-ones, single-bit, scattered patterns.
+        let patterns: &[u64] = &[
+            0,
+            0xFFFF_FFFF,
+            0x0000_0001,
+            0x8000_0000,
+            0xAAAA_AAAA,
+            0x5555_5555,
+            0xDEAD_BEEF,
+            0x1234_5678,
+            0xCAFE_F00D,
+        ];
+        for &bits in patterns {
+            let cell = BinaryU64Poly::<D>::unpack_u64(bits);
+            let optimized = eval_f2_poly_d_at_with_powers::<D>(&cell, &pows);
+            let reference =
+                eval_f2_poly_d_at_with_powers_branchless::<D>(&cell, &pows);
+            assert_eq!(
+                optimized, reference,
+                "eval mismatch for bit pattern {bits:#x}"
+            );
+        }
     }
 }

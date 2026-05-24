@@ -29,6 +29,13 @@ rayon = { workspace = true, optional = true }
 blake3 = { workspace = true }
 uninit = "0.6.2"
 
+# Optional Metal GPU backend (macOS only). Adapted from
+# `albertgarreta/bolt-rs` — see `src/metal_gpu/` for the Blake3 leaf-hash
+# kernel and the dispatch wrapper.
+metal = { version = "0.31", optional = true }
+objc = { version = "0.2", optional = true }
+block = { version = "0.1", optional = true }
+
 # Compression libraries, used only to estimate compressed proof sizes
 zstd = "0.13"
 
@@ -43,6 +50,9 @@ workspace = true
 parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
 simd = ["zinc-poly/simd"]
 unchecked = []
+# Metal GPU Blake3 leaf-hash path for the commit phase. macOS-only.
+# When disabled, the GPU module is omitted and only the CPU path is built.
+metal_gpu = ["dep:metal", "dep:objc", "dep:block"]
 
 [[bench]]
 name = "zip_benches"

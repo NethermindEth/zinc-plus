@@ -1821,22 +1821,28 @@ where
                 let mut col_contrib: Vec<BinaryF2Poly<7>> =
                     Vec::with_capacity(row_len);
                 for j in 0..row_len {
-                    let column_j_lifted: Vec<BinaryF2Poly<1>> = (0..num_rows)
-                        .map(|i| {
+                    // Inline `f2_inner_product::<1, 3, 4>(lifted, coeffs)`
+                    // and the lift, so the (col, j) loop body does NOT
+                    // allocate a fresh `Vec<BinaryF2Poly<1>>` of length
+                    // `num_rows` per iteration — that allocation was
+                    // ~2 ms parallel at nvars=16 (50 cols × 8 192 j × 8
+                    // entries). Cells (W=1, ~16 set bits avg) are far
+                    // sparser than `coeffs` (W=3, ~96 set bits avg), so
+                    // the schoolbook in `f2_poly_mul` still iterates
+                    // over the sparser operand.
+                    let mut per_col_entry = BinaryF2Poly::<4>::zero();
+                    for i in 0..num_rows {
+                        let cell =
                             zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
                                 &col.evaluations[i * row_len + j],
-                            )
-                        })
-                        .collect();
-                    // Cells (W=1, ~16 set bits avg) are far sparser
-                    // than `coeffs` (W=3, ~96 set bits avg); pass the
-                    // lifted cells as `a` so the schoolbook in
-                    // `f2_poly_mul` iterates over the sparser operand.
-                    let per_col_entry: BinaryF2Poly<4> =
-                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 3, 4>(
-                            &column_j_lifted,
-                            &coeffs,
-                        );
+                            );
+                        let prod: BinaryF2Poly<4> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                &cell,
+                                &coeffs[i],
+                            );
+                        per_col_entry += prod;
+                    }
                     let scaled: BinaryF2Poly<7> =
                         zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
                             &gamma[g],
