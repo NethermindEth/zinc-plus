@@ -502,6 +502,106 @@ fn bench_micro_prover_uair(
     // RAA-F_2 codeword encoder over every committed column and folds
     // the Merkle tree. Belongs to the prover side of the protocol
     // even though it lives outside the IC + sumcheck loop.
+    // ---- 0a) Commit-Pair: just the trace-pairing pre-step ----
+    group.bench_function(BenchmarkId::new("Commit-Pair", id), |bench| {
+        bench.iter(|| {
+            let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+            black_box(paired);
+        });
+    });
+
+    // ---- 0b) Commit-Encode: pair + encode_rows for every paired MLE (parallel) ----
+    group.bench_function(BenchmarkId::new("Commit-Encode", id), |bench| {
+        use rayon::prelude::*;
+        use zip_plus::pcs::structs::ZipPlus;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        bench.iter(|| {
+            let cw_matrices: Vec<_> = paired
+                .par_iter()
+                .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
+                .collect();
+            black_box(cw_matrices);
+        });
+    });
+
+    // ---- 0c) Commit-EncodeTranspose: + transpose to column-major ----
+    group.bench_function(BenchmarkId::new("Commit-EncodeTranspose", id), |bench| {
+        use rayon::prelude::*;
+        use zip_plus::pcs::phase_commit::transpose_to_columns;
+        use zip_plus::pcs::structs::ZipPlus;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let codeword_len = fx.pp.linear_code.codeword_len();
+        bench.iter(|| {
+            let cw_matrices: Vec<_> = paired
+                .par_iter()
+                .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
+                .collect();
+            let cw_columns = transpose_to_columns(&cw_matrices, fx.pp.num_rows, codeword_len);
+            black_box((cw_matrices, cw_columns));
+        });
+    });
+
+    // ---- 0d) Commit-Merkle-only: build Merkle from pre-built cw_columns ----
+    group.bench_function(BenchmarkId::new("Commit-Merkle-only", id), |bench| {
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
+        use zip_plus::merkle::MerkleTree;
+        use zip_plus::pcs::phase_commit::transpose_to_columns;
+        use zip_plus::pcs::structs::ZipPlus;
+        use rayon::prelude::*;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let codeword_len = fx.pp.linear_code.codeword_len();
+        let cw_matrices: Vec<_> = paired
+            .par_iter()
+            .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
+            .collect();
+        let cw_columns = transpose_to_columns(&cw_matrices, fx.pp.num_rows, codeword_len);
+        bench.iter(|| {
+            let column_refs: Vec<&[_]> = cw_columns.iter().map(|c| c.as_slice()).collect();
+            let mt = MerkleTree::new_from_column_groups(&column_refs, LEAF_GROUP_SIZE);
+            black_box(mt);
+        });
+    });
+
+    // ---- 0e) Commit-Fused: encode + fused leaf-hash from cw_matrices
+    //          (skips transpose entirely, builds Merkle root directly) ----
+    group.bench_function(BenchmarkId::new("Commit-Fused", id), |bench| {
+        use rayon::prelude::*;
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
+        use zip_plus::merkle::MerkleTree;
+        use zip_plus::pcs::structs::ZipPlus;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let codeword_len = fx.pp.linear_code.codeword_len();
+        let num_rows = fx.pp.num_rows;
+        bench.iter(|| {
+            let cw_matrices: Vec<_> = paired
+                .par_iter()
+                .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
+                .collect();
+            let mt = MerkleTree::new_from_row_major_grouped(
+                &cw_matrices,
+                num_rows,
+                codeword_len,
+                LEAF_GROUP_SIZE,
+            );
+            black_box((cw_matrices, mt));
+        });
+    });
+
+    // ---- 0) Commit (PCS commit + Merkle root + transcript absorb) ----
+    //
+    // Without this entry the Micro group's prover sum would miss the
+    // pre-IC commit cost — `commit_and_absorb_f2_trace` runs the
+    // RAA-F_2 codeword encoder over every committed column and folds
+    // the Merkle tree. Belongs to the prover side of the protocol
+    // even though it lives outside the IC + sumcheck loop.
     group.bench_function(BenchmarkId::new("Commit", id), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
@@ -999,7 +1099,12 @@ fn bench_micro_prover_open(
                 .collect()
         };
         use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
-        let single_col_len = hint.cw_columns[0].len();
+        // Commit no longer materialises cw_columns — gather from
+        // row-major cw_matrices on the fly, mirroring prove_f2_open.
+        let batch = hint.cw_matrices.len();
+        let single_col_len = batch * fx.pp.num_rows;
+        let num_rows = fx.pp.num_rows;
+        let cw_codeword_len = fx.pp.linear_code.codeword_len();
         bench.iter(|| {
             #[cfg(feature = "parallel")]
             use rayon::prelude::*;
@@ -1011,11 +1116,33 @@ fn bench_micro_prover_open(
                 .map(|&column_idx| {
                     let group_idx = column_idx / LEAF_GROUP_SIZE;
                     let group_start = group_idx * LEAF_GROUP_SIZE;
-                    let mut group_values: Vec<BinaryPoly<64>> =
-                        Vec::with_capacity(LEAF_GROUP_SIZE * single_col_len);
-                    for l in 0..LEAF_GROUP_SIZE {
-                        group_values.extend_from_slice(&hint.cw_columns[group_start + l]);
+                    let total = LEAF_GROUP_SIZE * single_col_len;
+                    let mut group_values: Vec<std::mem::MaybeUninit<BinaryPoly<64>>> =
+                        Vec::with_capacity(total);
+                    unsafe { group_values.set_len(total); }
+                    for m in 0..batch {
+                        let m_offset = m * num_rows;
+                        let mat_data = &hint.cw_matrices[m].data;
+                        for r in 0..num_rows {
+                            let row_off = r * cw_codeword_len + group_start;
+                            let cells = &mat_data[row_off..row_off + LEAF_GROUP_SIZE];
+                            for (l, cell) in cells.iter().enumerate() {
+                                let position = l * single_col_len + m_offset + r;
+                                unsafe {
+                                    group_values
+                                        .get_unchecked_mut(position)
+                                        .write(cell.clone());
+                                }
+                            }
+                        }
                     }
+                    let group_values: Vec<BinaryPoly<64>> = {
+                        let mut v = core::mem::ManuallyDrop::new(group_values);
+                        let (ptr, len, cap) = (v.as_mut_ptr(), v.len(), v.capacity());
+                        unsafe {
+                            Vec::from_raw_parts(ptr.cast::<BinaryPoly<64>>(), len, cap)
+                        }
+                    };
                     let merkle_proof = hint
                         .merkle_tree
                         .prove(group_idx)

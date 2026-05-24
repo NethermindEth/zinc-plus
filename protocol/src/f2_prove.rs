@@ -1208,6 +1208,15 @@ pub fn unpair_cell<const D: usize>(
     (lo, hi)
 }
 
+/// Public wrapper around [`pair_trace_polys`] so per-region benches
+/// can stage the pairing pre-step without going through the full
+/// commit pipeline. Not part of the verified protocol surface.
+pub fn pair_trace_polys_pub<const D: usize>(
+    trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> {
+    pair_trace_polys::<D>(trace_binary_cols)
+}
+
 /// Pair an even-length-or-shorter slice of trace MLEs into half-as-many
 /// packed MLEs, each cell holding `(col_{2k}, col_{2k+1})` (low / high
 /// u32). If the input length is odd, the last packed MLE pairs the
@@ -1562,20 +1571,57 @@ where
             .map(|_| sample_column_idx(transcript, codeword_len))
             .collect();
 
-        let col_len = commit_hint.cw_columns[0].len();
+        // Gather opened-column data directly from `commit_hint.cw_matrices`
+        // (the row-major encoded matrices). Commit no longer materialises
+        // `cw_columns`; reading on the fly avoids the 44 MB transpose
+        // intermediate. The output layout matches the canonical leaf
+        // layout used by `hash_grouped_leaf_from_row_major`:
+        //   for l in 0..G: for m in 0..batch: for r in 0..num_rows:
+        //     cw_matrices[m].data[r * codeword_len + group_start + l]
+        let batch = commit_hint.cw_matrices.len();
+        let col_len = batch * num_rows;
         let opened_columns: Vec<F2OpenedColumn<D>> = cfg_iter!(column_indices)
             .map(|&column_idx| {
-                // Group-aware open: the Merkle leaf for `column_idx` is
-                // `H(cw_columns[group*G] || … || cw_columns[group*G + G-1])`
-                // where `group = column_idx / G`. Send all G columns of
-                // the group so the verifier can recompute the leaf hash.
                 let group_idx = column_idx / LEAF_GROUP_SIZE;
                 let group_start = group_idx * LEAF_GROUP_SIZE;
-                let mut group_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> =
-                    Vec::with_capacity(LEAF_GROUP_SIZE * col_len);
-                for l in 0..LEAF_GROUP_SIZE {
-                    group_values.extend_from_slice(&commit_hint.cw_columns[group_start + l]);
+                let total = LEAF_GROUP_SIZE * col_len;
+                let mut group_values: Vec<std::mem::MaybeUninit<BinaryPoly<PACKED_STORAGE_WIDTH>>> =
+                    Vec::with_capacity(total);
+                // SAFETY: every slot is initialised below before being read.
+                unsafe { group_values.set_len(total); }
+                // Cache-friendly read pattern: outer (m, r), inner l —
+                // one cacheline of G ≤ 8 consecutive cells per (m, r).
+                // Writes scatter across the small (≤ G * col_len * 8 ≈
+                // 10 KB) destination buffer, which stays in L1.
+                for m in 0..batch {
+                    let m_offset = m * num_rows;
+                    let mat_data = &commit_hint.cw_matrices[m].data;
+                    for r in 0..num_rows {
+                        let row_off = r * codeword_len + group_start;
+                        let cells = &mat_data[row_off..row_off + LEAF_GROUP_SIZE];
+                        for (l, cell) in cells.iter().enumerate() {
+                            let position = l * col_len + m_offset + r;
+                            // SAFETY: position < LEAF_GROUP_SIZE * col_len = total.
+                            unsafe {
+                                group_values
+                                    .get_unchecked_mut(position)
+                                    .write(cell.clone());
+                            }
+                        }
+                    }
                 }
+                // SAFETY: every slot was written above.
+                let group_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> = {
+                    let mut v = core::mem::ManuallyDrop::new(group_values);
+                    let (ptr, len, cap) = (v.as_mut_ptr(), v.len(), v.capacity());
+                    unsafe {
+                        Vec::from_raw_parts(
+                            ptr.cast::<BinaryPoly<PACKED_STORAGE_WIDTH>>(),
+                            len,
+                            cap,
+                        )
+                    }
+                };
                 let merkle_proof = commit_hint
                     .merkle_tree
                     .prove(group_idx)

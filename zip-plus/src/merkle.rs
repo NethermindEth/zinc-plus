@@ -119,6 +119,50 @@ impl MerkleTree {
         build_merkle_tree_from_leaves(leaves)
     }
 
+    /// Like [`Self::new_from_column_groups`] but builds leaves directly
+    /// from row-major `cw_matrices`, skipping the column-major
+    /// intermediate (`cw_columns`) entirely. Per-leaf work goes into a
+    /// small (G × batch × num_rows × elem_bytes) scratch buffer that
+    /// stays in L1, so we avoid the write-allocate amplification of
+    /// scattering into thousands of small `Vec` buffers and the second
+    /// pass over the column slab to re-read for hashing.
+    ///
+    /// Produces the **same Merkle root** as [`Self::new_from_column_groups`]
+    /// applied to the column-major mirror of `cw_matrices` (verified by
+    /// a round-trip test): the byte layout of each leaf is
+    /// `for l in 0..group_size: for m in 0..batch: for r in 0..num_rows:
+    /// cw_matrices[m].data[r * codeword_len + g * group_size + l]`.
+    pub fn new_from_row_major_grouped<R>(
+        cw_matrices: &[crypto_primitives::DenseRowMatrix<R>],
+        num_rows: usize,
+        codeword_len: usize,
+        group_size: usize,
+    ) -> Self
+    where
+        R: ConstTranscribable + Send + Sync,
+    {
+        assert!(!cw_matrices.is_empty());
+        assert!(group_size > 0 && group_size.is_power_of_two());
+        assert!(codeword_len.is_power_of_two());
+        assert_eq!(codeword_len % group_size, 0);
+        let num_leaves = codeword_len / group_size;
+        assert!(num_leaves.is_power_of_two());
+
+        let group_indices: Vec<usize> = (0..num_leaves).collect();
+        let leaves: Vec<MtHash> = cfg_iter!(group_indices)
+            .map(|&g| {
+                hash_grouped_leaf_from_row_major(
+                    cw_matrices,
+                    num_rows,
+                    codeword_len,
+                    g,
+                    group_size,
+                )
+            })
+            .collect();
+        build_merkle_tree_from_leaves(leaves)
+    }
+
     /// Like [`Self::new_from_columns`] but groups `group_size` consecutive
     /// columns into a single Merkle leaf. The leaf hash is `H(col_0 || …
     /// || col_{group_size-1})` (each column serialised contiguously, in
@@ -251,6 +295,61 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
         let start = i * elem_bytes;
         v.write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
     }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&buf);
+    hasher.finalize().into()
+}
+
+/// Hash one Merkle leaf directly from the row-major `cw_matrices`,
+/// skipping the column-major mirror. Writes the canonical leaf byte
+/// layout (matching [`hash_column_group`]) into a small per-leaf
+/// scratch buffer, then hashes.
+///
+/// Reads are cache-friendly: for each `(m, r)` pair we read
+/// `group_size` consecutive cells (one cacheline at G ≤ 8). Writes hit
+/// `group_size` scattered positions in the L1-resident scratch buffer.
+#[allow(clippy::arithmetic_side_effects)]
+fn hash_grouped_leaf_from_row_major<R>(
+    cw_matrices: &[crypto_primitives::DenseRowMatrix<R>],
+    num_rows: usize,
+    codeword_len: usize,
+    group_idx: usize,
+    group_size: usize,
+) -> MtHash
+where
+    R: ConstTranscribable,
+{
+    let elem_bytes = R::NUM_BYTES;
+    let batch = cw_matrices.len();
+    let group_start = group_idx * group_size;
+    let buf_len = group_size * batch * num_rows * elem_bytes;
+    let mut buf = vec![0u8; buf_len];
+
+    // Canonical leaf layout (matches `hash_column_group`):
+    //   for l in 0..group_size:
+    //     for m in 0..batch:
+    //       for r in 0..num_rows:
+    //         cell = cw_matrices[m].data[r * codeword_len + group_start + l]
+    //
+    // Iterate (m, r) outer, l inner so the source reads are contiguous
+    // (one cacheline of `group_size` cells per (m, r)). Writes scatter
+    // across the small scratch buffer, which stays in L1.
+    let col_stride = batch * num_rows * elem_bytes;
+    let m_stride = num_rows * elem_bytes;
+    for m in 0..batch {
+        let m_base = m * m_stride;
+        let mat_data = &cw_matrices[m].data;
+        for r in 0..num_rows {
+            let r_offset = m_base + r * elem_bytes;
+            let row_off = r * codeword_len + group_start;
+            let cells = &mat_data[row_off..row_off + group_size];
+            for (l, cell) in cells.iter().enumerate() {
+                let byte_offset = l * col_stride + r_offset;
+                cell.write_transcription_bytes_exact(&mut buf[byte_offset..byte_offset + elem_bytes]);
+            }
+        }
+    }
+
     let mut hasher = blake3::Hasher::new();
     hasher.update(&buf);
     hasher.finalize().into()
