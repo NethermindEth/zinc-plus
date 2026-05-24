@@ -46,7 +46,8 @@ use zinc_poly::{
 };
 use zinc_primality::MillerRabin;
 use zinc_protocol::f2_prove::{
-    F2BitOpVirtualSpec, F2FullProof, F2VirtualBpSpec, F2ZincTypes, ZincPlusPiopF2,
+    F2BitOpVirtualSpec, F2FullProof, F2KSource, F2KVirtualSpec, F2VirtualBpSpec, F2ZincTypes,
+    ZincPlusPiopF2,
 };
 use zinc_uair::BitOp;
 use zinc_test_uair::{
@@ -148,6 +149,99 @@ fn sha_f2_bit_op_virtuals() -> Vec<F2BitOpVirtualSpec> {
             col_idx: cols::W_SHR10_W,
             source_col_idx: cols::W_W,
             op: BitOp::ShiftR(10),
+        },
+    ]
+}
+
+/// Combined-K virtuals for SHA-256 F_2 (one per modular addition C5–C11).
+///
+/// Each spec mirrors the post-pass recipe in
+/// `Sha256F2Uair::generate_random_trace`'s K-column construction:
+/// `K[k] = ShiftR(1)( XOR_g source_g[k + row_shift_g] )`. Layout invariant:
+/// the 7 K virtuals occupy the **last 7 witness columns**
+/// (`W_K_W` … `W_K_FF_E`), which keeps the open-path γ batch as a
+/// simple tail slice.
+///
+/// **Status — placeholder for Issue 1**: with these specs in scope, the
+/// 7 K cols are skipped from both the commit and the γ-batched PCS
+/// open. Their MLE evals at `r*` are extracted from the sumcheck
+/// transcript and currently **trusted** (no derivation from sources,
+/// no PCS discharge). See [`F2KVirtualSpec`] for the soundness caveat;
+/// this enables proof-size measurement of the K-virtualised path
+/// before the sound discharge is wired in.
+fn sha_f2_k_virtuals() -> Vec<F2KVirtualSpec> {
+    use zinc_test_uair::sha256_f2::cols;
+    let wit = |c: usize, r: usize| F2KSource {
+        col_idx: c,
+        row_shift: r,
+        is_public: false,
+    };
+    let pubc = |c: usize, r: usize| F2KSource {
+        col_idx: c,
+        row_shift: r,
+        is_public: true,
+    };
+    vec![
+        // C5: K_W = ShiftR(1)( W[k+16] ⊕ W[k] ⊕ σ_0(W)[k+1] ⊕ W[k+9] ⊕ σ_1(W)[k+14] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_W,
+            op: BitOp::ShiftR(1),
+            sources: vec![
+                wit(cols::W_W, 16),
+                wit(cols::W_W, 0),
+                wit(cols::W_SIG0, 1),
+                wit(cols::W_W, 9),
+                wit(cols::W_SIG1, 14),
+            ],
+        },
+        // C6: K_T1 = ShiftR(1)( T_1[k+3] ⊕ e[k] ⊕ Σ_1(e)[k+3] ⊕ u_ef[k+3]
+        //               ⊕ u_neg[k+3] ⊕ K[k+3] ⊕ W[k+3] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_T1,
+            op: BitOp::ShiftR(1),
+            sources: vec![
+                wit(cols::W_T1, 3),
+                wit(cols::W_E, 0),
+                wit(cols::W_SIGMA1, 3),
+                wit(cols::W_UEF, 3),
+                wit(cols::W_UNEG_E_G, 3),
+                pubc(cols::PA_K, 3),
+                wit(cols::W_W, 3),
+            ],
+        },
+        // C7: K_T2 = ShiftR(1)( T_2[k] ⊕ Σ_0(a)[k] ⊕ Maj[k] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_T2,
+            op: BitOp::ShiftR(1),
+            sources: vec![
+                wit(cols::W_T2, 0),
+                wit(cols::W_SIGMA0, 0),
+                wit(cols::W_MAJ, 0),
+            ],
+        },
+        // C8: K_A = ShiftR(1)( a[k+4] ⊕ T_1[k+3] ⊕ T_2[k+3] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_A,
+            op: BitOp::ShiftR(1),
+            sources: vec![wit(cols::W_A, 4), wit(cols::W_T1, 3), wit(cols::W_T2, 3)],
+        },
+        // C9: K_E = ShiftR(1)( e[k+4] ⊕ a[k] ⊕ T_1[k+3] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_E,
+            op: BitOp::ShiftR(1),
+            sources: vec![wit(cols::W_E, 4), wit(cols::W_A, 0), wit(cols::W_T1, 3)],
+        },
+        // C10: K_FF_A = ShiftR(1)( a[k+4] ⊕ a[k] ⊕ pa_a[k] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_FF_A,
+            op: BitOp::ShiftR(1),
+            sources: vec![wit(cols::W_A, 4), wit(cols::W_A, 0), pubc(cols::PA_A, 0)],
+        },
+        // C11: K_FF_E = ShiftR(1)( e[k+4] ⊕ e[k] ⊕ pa_e[k] ).
+        F2KVirtualSpec {
+            col_idx: cols::W_K_FF_E,
+            op: BitOp::ShiftR(1),
+            sources: vec![wit(cols::W_E, 4), wit(cols::W_E, 0), pubc(cols::PA_E, 0)],
         },
     ]
 }
@@ -330,6 +424,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                     &fx.pp,
                     &fx.trace.binary_poly,
                     &sha_f2_bit_op_virtuals(),
+                    &sha_f2_k_virtuals(),
                 )
                 .expect("commit should succeed");
             black_box((hint, comm));
@@ -346,6 +441,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &fx.pp,
                         &fx.trace.binary_poly,
                         &sha_f2_bit_op_virtuals(),
+                        &sha_f2_k_virtuals(),
                     )
                     .expect("commit should succeed");
                 transcript
@@ -376,6 +472,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &fx.pp,
                         &fx.trace.binary_poly,
                         &sha_f2_bit_op_virtuals(),
+                        &sha_f2_k_virtuals(),
                     )
                     .expect("commit should succeed");
                 let (_uair_proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
@@ -415,6 +512,7 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
             &fx.trace,
             &[],
             &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -739,6 +837,7 @@ fn bench_micro_prover_uair(
                 ::commit_and_absorb_f2_trace_with_virtuals(
                     &mut transcript, &fx.pp, &fx.trace.binary_poly,
                     &sha_f2_bit_op_virtuals(),
+                    &sha_f2_k_virtuals(),
                 )
                 .expect("commit");
             black_box((hint, comm));
@@ -765,6 +864,7 @@ fn bench_micro_prover_uair(
                     ::commit_and_absorb_f2_trace_with_virtuals(
                         &mut transcript, &fx.pp, &fx.trace.binary_poly,
                         &sha_f2_bit_op_virtuals(),
+                        &sha_f2_k_virtuals(),
                     )
                     .expect("commit");
                 transcript
@@ -792,6 +892,7 @@ fn bench_micro_prover_uair(
                     ::commit_and_absorb_f2_trace_with_virtuals(
                         &mut transcript, &fx.pp, &fx.trace.binary_poly,
                         &sha_f2_bit_op_virtuals(),
+                        &sha_f2_k_virtuals(),
                     )
                     .expect("commit");
                 transcript
@@ -1076,6 +1177,7 @@ fn bench_micro_prover_open(
             &fx.pp,
             &fx.trace.binary_poly,
             &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
         )
         .expect("commit");
         let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
@@ -1369,6 +1471,7 @@ fn bench_micro_verifier_uair(
             &fx.trace,
             &[],
             &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -1537,6 +1640,7 @@ fn bench_micro_verifier_open(
             &fx.trace,
             &[],
             &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -1812,6 +1916,7 @@ fn e2e_benches(c: &mut Criterion) {
                     &fx.trace,
                     &[],
                     &sha_f2_bit_op_virtuals(),
+                    &sha_f2_k_virtuals(),
                     num_vars,
                     sha256_f2_project_scalar::<R>,
                     recommended_num_column_openings(REP),
@@ -1829,6 +1934,7 @@ fn e2e_benches(c: &mut Criterion) {
                 &fx.trace,
                 &[],
                 &sha_f2_bit_op_virtuals(),
+                &sha_f2_k_virtuals(),
                 num_vars,
                 sha256_f2_project_scalar::<R>,
                 recommended_num_column_openings(REP),
@@ -1850,6 +1956,7 @@ fn e2e_benches(c: &mut Criterion) {
                     &proof,
                     &[],
                     &sha_f2_bit_op_virtuals(),
+                    &sha_f2_k_virtuals(),
                     &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
                     num_vars,
                     fx.num_primary,
