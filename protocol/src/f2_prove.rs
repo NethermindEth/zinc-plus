@@ -1491,6 +1491,71 @@ pub fn pair_trace_polys_pub<const D: usize>(
     pair_trace_polys::<D>(trace_binary_cols)
 }
 
+/// Filtered variant of [`pair_trace_polys_pub`] that produces the
+/// SAME paired-witness-primary slice that
+/// [`ZincPlusPiopF2::commit_f2_trace_with_virtuals`] commits — i.e.
+/// excludes public cols, [`F2BitOpVirtualSpec`] targets, and
+/// [`F2KVirtualSpec`] targets. Per-region benches that want to time
+/// the encode/scatter/Merkle path on the *real* commit shape (rather
+/// than the inflated full-trace shape) should call this instead of
+/// [`pair_trace_polys_pub`].
+///
+/// `num_pub_bin` is the number of public binary_poly cols, typically
+/// `U::signature().public_cols().num_binary_poly_cols()`. Caller
+/// supplies it so this helper stays free of the `U: Uair` bound.
+pub fn pair_primary_witness_polys_pub<const D: usize>(
+    trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    num_pub_bin: usize,
+    bit_op_specs: &[F2BitOpVirtualSpec],
+    k_specs: &[F2KVirtualSpec],
+) -> Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> {
+    let num_wit_bin = trace_binary_cols.len() - num_pub_bin;
+    let witness_bit_op_specs: Vec<F2BitOpVirtualSpec> = bit_op_specs
+        .iter()
+        .map(|s| F2BitOpVirtualSpec {
+            col_idx: s.col_idx - num_pub_bin,
+            source_col_idx: s.source_col_idx - num_pub_bin,
+            op: s.op,
+        })
+        .collect();
+    let witness_k_specs: Vec<F2KVirtualSpec> = k_specs
+        .iter()
+        .map(|s| {
+            let sources_wl: Vec<F2KSource> = s
+                .sources
+                .iter()
+                .map(|src| {
+                    if src.is_public {
+                        *src
+                    } else {
+                        F2KSource {
+                            col_idx: src.col_idx - num_pub_bin,
+                            row_shift: src.row_shift,
+                            is_public: false,
+                        }
+                    }
+                })
+                .collect();
+            F2KVirtualSpec {
+                col_idx: s.col_idx - num_pub_bin,
+                op: s.op,
+                sources: sources_wl,
+            }
+        })
+        .collect();
+    let primary_witness_indices = primary_col_indices_from_virtuals(
+        num_wit_bin,
+        &witness_bit_op_specs,
+        &witness_k_specs,
+    );
+    let witness_slice = &trace_binary_cols[num_pub_bin..];
+    let primary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = primary_witness_indices
+        .iter()
+        .map(|&i| witness_slice[i].clone())
+        .collect();
+    pair_trace_polys::<D>(&primary_cols)
+}
+
 /// Materialise the bit-op virtual columns from the primary trace.
 /// Each [`F2BitOpVirtualSpec`] produces one MLE column at the
 /// protocol index `col_idx`; the result is keyed by `col_idx` for

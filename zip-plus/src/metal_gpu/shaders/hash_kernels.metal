@@ -179,6 +179,24 @@ static inline void blake3_compress_chunk(
     for (uint i = 0; i < 8; ++i) out_cv[i] = cv[i];
 }
 
+// Parent-compress two child CVs into one. `flags` should include PARENT
+// (1u<<2); the caller adds ROOT (1u<<3) on the topmost compression only.
+// Output is written to `out_cv` (length 8).
+static inline void blake3_parent_compress(
+    thread const uint* left_cv,
+    thread const uint* right_cv,
+    uint flags,
+    thread uint* out_cv)
+{
+    uint blk[16];
+    for (uint j = 0; j < 8; ++j) blk[j]     = left_cv[j];
+    for (uint j = 0; j < 8; ++j) blk[j + 8] = right_cv[j];
+    uint cv[8];
+    for (uint j = 0; j < 8; ++j) cv[j] = BLAKE3_IV[j];
+    blake3_compress(cv, blk, 0, 64, flags, nullptr);
+    for (uint j = 0; j < 8; ++j) out_cv[j] = cv[j];
+}
+
 kernel void hash_leaves_blake3(
     device const uchar*        data   [[ buffer(0) ]],
     device uchar*              out    [[ buffer(1) ]],
@@ -205,50 +223,86 @@ kernel void hash_leaves_blake3(
         return;
     }
 
-    // Multi-chunk path: each chunk is a normal (non-root) chunk; the
-    // root flag is set later on the final PARENT compression.
-    // Assumes len ≤ 65_536 bytes (64 chunks). Larger inputs must fall
-    // back to CPU (dispatcher checks this).
+    // ==== Multi-chunk path: streaming subtree-stack algorithm ====
+    //
+    // Replaces the previous bounded (≤64-chunk) path with Blake3's
+    // standard streaming pattern. After each chunk, merge upward into
+    // the parent subtree stack as long as the top has the same height
+    // (mimicking how blake3's Hasher consumes input). The stack holds
+    // at most `ceil(log2(n_chunks))` partial CVs, each 8 u32 = 32 B,
+    // so even for 16 GB leaves (~16M chunks → depth 24) the per-thread
+    // stack is < 1 KB.
+    //
+    // ROOT-flag rule (Blake3 spec): only the LAST compression that
+    // produces the final 32-byte output carries ROOT. Two cases:
+    //   1. Streaming merge: the last chunk's bubble-up may end with
+    //      a merge that empties the stack — that's the root.
+    //   2. Finalize merge: after the streaming loop, multiple subtree
+    //      CVs may remain on the stack at different heights. We merge
+    //      them top-down; the final merge gets ROOT.
     uint n_chunks = (len + 1023) / 1024;
-    uint cvs[64 * 8];
+
+    // 24-deep stack: supports leaves up to 2^24 × 1024 B = 16 GB.
+    // SHA-256 F_2 at nvars=20 needs depth 14 (14 MB leaves); nvars=24
+    // would need depth 18. 24 leaves comfortable headroom.
+    const uint MAX_STACK_DEPTH = 24;
+    uint stack[MAX_STACK_DEPTH * 8];
+    uint stack_h[MAX_STACK_DEPTH];
+    uint depth = 0;
+
     uint off = 0;
     for (uint c = 0; c < n_chunks; ++c) {
-        uint this_len = (c + 1 == n_chunks) ? (len - off) : 1024;
+        bool is_last_chunk = (c + 1 == n_chunks);
+        uint this_len = is_last_chunk ? (len - off) : 1024;
         uint cv[8];
-        blake3_compress_chunk(msg + off, this_len, (ulong)c, 0u, /*is_root_chunk=*/false, cv);
-        for (uint i = 0; i < 8; ++i) cvs[c*8 + i] = cv[i];
+        blake3_compress_chunk(msg + off, this_len, (ulong)c, 0u,
+                              /*is_root_chunk=*/false, cv);
         off += this_len;
+
+        // Bubble up: merge with same-height subtrees on the stack.
+        uint cv_h = 0;
+        while (depth > 0 && stack_h[depth - 1] == cv_h) {
+            uint left[8];
+            for (uint j = 0; j < 8; ++j) left[j] = stack[(depth - 1) * 8 + j];
+            depth -= 1;
+            // If this is the LAST chunk and the bubble-up emptied the
+            // stack, this merge produces the root — set ROOT now.
+            uint flags = (1u << 2);
+            if (is_last_chunk && depth == 0) flags |= BLAKE3_ROOT;
+            uint merged[8];
+            blake3_parent_compress(left, cv, flags, merged);
+            for (uint j = 0; j < 8; ++j) cv[j] = merged[j];
+            cv_h += 1;
+        }
+        for (uint j = 0; j < 8; ++j) stack[depth * 8 + j] = cv[j];
+        stack_h[depth] = cv_h;
+        depth += 1;
     }
 
-    // Parent-compress pairs up the tree.
-    uint n = n_chunks;
-    while (n > 1) {
-        uint m = 0;
-        for (uint i = 0; i + 1 < n; i += 2) {
-            uint blk[16];
-            for (uint j = 0; j < 8; ++j) blk[j]   = cvs[i*8 + j];
-            for (uint j = 0; j < 8; ++j) blk[j+8] = cvs[(i+1)*8 + j];
-            uint cv[8];
-            for (uint j = 0; j < 8; ++j) cv[j] = BLAKE3_IV[j];
-            uint flags = (1u << 2); // PARENT
-            if (n == 2) flags |= BLAKE3_ROOT;
-            blake3_compress(cv, blk, 0, 64, flags, nullptr);
-            for (uint j = 0; j < 8; ++j) cvs[m*8 + j] = cv[j];
-            m += 1;
-        }
-        if (n % 2 == 1) {
-            // Odd lifter: carry the last cv up without compression.
-            for (uint j = 0; j < 8; ++j) cvs[m*8 + j] = cvs[(n-1)*8 + j];
-            m += 1;
-        }
-        n = m;
+    // ==== Finalize: merge any remaining subtrees top-down ====
+    //
+    // After the streaming loop the stack holds 1+ CVs at distinct,
+    // strictly-decreasing heights (largest subtree on bottom). Merge
+    // the topmost two repeatedly until depth=1. The final merge in
+    // this loop produces the root.
+    while (depth > 1) {
+        uint right[8];
+        for (uint j = 0; j < 8; ++j) right[j] = stack[(depth - 1) * 8 + j];
+        depth -= 1;
+        uint left[8];
+        for (uint j = 0; j < 8; ++j) left[j] = stack[(depth - 1) * 8 + j];
+        uint flags = (1u << 2);
+        if (depth == 1) flags |= BLAKE3_ROOT;
+        uint merged[8];
+        blake3_parent_compress(left, right, flags, merged);
+        for (uint j = 0; j < 8; ++j) stack[(depth - 1) * 8 + j] = merged[j];
     }
 
     device uchar* dst = out + (uint)gid * 32u;
     for (uint i = 0; i < 8; ++i) {
-        dst[i*4 + 0] = (uchar)(cvs[i]      );
-        dst[i*4 + 1] = (uchar)(cvs[i] >>  8);
-        dst[i*4 + 2] = (uchar)(cvs[i] >> 16);
-        dst[i*4 + 3] = (uchar)(cvs[i] >> 24);
+        dst[i*4 + 0] = (uchar)(stack[i]      );
+        dst[i*4 + 1] = (uchar)(stack[i] >>  8);
+        dst[i*4 + 2] = (uchar)(stack[i] >> 16);
+        dst[i*4 + 3] = (uchar)(stack[i] >> 24);
     }
 }

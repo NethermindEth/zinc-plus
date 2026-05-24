@@ -217,10 +217,8 @@ impl MerkleTree {
         assert!(num_leaves > 0 && num_leaves.is_power_of_two());
         assert!(leaf_bytes > 0);
         assert_eq!(slab.len(), num_leaves * leaf_bytes);
-        assert!(
-            leaf_bytes <= 64 * 1024,
-            "GPU Blake3 kernel only supports leaves up to 64 KB; got {leaf_bytes} bytes"
-        );
+        // Upper bound is the kernel's per-thread CV-stack depth (24 →
+        // 2^24 chunks = 16 GB); see `hash_columns_gpu` for the cap.
 
         // SAFETY: `slab.as_ptr()` is valid for `slab.len()` bytes and
         // outlives the synchronous `hash_columns_gpu` call (which waits
@@ -283,14 +281,9 @@ impl MerkleTree {
         let elem_bytes = R::NUM_BYTES;
         let batch = cw_matrices.len();
         let leaf_bytes = group_size * batch * num_rows * elem_bytes;
-        // Hard cap: kernel's multi-chunk path only handles ≤ 64 chunks
-        // (= 64 KB) per leaf. Anything larger falls back to the CPU
-        // path. This matches the assert in `hash_columns_gpu`.
-        assert!(
-            leaf_bytes <= 64 * 1024,
-            "GPU Blake3 kernel only supports leaves up to 64 KB; got {leaf_bytes} bytes — \
-             use `new_from_row_major_grouped` (CPU) for larger leaves"
-        );
+        // Upper bound is the kernel's per-thread CV-stack depth (24 →
+        // 2^24 chunks = 16 GB). `hash_columns_gpu` enforces it; we
+        // forward through.
 
         let mut slab = vec![0u8; num_leaves * leaf_bytes];
 
