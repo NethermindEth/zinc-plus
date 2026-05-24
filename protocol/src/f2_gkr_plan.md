@@ -1,9 +1,122 @@
 # F_2 SHA-256 — GKR-virtual carries & majorities plan
 
-> **2026-05-24 revision.** After building Phase-0/1 (Sklansky reference
-> + a standalone GKR substrate over GF(2^192)) I went deeper into the
-> F_2 prover and found two things that substantially change the
-> downstream phases:
+> **2026-05-24 revision 2 (K-combine).** After Phase-2a-pilot landed
+> (commit `d3c4636`: ideal swap from `(X^32 − 1)` to `(X^32)` on all 7
+> addition constraints, `shiftl1` compensators, bit-31 mask on
+> carries), a deeper look at the constraint structure surfaces a
+> stronger move than what the first revision proposed.
+>
+> **The insight.** Every addition constraint C5–C11 has the shape
+> ```
+>   target − Σ(inputs) − X·m_1 − … − X·m_k − X·c + comp  ∈  (X^32)
+> ```
+> The `X·_` terms factor over F_2:
+> `X·m_1 ⊕ … ⊕ X·m_k ⊕ X·c = X·(m_1 ⊕ … ⊕ m_k ⊕ c)`. Define
+> `K := m_1 ⊕ … ⊕ m_k ⊕ c` (a single 32-bit column). Every
+> multi-input addition then collapses to the same 2-input shape
+> ```
+>   target − Σ(inputs) − X·K + comp  ∈  (X^32),
+> ```
+> and the Phase-2a math pins `K = ShiftR(1)(target ⊕ Σ(inputs) ⊕ comp)`
+> — a linear XOR-of-shifted-primaries followed by a single
+> `ShiftR(1)`. *Every* carry/majority column becomes Phase-2a-
+> virtualisable; the CSA majority columns disappear from the layout,
+> not just from commits.
+>
+> **What this changes.** Phase 2a's scope grows from 7 cols (just the
+> Binius carries) to **13 cols** (all 6 CSA majorities + all 7 carries
+> combined into 7 K-columns, all virtualised). The CSA tree in
+> witness gen disappears — the prover computes K directly from
+> `(target, inputs, comp)` via the ShiftR-of-XOR formula. Phase 2b
+> shrinks correspondingly: only the 3 AND-based input columns
+> (`W_MAJ`, `W_UEF`, `W_UNEG_E_G`) remain as degree-2 work, because
+> they're independent witnesses used as *inputs* to additions rather
+> than intermediates *of* additions.
+>
+> Numerical sanity check (4-input add, `x_0=x_1=x_2=x_3=1`):
+> chained-add carries `c_1=1, c_2=0, c_3=3`, so
+> `K = c_1 ⊕ c_2 ⊕ c_3 = 2`. Direct formula:
+> `target=4, Σx=4 (≡0 in XOR), comp=0`, so
+> `ShiftR(1)(target ⊕ Σx) = ShiftR(1)(0b100) = 0b010 = 2`. ✓
+>
+> Soundness story unchanged: as for any single-carry virtualisation,
+> the constraint pins `K` given `(target, inputs, comp)` but doesn't
+> on its own enforce `target = Σ inputs mod 2^32`. The outer SHA-256
+> boundary check (public final-hash vs prover's claimed hash) is
+> what makes the prover have to use the honest target everywhere
+> upstream.
+>
+> **Revised phase table** (replaces both prior tables — including
+> the one in revision 1 below):
+>
+> | Phase | What | Mechanism | Cols eliminated | Est. |
+> |-------|------|-----------|------------------|------|
+> | 0 ✅ | Sklansky reference + golden vectors | n/a | — | done |
+> | 1 ✅ | GKR substrate (single 32-bit add, GF(2^192)) | layered sumcheck | — | done |
+> | 2a-pilot ✅ | `(X^32)` ideal swap + `shiftl1` comps + bit-31 carry mask | constraint refactor | 0 (sets up 2a-K) | done (commit `d3c4636`) |
+> | **2a-K (new)** | **K-combine refactor: replace `(m_1…m_k, c)` per add with one `K` col; declare all 7 K's virtual via Rot/ShiftR-of-XOR-of-shifted-primaries spec** | **linear virtual (no GKR)** | **13** (6 CSA majs + 7 carries) | **2–4 d** |
+> | 2b | Degree-2 virtualisation for the 3 input AND/Maj cols (`W_MAJ`, `W_UEF`, `W_UNEG_E_G`) — one Hadamard-style sumcheck per column, reusing the Phase-1 sumcheck plumbing as a one-layer GKR | one-layer GKR per col | 3 | 2 d |
+> | 3 | Cross-instance batching across all 2b instances in a SHA block | random linear combination | — | 1 d |
+> | 4 | Bench + ship | — | — | ½ d |
+>
+> **Total eliminable witness cols: 16 of 27** (= 59%), up from the
+> revision-1 estimate of 16 split awkwardly between linear (7) and
+> degree-2 (9). The mechanism split is now clean: 13 via Phase 2a's
+> linear virtualisation alone, 3 via a tiny degree-2 sumcheck.
+>
+> **Phase 2a-K work breakdown:**
+> 1. **Column-layout update** in [`test-uair/src/sha256_f2.rs`](../../test-uair/src/sha256_f2.rs):
+>    drop 6 `W_M_*` slots, rename 7 `W_C_*` slots → `W_K_*`. Witness
+>    count: 27 → 21.
+> 2. **Constraint code update**: collapse each C5–C11 to the unified
+>    `target − Σ inputs − X·K + comp ∈ (X^32)` template.
+> 3. **Witness-gen update**: replace CSA-tree computation with direct
+>    `K = ShiftR(1)(target ⊕ Σ inputs ⊕ comp)`. The intermediate
+>    `(s, m_1, m_2, …)` chain disappears entirely — `target` is still
+>    `wrapping_add` of the inputs, but no CSA bookkeeping.
+> 4. **Compensator update**: the `shiftl1`-of-carry term in
+>    `pa_c_*_vals` now uses K directly (one term instead of
+>    `Σ shiftl1(m_j) ⊕ shiftl1(c)`).
+> 5. **Virtualisation-mechanism extension** in
+>    [`protocol/src/f2_prove.rs`](f2_prove.rs): introduce
+>    `F2RotShiftedXorVirtualSpec { rot_amount, sources: Vec<(col_idx, row_shift)> }`
+>    (or cascading of existing `F2VirtualBpSpec` → `F2BitOpVirtualSpec`,
+>    pick whichever the existing PCS spot-check is easier to extend).
+>    The verifier reconstructs the virtual cell from sampled-position
+>    source cells (possibly at multiple rows when `row_shift ≠ 0`).
+> 6. **Declare the 7 K cols virtual** with their derivation specs and
+>    confirm all 13 baseline tests + the SHA-256 roundtrip still pass.
+> 7. **Bench**: rerun `Steps` + e2e at nvars=9, compare against the
+>    `phase2a-pilot` baseline already captured in `target/criterion/`.
+>
+> **Risks / off-ramps:**
+> - **Cross-row sources.** The XOR sources for some K cols include
+>   shifted versions (e.g. `W_W^{↓16}`, `W_A^{↓4}`). The existing
+>   shift infrastructure declares these via `ShiftSpec` and they're
+>   accessible inside `constrain_general` — but the virtualisation
+>   mechanism today (`F2BitOpVirtualSpec` / `F2VirtualBpSpec`) only
+>   touches same-row sources. PCS spot-check reconstruction needs to
+>   open source cells at multiple rows. If extending the spot-check
+>   for cross-row sources turns out fiddly, fall back to (a) only
+>   virtualising the K's whose sources are all same-row (C7, T_2), and
+>   (b) keeping cross-row-source K's committed until a follow-up.
+> - **Boundary rows.** The K column on inactive rows is whatever the
+>   `ShiftR(1)(target ⊕ Σ inputs ⊕ comp)` formula yields — the comp
+>   column already absorbs the residue there. Confirm in tests that
+>   inactive-row K values don't break the proof's selector-gated
+>   constraints (C16–C18).
+> - **Sumcheck cost.** Virtualised cols still participate in
+>   sumcheck (they have MLE-eval claims). Eliminating 6 CSA cols
+>   reduces the γ-batched col count from 41 → 35, which actually
+>   *speeds up* sumcheck. Eliminating 7 K cols from commits speeds
+>   up commit + PCS open.
+>
+> ---
+>
+> **2026-05-24 revision 1 (superseded by revision 2 above).** After
+> building Phase-0/1 (Sklansky reference + a standalone GKR substrate
+> over GF(2^192)) I went deeper into the F_2 prover and found two
+> things that substantially change the downstream phases:
 >
 > 1. **The carry columns are linear in bits.** C10/C11 (and analogously
 >    C5–C9) force the carry word to be a **Rot(31) of an XOR-of-other-
