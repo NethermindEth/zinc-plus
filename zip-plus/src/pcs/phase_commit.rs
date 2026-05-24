@@ -135,17 +135,26 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // [`MerkleTree::new_from_row_major_grouped_gpu`] would otherwise
         // do (it walks every cell of `cw_matrices` a second time).
         //
-        // Two guards route back to the CPU fused path:
-        //   * `num_leaves < GPU_MIN_LEAVES`: GPU launch overhead
-        //     (~500 µs warm) exceeds the CPU work for tiny commits.
-        //     The SHA-256 F_2 bench at nvars=9 has 32 leaves and CPU
-        //     finishes in ~190 µs total, vs ~610 µs for GPU.
-        //   * `leaf_bytes > 64 KB`: kernel's multi-chunk path only
-        //     handles ≤ 64 chunks per leaf.
+        // The kernel handles arbitrary leaf sizes (streaming subtree
+        // stack, up to 16 GB per leaf). The dispatch heuristic
+        // gates on `num_leaves` only — that's what controls how
+        // many GPU threads are in flight and whether the per-launch
+        // driver overhead (~hundreds of µs warm) can be amortised.
+        //
+        // Empirically (Apple Silicon, SHA-256 F_2 shape with 8-row
+        // commits → leaf_bytes ≈ 3 KB regardless of nvars):
+        //   * nvars=9 (32 leaves): CPU 2 ms, GPU 2.9 ms — GPU loses.
+        //   * nvars=16 (4096 leaves): CPU 32 ms, GPU 25 ms — GPU −22%.
+        //   * nvars=22 (262 144 leaves): CPU 3.0 s, GPU 2.4 s — GPU −19%.
+        //
+        // A 256-leaf floor sits comfortably in the win regime across
+        // protocol shapes; protocols with very thin leaves still pay
+        // the launch overhead either way.
         //
         // Both paths produce the same Merkle root — verified by
-        // `merkle::tests::gpu_row_major_grouped_root_matches_cpu` and
-        // `merkle::tests::gpu_inline_packed_root_matches_cpu`.
+        // `merkle::tests::gpu_row_major_grouped_root_matches_cpu`,
+        // `merkle::tests::gpu_inline_packed_root_matches_cpu`, and
+        // `metal_gpu::tests::gpu_blake3_matches_cpu_for_large_leaves`.
         #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
         let (cw_matrices, merkle_tree) = {
             use crate::merkle::GpuSlabPtr;
@@ -154,7 +163,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let elem_bytes = <Zt::Cw as ConstTranscribable>::NUM_BYTES;
             let leaf_bytes =
                 leaf_group_size * batch_size * pp.num_rows * elem_bytes;
-            let go_gpu = num_leaves >= GPU_MIN_LEAVES && leaf_bytes <= 64 * 1024;
+            let go_gpu = num_leaves >= GPU_MIN_LEAVES;
 
             if go_gpu {
                 let mut slab = vec![0u8; num_leaves * leaf_bytes];

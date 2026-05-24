@@ -106,10 +106,13 @@ impl MetalContext {
     /// command-buffer execution (we block on completion before returning,
     /// so this is satisfied as long as `base` is valid at call time).
     ///
-    /// Note: the Blake3 kernel implements the single-chunk path (≤ 1024
-    /// bytes per leaf) and the multi-chunk path up to 64 chunks (≤ 64 KB
-    /// per leaf). For larger leaves use the CPU path
-    /// ([`crate::merkle::MerkleTree::new_from_row_major_grouped`]).
+    /// Note: the Blake3 kernel handles arbitrary leaf sizes via a
+    /// streaming subtree-stack inside each thread (see
+    /// `hash_leaves_blake3` in `shaders/hash_kernels.metal`). The
+    /// per-thread stack supports leaves up to ~16 GB; for larger
+    /// inputs the CPU path
+    /// ([`crate::merkle::MerkleTree::new_from_row_major_grouped`])
+    /// remains available.
     pub unsafe fn hash_columns_gpu(
         &self,
         kind: GpuHashKind,
@@ -117,10 +120,14 @@ impl MetalContext {
         num_cols: usize,
         col_byte_len: usize,
     ) -> Vec<u8> {
+        // 16 GB / leaf upper bound matches the kernel's 24-deep CV
+        // stack (`2^24 × 1024 B`). Larger leaves would silently lose
+        // data in the bubble-up merge; assert loudly instead.
+        const MAX_LEAF_BYTES: usize = 16 * 1024 * 1024 * 1024;
         assert!(
-            col_byte_len <= 64 * 1024,
-            "GPU Blake3 kernel only supports leaves up to 64 KB; got {col_byte_len} bytes — \
-             fall back to the CPU path for larger inputs"
+            col_byte_len <= MAX_LEAF_BYTES,
+            "GPU Blake3 kernel supports leaves up to {} bytes; got {col_byte_len}",
+            MAX_LEAF_BYTES,
         );
         let pipeline = match kind {
             GpuHashKind::Blake3 => &self.pipeline_hash_blake3,
@@ -252,6 +259,47 @@ mod tests {
                     &gpu[i * 32..(i + 1) * 32],
                     &expected[..],
                     "mismatch at leaf {i} of {num_cols}, col_bytes={col_bytes}"
+                );
+            }
+        }
+    }
+
+    /// Cross-check large-leaf paths (> 64 KB), exercising the streaming
+    /// subtree-stack kernel. Sizes here are picked to (a) cross the old
+    /// 64 KB hard cap, (b) hit boundary cases for chunk counts that
+    /// merge into balanced (power-of-two) vs unbalanced subtrees, and
+    /// (c) include a multi-MB leaf representative of SHA-256 F_2's
+    /// shape (~14 MB / leaf at nvars=20).
+    #[test]
+    fn gpu_blake3_matches_cpu_for_large_leaves() {
+        let ctx = MetalContext::get();
+        // Sizes (bytes): 64 KB, 65 KB (over old cap), 256 KB, ~1 MB,
+        // 14 MB (~SHA-256 F_2 nvars=20 leaf size, but rounded).
+        // num_cols kept small (4) because each leaf is multi-MB; a 32-
+        // col 14 MB-each test would allocate ~450 MB.
+        for &col_bytes in &[
+            65 * 1024usize,
+            64 * 1024 + 1,
+            256 * 1024,
+            1_048_576,
+            4 * 1024 * 1024,
+        ] {
+            let num_cols = 4;
+            let mut data = vec![0u8; num_cols * col_bytes];
+            for (i, b) in data.iter_mut().enumerate() {
+                *b = ((i * 1103515245).wrapping_add(12345) >> 16) as u8;
+            }
+            let gpu = unsafe {
+                ctx.hash_columns_gpu(GpuHashKind::Blake3, data.as_ptr(), num_cols, col_bytes)
+            };
+            assert_eq!(gpu.len(), num_cols * 32);
+            for i in 0..num_cols {
+                let leaf = &data[i * col_bytes..(i + 1) * col_bytes];
+                let expected: [u8; 32] = blake3::hash(leaf).into();
+                assert_eq!(
+                    &gpu[i * 32..(i + 1) * 32],
+                    &expected[..],
+                    "large-leaf mismatch at leaf {i} of {num_cols}, col_bytes={col_bytes}"
                 );
             }
         }

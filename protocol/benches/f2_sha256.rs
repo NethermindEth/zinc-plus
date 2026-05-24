@@ -638,7 +638,12 @@ fn bench_micro_prover_uair(
     // ---- 0a) Commit-Pair: just the trace-pairing pre-step ----
     group.bench_function(BenchmarkId::new("Commit-Pair", id), |bench| {
         bench.iter(|| {
-            let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+            let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
             black_box(paired);
         });
     });
@@ -649,7 +654,12 @@ fn bench_micro_prover_uair(
         use zip_plus::pcs::structs::ZipPlus;
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         bench.iter(|| {
             let cw_matrices: Vec<_> = paired
                 .par_iter()
@@ -666,7 +676,12 @@ fn bench_micro_prover_uair(
         use zip_plus::pcs::structs::ZipPlus;
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         let codeword_len = fx.pp.linear_code.codeword_len();
         bench.iter(|| {
             let cw_matrices: Vec<_> = paired
@@ -687,7 +702,12 @@ fn bench_micro_prover_uair(
         use rayon::prelude::*;
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         let codeword_len = fx.pp.linear_code.codeword_len();
         let cw_matrices: Vec<_> = paired
             .par_iter()
@@ -710,7 +730,12 @@ fn bench_micro_prover_uair(
         use zip_plus::pcs::structs::ZipPlus;
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         let codeword_len = fx.pp.linear_code.codeword_len();
         let num_rows = fx.pp.num_rows;
         bench.iter(|| {
@@ -741,7 +766,12 @@ fn bench_micro_prover_uair(
         use zip_plus::pcs::structs::ZipPlus;
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         let codeword_len = fx.pp.linear_code.codeword_len();
         let num_rows = fx.pp.num_rows;
         bench.iter(|| {
@@ -783,7 +813,12 @@ fn bench_micro_prover_uair(
         type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
         type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
         type Cw = <BinZt as zip_plus::pcs::structs::ZipTypes>::Cw;
-        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+            &sha_f2_k_virtuals(),
+        );
         let codeword_len = fx.pp.linear_code.codeword_len();
         let num_rows = fx.pp.num_rows;
         let batch_size = paired.len();
@@ -1884,7 +1919,7 @@ fn bench_micro_verifier_open(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[9,16,19,20,21];
+const NVARS_SWEEP: &[usize] = &[9,16,22];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
@@ -1982,7 +2017,7 @@ fn step_benches(c: &mut Criterion) {
 
 fn micro_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Micro");
-    let fx = setup_prover(16);
+    let fx = setup_prover(21);
     let id = format!("nvars={}", fx.num_vars);
     bench_micro_prover_uair(&mut group, &id, &fx);
     bench_micro_prover_open(&mut group, &id, &fx);
