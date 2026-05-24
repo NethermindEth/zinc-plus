@@ -914,12 +914,37 @@ where
         // across columns and each eval is O(2^num_vars) GF(2^192)
         // ops, so this is one of the heavier outer loops — fan out
         // across rayon workers.
+        //
+        // `projected_trace` is consumed here (it isn't used after this
+        // step). For each column we move its `Vec<BinaryFieldGF192>`
+        // out and zero-copy reinterpret it as `Vec<Uint<3>>` —
+        // `BinaryFieldGF192` is `#[repr(transparent)]` around
+        // `Uint<3>`, so the bytes are identical and we skip the
+        // ~24 MB / col allocation+copy this loop used to do at
+        // nvars=20 (and ~1.5 MB / col at nvars=16).
         let zero_inner = *BinaryFieldGF192::zero().inner();
-        let all_col_evals: Vec<BinaryFieldGF192> = cfg_iter!(projected_trace)
+        let all_col_evals: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(projected_trace)
             .map(|col| {
+                let num_vars = col.num_vars;
+                let inner_evals: Vec<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> = {
+                    // SAFETY: BinaryFieldGF192 is #[repr(transparent)]
+                    // around <BinaryFieldGF192 as Field>::Inner (Uint<3>),
+                    // so the Vec's storage layout is identical. We move
+                    // the original Vec out (ManuallyDrop) and rebuild
+                    // it under the inner element type.
+                    let mut me = core::mem::ManuallyDrop::new(col.evaluations);
+                    let (ptr, len, cap) = (me.as_mut_ptr(), me.len(), me.capacity());
+                    unsafe {
+                        Vec::from_raw_parts(
+                            ptr.cast::<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>(),
+                            len,
+                            cap,
+                        )
+                    }
+                };
                 let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
-                    col.num_vars,
-                    col.evaluations.iter().map(|x| *x.inner()).collect(),
+                    num_vars,
+                    inner_evals,
                     zero_inner,
                 );
                 <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
@@ -1820,39 +1845,51 @@ where
         let per_col_combined: Vec<Vec<BinaryF2Poly<7>>> = cfg_iter!(trace_binary_cols)
             .enumerate()
             .map(|(g, col)| {
-                let mut col_contrib: Vec<BinaryF2Poly<7>> =
-                    Vec::with_capacity(row_len);
-                for j in 0..row_len {
-                    // Inline `f2_inner_product::<1, 3, 4>(lifted, coeffs)`
-                    // and the lift, so the (col, j) loop body does NOT
-                    // allocate a fresh `Vec<BinaryF2Poly<1>>` of length
-                    // `num_rows` per iteration — that allocation was
-                    // ~2 ms parallel at nvars=16 (50 cols × 8 192 j × 8
-                    // entries). Cells (W=1, ~16 set bits avg) are far
-                    // sparser than `coeffs` (W=3, ~96 set bits avg), so
-                    // the schoolbook in `f2_poly_mul` still iterates
-                    // over the sparser operand.
-                    let mut per_col_entry = BinaryF2Poly::<4>::zero();
-                    for i in 0..num_rows {
+                // Loop-reorder: outer over `i` (rows), inner over `j`
+                // (codeword positions). The original (j outer, i inner)
+                // order read `col.evaluations[i * row_len + j]` with a
+                // `row_len`-stride between successive `i` values. At
+                // nvars=20 `row_len = 131072` and `BinaryPoly<32>` is
+                // 4 bytes, so the stride is 512 KB — well past what the
+                // hardware prefetcher tracks and well past the per-row
+                // working set the L1 can hold. Flipping the loops makes
+                // the read pattern sequential within each row pass and
+                // also keeps `coeffs[i]` in registers across the inner
+                // `j` loop instead of reloading it every (i, j) pair.
+                //
+                // Accumulate per-`j` partials in `col_partial` (W=4),
+                // then a final pass multiplies each by `γ_g` (W=7).
+                // Same total work, dramatically better cache + register
+                // behaviour at large `nvars`.
+                let mut col_partial: Vec<BinaryF2Poly<4>> =
+                    vec![BinaryF2Poly::<4>::zero(); row_len];
+                for i in 0..num_rows {
+                    let row_slice =
+                        &col.evaluations[i * row_len..(i + 1) * row_len];
+                    let coeff_i = &coeffs[i];
+                    for j in 0..row_len {
                         let cell =
                             zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
-                                &col.evaluations[i * row_len + j],
+                                &row_slice[j],
                             );
                         let prod: BinaryF2Poly<4> =
                             zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                &cell,
-                                &coeffs[i],
+                                &cell, coeff_i,
                             );
-                        per_col_entry += prod;
+                        col_partial[j] += prod;
                     }
-                    let scaled: BinaryF2Poly<7> =
-                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
-                            &gamma[g],
-                            &per_col_entry,
-                        );
-                    col_contrib.push(scaled);
                 }
-                col_contrib
+                // Apply `γ_g` in a separate pass over `col_partial`.
+                // Reads stride 1, writes stride 1, kernel is identical
+                // per `j` — easy to keep `gamma[g]` in registers.
+                col_partial
+                    .into_iter()
+                    .map(|entry| {
+                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
+                            &gamma[g], &entry,
+                        )
+                    })
+                    .collect::<Vec<BinaryF2Poly<7>>>()
             })
             .collect();
 

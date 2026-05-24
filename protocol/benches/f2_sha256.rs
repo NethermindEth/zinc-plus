@@ -1163,12 +1163,13 @@ fn bench_micro_prover_open(
 
     // ---- d) CombinedRow — per-column combined_row contributions (parallel) ----
     //
-    // Mirrors the inline-lift + fused inner-product structure from the
-    // real `prove_f2_open` body (see `f2_prove.rs:1818-1854`): each
-    // `(col, j)` iteration accumulates `Σ_i lift(cell_i_j) · coeffs[i]`
-    // directly into a stack `BinaryF2Poly<4>`, skipping the per-j
-    // `Vec<BinaryF2Poly<1>>` materialisation that the textbook
-    // `f2_inner_product` would force.
+    // Mirrors the loop-reordered structure from the real
+    // `prove_f2_open` body (see `f2_prove.rs:1818-1858`): outer over
+    // `i` (rows) so reads on `col.evaluations[i * row_len + j]` are
+    // sequential and `coeffs[i]` stays in registers across the inner
+    // `j` loop. A separate final pass applies `γ_g` to each per-j
+    // partial. Same total work, much better cache locality at large
+    // `nvars` (at nvars=20 the row stride is 512 KB).
     group.bench_function(BenchmarkId::new("Open-d-CombinedRow", id), |bench| {
         bench.iter(|| {
             #[cfg(feature = "parallel")]
@@ -1179,22 +1180,23 @@ fn bench_micro_prover_open(
             let it = fx.trace.binary_poly.iter().enumerate();
             let per_col: Vec<Vec<BinaryF2Poly<7>>> = it
                 .map(|(g, col)| {
-                    let mut col_contrib: Vec<BinaryF2Poly<7>> = Vec::with_capacity(row_len);
-                    for j in 0..row_len {
-                        let mut per_col_entry = BinaryF2Poly::<4>::zero();
-                        for i in 0..num_rows {
-                            let cell = lift_bp_to_f2_poly_1::<D>(
-                                &col.evaluations[i * row_len + j],
-                            );
+                    let mut col_partial: Vec<BinaryF2Poly<4>> =
+                        vec![BinaryF2Poly::<4>::zero(); row_len];
+                    for i in 0..num_rows {
+                        let row_slice =
+                            &col.evaluations[i * row_len..(i + 1) * row_len];
+                        let coeff_i = &coeffs[i];
+                        for j in 0..row_len {
+                            let cell = lift_bp_to_f2_poly_1::<D>(&row_slice[j]);
                             let prod: BinaryF2Poly<4> =
-                                f2_poly_mul::<1, 3, 4>(&cell, &coeffs[i]);
-                            per_col_entry += prod;
+                                f2_poly_mul::<1, 3, 4>(&cell, coeff_i);
+                            col_partial[j] += prod;
                         }
-                        let scaled: BinaryF2Poly<7> =
-                            f2_poly_mul::<3, 4, 7>(&gamma[g], &per_col_entry);
-                        col_contrib.push(scaled);
                     }
-                    col_contrib
+                    col_partial
+                        .into_iter()
+                        .map(|entry| f2_poly_mul::<3, 4, 7>(&gamma[g], &entry))
+                        .collect::<Vec<BinaryF2Poly<7>>>()
                 })
                 .collect();
             black_box(per_col);
@@ -1772,7 +1774,7 @@ fn bench_micro_verifier_open(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[9,16];
+const NVARS_SWEEP: &[usize] = &[9,16,19,20,21];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
