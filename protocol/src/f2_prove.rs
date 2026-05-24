@@ -230,6 +230,20 @@ where
 /// generic; left fixed here while only this UAIR uses the F_2 path.
 pub const PACKED_STORAGE_WIDTH: usize = 64;
 
+/// Number of consecutive codeword columns hashed into one Merkle leaf.
+/// With a 2-row commit (one storage cell per column = 16 B), each
+/// un-grouped leaf hash pays a Blake3 setup cost that dwarfs its
+/// per-byte work; grouping `LEAF_GROUP_SIZE` columns per leaf
+/// amortises that setup over `LEAF_GROUP_SIZE × paired_batch ×
+/// num_rows × 8` bytes of payload and reduces the leaf count (and
+/// thus tree-internal hash count) by the same factor. Per opening the
+/// prover must send all `LEAF_GROUP_SIZE` columns of the queried
+/// group so the verifier can recompute the leaf hash — a wire bloat
+/// of `LEAF_GROUP_SIZE×` on the column-values portion of the proof,
+/// partly offset by a shorter Merkle path (`log2(group_size)` fewer
+/// sibling hashes per opening).
+pub const LEAF_GROUP_SIZE: usize = 8;
+
 /// All-`F_2` ZincTypes-like trait. Mirrors [`ZincTypes`](crate::ZincTypes)
 /// but drops the `ArbitraryZt`/`IntZt` lanes (an all-`F_2` UAIR has
 /// neither) and the prime-modulus / challenge / projecting-element
@@ -1019,9 +1033,11 @@ where
     > {
         // Pair consecutive trace columns into packed storage cells of
         // width `PACKED_STORAGE_WIDTH = 64`. Halves the cw_matrices count,
-        // transpose memory traffic, and Merkle-leaf input bytes.
+        // transpose memory traffic, and Merkle-leaf input bytes. Then
+        // group `LEAF_GROUP_SIZE` consecutive codeword columns per
+        // Merkle leaf so Blake3 setup amortises over the group.
         let paired = pair_trace_polys::<D>(trace_binary_cols);
-        ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit(pp, &paired)
+        ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit_grouped(pp, &paired, LEAF_GROUP_SIZE)
     }
 
     /// Convenience: commit + absorb the resulting commitment root
@@ -1546,23 +1562,27 @@ where
             .map(|_| sample_column_idx(transcript, codeword_len))
             .collect();
 
+        let col_len = commit_hint.cw_columns[0].len();
         let opened_columns: Vec<F2OpenedColumn<D>> = cfg_iter!(column_indices)
             .map(|&column_idx| {
-                // Column-major mirror: `cw_columns[column_idx]` already
-                // holds `(paired_matrix, row)` packed cells in the exact
-                // layout the verifier hashes for the Merkle leaf check
-                // (`[p * num_rows + r]`, paired_batch_size entries per
-                // row × num_rows rows). One clone replaces the previous
-                // `batch_size × num_rows` cache-line-strided reads.
-                let column_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> =
-                    commit_hint.cw_columns[column_idx].clone();
+                // Group-aware open: the Merkle leaf for `column_idx` is
+                // `H(cw_columns[group*G] || … || cw_columns[group*G + G-1])`
+                // where `group = column_idx / G`. Send all G columns of
+                // the group so the verifier can recompute the leaf hash.
+                let group_idx = column_idx / LEAF_GROUP_SIZE;
+                let group_start = group_idx * LEAF_GROUP_SIZE;
+                let mut group_values: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> =
+                    Vec::with_capacity(LEAF_GROUP_SIZE * col_len);
+                for l in 0..LEAF_GROUP_SIZE {
+                    group_values.extend_from_slice(&commit_hint.cw_columns[group_start + l]);
+                }
                 let merkle_proof = commit_hint
                     .merkle_tree
-                    .prove(column_idx)
-                    .expect("Merkle prove should succeed for in-range column idx");
+                    .prove(group_idx)
+                    .expect("Merkle prove should succeed for in-range group idx");
                 F2OpenedColumn {
                     column_idx,
-                    column_values,
+                    column_values: group_values,
                     merkle_proof,
                     _trace_d: core::marker::PhantomData,
                 }
@@ -1720,9 +1740,11 @@ where
 
         // `batch_size` here is the *paired* batch size (the prover
         // committed `paired_batch_size = ⌈num_cols / 2⌉` packed
-        // matrices). The Merkle leaf hashes `paired_batch_size *
-        // num_rows` packed cells; the γ-discharge unpacks each
-        // packed cell into two trace-cell-width halves.
+        // matrices). Each Merkle leaf hashes `LEAF_GROUP_SIZE`
+        // consecutive codeword columns concatenated; per opening the
+        // prover sends all `LEAF_GROUP_SIZE` columns of the group so
+        // the verifier can recompute the leaf hash. The γ-discharge
+        // unpacks each packed cell into two trace-cell-width halves.
         let paired_batch_size = num_cols.div_ceil(2);
         if batch_size != paired_batch_size {
             return Err(F2OpenError::ColumnValuesLenMismatch {
@@ -1730,7 +1752,8 @@ where
                 got: batch_size,
             });
         }
-        let expected_column_values_len = paired_batch_size * num_rows;
+        let single_col_len = paired_batch_size * num_rows;
+        let expected_column_values_len = LEAF_GROUP_SIZE * single_col_len;
 
         // The column-opening loop is the single dominant cost of
         // `verify_f2_open` (~656 F_2[X]<3>·<1> mults per opened
@@ -1762,41 +1785,43 @@ where
                     });
                 }
 
-                // (a) Merkle path — over the packed cells exactly as
-                //     committed.
+                // (a) Merkle path — recompute the leaf hash from the
+                //     `LEAF_GROUP_SIZE` columns of the queried group
+                //     and verify against the root.
+                let group_idx = opened.column_idx / LEAF_GROUP_SIZE;
+                let group_slices: Vec<&[BinaryPoly<PACKED_STORAGE_WIDTH>]> = (0
+                    ..LEAF_GROUP_SIZE)
+                    .map(|l| {
+                        &opened.column_values[l * single_col_len..(l + 1) * single_col_len]
+                    })
+                    .collect();
                 opened
                     .merkle_proof
-                    .verify(&commitment.root, &opened.column_values, opened.column_idx)
+                    .verify_grouped(&commitment.root, &group_slices, group_idx)
                     .map_err(|e| F2OpenError::MerkleVerify {
                         column_idx: opened.column_idx,
                         reason: format!("{e}"),
                     })?;
 
-                // (b) γ-weighted encoding consistency. Cells are
-                //     packed pairs (`BinaryPoly<PACKED_STORAGE_WIDTH>`):
-                //     lift each packed cell straight from its raw u64
-                //     into two `BinaryF2Poly<1>` halves (lo = col 2p,
-                //     hi = col 2p+1) without materialising an
-                //     intermediate `BinaryPoly<D>` — the canonical
-                //     bit-pattern lift on `BinaryU64Poly` is just a
-                //     u64 copy, and the iter-based
-                //     `lift_bp_to_f2_poly_1` would walk 64 bits per
-                //     packed cell to do the same work.
+                // (b) γ-weighted encoding consistency on the queried
+                //     column within the group (the verifier only needs
+                //     to check the codeword cell at `column_idx`, not
+                //     the other group members).
                 //
                 //  weighted_col[i] = Σ_g γ_g · cw_M^g[i, j]  ∈ F_2[X]<4>
                 //  actual_at_j     = Σ_i coeffs[i] · weighted_col[i]  ∈ F_2[X]<7>
                 //  expected_at_j   = encoded[j]  ∈ F_2[X]<7>
                 //
-                // Inner-loop optimisation: `f2_poly_mul` is schoolbook
-                // and iterates over the SET bits of operand `a`. The
-                // lifted half-cell is a ≤32-bit `BinaryF2Poly<1>`
-                // (~16 set bits average), while γ is a 192-bit
-                // `BinaryF2Poly<3>` (~96 set bits average). Passing
-                // the cell half as `a` gives ~6× fewer XOR-shifts vs.
-                // the natural `γ · cell` ordering. The product is
-                // commutative in `F_2[X]`.
+                // Lift each packed cell straight from its raw u64 into
+                // two `BinaryF2Poly<1>` halves (lo = col 2p, hi = col 2p+1)
+                // without materialising an intermediate `BinaryPoly<D>` —
+                // the canonical bit-pattern lift on `BinaryU64Poly` is
+                // just a u64 copy.
                 use zinc_poly::univariate::F2PackU64;
                 let lo_mask: u64 = 0xFFFF_FFFFu64;
+                let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
+                let local_col = &opened.column_values
+                    [local_idx * single_col_len..(local_idx + 1) * single_col_len];
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
                 for p in 0..paired_batch_size {
@@ -1804,7 +1829,7 @@ where
                     let g_hi = 2 * p + 1;
                     let has_hi = g_hi < num_cols;
                     for i in 0..num_rows {
-                        let packed_bits = opened.column_values[p * num_rows + i].pack_u64();
+                        let packed_bits = local_col[p * num_rows + i].pack_u64();
                         let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
                         let prod_lo: BinaryF2Poly<4> =
                             zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(

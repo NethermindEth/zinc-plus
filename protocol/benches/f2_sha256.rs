@@ -997,6 +997,8 @@ fn bench_micro_prover_open(
                 .map(|_| zinc_protocol::f2_prove::sample_column_idx(&mut t, codeword_len))
                 .collect()
         };
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
+        let single_col_len = hint.cw_columns[0].len();
         bench.iter(|| {
             #[cfg(feature = "parallel")]
             use rayon::prelude::*;
@@ -1006,13 +1008,18 @@ fn bench_micro_prover_open(
             let it = indices.iter();
             let all: Vec<(Vec<BinaryPoly<64>>, _)> = it
                 .map(|&column_idx| {
-                    let column_values: Vec<BinaryPoly<64>> =
-                        hint.cw_columns[column_idx].clone();
+                    let group_idx = column_idx / LEAF_GROUP_SIZE;
+                    let group_start = group_idx * LEAF_GROUP_SIZE;
+                    let mut group_values: Vec<BinaryPoly<64>> =
+                        Vec::with_capacity(LEAF_GROUP_SIZE * single_col_len);
+                    for l in 0..LEAF_GROUP_SIZE {
+                        group_values.extend_from_slice(&hint.cw_columns[group_start + l]);
+                    }
                     let merkle_proof = hint
                         .merkle_tree
-                        .prove(column_idx)
+                        .prove(group_idx)
                         .expect("Merkle prove");
-                    (column_values, merkle_proof)
+                    (group_values, merkle_proof)
                 })
                 .collect();
             black_box(all);
@@ -1350,10 +1357,13 @@ fn bench_micro_verifier_open(
     group.bench_function(BenchmarkId::new("VerifyOpen-e-PerOpening", id), |bench| {
         // Pre-compute encoded combined_row once (the protocol caches
         // this across openings).
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
         let encoded: Vec<BinaryF2Poly<7>> = fx
             .pp
             .linear_code
             .encode_f2_lin_open::<7>(&proof.open.combined_row);
+        let paired_batch = num_cols.div_ceil(2);
+        let single_col_len = paired_batch * num_rows;
         bench.iter(|| {
             #[cfg(feature = "parallel")]
             use rayon::prelude::*;
@@ -1362,19 +1372,29 @@ fn bench_micro_verifier_open(
             #[cfg(not(feature = "parallel"))]
             let it = proof.open.opened_columns.iter();
             it.for_each(|opened| {
-                // (a) Merkle path
+                // (a) Merkle path — recompute leaf hash from the
+                //     `LEAF_GROUP_SIZE` columns of the group.
+                let group_idx = opened.column_idx / LEAF_GROUP_SIZE;
+                let group_slices: Vec<&[BinaryPoly<64>]> = (0..LEAF_GROUP_SIZE)
+                    .map(|l| {
+                        &opened.column_values[l * single_col_len..(l + 1) * single_col_len]
+                    })
+                    .collect();
                 opened
                     .merkle_proof
-                    .verify(&proof.commitment.root, &opened.column_values, opened.column_idx)
+                    .verify_grouped(&proof.commitment.root, &group_slices, group_idx)
                     .expect("Merkle verify");
 
-                // (b) γ-weighted encoding consistency. Lift each
-                //     packed cell straight from its raw u64 into two
+                // (b) γ-weighted encoding consistency on the queried
+                //     column within the group. Lift each packed cell
+                //     straight from its raw u64 into two
                 //     `BinaryF2Poly<1>` halves without an intermediate
                 //     `BinaryPoly<D>` allocation. Mirrors the fast
                 //     path in `verify_f2_open`.
                 use zinc_poly::univariate::F2PackU64;
-                let paired_batch = num_cols.div_ceil(2);
+                let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
+                let local_col = &opened.column_values
+                    [local_idx * single_col_len..(local_idx + 1) * single_col_len];
                 let lo_mask: u64 = 0xFFFF_FFFFu64;
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
@@ -1383,7 +1403,7 @@ fn bench_micro_verifier_open(
                     let g_hi = 2 * p + 1;
                     let has_hi = g_hi < num_cols;
                     for i in 0..num_rows {
-                        let packed_bits = opened.column_values[p * num_rows + i].pack_u64();
+                        let packed_bits = local_col[p * num_rows + i].pack_u64();
                         let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
                         let prod_lo: BinaryF2Poly<4> =
                             f2_poly_mul::<1, 3, 4>(&lo_lifted, &gamma_lifted[g_lo]);
