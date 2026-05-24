@@ -1013,8 +1013,13 @@ fn bench_micro_prover_uair(
         let zero_inner = *BinaryFieldGF192::zero().inner();
 
         bench.iter(|| {
-            let col_evals: Vec<BinaryFieldGF192> = projected
-                .iter()
+            #[cfg(feature = "parallel")]
+            use rayon::prelude::*;
+            #[cfg(feature = "parallel")]
+            let it = projected.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let it = projected.iter();
+            let col_evals: Vec<BinaryFieldGF192> = it
                 .map(|col| {
                     let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                         col.num_vars,
