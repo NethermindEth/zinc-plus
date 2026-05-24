@@ -262,9 +262,9 @@ struct ProverFixture {
 
 fn setup_prover(num_vars: usize) -> ProverFixture {
     let mut rng_local = rng();
-    let row_len: usize = 32;
+    let num_rows: usize = 8;
     let poly_size = 1usize << num_vars;
-    let num_rows = poly_size / row_len;
+    let row_len = poly_size / num_rows;
     assert_eq!(num_rows * row_len, poly_size);
 
     let trace = U::generate_random_trace(num_vars, &mut rng_local);
