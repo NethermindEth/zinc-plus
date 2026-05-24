@@ -262,12 +262,13 @@ struct ProverFixture {
 
 fn setup_prover(num_vars: usize) -> ProverFixture {
     let mut rng_local = rng();
-    // Use a 2-row commit shape: the codeword matrix is `2 × row_len`,
-    // each column is just 2 cells per matrix → ~`paired_batch · 2`
-    // bytes per opened leaf. Trades a longer codeword (more Merkle
-    // leaves, deeper tree) for tiny opening payloads. See
-    // `recommended_num_column_openings` for the soundness side.
-    let num_rows: usize = 2;
+    // Use an 8-row commit shape: the codeword matrix is `8 × row_len`,
+    // each column carries 8 cells per matrix → ~`paired_batch · 8`
+    // bytes per packed column buffer. Compared to `num_rows = 2`, the
+    // Merkle tree has 4× fewer leaves (and 4× fewer tree-internal
+    // hashes), trading slightly larger per-opening payloads for less
+    // Blake3 setup overhead on the commit side.
+    let num_rows: usize = 8;
     let poly_size = 1usize << num_vars;
     let row_len = poly_size / num_rows;
     assert_eq!(num_rows * row_len, poly_size);
