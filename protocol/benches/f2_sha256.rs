@@ -653,11 +653,43 @@ fn bench_micro_prover_uair(
 
     // ---- a) F_2-native IC ----
     //
-    // The current code path: per-row bit-poly arithmetic + per-bit
-    // MLE eval at the IC point. Replaces the old
-    // RowMajorProject + ProjectScalars + ICProveCombined trio that
-    // earlier versions of this bench measured.
+    // The IC step. SHA-256 F_2 is degree-1 in trace MLEs (see
+    // `sha_f2_uair_is_mle_first_eligible`) so the real prover routes
+    // through `prove_linear` (MLE-first). We bench the same lane here
+    // so micro and end-to-end measurements stay aligned.
+    //
+    // `_OldCombined` is left in as a separate sub-bench for the
+    // row-major path so the impact of the MLE-first dispatch is
+    // visible side-by-side without changing how the headline IC
+    // number is read.
     group.bench_function(BenchmarkId::new("UAIR-a-F2NativeIC", id), |bench| {
+        bench.iter_batched(
+            || {
+                let mut transcript = Blake3Transcript::new();
+                let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::commit_and_absorb_f2_trace_with_virtuals(
+                        &mut transcript, &fx.pp, &fx.trace.binary_poly,
+                        &sha_f2_bit_op_virtuals(),
+                    )
+                    .expect("commit");
+                transcript
+            },
+            |mut transcript| {
+                let (proof, state) = F2NativeIc::<U>::prove_linear::<BinaryFieldGF192, _, D>(
+                    &mut transcript,
+                    &fx.trace.binary_poly,
+                    num_constraints,
+                    fx.num_vars,
+                    &field_cfg,
+                    |s: &<U as zinc_uair::Uair>::Scalar, _cfg: &()| sha256_f2_project_scalar::<R>(s),
+                );
+                black_box((proof, state));
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    group.bench_function(BenchmarkId::new("UAIR-a-F2NativeIC-OldCombined", id), |bench| {
         bench.iter_batched(
             || {
                 let mut transcript = Blake3Transcript::new();
