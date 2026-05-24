@@ -39,6 +39,10 @@ workspace = true
 parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []
+# Metal GPU Blake3 leaf-hash path in the commit phase. macOS-only.
+# Forwarded to `zip-plus/metal_gpu`. Used by the `Commit-Fused-GPU`
+# micro bench entry in `benches/f2_sha256.rs`.
+metal_gpu = ["zip-plus/metal_gpu"]
 # Switch the IPRS bench code from inverse-rate 4 (rate 1/4) to inverse-rate 8
 # (rate 1/8). Affects every `IprsCode<..., REP, ...>` instance in `benches/e2e.rs`.
 iprs-rate-1-8 = []

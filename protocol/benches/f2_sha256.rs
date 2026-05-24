@@ -624,6 +624,101 @@ fn bench_micro_prover_uair(
         });
     });
 
+    // ---- 0f) Commit-Fused-GPU: encode + pack leaves into a contiguous
+    //          slab + dispatch Metal Blake3 leaf hash + build the tree.
+    //          Produces the same Merkle root as Commit-Fused (covered by
+    //          `merkle::tests::gpu_row_major_grouped_root_matches_cpu`).
+    //          Only built with `--features metal_gpu` on macOS.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    group.bench_function(BenchmarkId::new("Commit-Fused-GPU", id), |bench| {
+        use rayon::prelude::*;
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
+        use zip_plus::merkle::MerkleTree;
+        use zip_plus::pcs::structs::ZipPlus;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let codeword_len = fx.pp.linear_code.codeword_len();
+        let num_rows = fx.pp.num_rows;
+        bench.iter(|| {
+            let cw_matrices: Vec<_> = paired
+                .par_iter()
+                .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
+                .collect();
+            let mt = MerkleTree::new_from_row_major_grouped_gpu(
+                &cw_matrices,
+                num_rows,
+                codeword_len,
+                LEAF_GROUP_SIZE,
+            );
+            black_box((cw_matrices, mt));
+        });
+    });
+
+    // ---- 0g) Commit-Fused-GPU-Inline: encode + per-matrix scatter into
+    //          a shared slab in the SAME par_iter, then GPU dispatch +
+    //          tree build from the prebuilt slab. Avoids the dedicated
+    //          pack pass that `Commit-Fused-GPU` does internally
+    //          (which walks every cell of `cw_matrices` a second time
+    //          after the encode loop).
+    //
+    //          Each worker scatters its matrix's contribution while
+    //          that matrix's data is still hot in L1/L2 from the encode
+    //          that just produced it. Different `m_idx` values write to
+    //          disjoint byte sub-ranges within every leaf → race-free.
+    //
+    //          Same Merkle root as Commit-Fused (covered by
+    //          `merkle::tests::gpu_inline_packed_root_matches_cpu`).
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    group.bench_function(BenchmarkId::new("Commit-Fused-GPU-Inline", id), |bench| {
+        use rayon::prelude::*;
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
+        use zinc_transcript::traits::ConstTranscribable;
+        use zip_plus::merkle::{GpuSlabPtr, MerkleTree};
+        use zip_plus::pcs::structs::ZipPlus;
+        type BinZt = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryZt;
+        type BinLc = <BenchF2Types<D> as F2ZincTypes<D>>::BinaryLc;
+        type Cw = <BinZt as zip_plus::pcs::structs::ZipTypes>::Cw;
+        let paired = zinc_protocol::f2_prove::pair_trace_polys_pub::<D>(&fx.trace.binary_poly);
+        let codeword_len = fx.pp.linear_code.codeword_len();
+        let num_rows = fx.pp.num_rows;
+        let batch_size = paired.len();
+        let elem_bytes = <Cw as ConstTranscribable>::NUM_BYTES;
+        let leaf_bytes = LEAF_GROUP_SIZE * batch_size * num_rows * elem_bytes;
+        let num_leaves = codeword_len / LEAF_GROUP_SIZE;
+        bench.iter(|| {
+            let mut slab = vec![0u8; num_leaves * leaf_bytes];
+            let slab_ptr = GpuSlabPtr {
+                ptr: slab.as_mut_ptr(),
+                len: slab.len(),
+            };
+            let cw_matrices: Vec<_> = paired
+                .par_iter()
+                .enumerate()
+                .map(|(m_idx, poly)| {
+                    let mat = ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly);
+                    // SAFETY: distinct m_idx values per worker write to
+                    // disjoint byte sub-ranges within each leaf.
+                    unsafe {
+                        MerkleTree::scatter_matrix_into_gpu_slab(
+                            slab_ptr,
+                            m_idx,
+                            &mat,
+                            num_rows,
+                            codeword_len,
+                            LEAF_GROUP_SIZE,
+                            batch_size,
+                            leaf_bytes,
+                        );
+                    }
+                    mat
+                })
+                .collect();
+            let mt = MerkleTree::new_from_packed_slab_gpu(&slab, num_leaves, leaf_bytes);
+            black_box((cw_matrices, mt));
+        });
+    });
+
     // ---- 0) Commit (PCS commit + Merkle root + transcript absorb) ----
     //
     // Without this entry the Micro group's prover sum would miss the
@@ -1062,6 +1157,13 @@ fn bench_micro_prover_open(
     });
 
     // ---- d) CombinedRow — per-column combined_row contributions (parallel) ----
+    //
+    // Mirrors the inline-lift + fused inner-product structure from the
+    // real `prove_f2_open` body (see `f2_prove.rs:1818-1854`): each
+    // `(col, j)` iteration accumulates `Σ_i lift(cell_i_j) · coeffs[i]`
+    // directly into a stack `BinaryF2Poly<4>`, skipping the per-j
+    // `Vec<BinaryF2Poly<1>>` materialisation that the textbook
+    // `f2_inner_product` would force.
     group.bench_function(BenchmarkId::new("Open-d-CombinedRow", id), |bench| {
         bench.iter(|| {
             #[cfg(feature = "parallel")]
@@ -1074,11 +1176,15 @@ fn bench_micro_prover_open(
                 .map(|(g, col)| {
                     let mut col_contrib: Vec<BinaryF2Poly<7>> = Vec::with_capacity(row_len);
                     for j in 0..row_len {
-                        let column_j_lifted: Vec<BinaryF2Poly<1>> = (0..num_rows)
-                            .map(|i| lift_bp_to_f2_poly_1::<D>(&col.evaluations[i * row_len + j]))
-                            .collect();
-                        let per_col_entry: BinaryF2Poly<4> =
-                            f2_inner_product::<1, 3, 4>(&column_j_lifted, &coeffs);
+                        let mut per_col_entry = BinaryF2Poly::<4>::zero();
+                        for i in 0..num_rows {
+                            let cell = lift_bp_to_f2_poly_1::<D>(
+                                &col.evaluations[i * row_len + j],
+                            );
+                            let prod: BinaryF2Poly<4> =
+                                f2_poly_mul::<1, 3, 4>(&cell, &coeffs[i]);
+                            per_col_entry += prod;
+                        }
                         let scaled: BinaryF2Poly<7> =
                             f2_poly_mul::<3, 4, 7>(&gamma[g], &per_col_entry);
                         col_contrib.push(scaled);
@@ -1091,7 +1197,16 @@ fn bench_micro_prover_open(
     });
 
     // ---- e) MerkleOpens — t = 987 sample + path generations ----
+    //
+    // The real `prove_f2_open` maps each sampled `column_idx` to its
+    // Merkle leaf via `group_idx = column_idx / LEAF_GROUP_SIZE` before
+    // calling `merkle_tree.prove(...)` (see `f2_prove.rs:1924-1926`).
+    // We mirror that here so the bench works for any `LEAF_GROUP_SIZE >
+    // 1` shape — without the divide we'd hand `prove()` an index past
+    // `num_leaves = codeword_len / LEAF_GROUP_SIZE` and trip
+    // `InvalidLeafIndex`.
     group.bench_function(BenchmarkId::new("Open-e-MerkleOpens", id), |bench| {
+        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
         bench.iter_batched(
             || {
                 // Each iteration drives the loop on a fresh transcript
@@ -1105,9 +1220,10 @@ fn bench_micro_prover_open(
                         &mut transcript,
                         codeword_len,
                     );
+                    let group_idx = column_idx / LEAF_GROUP_SIZE;
                     let merkle_proof = hint
                         .merkle_tree
-                        .prove(column_idx)
+                        .prove(group_idx)
                         .expect("Merkle prove");
                     paths.push(merkle_proof);
                 }

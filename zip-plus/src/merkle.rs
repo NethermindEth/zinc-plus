@@ -7,12 +7,40 @@ use std::{
 };
 use thiserror::Error;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
-use zinc_utils::{add, cfg_into_iter, cfg_iter, sub};
+use zinc_utils::{add, cfg_chunks_mut, cfg_into_iter, cfg_iter, sub};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 pub const HASH_OUT_LEN: usize = blake3::OUT_LEN;
+
+/// Raw `Send + Sync` pointer to a GPU leaf-slab, used by the parallel
+/// inline-pack commit path so multiple rayon workers can scatter into
+/// the same slab concurrently. The slab's byte layout is the canonical
+/// leaf layout from [`MerkleTree::new_from_row_major_grouped`]; each
+/// caller writes to disjoint sub-ranges (one `m_idx` per worker), so
+/// the parallel writes are race-free under that contract.
+///
+/// Only available with the `metal_gpu` feature on macOS — it lives
+/// here (rather than in the GPU module) because it's part of the
+/// `MerkleTree`/`scatter_matrix_into_gpu_slab` public API.
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+#[derive(Copy, Clone)]
+pub struct GpuSlabPtr {
+    /// Base pointer to the slab.
+    pub ptr: *mut u8,
+    /// Total slab length in bytes (`num_leaves * leaf_bytes`).
+    pub len: usize,
+}
+
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+// SAFETY: the slab pointer is only dereferenced under
+// `scatter_matrix_into_gpu_slab`'s unsafe contract (disjoint `m_idx`
+// per concurrent caller), so racing between threads is the caller's
+// responsibility, not the type's.
+unsafe impl Send for GpuSlabPtr {}
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+unsafe impl Sync for GpuSlabPtr {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -161,6 +189,200 @@ impl MerkleTree {
             })
             .collect();
         build_merkle_tree_from_leaves(leaves)
+    }
+
+    /// Build the Merkle tree from a pre-packed leaf slab using the GPU
+    /// Blake3 kernel. See [`GpuSlabPtr`] for the slab-pointer wrapper
+    /// used by parallel callers.
+    ///
+    /// Note: this method is gated below by `#[cfg(...)]`; the doc-link
+    /// to [`GpuSlabPtr`] only resolves when `metal_gpu` is enabled. Used by the inline-pack commit path in
+    /// `pcs::phase_commit::commit_grouped`, which assembles the slab
+    /// while encoding (skipping the dedicated pack pass that
+    /// [`Self::new_from_row_major_grouped_gpu`] does internally).
+    ///
+    /// `slab` must already be in the canonical leaf layout (see
+    /// [`Self::new_from_row_major_grouped`]): leaf `g` occupies
+    /// `slab[g * leaf_bytes .. (g + 1) * leaf_bytes]`.
+    ///
+    /// Requires the `metal_gpu` feature and macOS.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub fn new_from_packed_slab_gpu(
+        slab: &[u8],
+        num_leaves: usize,
+        leaf_bytes: usize,
+    ) -> Self {
+        use crate::metal_gpu::{GpuHashKind, MetalContext};
+
+        assert!(num_leaves > 0 && num_leaves.is_power_of_two());
+        assert!(leaf_bytes > 0);
+        assert_eq!(slab.len(), num_leaves * leaf_bytes);
+        assert!(
+            leaf_bytes <= 64 * 1024,
+            "GPU Blake3 kernel only supports leaves up to 64 KB; got {leaf_bytes} bytes"
+        );
+
+        // SAFETY: `slab.as_ptr()` is valid for `slab.len()` bytes and
+        // outlives the synchronous `hash_columns_gpu` call (which waits
+        // for command-buffer completion before returning).
+        let leaf_bytes_out = unsafe {
+            MetalContext::get().hash_columns_gpu(
+                GpuHashKind::Blake3,
+                slab.as_ptr(),
+                num_leaves,
+                leaf_bytes,
+            )
+        };
+        debug_assert_eq!(leaf_bytes_out.len(), num_leaves * HASH_OUT_LEN);
+
+        let leaves: Vec<MtHash> = leaf_bytes_out
+            .chunks_exact(HASH_OUT_LEN)
+            .map(|h| {
+                let mut arr = [0u8; HASH_OUT_LEN];
+                arr.copy_from_slice(h);
+                MtHash(arr)
+            })
+            .collect();
+        build_merkle_tree_from_leaves(leaves)
+    }
+
+    /// GPU sibling of [`Self::new_from_row_major_grouped`]. Produces the
+    /// **same Merkle root** (verified by a round-trip test) by packing
+    /// every leaf's pre-image bytes into a single contiguous slab
+    /// (`num_leaves × leaf_bytes`) and dispatching one Metal Blake3 call
+    /// over the whole slab. The packing pass is rayon-parallel across
+    /// leaves and writes each leaf's slot exactly once.
+    ///
+    /// Why pack instead of pointing the GPU at the row-major `cw_matrices`
+    /// directly? The kernel expects each leaf to be one contiguous
+    /// `col_byte_len` slice. The canonical leaf layout interleaves cells
+    /// across `batch × num_rows` source matrices, so a zero-copy GPU
+    /// dispatch is only possible if the codeword storage is column-major
+    /// to begin with — a larger surgery left for follow-up.
+    ///
+    /// Requires the `metal_gpu` feature and macOS.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub fn new_from_row_major_grouped_gpu<R>(
+        cw_matrices: &[crypto_primitives::DenseRowMatrix<R>],
+        num_rows: usize,
+        codeword_len: usize,
+        group_size: usize,
+    ) -> Self
+    where
+        R: ConstTranscribable + Send + Sync,
+    {
+        use crate::metal_gpu::{GpuHashKind, MetalContext};
+
+        assert!(!cw_matrices.is_empty());
+        assert!(group_size > 0 && group_size.is_power_of_two());
+        assert!(codeword_len.is_power_of_two());
+        assert_eq!(codeword_len % group_size, 0);
+        let num_leaves = codeword_len / group_size;
+        assert!(num_leaves.is_power_of_two());
+
+        let elem_bytes = R::NUM_BYTES;
+        let batch = cw_matrices.len();
+        let leaf_bytes = group_size * batch * num_rows * elem_bytes;
+        // Hard cap: kernel's multi-chunk path only handles ≤ 64 chunks
+        // (= 64 KB) per leaf. Anything larger falls back to the CPU
+        // path. This matches the assert in `hash_columns_gpu`.
+        assert!(
+            leaf_bytes <= 64 * 1024,
+            "GPU Blake3 kernel only supports leaves up to 64 KB; got {leaf_bytes} bytes — \
+             use `new_from_row_major_grouped` (CPU) for larger leaves"
+        );
+
+        let mut slab = vec![0u8; num_leaves * leaf_bytes];
+
+        // Pack leaves in parallel. Each rayon worker writes exactly one
+        // disjoint `leaf_bytes`-sized slot, so the parallel iteration is
+        // safe with `par_chunks_mut`. The inner loop is the canonical
+        // layout from `hash_grouped_leaf_from_row_major`:
+        //   for l in 0..group_size:
+        //     for m in 0..batch:
+        //       for r in 0..num_rows:
+        //         cell = cw_matrices[m].data[r*codeword_len + group_start + l]
+        let col_stride = batch * num_rows * elem_bytes;
+        let m_stride = num_rows * elem_bytes;
+        cfg_chunks_mut!(slab, leaf_bytes)
+            .enumerate()
+            .for_each(|(g, leaf_buf)| {
+                let group_start = g * group_size;
+                for (m, mat) in cw_matrices.iter().enumerate() {
+                    let m_base = m * m_stride;
+                    let data = &mat.data;
+                    for r in 0..num_rows {
+                        let r_offset = m_base + r * elem_bytes;
+                        let row_off = r * codeword_len + group_start;
+                        let cells = &data[row_off..row_off + group_size];
+                        for (l, cell) in cells.iter().enumerate() {
+                            let byte_offset = l * col_stride + r_offset;
+                            cell.write_transcription_bytes_exact(
+                                &mut leaf_buf[byte_offset..byte_offset + elem_bytes],
+                            );
+                        }
+                    }
+                }
+            });
+
+        Self::new_from_packed_slab_gpu(&slab, num_leaves, leaf_bytes)
+    }
+
+    /// Scatter one source matrix's cells into a GPU leaf-slab — the
+    /// per-matrix half of the leaf pack, used by the inline-pack commit
+    /// path. The slab byte layout is the canonical one from
+    /// [`Self::new_from_row_major_grouped`]:
+    /// leaf `g` occupies `slab[g * leaf_bytes ..]` and within that,
+    /// matrix `m_idx`'s cell at `(r, group_start + l)` lands at
+    /// `l * col_stride + m_idx * m_stride + r * elem_bytes`.
+    ///
+    /// Calling this from rayon with distinct `m_idx` values per task is
+    /// race-free: different matrices write to disjoint byte sub-ranges
+    /// within every leaf, regardless of how many workers run in parallel.
+    ///
+    /// # Safety
+    /// `slab.ptr` must point to ≥ `num_leaves * leaf_bytes` writable bytes.
+    /// All concurrent callers must use distinct `m_idx` ∈ `0..batch`.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub unsafe fn scatter_matrix_into_gpu_slab<R: ConstTranscribable>(
+        slab: GpuSlabPtr,
+        m_idx: usize,
+        mat: &crypto_primitives::DenseRowMatrix<R>,
+        num_rows: usize,
+        codeword_len: usize,
+        group_size: usize,
+        batch: usize,
+        leaf_bytes: usize,
+    ) {
+        let elem_bytes = R::NUM_BYTES;
+        let col_stride = batch * num_rows * elem_bytes;
+        let m_stride = num_rows * elem_bytes;
+        let m_base = m_idx * m_stride;
+        let num_leaves = codeword_len / group_size;
+        let data = &mat.data;
+
+        for g in 0..num_leaves {
+            let leaf_base = g * leaf_bytes;
+            let group_start = g * group_size;
+            for r in 0..num_rows {
+                let r_offset = m_base + r * elem_bytes;
+                let row_off = r * codeword_len + group_start;
+                let cells = &data[row_off..row_off + group_size];
+                for (l, cell) in cells.iter().enumerate() {
+                    let byte_offset = leaf_base + l * col_stride + r_offset;
+                    // SAFETY: byte_offset + elem_bytes ≤ leaf_base + leaf_bytes
+                    // ≤ slab.len; no aliasing with other matrices' writes by
+                    // the function-level safety contract.
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            slab.ptr.add(byte_offset),
+                            elem_bytes,
+                        )
+                    };
+                    cell.write_transcription_bytes_exact(dst);
+                }
+            }
+        }
     }
 
     /// Like [`Self::new_from_columns`] but groups `group_size` consecutive
@@ -834,6 +1056,141 @@ mod tests {
                 "Merkle proof verification failed for leaf index {i}: {}",
                 result.err().unwrap()
             );
+        }
+    }
+
+    /// Round-trip: GPU-built tree from row-major `cw_matrices` must have
+    /// the same root as the CPU path for the same input. Covers a few
+    /// representative shapes from the F_2 commit bench (`num_rows = 8`,
+    /// `LEAF_GROUP_SIZE = 8`, varied `codeword_len` and `batch`).
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    #[test]
+    fn gpu_row_major_grouped_root_matches_cpu() {
+        use crypto_primitives::DenseRowMatrix;
+
+        const N: usize = 3;
+        const NUM_ROWS: usize = 8;
+        const GROUP_SIZE: usize = 8;
+
+        let mut rng = rng();
+        for &(codeword_len, batch) in &[
+            (64usize, 1usize),
+            (128, 4),
+            (256, 16),
+            (512, 41), // similar to the SHA-256 F_2 paired batch count
+        ] {
+            let cw_matrices: Vec<DenseRowMatrix<Int<N>>> = (0..batch)
+                .map(|_| {
+                    let data: Vec<Int<N>> = (0..NUM_ROWS * codeword_len)
+                        .map(|_| Int::<N>::random(&mut rng))
+                        .collect();
+                    DenseRowMatrix {
+                        num_rows: NUM_ROWS,
+                        num_cols: codeword_len,
+                        data,
+                    }
+                })
+                .collect();
+
+            let cpu = MerkleTree::new_from_row_major_grouped(
+                &cw_matrices,
+                NUM_ROWS,
+                codeword_len,
+                GROUP_SIZE,
+            );
+            let gpu = MerkleTree::new_from_row_major_grouped_gpu(
+                &cw_matrices,
+                NUM_ROWS,
+                codeword_len,
+                GROUP_SIZE,
+            );
+
+            assert_eq!(
+                cpu.root(),
+                gpu.root(),
+                "GPU root != CPU root for codeword_len={codeword_len}, batch={batch}"
+            );
+            assert_eq!(cpu.height(), gpu.height());
+        }
+    }
+
+    /// Round-trip: the inline-pack path
+    /// (per-matrix `scatter_matrix_into_gpu_slab` followed by
+    /// `new_from_packed_slab_gpu`) produces the same Merkle root as the
+    /// CPU fused path. Exercises the same helpers used inside
+    /// `commit_grouped`'s GPU-inline branch.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    #[test]
+    fn gpu_inline_packed_root_matches_cpu() {
+        use crypto_primitives::DenseRowMatrix;
+
+        const N: usize = 3;
+        const NUM_ROWS: usize = 8;
+        const GROUP_SIZE: usize = 8;
+
+        let mut rng = rng();
+        for &(codeword_len, batch) in &[
+            (64usize, 1usize),
+            (128, 4),
+            (256, 16),
+            (512, 41),
+        ] {
+            let cw_matrices: Vec<DenseRowMatrix<Int<N>>> = (0..batch)
+                .map(|_| {
+                    let data: Vec<Int<N>> = (0..NUM_ROWS * codeword_len)
+                        .map(|_| Int::<N>::random(&mut rng))
+                        .collect();
+                    DenseRowMatrix {
+                        num_rows: NUM_ROWS,
+                        num_cols: codeword_len,
+                        data,
+                    }
+                })
+                .collect();
+
+            // CPU reference.
+            let cpu = MerkleTree::new_from_row_major_grouped(
+                &cw_matrices,
+                NUM_ROWS,
+                codeword_len,
+                GROUP_SIZE,
+            );
+
+            // Inline-pack: each matrix scatters into a shared slab via
+            // raw pointer. Disjoint sub-ranges → race-free.
+            let elem_bytes = <Int<N> as ConstTranscribable>::NUM_BYTES;
+            let leaf_bytes = GROUP_SIZE * batch * NUM_ROWS * elem_bytes;
+            let num_leaves = codeword_len / GROUP_SIZE;
+            let mut slab = vec![0u8; num_leaves * leaf_bytes];
+            let slab_ptr = GpuSlabPtr {
+                ptr: slab.as_mut_ptr(),
+                len: slab.len(),
+            };
+            for (m_idx, mat) in cw_matrices.iter().enumerate() {
+                // SAFETY: distinct m_idx values write to disjoint
+                // sub-ranges of every leaf.
+                unsafe {
+                    MerkleTree::scatter_matrix_into_gpu_slab(
+                        slab_ptr,
+                        m_idx,
+                        mat,
+                        NUM_ROWS,
+                        codeword_len,
+                        GROUP_SIZE,
+                        batch,
+                        leaf_bytes,
+                    );
+                }
+            }
+            let gpu_inline =
+                MerkleTree::new_from_packed_slab_gpu(&slab, num_leaves, leaf_bytes);
+
+            assert_eq!(
+                cpu.root(),
+                gpu_inline.root(),
+                "GPU-inline root != CPU root for codeword_len={codeword_len}, batch={batch}"
+            );
+            assert_eq!(cpu.height(), gpu_inline.height());
         }
     }
 }
