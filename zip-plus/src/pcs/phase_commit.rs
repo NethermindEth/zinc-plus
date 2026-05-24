@@ -56,14 +56,37 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// # Panics
     /// - Panics if any polynomial's evaluation count does not match
     ///   `pp.num_rows * pp.linear_code.row_len()`.
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn commit(
         pp: &ZipPlusParams<Zt, Lc>,
         polys: &[DenseMultilinearExtension<Zt::Eval>],
     ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
+        Self::commit_grouped(pp, polys, 1)
+    }
+
+    /// Like [`Self::commit`] but groups `leaf_group_size` consecutive
+    /// codeword columns into one Merkle leaf. Trades wire-side cost at
+    /// open time (each opening must carry all `leaf_group_size` columns
+    /// of its group) for fewer Blake3 invocations on the commit side —
+    /// the per-hash setup overhead amortises across the group. For
+    /// tall-thin codeword matrices (`num_rows` small) this can cut
+    /// commit time multi-fold.
+    ///
+    /// `leaf_group_size` must be a power of two and divide
+    /// `pp.linear_code.codeword_len()`. Pass `1` for the un-grouped
+    /// commit (matches [`Self::commit`]).
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn commit_grouped(
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        leaf_group_size: usize,
+    ) -> Result<(ZipPlusHint<Zt::Cw>, ZipPlusCommitment), ZipError> {
         assert!(
             !polys.is_empty(),
             "Batch must contain at least one polynomial"
+        );
+        assert!(
+            leaf_group_size > 0 && leaf_group_size.is_power_of_two(),
+            "leaf_group_size must be a power of two; got {leaf_group_size}",
         );
         let batch_size = polys.len();
         let row_len = pp.linear_code.row_len();
@@ -96,7 +119,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // into a single scan whose output is shared.
         let cw_columns = transpose_to_columns(&cw_matrices, pp.num_rows, pp.linear_code.codeword_len());
         let column_refs: Vec<&[Zt::Cw]> = cw_columns.iter().map(|c| c.as_slice()).collect();
-        let merkle_tree = MerkleTree::new_from_columns(&column_refs);
+        let merkle_tree = if leaf_group_size == 1 {
+            MerkleTree::new_from_columns(&column_refs)
+        } else {
+            MerkleTree::new_from_column_groups(&column_refs, leaf_group_size)
+        };
         let root = merkle_tree.root();
 
         Ok((

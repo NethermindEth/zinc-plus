@@ -119,6 +119,55 @@ impl MerkleTree {
         build_merkle_tree_from_leaves(leaves)
     }
 
+    /// Like [`Self::new_from_columns`] but groups `group_size` consecutive
+    /// columns into a single Merkle leaf. The leaf hash is `H(col_0 || …
+    /// || col_{group_size-1})` (each column serialised contiguously, in
+    /// the same order it appears in `columns`).
+    ///
+    /// Trades wire-side cost — each opening must carry all `group_size`
+    /// columns of its group so the verifier can recompute the leaf hash
+    /// — for fewer Blake3 invocations on the commit side. For small
+    /// per-column buffers (e.g. a tall-thin codeword matrix with
+    /// `num_rows = 2`), per-hash setup overhead dominates and grouping
+    /// can cut commit time multi-fold.
+    ///
+    /// Constraints: `columns.len()` must be a multiple of `group_size`,
+    /// `group_size` must be a power of two, and `columns.len() /
+    /// group_size` must be a power of two.
+    pub fn new_from_column_groups<S>(columns: &[&[S]], group_size: usize) -> Self
+    where
+        S: ConstTranscribable + Send + Sync,
+    {
+        assert!(!columns.is_empty());
+        assert!(group_size > 0 && group_size.is_power_of_two());
+        let num_cols = columns.len();
+        assert!(num_cols.is_power_of_two());
+        assert_eq!(
+            num_cols % group_size,
+            0,
+            "columns.len() ({num_cols}) must be a multiple of group_size ({group_size})"
+        );
+        let num_leaves = num_cols / group_size;
+        assert!(num_leaves.is_power_of_two());
+
+        let col_len = columns[0].len();
+        assert!(col_len > 0);
+        assert!(
+            columns.iter().all(|c| c.len() == col_len),
+            "All columns must have the same length"
+        );
+
+        let group_indices: Vec<usize> = (0..num_leaves).collect();
+        let leaves: Vec<MtHash> = cfg_iter!(group_indices)
+            .map(|&g| {
+                let start = g * group_size;
+                let group_slice = &columns[start..start + group_size];
+                hash_column_group(group_slice)
+            })
+            .collect();
+        build_merkle_tree_from_leaves(leaves)
+    }
+
     /// Build a Merkle tree over leaves derived from three groups of rows
     /// with potentially different element types. Any group may be empty,
     /// but at least one must be non-empty (and m_cols is taken from the
@@ -201,6 +250,32 @@ fn hash_column<S: ConstTranscribable>(values: &[S]) -> MtHash {
     for (i, v) in values.iter().enumerate() {
         let start = i * elem_bytes;
         v.write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&buf);
+    hasher.finalize().into()
+}
+
+/// Hash a group of columns into one Merkle leaf.
+/// Layout: `H(col_0 || col_1 || … || col_{G-1})` where each column's
+/// elements are serialised contiguously in `S`'s transcription format.
+/// All columns must have the same length.
+#[allow(clippy::arithmetic_side_effects)]
+fn hash_column_group<S: ConstTranscribable>(columns: &[&[S]]) -> MtHash {
+    assert!(!columns.is_empty());
+    let elem_bytes = S::NUM_BYTES;
+    let col_len = columns[0].len();
+    debug_assert!(
+        columns.iter().all(|c| c.len() == col_len),
+        "hash_column_group: all columns must have the same length"
+    );
+    let mut buf = vec![0_u8; columns.len() * col_len * elem_bytes];
+    for (g, col) in columns.iter().enumerate() {
+        let group_offset = g * col_len * elem_bytes;
+        for (i, v) in col.iter().enumerate() {
+            let start = group_offset + i * elem_bytes;
+            v.write_transcription_bytes_exact(&mut buf[start..start + elem_bytes]);
+        }
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(&buf);
@@ -441,6 +516,23 @@ impl MerkleProof {
         S: ConstTranscribable,
     {
         self.verify_with_leaf(root, hash_column(column_values), leaf_index)
+    }
+
+    /// Verifies the proof for a leaf produced by hashing a *group* of
+    /// `column_group.len()` consecutive columns (matching
+    /// [`MerkleTree::new_from_column_groups`]'s leaf layout). The caller
+    /// must pass the columns in the same order they appeared in the
+    /// commit-side `columns` slice.
+    pub fn verify_grouped<S>(
+        &self,
+        root: &MtHash,
+        column_group: &[&[S]],
+        leaf_index: usize,
+    ) -> Result<(), MerkleError>
+    where
+        S: ConstTranscribable,
+    {
+        self.verify_with_leaf(root, hash_column_group(column_group), leaf_index)
     }
 
     /// Verifies the proof for a leaf produced by hashing three heterogeneous
