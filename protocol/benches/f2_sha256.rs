@@ -262,9 +262,14 @@ struct ProverFixture {
 
 fn setup_prover(num_vars: usize) -> ProverFixture {
     let mut rng_local = rng();
-    let row_len: usize = 32;
+    // Use a 2-row commit shape: the codeword matrix is `2 × row_len`,
+    // each column is just 2 cells per matrix → ~`paired_batch · 2`
+    // bytes per opened leaf. Trades a longer codeword (more Merkle
+    // leaves, deeper tree) for tiny opening payloads. See
+    // `recommended_num_column_openings` for the soundness side.
+    let num_rows: usize = 2;
     let poly_size = 1usize << num_vars;
-    let num_rows = poly_size / row_len;
+    let row_len = poly_size / num_rows;
     assert_eq!(num_rows * row_len, poly_size);
 
     let trace = U::generate_random_trace(num_vars, &mut rng_local);
@@ -1412,7 +1417,7 @@ fn bench_micro_verifier_open(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[9,16];
+const NVARS_SWEEP: &[usize] = &[9,16,20];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
