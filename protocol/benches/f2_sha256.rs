@@ -46,8 +46,9 @@ use zinc_poly::{
 };
 use zinc_primality::MillerRabin;
 use zinc_protocol::f2_prove::{
-    F2FullProof, F2VirtualBpSpec, F2ZincTypes, ZincPlusPiopF2,
+    F2BitOpVirtualSpec, F2FullProof, F2VirtualBpSpec, F2ZincTypes, ZincPlusPiopF2,
 };
+use zinc_uair::BitOp;
 use zinc_test_uair::{
     GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
     sha256_f2_project_scalar,
@@ -120,6 +121,36 @@ impl<const D: usize> F2ZincTypes<D> for BenchF2Types<D> {
 type R = Int<4>;
 type U = Sha256F2Uair<R>;
 const D: usize = 32;
+
+/// Bit-op virtual columns declared by the SHA-256 F_2 UAIR bench. Each
+/// entry tells the protocol that the trace column at `col_idx` is the
+/// cell-wise `op` of `source_col_idx`'s cells, so the prover skips
+/// encoding/Merkle-committing those columns — the verifier
+/// reconstructs their codeword cells from the source's opened cells.
+///
+/// At present only the pure SHR columns are virtualised:
+///   `W_SHR3_W  = SHR^3(W_W)`
+///   `W_SHR10_W = SHR^10(W_W)`
+/// Both shrink the commit-side workload (fewer paired storage
+/// matrices, smaller Merkle leaf bytes) without growing the proof.
+/// `Σ_0`/`Σ_1`/`σ_0`/`σ_1` are XOR-sums of three rotations each and
+/// could be virtualised the same way, but each then needs three
+/// `BitOp::Rot` virtuals XOR'd together — left for a follow-up.
+fn sha_f2_bit_op_virtuals() -> Vec<F2BitOpVirtualSpec> {
+    use zinc_test_uair::sha256_f2::cols;
+    vec![
+        F2BitOpVirtualSpec {
+            col_idx: cols::W_SHR3_W,
+            source_col_idx: cols::W_W,
+            op: BitOp::ShiftR(3),
+        },
+        F2BitOpVirtualSpec {
+            col_idx: cols::W_SHR10_W,
+            source_col_idx: cols::W_W,
+            op: BitOp::ShiftR(10),
+        },
+    ]
+}
 
 // ---------------------------------------------------------------------------
 // Proof-size measurement.
@@ -294,10 +325,11 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
             let (hint, comm) =
-                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace(
+                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace_with_virtuals(
                     &mut transcript,
                     &fx.pp,
                     &fx.trace.binary_poly,
+                    &sha_f2_bit_op_virtuals(),
                 )
                 .expect("commit should succeed");
             black_box((hint, comm));
@@ -309,10 +341,11 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
             || {
                 let mut transcript = Blake3Transcript::new();
                 let _ =
-                    ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace(
+                    ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace_with_virtuals(
                         &mut transcript,
                         &fx.pp,
                         &fx.trace.binary_poly,
+                        &sha_f2_bit_op_virtuals(),
                     )
                     .expect("commit should succeed");
                 transcript
@@ -338,10 +371,11 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
             || {
                 let mut transcript = Blake3Transcript::new();
                 let (hint, _comm) =
-                    ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace(
+                    ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace_with_virtuals(
                         &mut transcript,
                         &fx.pp,
                         &fx.trace.binary_poly,
+                        &sha_f2_bit_op_virtuals(),
                     )
                     .expect("commit should succeed");
                 let (_uair_proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
@@ -375,11 +409,12 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
 fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &ProverFixture) {
     let proof = {
         let mut transcript = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
             &mut transcript,
             &fx.pp,
             &fx.trace,
             &[],
+            &sha_f2_bit_op_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -606,8 +641,9 @@ fn bench_micro_prover_uair(
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
             let (hint, comm) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
-                ::commit_and_absorb_f2_trace(
+                ::commit_and_absorb_f2_trace_with_virtuals(
                     &mut transcript, &fx.pp, &fx.trace.binary_poly,
+                    &sha_f2_bit_op_virtuals(),
                 )
                 .expect("commit");
             black_box((hint, comm));
@@ -626,8 +662,9 @@ fn bench_micro_prover_uair(
             || {
                 let mut transcript = Blake3Transcript::new();
                 let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
-                    ::commit_and_absorb_f2_trace(
+                    ::commit_and_absorb_f2_trace_with_virtuals(
                         &mut transcript, &fx.pp, &fx.trace.binary_poly,
+                        &sha_f2_bit_op_virtuals(),
                     )
                     .expect("commit");
                 transcript
@@ -902,10 +939,11 @@ fn bench_micro_prover_open(
     // open phase takes from the earlier prove steps.
     let (hint, subclaim) = {
         let mut t = Blake3Transcript::new();
-        let (h, _) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace(
+        let (h, _) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::commit_and_absorb_f2_trace_with_virtuals(
             &mut t,
             &fx.pp,
             &fx.trace.binary_poly,
+            &sha_f2_bit_op_virtuals(),
         )
         .expect("commit");
         let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
@@ -1170,11 +1208,12 @@ fn bench_micro_verifier_uair(
 ) {
     let proof = {
         let mut transcript = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
             &mut transcript,
             &fx.pp,
             &fx.trace,
             &[],
+            &sha_f2_bit_op_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -1325,11 +1364,12 @@ fn bench_micro_verifier_open(
 
     let proof = {
         let mut transcript = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
             &mut transcript,
             &fx.pp,
             &fx.trace,
             &[],
+            &sha_f2_bit_op_virtuals(),
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
             recommended_num_column_openings(REP),
@@ -1591,11 +1631,12 @@ fn e2e_benches(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("Prove", &id), |bench| {
             bench.iter(|| {
                 let mut transcript = Blake3Transcript::new();
-                let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+                let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
                     &mut transcript,
                     &fx.pp,
                     &fx.trace,
                     &[],
+                    &sha_f2_bit_op_virtuals(),
                     num_vars,
                     sha256_f2_project_scalar::<R>,
                     recommended_num_column_openings(REP),
@@ -1607,11 +1648,12 @@ fn e2e_benches(c: &mut Criterion) {
 
         let proof = {
             let mut transcript = Blake3Transcript::new();
-            ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full(
+            ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
                 &mut transcript,
                 &fx.pp,
                 &fx.trace,
                 &[],
+                &sha_f2_bit_op_virtuals(),
                 num_vars,
                 sha256_f2_project_scalar::<R>,
                 recommended_num_column_openings(REP),
@@ -1627,11 +1669,12 @@ fn e2e_benches(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("Verify", &id), |bench| {
             bench.iter(|| {
                 let mut transcript = Blake3Transcript::new();
-                let subclaim = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full(
+                let subclaim = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full_with_bit_ops(
                     &mut transcript,
                     &fx.pp,
                     &proof,
                     &[],
+                    &sha_f2_bit_op_virtuals(),
                     num_vars,
                     fx.num_primary,
                     |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
