@@ -910,11 +910,13 @@ where
 
         // -- Derive the prover-side subclaim --------------------
         let sumcheck_point = prover_states[0].randomness.clone();
-        // Per-column (primary + virtual) MLE evals at r*.
-        let all_col_evals: Vec<BinaryFieldGF192> = projected_trace
-            .iter()
+        // Per-column (primary + virtual) MLE evals at r*. Independent
+        // across columns and each eval is O(2^num_vars) GF(2^192)
+        // ops, so this is one of the heavier outer loops — fan out
+        // across rayon workers.
+        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let all_col_evals: Vec<BinaryFieldGF192> = cfg_iter!(projected_trace)
             .map(|col| {
-                let zero_inner = *BinaryFieldGF192::zero().inner();
                 let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     col.evaluations.iter().map(|x| *x.inner()).collect(),
