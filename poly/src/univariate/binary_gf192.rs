@@ -128,9 +128,18 @@ impl BinaryFieldGF192 {
     /// `c_{k+1} = c_k^2 · a`. After 190 such steps from `c_1 = a`,
     /// `c_191 = a^{2^191 - 1}`. Total cost: 191 squarings + 190 mults.
     ///
-    /// This is the naive chain — an addition-chain optimised inverse
-    /// (`c_{2k} = c_k^{2^k} · c_k`) would cut multiplications to ~10
-    /// and squarings to 192. Doable later if profiling demands it.
+    /// # TODO — Itoh–Tsujii addition chain (deferred optimisation)
+    ///
+    /// The naive chain runs 190 multiplications; Itoh–Tsujii rebuilds
+    /// `a^{2^k - 1}` via the recurrence
+    /// `c_{k+m} = (c_k)^{2^m} · c_m`, which lets the exponent's binary
+    /// expansion drive the chain. For `GF(2^192)` that brings the count
+    /// down to ~8 multiplications + 191 squarings — a ~24× reduction in
+    /// multiplications and a roughly proportional wall-clock win on the
+    /// `inverse` benchmark. Worth doing once the PIOP hits inverses on
+    /// a hot path (today's F_2 prove path is multiplication-heavy and
+    /// rarely calls `inverse`). Same recurrence applies to
+    /// [`super::binary_gf128::BinaryFieldGF128::inverse`].
     ///
     /// Panics if `self.is_zero()` — `0` has no multiplicative inverse.
     pub fn inverse(&self) -> Self {
@@ -664,9 +673,116 @@ impl InnerTransparentField for BinaryFieldGF192 {
 // -- carryless multiplication and reduction --------------------------
 
 /// F_2 polynomial multiplication of two 192-bit operands → 384 bits.
-/// Schoolbook bit-by-bit on the lhs; O(192 × 3) word ops.
+///
+/// Toom–Cook 3-way (a.k.a. 3-way Karatsuba) over the 64-bit limbs:
+/// six 64×64 carryless products composed with `≈ 20` XORs, vs the
+/// previous scalar bit-by-bit schoolbook (~`192 · 3` word ops at full
+/// popcount). Each inner 64×64 dispatches to PMULL on aarch64,
+/// PCLMUL on x86_64, or a scalar fallback on other targets.
+///
+/// Let `a = (a0, a1, a2)`, `b = (b0, b1, b2)` with `ai`, `bj` 64-bit
+/// F_2 polynomials. The diagonal products `t_i = a_i · b_i` and the
+/// "sum" products `s_{ij} = (a_i + a_j)(b_i + b_j)` give the off-
+/// diagonal cross terms via `s_{ij} ^ t_i ^ t_j = a_i·b_j + a_j·b_i`
+/// (char-2 sub == add). Six 64×64 muls, summed back at the right
+/// 64-bit positions, yield the full 384-bit product.
 #[allow(clippy::arithmetic_side_effects)]
 fn clmul_192x192(a: &[u64; 3], b: &[u64; 3]) -> [u64; 6] {
+    let t0 = clmul_64x64(a[0], b[0]);
+    let t1 = clmul_64x64(a[1], b[1]);
+    let t2 = clmul_64x64(a[2], b[2]);
+
+    let s01 = clmul_64x64(a[0] ^ a[1], b[0] ^ b[1]);
+    let s12 = clmul_64x64(a[1] ^ a[2], b[1] ^ b[2]);
+    let s02 = clmul_64x64(a[0] ^ a[2], b[0] ^ b[2]);
+
+    // `c_ij = s_ij ^ t_i ^ t_j` is the (a_i·b_j + a_j·b_i) cross term.
+    let c01 = [s01[0] ^ t0[0] ^ t1[0], s01[1] ^ t0[1] ^ t1[1]];
+    let c12 = [s12[0] ^ t1[0] ^ t2[0], s12[1] ^ t1[1] ^ t2[1]];
+    let c02 = [s02[0] ^ t0[0] ^ t2[0], s02[1] ^ t0[1] ^ t2[1]];
+
+    // Place the six 128-bit products at the right 64-bit positions:
+    //   t0   @ word 0..1
+    //   c01  @ word 1..2
+    //   t1+c02 @ word 2..3
+    //   c12  @ word 3..4
+    //   t2   @ word 4..5
+    [
+        t0[0],
+        t0[1] ^ c01[0],
+        c01[1] ^ t1[0] ^ c02[0],
+        t1[1] ^ c02[1] ^ c12[0],
+        c12[1] ^ t2[0],
+        t2[1],
+    ]
+}
+
+/// 64×64 → 128-bit carryless multiplication.
+///
+/// Hardware-accelerated where available; scalar fallback elsewhere.
+/// Kept module-local (mirror of [`super::binary_gf128`]'s `clmul_64x64`)
+/// so both `BinaryFieldGF192` and `BinaryFieldGF128` are self-contained.
+/// If we end up adding a third binary field, lift this into a shared
+/// `binary_clmul` helper.
+#[inline]
+fn clmul_64x64(a: u64, b: u64) -> [u64; 2] {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        unsafe {
+            use core::arch::aarch64::vmull_p64;
+            let prod: u128 = core::mem::transmute(vmull_p64(a, b));
+            [prod as u64, (prod >> 64) as u64]
+        }
+    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    {
+        unsafe {
+            use core::arch::x86_64::{__m128i, _mm_clmulepi64_si128, _mm_set_epi64x};
+            let av = _mm_set_epi64x(0, a as i64);
+            let bv = _mm_set_epi64x(0, b as i64);
+            let prod: __m128i = _mm_clmulepi64_si128(av, bv, 0x00);
+            let bytes: [u64; 2] = core::mem::transmute(prod);
+            bytes
+        }
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        all(target_arch = "x86_64", target_feature = "pclmulqdq"),
+    )))]
+    {
+        clmul_192x192_scalar_inner(a, b)
+    }
+}
+
+/// Portable scalar fallback for 64×64 carryless mul. Correctness-only;
+/// not exercised on the CI / bench targets (which all have PMULL or
+/// PCLMUL). Iterates set bits of `a` and XORs `b << shift` into the
+/// 128-bit accumulator.
+#[inline]
+#[allow(dead_code, clippy::arithmetic_side_effects)]
+fn clmul_192x192_scalar_inner(a: u64, b: u64) -> [u64; 2] {
+    let mut a_word = a;
+    let mut lo: u64 = 0;
+    let mut hi: u64 = 0;
+    while a_word != 0 {
+        let shift = a_word.trailing_zeros();
+        if shift == 0 {
+            lo ^= b;
+        } else if shift < 64 {
+            lo ^= b << shift;
+            hi ^= b >> (64 - shift);
+        }
+        a_word &= a_word - 1;
+    }
+    [lo, hi]
+}
+
+/// Reference scalar `clmul_192x192` — bit-by-bit schoolbook on the
+/// lhs. Kept for `assert_eq` cross-checks against the hardware
+/// Toom-3 path; never used in production code.
+#[cfg(test)]
+#[allow(clippy::arithmetic_side_effects)]
+fn clmul_192x192_scalar(a: &[u64; 3], b: &[u64; 3]) -> [u64; 6] {
     let mut acc = [0u64; 6];
     for ai in 0..3 {
         let mut a_word = a[ai];
@@ -681,6 +797,9 @@ fn clmul_192x192(a: &[u64; 3], b: &[u64; 3]) -> [u64; 6] {
 }
 
 /// XOR `b << shift` (`b` is the 192-bit operand) into `acc` (384 bits).
+/// Used only by the scalar reference path; the hardware Toom-3 routine
+/// composes 64×64 products directly without shift-and-XOR plumbing.
+#[cfg(test)]
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
 fn xor_b_shifted(acc: &mut [u64; 6], b: &[u64; 3], shift: usize) {
@@ -866,6 +985,35 @@ pub fn eval_f2_poly_d_at_with_powers<const D: usize>(
         }
     }
     acc
+}
+
+/// Branchless variant of [`eval_f2_poly_d_at_with_powers`]: instead of
+/// the `if bit_set` branch, mask each `alpha_powers[i]` by
+/// `-(bit) as u64` and unconditionally XOR into the accumulator. For
+/// random bit-poly cells the branchy form mispredicts ~50% of the time;
+/// the branchless variant trades the branch for `D` extra ANDs + 0–`D`
+/// extra XORs, which the CPU pipelines cleanly.
+///
+/// The caller must ensure `alpha_powers.len() >= D`.
+#[inline]
+pub fn eval_f2_poly_d_at_with_powers_branchless<const D: usize>(
+    p: &BinaryPoly<D>,
+    alpha_powers: &[BinaryFieldGF192],
+) -> BinaryFieldGF192 {
+    debug_assert!(
+        alpha_powers.len() >= D,
+        "eval_f2_poly_d_at_with_powers_branchless: powers slice ({}) shorter than D ({D})",
+        alpha_powers.len(),
+    );
+    let mut acc = [0u64; 3];
+    for (i, c) in p.iter().enumerate() {
+        let mask: u64 = 0u64.wrapping_sub(c.inner() as u64);
+        let pw = alpha_powers[i].words();
+        acc[0] ^= pw[0] & mask;
+        acc[1] ^= pw[1] & mask;
+        acc[2] ^= pw[2] & mask;
+    }
+    BinaryFieldGF192::from_words(acc)
 }
 
 /// Substitute `X = alpha` in an `F_2[X]<D>`-typed cell stored in
@@ -1156,6 +1304,34 @@ mod tests {
         let again = sum + b;
         assert_eq!(again, a, "char-2: (a + b) + b = a");
         assert_eq!(a + a, BinaryFieldGF192::zero(), "char-2: a + a = 0");
+    }
+
+    #[test]
+    fn toom3_clmul_matches_scalar_reference() {
+        // The hardware Toom-3 `clmul_192x192` (6 PMULLs + XOR mix)
+        // must match the scalar bit-by-bit schoolbook on all input
+        // shapes — guards the Karatsuba bookkeeping (the c01/c12/c02
+        // recombination) against off-by-one slot errors.
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(0x192_7001);
+        for _ in 0..64 {
+            let a: [u64; 3] = [rng.random(), rng.random(), rng.random()];
+            let b: [u64; 3] = [rng.random(), rng.random(), rng.random()];
+            assert_eq!(clmul_192x192(&a, &b), clmul_192x192_scalar(&a, &b));
+        }
+        // Boundary cases: zero, all-ones, single-bit-set limbs.
+        assert_eq!(
+            clmul_192x192(&[0, 0, 0], &[u64::MAX, u64::MAX, u64::MAX]),
+            clmul_192x192_scalar(&[0, 0, 0], &[u64::MAX, u64::MAX, u64::MAX]),
+        );
+        assert_eq!(
+            clmul_192x192(&[1, 0, 0], &[0, 1, 0]),
+            clmul_192x192_scalar(&[1, 0, 0], &[0, 1, 0]),
+        );
+        assert_eq!(
+            clmul_192x192(&[u64::MAX, u64::MAX, u64::MAX], &[u64::MAX, u64::MAX, u64::MAX]),
+            clmul_192x192_scalar(&[u64::MAX, u64::MAX, u64::MAX], &[u64::MAX, u64::MAX, u64::MAX]),
+        );
     }
 
     #[test]

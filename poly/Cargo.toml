@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "mle_evaluation"
 harness = false
+
+[[bench]]
+name = "binary_gf_compare"
+harness = false

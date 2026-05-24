@@ -485,17 +485,34 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
 /// Each entry is serialized via `ConstTranscribable::write_transcription_bytes`
 /// and absorbed. This must be called in the same order by both prover and
 /// verifier, after commitments and before the random prime draw.
-fn absorb_public_columns<T: ConstTranscribable>(
+pub(crate) fn absorb_public_columns<T: ConstTranscribable>(
     transcript: &mut impl Transcript,
     cols: &[DenseMultilinearExtension<T>],
 ) {
-    let mut buf = vec![0u8; T::NUM_BYTES];
+    if cols.is_empty() {
+        // Match the original one-cell-at-a-time loop's behaviour on
+        // empty input: do nothing (no framing bytes absorbed). Callers
+        // passing `&[]` for UAIRs without public columns must see the
+        // same transcript state as before this batching change.
+        return;
+    }
+    // Pack all cells into one contiguous buffer and absorb once.
+    // The previous one-cell-at-a-time loop made 1 absorb_slice call
+    // per cell (~917k calls for a 14-col SHA F_2 trace at nvars=16);
+    // each call has its own framing-byte overhead, so batching cuts
+    // this to a single Blake3 update on a flat 7 MiB buffer.
+    let elem_bytes = T::NUM_BYTES;
+    let total_cells: usize = cols.iter().map(|c| c.evaluations.len()).sum();
+    let mut buf = vec![0u8; total_cells * elem_bytes];
+    let mut offset = 0usize;
     for col in cols {
         for entry in col.iter() {
-            entry.write_transcription_bytes_exact(&mut buf);
-            transcript.absorb_slice(&buf);
+            entry.write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes]);
+            offset += elem_bytes;
         }
     }
+    debug_assert_eq!(offset, buf.len());
+    transcript.absorb_slice(&buf);
 }
 
 /// Compute per-column lifted MLE evaluations at `point`.

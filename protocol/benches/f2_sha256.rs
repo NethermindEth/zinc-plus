@@ -1224,6 +1224,10 @@ fn bench_micro_verifier_uair(
             || {
                 let mut t = Blake3Transcript::new();
                 ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+            &mut t,
+            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+        );
                 t
             },
             |mut transcript| {
@@ -1249,6 +1253,10 @@ fn bench_micro_verifier_uair(
             || {
                 let mut t = Blake3Transcript::new();
                 ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+            &mut t,
+            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+        );
                 let _ = <U as IdealCheckProtocol>
                     ::verify_as_subprotocol::<_, Sha256F2Ideal, _>(
                         &mut t,
@@ -1284,6 +1292,10 @@ fn bench_micro_verifier_uair(
         let (ic_eval_point, sumcheck_point, expected) = {
             let mut t = Blake3Transcript::new();
             ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+            &mut t,
+            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+        );
             let ic_subclaim = <U as IdealCheckProtocol>
                 ::verify_as_subprotocol::<_, Sha256F2Ideal, _>(
                     &mut t,
@@ -1384,6 +1396,10 @@ fn bench_micro_verifier_open(
     let subclaim = {
         let mut t = Blake3Transcript::new();
         ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+            &mut t,
+            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+        );
         ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_uair(
             &mut t,
             &proof.uair,
@@ -1401,6 +1417,10 @@ fn bench_micro_verifier_open(
     let post_uair_transcript = || {
         let mut t = Blake3Transcript::new();
         ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+            &mut t,
+            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
+        );
         let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_uair(
             &mut t,
             &proof.uair,
@@ -1669,6 +1689,7 @@ fn e2e_benches(c: &mut Criterion) {
                     &proof,
                     &[],
                     &sha_f2_bit_op_virtuals(),
+                    &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
                     num_vars,
                     fx.num_primary,
                     |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),

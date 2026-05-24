@@ -808,6 +808,15 @@ where
         // field multiplications across the whole projection.
         let alpha_pows: Vec<BinaryFieldGF192> =
             zinc_poly::univariate::binary_gf192::alpha_powers(&alpha, D);
+        // Keeps the branchy `if bit { acc += pow }` form: SHA-256
+        // trace bits are predictable enough that the branch predictor
+        // handles the per-bit conditional well. The branchless variant
+        // `eval_f2_poly_d_at_with_powers_branchless` wins by ~10× on
+        // *random* inputs (see `binary_gf_compare::project_col_65536`)
+        // but regressed ~8 ms on the actual prover, presumably because
+        // it pays the extra ANDs unconditionally and the input bit
+        // pattern isn't adversarial enough to recoup the cost. Revisit
+        // if we benchmark on a UAIR whose cells are closer to uniform.
         let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> =
             cfg_iter!(extended_trace.binary_poly)
                 .map(|col| {
@@ -1143,16 +1152,19 @@ where
     }
 
     /// Like [`Self::commit_f2_trace`] but skips committing the bit-op
-    /// virtual columns declared by `bit_op_specs`. Only primary
-    /// (non-virtual) columns are paired and committed. The full trace
-    /// (incl materialised virtuals) is still passed in so the
-    /// constraint system and downstream prove/open code can index by
-    /// the protocol's original column order; the spec is the bridge
-    /// between "the verifier sees N columns of MLE eval claims" and
-    /// "the prover only encodes & Merkle-commits the
-    /// `N - bit_op_specs.len()` primary columns".
+    /// virtual columns declared by `bit_op_specs` AND the public
+    /// columns (which the verifier already knows and can encode
+    /// locally). Only **non-public, non-virtual** witness columns are
+    /// paired and Merkle-committed. The full trace (incl materialised
+    /// virtuals) is still passed in so the constraint system can
+    /// index by the protocol's original column order; the
+    /// public/witness split is read off `U::signature()`, mirroring
+    /// the integer protocol's [`absorb_public_columns`] pattern.
     ///
-    /// See [`F2BitOpVirtualSpec`] for the soundness argument.
+    /// See [`F2BitOpVirtualSpec`] for the soundness argument for the
+    /// bit-op virtuals. Public columns are bound to the proof via
+    /// [`Self::commit_and_absorb_f2_trace_with_virtuals`] absorbing
+    /// their bytes into the transcript after the commitment root.
     pub fn commit_f2_trace_with_virtuals(
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
@@ -1164,17 +1176,46 @@ where
         ),
         ZipError,
     > {
-        // Filter to primary cols (those not declared virtual), then
-        // pair + commit. Order within the primary list follows the
-        // ascending protocol column index — stable so prove + verify
-        // agree on which storage matrix / lo-vs-hi slot each primary
-        // col lives in.
-        let primary_indices =
-            primary_col_indices_from_virtuals(trace_binary_cols.len(), bit_op_specs);
-        let primary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = primary_indices
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_wit_bin = trace_binary_cols.len() - num_pub_bin;
+
+        // Translate bit-op specs from PROTOCOL col indices into
+        // WITNESS-local indices (witness slice starts at `num_pub_bin`).
+        let witness_bit_op_specs: Vec<F2BitOpVirtualSpec> = bit_op_specs
             .iter()
-            .map(|&i| trace_binary_cols[i].clone())
+            .map(|s| {
+                assert!(
+                    s.col_idx >= num_pub_bin,
+                    "F2BitOpVirtualSpec.col_idx {} is in the public range \
+                     [0, {}); only witness columns can be virtualised",
+                    s.col_idx,
+                    num_pub_bin,
+                );
+                assert!(
+                    s.source_col_idx >= num_pub_bin,
+                    "F2BitOpVirtualSpec.source_col_idx {} is in the public range; \
+                     only witness columns can serve as bit-op sources today",
+                    s.source_col_idx,
+                );
+                F2BitOpVirtualSpec {
+                    col_idx: s.col_idx - num_pub_bin,
+                    source_col_idx: s.source_col_idx - num_pub_bin,
+                    op: s.op,
+                }
+            })
             .collect();
+
+        // Filter to primary WITNESS cols (those neither public nor
+        // declared virtual), then pair + commit.
+        let primary_witness_indices =
+            primary_col_indices_from_virtuals(num_wit_bin, &witness_bit_op_specs);
+        let witness_slice = &trace_binary_cols[num_pub_bin..];
+        let primary_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+            primary_witness_indices
+                .iter()
+                .map(|&i| witness_slice[i].clone())
+                .collect();
         let paired = pair_trace_polys::<D>(&primary_cols);
         ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::commit_grouped(pp, &paired, LEAF_GROUP_SIZE)
     }
@@ -1201,7 +1242,12 @@ where
         )
     }
 
-    /// `commit_and_absorb` variant aware of bit-op virtual columns.
+    /// `commit_and_absorb` variant aware of bit-op virtual columns and
+    /// the public/witness split. Public columns are NOT committed —
+    /// the verifier knows them — but their bytes are absorbed into the
+    /// transcript right after the commitment root so the proof binds
+    /// to them (matching the integer protocol's
+    /// `absorb_public_columns` pattern in [`crate::verifier::verify`]).
     /// See [`Self::commit_f2_trace_with_virtuals`].
     pub fn commit_and_absorb_f2_trace_with_virtuals(
         transcript: &mut impl Transcript,
@@ -1220,12 +1266,15 @@ where
             trace_binary_cols,
             bit_op_specs,
         )?;
-        // Mirror the integer protocol's commitment-absorption: write
-        // the Merkle root bytes directly. (`ZipPlusCommitment`
-        // implements `ConstTranscribable`; here we use the byte-level
-        // form to match how the existing Zip+ tests prime their
-        // verifier transcripts.)
+        // Absorb the Merkle root, then the public column data — same
+        // order as the integer prover. The verifier's mirror absorbs
+        // both in the same sequence so Fiat-Shamir challenges drawn
+        // afterwards depend on every public byte the proof claims to
+        // be valid against.
         transcript.absorb_slice(&*comm.root);
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        crate::absorb_public_columns(transcript, &trace_binary_cols[..num_pub_bin]);
         Ok((hint, comm))
     }
 
@@ -1238,6 +1287,18 @@ where
         commitment: &ZipPlusCommitment,
     ) {
         transcript.absorb_slice(&*commitment.root);
+    }
+
+    /// Verifier counterpart of the public-column absorption performed by
+    /// [`Self::commit_and_absorb_f2_trace_with_virtuals`] right after
+    /// the commitment root. Must be called in the same order — i.e.
+    /// immediately after [`Self::absorb_commitment`] — so the
+    /// Fiat-Shamir randomness drawn afterwards matches the prover's.
+    pub fn absorb_public_binary_cols(
+        transcript: &mut impl Transcript,
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    ) {
+        crate::absorb_public_columns(transcript, public_binary_trace);
     }
 }
 
@@ -1486,9 +1547,15 @@ pub enum F2OpenError {
     ColumnValuesLenMismatch { expected: usize, got: usize },
 }
 
-/// Absorb a slice of `BinaryF2Poly<W>` into the transcript by
-/// writing each entry's `W × u64` words as little-endian bytes.
-/// Deterministic and prover/verifier-symmetric.
+/// Absorb a slice of `BinaryF2Poly<W>` into the transcript.
+/// Pack all entries' `W × u64` words contiguously into a single
+/// buffer and absorb in one `absorb_slice` call. Each `absorb_slice`
+/// carries framing bytes (0x6 / 0x7) and a Blake3 `update`; batching
+/// avoids paying that overhead per 8-byte word (for SHA-256
+/// `row_len ≈ 5500`, `combined_row` is ~5500·W=7 = 38.5k words —
+/// the old per-word loop made that many `absorb_slice` calls; the
+/// batched form makes one). On an empty input we early-return so
+/// the transcript state matches the old loop on zero-element inputs.
 ///
 /// Public so per-region benches can exercise the open phase's
 /// sub-steps independently; not part of the verified protocol surface.
@@ -1496,13 +1563,21 @@ pub fn absorb_f2_poly_slice<'a, const W: usize, I>(transcript: &mut impl Transcr
 where
     I: IntoIterator<Item = &'a BinaryF2Poly<W>>,
 {
-    let mut buf = [0u8; 8];
-    for p in iter {
+    // Two-pass: collect a flat byte buffer, then one absorb_slice.
+    // The intermediate `Vec` is small (W · 8 ≤ 80 bytes per entry).
+    let polys: Vec<&BinaryF2Poly<W>> = iter.into_iter().collect();
+    if polys.is_empty() {
+        // Match the original per-word loop's transcript state on
+        // empty input (no framing bytes absorbed).
+        return;
+    }
+    let mut buf = Vec::with_capacity(polys.len() * W * 8);
+    for p in &polys {
         for w in p.words() {
-            buf.copy_from_slice(&w.to_le_bytes());
-            transcript.absorb_slice(&buf);
+            buf.extend_from_slice(&w.to_le_bytes());
         }
     }
+    transcript.absorb_slice(&buf);
 }
 
 /// Squeeze a u64 challenge from the transcript and reduce modulo
@@ -1861,13 +1936,22 @@ where
         proof: &F2OpenProof<D>,
         subclaim: &F2VerifierSubclaim,
     ) -> Result<(), F2OpenError> {
-        Self::verify_f2_open_with_virtuals(transcript, pp, commitment, proof, subclaim, &[])
+        Self::verify_f2_open_with_virtuals(
+            transcript, pp, commitment, proof, subclaim, &[],
+        )
     }
 
-    /// `verify_f2_open` variant aware of [`F2BitOpVirtualSpec`]s. The
-    /// `opened.column_values` slices carry primary cells only; the
-    /// verifier derives each virtual column's cell on the fly via the
-    /// declared bit-op on its source column's cell.
+    /// `verify_f2_open` variant aware of [`F2BitOpVirtualSpec`]s **and**
+    /// the public/witness split. The open is **witness-only**:
+    /// public columns aren't part of the Merkle commitment, and the
+    /// verifier never encodes them here — their MLE evals at r* are
+    /// validated against `public_binary_trace` upstream in
+    /// `verify_f2_full_with_bit_ops`, mirroring the integer protocol's
+    /// pattern where the verifier computes public MLE evals locally
+    /// and the PCS open proves witness MLE evals only. The
+    /// `opened.column_values` slices carry primary **witness** cells
+    /// only; bit-op virtual witness cells are derived from their
+    /// source cells via `apply_bit_op_u32`.
     pub fn verify_f2_open_with_virtuals(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -1878,11 +1962,24 @@ where
     ) -> Result<(), F2OpenError> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
-        // The F_2[X] open binds only the primary (committed) columns —
-        // virtual columns are derived locally and never opened.
-        let num_cols = subclaim.primary_column_evals.len();
         let batch_size = commitment.batch_size;
         let codeword_len = pp.linear_code.codeword_len();
+        // The F_2[X] open binds only the WITNESS primary (committed)
+        // columns — public cols are never opened; virtual cols are
+        // derived locally and never opened. `num_cols` counts witness
+        // primary cols, matching the prover-side
+        // `prove_f2_open(&trace.binary_poly[num_pub_bin..], …)` call.
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_cols = subclaim
+            .primary_column_evals
+            .len()
+            .checked_sub(num_pub_bin)
+            .expect(
+                "verify_f2_open_with_virtuals: \
+                 subclaim.primary_column_evals must include public + witness primary cols",
+            );
+        let witness_primary_evals = &subclaim.primary_column_evals[num_pub_bin..];
 
         // -- Shape checks -----------------------------------------
         if proof.b_vector.len() != num_rows {
@@ -1933,7 +2030,8 @@ where
         }
 
         // -- Check 2: lift discharge in GF(2^192) ------------------
-        //    ψ_α(a')  =  Σ_g γ_g_gf · a_g.
+        //    ψ_α(a')  =  Σ_g γ_g_gf · a_g  (g ranges over WITNESS
+        // primary cols only — public cols aren't in this batch).
         let psi = zinc_poly::univariate::binary_gf192::eval_f2_wide_poly_at::<10>(
             &proof.lifted_claim,
             &subclaim.alpha,
@@ -1941,7 +2039,7 @@ where
         let mut expected = BinaryFieldGF192::zero();
         for g in 0..num_cols {
             let mut term = gamma_gf[g];
-            term *= &subclaim.primary_column_evals[g];
+            term *= &witness_primary_evals[g];
             expected += &term;
         }
         if psi != expected {
@@ -1991,27 +2089,41 @@ where
         }
 
         // -- Check 4: per-column-opening encoding + Merkle ---------
-        //   For each j ∈ opened cols:
-        //     (a) Merkle verify column values against root.
-        //     (b) encode(combined_row')[j] = Σ_i coeffs[i] · Σ_g γ_g · cw_M^g[i, j].
-        // The encoding is F_2[X]-linear, so encoding combined_row'
-        // once (cost O(codeword_len)) lets us index at each sampled
-        // column. Same encoding for every opened col — cache it.
+        //
+        // Witness-only encoding consistency:
+        //   encode(combined_row)[j] = Σ_i coeffs[i] · Σ_{g witness} γ_g · cw_M^g[i, j]
+        // where `combined_row` is the prover-sent witness-only batch.
+        // Public columns are not part of this equation — the verifier
+        // validates their MLE evals at r* upstream from `public_trace`
+        // (in `verify_f2_full_with_bit_ops`), not via this open.
         let encoded: Vec<BinaryF2Poly<7>> = pp
             .linear_code
             .encode_f2_lin_open::<7>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
-        // The prover committed only *primary* (non-virtual) columns,
-        // paired two-at-a-time into storage matrices. The committed
-        // batch_size is therefore `⌈num_primary / 2⌉`, NOT
-        // `⌈num_cols / 2⌉`. Bit-op virtual columns share storage with
-        // their source column — their cells are derived on the fly
-        // from the source's primary cell via `apply_bit_op_u32`.
-        let primary_indices =
-            primary_col_indices_from_virtuals(num_cols, bit_op_specs);
-        let num_primary = primary_indices.len();
-        let paired_primary_count = num_primary.div_ceil(2);
+        // γ is witness-local: gamma[g] corresponds to the g-th
+        // primary witness column (witness-local indexing). The
+        // encoding-consistency loop below indexes gamma by
+        // `wit_local_*` rather than protocol-global col idx.
+        let num_wit_bin = num_cols;
+
+        // Translate bit-op specs from PROTOCOL indices to
+        // WITNESS-local indices for filtering primary witness cols.
+        let witness_bit_op_specs: Vec<F2BitOpVirtualSpec> = bit_op_specs
+            .iter()
+            .map(|s| F2BitOpVirtualSpec {
+                col_idx: s.col_idx - num_pub_bin,
+                source_col_idx: s.source_col_idx - num_pub_bin,
+                op: s.op,
+            })
+            .collect();
+
+        // Primary witness indices (witness-local). These map 1-1 to
+        // the paired storage slots in `opened.column_values`.
+        let primary_witness_indices =
+            primary_col_indices_from_virtuals(num_wit_bin, &witness_bit_op_specs);
+        let num_primary_witness = primary_witness_indices.len();
+        let paired_primary_count = num_primary_witness.div_ceil(2);
         if batch_size != paired_primary_count {
             return Err(F2OpenError::ColumnValuesLenMismatch {
                 expected: paired_primary_count,
@@ -2022,13 +2134,11 @@ where
         let expected_column_values_len = LEAF_GROUP_SIZE * single_col_len;
 
         // Precompute the bit-op virtual specs grouped by source col
-        // index, so the encoding-consistency loop can fan out the
-        // virtual contributions in O(1) per primary cell.
-        // `virtuals_by_source[source_col_idx]` holds all virtual
-        // columns that derive from `source_col_idx`.
+        // index (WITNESS-local), so the encoding-consistency loop can
+        // fan out the virtual contributions in O(1) per primary cell.
         let mut virtuals_by_source: Vec<Vec<F2BitOpVirtualSpec>> =
-            vec![Vec::new(); num_cols];
-        for spec in bit_op_specs {
+            vec![Vec::new(); num_wit_bin];
+        for spec in &witness_bit_op_specs {
             virtuals_by_source[spec.source_col_idx].push(*spec);
         }
 
@@ -2101,13 +2211,17 @@ where
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
                 let mut weighted_col: Vec<BinaryF2Poly<4>> =
                     vec![BinaryF2Poly::<4>::zero(); num_rows];
+
+                // Witness primary + bit-op virtual contributions:
+                // cells from the opened paired storage matrices.
+                // γ is witness-local: gamma[wit_local_*] / gamma[spec.col_idx]
+                // index witness cols directly (no public offset).
+                // Public columns aren't in this batch; their MLE evals
+                // at r* are validated upstream from `public_trace`.
                 for p in 0..paired_primary_count {
-                    // Recover the protocol col indices that paired into
-                    // storage slot `p`'s lo / hi halves. These are
-                    // primary cols by construction.
-                    let prot_col_lo = primary_indices[2 * p];
-                    let prot_col_hi_opt: Option<usize> =
-                        primary_indices.get(2 * p + 1).copied();
+                    let wit_local_lo = primary_witness_indices[2 * p];
+                    let wit_local_hi_opt: Option<usize> =
+                        primary_witness_indices.get(2 * p + 1).copied();
                     for i in 0..num_rows {
                         let packed_bits = local_col[p * num_rows + i].pack_u64();
                         let lo_cell = packed_bits & lo_mask;
@@ -2116,13 +2230,13 @@ where
                         let lo_lifted = BinaryF2Poly::<1>::from_words([lo_cell]);
                         let prod_lo: BinaryF2Poly<4> =
                             zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                &lo_lifted, &gamma[prot_col_lo],
+                                &lo_lifted, &gamma[wit_local_lo],
                             );
                         weighted_col[i] += prod_lo;
 
                         // Virtual contributions sourced from this lo
-                        // primary cell.
-                        for spec in &virtuals_by_source[prot_col_lo] {
+                        // primary cell (witness-local source idx).
+                        for spec in &virtuals_by_source[wit_local_lo] {
                             let v_cell = apply_bit_op_u32(lo_cell, spec.op);
                             let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
                             let prod_v: BinaryF2Poly<4> =
@@ -2132,19 +2246,19 @@ where
                             weighted_col[i] += prod_v;
                         }
 
-                        if let Some(prot_col_hi) = prot_col_hi_opt {
+                        if let Some(wit_local_hi) = wit_local_hi_opt {
                             let hi_cell = packed_bits >> 32;
                             // Primary hi contribution.
                             let hi_lifted = BinaryF2Poly::<1>::from_words([hi_cell]);
                             let prod_hi: BinaryF2Poly<4> =
                                 zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
-                                    &hi_lifted, &gamma[prot_col_hi],
+                                    &hi_lifted, &gamma[wit_local_hi],
                                 );
                             weighted_col[i] += prod_hi;
 
                             // Virtual contributions sourced from this hi
                             // primary cell.
-                            for spec in &virtuals_by_source[prot_col_hi] {
+                            for spec in &virtuals_by_source[wit_local_hi] {
                                 let v_cell = apply_bit_op_u32(hi_cell, spec.op);
                                 let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
                                 let prod_v: BinaryF2Poly<4> =
@@ -2261,16 +2375,23 @@ where
             project_scalar,
         )?;
 
-        // Step 7: γ-batched open. The `commit_hint`'s cw_matrices
-        // contain only primary columns (paired), so the cell-gather
-        // loop inside `prove_f2_open` naturally produces primary-only
+        // Step 7: γ-batched open over the WITNESS primary trace
+        // slice. Public columns aren't committed; the verifier
+        // computes their MLE evals at r* locally and isn't part
+        // of the lift-discharge / encoding-consistency batch
+        // (matches the integer protocol's witness-only PCS open).
+        // The `commit_hint`'s cw_matrices contain only witness
+        // primary columns (paired), so the cell-gather loop
+        // inside `prove_f2_open` produces witness-primary
         // `column_values`. Bit-op virtual contributions are
         // reconstructed verifier-side via `bit_op_specs`.
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let open_proof = Self::prove_f2_open(
             transcript,
             pp,
             &hint,
-            &trace.binary_poly,
+            &trace.binary_poly[num_pub_bin..],
             &subclaim.sumcheck_point,
             &subclaim.alpha,
             num_column_openings,
@@ -2296,6 +2417,7 @@ where
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         proof: &F2FullProof<D>,
         virtual_specs: &[F2VirtualBpSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -2310,13 +2432,22 @@ where
             proof,
             virtual_specs,
             &[],
+            public_binary_trace,
             num_vars,
             num_primary_columns,
             project_ideal,
         )
     }
 
-    /// `verify_f2_full` variant aware of bit-op virtual columns. See
+    /// `verify_f2_full` variant aware of bit-op virtual columns and
+    /// the public/witness split. `public_binary_trace` holds the
+    /// public binary_poly columns the prover absorbed at commit time;
+    /// the verifier absorbs the same bytes here and **computes the
+    /// public columns' MLE evaluations at r* directly** (matching the
+    /// integer protocol's pattern: public column claims are
+    /// discharged by the verifier doing the MLE evaluation itself
+    /// against `public_trace`, never via Zip+). The witness columns'
+    /// MLE evals at r* are proved by the γ-batched open. See
     /// [`Self::prove_f2_full_with_bit_ops`].
     #[allow(clippy::too_many_arguments)]
     pub fn verify_f2_full_with_bit_ops<IdealOverF>(
@@ -2325,6 +2456,7 @@ where
         proof: &F2FullProof<D>,
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -2333,8 +2465,11 @@ where
         IdealOverF: zinc_uair::ideal::Ideal
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
     {
-        // Step 0: absorb the commitment exactly as the prover did.
+        // Step 0: absorb the commitment, then the public columns —
+        // same order as the prover's
+        // `commit_and_absorb_f2_trace_with_virtuals`.
         Self::absorb_commitment(transcript, &proof.commitment);
+        crate::absorb_public_columns(transcript, public_binary_trace);
 
         // Steps 2-4: IC + α + sumcheck verifier (with XOR-virtual-col
         // consistency check baked in).
@@ -2348,8 +2483,78 @@ where
         )
         .map_err(F2FullVerifyError::Uair)?;
 
-        // Step 7: γ-batched open verifier — primary cols opened by
-        // Merkle, bit-op virtual cells derived from primary via `op`.
+        // Public column MLE eval validation. The prover's
+        // `column_evals_at_rstar[0..num_pub_bin]` claim values for
+        // each public col's α-projected MLE at r*. Recompute them
+        // from `public_binary_trace` and check — the only check
+        // that binds these claimed evals to the actual public
+        // input. (Witness col evals are bound by the Zip+ open.)
+        //
+        // Per-col cost (nvars=16, D=32): one α-projection pass over
+        // 2^16 cells + one length-2^16 MLE eval at r*. Independent
+        // across columns — parallelise the outer loop.
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        if num_pub_bin > 0 {
+            assert_eq!(
+                public_binary_trace.len(),
+                num_pub_bin,
+                "verify_f2_full_with_bit_ops: public_binary_trace.len() ({}) must \
+                 match U::signature().public_cols().num_binary_poly_cols() ({})",
+                public_binary_trace.len(),
+                num_pub_bin,
+            );
+            let alpha_pows: Vec<BinaryFieldGF192> =
+                zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
+            // Parallel map to per-col computed evals (independent
+            // across cols; heavy α-project + MLE-eval), then a
+            // sequential equality scan emits the structured error.
+            let computed_evals: Vec<BinaryFieldGF192> =
+                cfg_iter!(public_binary_trace)
+                    .map(|col| {
+                        let field_cfg = ();
+                        let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                            .evaluations
+                            .iter()
+                            .map(|cell| {
+                                zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                                    cell, &alpha_pows,
+                                )
+                            })
+                            .collect();
+                        let zero_inner = *BinaryFieldGF192::zero().inner();
+                        let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
+                            col.num_vars,
+                            evals_at_alpha.iter().map(|x| *x.inner()).collect(),
+                            zero_inner,
+                        );
+                        <DenseMultilinearExtension<_>
+                            as zinc_poly::mle::MultilinearExtensionWithConfig<
+                                BinaryFieldGF192,
+                            >>::evaluate_with_config(
+                            inner_mle,
+                            &subclaim.sumcheck_point,
+                            &field_cfg,
+                        )
+                        .expect("MLE evaluation on r* should succeed")
+                    })
+                    .collect();
+            for (g, &computed) in computed_evals.iter().enumerate() {
+                let claimed = subclaim.primary_column_evals[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatch {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // Step 7: γ-batched open verifier — witness primary cells
+        // from the Merkle opening, witness bit-op virtual cells
+        // derived via `op`. Public cols aren't part of this batch;
+        // their MLE evals were validated above.
         Self::verify_f2_open_with_virtuals(
             transcript,
             pp,
@@ -2384,6 +2589,15 @@ where
     Uair(F2VerifyError<U, IdealOverF>),
     #[error("F_2[X] open verification failed: {0}")]
     Open(F2OpenError),
+    #[error(
+        "public column {public_col_idx}: claimed MLE eval at r* ({claimed:?}) doesn't match \
+         verifier's local computation from public_trace ({computed:?})"
+    )]
+    PublicColumnEvalMismatch {
+        public_col_idx: usize,
+        computed: BinaryFieldGF192,
+        claimed: BinaryFieldGF192,
+    },
 }
 
 #[cfg(test)]
@@ -3505,6 +3719,7 @@ mod tests {
             &pp,
             &proof,
             /* virtual_specs */ &[],
+            /* public_binary_trace */ &[],
             num_vars,
             /* num_primary_columns */ 2,
             |_ideal| ImpossibleIdeal,
@@ -3576,6 +3791,7 @@ mod tests {
             &pp,
             &proof,
             &[],
+            /* public_binary_trace */ &[],
             num_vars,
             2,
             |_| ImpossibleIdeal,
@@ -3731,6 +3947,7 @@ mod tests {
             &pp,
             &proof,
             &virtual_specs,
+            /* public_binary_trace */ &[],
             num_vars,
             /* num_primary_columns */ 2,
             |_ideal| ImpossibleIdeal,
@@ -3813,6 +4030,7 @@ mod tests {
             &pp,
             &proof,
             /* virtual_specs */ &[],
+            /* public_binary_trace */ &[],
             num_vars,
             2,
             |_| ImpossibleIdeal,
@@ -3883,11 +4101,11 @@ mod tests {
         .expect("prove_f2_full on SHA F_2 UAIR should succeed");
 
         // Sanity-check the proof shape. `batch_size` is the paired
-        // batch size — half of NUM_BIN (rounded up), since two trace
-        // columns are packed into one storage cell at commit time.
+        // batch size of the WITNESS columns — public cols are no
+        // longer committed (verifier encodes them locally).
         assert_eq!(
             proof.commitment.batch_size,
-            zinc_test_uair::sha256_f2::cols::NUM_BIN.div_ceil(2)
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_WIT.div_ceil(2)
         );
 
         // Verify on a fresh transcript.
@@ -3897,6 +4115,7 @@ mod tests {
             &pp,
             &proof,
             /* virtual_specs */ &[],
+            /* public_binary_trace */ &trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
             num_vars,
             zinc_test_uair::sha256_f2::cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
