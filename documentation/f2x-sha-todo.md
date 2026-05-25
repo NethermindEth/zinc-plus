@@ -67,11 +67,15 @@ at the bottom.
   `num_total_cols × 24 B` extra proof bytes for `open_evals_at_r_0`.
   Bench will show the regression.
 - **Followups**:
-  - **Refactor to avoid the α-projection recompute**: surface
-    `projected_trace` from `prove_f2_uair_with_groups` so the
-    multipoint-eval phase reuses it. Either change the function's
-    return tuple (mechanical churn across ~9 callers) or add a
-    sibling `prove_f2_uair_with_groups_keep_projected`.
+  - ~~Refactor to avoid the α-projection recompute~~ **shipped** —
+    `prove_f2_uair_with_groups` now returns `projected_trace` as a
+    third element; the multipoint-eval phase consumes it directly.
+    The savings at small nvars are within bench noise (the inline
+    α-recompute was cheaper than my initial estimate), but the
+    refactor's cost (one per-col `Vec` clone in
+    `column_evals_at_rstar`) scales with `cells × bytes` while the
+    saved recompute scales with `cells × ops`, so the win grows
+    with `2^N`. See subsequent commit.
   - **Tamper test for the new path**: existing
     `verify_f2_full_rejects_tampered_*` tests cover the sumcheck +
     open paths; add an analogue that tampers with
