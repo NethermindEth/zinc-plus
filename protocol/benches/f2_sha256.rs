@@ -205,6 +205,22 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         );
     }
 
+    // -- multipoint_eval.sumcheck_proof (Transcribable) --
+    let mut mp_sumcheck =
+        vec![0u8; proof.multipoint_eval.sumcheck_proof.get_num_bytes()];
+    proof
+        .multipoint_eval
+        .sumcheck_proof
+        .write_transcription_bytes_exact(&mut mp_sumcheck);
+
+    // -- open_evals_at_r_0 (per-column GF(2^192) values) --
+    let mut open_evals_at_r_0 = vec![0u8; proof.open_evals_at_r_0.len() * ALPHA_BYTES];
+    for (i, v) in proof.open_evals_at_r_0.iter().enumerate() {
+        v.inner().write_transcription_bytes_exact(
+            &mut open_evals_at_r_0[i * ALPHA_BYTES..(i + 1) * ALPHA_BYTES],
+        );
+    }
+
     // -- open.lifted_claim (BinaryF2Poly<10> = 80 bytes) --
     let mut lifted_claim = Vec::with_capacity(80);
     for w in proof.open.lifted_claim.words() {
@@ -265,6 +281,8 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         ("uair.ic_proof", ic_proof),
         ("uair.sumcheck", sumcheck),
         ("uair.col_evals@r*", col_evals_at_rstar),
+        ("mp_eval.sumcheck", mp_sumcheck),
+        ("mp_eval.col_evals@r_0", open_evals_at_r_0),
         ("open.lifted_claim", lifted_claim),
         ("open.b_vector", b_vector),
         ("open.combined_row", combined_row),
