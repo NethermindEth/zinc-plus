@@ -17,7 +17,8 @@ at the bottom.
 
 - [ ] Review how we do PCS open, with lifts and so on. Suspect unnecessary lifting etc
 - [ ] GF(128)
-- [ ] Are we doing multipoint eval?
+- [x] Are we doing multipoint eval? Now yes — see "Multipoint-eval
+      phase wired into the F_2 prove path" under Shipped work.
 - [ ] SHIFT vector proving — **row-level** shift virtualization (needed
       for the K-discharge work, Issue 1). The per-cell SHIFTR case
       already ships via `F2BitOpVirtualSpec`; see the "Per-cell SHIFTR
@@ -29,6 +30,53 @@ at the bottom.
 ---
 
 ## Shipped work (chronological, most recent first)
+
+### Multipoint-eval phase wired into the F_2 prove path (commit `<TBD>`)
+- **What**: added a `MultipointEval<BinaryFieldGF192>` step between
+  the F_2 sumcheck and the PCS open. The phase reduces the per-column
+  MLE evaluation claims at the sumcheck point `r*` (carried in
+  `F2Proof.column_evals_at_rstar`) to a single set of MLE eval
+  claims at a fresh point `r_0`, batched across columns. The
+  F_2 PCS open now happens at `r_0` instead of `r*`.
+  Proof shape: `F2FullProof` gains `multipoint_eval:
+  MultipointEvalProof<BinaryFieldGF192>` + `open_evals_at_r_0:
+  Vec<BinaryFieldGF192>` (length = num primary + num virtual cols).
+- **Why**: the multipoint-eval primitive is the standard mechanism
+  for reducing row-shifted MLE eval claims to non-shifted ones at
+  a related point — the prerequisite for sound row-shift discharge
+  in the K-virtual cols (Issue 1 below) and for the row-shifted
+  bit-op virtuals that `f2_native_ic.rs:735-740` currently punts on.
+  The integer protocol already runs this (Step 5 in
+  `protocol/src/prover.rs`); the F_2 path was the laggard.
+- **Today this is degenerate overhead.** The F_2 sumcheck doesn't
+  surface any row-shifted column evals yet (no Hadamard product
+  support — see the inline comment in `f2_native_ic.rs:735-740`),
+  so multipoint-eval is called with empty `down_evals` + `shifts`.
+  It just rerandomises the open point and γ-batches up_evals. The
+  payoff lands when Hadamard / K-discharge wires shifted-col evals
+  into the sumcheck output — those flow through
+  `MultipointEval::prove_as_subprotocol`'s `shifts` + `down_evals`
+  params without further protocol changes.
+- **Perf cost** (estimated, not measured): one extra α-projection
+  per prove (~500 ms at nvars=22) because the recompute pattern
+  duplicates work already done inside
+  `prove_f2_uair_with_groups` (where the original `projected_trace`
+  is consumed by the column-evals-at-r* materialisation). Plus one
+  additional MLE-eval pass per col at `r_0` (~few hundred ms at
+  nvars=22), one degree-2 sumcheck of `num_vars` rounds, and
+  `num_total_cols × 24 B` extra proof bytes for `open_evals_at_r_0`.
+  Bench will show the regression.
+- **Followups**:
+  - **Refactor to avoid the α-projection recompute**: surface
+    `projected_trace` from `prove_f2_uair_with_groups` so the
+    multipoint-eval phase reuses it. Either change the function's
+    return tuple (mechanical churn across ~9 callers) or add a
+    sibling `prove_f2_uair_with_groups_keep_projected`.
+  - **Tamper test for the new path**: existing
+    `verify_f2_full_rejects_tampered_*` tests cover the sumcheck +
+    open paths; add an analogue that tampers with
+    `multipoint_eval` or `open_evals_at_r_0` and confirms the
+    correct error variant fires.
 
 ### Per-cell SHIFTR virtualisation: in-tree canary (commit `<TBD>`)
 - **What**: extended `prove_then_verify_sha256_f2_with_k_virtuals_roundtrips`
@@ -194,15 +242,17 @@ at the bottom.
   reconstruction. The constraint system relies on the SHA-256
   boundary check (publicly-fixed final digest) to make this
   honest-prover-only design effectively sound.
-- **What's needed**: a **row-shift** predicate gadget — a mechanism
-  for the verifier to evaluate `MLE(SHIFT_row^k(v))(r*)` from
-  `MLE(v)(r*)` for the cross-row shifts that appear inside each K
-  source recipe (e.g. `wit(cols::W_W, 16)`, `wit(cols::W_SIG0, 1)`).
-  Likely a shift-predicate over GF(2^192). **The per-cell `ShiftR^1`
-  that wraps the K recipe is already handled** by
-  `F2BitOpVirtualSpec` and `apply_bit_op_u32` (shipped, with the
-  in-tree canary above); the K-discharge work just needs the row-
-  shift piece on top.
+- **What's needed**: a **row-shift** discharge mechanism for the
+  cross-row shifts inside each K source recipe (e.g. `wit(cols::W_W, 16)`,
+  `wit(cols::W_SIG0, 1)`). Note: MLE evaluation at a fixed point does
+  *not* commute with row shifts, so the verifier **cannot** derive
+  `MLE(SHIFT_row^k(v))(r*)` directly from `MLE(v)(r*)`. The mechanism
+  has to relate the two via something other than evaluation-at-the-
+  same-point — exact shape is left to the design owner; placeholder
+  text deliberately vague here. **The per-cell `ShiftR^1` that wraps
+  the K recipe is already handled** by `F2BitOpVirtualSpec` and
+  `apply_bit_op_u32` (shipped, with the in-tree canary above); the
+  K-discharge work just needs the row-shift piece on top.
 - **Where**: `protocol/src/f2_prove.rs::verify_f2_full_with_bit_ops`
   would gain a "derive K col evals from source col evals + spec"
   step, analogous to how `F2VirtualBpSpec` (XOR) virtuals are

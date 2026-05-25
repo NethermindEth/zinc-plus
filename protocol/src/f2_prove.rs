@@ -43,6 +43,9 @@ use crypto_primitives::{Field, FromWithConfig, PrimeField};
 use std::fmt::Debug;
 use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof as IcProof, VerifierSubclaim as IcVerifierSubclaim},
+    multipoint_eval::{
+        MultipointEval, MultipointEvalError, Proof as MultipointEvalProof,
+    },
     projections::project_f2_trace_row_major,
     sumcheck::{
         SumCheckError,
@@ -123,6 +126,8 @@ pub enum F2ProveError<U: Uair> {
     IdealCheck(zinc_piop::ideal_check::IdealCheckError<BinaryFieldGF192, U::Ideal>),
     #[error("evaluation projection failed: {0}")]
     EvalProjection(zinc_poly::EvaluationError),
+    #[error("multipoint-eval prove failed: {0}")]
+    MultipointEval(MultipointEvalError<BinaryFieldGF192>),
 }
 
 /// Verifier subclaim emitted by [`ZincPlusPiopF2::verify_f2_uair`]: the
@@ -2798,16 +2803,6 @@ where
             project_scalar,
         )?;
 
-        // Step 7: γ-batched open over the WITNESS NON-K primary trace
-        // slice. Public columns aren't committed; the verifier
-        // computes their MLE evals at r* locally and isn't part
-        // of the lift-discharge / encoding-consistency batch
-        // (matches the integer protocol's witness-only PCS open).
-        // K-virtual cols are excluded from the open by slicing them
-        // off the witness tail (layout invariant: K cols are the last
-        // `num_k` witness cols; see [`F2KVirtualSpec`]).
-        // Bit-op virtual contributions are reconstructed verifier-side
-        // via `bit_op_specs`.
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_k = k_specs.len();
@@ -2826,12 +2821,130 @@ where
                  expected tail range [{num_non_k}, {num_wit_bin_total})",
             );
         }
+
+        // -- Step 4.5: Multipoint-eval reduction (r* -> r_0) ---------
+        //
+        // Reduces the per-column MLE evaluation claims at the
+        // sumcheck point r* (carried in
+        // `uair_proof.column_evals_at_rstar`) to a single evaluation
+        // claim at a fresh random point r_0, batched across columns
+        // via gamma. Today there are no row-shifted column evals to
+        // discharge — the F_2 sumcheck doesn't surface them
+        // (no Hadamard support yet, see `f2_native_ic` + the
+        // f2x-sha-todo doc). When that lands, shifted-col evals
+        // flow through MultipointEval's `down_evals` + `shifts`
+        // params here.
+        //
+        // Perf note: re-projects the trace to α to get projected_trace
+        // in BinaryFieldGF192 form (the original projected_trace
+        // computed inside prove_f2_uair_with_groups is consumed
+        // during column_evals_at_rstar materialisation). Adds one α-
+        // projection per prove (~500 ms at nvars=22). The expedient
+        // refactor would be to surface the projected_trace from
+        // prove_f2_uair_with_groups instead of recomputing here —
+        // tracked in documentation/f2x-sha-todo.md.
+        let extended_binary_poly_for_mp: std::borrow::Cow<
+            '_,
+            [DenseMultilinearExtension<BinaryPoly<D>>],
+        > = if virtual_specs.is_empty() {
+            std::borrow::Cow::Borrowed(&trace.binary_poly)
+        } else {
+            let virtual_cols =
+                materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
+            let mut all: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+                trace.binary_poly.iter().cloned().collect();
+            all.extend(virtual_cols);
+            std::borrow::Cow::Owned(all)
+        };
+        let alpha_pows_for_mp: Vec<BinaryFieldGF192> =
+            zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
+        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let projected_trace_for_mp: Vec<
+            DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>,
+        > = cfg_iter!(&*extended_binary_poly_for_mp)
+            .map(|col| {
+                let evals: Vec<<BinaryFieldGF192 as Field>::Inner> = col
+                    .evaluations
+                    .iter()
+                    .map(|cell| {
+                        *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                            cell,
+                            &alpha_pows_for_mp,
+                        )
+                        .inner()
+                    })
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(
+                    col.num_vars,
+                    evals,
+                    zero_inner,
+                )
+            })
+            .collect();
+
+        let (mp_proof, mp_prover_state) =
+            MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
+                transcript,
+                &projected_trace_for_mp,
+                &subclaim.sumcheck_point,
+                &uair_proof.column_evals_at_rstar,
+                /* down_evals */ &[],
+                /* shifts     */ &[],
+                &(),
+            )
+            .map_err(F2ProveError::MultipointEval)?;
+        let r_0 = mp_prover_state.eval_point;
+
+        // Per-column MLE evals at r_0. Same pattern (consume each
+        // projected col's inner Vec via the existing eval API) as
+        // the column_evals_at_rstar computation inside
+        // prove_f2_uair_with_groups. These are bound by the
+        // multipoint-eval verifier consistency check at r_0; the
+        // witness-primary slice is additionally bound by the F_2 PCS
+        // open below.
+        let open_evals_at_r_0: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(
+            projected_trace_for_mp
+        )
+        .map(|col| {
+            <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                BinaryFieldGF192,
+            >>::evaluate_with_config(col, &r_0, &())
+            .expect("MLE evaluation at r_0 should succeed")
+        })
+        .collect();
+
+        // Absorb open_evals_at_r_0 into the transcript (mirror of
+        // the column_evals_at_rstar absorb done inside
+        // prove_f2_uair_with_groups) so subsequent PCS-open
+        // challenges depend on them — guards against a malicious
+        // prover swapping the per-column open values after
+        // multipoint-eval.
+        let mut buf_r0 = vec![
+            0u8;
+            <<BinaryFieldGF192 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &open_evals_at_r_0 {
+            transcript.absorb_random_field(v, &mut buf_r0);
+        }
+
+        // Step 7: γ-batched open over the WITNESS NON-K primary trace
+        // slice, now at the multipoint-eval output point r_0.
+        // Public columns aren't committed; the verifier
+        // computes their MLE evals at r_0 locally and isn't part
+        // of the lift-discharge / encoding-consistency batch
+        // (matches the integer protocol's witness-only PCS open).
+        // K-virtual cols are excluded from the open by slicing them
+        // off the witness tail (layout invariant: K cols are the last
+        // `num_k` witness cols; see [`F2KVirtualSpec`]).
+        // Bit-op virtual contributions are reconstructed verifier-side
+        // via `bit_op_specs`.
         let open_proof = Self::prove_f2_open(
             transcript,
             pp,
             &hint,
             &trace.binary_poly[num_pub_bin..num_pub_bin + num_non_k],
-            &subclaim.sumcheck_point,
+            &r_0,
             &subclaim.alpha,
             num_column_openings,
         );
@@ -2839,6 +2952,8 @@ where
         Ok(F2FullProof {
             commitment,
             uair: uair_proof,
+            multipoint_eval: mp_proof,
+            open_evals_at_r_0,
             open: open_proof,
         })
     }
@@ -2893,7 +3008,6 @@ where
             project_scalar,
         )?;
 
-        // Step 7: γ-batched open over non-K witness slice (unchanged).
         let num_k = k_specs.len();
         let num_wit_bin_total = trace.binary_poly.len() - num_pub_bin;
         let num_non_k = num_wit_bin_total - num_k;
@@ -2911,12 +3025,90 @@ where
                  expected tail range [{num_non_k}, {num_wit_bin_total})",
             );
         }
+
+        // -- Step 4.5: Multipoint-eval reduction (r* -> r_0) ---------
+        // Identical to the non-pre-paired prover; see
+        // [`Self::prove_f2_full_with_bit_ops`] for the full
+        // commentary.
+        let extended_binary_poly_for_mp: std::borrow::Cow<
+            '_,
+            [DenseMultilinearExtension<BinaryPoly<D>>],
+        > = if virtual_specs.is_empty() {
+            std::borrow::Cow::Borrowed(&trace.binary_poly)
+        } else {
+            let virtual_cols =
+                materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
+            let mut all: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+                trace.binary_poly.iter().cloned().collect();
+            all.extend(virtual_cols);
+            std::borrow::Cow::Owned(all)
+        };
+        let alpha_pows_for_mp: Vec<BinaryFieldGF192> =
+            zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
+        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let projected_trace_for_mp: Vec<
+            DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>,
+        > = cfg_iter!(&*extended_binary_poly_for_mp)
+            .map(|col| {
+                let evals: Vec<<BinaryFieldGF192 as Field>::Inner> = col
+                    .evaluations
+                    .iter()
+                    .map(|cell| {
+                        *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                            cell,
+                            &alpha_pows_for_mp,
+                        )
+                        .inner()
+                    })
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(
+                    col.num_vars,
+                    evals,
+                    zero_inner,
+                )
+            })
+            .collect();
+
+        let (mp_proof, mp_prover_state) =
+            MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
+                transcript,
+                &projected_trace_for_mp,
+                &subclaim.sumcheck_point,
+                &uair_proof.column_evals_at_rstar,
+                /* down_evals */ &[],
+                /* shifts     */ &[],
+                &(),
+            )
+            .map_err(F2ProveError::MultipointEval)?;
+        let r_0 = mp_prover_state.eval_point;
+
+        let open_evals_at_r_0: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(
+            projected_trace_for_mp
+        )
+        .map(|col| {
+            <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                BinaryFieldGF192,
+            >>::evaluate_with_config(col, &r_0, &())
+            .expect("MLE evaluation at r_0 should succeed")
+        })
+        .collect();
+
+        let mut buf_r0 = vec![
+            0u8;
+            <<BinaryFieldGF192 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &open_evals_at_r_0 {
+            transcript.absorb_random_field(v, &mut buf_r0);
+        }
+
+        // Step 7: γ-batched open over non-K witness slice at r_0.
         let open_proof = Self::prove_f2_open(
             transcript,
             pp,
             &hint,
             &trace.binary_poly[num_pub_bin..num_pub_bin + num_non_k],
-            &subclaim.sumcheck_point,
+            &r_0,
             &subclaim.alpha,
             num_column_openings,
         );
@@ -2924,6 +3116,8 @@ where
         Ok(F2FullProof {
             commitment,
             uair: uair_proof,
+            multipoint_eval: mp_proof,
+            open_evals_at_r_0,
             open: open_proof,
         })
     }
@@ -3079,18 +3273,144 @@ where
             }
         }
 
-        // Step 7: γ-batched open verifier — witness NON-K primary
-        // cells from the Merkle opening, witness bit-op virtual cells
-        // derived via `op`. Public cols aren't part of this batch;
-        // their MLE evals were validated above. K-virtual col evals
-        // are extracted from the sumcheck transcript but not
-        // discharged here (Issue 1 placeholder).
+        // -- Step 4.5 verify: multipoint-eval reduction (r* -> r_0) --
+        //
+        // Mirror of the prover's
+        // [`Self::prove_f2_full_with_bit_ops`] multipoint-eval phase.
+        // Reduces the per-col MLE eval claims at r* (carried in
+        // `proof.uair.column_evals_at_rstar`) to `r_0`, then checks
+        // the prover-supplied `proof.open_evals_at_r_0` against the
+        // reduction. The witness-primary slice of
+        // `open_evals_at_r_0` is what the F_2 PCS open at r_0 binds.
+        let mp_subclaim = MultipointEval::<BinaryFieldGF192>::verify_as_subprotocol(
+            transcript,
+            proof.multipoint_eval.clone(),
+            &subclaim.sumcheck_point,
+            &proof.uair.column_evals_at_rstar,
+            /* down_evals */ &[],
+            /* shifts     */ &[],
+            num_vars,
+            &(),
+        )
+        .map_err(F2FullVerifyError::MultipointEval)?;
+        let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+        // Absorb open_evals_at_r_0 into transcript (mirror of the
+        // prover's absorb).
+        let mut buf_r0 = vec![
+            0u8;
+            <<BinaryFieldGF192 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &proof.open_evals_at_r_0 {
+            transcript.absorb_random_field(v, &mut buf_r0);
+        }
+
+        // Length check: open_evals_at_r_0 must cover every column
+        // multipoint-eval batched (primary + virtual), matching the
+        // length of `uair.column_evals_at_rstar`.
+        if proof.open_evals_at_r_0.len() != proof.uair.column_evals_at_rstar.len() {
+            return Err(F2FullVerifyError::OpenEvalsLengthMismatch {
+                got: proof.open_evals_at_r_0.len(),
+                expected: proof.uair.column_evals_at_rstar.len(),
+            });
+        }
+
+        // Public col MLE evals at r_0: validate by local
+        // recomputation against `public_binary_trace`. Same shape as
+        // the at-r* check above, just at the new point.
+        if num_pub_bin > 0 {
+            let alpha_pows_r0: Vec<BinaryFieldGF192> =
+                zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
+            let computed_evals_r0: Vec<BinaryFieldGF192> = cfg_iter!(public_binary_trace)
+                .map(|col| {
+                    let field_cfg = ();
+                    let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                        .evaluations
+                        .iter()
+                        .map(|cell| {
+                            zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                                cell, &alpha_pows_r0,
+                            )
+                        })
+                        .collect();
+                    let zero_inner = *BinaryFieldGF192::zero().inner();
+                    let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
+                        col.num_vars,
+                        evals_at_alpha.iter().map(|x| *x.inner()).collect(),
+                        zero_inner,
+                    );
+                    <DenseMultilinearExtension<_>
+                        as zinc_poly::mle::MultilinearExtensionWithConfig<
+                            BinaryFieldGF192,
+                        >>::evaluate_with_config(inner_mle, &r_0, &field_cfg)
+                    .expect("MLE evaluation on r_0 should succeed")
+                })
+                .collect();
+            for (g, &computed) in computed_evals_r0.iter().enumerate() {
+                let claimed = proof.open_evals_at_r_0[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatchAtR0 {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // XOR-virtual cols: derive their MLE evals at r_0 from
+        // primary evals at r_0 and check consistency with the
+        // prover's claim (same pattern as the at-r* check inside
+        // verify_f2_uair).
+        let (primary_evals_at_r_0, virtual_evals_at_r_0_from_proof) =
+            proof.open_evals_at_r_0.split_at(num_primary_columns);
+        let virtual_evals_at_r_0_derived =
+            derive_f2_virtual_evals_at(primary_evals_at_r_0, virtual_specs);
+        for (k, (claimed, derived)) in virtual_evals_at_r_0_from_proof
+            .iter()
+            .zip(virtual_evals_at_r_0_derived.iter())
+            .enumerate()
+        {
+            if claimed != derived {
+                return Err(F2FullVerifyError::VirtualColumnEvalMismatchAtR0 {
+                    virtual_idx: k,
+                    derived: *derived,
+                    claimed: *claimed,
+                });
+            }
+        }
+
+        // Finalise multipoint-eval check: verify the sumcheck-
+        // reduction is internally consistent with `open_evals_at_r_0`.
+        MultipointEval::<BinaryFieldGF192>::verify_subclaim(
+            &mp_subclaim,
+            &proof.open_evals_at_r_0,
+            /* shifts */ &[],
+            &(),
+        )
+        .map_err(F2FullVerifyError::MultipointEval)?;
+
+        // Build a subclaim shifted to r_0 so the PCS open can be
+        // verified at the new point. The fields verify_f2_open_with_
+        // virtuals reads are: sumcheck_point, alpha, primary_column_
+        // evals (sliced for witness), virtual_column_evals. The
+        // ic_evaluation_point field is unused on that path.
+        let subclaim_at_r_0 = F2VerifierSubclaim {
+            ic_evaluation_point: subclaim.ic_evaluation_point.clone(),
+            alpha: subclaim.alpha,
+            sumcheck_point: r_0,
+            primary_column_evals: primary_evals_at_r_0.to_vec(),
+            virtual_column_evals: virtual_evals_at_r_0_derived,
+        };
+
+        // Step 7: γ-batched open verifier at r_0.
         Self::verify_f2_open_with_virtuals(
             transcript,
             pp,
             &proof.commitment,
             &proof.open,
-            &subclaim,
+            &subclaim_at_r_0,
             bit_op_specs,
             k_specs,
         )
@@ -3100,13 +3420,42 @@ where
     }
 }
 
-/// The complete F_2 proof: commitment + IC/sumcheck proof + Step 7
-/// γ-batched open. Produced by [`ZincPlusPiopF2::prove_f2_full`] and
-/// consumed by [`ZincPlusPiopF2::verify_f2_full`].
+/// The complete F_2 proof: commitment + IC/sumcheck proof +
+/// multipoint-eval reduction + Step 7 γ-batched open. Produced by
+/// [`ZincPlusPiopF2::prove_f2_full`] and consumed by
+/// [`ZincPlusPiopF2::verify_f2_full`].
+///
+/// The multipoint-eval phase reduces the per-column MLE evaluation
+/// claims at the sumcheck point `r*` (carried in
+/// `uair.column_evals_at_rstar`) to a single evaluation claim at a
+/// new point `r_0`, batched across columns. Today the F_2 sumcheck
+/// surfaces no row-shifted column evals (no Hadamard product
+/// support yet — see [`f2_native_ic`](crate::f2_native_ic)), so the
+/// reduction is the degenerate one that only batches the "up" col
+/// evals and rerandomises the open point from `r*` to `r_0`. When
+/// Hadamard / K-discharge wire shifted-col evals into the
+/// sumcheck output, multipoint-eval will absorb them via its
+/// `shifts` input and fold them into the same `r_0` open.
+///
+/// `open_evals_at_r_0` carries the prover-supplied per-column MLE
+/// evals at `r_0` (primary cols first, then virtual). The
+/// multipoint-eval verifier check validates that they are
+/// consistent with `uair.column_evals_at_rstar` via the sumcheck
+/// reduction; the F_2 PCS open at `r_0` then binds the
+/// witness-primary slice against the commitment.
 #[derive(Clone, Debug)]
 pub struct F2FullProof<const D: usize> {
     pub commitment: ZipPlusCommitment,
     pub uair: F2Proof,
+    /// Sumcheck reducing column MLE eval claims at `r*` to a single
+    /// open point `r_0`. Today's invocation passes no shifted-col
+    /// inputs; the proof gains one degree-2 sumcheck over `num_vars`
+    /// rounds.
+    pub multipoint_eval: MultipointEvalProof<BinaryFieldGF192>,
+    /// Per-column MLE evals at `r_0` (primary cols first, then
+    /// virtual), bound by the multipoint-eval consistency check and
+    /// — for the witness-primary slice — by [`Self::open`] below.
+    pub open_evals_at_r_0: Vec<BinaryFieldGF192>,
     pub open: F2OpenProof<D>,
 }
 
@@ -3118,6 +3467,8 @@ where
 {
     #[error("IC + sumcheck verification failed: {0}")]
     Uair(F2VerifyError<U, IdealOverF>),
+    #[error("multipoint-eval verification failed: {0}")]
+    MultipointEval(MultipointEvalError<BinaryFieldGF192>),
     #[error("F_2[X] open verification failed: {0}")]
     Open(F2OpenError),
     #[error(
@@ -3129,6 +3480,28 @@ where
         computed: BinaryFieldGF192,
         claimed: BinaryFieldGF192,
     },
+    #[error(
+        "public column {public_col_idx}: claimed MLE eval at r_0 ({claimed:?}) doesn't match \
+         verifier's local computation from public_trace ({computed:?})"
+    )]
+    PublicColumnEvalMismatchAtR0 {
+        public_col_idx: usize,
+        computed: BinaryFieldGF192,
+        claimed: BinaryFieldGF192,
+    },
+    #[error(
+        "virtual column {virtual_idx}: claimed MLE eval at r_0 ({claimed:?}) doesn't match \
+         verifier's derivation from primary evals at r_0 ({derived:?})"
+    )]
+    VirtualColumnEvalMismatchAtR0 {
+        virtual_idx: usize,
+        derived: BinaryFieldGF192,
+        claimed: BinaryFieldGF192,
+    },
+    #[error(
+        "open_evals_at_r_0 has length {got}, expected {expected} (= num_primary + num_virtual)"
+    )]
+    OpenEvalsLengthMismatch { got: usize, expected: usize },
 }
 
 #[cfg(test)]
