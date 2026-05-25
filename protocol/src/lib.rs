@@ -496,23 +496,52 @@ pub(crate) fn absorb_public_columns<T: ConstTranscribable>(
         // same transcript state as before this batching change.
         return;
     }
-    // Pack all cells into one contiguous buffer and absorb once.
-    // The previous one-cell-at-a-time loop made 1 absorb_slice call
-    // per cell (~917k calls for a 14-col SHA F_2 trace at nvars=16);
-    // each call has its own framing-byte overhead, so batching cuts
-    // this to a single Blake3 update on a flat 7 MiB buffer.
+    // Stream each column through the transcript via a reusable
+    // per-column scratch buffer. Replaces the previous design that
+    // packed every public cell into ONE contiguous buffer
+    // (`total_cells * elem_bytes` ≈ 235 MB at SHA-256 F_2 nvars=22)
+    // and then made a single `absorb_slice` call: that big alloc
+    // cost ~150 ms when the allocator/cache state had been disturbed
+    // by the preceding prove phases (e.g. inside an e2e prove loop),
+    // dwarfing the actual hashing work.
+    //
+    // The new design opens the same one-shot frame pair (`absorb_slice`
+    // = `absorb_inner(0x6) + absorb_inner(data) + absorb_inner(0x7)`)
+    // but emits the bulk data as N back-to-back `absorb_inner` calls,
+    // one per column. Blake3's `Hasher::update` is associative
+    // (`update(a); update(b)` ≡ `update(concat(a, b))`) so the
+    // transcript state after this call is byte-identical to the
+    // prior implementation. The scratch buffer is sized to the
+    // *single largest column* (~17 MB at nvars=22 — all 14 SHA F_2
+    // public cols are the same size, so this is 1/14 of the old
+    // alloc), comfortably fitting in L3 between successive prove
+    // iterations and avoiding the cold-DRAM penalty that hit the
+    // 235 MB buffer.
     let elem_bytes = T::NUM_BYTES;
-    let total_cells: usize = cols.iter().map(|c| c.evaluations.len()).sum();
-    let mut buf = vec![0u8; total_cells * elem_bytes];
-    let mut offset = 0usize;
+    let max_col_cells = cols
+        .iter()
+        .map(|c| c.evaluations.len())
+        .max()
+        .unwrap_or(0);
+
+    // Frame open — matches the `absorb_slice` default impl's
+    // pre-data framing byte.
+    transcript.absorb_inner(&[0x6]);
+    let mut col_buf = vec![0u8; max_col_cells * elem_bytes];
     for col in cols {
+        let col_bytes = col.evaluations.len() * elem_bytes;
+        let buf = &mut col_buf[..col_bytes];
+        let mut offset = 0usize;
         for entry in col.iter() {
             entry.write_transcription_bytes_exact(&mut buf[offset..offset + elem_bytes]);
             offset += elem_bytes;
         }
+        debug_assert_eq!(offset, col_bytes);
+        transcript.absorb_inner(buf);
     }
-    debug_assert_eq!(offset, buf.len());
-    transcript.absorb_slice(&buf);
+    // Frame close — same trailing framing byte the `absorb_slice`
+    // default impl appends.
+    transcript.absorb_inner(&[0x7]);
 }
 
 /// Compute per-column lifted MLE evaluations at `point`.

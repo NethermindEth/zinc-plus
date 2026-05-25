@@ -906,6 +906,56 @@ fn bench_micro_prover_uair(
         });
     });
 
+    // ---- 0.5) Commit-AfterPrevProve: same Commit code path but the
+    //          MACHINE STATE entering it matches what e2e sees — i.e.
+    //          a fresh full Prove (UAIR + Open) has just finished,
+    //          dropping its ~32 MB F2OpenProof.combined_row +
+    //          opened_columns, and the next iteration's Commit fires
+    //          on a cache/allocator state similar to e2e's per-iter
+    //          start. If this bench reports the same number as the
+    //          plain `Commit` micro, the e2e-vs-micro gap is real
+    //          wrap-up; if it reports the slower in-situ number
+    //          (~900 ms at nvars=22), the gap is context-dependent
+    //          state (cache / allocator / rayon-pool / GPU-warmth).
+    group.bench_function(BenchmarkId::new("Commit-AfterPrevProve", id), |bench| {
+        bench.iter_batched(
+            || {
+                // Setup: run a full Prove and drop it, leaving the
+                // process state where e2e leaves it between iters.
+                let mut t = Blake3Transcript::new();
+                let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::prove_f2_full_pre_paired_with_bit_ops(
+                        &mut t,
+                        &fx.pp,
+                        &fx.trace,
+                        &fx.paired_primary_witness,
+                        &[],
+                        &sha_f2_bit_op_virtuals(),
+                        &sha_f2_k_virtuals(),
+                        fx.num_vars,
+                        sha256_f2_project_scalar::<R>,
+                        recommended_num_column_openings(REP),
+                    )
+                    .expect("setup prove");
+                drop(proof);
+                ()
+            },
+            |()| {
+                let mut transcript = Blake3Transcript::new();
+                let (hint, comm) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                    ::commit_and_absorb_pre_paired_witness(
+                        &mut transcript,
+                        &fx.pp,
+                        &fx.paired_primary_witness,
+                        &fx.trace.binary_poly[..num_pub_bin],
+                    )
+                    .expect("commit");
+                black_box((hint, comm));
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
 
     // ---- a) F_2-native IC ----
     //
