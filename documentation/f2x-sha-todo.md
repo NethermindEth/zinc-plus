@@ -13,7 +13,40 @@ at the bottom.
 
 ---
 
+## Fast-described sketch todo's
+
+- [ ] Review how we do PCS open, with lifts and so on. Suspect unnecessary lifting etc
+- [ ] GF(128)
+- [ ] Are we doing multipoint eval?
+- [ ] SHIFT vector proving, with virtualization for the mod 2^32 add
+- [ ] Review approach to add mod 2^32 in documentation
+- [ ] Hadamard product implementation
+
+
+---
+
 ## Shipped work (chronological, most recent first)
+
+### Reuse the 768 MB commit slab process-wide (commit `<TBD>`)
+- **What**: cached the `commit_grouped` GPU-inline slab in a
+  process-wide `static OnceLock<Mutex<Vec<u8>>>` in
+  `zip-plus/src/pcs/phase_commit.rs`. The Mutex is held for the
+  full GPU-branch duration. Slab grows on demand, never shrinks
+  — for SHA-256 F_2 the size is constant per protocol, so the
+  resize is a one-time first-call cost. No zero-init needed
+  between commits since `scatter_matrix_into_gpu_slab` fully
+  overwrites the active region.
+- **Why**: each commit was allocating a fresh 768 MB
+  `Vec<u8>` then writing through it (cold pages, cold cache).
+  Caching reuses the same DRAM pages — they stay resident across
+  commits and the second touch hits warm cache.
+- **Result at nvars=22**:
+  `Commit-AfterPrevProve` 772 ms → 566 ms (−206 ms, −27%).
+  `Prove e2e` 2.17 s → **1.53 s** (−640 ms, −29.5%).
+  Cumulative since CPU baseline: 2.96 s → 1.53 s (−48%).
+  The expected-gain estimate (100–200 ms) substantially under-
+  shot the actual gain — the cold-DRAM penalty on a fresh
+  768 MB write-through was far larger than the alloc cost alone.
 
 ### Stream public-col absorb per-column (commit `c5b1c64`)
 - **What**: replaced the 235 MB single-buffer absorb in
@@ -120,28 +153,6 @@ at the bottom.
 
 ## Identified but not implemented
 
-### Reuse the 768 MB commit slab across commits
-- **Why it matters**: this is now the dominant residual cost in
-  `Commit-AfterPrevProve` vs isolated Commit (~215 ms remaining
-  gap). Each commit allocates a fresh 768 MB slab (`vec![0u8; ...]`
-  inside `phase_commit.rs::commit_grouped`'s GPU-inline branch),
-  writes to it, then drops it at end of commit. In a tight loop
-  the allocator returns the same pages and the cache stays warm;
-  in e2e the allocator's been disturbed and the slab hits cold
-  DRAM.
-- **Where**: `zip-plus/src/pcs/phase_commit.rs` ~line 170, the
-  `if go_gpu { let mut slab = vec![0u8; ...]; … }` branch.
-- **Approach options**:
-  - (a) Per-`ZipPlus` static thread-local scratch resized
-        on-demand. Reset to zero each commit (cheap memset).
-  - (b) Caller-owned `&mut Vec<u8>` parameter passed into
-        `commit_grouped` / `commit_pre_paired_witness`. Bench
-        fixture / production prover owns the buffer.
-  - (c) `MetalContext`-owned scratch (since it already holds
-        per-process scratch in `HashScratch`).
-- **Expected gain**: 100–200 ms on e2e Prove at nvars=22; bigger
-  at higher nvars.
-
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at
   `r*` are extracted from the sumcheck transcript and **trusted**
@@ -223,17 +234,14 @@ at the bottom.
 
 ## Open questions / hypotheses to test
 
-### Why is `Commit-AfterPrevProve` still ~210 ms slower than `Commit` (isolated)?
-- After the per-col absorb fix, the gap dropped from 320 ms to
-  210 ms. The remaining gap is inside `commit_grouped` — the
-  encode + scatter + GPU dispatch + Merkle build.
-- The 768 MB slab alloc (see above) is the top suspect. **Test
-  plan**: instrument the inside of `commit_grouped`'s GPU branch
-  to time (slab alloc, encode-and-scatter, GPU dispatch, tree
-  build) separately in both isolated and AfterPrevProve contexts.
-- Secondary suspect: the per-row encode rayon parallelism may
-  re-spawn worker thread state if the rayon pool went idle during
-  the prior UAIR/Open.
+### Why is `Commit-AfterPrevProve` still ~47 ms slower than `Commit` (isolated)?
+- After the slab-reuse fix the gap dropped from 215 ms to ~47 ms
+  (566 vs 519 ms). The big suspect — the 768 MB slab alloc — was
+  confirmed and fixed. The residual ~47 ms is probably the
+  per-row encode rayon parallelism re-spawning worker thread
+  state after the pool sat idle during the prior UAIR/Open, or
+  cold L2 cache on the paired-witness MLE evaluations re-read.
+- Low priority — at this point we're chasing noise-level variance.
 
 ### Does the bench fixture's `num_rows = 8` choice make sense for measurement?
 - `setup_prover` hard-codes `num_rows = 8` independent of `nvars`,
