@@ -18,6 +18,24 @@ use zinc_transcript::traits::ConstTranscribable;
 use rayon::prelude::*;
 use zinc_poly::mle::DenseMultilinearExtension;
 
+/// Process-wide cached scratch for the GPU-inline commit slab. The
+/// slab is `num_leaves × leaf_bytes` bytes — at SHA-256 F_2 nvars=22
+/// that's ~768 MB. Re-allocating it on every commit costs ~150 ms
+/// when the allocator/L3 state has been disturbed by the prior
+/// prove phases (the gap visible in the `Commit-AfterPrevProve`
+/// micro bench vs the tight-loop `Commit` micro). Caching it
+/// process-wide reuses the same pages across commits, sidestepping
+/// the cold-DRAM penalty.
+///
+/// The `Mutex` is held for the full duration of one `commit_grouped`
+/// call (so the slab can't be touched by a concurrent commit). For
+/// the SHA-256 F_2 single-prover case this is free; if multiple
+/// provers ever run in parallel they'll serialise on the GPU commit
+/// step but still parallelise everywhere else.
+#[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+static COMMIT_SLAB_SCRATCH: std::sync::OnceLock<std::sync::Mutex<Vec<u8>>> =
+    std::sync::OnceLock::new();
+
 impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     /// Creates a commitment to one or more multilinear polynomials using the
     /// ZIP PCS scheme.
@@ -166,10 +184,31 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             let go_gpu = num_leaves >= GPU_MIN_LEAVES;
 
             if go_gpu {
-                let mut slab = vec![0u8; num_leaves * leaf_bytes];
+                // Borrow the process-wide cached scratch slab. Grow
+                // on demand; never shrink (we'd lose the cached
+                // pages). For SHA-256 F_2 the size is constant per
+                // protocol, so the resize is a one-time first-call
+                // cost. The Mutex is held for the full GPU-branch
+                // duration — no concurrent commits can race on the
+                // raw slab pointer below.
+                let slab_mutex = COMMIT_SLAB_SCRATCH
+                    .get_or_init(|| std::sync::Mutex::new(Vec::new()));
+                let mut slab = slab_mutex
+                    .lock()
+                    .expect("commit slab scratch poisoned");
+                let required = num_leaves * leaf_bytes;
+                if slab.len() < required {
+                    slab.resize(required, 0);
+                }
+                // Every byte in `0..required` is fully overwritten
+                // by the `scatter_matrix_into_gpu_slab` calls below
+                // (each `m_idx` covers its disjoint sub-range of every
+                // leaf, and we run for all `m_idx ∈ 0..batch_size`),
+                // so no zero-init is needed — the prior commit's
+                // bytes get cleanly overwritten.
                 let slab_ptr = GpuSlabPtr {
                     ptr: slab.as_mut_ptr(),
-                    len: slab.len(),
+                    len: required,
                 };
                 let num_rows = pp.num_rows;
                 let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys)
@@ -180,7 +219,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                         // SAFETY: each `m_idx` ∈ 0..batch_size writes to
                         // a disjoint byte sub-range within every leaf
                         // (see `scatter_matrix_into_gpu_slab` contract),
-                        // so concurrent rayon workers don't race.
+                        // so concurrent rayon workers don't race. The
+                        // Mutex above ensures no concurrent commit
+                        // holds an aliased pointer to the same slab.
                         unsafe {
                             MerkleTree::scatter_matrix_into_gpu_slab(
                                 slab_ptr,
@@ -197,10 +238,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                     })
                     .collect();
                 let tree = MerkleTree::new_from_packed_slab_gpu(
-                    &slab,
+                    &slab[..required],
                     num_leaves,
                     leaf_bytes,
                 );
+                drop(slab);
                 (cw_matrices, tree)
             } else {
                 let cw_matrices: Vec<DenseRowMatrix<Zt::Cw>> = cfg_iter!(polys)
