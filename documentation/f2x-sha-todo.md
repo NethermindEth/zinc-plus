@@ -18,7 +18,10 @@ at the bottom.
 - [ ] Review how we do PCS open, with lifts and so on. Suspect unnecessary lifting etc
 - [ ] GF(128)
 - [ ] Are we doing multipoint eval?
-- [ ] SHIFT vector proving, with virtualization for the mod 2^32 add
+- [ ] SHIFT vector proving — **row-level** shift virtualization (needed
+      for the K-discharge work, Issue 1). The per-cell SHIFTR case
+      already ships via `F2BitOpVirtualSpec`; see the "Per-cell SHIFTR
+      virtualisation in-tree canary" entry under Shipped work below.
 - [ ] Review approach to add mod 2^32 in documentation
 - [ ] Hadamard product implementation
 
@@ -26,6 +29,37 @@ at the bottom.
 ---
 
 ## Shipped work (chronological, most recent first)
+
+### Per-cell SHIFTR virtualisation: in-tree canary (commit `<TBD>`)
+- **What**: extended `prove_then_verify_sha256_f2_with_k_virtuals_roundtrips`
+  in `protocol/src/f2_prove.rs` to also pass `F2BitOpVirtualSpec`s for
+  `W_SHR3_W = SHR^3(W_W)` and `W_SHR10_W = SHR^10(W_W)`. Adjusted the
+  expected `batch_size` to account for the two extra excluded cols.
+- **Why**: the bench (`protocol/benches/f2_sha256.rs`) already declares
+  these specs via `sha_f2_bit_op_virtuals()` and threads them through
+  every prove/verify callsite (shipped in commit `fdd2d01`), so the
+  commit-side savings are already realised at bench time. But no CI-
+  runnable test exercised the full prove-then-verify roundtrip with
+  non-empty `bit_op_specs` on the real SHA-256 F_2 UAIR — the two
+  in-tree tests (`prove_then_verify_sha256_f2_roundtrips` and
+  `..._with_k_virtuals_roundtrips`) both passed empty `bit_op_specs`.
+  This entry closes that gap so a regression in the per-cell SHIFTR
+  reconstruction (`apply_bit_op_u32` at f2_prove.rs:300 or the
+  `verify_f2_open_with_virtuals` derivation loop at f2_prove.rs:2575-2700)
+  fails a test, not just a bench.
+- **Where**: `protocol/src/f2_prove.rs` (test `prove_then_verify_sha256_f2_with_k_virtuals_roundtrips`,
+  lines ~4797-4836 after the edit).
+- **Related future work — trace-builder JIT (not in this entry)**:
+  `Sha256F2Uair::generate_random_trace` still materialises
+  `W_SHR3_W` and `W_SHR10_W` row-by-row (lines 836-837 + the MLE push
+  at 1052-1053), even though they're now excluded from the commit.
+  Cutting that work needs the prover to JIT-materialise bit-op virtual
+  MLEs inside `prove_f2_full_with_bit_ops` before
+  `prove_f2_uair_with_groups` consumes the trace — currently the
+  caller is expected to pre-materialise them at the declared
+  `col_idx`. Estimated savings at nvars=22: ~30 MB allocation +
+  ~5 ms CPU per prove (2 cols out of 41). Symmetric with the K-cols
+  pattern, which also pre-materialises and accepts the cost.
 
 ### Reuse the 768 MB commit slab process-wide (commit `<TBD>`)
 - **What**: cached the `commit_grouped` GPU-inline slab in a
@@ -160,10 +194,15 @@ at the bottom.
   reconstruction. The constraint system relies on the SHA-256
   boundary check (publicly-fixed final digest) to make this
   honest-prover-only design effectively sound.
-- **What's needed**: a mechanism for the verifier to access
-  `MLE(ShiftR^1(v))(r*)` from `MLE(v)(r*)` without a dedicated
-  commitment — likely a shift-predicate gadget that lifts to
-  GF(2^192).
+- **What's needed**: a **row-shift** predicate gadget — a mechanism
+  for the verifier to evaluate `MLE(SHIFT_row^k(v))(r*)` from
+  `MLE(v)(r*)` for the cross-row shifts that appear inside each K
+  source recipe (e.g. `wit(cols::W_W, 16)`, `wit(cols::W_SIG0, 1)`).
+  Likely a shift-predicate over GF(2^192). **The per-cell `ShiftR^1`
+  that wraps the K recipe is already handled** by
+  `F2BitOpVirtualSpec` and `apply_bit_op_u32` (shipped, with the
+  in-tree canary above); the K-discharge work just needs the row-
+  shift piece on top.
 - **Where**: `protocol/src/f2_prove.rs::verify_f2_full_with_bit_ops`
   would gain a "derive K col evals from source col evals + spec"
   step, analogous to how `F2VirtualBpSpec` (XOR) virtuals are

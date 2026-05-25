@@ -4767,25 +4767,43 @@ mod tests {
             },
         ];
 
-        // Prove with K virtuals declared (and no bit-op virtuals here
-        // — keeping the test focused on K plumbing).
+        // Per-cell SHIFTR virtuals: W_SHR3_W = SHR^3(W_W),
+        // W_SHR10_W = SHR^10(W_W). Mirrors the bench's
+        // `sha_f2_bit_op_virtuals()` helper; included here so the
+        // in-tree test exercises the bit-op virtual path end-to-end
+        // alongside the K-virtual path (the bench is run on demand,
+        // these tests run in CI).
+        let bit_op_specs: Vec<F2BitOpVirtualSpec> = vec![
+            F2BitOpVirtualSpec {
+                col_idx: cols::W_SHR3_W,
+                source_col_idx: cols::W_W,
+                op: BitOp::ShiftR(3),
+            },
+            F2BitOpVirtualSpec {
+                col_idx: cols::W_SHR10_W,
+                source_col_idx: cols::W_W,
+                op: BitOp::ShiftR(10),
+            },
+        ];
+
         let mut prover_transcript = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_bit_ops(
             &mut prover_transcript,
             &pp,
             &trace,
             /* virtual_specs */ &[],
-            /* bit_op_specs */ &[],
+            &bit_op_specs,
             &k_specs,
             num_vars,
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_bit_ops + k_specs on SHA F_2 UAIR should succeed");
+        .expect("prove_f2_full_with_bit_ops + bit_op_specs + k_specs on SHA F_2 UAIR should succeed");
 
-        // batch_size = paired count of NON-K witness cols.
-        let num_non_k = cols::NUM_BIN_WIT - k_specs.len();
-        assert_eq!(proof.commitment.batch_size, num_non_k.div_ceil(2));
+        // batch_size = paired count of witness cols that are neither
+        // bit-op nor K virtuals.
+        let num_primary_wit = cols::NUM_BIN_WIT - k_specs.len() - bit_op_specs.len();
+        assert_eq!(proof.commitment.batch_size, num_primary_wit.div_ceil(2));
 
         let mut verifier_transcript = Blake3Transcript::new();
         let subclaim =
@@ -4794,14 +4812,14 @@ mod tests {
                 &pp,
                 &proof,
                 /* virtual_specs */ &[],
-                /* bit_op_specs */ &[],
+                &bit_op_specs,
                 &k_specs,
                 /* public_binary_trace */ &trace.binary_poly[..cols::NUM_BIN_PUB],
                 num_vars,
                 cols::NUM_BIN,
                 |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
             )
-            .expect("verify_f2_full_with_bit_ops + k_specs should succeed");
+            .expect("verify_f2_full_with_bit_ops + bit_op_specs + k_specs should succeed");
 
         assert_eq!(subclaim.sumcheck_point.len(), num_vars);
         assert_eq!(subclaim.primary_column_evals.len(), cols::NUM_BIN);
