@@ -387,7 +387,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                 transcript
             },
             |mut transcript| {
-                let (proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                let (proof, subclaim, _projected_trace) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
@@ -414,7 +414,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &sha_f2_bit_op_virtuals(),
                     )
                     .expect("commit should succeed");
-                let (_uair_proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                let (_uair_proof, subclaim, _projected_trace) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
@@ -1191,7 +1191,7 @@ fn bench_micro_prover_uair(
                 transcript
             },
             |mut transcript| {
-                let (proof, subclaim) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                let (proof, subclaim, _projected_trace) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
@@ -1244,7 +1244,7 @@ fn bench_micro_prover_open(
             &sha_f2_bit_op_virtuals(),
         )
         .expect("commit");
-        let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+        let (_proof, sub, _projected_trace) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
             ::prove_f2_uair_with_groups(
                 &mut t,
                 &fx.trace,
@@ -1539,7 +1539,7 @@ fn bench_micro_prover_open(
                             [..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
                     )
                     .expect("commit");
-                let (_proof, sub) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
+                let (_proof, sub, _projected_trace) = ZincPlusPiopF2::<BenchF2Types<D>, U, D>
                     ::prove_f2_uair_with_groups(
                         &mut t,
                         &fx.trace,

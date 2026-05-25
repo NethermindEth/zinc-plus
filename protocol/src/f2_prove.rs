@@ -810,32 +810,52 @@ where
     ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
         // No virtual columns. Use [`Self::prove_f2_uair_with_groups`]
         // with explicit `virtual_specs` for UAIRs that declare virtual
-        // binary_poly columns.
-        Self::prove_f2_uair_with_groups(
+        // binary_poly columns. Discards the third return value
+        // (`projected_trace`) — only the multipoint-eval phase in
+        // `prove_f2_full_with_bit_ops` needs that.
+        let (proof, subclaim, _projected_trace) = Self::prove_f2_uair_with_groups(
             transcript,
             trace,
             &[],
             num_vars,
             project_scalar,
-        )
+        )?;
+        Ok((proof, subclaim))
     }
 
     /// Virtual-column variant of [`Self::prove_f2_uair`]. Identical
     /// to the default entry point but accepts user-declared virtual
     /// binary_poly columns via `virtual_specs`.
     ///
-    /// Returns both the wire `F2Proof` and the prover-side
-    /// `F2VerifierSubclaim` — the latter mirrors what the verifier
-    /// would derive from the same transcript, and lets the caller
-    /// chain into [`Self::prove_f2_open`] without re-running the
-    /// IC + sumcheck on a verifier shim.
+    /// Returns the wire `F2Proof`, the prover-side
+    /// `F2VerifierSubclaim` (mirrors what the verifier would derive
+    /// from the same transcript and lets the caller chain into
+    /// [`Self::prove_f2_open`] without re-running the IC + sumcheck
+    /// on a verifier shim), and the α-projected trace MLEs in
+    /// `BinaryFieldGF192::Inner` form. The projected trace is
+    /// surfaced so callers running the downstream multipoint-eval
+    /// phase (e.g. [`Self::prove_f2_full_with_bit_ops`]) can reuse
+    /// it instead of re-projecting; callers that don't need it can
+    /// drop the third element. The per-col `column_evals_at_rstar`
+    /// inside the returned `F2Proof` is computed via a per-col
+    /// clone of the projected trace (the clone goes through the
+    /// existing zero-copy `ManuallyDrop` reinterpret for the
+    /// `evaluate_with_config` call, so only one copy per col is
+    /// paid).
     pub fn prove_f2_uair_with_groups(
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
-    ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
+    ) -> Result<
+        (
+            F2Proof,
+            F2VerifierSubclaim,
+            Vec<DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>>,
+        ),
+        F2ProveError<U>,
+    > {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
         let num_primary = trace.binary_poly.len();
@@ -1035,24 +1055,34 @@ where
         // ops, so this is one of the heavier outer loops — fan out
         // across rayon workers.
         //
-        // `projected_trace` is consumed here (it isn't used after this
-        // step). For each column we move its `Vec<BinaryFieldGF192>`
-        // out and zero-copy reinterpret it as `Vec<Uint<3>>` —
-        // `BinaryFieldGF192` is `#[repr(transparent)]` around
-        // `Uint<3>`, so the bytes are identical and we skip the
-        // ~24 MB / col allocation+copy this loop used to do at
-        // nvars=20 (and ~1.5 MB / col at nvars=16).
+        // Note: `projected_trace` is **preserved** here (we now return
+        // it so the caller can run the multipoint-eval phase without
+        // re-α-projecting). For each col we clone its
+        // `Vec<BinaryFieldGF192>` once into a workspace (paying one
+        // copy ~`24 B × 2^num_vars` per col) and then ManuallyDrop the
+        // clone — `BinaryFieldGF192` is `#[repr(transparent)]` around
+        // `<BinaryFieldGF192 as Field>::Inner` (`Uint<3>`), so the
+        // bytes are layout-identical and we can rebuild the `Vec` at
+        // the inner type. The clone is the cost of preserving
+        // `projected_trace`; saves ~one α-projection (`~D × 2^num_vars`
+        // F-adds per col) in `prove_f2_full_with_bit_ops`'s
+        // multipoint-eval phase.
         let zero_inner = *BinaryFieldGF192::zero().inner();
-        let all_col_evals: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(projected_trace)
+        let all_col_evals: Vec<BinaryFieldGF192> = cfg_iter!(&projected_trace)
             .map(|col| {
                 let num_vars = col.num_vars;
+                // Per-col clone of the Vec<BinaryFieldGF192> evaluations.
+                // The clone is moved into `inner_mle` and then consumed
+                // by `evaluate_with_config`; `projected_trace` itself
+                // is untouched.
+                let cloned_evals: Vec<BinaryFieldGF192> = col.evaluations.clone();
                 let inner_evals: Vec<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> = {
                     // SAFETY: BinaryFieldGF192 is #[repr(transparent)]
                     // around <BinaryFieldGF192 as Field>::Inner (Uint<3>),
                     // so the Vec's storage layout is identical. We move
-                    // the original Vec out (ManuallyDrop) and rebuild
+                    // the cloned Vec out (ManuallyDrop) and rebuild
                     // it under the inner element type.
-                    let mut me = core::mem::ManuallyDrop::new(col.evaluations);
+                    let mut me = core::mem::ManuallyDrop::new(cloned_evals);
                     let (ptr, len, cap) = (me.as_mut_ptr(), me.len(), me.capacity());
                     unsafe {
                         Vec::from_raw_parts(
@@ -1097,6 +1127,42 @@ where
             virtual_column_evals: virtual_evals.to_vec(),
         };
 
+        // Convert `projected_trace` from `DenseMLE<BinaryFieldGF192>`
+        // to `DenseMLE<<BinaryFieldGF192 as Field>::Inner>` so callers
+        // can feed it straight into `MultipointEval::prove_as_subprotocol`
+        // (which is generic over `F: InnerTransparentField` and expects
+        // `&[DenseMLE<F::Inner>]`). Per col we transmute the `Vec`
+        // via the same `ManuallyDrop` trick used for the
+        // column_evals_at_rstar pass above — `BinaryFieldGF192` is
+        // `#[repr(transparent)]` around `Uint<3>` so the bytes are
+        // identical and this is zero-copy.
+        let projected_trace_inner: Vec<
+            DenseMultilinearExtension<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>,
+        > = projected_trace
+            .into_iter()
+            .map(|col| {
+                let num_vars = col.num_vars;
+                let inner_evals: Vec<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> = {
+                    let mut me = core::mem::ManuallyDrop::new(col.evaluations);
+                    let (ptr, len, cap) = (me.as_mut_ptr(), me.len(), me.capacity());
+                    // SAFETY: BinaryFieldGF192 is #[repr(transparent)]
+                    // around Uint<3>; the storage layout is identical.
+                    unsafe {
+                        Vec::from_raw_parts(
+                            ptr.cast::<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>(),
+                            len,
+                            cap,
+                        )
+                    }
+                };
+                DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    inner_evals,
+                    zero_inner,
+                )
+            })
+            .collect();
+
         Ok((
             F2Proof {
                 ic_proof,
@@ -1106,6 +1172,7 @@ where
                 column_evals_at_rstar: all_col_evals,
             },
             subclaim,
+            projected_trace_inner,
         ))
     }
 
@@ -2795,13 +2862,14 @@ where
         // virtual cols. K cols' MLE evals at `r*` end up in
         // `subclaim.primary_column_evals` but are NOT bound by the
         // PCS open below (Issue 1 placeholder).
-        let (uair_proof, subclaim) = Self::prove_f2_uair_with_groups(
-            transcript,
-            trace,
-            virtual_specs,
-            num_vars,
-            project_scalar,
-        )?;
+        let (uair_proof, subclaim, projected_trace_for_mp) =
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                num_vars,
+                project_scalar,
+            )?;
 
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -2835,53 +2903,10 @@ where
         // flow through MultipointEval's `down_evals` + `shifts`
         // params here.
         //
-        // Perf note: re-projects the trace to α to get projected_trace
-        // in BinaryFieldGF192 form (the original projected_trace
-        // computed inside prove_f2_uair_with_groups is consumed
-        // during column_evals_at_rstar materialisation). Adds one α-
-        // projection per prove (~500 ms at nvars=22). The expedient
-        // refactor would be to surface the projected_trace from
-        // prove_f2_uair_with_groups instead of recomputing here —
-        // tracked in documentation/f2x-sha-todo.md.
-        let extended_binary_poly_for_mp: std::borrow::Cow<
-            '_,
-            [DenseMultilinearExtension<BinaryPoly<D>>],
-        > = if virtual_specs.is_empty() {
-            std::borrow::Cow::Borrowed(&trace.binary_poly)
-        } else {
-            let virtual_cols =
-                materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
-            let mut all: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
-                trace.binary_poly.iter().cloned().collect();
-            all.extend(virtual_cols);
-            std::borrow::Cow::Owned(all)
-        };
-        let alpha_pows_for_mp: Vec<BinaryFieldGF192> =
-            zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
-        let zero_inner = *BinaryFieldGF192::zero().inner();
-        let projected_trace_for_mp: Vec<
-            DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>,
-        > = cfg_iter!(&*extended_binary_poly_for_mp)
-            .map(|col| {
-                let evals: Vec<<BinaryFieldGF192 as Field>::Inner> = col
-                    .evaluations
-                    .iter()
-                    .map(|cell| {
-                        *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
-                            cell,
-                            &alpha_pows_for_mp,
-                        )
-                        .inner()
-                    })
-                    .collect();
-                DenseMultilinearExtension::from_evaluations_vec(
-                    col.num_vars,
-                    evals,
-                    zero_inner,
-                )
-            })
-            .collect();
-
+        // `projected_trace_for_mp` is the α-projected extended trace
+        // surfaced by `prove_f2_uair_with_groups`, so no re-projection
+        // is needed here (that's the followup the prior multipoint-
+        // eval commit flagged in documentation/f2x-sha-todo.md).
         let (mp_proof, mp_prover_state) =
             MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
                 transcript,
@@ -3000,13 +3025,14 @@ where
         .expect("F_2 pre-paired commit should succeed for a well-shaped trace");
 
         // Steps 2-4: IC + α + sumcheck (unchanged from the trace-pairing variant).
-        let (uair_proof, subclaim) = Self::prove_f2_uair_with_groups(
-            transcript,
-            trace,
-            virtual_specs,
-            num_vars,
-            project_scalar,
-        )?;
+        let (uair_proof, subclaim, projected_trace_for_mp) =
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                num_vars,
+                project_scalar,
+            )?;
 
         let num_k = k_specs.len();
         let num_wit_bin_total = trace.binary_poly.len() - num_pub_bin;
@@ -3029,46 +3055,9 @@ where
         // -- Step 4.5: Multipoint-eval reduction (r* -> r_0) ---------
         // Identical to the non-pre-paired prover; see
         // [`Self::prove_f2_full_with_bit_ops`] for the full
-        // commentary.
-        let extended_binary_poly_for_mp: std::borrow::Cow<
-            '_,
-            [DenseMultilinearExtension<BinaryPoly<D>>],
-        > = if virtual_specs.is_empty() {
-            std::borrow::Cow::Borrowed(&trace.binary_poly)
-        } else {
-            let virtual_cols =
-                materialize_f2_virtual_bp_cols::<D>(&trace.binary_poly, virtual_specs);
-            let mut all: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
-                trace.binary_poly.iter().cloned().collect();
-            all.extend(virtual_cols);
-            std::borrow::Cow::Owned(all)
-        };
-        let alpha_pows_for_mp: Vec<BinaryFieldGF192> =
-            zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
-        let zero_inner = *BinaryFieldGF192::zero().inner();
-        let projected_trace_for_mp: Vec<
-            DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>,
-        > = cfg_iter!(&*extended_binary_poly_for_mp)
-            .map(|col| {
-                let evals: Vec<<BinaryFieldGF192 as Field>::Inner> = col
-                    .evaluations
-                    .iter()
-                    .map(|cell| {
-                        *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
-                            cell,
-                            &alpha_pows_for_mp,
-                        )
-                        .inner()
-                    })
-                    .collect();
-                DenseMultilinearExtension::from_evaluations_vec(
-                    col.num_vars,
-                    evals,
-                    zero_inner,
-                )
-            })
-            .collect();
-
+        // commentary. Uses the `projected_trace_for_mp` surfaced by
+        // `prove_f2_uair_with_groups` above, so no re-projection is
+        // performed.
         let (mp_proof, mp_prover_state) =
             MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
                 transcript,
