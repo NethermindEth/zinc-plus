@@ -66,6 +66,66 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### C5–C11 modular-addition constraints moved into `F_shift = F_2[X]/(X^32)` (commit `<TBD>`)
+- **What**: `test-uair/src/sha256_f2.rs`. Step 1 of aligning the F_2
+  SHA-256 UAIR with `documentation/sha-f2x-doc/`.
+  1. `Sha256F2Ideal` lifted from a unit struct to a payload-free
+     enum with two variants: `RotXw1` (`(X^32 − 1)` — `F_rot`) and
+     `ShiftX32` (`(X^32)` — `F_shift`). `IdealCheck::contains`
+     dispatches on the variant; `ShiftX32` membership is "coefficients
+     at positions 0..32 are all zero," matching the principal
+     ideal `(X^32)`.
+  2. The constraint impl now uses two ideal handles: `ideal_rot` for
+     the rotation identities (C1–C4) and `ideal_shift` for the
+     modular-addition LinSum constraints (C5–C11). C12–C18 are
+     unaffected (boundary pins use `assert_zero`; AND Hadamards are
+     external).
+  3. The witness generator's `PA_C_*` compensator builders now use
+     non-cyclic `(x << 1)` (`shl1`) instead of `rotl1` for the
+     `X·m_j` / `X·c_*` contributions. Under the `F_shift` convention,
+     `X·c` drops bit 31 of `c` via the quotient — the compensator
+     residue must match. The constraint expression `mbs(w_c_*,
+     x_scalar)` is unchanged: in `F_shift` the resulting polynomial's
+     bit-32 coefficient is unconstrained, so the `IdealCheck` only
+     pins bits 0..31.
+- **Why**: the spec's Lemma `binius-vc` lives in `F_shift` for good
+  reason — the `(X^32)` quotient kills the bit-31 carry-out
+  automatically, so the per-step Binius Hadamard `(a + X·c) ⊙ (b +
+  X·c) = c + X·c` is a *ring* equation in `F_shift`, not a relation
+  that has to know about cyclic wrap. Under the prior `RotXw1`
+  framing, bit-31 of each `m_j`/`c_*` wrapped to bit 0 via cyclic
+  rotation, which (a) made `PA_C_*` non-zero on honest active rows
+  whenever the final carry-out was 1, and (b) coupled bit-32 effects
+  back into the LSB check — a structural divergence from the doc that
+  this swap eliminates. Under `ShiftX32`, `PA_C_*` is zero on every
+  active row as the doc specifies (the modular-add identity is exact
+  in `F_shift`).
+- **Verification**: all 12 tests in
+  `cargo test -p zinc-protocol --features parallel --lib
+  f2_prove::tests` pass, including
+  `prove_then_verify_sha256_f2_roundtrips`. The four
+  `zinc-test-uair` `sha256_f2` shape-level lib tests pass.
+- **Status vs the broader spec alignment plan**: this is step 1 of 5
+  from the gap analysis in conversation. Done: ideal split + matching
+  witness compensator. Remaining:
+  - **(2)** Rip out the CSA-flattened linear identity in favour of
+    chained-Binius per-step `BiniusAdd` constraints. Replace the 6
+    `W_M_*` and 7 `W_C_*` columns with the doc's 6 chained-Binius
+    intermediate-sum columns (`W_W^{(1,2)}`, `W_{T_1}^{(1..4)}`) +
+    1 packed `W_β` carry-out column.
+  - **(3)** Collapse the 7 scalar `PA_C_*` columns into one packed
+    bit-poly `PA_C` with the doc's bit allocation.
+  - **(4)** Rewrite C5–C11 as 13 per-step `BiniusAdd` constraints
+    (each = one LSB equation + one column-level Hadamard relation).
+  - **(5)** Register the 13 addition-side Hadamards + 3 AND-side
+    Hadamards with whatever Hadamard-product mechanism we adopt.
+- **Caveat — pre-existing build state**: `cargo build -p zinc-protocol`
+  *without* `--features parallel` does not compile on this branch
+  (errors in `f2_prove.rs:603` from `cfg_iter!` expanding to
+  `Iterator::reduce` with a rayon-shaped call). This is independent
+  of the ideal swap and was on the baseline tree; flagged so the
+  next agent doesn't blame this change.
+
 ### Multipoint-eval phase wired into the F_2 prove path (commit `<TBD>`)
 - **What**: added a `MultipointEval<BinaryFieldGF192>` step between
   the F_2 sumcheck and the PCS open. The phase reduces the per-column
@@ -273,6 +333,56 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Identified but not implemented
+
+### Chained-Binius rewrite of C5–C11 (doc-spec alignment, step 2 of 5)
+- **What**: replace the impl's CSA-flattened LinSum constraints
+  (one per modular-add, 7 total) with the doc's per-step `BiniusAdd`
+  construction (one LSB check + one column-level Hadamard relation
+  per binary step, 13 total across all chains). This is step 2 of
+  the 5-step spec-alignment plan; step 1 (ideal split + `F_shift`
+  swap) shipped above.
+- **Why it matters**: the doc's chained-Binius scheme is the
+  canonical form — clean per-step structure that maps directly to
+  the (still-deferred) Hadamard-product check. The CSA-flattened
+  form is a closed-form trick that's harder to relate to the
+  Hadamard mechanism. Step 2 also brings the column layout closer
+  to the doc's 19-committed + 5-public ideal (vs current 27 + 14).
+- **Why deferred**: doing step 2 *alone* makes the column count
+  *worse* before getting better. The doc's layout assumes
+  - bit-level packing of the 13 `β_k` carry-outs into a single
+    `W_β` column, and
+  - bit-level packing of the 13 `κ_k` LSB compensators into a
+    single `PA_C` column.
+  Both packings require a SHIFT primitive (`SHR^j` to extract bit
+  `j`) — the doc's "design parameter" for shifted-column access
+  (cf. `sha-f2x-doc/sections/arithmetization.tex` Lemma
+  `shr-virtual`). Without that primitive on this branch, step 2
+  alone would expand 27 committed columns → ~33 (6 chained
+  intermediates + 13 unpacked `β` columns instead of 1 packed)
+  and 14 public bit-poly → ~20 (13 unpacked `κ` columns instead
+  of 1 packed). Step 3 (packing via SHIFT) then claws those back
+  down to the doc shape.
+- **Why this is bundled with step 5**: in isolation, the per-step
+  algebraic constraint of `BiniusAdd` is just the one-bit LSB
+  check `(t + x + y + κ)[0] = 0`. The full pinning of bits 1..31
+  of the addition lives in the column-level Hadamard `(x + X·c) ⊙
+  (y + X·c) = c + X·c`, which is deferred to an external
+  mechanism. Without step 5 (Hadamard discharge), step 2's AIR is
+  no *more* sound than the current CSA-flattened impl — both rely
+  on honest witnesses for addition correctness at bits 1..31, and
+  both achieve algebraic-level soundness only when the external
+  Hadamard check lands. So the natural batching is `step 2 + step
+  3 + step 5` as one atomic chained-Binius cutover, not a sequence
+  of three separate column-bloating rewrites.
+- **Estimated effort**: rough — 500-800 lines of changes across
+  `test-uair/src/sha256_f2.rs` (column layout, witness gen,
+  constraint impl, module docs). The constraint side adds a third
+  `Sha256F2Ideal::LsbX` variant (principal ideal `(X)` — bit 0 is
+  zero, bits 1..31 unconstrained) and unfolds C5/C6 each into
+  multiple per-step constraints. The witness gen materialises
+  the intermediate sums via chained binary addition and computes
+  per-step `β_k`, `κ_k`. The bulk of the LOC is just structural
+  expansion, not algorithmic novelty.
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

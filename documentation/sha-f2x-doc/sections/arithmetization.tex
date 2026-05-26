@@ -1,0 +1,528 @@
+% ===========================================================================
+\section{Arithmetising the SHA-256 building blocks over $\F_2[X]$}\label{sec:arith}
+% ===========================================================================
+
+We collect the lemmas that translate each SHA-256 building block into
+an $\F_2[X]$-constraint. Compared to \texttt{sha-uair-doc}'s $\Q[X]$
+identities, the $\F_2[X]$ versions are exact: there are no overflow
+witnesses for $\Sigma_0, \Sigma_1, \sigma_0, \sigma_1$, since the
+``per-coefficient sum of three bits'' that motivated the $\Q[X]$
+overhang vanishes when the ambient ring already takes coefficients
+modulo~$2$.
+
+Throughout this section, all polynomials are bit-polynomials in
+$\bitpoly{32} \subset \F_2[X]$. Two quotient rings appear, one per
+operation family:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item The rotation-flavoured identities for $\Sigma_i, \sigma_i$
+        live in $\Frot = \F_2[X]/(X^{32}-1)$ (multiplication by
+        $\rho_*$ modulo $X^{32}-1$).
+  \item The modular-addition identities of \Cref{sec:mod-add} live in
+        $\Fshift = \F_2[X]/(X^{32})$, where multiplication by~$X$ is
+        the genuine ring operation realising $\SHL^{1}$
+        (\Cref{sec:xshift}).
+\end{itemize}
+The Hadamard product $\bp{x} \had \bp{y}$ is defined coefficient-wise;
+$(\bp{x} \had \bp{y})_i := x_i \cdot y_i$.
+
+\subsection{Rotations}\label{sec:rot}
+
+\begin{lemma}[Rotation as multiplication in $\Frot$]\label{lem:rot}
+For any $\bp{u} \in \bitpoly{32}$ and $0 \le r < 32$,
+$$
+\ROTR^{r}(\bp{u}) \;=\; X^{32-r}\cdot \bp{u} \qquad \text{in } \Frot.
+$$
+Equivalently, for $\bp{u}, \bp{v} \in \bitpoly{32}$,
+$\bp{v} - X^{32-r}\cdot \bp{u} \in (X^{32}-1)$ in $\F_2[X]$ iff
+$\bp{v} = \ROTR^{r}(\bp{u})$.
+\end{lemma}
+
+This is the $\F_2$-coefficient specialisation of Lemma~8.7 of the
+Zinc+ paper. No overflow witness is required because, working in
+$\F_2[X]$, the coefficient $u_i + u_j$ that arises from a rotation
+collision is reduced modulo~$2$ for free.
+
+\subsection{The functions $\Sigma_0$ and $\Sigma_1$}\label{sec:big-sigma}
+
+Define
+\begin{equation}\label{eq:rho}
+\rho_{0}(X) := X^{30} + X^{19} + X^{10}, \qquad
+\rho_{1}(X) := X^{26} + X^{21} + X^{7}, \qquad \text{in } \F_2[X].
+\end{equation}
+
+\begin{lemma}[{$\F_2[X]$ identity for $\Sigma_0/\Sigma_1$}]\label{lem:big-sigma}
+Let $\bp{a}, \bp{y} \in \bitpoly{32}$. Then $\bp{y} = \widehat{\Sigma_0(a)}$
+if and only if
+\begin{equation}\label{eq:sig0}
+\bp{a} \cdot \rho_0(X) \;-\; \bp{y} \;\in\; (X^{32}-1) \qquad \text{in } \F_2[X],
+\end{equation}
+and analogously for $\Sigma_1$ via $\rho_1$.
+\end{lemma}
+
+\begin{proof}[Sketch]
+By \Cref{lem:rot}, the three rotations
+$\ROTR^{2}, \ROTR^{13}, \ROTR^{22}$ that constitute $\Sigma_0$ are
+multiplications by $X^{30}, X^{19}, X^{10}$ in $\Frot$ respectively;
+their $\XOR$-sum is $\bp{a} \cdot \rho_0(X)$ in $\Frot$. Reducing
+modulo $X^{32}-1$ is the only step that mixes coefficients, and in
+$\F_2[X]$ those collisions reduce modulo~$2$ as required.
+\end{proof}
+
+\begin{remark}[No overflow witness]\label{rem:no-overflow}
+In \texttt{sha-uair-doc}, the $\Q[X]$ version of this lemma carries an
+extra slack $2\,\bp{o}$ on the right-hand side, absorbing the
+$\{0,2\}$-valued integer overhang of three colliding bits. Over
+$\F_2[X]$, those overhangs vanish; $\bp{o}$ is identically zero and
+does not appear.
+\end{remark}
+
+\subsection{The functions $\sigma_0$ and $\sigma_1$}\label{sec:small-sigma}
+
+\begin{lemma}[Right shift is $R$-linear]\label{lem:shr-virtual}
+For any commutative ring~$R$ and $r \in \{1,\dots,31\}$, the map
+$\SHR^r: R^{<32}[X] \to R^{<32}[X]$ is $R$-linear.
+\end{lemma}
+
+The mechanism by which $\SHR^r$ values are made available to the
+verifier (committed column, lookup, dedicated gadget, $\dots$) is left
+as a design parameter of the arithmetisation; the constraints below
+are written assuming such values are accessible.
+
+Define
+\begin{equation}\label{eq:rho-sigma}
+\rho_{\sigma_0}(X) := X^{25} + X^{14}, \qquad
+\rho_{\sigma_1}(X) := X^{15} + X^{13}, \qquad \text{in } \F_2[X].
+\end{equation}
+
+\begin{lemma}[{$\F_2[X]$ identity for $\sigma_0/\sigma_1$}]\label{lem:small-sigma}
+Let $\bp{W}, \bp{y} \in \bitpoly{32}$. Then $\bp{y} = \widehat{\sigma_0(W)}$
+iff
+\begin{equation}\label{eq:lsig0}
+\bp{W} \cdot \rho_{\sigma_0}(X) \;+\; \SHR^{3}(\bp{W}) \;-\; \bp{y} \;\in\; (X^{32}-1)
+\qquad \text{in } \F_2[X],
+\end{equation}
+and analogously for $\sigma_1$ via $\rho_{\sigma_1}$ and $\SHR^{10}$.
+\end{lemma}
+
+As in \Cref{rem:no-overflow}, the $\Q[X]$ slack $2\bp{o}$ that
+\texttt{sha-uair-doc} carries does not arise here.
+
+\subsection{Bitwise AND as a Hadamard constraint}\label{sec:and-hadamard}
+
+\begin{lemma}[{$\AND$ as Hadamard product in $\F_2[X]$}]\label{lem:and}
+For $\bp{u}, \bp{v}, \bp{w} \in \bitpoly{32}$,
+$$
+\bp{w} \;=\; \widehat{u \AND v} \qquad \Longleftrightarrow \qquad
+\bp{w} \;=\; \bp{u}\, \had\, \bp{v}.
+$$
+\end{lemma}
+
+\begin{proof}
+Immediate from $u_i \cdot v_i = u_i \wedge v_i$ in $\F_2$ for each bit.
+\end{proof}
+
+\begin{remark}[Hadamard descends to $\Fshift$]\label{rem:had-descent}
+The Hadamard product is \emph{coefficient-local}:
+$(\bp{x} \had \bp{y})_i = x_i \cdot y_i$ depends only on the $i$-th
+coefficients of its inputs, without mixing across positions.
+Elements of $(X^{32}) \subset \F_2[X]$ are exactly the polynomials
+$\bp{p}$ with $\bp{p}[i] = 0$ for $i = 0, \dots, 31$, so for any
+$\bp{p} \in (X^{32})$ and any $\bp{y} \in \F_2[X]$ we have
+$(\bp{p} \had \bp{y})[i] = \bp{p}[i] \cdot \bp{y}[i] = 0$ for $i =
+0, \dots, 31$, i.e.\ $\bp{p} \had \bp{y} \in (X^{32})$. Coefficient-wise
+multiplication therefore preserves the ideal, and Hadamard descends
+to a well-defined operation on the quotient
+$\Fshift = \F_2[X]/(X^{32})$. In particular, the modular-addition
+Hadamard \eqref{eq:binius-had} of \Cref{sec:mod-add} is unambiguous
+when stated ``in $\Fshift$'' --- the same identity holds for any
+representatives of $\bp{a}, \bp{b}, \bp{c}$ in $\F_2[X]$ that agree
+on bits $0, \dots, 31$.
+
+(In contrast, Hadamard does \emph{not} descend to $\Frot =
+\F_2[X]/(X^{32}-1)$. The ideal $(X^{32}-1)$ relates the
+coefficient at position $i$ to the coefficient at position $i + 32$
+in a cyclic way, and coefficient-wise multiplication does not respect
+that structure --- e.g.\ $X^{32} - 1 \in (X^{32}-1)$, but
+$(X^{32}-1) \had 1 = 1 \notin (X^{32}-1)$. No Hadamard relation in
+this document is posed in $\Frot$.)
+\end{remark}
+
+We do \emph{not} encode this identity as an algebraic AIR constraint.
+The mechanism that enforces the Hadamard relation between the
+commitments of $\bp{u}, \bp{v}, \bp{w}$ is left as a design parameter
+of the arithmetisation and is not fixed in this document; the AIR
+layer below is described assuming that such a check is available
+externally.
+
+\subsection{$\Ch$ and $\Maj$ via committed $\AND$ witnesses}\label{sec:ch-maj}
+
+We split $\Ch$ into the two $\AND$ operands
+$\bp{u_{ef}} := \bp{e}\had \bp{f}$ and
+$\bp{u_{\neg e, g}} := \overline{\bp{e}}\had \bp{g}$ (where
+$\overline{\bp{e}} := \mathbf{1}_{32} - \bp{e}$ is the bitwise
+complement, accessible as a virtual column over $\bp{e}$). The
+implementation commits both as bit-polynomial witnesses; an external
+Hadamard-product check (mechanism unspecified, see
+\Cref{sec:and-hadamard}) enforces the $\AND$ relation.
+
+Once $\bp{u_{ef}}, \bp{u_{\neg e, g}}$ are pinned, $\Ch(e,f,g)$ is
+their disjoint-support sum:
+\begin{equation}\label{eq:ch-decomp}
+\widehat{\Ch(e,f,g)} \;=\; \bp{u_{ef}} \;+\; \bp{u_{\neg e,g}} \qquad \text{in } \F_2[X].
+\end{equation}
+The two summands have disjoint bit-support because $\bp{e}$ and
+$\overline{\bp{e}}$ do, so the $\F_2$ sum coincides with the integer
+sum at each coefficient.
+
+For $\Maj$ we use the carry-save identity
+$\Maj(a,b,c) = (a \oplus c) \wedge (b \oplus c) \oplus c$, which in
+$\F_2[X]$ reads
+\begin{equation}\label{eq:maj-identity}
+\widehat{\Maj(a,b,c)} \;=\; (\bp{a} + \bp{c}) \had (\bp{b} + \bp{c}) \;+\; \bp{c}.
+\end{equation}
+Committing $\bp{W_{\Maj}}$ as a witness and enforcing the Hadamard
+relation
+\begin{equation}\label{eq:maj-hadamard}
+(\bp{a} + \bp{c}) \had (\bp{b} + \bp{c}) \;=\; \bp{W_{\Maj}} + \bp{c}
+\end{equation}
+(via the same external Hadamard-product mechanism) pins
+$\bp{W_{\Maj}} = \widehat{\Maj(a,b,c)}$. Note that the inputs of the
+Hadamard product, $\bp{a}+\bp{c}$ and $\bp{b}+\bp{c}$, are virtual
+(free linear combinations of committed columns); only $\bp{W_{\Maj}}$
+requires its own commitment.
+
+\subsection{Modular addition via the per-step Binius identity in
+\texorpdfstring{$\Fshift$}{F2[X]/(X\^{}32)}}\label{sec:mod-add}
+
+We work in the quotient ring
+$\Fshift = \F_2[X]/(X^{32})$. In this ring, multiplication by~$X$
+coincides with the $\SHL^{1}$ operation on $\bitpoly{32}$: for
+$\bp{c} \in \bitpoly{32}$, the image of $X\cdot\bp{c}$ in $\Fshift$
+satisfies $(X\cdot\bp{c})[0] = 0$ and $(X\cdot\bp{c})[i] = \bp{c}[i-1]$
+for $i = 1,\dots,31$, with bit $\bp{c}[31]$ dropped by the quotient.
+Multiplication by~$X$ is therefore a genuine ring operation in $\Fshift$,
+not a custom unary convention — the ideal $(X^{32})$ absorbs the
+high-bit overflow automatically. We use this identification implicitly
+throughout this subsection: every constraint stated as ``$\cdot \in
+(X^{32})$'' is read as an equality in $\Fshift$.
+
+A two-input modular sum $\psi_2(\bp{s}) \equiv \psi_2(\bp{a}) +
+\psi_2(\bp{b}) \pmod{2^{32}}$ is arithmetised by a single column-level
+Hadamard identity on a virtual carry column. The carry word $\bp{c}
+\in \bitpoly{32}$ has its lower $31$ bits defined as a free
+$\F_2$-linear combination of $(\bp{s}, \bp{a}, \bp{b})$, and only its
+top bit $\bp{c}[31]$ — the carry-out of bit~$31$ that the modular
+reduction discards — is committed. Multi-input sums appearing in
+SHA-256 are handled at the UAIR layer (\Cref{sec:uair}) by introducing
+intermediate-sum columns and applying the binary lemma once per
+chained add; the present subsection fixes only the binary primitive.
+
+\begin{lemma}[Two-input modular addition via Binius with virtual carry]
+\label{lem:binius-vc}
+Let $\bp{a}, \bp{b}, \bp{s} \in \bitpoly{32}$. Then
+$\psi_2(\bp{s}) \equiv \psi_2(\bp{a}) + \psi_2(\bp{b}) \pmod{2^{32}}$
+if and only if there exists $\beta \in \F_2$ such that, defining
+$\bp{c} \in \bitpoly{32}$ by
+\begin{equation}\label{eq:c-virtual}
+\bp{c}[i] \;:=\; \bigl(\bp{s} + \bp{a} + \bp{b}\bigr)[\,i+1\,]
+\quad \text{for } i = 0,\dots,30, \qquad
+\bp{c}[31] \;:=\; \beta,
+\end{equation}
+the two constraints
+\begin{align}
+\bp{s} &= \bp{a} + \bp{b} + X\cdot\bp{c} \qquad \text{in } \Fshift, \label{eq:binius-linear}\\
+(\bp{a} + X\cdot\bp{c}) \had (\bp{b} + X\cdot\bp{c})
+   &= \bp{c} + X\cdot\bp{c} \qquad \text{in } \Fshift \label{eq:binius-had}
+\end{align}
+both hold. Under the virtualisation \eqref{eq:c-virtual} the linear
+identity \eqref{eq:binius-linear} carries a single bit of non-trivial
+content: bits $1, \dots, 31$ hold automatically (since
+$(X\cdot\bp{c})[i] = \bp{c}[i-1] = (\bp{s} + \bp{a} + \bp{b})[i]$ for
+$i = 1,\dots,31$ by construction of $\bp{c}[0..30]$), so
+\eqref{eq:binius-linear} is equivalent to the bit-$0$ equation
+\begin{equation}\label{eq:binius-lsb}
+\bigl(\bp{s} + \bp{a} + \bp{b}\bigr)[0] \;=\; 0,
+\end{equation}
+which is what the verifier actually checks (augmented with a $1$-bit
+compensator on inactive rows; see \Cref{rem:bin-lsb-comp}).
+\end{lemma}
+
+\begin{proof}
+Write $\bp{D} := \bp{s} + \bp{a} + \bp{b}$ in $\F_2[X]$ (the
+coefficient-wise XOR; identical to $\bp{s} - \bp{a} - \bp{b}$ since
+$-1 = 1$ in $\F_2$). With $\bp{c}$ defined by \eqref{eq:c-virtual},
+$X\cdot\bp{c}$ in $\Fshift$ satisfies
+\begin{equation}\label{eq:xc-bits}
+(X\cdot\bp{c})[0] = 0, \qquad
+(X\cdot\bp{c})[i] = \bp{c}[i-1] = \bp{D}[i] \quad \text{for } i = 1,\dots,31,
+\end{equation}
+using \eqref{eq:c-virtual} for indices $i-1 \in \{0,\dots,30\}$ and
+noting that $\bp{c}[31] = \beta$ never appears in $X\cdot\bp{c}$ (it
+would land at position~$32$, killed by the $(X^{32})$ quotient).
+Consequently
+\begin{equation*}
+(\bp{a} + X\cdot\bp{c})[0] = \bp{a}[0], \qquad
+(\bp{a} + X\cdot\bp{c})[i] = \bp{a}[i] + \bp{D}[i] = \bp{s}[i] + \bp{b}[i]
+\quad (i \geq 1),
+\end{equation*}
+and symmetrically for $\bp{b} + X\cdot\bp{c}$ with $\bp{a}, \bp{b}$
+swapped. The Hadamard identity \eqref{eq:binius-had} therefore unfolds
+into the per-bit scalar equations in $\F_2$:
+\begin{align}
+i = 0:&\qquad \bp{a}[0]\cdot\bp{b}[0] \;=\; \bp{D}[1], \label{eq:had-bit0}\\
+i \in [1, 30]:&\qquad \bigl(\bp{s}[i]+\bp{b}[i]\bigr)\bigl(\bp{s}[i]+\bp{a}[i]\bigr) \;=\; \bp{D}[i+1] + \bp{D}[i], \label{eq:had-mid}\\
+i = 31:&\qquad \bigl(\bp{s}[31]+\bp{b}[31]\bigr)\bigl(\bp{s}[31]+\bp{a}[31]\bigr) \;=\; \beta + \bp{D}[31], \label{eq:had-top}
+\end{align}
+using $\bp{c}[i] = \bp{D}[i+1]$ for $i \leq 30$ and $\bp{c}[31] =
+\beta$ on the right-hand sides (since $(\bp{c} + X\cdot\bp{c})[i] =
+\bp{c}[i] + \bp{c}[i-1]$ for $i \geq 1$, and $= \bp{c}[0]$ at $i = 0$).
+
+\emph{($\Leftarrow$).} Assume \eqref{eq:binius-linear} and
+\eqref{eq:binius-had}, equivalently \eqref{eq:binius-lsb} (the
+non-trivial bit-$0$ piece of \eqref{eq:binius-linear}) and
+\eqref{eq:had-bit0}--\eqref{eq:had-top}. We show $\bp{s}$ matches the
+honest $32$-bit binary sum of $\bp{a}, \bp{b}$ bit by bit, by
+induction on the position index.
+
+The LSB constraint \eqref{eq:binius-lsb} forces $\bp{s}[0] = \bp{a}[0]
++ \bp{b}[0]$, the honest sum bit at position~$0$ (no carry-in).
+Equation \eqref{eq:had-bit0} then forces $\bp{D}[1] =
+\bp{a}[0]\bp{b}[0]$, equivalently $\bp{s}[1] = \bp{a}[1] + \bp{b}[1] +
+\bp{a}[0]\bp{b}[0]$, the honest sum bit at position~$1$ with carry-in
+$\bp{a}[0]\bp{b}[0]$.
+
+For the inductive step, fix $i \in [1, 30]$ and assume $\bp{s}[0],
+\dots, \bp{s}[i]$ all equal the honest values, so that $\bp{D}[i] =
+\bp{s}[i] + \bp{a}[i] + \bp{b}[i]$ equals the honest carry-in to
+bit~$i$ (equivalently the honest carry-out of bit~$i-1$). Expanding
+\eqref{eq:had-mid} and using $x^2 = x$ in $\F_2$:
+\begin{align*}
+\bp{D}[i+1] \;&=\; \bigl(\bp{s}[i]+\bp{b}[i]\bigr)\bigl(\bp{s}[i]+\bp{a}[i]\bigr) + \bp{D}[i] \\
+            \;&=\; \bp{s}[i] + \bp{s}[i]\bigl(\bp{a}[i]+\bp{b}[i]\bigr) + \bp{a}[i]\bp{b}[i] + \bp{D}[i].
+\end{align*}
+Substituting $\bp{s}[i] = \bp{a}[i] + \bp{b}[i] + \bp{D}[i]$ cancels
+the standalone $\bp{s}[i]$ against $\bp{D}[i]$ and reorganises the
+$\bp{s}[i]\bigl(\bp{a}[i]+\bp{b}[i]\bigr)$ term:
+\begin{equation*}
+\bp{D}[i+1] \;=\; \bp{a}[i]\bp{b}[i] \;+\; \bp{D}[i]\bigl(\bp{a}[i]+\bp{b}[i]\bigr)
+            \;=\; \Maj\bigl(\bp{a}[i], \bp{b}[i], \bp{D}[i]\bigr),
+\end{equation*}
+the honest carry-out of bit~$i$. Hence $\bp{s}[i+1] = \bp{a}[i+1] +
+\bp{b}[i+1] + \bp{D}[i+1]$ is the honest sum bit at position~$i+1$,
+closing the induction.
+
+By induction $\bp{s}$ equals the honest binary sum on bits $0$ through
+$31$, so $\psi_2(\bp{s}) \equiv \psi_2(\bp{a}) + \psi_2(\bp{b})
+\pmod{2^{32}}$. Equation \eqref{eq:had-top} additionally determines
+\begin{equation}\label{eq:beta-formula}
+\beta \;=\; \bp{a}[31]\bp{b}[31] \;+\; \bp{D}[31]\bigl(\bp{a}[31]+\bp{b}[31]\bigr)
+       \;=\; \Maj\bigl(\bp{a}[31], \bp{b}[31], \bp{D}[31]\bigr),
+\end{equation}
+the honest carry-\emph{out} of bit~$31$ — the bit lost to the modular
+reduction.
+
+\emph{($\Rightarrow$).} Assume $\psi_2(\bp{s}) \equiv \psi_2(\bp{a}) +
+\psi_2(\bp{b}) \pmod{2^{32}}$. Let $\bp{c}_\star \in \bitpoly{32}$ be
+the standard binary-adder carry word: $\bp{c}_\star[i] :=
+\Maj\bigl(\bp{a}[i], \bp{b}[i], \bp{c}_\star[i-1]\bigr)$ for $i =
+0,\dots,31$ with $\bp{c}_\star[-1] := 0$. The full-adder identity
+gives $\bp{s} = \bp{a} + \bp{b} + X\cdot\bp{c}_\star$ in $\Fshift$ —
+this is exactly \eqref{eq:binius-linear} with $\bp{c} :=
+\bp{c}_\star$ — hence $\bp{D} = X\cdot\bp{c}_\star$: $\bp{D}[0] = 0$
+(verifying \eqref{eq:binius-lsb}) and $\bp{D}[i] = \bp{c}_\star[i-1]$
+for $i \geq 1$. Therefore $\bp{c}_\star[i] = \bp{D}[i+1]$ for $i =
+0,\dots,30$, matching \eqref{eq:c-virtual}; setting $\beta :=
+\bp{c}_\star[31]$ makes the virtual $\bp{c}$ agree with $\bp{c}_\star$
+on all $32$ bits. The Hadamard \eqref{eq:binius-had} is the standard
+Binius full-adder identity on the honest carry word and is satisfied.
+\end{proof}
+
+\begin{remark}[Why one committed bit is irreducible]\label{rem:beta-needed}
+The lower $31$ bits of $\bp{c}$ are $\F_2$-linear functions of
+$(\bp{s}, \bp{a}, \bp{b})$ — concretely $\bp{c}[0..30] = \SHR^{1}(\bp{D})
+\big|_{0..30}$ where $\bp{D} = \bp{s} + \bp{a} + \bp{b}$ — and are
+therefore free at the commitment layer (cf.\ \Cref{lem:shr-virtual}).
+The top bit $\bp{c}[31]$, in contrast, is the carry-\emph{out} of
+bit~$31$: a non-$\F_2$-linear function of $(\bp{a}, \bp{b})$ that
+depends on the full carry chain and that the modular sum $\bp{s}$ has
+discarded. Committing $\beta$ as a single $\F_2$ bit per row is
+therefore unavoidable. Without it, \eqref{eq:had-top} would reduce to
+an algebraic identity in $(\bp{a}[31], \bp{b}[31], \bp{s}[31])$ that
+rejects honest inputs whenever the genuine carry-out happens to
+be~$1$. The role of $\beta$ is to absorb that one lost bit, restoring
+the Hadamard's satisfiability on honest data; the constraint then
+pins $\beta$ to its honest value via \eqref{eq:beta-formula}.
+\end{remark}
+
+\begin{remark}[Public LSB compensator for inactive rows]\label{rem:bin-lsb-comp}
+On rows where the modular-sum identity is meaningful (the
+\emph{active} rows of \Cref{sec:trace-shape}), the linear identity
+\eqref{eq:binius-linear} reduces under the virtualisation
+\eqref{eq:c-virtual} to its bit-$0$ piece \eqref{eq:binius-lsb}, and
+this is automatic: $\bp{s}[0] = \bp{a}[0] + \bp{b}[0]$ since there is
+no carry into bit~$0$. On inactive rows the witness cells may hold
+arbitrary garbage, so the LSB constraint is augmented with a public
+compensator $\bp{\mathrm{comp}} \in \bitpoly{32}$ supported on bit~$0$
+only — i.e.\ $\bp{\mathrm{comp}}[i] = 0$ for $i \geq 1$:
+\begin{equation}\label{eq:lsb-comp}
+\bigl(\bp{s} + \bp{a} + \bp{b} + \bp{\mathrm{comp}}\bigr)[0] \;=\; 0.
+\end{equation}
+The verifier checks $\bp{\mathrm{comp}}[t] = 0$ on every active row~$t$
+(see \Cref{cons:public-checks}); on inactive rows the prover sets
+$\bp{\mathrm{comp}}[t][0] := \bigl(\bp{s}[t] + \bp{a}[t] + \bp{b}[t]
+\bigr)[0]$ to absorb the LSB residue. The compensator carries $1$
+bit per row.
+\end{remark}
+
+\begin{remark}[{$\bp{c}[0..30]$ is conceptually a virtual column}]
+\label{rem:c-virtual}
+The lower-bit virtualisation \eqref{eq:c-virtual} expresses
+$\bp{c}[0..30]$ as $\SHR^{1}$ of an $\F_2$-linear (XOR) combination
+of committed columns $\bp{s}, \bp{a}, \bp{b}$. Both $\SHR^{1}$ and
+$\F_2$-linear combination are free at the commitment layer
+(cf.\ \Cref{lem:shr-virtual} and the linearity of bit-polynomial
+commitments). The top bit $\beta = \bp{c}[31]$ is the only commitment
+cost. Whether the implementation packs $\beta$ into a dedicated
+single-bit column, into the low slot of a shared scratch column, or
+derives it on the fly during PCS opening is a design parameter of the
+PIOP layer, not of the AIR.
+\end{remark}
+
+\begin{remark}[Local soundness]\label{rem:bin-soundness}
+\Cref{lem:binius-vc} is a genuine equivalence: given $\bp{a}$ and
+$\bp{b}$, the constraints \eqref{eq:binius-lsb}\eqref{eq:binius-had}
+pin $\bp{s}$ uniquely to the honest modular sum, and $\beta$ to the
+honest carry-out of bit~$31$. Local soundness is therefore
+\emph{tight}: no global appeal is required to force every bit of
+$\bp{s}$ to its correct value. A faulty addition is caught at the
+constraint level, not only at the SHA-256 boundary.
+\end{remark}
+
+\begin{proposition}[Per-add commitment cost]\label{prop:binius-count}
+The two-input modular-addition gadget of \Cref{lem:binius-vc} commits
+exactly one $\F_2$ bit per row (the carry-out $\beta$) and enforces
+one column-level Hadamard relation \eqref{eq:binius-had} together
+with one $\F_2$-linear LSB check \eqref{eq:lsb-comp}. No $32$-bit
+carry-polynomial witness is required. For an $n$-input modular sum,
+the UAIR layer (\Cref{sec:uair}) materialises $n - 2$
+intermediate-sum bit-poly columns and applies \Cref{lem:binius-vc}
+once per binary step, for a total of $n - 1$ committed carry bits and
+$n - 1$ Hadamard relations per addition.
+\end{proposition}
+
+\subsection{Chaining for $n$-input modular sums}\label{sec:mod-add-chain}
+
+\Cref{lem:binius-vc} arithmetises the binary primitive only. The
+SHA-256 round update of \eqref{eq:a-update}\eqref{eq:e-update} involves
+modular sums of arity up to $7$; the message-schedule recurrence
+\eqref{eq:msched} introduces another arity-$4$ sum. We reduce each to
+a ripple of $n - 1$ binary applications of \Cref{lem:binius-vc} by
+introducing intermediate-sum columns.
+
+\begin{definition}[Chained-sum schedule]\label{def:chain}
+For $n \geq 2$ and inputs $\bp{a}_1, \dots, \bp{a}_n \in \bitpoly{32}$,
+materialise $n - 2$ intermediate-sum bit-polynomial columns
+$\bp{s}_2, \dots, \bp{s}_{n-1} \in \bitpoly{32}$ committed by the UAIR
+layer, and set $\bp{s}_1 := \bp{a}_1$ (a renaming, no new commitment)
+and $\bp{s}_n := \bp{s}$ (the final result already in the trace). The
+\emph{chained-sum schedule} is the family of binary recurrences
+\begin{equation}\label{eq:bin-chain}
+\bp{s}_k \;\equiv\; \bp{s}_{k-1} + \bp{a}_k \pmod{2^{32}}
+\qquad k = 2, \dots, n,
+\end{equation}
+one for each binary step in the chain.
+\end{definition}
+
+The $n$-input identity
+$\psi_2(\bp{s}) \equiv \sum_{j=1}^{n} \psi_2(\bp{a}_j) \pmod{2^{32}}$
+is then arithmetised by applying \Cref{lem:binius-vc} once per step of
+\eqref{eq:bin-chain}: step~$k$ takes inputs $(\bp{a}, \bp{b}, \bp{s})
+\mapsto (\bp{s}_{k-1}, \bp{a}_k, \bp{s}_k)$, commits one $\F_2$
+carry-out bit $\beta_k$, and enforces the per-step Hadamard
+\eqref{eq:binius-had} together with the per-step LSB compensator form
+\eqref{eq:lsb-comp} on the triple, with virtual carry $\bp{c}_k$
+defined by \eqref{eq:c-virtual} relative to that triple. Correctness
+follows by induction on $k$: \Cref{lem:binius-vc} pins each $\bp{s}_k$
+to the honest binary sum of $(\bp{s}_{k-1}, \bp{a}_k)$, so $\bp{s}_n$
+equals the full modular sum.
+
+\begin{proposition}[Per-addition cost for chained Binius]
+\label{prop:binius-chain-count}
+The chained-Binius gadget for an $n$-input modular sum commits, per
+addition:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $n - 2$ intermediate-sum bit-polynomial columns
+        ($\bp{s}_2, \dots, \bp{s}_{n-1} \in \bitpoly{32}$);
+  \item $n - 1$ carry-out $\F_2$ bits per row
+        ($\beta_2, \dots, \beta_n$, packable into a shared bit-poly
+        slot — bottom $\lceil (n-1)/32 \rceil$ columns suffice for
+        all chained adds in a round combined);
+\end{itemize}
+and enforces $n - 1$ Hadamard relations \eqref{eq:binius-had} together
+with $n - 1$ LSB checks \eqref{eq:lsb-comp} (each augmented with a
+$1$-bit public compensator).
+
+\emph{Irreducibility.} Neither the intermediate-sum columns nor the
+carry-out bits can be virtualised. Each $\bp{s}_k$ depends
+non-$\F_2$-linearly on the lower-bit carry chain of
+$(\bp{a}_1, \dots, \bp{a}_k)$, so no $\F_2$-linear extraction from
+previously-committed columns recovers it. Each $\beta_k$ is the top
+bit of a non-$\F_2$-linear carry word and is irreducible for the same
+reason that $\beta$ is irreducible in the binary case
+(\Cref{rem:beta-needed}).
+\end{proposition}
+
+\paragraph{Example: the $4$-input message-schedule sum.}
+The recurrence \eqref{eq:msched} forms
+$\bp{W}_t \equiv \bp{W}_{t-16}\, +\, \widehat{\sigma_0(W_{t-15})}\, +\,
+\bp{W}_{t-7}\, +\, \widehat{\sigma_1(W_{t-2})} \pmod{2^{32}}$ for
+$t \in \{17, \dots, 64\}$. The chain materialises two intermediate
+columns,
+\begin{align*}
+\bp{W}_t^{(1)} &\equiv \bp{W}_{t-16} + \widehat{\sigma_0(W_{t-15})} \pmod{2^{32}},\\
+\bp{W}_t^{(2)} &\equiv \bp{W}_t^{(1)} + \bp{W}_{t-7} \pmod{2^{32}},
+\end{align*}
+and the final binary step
+$\bp{W}_t \equiv \bp{W}_t^{(2)} + \widehat{\sigma_1(W_{t-2})}
+\pmod{2^{32}}$ produces the trace column $\bp{W}_t$ directly. The
+addition consumes three carry-out bits
+$\beta_W^{(1)}, \beta_W^{(2)}, \beta_W^{(3)} \in \F_2$ and three
+Hadamard relations per row.
+
+\paragraph{Round-level summary.}
+For the seven modular additions per SHA-256 round (with stated
+arities $W = 4$, $T_1 = 6$, $T_2 = 2$, $a' = 2$, $e' = 2$,
+$\mathrm{ff}_a = 2$, $\mathrm{ff}_e = 2$), the chained-Binius
+treatment commits $\sum_{\text{adds}} (n - 2) = 6$ intermediate-sum
+bit-polynomial columns and
+$\sum_{\text{adds}} (n - 1) = 13$ carry-out $\F_2$ bits per row, and
+enforces $13$ Hadamard relations together with $13$ LSB checks. The
+$13$ carry bits pack into a single bit-poly column (using bits
+$0,\dots,12$ of one $\bitpoly{32}$ slot), so the net committed-column
+count for modular addition is $6 + 1 = 7$ bit-polynomial columns per
+row.
+
+\subsection{The \texorpdfstring{$X$}{X}-shift in
+\texorpdfstring{$\F_2[X]/(X^{32})$}{F2[X]/(X\^{}32)}}\label{sec:xshift}
+
+The factor $X\cdot\bp{c}$ in the Hadamard \eqref{eq:binius-had} is
+genuine multiplication by~$X$ in the quotient ring $\Fshift$. For
+$\bp{c} \in \bitpoly{32}$, the image of $X\cdot\bp{c}$ in $\Fshift$
+is the bit-polynomial in $\bitpoly{32}$ with
+$(X\cdot\bp{c})[0] = 0$, $(X\cdot\bp{c})[i] = \bp{c}[i-1]$ for $i =
+1,\dots,31$, and bit $\bp{c}[31]$ dropped by the $(X^{32})$ quotient.
+As an operation on
+$\bitpoly{32}$ this coincides with the logical left-shift $\SHL^{1}$;
+the difference from a Binius-style ``custom $X\cdot$ unary operation''
+is that here $X\cdot\bp{c}$ is computed in a ring where the constraint
+already lives, so no convention is needed and the bit-31 truncation is
+the ideal acting, not a special-case rule.
+
+The MLE-side access pattern for $X\cdot\bp{c}$ (committed-column read,
+lookup gadget, or shift predicate) is left as a design parameter,
+exactly as for the right-shift reads of \Cref{sec:small-sigma}. In
+the chained-Binius treatment of \Cref{sec:mod-add-chain} the same
+mechanism handles every per-step carry $\bp{c}_k$: bits $0..30$ are
+free $\SHR^{1}$-derived combinations of committed columns and bit
+$31$ is a single committed $\F_2$ bit packed alongside the other
+carry-out bits.

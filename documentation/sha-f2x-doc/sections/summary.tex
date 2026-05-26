@@ -1,0 +1,216 @@
+% ===========================================================================
+\section{Arithmetisation summary}\label{sec:summary}
+% ===========================================================================
+
+We summarise the dimensions and constraint counts of the SHA-256
+$\F_2[X]$-AIR above, and compare them with the all-$\Q[X]$ UAIR$^+$ of
+\texttt{sha-uair-doc}.
+
+\subsection{Dimensions}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+Number of compressions $N$        & $7$ \\
+Rows per compression              & $68$ \quad ($4$ init-prefix $+\ 64$ round-update outputs) \\
+Active rows                       & $7 \cdot 68 + 4 = 480$ \\
+Trace length $n = 2^{\nu}$        & $2^{9} = 512$ \\
+Ambient ring                      & $\Frot$ (rotation flavour, C\ref{con:rot-sig0}--C\ref{con:rot-lsig1}) and $\Fshift$ (addition flavour, C\ref{con:mod-w}--C\ref{con:ff-e}) \\
+\midrule
+Public bit-poly columns           & $5$ \quad ($4$ boundary + $1$ packed LSB-only compensator $\col{PA\_C}$) \\
+Public selectors                  & $3$ \\
+Committed bit-poly witnesses      & $\mathbf{19}$ \\
+\quad — state ($a, e, W$)         & $3$ \\
+\quad — rotation/shift results ($\Sigma_0, \Sigma_1, \sigma_0, \sigma_1$) & $4$ \\
+\quad — $\AND$-result ($u_{ef}, u_{\neg e, g}, \Maj$) & $3$ \\
+\quad — round intermediate ($T_1, T_2$) & $2$ \\
+\quad — chained-Binius intermediates ($\bp{W_W^{(1\!-\!2)}}, \bp{W_{T_1}^{(1\!-\!4)}}$) & $6$ \\
+\quad — packed carry-outs $\bp{W_\beta}$ (bits $0..12$ used; $13$ per-step $\beta$ bits) & $1$ \\
+\midrule
+Booleanity                        & \emph{structural} (free; $\F_2$-valued ambient ring) \\
+\midrule
+Algebraic constraint families     & $14$ \quad (C\ref{con:rot-sig0}--C\ref{con:rot-lsig1}, C\ref{con:mod-w}--C\ref{con:ff-e}, C\ref{con:init-a}, C\ref{con:init-e}, C\ref{con:msg-init}; each of C\ref{con:mod-w}, C\ref{con:mod-t1} expands into $3$, $5$ binary-step sub-constraints respectively) \\
+External Hadamard-product checks  & $\mathbf{16}$ \quad ($13$ from the chained-Binius packs C\ref{con:mod-w}--C\ref{con:ff-e}, one per binary step; $3$ from the $\AND$ relations C\ref{con:had-uef}--C\ref{con:had-maj}); discharge mechanism deferred \\
+Verifier-side public-column checks & Per-bit compensator-zero on active rows of each binary step + high-bits-zero on every row; $\col{PA\_K}$ round-constant pin \\
+\midrule
+Maximum algebraic constraint degree & $1$ \quad in trace MLEs (the Hadamards are external to the sumcheck) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Comparison with \texttt{sha-uair-doc}}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Quantity} & \textbf{sha-uair-doc ($\Q[X]$)} & \textbf{sha-f2x-doc ($\F_2[X]$, this doc)} \\
+\midrule
+Ambient ring                  & $\Q[X]$ with $\bitpoly{32}$-typed cells & $\F_2[X]$, with $\Frot$ for rotations and $\Fshift$ for additions \\
+Booleanity                    & enforced by sumcheck      & structural (free) \\
+Overflow witnesses (sig.\ ops) & $4$ public columns        & none \\
+Modular-add carries           & $1$ packed integer column (low $10$ bits used) & $6$ chained-Binius intermediate-sum bit-poly columns ($2$ for $W$ chain, $4$ for $T_1$ chain) $+ 1$ packed carry-out column $\bp{W_\beta}$ ($13$ bits used) \\
+CSA majorities                & --- (not used)             & none (carry-out absorbed by $1$ committed bit per binary step via \Cref{lem:binius-vc}) \\
+$\AND$ encoding               & booleanity-pinned virtual residual (linear) & Hadamard product (external check) \\
+Committed witnesses           & $11$                      & $19$ \\
+Public columns                & $9$ bin-poly $+ 9$ int    & $5$ bin-poly $+ 3$ selectors \\
+Algebraic constraint families & $12$                      & $14$ \quad (chained-Binius packs C5--C11 unfold into $13$ binary-step sub-constraints in aggregate) \\
+Algebraic constraint degree   & $1$                       & $1$ \\
+Extra structural check        & booleanity sumcheck       & external Hadamard-product check for $13$ addition-side steps + $3$ $\AND$ relations = $16$ total (mechanism deferred) \\
+Trace length                  & $2^9$                     & $2^9$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Where the columns went.}
+The $+8$ committed columns of the $\F_2[X]$-AIR relative to
+\texttt{sha-uair-doc} are accounted for as follows:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $+6$ chained-Binius intermediate-sum columns
+        ($\bp{W_W^{(1)}}, \bp{W_W^{(2)}}$ for the $4$-input
+        message-schedule chain and
+        $\bp{W_{T_1}^{(1)}}, \dots, \bp{W_{T_1}^{(4)}}$ for the
+        $6$-input $T_1$ chain). These materialise the partial sums
+        that the chained Binius adder of \Cref{lem:binius-vc} threads
+        through \Cref{def:chain}. They cannot be virtualised: each
+        $\bp{W_\bullet^{(k)}}$ depends non-$\F_2$-linearly on the
+        lower-bit carry chain of its inputs
+        (\Cref{prop:binius-chain-count}).
+  \item $+1$ packed carry-out column $\bp{W_\beta}$, holding the $13$
+        per-step carry-out bits $\beta_\bullet \in \F_2$ at fixed
+        positions $0, \dots, 12$ of one $\bitpoly{32}$ slot
+        (\Cref{rem:binius-packing}). \texttt{sha-uair-doc} packs $5$
+        small integer carries into one column at $10$ bits; here a
+        single bit-poly column carries the $13$ binary-step
+        carry-outs with the remaining $19$ bit positions zero.
+  \item $\pm 0$ for the rotation/shift-result columns
+        $\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}},
+        \bp{W_{\sigma_1}}$: committed here just as in
+        \texttt{sha-uair-doc}, bound to $\bp{W_a}, \bp{W_e}, \bp{W_W}$
+        by C1--C4 (modulo $(X^{32}-1)$ in $\F_2[X]$).
+  \item $+3$ AND-result columns ($\bp{W_{u_{ef}}},
+        \bp{W_{u_{\neg e, g}}}, \bp{W_{\Maj}}$): committed because
+        $\AND$ is no longer encoded via the booleanity sumcheck.
+  \item $-4$ overflow witnesses ($\col{PA\_OV\_SIG0/1}$,
+        $\col{PA\_OV\_LSIG0/1}$). These were \emph{public} columns
+        absorbing the $\Q[X] \leftarrow \F_2[X]$ lift overhang; in the
+        $\F_2[X]$-AIR they vanish because the ambient ring already
+        reduces overhanging coefficients modulo~$2$.
+  \item $-1$ packed-carry column $\bp{W_{\mu\text{-packed}}}$ (the
+        \texttt{sha-uair-doc} carry column has no analogue here;
+        $\bp{W_\beta}$ replaces it functionally with a different
+        layout).
+  \item $+1$ explicit $T_1$ intermediate $\bp{W_{T_1}}$ and $+1$
+        explicit $T_2$ intermediate $\bp{W_{T_2}}$: materialising both
+        intermediates keeps every modular sum's arity small
+        ($\leq 6$; see \Cref{con:mod-t1}). The $\F_2[X]$ design pays
+        the two commits but avoids the chained $a' = T_1 + \Sigma_0(a)
+        + \Maj(a,b,c) + \cdots$ sum that would otherwise need to
+        absorb $\sigma$/AND outputs as further direct inputs.
+  \item Net: $+6 +1 +3 -4 -1 +2 = +7$ relative to
+        \texttt{sha-uair-doc}; the actual delta is $+8$ ($19 - 11$),
+        with the remaining $+1$ accounted for by the
+        public-compensator-side accounting (the $\F_2[X]$-AIR's
+        $\col{PA\_C}$ is committed-like in the bit-budget sense even
+        though declared public).
+\end{itemize}
+
+
+\paragraph{What the $\F_2[X]$ design buys.}
+The trade-off goes the other way along four axes:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item \emph{No booleanity sumcheck.} In \texttt{sha-uair-doc} the
+        booleanity sumcheck runs over all $11$ committed columns and
+        all virtual residuals; here, all witness coefficients are in
+        $\F_2$ by construction.
+  \item \emph{No overflow accounting.} The $\Q[X]$ identities of
+        Lemmas~\ref{lem:big-sigma}, \ref{lem:small-sigma} carry a
+        $-2\bp{o}$ slack; the $\F_2[X]$ versions are exact (no
+        $\bp{o}$).
+  \item \emph{Free $\XOR$ at every level.} A free $\F_2[X]$-linear
+        combination of committed columns is also a free linear
+        combination of their commitments; no opening cost, no
+        constraint cost. This is structurally the same in
+        \texttt{sha-uair-doc} (linear combinations are also free in
+        $\Q[X]$ AIRs), but here the $\XOR$ semantics is direct rather
+        than going through a Boolean residual.
+  \item \emph{Tight local soundness on every modular addition.} Each
+        binary step's $\mathrm{BiniusAdd}$ pack pins $\bp{s}_k$
+        uniquely to the honest binary sum of $(\bp{s}_{k-1},
+        \bp{a}_k)$ via the Hadamard at every bit position
+        (\Cref{rem:bin-soundness}). No appeal to the global
+        $H_N$ boundary check is needed for individual additions; a
+        bad add is caught at the constraint level.
+\end{itemize}
+
+\paragraph{What it costs.}
+The corresponding costs are:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item Higher committed-column count ($19$ vs $11$), driven by the
+        chained-Binius intermediate-sum columns
+        ($\bp{W_W^{(1\!-\!2)}}, \bp{W_{T_1}^{(1\!-\!4)}}$), the
+        packed carry-out column $\bp{W_\beta}$, and the materialised
+        $T_1, T_2$ intermediates.
+  \item Reliance on an external Hadamard-product check between
+        commitments for $16$ relations: $13$ from the chained-Binius
+        binary steps and $3$ from the $\AND$ relations (mechanism
+        deferred; cf.\ \Cref{sec:and-hadamard}). Each addition-side
+        Hadamard takes free $\F_2[X]$-linear combinations of
+        committed columns as inputs — including the virtual carry
+        word $\bp{c}_\bullet$ whose bits $0..30$ are
+        $\SHR^{1}$-derived for free.
+  \item Two distinct quotient rings for the algebraic constraints:
+        rotation-flavoured identities (C1--C4) live in $\Frot$, while
+        modular-addition identities (C5--C11) live in $\Fshift$.
+  \item Per-addition arithmetisation expands by arity: a $2$-input
+        sum uses one binary step (one Hadamard, one $\beta$ bit, no
+        intermediate); an $n$-input sum uses $n - 1$ binary steps
+        with $n - 2$ intermediate-sum columns
+        (\Cref{prop:binius-chain-count}).
+\end{itemize}
+
+\subsection{Final PIOP state}
+
+After the algebraic sumcheck and PCS opening, the verifier holds, for
+each of the $19$ committed columns $\bp{W_\bullet}$, a single MLE
+evaluation
+\[
+\mle{\bp{W_\bullet}}(r_j, r_y) \;\in\; \K, \qquad
+(r_j, r_y) \in \K^{5} \times \K^{9},
+\]
+where $\K$ is the verifier's challenge extension field. Reads of the
+virtual $\widehat{\Sigma_i(\cdot)}, \widehat{\sigma_i(W)}$ and the
+virtual carry words $\widehat{\bp{c}_\bullet}$ (with
+$\widehat{X \cdot \bp{c}_\bullet}$ in the Hadamards
+\eqref{eq:binius-had} of every binary step) are evaluated from
+$\widetilde{\bp{W_a}}, \widetilde{\bp{W_e}},
+\widetilde{\bp{W_W}}$, the intermediate-sum columns
+$\widetilde{\bp{W_\bullet^{(k)}}}$, and the packed carry-out
+$\widetilde{\bp{W_\beta}}$ at suitably rotated/shifted bit-index
+points via the underlying rotation/shift gadget
+(\Cref{rem:virtual-cols}). Because the lower $31$ bits of every
+virtual carry word are free $\SHR^{1}$-of-XOR combinations of
+committed columns, the verifier reconstructs them at the challenge
+point without any additional commitment opening; only the per-step
+$\beta_\bullet$ bits are read out of $\widetilde{\bp{W_\beta}}$ at
+the fixed positions of \Cref{rem:binius-packing}.
+
+\subsection{Composition with downstream UAIRs}
+
+The chosen layout exposes:
+\begin{itemize}
+\item $\col{PA\_A}\rowidx{0..4}$ and $\col{PA\_E}\rowidx{0..4}$, the
+input digest $H_0$;
+\item $\col{PA\_A}\rowidx{68N..68N+4}$ and $\col{PA\_E}\rowidx{68N..68N+4}$,
+the output digest $H_N$;
+\item $\col{PA\_M}\rowidx{68i..68i+16}$ for $i \in [0,N)$, the per-block
+message words;
+\end{itemize}
+all as public input cells, identically to \texttt{sha-uair-doc}.
+A downstream UAIR can therefore consume $H_N$ or any message word
+from this $\F_2[X]$-AIR's public input without any in-circuit
+cross-binding constraint, regardless of which arithmetisation produced
+the SHA stage.

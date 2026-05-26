@@ -43,15 +43,17 @@
 //! ## Constraint families
 //!
 //! A — Rotation/shift identities (C1–C4), all `(X^32 − 1)`-ideal in
-//!     `F_2[X]`: bind the committed Σ/σ-output columns to the state
-//!     columns via the `rho` polynomials of doc §2.2 / §2.3.
+//!     `F_2[X]` (the doc's `F_rot`): bind the committed Σ/σ-output
+//!     columns to the state columns via the `rho` polynomials of
+//!     doc §2.2 / §2.3.
 //!
-//! B — Modular-addition LinSum constraints (C5–C11), all
-//!     `(X^32 − 1)`-ideal. Each is the closed-form `F_2[X]`-linear
-//!     identity from doc §3.6 / §3.7: sum of inputs − sum of
-//!     `X·m_j` (CSA majorities) − `X·c_*` (final Binius carry) +
-//!     compensator. The Hadamard half of the modular-add gadget is
-//!     external (deferred per doc §3.4).
+//! B — Modular-addition LinSum constraints (C5–C11), all `(X^32)`-
+//!     ideal (the doc's `F_shift`, Lemma binius-vc). Each is the
+//!     closed-form `F_2[X]`-linear identity from doc §3.6 / §3.7:
+//!     sum of inputs − sum of `X·m_j` (CSA majorities) − `X·c_*`
+//!     (final Binius carry) + compensator, evaluated in `F_shift`.
+//!     The Hadamard half of the modular-add gadget is external
+//!     (deferred per doc §3.4).
 //!
 //! C — Boundary pinning (C16–C18), `assert_zero` gated by selectors:
 //!     pin init-prefix `W_A`/`W_E` to `PA_A`/`PA_E`, pin
@@ -85,18 +87,34 @@ use zinc_utils::from_ref::FromRef;
 use crate::GenerateRandomTrace;
 
 // ---------------------------------------------------------------------------
-// Sha256F2Ideal — single `(X^32 − 1)` ideal used by C1–C11.
+// Sha256F2Ideal — ideals used by the F_2[X] SHA-256 UAIR.
 // ---------------------------------------------------------------------------
 
-/// The lone ideal used by the F_2[X] SHA-256 UAIR: `(X^32 − 1)` over
-/// the random extension field at sumcheck time. Carries no data — the
-/// generating polynomial is constant.
+/// Ideals used by this UAIR.
+///
+/// Spec doc `documentation/sha-f2x-doc/sections/arithmetization.tex` puts
+/// rotation identities in `F_2[X]/(X^32 − 1)` (`F_rot`) and modular-addition
+/// identities in `F_2[X]/(X^32)` (`F_shift`). Both variants are defined
+/// here; the constraint impl below picks per family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sha256F2Ideal;
+pub enum Sha256F2Ideal {
+    /// `(X^32 − 1)` in `F_2[X]`. The natural ideal for rotation
+    /// identities (C1–C4). Currently also used by the addition
+    /// constraints (C5–C11) on this branch; a follow-up change will
+    /// flip those to `ShiftX32` once the witness generator's
+    /// compensator computation is updated to the non-cyclic
+    /// `X·(·) = (·) << 1` convention.
+    RotXw1,
+    /// `(X^32)` in `F_2[X]`. The doc's `F_shift` ideal — the natural
+    /// home for the Binius modular-addition identity, where bit-31
+    /// overflow is absorbed by the quotient. Defined but not yet wired
+    /// into any constraint.
+    ShiftX32,
+}
 
 impl FromRef<Sha256F2Ideal> for Sha256F2Ideal {
-    fn from_ref(_: &Sha256F2Ideal) -> Self {
-        Sha256F2Ideal
+    fn from_ref(value: &Sha256F2Ideal) -> Self {
+        *value
     }
 }
 
@@ -110,18 +128,36 @@ where
         if value.coeffs.is_empty() {
             return Ok(true);
         }
-        let one = F::one_with_cfg(value.coeffs[0].cfg());
-        IdealOrZero::NonZero(RotationIdeal::<F, 32>::new(one)).contains(value)
+        match self {
+            Sha256F2Ideal::RotXw1 => {
+                let one = F::one_with_cfg(value.coeffs[0].cfg());
+                IdealOrZero::NonZero(RotationIdeal::<F, 32>::new(one)).contains(value)
+            }
+            Sha256F2Ideal::ShiftX32 => {
+                // Membership in `(X^32)`: coefficients at positions
+                // 0..32 must all be zero (the polynomial is divisible
+                // by `X^32`). Higher-degree coefficients are
+                // unconstrained.
+                let limit = value.coeffs.len().min(32);
+                for c in &value.coeffs[..limit] {
+                    if !F::is_zero(c) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        }
     }
 }
 
-/// Project an `IdealOrZero<Sha256F2Ideal>` into the verifier field
-/// (always the same `Sha256F2Ideal` since it carries no data). Drop
-/// the `Zero` arm; it is filtered upstream by the IC's per-constraint
-/// loop before any projection runs.
+/// Project an `IdealOrZero<Sha256F2Ideal>` into the verifier field.
+/// The `Zero` arm is filtered upstream by the IC's per-constraint loop
+/// before any projection runs; we return `RotXw1` as a harmless
+/// default in that branch.
 pub fn sha256_f2_project_ideal(ideal: &IdealOrZero<Sha256F2Ideal>) -> Sha256F2Ideal {
     match ideal {
-        IdealOrZero::NonZero(_) | IdealOrZero::Zero => Sha256F2Ideal,
+        IdealOrZero::NonZero(i) => *i,
+        IdealOrZero::Zero => Sha256F2Ideal::RotXw1,
     }
 }
 
@@ -332,7 +368,14 @@ where
         let down_w_t2_3 = &down.binary_poly[16];
 
         // Ideals (just one for everything modular-flavoured).
-        let ideal_rot = ideal_from_ref(&Sha256F2Ideal);
+        // Rotation identities (C1–C4) live in F_rot = F_2[X]/(X^32 − 1).
+        // Modular-addition identities (C5–C11) live in F_shift =
+        // F_2[X]/(X^32) per doc Lemma binius-vc, where X·c drops bit
+        // 31 of c via the quotient (vs. wrapping it to bit 0 under
+        // F_rot). The witness gen's PA_C_* compensators use the
+        // matching non-cyclic shift convention.
+        let ideal_rot = ideal_from_ref(&Sha256F2Ideal::RotXw1);
+        let ideal_shift = ideal_from_ref(&Sha256F2Ideal::ShiftX32);
 
         // Scalars.
         // rho polynomials — bit positions per Lemma 2.2 / 2.3.
@@ -380,14 +423,15 @@ where
         // (B) Modular-addition LinSum constraints — C5..C11.
         //
         // Each is the closed-form F_2[X]-linear identity from doc
-        // §3.6: target − inputs − Σ X·m_j − X·c_* + compensator ∈
-        // (X^32 − 1). All signs collapse to + over F_2 anyway; we keep
-        // the `−` form for parity with the integer-pipeline UAIR.
+        // §3.6 / §3.7, stated in F_shift = F_2[X]/(X^32). The form is
+        // target − inputs − Σ X·m_j − X·c_* + compensator ∈ (X^32). All
+        // signs collapse to + over F_2 anyway; we keep the `−` form
+        // for parity with the integer-pipeline UAIR.
         // -----------------------------------------------------------
 
         // C5 (4-input message schedule, anchor t = t' − 16):
         //   W_W^{↓16} − W_W − W_SIG0^{↓1} − W_W^{↓9} − W_SIG1^{↓14}
-        //              − X·m_W1 − X·m_W2 − X·c_W + PA_C_W ∈ (X^32−1).
+        //              − X·m_W1 − X·m_W2 − X·c_W + PA_C_W ∈ (X^32).
         let lin_w = down_w_w_16.clone()
             - w_w
             - down_w_sig0_1
@@ -397,7 +441,7 @@ where
             - &mbs(w_m_w2, &x_scalar).expect("X · m_W2 overflow")
             - &mbs(w_c_w, &x_scalar).expect("X · c_W overflow")
             + pa_c_w;
-        b.assert_in_ideal(lin_w, &ideal_rot);
+        b.assert_in_ideal(lin_w, &ideal_shift);
 
         // C6 (6-input T_1, anchor t = t' − 3): inputs are h[t'] (= e[t]
         // via the shift-register), Σ_1(e[t]), u_ef[t'], u_{¬e,g}[t'],
@@ -415,55 +459,55 @@ where
             - &mbs(w_m_t1_4, &x_scalar).expect("X · m_T1_4 overflow")
             - &mbs(w_c_t1, &x_scalar).expect("X · c_T1 overflow")
             + pa_c_t1;
-        b.assert_in_ideal(lin_t1, &ideal_rot);
+        b.assert_in_ideal(lin_t1, &ideal_shift);
 
         // C7 (2-input T_2, row-local):
-        //   W_T2 − W_SIGMA0 − W_MAJ − X·c_T2 + PA_C_T2 ∈ (X^32 − 1).
+        //   W_T2 − W_SIGMA0 − W_MAJ − X·c_T2 + PA_C_T2 ∈ (X^32).
         let lin_t2 = w_t2.clone()
             - w_sigma0
             - w_maj
             - &mbs(w_c_t2, &x_scalar).expect("X · c_T2 overflow")
             + pa_c_t2;
-        b.assert_in_ideal(lin_t2, &ideal_rot);
+        b.assert_in_ideal(lin_t2, &ideal_shift);
 
         // C8 (a' = T_1 + T_2, anchor t = t' − 3, target a[t'+1] at
         // up.W_a^{↓4}):
-        //   W_A^{↓4} − W_T1^{↓3} − W_T2^{↓3} − X·c_A + PA_C_A ∈ (X^32 − 1).
+        //   W_A^{↓4} − W_T1^{↓3} − W_T2^{↓3} − X·c_A + PA_C_A ∈ (X^32).
         let lin_a = down_w_a_4.clone()
             - down_w_t1_3
             - down_w_t2_3
             - &mbs(w_c_a, &x_scalar).expect("X · c_A overflow")
             + pa_c_a;
-        b.assert_in_ideal(lin_a, &ideal_rot);
+        b.assert_in_ideal(lin_a, &ideal_shift);
 
         // C9 (e' = d + T_1, anchor t = t' − 3): d[t'] = a[t'−4] is
         // up.W_a; T_1[t'] is down.W_T1^{↓3}.
-        //   W_E^{↓4} − W_A − W_T1^{↓3} − X·c_E + PA_C_E ∈ (X^32 − 1).
+        //   W_E^{↓4} − W_A − W_T1^{↓3} − X·c_E + PA_C_E ∈ (X^32).
         let lin_e = down_w_e_4.clone()
             - w_a
             - down_w_t1_3
             - &mbs(w_c_e, &x_scalar).expect("X · c_E overflow")
             + pa_c_e;
-        b.assert_in_ideal(lin_e, &ideal_rot);
+        b.assert_in_ideal(lin_e, &ideal_shift);
 
         // C10 (feed-forward a, junction-window): H_{i+1}[a] = H_i[a] +
         // internal_final[a].
-        //   W_A^{↓4} − W_A − PA_A − X·c_FF_A + PA_C_FF_A ∈ (X^32 − 1).
+        //   W_A^{↓4} − W_A − PA_A − X·c_FF_A + PA_C_FF_A ∈ (X^32).
         let lin_ff_a = down_w_a_4.clone()
             - w_a
             - pa_a
             - &mbs(w_c_ff_a, &x_scalar).expect("X · c_FF_A overflow")
             + pa_c_ff_a;
-        b.assert_in_ideal(lin_ff_a, &ideal_rot);
+        b.assert_in_ideal(lin_ff_a, &ideal_shift);
 
         // C11 (feed-forward e):
-        //   W_E^{↓4} − W_E − PA_E − X·c_FF_E + PA_C_FF_E ∈ (X^32 − 1).
+        //   W_E^{↓4} − W_E − PA_E − X·c_FF_E + PA_C_FF_E ∈ (X^32).
         let lin_ff_e = down_w_e_4.clone()
             - w_e
             - pa_e
             - &mbs(w_c_ff_e, &x_scalar).expect("X · c_FF_E overflow")
             + pa_c_ff_e;
-        b.assert_in_ideal(lin_ff_e, &ideal_rot);
+        b.assert_in_ideal(lin_ff_e, &ideal_shift);
 
         // -----------------------------------------------------------
         // (D) Boundary pinning — C16, C17, C18.
@@ -907,22 +951,30 @@ where
 
         // ---- Compensator columns (PA_C_*) ----------------------------
         // For each linear constraint Cℓ, the compensator carries the
-        // F_2[X] residue of the constraint's inner expression mod
-        // (X^32 − 1) on every row. On active rows with honest
+        // F_2[X] residue of the constraint's inner expression in the
+        // active ideal on every row. On active rows with honest
         // witnesses the residue is zero; on inactive rows it absorbs
         // whatever the row's contents happen to imply, making the
         // constraint hold unconditionally.
         //
         // Bit-poly XOR is exactly the F_2[X] sum in degree-<32 form.
-        // Terms multiplied by `X` (carries, majorities) get rotated:
-        // `X · p (mod X^32 − 1) = rotl1(p)`.
-        let rotl1 = |x: u32| -> u32 { (x << 1) | (x >> 31) };
+        // Terms multiplied by `X` are shifted: `X · p (mod X^32) =
+        // (p << 1) & 0xFFFFFFFF`, dropping bit 31 of `p` (which would
+        // land at position 32 and be killed by the (X^32) ideal). This
+        // is the doc's `F_shift` convention (Lemma binius-vc); under
+        // it, `PA_C` is zero on every active row by the modular-add
+        // identity. Under the prior `(X^32 − 1)` convention the
+        // analogous expression used `rotl1` (cyclic shift), which
+        // wrapped bit-31 of the carry/majority back to bit 0 and made
+        // PA_C non-zero on active rows whenever the final carry-out
+        // was 1 — a divergence from the doc the ideal switch fixes.
+        let shl1 = |x: u32| -> u32 { x << 1 };
         let xor4 = |a: u32, b: u32, c: u32, d: u32| -> u32 { a ^ b ^ c ^ d };
 
         // C5 inner at row k (= 0 on schedule-active rows when honest):
         //   inner_W = W[k+16] ^ W[k] ^ σ_0(W)[k+1] ^ W[k+9] ^
-        //             σ_1(W)[k+14] ^ rotl1(m_W1) ^ rotl1(m_W2) ^
-        //             rotl1(c_W).
+        //             σ_1(W)[k+14] ^ (m_W1 << 1) ^ (m_W2 << 1) ^
+        //             (c_W << 1).
         // PA_C_W = inner_W on every row (zero on active rows under the
         // honest CSA derivation, nonzero on inactive rows where the
         // free witness columns determine the residue).
@@ -935,9 +987,9 @@ where
                     load(&sig0_vals, k + 1),
                     load(&w_vals, k + 9),
                 ) ^ load(&sig1_vals, k + 14)
-                    ^ rotl1(load(&m_w1_vals, k))
-                    ^ rotl1(load(&m_w2_vals, k))
-                    ^ rotl1(load(&c_w_vals, k));
+                    ^ shl1(load(&m_w1_vals, k))
+                    ^ shl1(load(&m_w2_vals, k))
+                    ^ shl1(load(&c_w_vals, k));
                 inner
             })
             .collect();
@@ -945,8 +997,8 @@ where
         // C6 inner at row k:
         //   inner_T1 = W_T1[k+3] ^ W_e[k] ^ Σ_1(e)[k+3] ^ u_ef[k+3] ^
         //              u_neg[k+3] ^ K[k+3] ^ W[k+3] ^
-        //              rotl1(m_T1_1) ^ rotl1(m_T1_2) ^
-        //              rotl1(m_T1_3) ^ rotl1(m_T1_4) ^ rotl1(c_T1).
+        //              (m_T1_1 << 1) ^ (m_T1_2 << 1) ^
+        //              (m_T1_3 << 1) ^ (m_T1_4 << 1) ^ (c_T1 << 1).
         let pa_c_t1_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&t1_vals, k + 3)
@@ -956,55 +1008,55 @@ where
                     ^ load(&u_neg_e_g_vals, k + 3)
                     ^ load(&k_vals, k + 3)
                     ^ load(&w_vals, k + 3)
-                    ^ rotl1(load(&m_t1_1_vals, k))
-                    ^ rotl1(load(&m_t1_2_vals, k))
-                    ^ rotl1(load(&m_t1_3_vals, k))
-                    ^ rotl1(load(&m_t1_4_vals, k))
-                    ^ rotl1(load(&c_t1_vals, k))
+                    ^ shl1(load(&m_t1_1_vals, k))
+                    ^ shl1(load(&m_t1_2_vals, k))
+                    ^ shl1(load(&m_t1_3_vals, k))
+                    ^ shl1(load(&m_t1_4_vals, k))
+                    ^ shl1(load(&c_t1_vals, k))
             })
             .collect();
 
         // C7 inner at row k (row-local, no shifts on inputs):
-        //   inner_T2 = W_T2[k] ^ Σ_0(a)[k] ^ Maj[k] ^ rotl1(c_T2).
+        //   inner_T2 = W_T2[k] ^ Σ_0(a)[k] ^ Maj[k] ^ (c_T2 << 1).
         let pa_c_t2_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&t2_vals, k)
                     ^ load(&sigma0_vals, k)
                     ^ load(&maj_vals, k)
-                    ^ rotl1(load(&c_t2_vals, k))
+                    ^ shl1(load(&c_t2_vals, k))
             })
             .collect();
 
         // C8 inner at row k:
-        //   inner_A = W_a[k+4] ^ W_T1[k+3] ^ W_T2[k+3] ^ rotl1(c_A).
+        //   inner_A = W_a[k+4] ^ W_T1[k+3] ^ W_T2[k+3] ^ (c_A << 1).
         let pa_c_a_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&a_vals, k + 4)
                     ^ load(&t1_vals, k + 3)
                     ^ load(&t2_vals, k + 3)
-                    ^ rotl1(load(&c_a_vals, k))
+                    ^ shl1(load(&c_a_vals, k))
             })
             .collect();
 
         // C9 inner at row k:
-        //   inner_E = W_e[k+4] ^ W_a[k] ^ W_T1[k+3] ^ rotl1(c_E).
+        //   inner_E = W_e[k+4] ^ W_a[k] ^ W_T1[k+3] ^ (c_E << 1).
         let pa_c_e_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&e_vals, k + 4)
                     ^ load(&a_vals, k)
                     ^ load(&t1_vals, k + 3)
-                    ^ rotl1(load(&c_e_vals, k))
+                    ^ shl1(load(&c_e_vals, k))
             })
             .collect();
 
         // C10 inner at row k:
-        //   inner_FF_A = W_a[k+4] ^ W_a[k] ^ PA_A[k] ^ rotl1(c_FF_A).
+        //   inner_FF_A = W_a[k+4] ^ W_a[k] ^ PA_A[k] ^ (c_FF_A << 1).
         let pa_c_ff_a_vals: Vec<u32> = (0..n)
             .map(|k| {
                 load(&a_vals, k + 4)
                     ^ load(&a_vals, k)
                     ^ load(&pa_a_vals, k)
-                    ^ rotl1(load(&c_ff_a_vals, k))
+                    ^ shl1(load(&c_ff_a_vals, k))
             })
             .collect();
 
@@ -1014,7 +1066,7 @@ where
                 load(&e_vals, k + 4)
                     ^ load(&e_vals, k)
                     ^ load(&pa_e_vals, k)
-                    ^ rotl1(load(&c_ff_e_vals, k))
+                    ^ shl1(load(&c_ff_e_vals, k))
             })
             .collect();
 

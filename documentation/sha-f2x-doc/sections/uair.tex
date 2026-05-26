@@ -1,0 +1,532 @@
+% ===========================================================================
+\section{Full $\F_2[X]$-AIR}\label{sec:uair}
+% ===========================================================================
+
+We assemble the building blocks of \Cref{sec:arith} into a complete
+$\F_2[X]$-AIR for the chained-compression relation
+\eqref{eq:rel-sha}. The trace and row conventions are inherited from
+\texttt{sha-uair-doc} (\Cref{sec:trace-shape}); the column layout
+(\Cref{sec:cols}) and the constraint list (\Cref{sec:constraints})
+are specific to this arithmetisation.
+
+\subsection{Trace shape}\label{sec:trace-shape}
+
+Fix $N := \mathrm{NUM\_COMPRESSIONS}$ and $\mathrm{ROWS\_PER\_COMP} := 68$
+($4$ init-prefix rows $+$ $64$ round-update output rows). Compression
+$i \in [0,N)$ occupies rows $[\,68i,\,68(i+1)\,)$; a $4$-row $H_N$
+output prefix occupies $[\,68N,\,68N+4\,)$. The total
+$\mathrm{ACTIVE\_ROWS} := 68N + 4$, and trace length is
+$n := 2^{\nu}$ with $\nu$ the smallest integer satisfying
+$2^{\nu} \ge \mathrm{ACTIVE\_ROWS}$. The row sets — \emph{schedule-active}
+$\bigcup_i [\,68i,\,68i+48\,)$, \emph{update-active}
+$\bigcup_i [\,68i,\,68i+64\,)$, \emph{init-prefix}
+$\bigcup_i [\,68i,\,68i+4\,)$ (for $i \in [0,N]$),
+\emph{junction-window} $\bigcup_i [\,68i+64,\,68(i{+}1)\,)$, and
+\emph{message-seed} $\bigcup_i [\,68i,\,68i+16\,)$ — are identical to
+those in \Cref{sec:uair} of \texttt{sha-uair-doc}.
+
+\subsection{Column layout}\label{sec:cols}
+
+Every trace cell holds a bit-polynomial in
+$\bitpoly{32} \subset \F_2[X]$. The commitment is taken in an
+$\F_2[X]$-native PCS (specific choice deferred); consequently
+the booleanity constraint that pinned $\bitpoly{32}$ membership in
+\texttt{sha-uair-doc} is structurally automatic here — coefficients
+live in $\F_2 = \{0,1\}$ by definition of the ambient ring.
+
+\paragraph{Public bit-polynomial columns ($4$).}
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Column} & \textbf{Role} \\
+\midrule
+$\col{PA\_A}$  & Boundary column for the $a$-register; carries $H_i$ at init prefixes, $H_N$ at output prefix \\
+$\col{PA\_E}$  & Boundary column for the $e$-register \\
+$\col{PA\_K}$  & SHA-256 round constants $K_t$ (bit-polynomial form) \\
+$\col{PA\_M}$  & Public message-block words \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{Public selectors ($3$, $\{0,1\}$-valued public columns).}
+$S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{FF}}, S_{\mathrm{MSG-INIT}}$,
+with supports as in \texttt{sha-uair-doc} (the
+$N+1$ init prefixes, the $N$ junction windows, the $N$ message-seed
+windows respectively). Selectors are stored as scalar $\{0,1\}$ rather
+than bit-polynomials; the row-wise selector value multiplies a bit-poly
+constraint coefficient-wise.
+
+\paragraph{Public active-row compensators ($1$ packed $\bitpoly{32}$ column).}
+$\col{PA\_C}$. Under the chained-Binius treatment of
+\Cref{sec:mod-add,sec:mod-add-chain}, each binary step of every
+modular-addition chain carries a $1$-bit LSB compensator
+(\Cref{rem:bin-lsb-comp}). Across the seven SHA-256 modular sums
+(arities $4, 6, 2, 2, 2, 2, 2$) there are $\sum_j (n_j - 1) = 13$
+binary steps per row and therefore $13$ compensator bits to absorb.
+We pack all $13$ into the bottom of a single bit-poly column
+$\col{PA\_C}$ at fixed positions (allocation given below in
+\Cref{rem:binius-packing}), leaving bits $13, \dots, 31$ as zero. The
+verifier checks $\col{PA\_C}[t][j] = 0$ on every active row of the
+$j$-th step's row set, and $\col{PA\_C}[t][j] = 0$ for $j \in [13,
+31]$ on every row.
+
+\paragraph{Committed witness columns ($19$).}
+We organise the witnesses into six groups: \emph{state} columns ($3$),
+\emph{rotation/shift-result} columns ($4$), \emph{$\AND$-result}
+columns ($3$), \emph{round-intermediate} columns ($2$),
+\emph{chained-Binius intermediate-sum} columns ($6$), and a single
+\emph{packed carry-out} column ($1$).
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.26\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Column} & \textbf{Role} \\
+\midrule
+\multicolumn{2}{l}{\textit{State columns ($3$)}} \\[1pt]
+$\bp{W_a}$              & Working $a$-register $a[t]$ \\
+$\bp{W_e}$              & Working $e$-register $e[t]$ \\
+$\bp{W_W}$              & Message-schedule word $W[t]$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Rotation/shift-result columns ($4$, pinned by C\ref{con:rot-sig0}--C\ref{con:rot-lsig1})}} \\[1pt]
+$\bp{W_{\Sigma_0}}$     & $\Sigma_0(a[t])$ result (pinned by \Cref{con:rot-sig0}) \\
+$\bp{W_{\Sigma_1}}$     & $\Sigma_1(e[t])$ result (pinned by \Cref{con:rot-sig1}) \\
+$\bp{W_{\sigma_0}}$     & $\sigma_0(W[t])$ result (pinned by \Cref{con:rot-lsig0}) \\
+$\bp{W_{\sigma_1}}$     & $\sigma_1(W[t])$ result (pinned by \Cref{con:rot-lsig1}) \\
+\midrule
+\multicolumn{2}{l}{\textit{$\AND$-result columns ($3$, pinned by Hadamard relations)}} \\[1pt]
+$\bp{W_{u_{ef}}}$       & $\Ch$ operand $u_{ef} = e \AND f$ (Hadamard with $\bp{W_e}, \bp{W_e}^{\downarrow 1}$ shift; cf.\ \Cref{con:had-uef}) \\
+$\bp{W_{u_{\neg e,g}}}$ & $\Ch$ operand $u_{\neg e,g} = (\NOT e) \AND g$ (Hadamard with $\mathbf{1} - \bp{W_e}$ and $\bp{W_e}^{\downarrow 2}$ shift; cf.\ \Cref{con:had-uneg}) \\
+$\bp{W_{\Maj}}$         & $\Maj(a,b,c)$ result (Hadamard via \Cref{eq:maj-hadamard}; cf.\ \Cref{con:had-maj}) \\
+\midrule
+\multicolumn{2}{l}{\textit{Round-intermediate columns ($2$)}} \\[1pt]
+$\bp{W_{T_1}}$          & Round intermediate $T_1$ (definition: \Cref{eq:t1}) \\
+$\bp{W_{T_2}}$          & Round intermediate $T_2 := \Sigma_0(a) + \Maj(a,b,c) \pmod{2^{32}}$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Chained-Binius intermediate-sum columns ($6$, materialised per \Cref{def:chain})}} \\[1pt]
+$\bp{W_W^{(1)}}, \bp{W_W^{(2)}}$ & Two partial sums of the $4$-input message-schedule chain (\Cref{con:mod-w}) \\
+$\bp{W_{T_1}^{(1)}}, \dots, \bp{W_{T_1}^{(4)}}$ & Four partial sums of the $6$-input $T_1$ chain (\Cref{con:mod-t1}) \\
+\midrule
+\multicolumn{2}{l}{\textit{Packed carry-out column ($1$; \Cref{rem:binius-packing})}} \\[1pt]
+$\bp{W_\beta}$          & Single $\bitpoly{32}$ column whose bits $0, \dots, 12$ hold the $13$ per-step carry-out bits $\beta_W^{(1\!-\!3)}, \beta_{T_1}^{(1\!-\!5)}, \beta_{T_2}, \beta_a, \beta_e, \beta_{\mathrm{ff},a}, \beta_{\mathrm{ff},e}$; bits $13, \dots, 31$ are zero (verifier-checked) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{remark}[Packing convention for $\beta$ and compensator bits]
+\label{rem:binius-packing}
+The $13$ per-step carry-out bits $\beta_\bullet$ and the $13$ per-step
+LSB compensator bits are packed at \emph{matching} fixed positions of
+$\bp{W_\beta}$ and $\col{PA\_C}$ respectively, so that bit $j$ of
+each column refers to the same binary step. The allocation:
+\begin{center}
+\small
+\begin{tabular}{cl}
+\toprule
+\textbf{Bit position $j$} & \textbf{Binary step} \\
+\midrule
+$0, 1, 2$       & W chain steps $1, 2, 3$ (\Cref{con:mod-w}) \\
+$3, 4, 5, 6, 7$ & $T_1$ chain steps $1, 2, 3, 4, 5$ (\Cref{con:mod-t1}) \\
+$8$             & $T_2$ (\Cref{con:mod-t2}) \\
+$9$             & $a'$ (\Cref{con:mod-a}) \\
+$10$            & $e'$ (\Cref{con:mod-e}) \\
+$11$            & feed-forward-$a$ (\Cref{con:ff-a}) \\
+$12$            & feed-forward-$e$ (\Cref{con:ff-e}) \\
+$13$--$31$      & zero (verifier-checked on every row) \\
+\bottomrule
+\end{tabular}
+\end{center}
+Different binary steps gate to different row sets (schedule-active
+for the W chain; update-active for $T_1, T_2, a', e'$; junction-window
+for the two feed-forward sums). The verifier amortises the per-bit
+row-set zero check into one $O(n)$ sweep of $\col{PA\_C}$ alongside
+the $\bp{W_\beta}$ high-bits-zero check.
+\end{remark}
+
+\begin{remark}[Virtual columns]\label{rem:virtual-cols}
+The bitwise complement $\overline{\bp{e}} := \mathbf{1}_{32} + \bp{e}$
+(in $\F_2[X]$) is a free linear combination of the committed
+$\bp{W_e}$ with the constant bit-poly $\mathbf{1}_{32}$, hence
+virtual. The rotation/shift outputs
+$\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}},
+\bp{W_{\sigma_1}}$ are \emph{committed} (not virtual); their values
+are bound to $\bp{W_a}, \bp{W_e}, \bp{W_W}$ by
+\Cref{con:rot-sig0}--\Cref{con:rot-lsig1}.
+
+Each binary step of a chained-Binius modular addition uses a virtual
+carry word $\bp{c}_\bullet \in \bitpoly{32}$ whose bits $0, \dots, 30$
+are derived as $\SHR^{1}$ of the $\F_2$-linear combination
+$\bp{\mathrm{target}} + \bp{a} + \bp{b}$ for that step (cf.\
+\Cref{eq:c-virtual}); only bit $31$ — the step's committed carry-out
+$\beta_\bullet$ — lives in $\bp{W_\beta}$. The $\F_2$-linear part and
+the $\SHR^{1}$ are both free at the commitment layer
+(\Cref{lem:shr-virtual} and \Cref{rem:c-virtual}); the verifier reads
+$\bp{c}_\bullet$ via the standard SHIFT-vector mechanism during
+constraint evaluation. The intermediate-sum columns
+$\bp{W_W^{(k)}}, \bp{W_{T_1}^{(k)}}$ are \emph{committed} (not
+virtual) — each depends non-$\F_2$-linearly on the carry chain of
+prior inputs and so cannot be reconstructed from a free combination
+of committed columns (\Cref{prop:binius-chain-count}).
+
+The sumcheck verifying the AIR's binding constraints requires access
+to rotated/shifted bit-index MLE points of $\bp{W_a}, \bp{W_e},
+\bp{W_W}$ and to row-shifted MLE points of the various intermediate
+and result columns; the underlying rotation/shift and shift-predicate
+gadgets are design parameters.
+\end{remark}
+
+\paragraph{Counting summary.}
+$4 + 1 = 5$ public bit-poly columns ($4$ boundary + $1$ packed
+LSB-only compensator $\col{PA\_C}$), $3$ public selectors, and $19$
+committed bit-poly witness columns. The witness count splits as
+$3 + 4 + 3 + 2 + 6 + 1$ (state, rotation/shift, $\AND$,
+round-intermediate, chained-Binius intermediates, packed carry-out
+$\bp{W_\beta}$). Per row, the modular-addition witness footprint is
+$6 \cdot 32 + 13 = 205$ bits of committed data plus $13$ bits of
+public-compensator data. Compared with \texttt{sha-uair-doc}:
+$9 + 11 = 20$ bit-poly columns and $9$ public integer columns.
+
+\subsection{Constraints}\label{sec:constraints}
+
+We organise constraints into four classes:
+
+\begin{enumerate}[label=(\Alph*)]
+  \item \textbf{Rotation/shift identities} for the committed
+        $\bp{W_{\Sigma_i}}, \bp{W_{\sigma_i}}$ columns, stated as
+        polynomial congruences modulo $X^{32}-1$ in $\F_2[X]$.
+  \item \textbf{Modular-addition constraints} — one chained-Binius
+        pack per modular addition, of arity $n_j \in \{2, 4, 6\}$,
+        consisting of $n_j - 1$ binary applications of
+        \Cref{lem:binius-vc} on intermediate-sum columns
+        (\Cref{def:chain}, \Cref{rem:bin-lsb-comp}). Each binary step
+        contributes one $\F_2$-linear LSB check and one column-level
+        Hadamard relation in $\Fshift$, with $X\cdot\bp{c}_\bullet$ as
+        genuine ring multiplication (\Cref{sec:xshift}) on the
+        virtual carry word for that step.
+  \item \textbf{$\AND$ Hadamard relations} for $\bp{W_{u_{ef}}},
+        \bp{W_{u_{\neg e,g}}}, \bp{W_{\Maj}}$ — column-level
+        declarations enforced by an external Hadamard-product check
+        (mechanism deferred; cf.\ \Cref{sec:and-hadamard}), not
+        per-row constraints.
+  \item \textbf{Boundary pinning} — init-prefix, message-init, and
+        public-input zero-ideal pins.
+\end{enumerate}
+
+Following the row-variable convention of
+\texttt{sha-uair-doc} (Section~3.3 there), every algebraic
+constraint below is written with forward-only cell accesses
+$\bp{x}^{\downarrow\Delta}\rowidx{t} = \bp{x}\rowidx{t+\Delta}$
+($\bp{x}\rowidx{t+\Delta} = 0$ off the trace tail).
+
+\paragraph{Row-set table.}
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Name} & \textbf{Row set $\mathcal{T}$} & \textbf{Used by} \\
+\midrule
+Active                & $[0, \mathrm{ACTIVE\_ROWS})$ & C\ref{con:rot-sig0}, C\ref{con:rot-sig1} \\
+Schedule-active       & $\bigcup_i [\,68i,\,68i + 48\,)$ & C\ref{con:rot-lsig0}, C\ref{con:rot-lsig1}, C\ref{con:mod-w} \\
+Update-active         & $\bigcup_i [\,68i,\,68i + 64\,)$ & C\ref{con:mod-t1}, C\ref{con:mod-t2}, C\ref{con:mod-a}, C\ref{con:mod-e} \\
+Init-prefix           & $\bigcup_i [\,68i,\,68i + 4\,)$ ($i \in [0,N]$) & C\ref{con:init-a}, C\ref{con:init-e} \\
+Junction-window       & $\bigcup_i [\,68i + 64,\,68(i{+}1)\,)$ & C\ref{con:ff-a}, C\ref{con:ff-e} \\
+Message-seed          & $\bigcup_i [\,68i,\,68i + 16\,)$ & C\ref{con:msg-init} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% --- (A) Rotation/shift identities ----------------------------------------
+
+\paragraph{(A) Rotation identities for $\Sigma_0, \Sigma_1$, $\sigma_0, \sigma_1$.}
+
+These are in-circuit constraints that bind the committed
+rotation/shift-result columns $\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}},
+\bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$ to $\bp{W_a}, \bp{W_e},
+\bp{W_W}$ via the identities of \Cref{lem:big-sigma} and
+\Cref{lem:small-sigma}. They live in $\F_2[X]$ with the polynomial
+congruence stated modulo the principal ideal $(X^{32}-1)$ — i.e.\
+inside the quotient $\Frot$, which is the natural ring for rotations.
+The verifier accesses rotated/shifted bit-index MLE points of
+$\bp{W_a}, \bp{W_e}, \bp{W_W}$ via the underlying rotation/shift gadget
+(design parameter, cf.\ \Cref{rem:virtual-cols}).
+
+For every active row $t$:
+\begin{align}
+\bp{W_a}\rowidx{t} \cdot \rho_{0}(X) - \bp{W_{\Sigma_0}}\rowidx{t} &\in (X^{32}-1) \quad \text{in } \F_2[X], \tag{C1}\label{con:rot-sig0}\\
+\bp{W_e}\rowidx{t} \cdot \rho_{1}(X) - \bp{W_{\Sigma_1}}\rowidx{t} &\in (X^{32}-1) \quad \text{in } \F_2[X]. \tag{C2}\label{con:rot-sig1}
+\end{align}
+
+For every schedule-active row $t$ (with $\SHR^r(\bp{W_W})$ accessed
+via the deferred right-shift gadget):
+\begin{align}
+\bp{W_W}^{\downarrow 1}\rowidx{t} \cdot \rho_{\sigma_0}(X) + \SHR^{3}(\bp{W_W}^{\downarrow 1})\rowidx{t} - \bp{W_{\sigma_0}}^{\downarrow 1}\rowidx{t} &\in (X^{32}-1) \quad \text{in } \F_2[X], \tag{C3}\label{con:rot-lsig0}\\
+\bp{W_W}^{\downarrow 14}\rowidx{t} \cdot \rho_{\sigma_1}(X) + \SHR^{10}(\bp{W_W}^{\downarrow 14})\rowidx{t} - \bp{W_{\sigma_1}}^{\downarrow 14}\rowidx{t} &\in (X^{32}-1) \quad \text{in } \F_2[X]. \tag{C4}\label{con:rot-lsig1}
+\end{align}
+The forward-shift offsets ($1$ and $14$) align the SHA-spec reads
+$\sigma_0(W[t'-15])$ and $\sigma_1(W[t'-2])$ ($t' = t + 16$) onto the
+appropriate rows of $\bp{W_W}, \bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$.
+
+% --- (B) Modular addition packs ------------------------------------------
+
+\paragraph{(B) Modular addition constraints.}
+
+By \Cref{lem:binius-vc} (binary case) and \Cref{sec:mod-add-chain}
+($n$-input chained case), each modular sum
+$\bp{\mathrm{target}} \equiv \sum_{k=1}^{n} \bp{\mathrm{input}}_k
+\pmod{2^{32}}$ is captured by $n - 1$ binary Binius steps with
+$n - 2$ intermediate-sum columns. To keep the constraint listing
+compact we adopt the shorthand
+\begin{equation}\label{eq:binius-add-template}
+\mathrm{BiniusAdd}\bigl(\bp{t};\; \bp{x}, \bp{y};\; \beta;\; \kappa\bigr)
+\;:\equiv\;
+\begin{cases}
+(\bp{t} + \bp{x} + \bp{y} + \kappa \cdot 1)[0] = 0, \\[2pt]
+(\bp{x} + X\cdot\bp{c}) \had (\bp{y} + X\cdot\bp{c}) = \bp{c} + X\cdot\bp{c}
+\;\;\text{in } \Fshift,
+\end{cases}
+\end{equation}
+where $\beta \in \F_2$ is the step's committed carry-out (a fixed bit
+of $\bp{W_\beta}$), $\kappa \in \F_2$ is the step's LSB compensator (a
+fixed bit of $\col{PA\_C}$), and $\bp{c} \in \bitpoly{32}$ is the
+virtual carry word $\bp{c}[i] := (\bp{t} + \bp{x} + \bp{y})[i+1]$ for
+$i = 0, \dots, 30$ with $\bp{c}[31] := \beta$ (\Cref{eq:c-virtual},
+\Cref{rem:c-virtual}). The constant ``$\cdot 1$'' embeds the scalar
+$\kappa$ as a bit-poly supported on bit~$0$ only. Each
+$\mathrm{BiniusAdd}$ unfolds into exactly one $\F_2$ LSB equation
+(per row, gated by its row set) and one column-level Hadamard
+relation in $\Fshift$.
+
+The seven modular-addition packs are listed below as ordered chains
+of $\mathrm{BiniusAdd}$ invocations. We index the carry-out bits of
+$\bp{W_\beta}$ and the compensator bits of $\col{PA\_C}$ at fixed
+positions per \Cref{rem:binius-packing}; we abbreviate
+$\beta_\bullet^{(k)} := \bp{W_\beta}[t][j_k]$ and
+$\kappa_\bullet^{(k)} := \col{PA\_C}[t][j_k]$ for the bit position
+$j_k$ allocated to step $k$.
+
+\subparagraph{C5 — message schedule ($4$-input, $3$ binary steps).}
+Anchoring at $t := t' - 16$ so the SHA-spec reads become forward
+shifts, with intermediates
+$\bp{W_W^{(1)}}, \bp{W_W^{(2)}} \in \bitpoly{32}$. For every
+schedule-active row $t$:
+\begin{align}
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_W^{(1)}}\rowidx{t};\;
+    \bp{W_W}\rowidx{t},\,
+    \bp{W_{\sigma_0}}^{\downarrow 1}\rowidx{t};\;
+    \beta_W^{(1)},\; \kappa_W^{(1)}\bigr), \tag{C5a}\label{con:mod-w-1}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_W^{(2)}}\rowidx{t};\;
+    \bp{W_W^{(1)}}\rowidx{t},\,
+    \bp{W_W}^{\downarrow 9}\rowidx{t};\;
+    \beta_W^{(2)},\; \kappa_W^{(2)}\bigr), \tag{C5b}\label{con:mod-w-2}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_W}^{\downarrow 16}\rowidx{t};\;
+    \bp{W_W^{(2)}}\rowidx{t},\,
+    \bp{W_{\sigma_1}}^{\downarrow 14}\rowidx{t};\;
+    \beta_W^{(3)},\; \kappa_W^{(3)}\bigr). \tag{C5c}\label{con:mod-w-3}
+\end{align}
+We refer to the pack \eqref{con:mod-w-1}--\eqref{con:mod-w-3}
+collectively as \Cref{con:mod-w}:
+\label{con:mod-w}\(\text{C5} := \text{C5a} \wedge \text{C5b} \wedge \text{C5c}\).
+
+\subparagraph{C6 — intermediate $T_1$ ($6$-input, $5$ binary steps).}
+Define
+\begin{equation}\label{eq:t1}
+T_1[t'] \;:\equiv\; h[t'] + \Sigma_1(e[t']) + \Ch(e[t'],f[t'],g[t'])
++ K[t'] + W[t'] \pmod{2^{32}},
+\end{equation}
+with $\Ch$ split as in \eqref{eq:ch-decomp}. Anchoring at
+$t := t' - 3$ and using intermediates $\bp{W_{T_1}^{(1)}}, \dots,
+\bp{W_{T_1}^{(4)}}$. For every update-active row $t$, with addends in
+order $h, \Sigma_1, u_{ef}, u_{\neg e,g}, K_t, W_t$ (mapping to
+trace cells via the shift-register convention \Cref{rem:shift-register}):
+\begin{align}
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{T_1}^{(1)}}\rowidx{t};\;
+    \bp{W_e}\rowidx{t},\,
+    \bp{W_{\Sigma_1}}^{\downarrow 3}\rowidx{t};\;
+    \beta_{T_1}^{(1)},\; \kappa_{T_1}^{(1)}\bigr), \tag{C6a}\label{con:mod-t1-1}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{T_1}^{(2)}}\rowidx{t};\;
+    \bp{W_{T_1}^{(1)}}\rowidx{t},\,
+    \bp{W_{u_{ef}}}^{\downarrow 3}\rowidx{t};\;
+    \beta_{T_1}^{(2)},\; \kappa_{T_1}^{(2)}\bigr), \tag{C6b}\label{con:mod-t1-2}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{T_1}^{(3)}}\rowidx{t};\;
+    \bp{W_{T_1}^{(2)}}\rowidx{t},\,
+    \bp{W_{u_{\neg e,g}}}^{\downarrow 3}\rowidx{t};\;
+    \beta_{T_1}^{(3)},\; \kappa_{T_1}^{(3)}\bigr), \tag{C6c}\label{con:mod-t1-3}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{T_1}^{(4)}}\rowidx{t};\;
+    \bp{W_{T_1}^{(3)}}\rowidx{t},\,
+    \col{PA\_K}^{\downarrow 3}\rowidx{t};\;
+    \beta_{T_1}^{(4)},\; \kappa_{T_1}^{(4)}\bigr), \tag{C6d}\label{con:mod-t1-4}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{T_1}}^{\downarrow 3}\rowidx{t};\;
+    \bp{W_{T_1}^{(4)}}\rowidx{t},\,
+    \bp{W_W}^{\downarrow 3}\rowidx{t};\;
+    \beta_{T_1}^{(5)},\; \kappa_{T_1}^{(5)}\bigr). \tag{C6e}\label{con:mod-t1-5}
+\end{align}
+The first summand $\bp{W_e}\rowidx{t}$ plays the role of $h[t']$
+($t' = t + 3$) via $h[t'] = e[t'-3] = e[t]$. We refer to the pack
+\eqref{con:mod-t1-1}--\eqref{con:mod-t1-5} collectively as
+\Cref{con:mod-t1}: \label{con:mod-t1}\(\text{C6}\).
+
+\subparagraph{C7 — intermediate $T_2$ ($2$-input, $1$ binary step).}
+$T_2[t'] :\equiv \Sigma_0(a[t']) + \Maj(a[t'], b[t'], c[t']) \pmod{2^{32}}$.
+For every update-active row $t$:
+\begin{equation}\tag{C7}\label{con:mod-t2}
+\mathrm{BiniusAdd}\bigl(
+    \bp{W_{T_2}}\rowidx{t};\;
+    \bp{W_{\Sigma_0}}\rowidx{t},\, \bp{W_{\Maj}}\rowidx{t};\;
+    \beta_{T_2},\; \kappa_{T_2}\bigr).
+\end{equation}
+Materialising $\bp{W_{T_2}}$ as its own committed column (rather than
+inlining it into C\ref{con:mod-a}) keeps the $a'$ update a clean
+$2$-input sum and matches the implementation layout.
+
+\subparagraph{C8 — register update for $a$ ($2$-input, $1$ binary step).}
+$a' = T_1 + T_2$, output landing on $\bp{W_a}^{\downarrow 4}$:
+\begin{equation}\tag{C8}\label{con:mod-a}
+\mathrm{BiniusAdd}\bigl(
+    \bp{W_a}^{\downarrow 4}\rowidx{t};\;
+    \bp{W_{T_1}}^{\downarrow 3}\rowidx{t},\, \bp{W_{T_2}}^{\downarrow 3}\rowidx{t};\;
+    \beta_a,\; \kappa_a\bigr),
+\end{equation}
+on every update-active row $t$.
+
+\subparagraph{C9 — register update for $e$ ($2$-input, $1$ binary step).}
+$e' = d + T_1$ with $d[t'] = a[t'-4]$:
+\begin{equation}\tag{C9}\label{con:mod-e}
+\mathrm{BiniusAdd}\bigl(
+    \bp{W_e}^{\downarrow 4}\rowidx{t};\;
+    \bp{W_a}\rowidx{t},\, \bp{W_{T_1}}^{\downarrow 3}\rowidx{t};\;
+    \beta_e,\; \kappa_e\bigr),
+\end{equation}
+on every update-active row $t$.
+
+\subparagraph{C10, C11 — feed-forward ($2$-input each, $1$ binary step each).}
+On every junction-window row $t$:
+\begin{align}
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_a}^{\downarrow 4}\rowidx{t};\;
+    \bp{W_a}\rowidx{t},\, \col{PA\_A}\rowidx{t};\;
+    \beta_{\mathrm{ff},a},\; \kappa_{\mathrm{ff},a}\bigr), \tag{C10}\label{con:ff-a}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_e}^{\downarrow 4}\rowidx{t};\;
+    \bp{W_e}\rowidx{t},\, \col{PA\_E}\rowidx{t};\;
+    \beta_{\mathrm{ff},e},\; \kappa_{\mathrm{ff},e}\bigr). \tag{C11}\label{con:ff-e}
+\end{align}
+
+% --- (C) AND Hadamard relations ------------------------------------------
+
+\paragraph{(C) $\AND$ Hadamard relations.}
+
+The following constraints are not row-by-row algebraic constraints in
+the sumcheck; they are column-level Hadamard-product relations whose
+discharge mechanism is deferred (cf.\ \Cref{sec:and-hadamard}). We
+list them for completeness; the implementation registers them as a
+Hadamard-spec on the relevant column triple at circuit-construction
+time.
+
+For every row $t$:
+\begin{align}
+\bp{W_e}\rowidx{t} \had \bp{W_e}^{\downarrow 1}\rowidx{t}
+   &= \bp{W_{u_{ef}}}\rowidx{t}, \tag{C12}\label{con:had-uef}\\
+\bigl(\mathbf{1}_{32} - \bp{W_e}\rowidx{t}\bigr) \had \bp{W_e}^{\downarrow 2}\rowidx{t}
+   &= \bp{W_{u_{\neg e,g}}}\rowidx{t}, \tag{C13}\label{con:had-uneg}\\
+\bigl(\bp{W_a}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t}\bigr) \had \bigl(\bp{W_a}^{\downarrow 1}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t}\bigr)
+   &= \bp{W_{\Maj}}\rowidx{t} + \bp{W_a}^{\downarrow 2}\rowidx{t}. \tag{C14}\label{con:had-maj}
+\end{align}
+The shift offsets exploit \Cref{rem:shift-register}: at SHA round $t'$,
+$f[t'] = e[t'-1]$, $g[t'] = e[t'-2]$, $b[t']=a[t'-1]$, $c[t']=a[t'-2]$.
+For \Cref{con:had-uef} the anchor is $t := t' - 1$ so that $e[t']$ lands
+on $\bp{W_e}^{\downarrow 1}\rowidx{t}$ etc.; similar re-anchoring for
+\Cref{con:had-uneg}, \Cref{con:had-maj}.
+
+\paragraph{Total Hadamard checks.}\label{con:had-total}
+
+Under the chained-Binius treatment, the modular-addition packs
+C\ref{con:mod-w}--C\ref{con:ff-e} contribute one Hadamard relation
+per binary step, for $3 + 5 + 1 + 1 + 1 + 1 + 1 = 13$ addition-side
+Hadamards per row. The three $\AND$-flavoured pins
+C\ref{con:had-uef}--C\ref{con:had-maj} for the $\Ch$ operands and
+$\Maj$ contribute another three. The total is therefore $\mathbf{16}$
+column-level Hadamard relations. All $16$ may take free
+$\F_2[X]$-linear combinations of committed columns as inputs
+(including the virtual carry words $\bp{c}_\bullet$ for the addition
+side, whose bits $0..30$ are $\SHR^{1}$ of committed-column XORs and
+whose bit $31$ is a single packed cell of $\bp{W_\beta}$); they are
+discharged externally by the Hadamard-product mechanism (deferred;
+cf.\ \Cref{sec:and-hadamard}).
+
+% --- (D) Boundary pinning ------------------------------------------------
+
+\paragraph{(D) Boundary pinning.}
+
+For every init-prefix row $t$ across all $N+1$ blocks:
+\begin{align}
+S_{\mathrm{INIT-PREFIX}}\rowidx{t} \cdot \bigl(\bp{W_a}\rowidx{t} - \col{PA\_A}\rowidx{t}\bigr) &= 0, \tag{C16}\label{con:init-a}\\
+S_{\mathrm{INIT-PREFIX}}\rowidx{t} \cdot \bigl(\bp{W_e}\rowidx{t} - \col{PA\_E}\rowidx{t}\bigr) &= 0. \tag{C17}\label{con:init-e}
+\end{align}
+For every message-seed row $t$:
+\begin{equation}\tag{C18}\label{con:msg-init}
+S_{\mathrm{MSG-INIT}}\rowidx{t} \cdot \bigl(\bp{W_W}\rowidx{t} - \col{PA\_M}\rowidx{t}\bigr) \;=\; 0.
+\end{equation}
+These are zero-ideal constraints in $\F_2[X]$, gated by public boolean
+selectors.
+
+\subsection{Verifier-side structural checks}\label{cons:public-checks}
+
+The verifier discharges the following row-wise checks directly on
+\texttt{public\_trace} before the algebraic sumcheck begins:
+\begin{itemize}[leftmargin=2em]
+  \item Public bit-poly columns ($\col{PA\_A}, \col{PA\_E},
+        \col{PA\_K}, \col{PA\_M}, \col{PA\_C}$) lie in $\bitpoly{32}$
+        coefficient-wise.
+  \item Selectors $S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{FF}},
+        S_{\mathrm{MSG-INIT}}$ take their declared support values.
+  \item Packed compensator $\col{PA\_C}$: bits $13, \dots, 31$ are
+        zero on every row of the trace; each individual compensator
+        bit (positions $0, \dots, 12$ per \Cref{rem:binius-packing})
+        vanishes on every active row of the corresponding binary
+        step's row set:
+        \begin{align*}
+          \col{PA\_C}\rowidx{t}[j] &= 0
+            \quad\text{for } j \in \{0, 1, 2\}\
+            \text{on every schedule-active row } t, \\
+          \col{PA\_C}\rowidx{t}[j] &= 0
+            \quad\text{for } j \in \{3, \dots, 10\}\
+            \text{on every update-active row } t, \\
+          \col{PA\_C}\rowidx{t}[j] &= 0
+            \quad\text{for } j \in \{11, 12\}\
+            \text{on every junction-window row } t, \\
+          \col{PA\_C}\rowidx{t}[j] &= 0
+            \quad\text{for } j \in \{13, \dots, 31\}\
+            \text{on every row } t.
+        \end{align*}
+        On inactive rows of a given binary step, the corresponding
+        compensator bit may be $\{0,1\}$-valued and is unconstrained
+        beyond bit-$0$-only support (\Cref{rem:bin-lsb-comp},
+        \Cref{rem:binius-packing}). The verifier amortises all
+        per-bit row-set zero checks into one $O(n)$ sweep of
+        $\col{PA\_C}$.
+  \item Round constants: $\col{PA\_K}\rowidx{t} = \widehat{K_{t+3}}$ on
+        every update-active row.
+\end{itemize}
+All are $O(n)$ inspections amortised into the verifier's normal
+public-trace iteration.
+
+\subsection{Composition with downstream UAIRs}
+
+The layout exposes $H_0, H_N$, and the per-block message words as
+public cells of $\col{PA\_A}, \col{PA\_E}, \col{PA\_M}$ at the same row
+ranges as in \texttt{sha-uair-doc}. A downstream UAIR (e.g.\ a hash-chain
+verifier or ECDSA component) can therefore read these directly from
+the public input without any in-circuit binding. The eventual choice
+of binary-code PCS and Hadamard-check mechanism influences only the
+proof size and verifier work at the PCS-opening step; it does not
+change the column or constraint layout exposed to a downstream
+consumer.

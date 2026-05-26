@@ -1,0 +1,157 @@
+% ===========================================================================
+\section{SHA-256 overview and target relation}\label{sec:overview}
+% ===========================================================================
+
+We briefly recall SHA-256 to fix notation, then state the relation our
+$\F_2[X]$-AIR arithmetises. The target relation is identical to that of
+\texttt{sha-uair-doc}; only the arithmetisation differs.
+
+\paragraph{Words and bit operations.}
+A \emph{word} is an integer $x \in [0\mathbin{..}2^{32}-1]$ with bit
+decomposition $x = \sum_{i=0}^{31} x_i\, 2^i$, $x_i \in \{0,1\}$.
+For $x,y,z \in [0\mathbin{..}2^{32}-1]$ and $r \in \{1,\dots,31\}$ the
+operations $\XOR$, $\AND$, $\ROTR^r$, $\SHR^r$, $\SHL^r$ are defined
+coefficient-wise on bits in the standard way; bitwise negation is
+$\NOT x := (2^{32}-1) - x$. We write $\bitpoly{32}$ for the set of
+\emph{bit-polynomials}
+$\bp{x}(X) := \sum_{i=0}^{31} x_i X^i \in \F_2[X]$.
+The map $\psi_{2}: \bitpoly{32} \to [0\mathbin{..}2^{32}-1]$ defined by
+$\psi_{2}(\bp{x}) := \bp{x}(2)$ (after lifting to $\Z[X]$) is a
+bijection.
+
+\paragraph{Ambient ring.}
+All constraints live in $\F_2[X]$, modulo two principal-ideal
+quotients chosen by the operation being arithmetised:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item Rotation identities for $\Sigma_i, \sigma_i$ live in
+        $\Frot = \F_2[X]/(X^{32}-1)$, the natural quotient for cyclic
+        rotations.
+  \item Modular-addition identities for sums modulo $2^{32}$ live in
+        $\Fshift = \F_2[X]/(X^{32})$, where multiplication by~$X$
+        coincides with $\SHL^{1}$ as a genuine ring operation (the
+        $(X^{32})$ ideal drops the bit-31 overflow automatically).
+\end{itemize}
+Modular addition is arithmetised by the per-step Binius identity of
+\Cref{lem:binius-vc}: a single column-level Hadamard relation in
+$\Fshift$ on a $31$-bit-virtual carry column, with only the carry-out
+of bit~$31$ committed as a single $\F_2$ bit per row. Multi-input
+sums are reduced to chained binary applications at the UAIR layer
+(\Cref{sec:mod-add-chain}); each binary step's $X\cdot\bp{c}$ factor
+is genuine multiplication in $\Fshift$, with the $(X^{32})$ ideal
+absorbing the bit-$31$ overflow automatically.
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Rotations} $\ROTR^r$ are exact in $\Frot$:
+        $\ROTR^r(\bp{x}) = X^{32-r}\cdot \bp{x}$ in $\Frot$.
+  \item \emph{Logical shifts} $\SHL^r, \SHR^r$ drop bits off the
+        boundary and are not ring operations on $\Frot$; we model
+        them as coordinate-wise $\F_2$-linear maps from $\bitpoly{32}$
+        to $\bitpoly{32}$ (\Cref{lem:shr-virtual},
+        \Cref{sec:xshift}). Their handling at the PIOP layer
+        (committed shifted column, lookup, or sumcheck gadget) is
+        left as a design parameter.
+  \item \emph{Bitwise AND} $\bp{x} \had \bp{y}$ is the Hadamard product:
+        coefficient-wise multiplication in $\F_2$. It is not the
+        polynomial product $\bp{x}\cdot\bp{y}$ in $\F_2[X]$ (which is
+        convolution). The mechanism enforcing the Hadamard relation
+        between commitments is left as a design parameter; see
+        \Cref{sec:and-hadamard}.
+\end{itemize}
+
+\paragraph{SHA-256 auxiliary functions.}
+SHA-256 employs six auxiliary functions; for $x,y,z \in [0\mathbin{..}2^{32}-1]$,
+\begin{align*}
+\Sigma_0(x) &:= \ROTR^{2}(x)\, \XOR\, \ROTR^{13}(x)\, \XOR\, \ROTR^{22}(x), \\
+\Sigma_1(x) &:= \ROTR^{6}(x)\, \XOR\, \ROTR^{11}(x)\, \XOR\, \ROTR^{25}(x), \\
+\Ch(x,y,z) &:= (x \AND y)\, \XOR\, ((\NOT x) \AND z), \\
+\Maj(x,y,z) &:= (x \AND y)\, \XOR\, (x \AND z)\, \XOR\, (y \AND z), \\
+\sigma_0(x) &:= \ROTR^{7}(x)\, \XOR\, \ROTR^{18}(x)\, \XOR\, \SHR^{3}(x), \\
+\sigma_1(x) &:= \ROTR^{17}(x)\, \XOR\, \ROTR^{19}(x)\, \XOR\, \SHR^{10}(x).
+\end{align*}
+
+\paragraph{Compression function.}
+Given a $512$-bit message block $(M_t)_{t \in [16]}$, an initial state
+$(a_1,\dots,h_1) \in [0\mathbin{..}2^{32}-1]^8$, and the
+$64$ public round constants $(K_t)_{t\in[64]}$, SHA-256 first expands
+the message schedule $(W_t)_{t\in[64]}$ via
+\begin{equation}\label{eq:msched}
+W_t \;=\; \begin{cases} M_t & t \in [16], \\
+W_{t-16} + \sigma_0(W_{t-15}) + W_{t-7} + \sigma_1(W_{t-2}) \pmod{2^{32}} & t \in \{17,\dots,64\},
+\end{cases}
+\end{equation}
+and then runs $64$ round updates. At round $t$, the state
+$(a_t,\dots,h_t)$ is updated according to
+\begin{align}
+&a_{t+1} \equiv h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t + \Sigma_0(a_t) + \Maj(a_t,b_t,c_t) \pmod{2^{32}}, \label{eq:a-update}\\
+&e_{t+1} \equiv d_t + h_t + \Sigma_1(e_t) + \Ch(e_t,f_t,g_t) + K_t + W_t
+                \pmod{2^{32}}, \label{eq:e-update}\\
+&(b_{t+1},c_{t+1},d_{t+1},f_{t+1},g_{t+1},h_{t+1}) = (a_t,b_t,c_t,e_t,f_t,g_t).\notag
+\end{align}
+The compression's output is the feed-forward sum
+$H_{i+1} \equiv H_i + (a_{65},\dots,h_{65}) \pmod{2^{32}}$ component-wise.
+
+\begin{remark}[Shift-register layout]\label{rem:shift-register}
+The registers $b,c,d,f,g,h$ are shifted copies of earlier values
+of $a$ and $e$: $b_{t+1}=a_t$, $c_{t+1}=a_{t-1}$, $d_{t+1}=a_{t-2}$,
+and analogously $f_{t+1}=e_t$, $g_{t+1}=e_{t-1}$, $h_{t+1}=e_{t-2}$.
+As in \texttt{sha-uair-doc}, we store only the $a$- and $e$-registers
+in our trace and recover the rest via shifted row accesses.
+\end{remark}
+
+\paragraph{Chained compressions.}
+The implementation arithmetises $N := \mathrm{NUM\_COMPRESSIONS}$
+chained compressions in a single trace, exactly as in
+\texttt{sha-uair-doc}: given a sequence of
+message blocks $(M^{(i)})_{i \in [0,N)}$ and an initial digest
+$H_0 \in [0\mathbin{..}2^{32}-1]^8$, define $H_{i+1}$ as the output of
+the $i$-th compression on input $(H_i, M^{(i)})$. The terminal value
+$H_N$ is pinned as a public boundary.
+
+\paragraph{Target relation.}
+We arithmetise the chained-compression relation
+\begin{equation}\label{eq:rel-sha}
+\mathrm{REL}_{\textsc{sha}_N} \;:=\;
+\left\{(\mathbf{i},\mathbf{x};\mathbf{w}) \;\middle|\;
+\begin{aligned}
+&\mathbf{i} = (K_t)_{t\in[64]}, \\
+&\mathbf{x} = \bigl(H_0,\;(M^{(i)})_{i \in [0,N)},\;H_N\bigr), \\
+&\mathbf{w} = \bigl((W_t^{(i)})_{i,t},\;(a_t^{(i)},\dots,h_t^{(i)})_{i,t}\bigr), \\
+&\text{each } (W_t^{(i)})_t \text{ satisfies \eqref{eq:msched}}, \\
+&\text{each round update satisfies \eqref{eq:a-update}, \eqref{eq:e-update}}, \\
+&H_{i+1} \equiv H_i + (a_{65}^{(i)},\dots,h_{65}^{(i)}) \pmod{2^{32}} \forall i \in [0,N).
+\end{aligned}\right\}.
+\end{equation}
+
+The remainder of this document constructs an $\F_2[X]$-AIR instance
+$(\mathbf{i}_{\text{air}},\mathbf{x}_{\text{air}};\mathbf{w}_{\text{air}})$
+that lies in the corresponding $\F_2[X]$-AIR relation if and only if
+the input witness lies in $\mathrm{REL}_{\textsc{sha}_N}$.
+
+\paragraph{Comparison with \texttt{sha-uair-doc}.}
+The all-$\Q[X]$ UAIR$^+$ of \texttt{sha-uair-doc} commits to lifted
+bit-polynomials in $\Q[X]$ and uses public overflow-witness columns
+($\col{PA\_OV\_*}$) to absorb the integer overhang incurred when the
+$\F_2[X]$ identities of Lemmas~\ref{lem:big-sigma},
+\ref{lem:small-sigma} are lifted back to $\Q[X]$. Modular reduction is
+performed via the $(X-2)$ ideal with small integer carry witnesses
+packed into a single column; $\AND$ is encoded by virtual residuals
+that are pinned to $\bitpoly{32}$ by the booleanity sumcheck.
+
+The present arithmetisation makes the dual choice: it stays inside
+$\F_2[X]$, removes the overflow witnesses entirely, and replaces the
+booleanity-residual encoding of $\AND$ by a direct Hadamard product
+constraint (\Cref{sec:and-hadamard}); the mechanism that discharges
+that Hadamard constraint is deferred as a design parameter.
+Modular addition is encoded by the per-step Binius identity of
+\Cref{lem:binius-vc}: a single column-level Hadamard relation in
+$\Fshift$ on a virtual carry word, with only the carry-out of bit~$31$
+committed as a single $\F_2$ bit per row. Local soundness is tight:
+the Hadamard at each bit position propagates the honest full-adder
+recurrence, so the constraint alone pins $\bp{s}$ to the honest
+modular sum (no appeal to the boundary check needed for the addition
+itself). $n$-input sums are handled at the UAIR layer by introducing
+$n - 2$ intermediate-sum bit-poly columns and applying the binary
+lemma $n - 1$ times; each binary step costs one carry bit per row and
+one Hadamard. Public-input data per add: an LSB-only compensator
+($1$ bit per row vs the $32$-bit overflow witness the all-$\Q[X]$
+construction carries). We make these counts explicit in
+\Cref{sec:summary}.

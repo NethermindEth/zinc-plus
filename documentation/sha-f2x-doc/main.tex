@@ -1,0 +1,64 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{The SHA-256 $\F_2[X]$-AIR \\
+       \large Binius-style arithmetisation over $\F_2[X]$}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Draft companion to the all-$\Q[X]$ \texttt{sha-uair-doc}.
+This document describes a different arithmetisation of the same SHA-256
+relation, committing natively over $\F_2[X]$ and treating AND as a
+column-level Hadamard-product relation whose proof mechanism is left
+as a design parameter.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe a SHA-256 arithmetisation that commits all witness columns
+as bit-polynomials in $\F_2[X]$ rather than lifting them to $\Q[X]$
+with overflow witnesses. The design rests on four primitives:
+\emph{(i)}~$\XOR$ is realised as polynomial addition in $\F_2[X]$ and
+is free at the commitment layer; \emph{(ii)}~$\AND$ is realised as
+coefficient-wise (Hadamard) multiplication, declared as a column-level
+Hadamard-product relation whose discharge mechanism is deferred as a
+design parameter; \emph{(iii)}~$\SHR$ and $\ROTR$ are realised as
+bit-level linear maps on bit-polynomial columns with the access
+mechanism for shifted values likewise deferred; \emph{(iv)}~modular
+addition $\pmod{2^{32}}$ is realised by the \emph{per-step Binius
+identity with virtual carry} in the quotient ring $\F_2[X]/(X^{32})$:
+for each binary step $\bp{s} \equiv \bp{a} + \bp{b} \pmod{2^{32}}$,
+the carry word $\bp{c} \in \bitpoly{32}$ has its lower $31$ bits
+defined as $\SHR^{1}$ of the XOR difference $\bp{s} + \bp{a} + \bp{b}$
+— a free combination of committed columns — and only the carry-out
+of bit~$31$ (one $\F_2$ bit per row) is committed; the binary
+addition is then pinned by the linear identity $\bp{s} = \bp{a} +
+\bp{b} + X\cdot\bp{c}$ together with the Binius full-adder Hadamard
+$(\bp{a} + X\cdot\bp{c}) \had (\bp{b} + X\cdot\bp{c}) = \bp{c} +
+X\cdot\bp{c}$ in $\F_2[X]/(X^{32})$. Multi-input modular sums chain
+$n - 1$ such binary steps with $n - 2$ intermediate-sum columns.
+Multiplication by $X$ in $\F_2[X]/(X^{32})$ is the genuine ring
+operation; an LSB-only public compensator absorbs the bit-$0$ residue
+on inactive rows. We assemble these primitives into a complete
+chained-compression AIR following the column- and constraint-layout
+conventions of \texttt{sha-uair-doc}. The result is a constraint
+system whose final state is a single MLE-evaluation claim per
+committed column over the verifier's challenge extension field, with
+tight local soundness on every modular addition (no appeal to the
+global $H_N$ boundary check needed for individual adds).
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/arithmetization}
+\input{sections/uair}
+\input{sections/summary}
+
+\end{document}
