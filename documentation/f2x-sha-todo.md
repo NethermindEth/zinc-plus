@@ -29,7 +29,7 @@ at the bottom.
 
 ---
 
-## Branch caveat: Group 8 rolled back via Path C salvage (this branch)
+## Branch: Group 8 fully removed (this branch)
 
 This branch (`f2-clean`, cherry-picked from `main-beta`) **does not
 include** the Group 8 commits originally on `claude/gkr-virtual-cols`:
@@ -39,31 +39,28 @@ exclusion from commit + γ-batched open. Test-uair's witness generator
 and `Sha256F2Ideal` are at the pre-Group-8 shape (27 binary cols,
 `(X^32 - 1)` for additions, no `W_K_*` cols).
 
-**Caveat — file content does not match the cherry-pick history.**
-Resolving the `322f74a` multipoint-eval conflict by taking the
-incoming tree pulled the Group 8 protocol code (struct definitions
-for `F2KVirtualSpec` / `F2KSource`, the K-witness-tail assertions,
-the K-aware open slicing) back into `protocol/src/f2_prove.rs`, even
-though the Group 8 SHAs are not in the cherry-pick log. The
-plumbing is rendered **inert** by stubbing
-`protocol/benches/f2_sha256.rs::sha_f2_k_virtuals()` to return
-`Vec::new()` — every call site passes an empty K-spec list, so
-`num_k = 0` everywhere and the K paths short-circuit.
+The protocol code (`protocol/src/f2_prove.rs`) and the bench
+(`protocol/benches/f2_sha256.rs`) have been scrubbed of all K-virt
+machinery: no `F2KVirtualSpec` / `F2KSource` struct definitions, no
+`k_specs` parameter on any function, no K-tail layout assertions, no
+K-aware witness slicing, no `sha_f2_k_virtuals()` helper or call
+sites. The intermediate "stub the helper to neutralize the plumbing"
+state (commit 7a01531) is now superseded by the deep removal in
+commit 57af4e0.
 
 Consequences:
-- Issue 1 (trusted K-virtual MLE eval discharge) does NOT fire on
-  this branch — there are no K-virtuals to discharge.
+- Issue 1 (trusted K-virtual MLE eval discharge) is structurally
+  absent on this branch — there is no K machinery, sound or
+  otherwise.
 - The "exclude 7 combined-K cols from commit + γ-batched open"
   optimisation is gone (the witness has no K cols to exclude).
-- The `prove_then_verify_sha256_f2_with_k_virtuals_roundtrips` test
-  was removed (depends on dropped col constants).
-- If future work re-introduces K-virtuals, the protocol-side
-  machinery is already present in `f2_prove.rs` — just remove the
-  stub and provide real K specs.
+- Re-introducing K-virtuals on this branch would require restoring
+  the struct definitions and the plumbing through the prove/commit/
+  open/verify entry points — not a one-line flag flip.
 
 Entries below referring to "K cols" / "combined-K" / "F2KVirtualSpec"
 describe machinery that ran on `claude/gkr-virtual-cols` but is
-**inert** on this branch.
+**not present** on this branch.
 
 ---
 
