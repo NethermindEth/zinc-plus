@@ -66,6 +66,31 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Metal Blake3 dispatch: lift hard-coded `min(256)` threadgroup cap (commit `31c422b`)
+- **What**: `zip-plus/src/metal_gpu/mod.rs:201-214`. The Blake3
+  hash-kernel dispatch was rounding the threadgroup size down to a
+  multiple of `thread_execution_width` and then capping it at 256,
+  regardless of what the pipeline itself reported as
+  `max_total_threads_per_threadgroup`. Removed the artificial cap;
+  the runtime's own limit (which already accounts for the kernel's
+  per-thread private-memory and register footprint) now wins.
+- **Why**: at SHA-256 F_2 nvars≥16, `num_cols` (= num_leaves) is in
+  the 10⁴–10⁵ range, so the dispatch was using one threadgroup per
+  256 leaves — likely under-occupying Apple Silicon GPUs that support
+  ≥ 512 threads/threadgroup for kernels of this resource shape. The
+  kernel's worst-case per-thread private memory is ~864 B (the
+  24-deep subtree-stack `uint[8]` + `stack_h[24]` + `cv[8]`); the
+  runtime already considers this when reporting max-threads, so the
+  hard cap was redundant.
+- **Verification**: `gpu_blake3_matches_cpu_for_various_sizes` and
+  `gpu_blake3_matches_cpu_for_large_leaves` pass; F_2 SHA-256 lib
+  tests 13/13 pass under
+  `--features parallel,simd,unchecked,metal_gpu`. Empirical bench
+  delta not measured in this session — expected: lower GPU dispatch
+  overhead, ~10–30% Blake3 throughput improvement on Apple Silicon
+  per `metal_gpu::tests::gpu_blake3_matches_cpu_for_large_leaves`-
+  shaped workloads.
+
 ### Parallelise SHA F_2 witness gen post-loop builders (commit `<TBD>`)
 - **What**: in `test-uair/src/sha256_f2.rs::generate_random_trace`,
   switch the per-row builder loops that run *after* the
@@ -465,6 +490,43 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
+### Fast u64 scatter in `scatter_matrix_into_gpu_slab` for F2PackU64 cells
+- **What**: `zip-plus/src/merkle.rs::scatter_matrix_into_gpu_slab`
+  currently routes per-cell writes through
+  `cell.write_transcription_bytes_exact(dst)`, which (for
+  `BinaryU64Poly<D>` via `delegate_const_transcribable` → u64)
+  expands to `dst.copy_from_slice(&value.to_le_bytes())`. LLVM
+  should fuse this into a single 8-byte unaligned store, but
+  inspecting the trip through `slice::from_raw_parts_mut` +
+  `to_le_bytes` + `copy_from_slice` suggests there is still some
+  overhead from the slice-fattening and the unknown alignment of
+  `dst`. An explicit `ptr::write_unaligned::<u64>(...)` after
+  `cell.pack_u64().to_le()` removes the slice creation, the
+  `[u8;8]` intermediate, and the trait-method indirection.
+- **Why deferred (not implemented)**: the scatter is generic over
+  `R: ConstTranscribable`, called from a generic `ZipPlus::commit_grouped`
+  that runs for BOTH the F_2 path (cells = `BinaryPoly<64>`,
+  F2PackU64) and the integer path (cells = `Int<3>`, NOT F2PackU64).
+  Adding `F2PackU64` to the scatter's bounds breaks the integer
+  callers. Stable Rust has no way to specialise the scatter
+  on-the-fly without either (a) `min_specialization` (nightly),
+  (b) a split commit pipeline (`commit_grouped_f2` + `commit_grouped_int`),
+  or (c) `TypeId`-based dispatch with `R: 'static`.
+- **How to apply** (when picked up): the simplest stable route is
+  to add a `scatter_matrix_into_gpu_slab_u64<R: F2PackU64 + ConstTranscribable>`
+  sibling function in `merkle.rs`, then either (i) split `commit_grouped`
+  into an `_f2` variant with a tighter `Zt::Cw: F2PackU64` bound
+  that calls the new scatter, or (ii) plumb a "fast scatter" trait
+  method on `ZipTypes` with a default impl that calls the slow
+  scatter and a `BinaryPoly<D>`-side override.
+- **Expected impact**: estimated 2–5% of Commit wall time. Smaller
+  than the 5–15% the optimization audit estimated — LLVM does most
+  of the work already; the win is mostly from removing the slice
+  construction and bounds-check structure rather than from changing
+  the actual store width.
+- **Soundness**: none. Pure compile-time refactor; the bit pattern
+  written is identical.
+
 ### Hadamard discharge for the 13 + 3 column-level relations (step 5 of 5)
 - **What**: an external `(x + X·c) ⊙ (y + X·c) = c + X·c` (in
   `F_shift`) check for each of the 13 chained-`BiniusAdd` binary
@@ -548,6 +610,71 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 - **Fix idea**: maybe run setup once outside the batch and clone
   the inputs per-iter? Or accept the inflation and document it.
 
+### `prove_f2_open` per-column loop is over the full witness slice (20 cols), not the paired-commit set (9)
+- **Where**: `protocol/src/f2_prove.rs:1945-1991` (the
+  `per_col_results` loop) and `:2020-2069` (the
+  `per_col_combined` loop). Both iterate `num_cols =
+  trace_binary_cols.len()` which the caller passes as
+  `&trace.binary_poly[num_pub_bin..]` = 20 cols at
+  `prove_f2_full*` call sites (`f2_prove.rs:2684`,
+  `f2_prove.rs:2796`).
+- **Observation**: those 20 cols include the 12 bit-op virtuals
+  (`SHR^j(PA_C)` for j ∈ 1..12). Their MLE eval claims at r* are
+  ALREADY independent witness claims because the open's job is to
+  bind them via γ-batching + Schwartz-Zippel discharge — except the
+  γ_g for each virtual col can be folded into the γ for its source
+  via the per-cell BitOp algebra (XOR/Rot/SHR all commute with the
+  linear γ-fold). At least for the SHIFTR case (which is all 12
+  virtuals here), the virtual's contribution to `b_g`, `a_g'`, and
+  `combined_row_g` can be derived from the source's
+  contribution by applying the same BitOp to the *cells before
+  inner-producting with q1*. In other words: open does NOT need to
+  re-lift+inner-product the virtual cell stream — it can derive
+  the virtual's per-row partial from the source's per-row partial
+  after the cell-level `apply_bit_op_u32`.
+- **Expected impact**: drop the per-col loop's outer iteration count
+  from 20 → 8 (1 primary witness per source for each of the 5
+  non-virtual witness cols plus 3 source cols that have virtuals).
+  Estimated 30-50% of `prove_f2_open` wall time given the per-col
+  cost dominates (each col is a full `O(num_rows × row_len)`
+  cell-lift + multiply pass). Verify-side mirror needs the same
+  shape change. **Effort: M**, with a careful soundness pass on
+  what "fold γ into the source via BitOp" means at the wide-poly
+  product layer (currently the lift is `bp_to_f2_poly_1` then
+  multiply by γ as a `BinaryF2Poly<3>` — the BitOp's
+  bit-permutation needs to land *before* the lift, not after).
+
+### Multipoint-eval as degenerate γ-rerandomization (down_evals=[])
+- **Where**: `protocol/src/f2_prove.rs:2628-2638` and
+  `f2_prove.rs:2758-2768` — both call sites pass `down_evals=&[]`
+  and `shifts=&[]`.
+- **What it's doing today**: with empty shifts/downs, the
+  `MultipointEval::prove_as_subprotocol`
+  (`piop/src/multipoint_eval.rs:159-180`) reduces to a degree-2
+  sumcheck of `eq(b, r*) · Σ_j γ_j · trace_j(b)`. That's
+  essentially a γ-rerandomization of the per-column claims from
+  r* to a fresh r_0, with the full sumcheck cost (`num_vars`
+  rounds of degree-2 messages over GF(2^192)). The combined
+  evaluation at r_0 is then sent through the open path.
+- **Why it isn't free overhead**: the rerandomization moves the
+  open's `r*` to a new `r_0` so the prover can't tailor the open
+  to the IC sumcheck's exact point. Without it, the open's
+  Schwartz-Zippel batching is restricted to the IC point — fine
+  for the current single-open structure but blocks any future
+  multi-point lookup batching.
+- **Possible optimization**: when `shifts.is_empty()`, the
+  multipoint-eval phase could fall back to a leaner γ-fold-only
+  protocol that skips the eq-table build and the sumcheck (just
+  draws γ and the verifier checks the same fold via a single
+  GF(2^192) batch identity). The current shape pays the full
+  sumcheck cost for what is effectively a free rerandomization.
+- **Expected impact**: small but nonzero — at nvars=20 the inner
+  sumcheck is ~25 rounds × O(2^num_vars / 2^round) over
+  GF(2^192). The fold-only fallback would save the per-round
+  message bytes and the eq-table eval. Estimated 2-4% Prove e2e.
+  **Effort: M** (a new sub-protocol shape + verifier mirror).
+  Lower priority than the per-col open loop above.
+
 ### Sumcheck data-clone elimination
 - **Where**: after the two clones we eliminated in commit
   `22f618a`, there's still room. The `projected_trace` at
@@ -576,6 +703,48 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 - Low priority — the residual wrap-up at nvars=22 is now ~40 ms
   for Open, ~270 ms for UAIR (post-clone-removal). Not currently
   the largest pain.
+
+### Generalise `F2BitOpVirtualSpec` to a "multi-source XOR with per-source per-cell BitOp" spec (chained-Binius cols)
+- **What**: introduce a new virtual-spec type whose evaluation rule
+  is `target[i] = XOR_k op_k(source_k[i])` for a list of
+  `(source_col, BitOp)` pairs, generalising the current per-cell
+  `F2BitOpVirtualSpec` (which is the single-source case). Then
+  declare the 6 chained-Binius intermediate cols (`W_W_S1`,
+  `W_W_S2`, `W_T1_S1..S4`, in `test-uair/src/sha256_f2.rs:1068-1073`,
+  protocol indices `cols::W_W_S1` etc) as virtuals under this spec.
+- **Why it works on this branch (vs the K-virt machinery on
+  `claude/gkr-virtual-cols`)**: every chained-Binius intermediate
+  `s_k` is bit-by-bit determined by its predecessor + XOR
+  contributions + a single LSB carry bit pulled from `PA_C`, **but
+  the constraint `(s_k + ...)[0] = 0 (mod X^32 − 1)` already locks
+  `s_k` bit 0**. The remaining bits 1..31 of `s_k` are NOT yet
+  AIR-pinned (that's the Hadamard step 5 work in the entry above).
+  Concretely: the LHS of C5a in `test-uair/src/sha256_f2.rs:500-503`
+  forces `W_W_S1 ≡ W_W + W_SIG0^{↓1} + κ_{W,1} (mod X^32)`, but
+  `mod X^32 − 1` is also `mod X^32` only at bit 0 — bits 1..31 are
+  free in the current AIR. So **declaring `W_W_S1` virtual today is
+  unsound at the AIR layer** until Hadamard discharge (step 5) lands.
+- **Why this is different from the K-virt Issue 1 hole**: this spec
+  is purely per-cell (no row shifts) — it derives `target[i]` from
+  the *same row* of source cols. MLE evaluation at a fixed `r*`
+  commutes with per-cell BitOp + XOR, so the verifier can recompute
+  `MLE(target)(r*) = XOR_k op_k(MLE(source_k)(r*))` with no
+  row-shift discharge needed. Soundness for the eval-at-r* step is
+  free. The blocker is only the AIR-layer bit-1..31 pinning, which
+  is the same Hadamard work the K-virt rollback also waits on.
+- **Expected impact if Hadamard lands**: drops `paired_batch` from 9
+  → 6 (excluding 6 cols from commit halves the leaf-bytes input to
+  Blake3, and shrinks paired storage by ~1/3). At nvars=20 the
+  per-leaf-byte work and the GPU slab size shrink ~33%, plausibly
+  buying back ~10-15% of the Commit phase. The open's per-column
+  loop in `prove_f2_open` still runs over the full witness slice
+  (20 cols), so this doesn't directly speed open; that would need a
+  separate "open-virtuals" change.
+- **Effort**: **L** as long as Hadamard discharge is the gate. The
+  spec type itself is a small addition; the BlockerN is the
+  unrelated Hadamard step 5 work. Calling it out so future-me
+  doesn't try the spec change in isolation and produce an unsound
+  prover. **Do not attempt without Hadamard.**
 
 ### Investigate Metal `MTLCommandQueue` reuse / `MTLCommandBuffer` pooling
 - **Why**: the GPU dispatch warmup test (rejected above) shows the
