@@ -445,6 +445,54 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Investigated, didn't help
 
+### `F2NativeIc::prove_linear` loop inversion + bit-d masks (rejected — wrong target)
+- **Hypothesis (from optimization survey)**: the per-bit
+  `coeffs[d] += &eq_table[row]` accumulation in
+  `protocol/src/f2_native_ic.rs:686-705` (and the analogous shifts
+  loop `:715-742`) could be rewritten with `d` as the outer loop
+  and `i` as the inner, using a precomputed `bit_d_mask: Vec<u64>`
+  per column. Claimed impact: 5-10% UAIR/IC.
+- **Why the claim doesn't hold up**:
+  1. The current code already short-circuits on `bits == 0` via
+     `while bits != 0 { ... }` — zero cells contribute nothing.
+     For random data (~50% set bits per cell), the inner loop
+     runs ~16 times per cell.
+  2. The proposed inversion iterates ALL `(d, i)` pairs:
+     `32 × usable_rows` per column. Strictly MORE iterations than
+     the current sparse pattern (~16 × usable_rows for random
+     data; far less when cells are zero).
+  3. Per-column bit-d masks are large at scale: at nvars=22
+     they'd be `usable_rows / 8 × D = 4M/8 × 32 = 16 MB per col`,
+     ~450 MB total across 28 cols. Cache-hostile.
+  4. The proposed SIMD vectorisation needs an efficient
+     "masked XOR-reduce" primitive; NEON (Apple Silicon) lacks a
+     direct one. AVX-512's `vpternlogq` could help on x86 but
+     doesn't apply to the target platform.
+- **Measurement (criterion at nvars=22, --features parallel,simd,
+  unchecked,metal_gpu)**:
+
+  | Micro                          | Time     | % of UAIR-FULL | % of Prove e2e |
+  |--------------------------------|----------|----------------|----------------|
+  | UAIR-a-F2NativeIC (`prove_linear`) | 24.5 ms | 5.8%           | ~1.1%          |
+  | UAIR-FULL                      | 424.5 ms | 100%           | ~19%           |
+  | Prove (for context, nvars=22)  | 2.25 s   | —              | 100%           |
+
+  Even a *complete* elimination of `prove_linear` time would only
+  yield ~1.1% Prove e2e — far below the 5-10% the survey
+  estimated. A realistic rewrite that saves, say, 50% of
+  `prove_linear`'s time is ~0.5% e2e: too small to justify the
+  added complexity.
+- **Adjacent opportunity (not pursued either, same code)**: at
+  `nvars=22` only ~476 of 4M rows (= 7 compressions × 68 rows
+  per comp) carry non-zero cells; the remaining ~99.99% hit the
+  `while bits != 0` short-circuit but still pay loop-control +
+  cell load + `bp_to_u64`. Plumbing an "active row hint" through
+  the Uair trait so `prove_linear` iterates only `0..active_rows`
+  would skip ~117 M empty iterations across all cols. Upper bound
+  on savings: still ≤ `prove_linear`'s 24 ms, so ≤ 1% Prove e2e.
+  Tracked here but not implemented in this session — the payoff
+  is small and the abstraction change touches `Uair`/`UairSignature`.
+
 ### Metal Blake3 dispatch: lifting the `min(256)` threadgroup cap (rejected)
 - **Hypothesis**: the hard-coded `min(256)` cap on
   `threads_per_threadgroup` in
