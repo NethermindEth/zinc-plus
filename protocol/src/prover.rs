@@ -35,9 +35,8 @@ use zip_plus::{
 // Type-state structs
 //
 
-/// Persistent prover infrastructure carried across every step: the
-/// Fiat-Shamir transcript, PCS parameters/hints/commitments, and trace
-/// reference.
+/// Initial prover state, before commitment: the UAIR signature, the
+/// caller-provided original trace, and the folded witness trace.
 #[derive(Clone, Debug)]
 pub struct ProverFolded<
     'a,
@@ -54,9 +53,9 @@ pub struct ProverFolded<
     _phantom: PhantomData<(&'a u8, U, F)>,
 }
 
-/// Persistent prover infrastructure carried across every step: the
-/// Fiat-Shamir transcript, PCS parameters/hints/commitments, and trace
-/// reference.
+/// Persistent prover infrastructure carried across every subsequent
+/// step: the Fiat-Shamir transcript, PCS parameters/hints/commitments,
+/// and trace reference.
 /// Obtained after step 1 via [`step1_commit`](ProverFolded::step1_commit).
 #[derive(Clone, Debug)]
 pub struct ProverCommitted<
@@ -313,7 +312,7 @@ where
     F: PrimeField,
     F::Inner: ConstTranscribable,
 {
-    /// Step 1: Folding the trace.
+    /// Step 0: Folding the trace.
     #[allow(clippy::type_complexity)]
     pub fn step0_fold<'a>(
         trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
@@ -939,7 +938,7 @@ where
     /// Zinc+ full PIOP prover.
     ///
     /// Runs all protocol steps in sequence and returns the assembled proof.
-    /// For per-step control, start with [`Self::step1_commit`] and chain the
+    /// For per-step control, start with [`Self::step0_fold`] and chain the
     /// individual `stepN_*` methods.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
@@ -1013,7 +1012,7 @@ where
     debug_assert_eq!(alpha_powers.len(), D);
     let zero = F::zero_with_cfg(field_cfg);
 
-    // Sequential row loop: per-row work is at most `D` conditional adds,
+    // Sequential row loop: per-row work is at most `D` conditional adds.
     // The caller parallelizes the outer loop over witness binary-poly columns.
     let evaluations: Vec<F::Inner> = col
         .evaluations

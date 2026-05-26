@@ -179,9 +179,9 @@ pub struct VerifierSumchecked<
     cpr_down_evals: Vec<F>,
     /// `bit_slice_evals` carried over from booleanity's `finalize_verifier`,
     /// to be collapsed into the appended `up_evals` entries
-    /// $c_j = \sum_i b_{j,i}\,(\alpha')^i$
+    /// $c_j = \sum_i b_{j,i}\,(\alpha')^i$.
     ///
-    /// `None` iff there are  no witness binary-poly columns.
+    /// `None` iff there are no witness binary-poly columns.
     bool_bit_slice_evals: Option<Vec<F>>,
     /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
     /// booleanity's `finalize_verifier`. Consumed in step 5 (bridge
@@ -492,7 +492,9 @@ where
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
-    /// Step 4: Sumcheck verification (CPR + booleanity lookup).
+    /// Step 4: Sumcheck verification (CPR + optional booleanity +
+    /// future lookup groups), followed by the squeeze of the bridge
+    /// challenge $\alpha'$ when booleanity ran.
     pub fn step4_sumcheck_verify(
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
@@ -511,9 +513,11 @@ where
             &self.field_cfg,
         )?;
 
-        // Booleanity pre-sumcheck: squeezes r, \gamma, \delta in that order.
-        // Determined statically from the UAIR signature, so prover and
-        // verifier always agree on the presence flag.
+        // Booleanity pre-sumcheck: squeezes the zerocheck point `r`
+        // (num_vars field elements) and the batching challenge `alpha`,
+        // in that order.
+        // Presence is determined statically from the UAIR signature, so prover and
+        // verifier always agree on it.
         let sig = self.base.uair_signature.clone();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_total_bin = sig.total_cols().num_binary_poly_cols();
@@ -992,7 +996,7 @@ where
     /// Zinc+ full PIOP verifier.
     ///
     /// Runs all verification steps in sequence and returns `Ok(())` on
-    /// success. For per-step control, starts with
+    /// success. For per-step control, start with
     /// [`Self::step0_reconstruct_transcript`] and chain the individual
     /// `stepN_*` methods.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]

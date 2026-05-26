@@ -10,12 +10,18 @@
 //!
 //! After the three compiler steps, the protocol continues with:
 //!
-//! - Combined CPR + Lookup multi-degree sumcheck (CPR group at degree
-//!   `max_deg+2`, one lookup group per table type; shared eval point `r*`)
-//! - Multi-point evaluation sumcheck (combines up/down evals at r* into a
-//!   single evaluation point r_0)
-//! - Lift-and-project (unprojected MLE evaluations at r_0)
-//! - Zip+ PCS open/verify at r_0
+//! - Combined CPR + Booleanity + Lookup multi-degree sumcheck (CPR group at
+//!   degree `max_deg+2`; optional booleanity group at degree 3 when the UAIR
+//!   has witness binary-poly columns; one lookup group per table type; shared
+//!   eval point `r*`)
+//! - $\alpha'$ bridge: squeeze a fresh challenge $\alpha'$ after the booleanity
+//!   `bit_slice_evals` are absorbed, and append one extra $\alpha'$-projected
+//!   MLE + up-eval to the multipoint-eval inputs per witness binary-poly column
+//!   (see `BooleanityChecker`)
+//! - Multi-point evaluation sumcheck (combines up/down evals at `r*` into a
+//!   single evaluation point `r_0`)
+//! - Lift-and-project (unprojected MLE evaluations at `r_0`)
+//! - Zip+ PCS open/verify at `r_0`
 
 pub mod fold;
 pub mod prover;
@@ -73,10 +79,10 @@ pub struct Proof<F: PrimeField> {
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof (up_evals + down_evals).
     pub cpr_proof: CombinedPolyResolverProof<F>,
-    /// Multi-degree sumcheck proof (CPR group + future lookup groups).
+    /// Multi-degree sumcheck proof (CPR group + lookup groups).
     pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
     /// Multi-point evaluation sumcheck proof (combines up_evals and
-    /// down_evals at r' into a single evaluation point r_0).
+    /// down_evals at `r*` into a single evaluation point `r_0`).
     pub multipoint_eval: MultipointEvalProof<F>,
     /// Witness-only polynomial MLE evaluations at r_0 in F_q[X]
     /// (after \phi_q, before \psi_a), ordered as

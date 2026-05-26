@@ -62,10 +62,10 @@ pub struct ProverState<F: PrimeField> {
     pub round: usize,
     /// Claimed sum for the first round polynomial.
     pub asserted_sum: Option<F>,
-    /// When `true`, the next [`prove_round`] invocation pushes the verifier
-    /// challenge into `randomness` but skips the `fix_variables_with_config`
-    /// fold of `mles`. Used by round-1 fast paths (see that pre-fold the
-    /// MLEs as part of their setup.
+    /// When `true`, the next [`Self::prove_round`] invocation pushes the
+    /// verifier challenge into `randomness` but skips the
+    /// `fix_variables_with_config` fold of `mles`. Used by round-1 fast
+    /// paths (see that pre-fold the MLEs as part of their setup.
     /// The flag is reset to `false` after the skipped fold.
     pub skip_next_fold: bool,
 }

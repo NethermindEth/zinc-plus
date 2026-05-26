@@ -5,8 +5,7 @@
 //! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
 //! CPR group with shared randomness, and emits bit-slice claims at the
 //! multi-degree sumcheck output point $r^\star$ for the protocol layer's
-//! $\alpha'$ substitution into multipoint-eval (see "Soundness bridge"
-//! below).
+//! $\alpha'$ bridge into multipoint-eval (see "Soundness bridge" below).
 //!
 //! # Relation
 //!
@@ -45,24 +44,26 @@
 //! at $r^\star$. The protocol-layer caller squeezes a fresh challenge
 //! $\alpha'$ from the transcript **after** `bit_slice_evals` are absorbed
 //! (the absorption is performed by [`BooleanityChecker::finalize_prover`] /
-//! `finalize_verifier`), then substitutes the multipoint-eval input value
-//! for each witness binary-poly column $u_j$ with
+//! `finalize_verifier`), then, for each witness binary-poly column $u_j$,
+//! *appends* one extra column to the multipoint-eval input list:
+//! - an extra MLE $\widetilde{\psi_{\alpha'}(u_j)}$ (the prover-side
+//!   $\alpha'$-projection of $u_j$), and
+//! - an extra up-eval scalar $c'_j \;:=\; \sum_{i=0}^{D-1}
+//!   b_{j,i}\,\alpha'^{\,i}$ (where $b_{j,i} = \widetilde{v_{j,i}}(r^\star)$
+//!   from `bit_slice_evals`).
 //!
-//! $$
-//!   c'_j \;:=\; \sum_{i=0}^{D-1} b_{j,i}\,\alpha'^{\,i}.
-//! $$
+//! No `ShiftSpec` references the appended slot, so down-evals / shifts
+//! pass through unchanged: row-shifted projections of witness binary-poly
+//! columns inherit booleanity from the un-shifted, $\psi_a$-projected
+//! slot they already reference in the multipoint-eval sumcheck.
 //!
-//! Multipoint-eval / PCS is $\psi$-oblivious, so swapping the value at
-//! the multipoint-eval boundary and evaluating each $\bar u_j$ at
-//! $\alpha'$ in the lifted-evals step enforces
+//! Multipoint-eval / PCS is $\psi$-oblivious, so the appended slot
+//! combined with the lifted-evals step evaluating the corresponding
+//! $\bar u_j$ at $\alpha'$ enforces
 //! $\widetilde{\psi_{\alpha'}(u_j)}(r^\star) = c'_j$ via the PCS chain.
 //! By Schwartz–Zippel on the indeterminate $X$, if `bit_slice_evals` are
 //! not the true bit-decomposition then equality fails with probability
 //! $\le (D-1)/|F|$, so the verifier rejects.
-//!
-//! Row-shifted projections of witness binary-poly columns (used when a
-//! UAIR `ShiftSpec` sources from such a column) are bound implicitly by
-//! the multipoint-eval sumcheck's through original columns.
 
 use crate::{
     CombFn,
@@ -146,8 +147,9 @@ pub struct BoolVerifierAncillary<F: PrimeField> {
 /// Carries the (sumcheck-residue-validated) bit-slice evaluations at the
 /// shared multi-degree sumcheck point $r^\star$. The protocol-layer
 /// caller squeezes $\alpha'$ from the transcript (after this struct
-/// is produced) and uses it together with these values to substitute the
-/// multipoint-eval inputs for witness binary-poly columns.
+/// is produced) and uses it together with these values to *append* one
+/// extra multipoint-eval column (and up-eval $c'_j$) per witness
+/// binary-poly column — see the module-level docs.
 #[derive(Clone, Debug)]
 pub struct BoolVerifierSubclaim<F: PrimeField> {
     /// Bit-slice MLE evaluations at `r*`, in `(j-major, i-minor)` order.
@@ -343,8 +345,10 @@ where
     /// absorbs `bit_slice_evals` into the transcript.
     ///
     /// The bit-decomposition consistency at $r^\star$ is **not** checked
-    /// here; the protocol layer squeezes $\alpha'$ and substitutes
-    /// the multipoint-eval inputs against `bit_slice_evals`.
+    /// here; the protocol layer squeezes $\alpha'$ and appends an extra
+    /// multipoint-eval column (and up-eval $c'_j$) per witness
+    /// binary-poly column derived from `bit_slice_evals` — see the
+    /// module-level docs.
     pub fn finalize_verifier(
         transcript: &mut impl Transcript,
         proof: BooleanityProof<F>,
@@ -634,9 +638,10 @@ fn batched_booleanity_sum<F: PrimeField>(
 /// i-th bit MLE evaluates at hypercube point `b` to the i-th bit of the
 /// row entry `trace_bin_poly[j][b]`.
 ///
-/// This helper is the single source of truth for MLE ordering. Both the
-/// booleanity sumcheck group and the `MultipointEval` extension call it
-/// to guarantee identical ordering between prover and verifier.
+/// Used by the `num_vars == 1` fallback of
+/// [`BooleanityRound1FastPath::fold_with_challenge`] (where the standard
+/// prover never performs the round-1 fold, so the fast path must emit
+/// the un-folded MLE bundle directly) and by booleanity unit tests.
 fn build_witness_bit_slice_mles<F, const D: usize>(
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     field_cfg: &F::Config,
@@ -815,13 +820,13 @@ mod tests {
     }
 
     /// Exercises the fast-path edge case where `eq_other_table = [1]`
-    // (empty product) and `fold_with_r1` produces 0-variable MLEs,
-    // after which the rounds-2..num_vars loop runs zero times.
+    /// (empty product) and `fold_with_challenge` produces 0-variable
+    /// MLEs, after which the rounds-2..num_vars loop runs zero times.
     #[test]
     fn happy_path_num_vars_one() {
         // Two columns, two rows each. Mixed bit patterns so the bit-slice
         // MLEs are not all-zero (exercises every branch of the 4-way
-        // bit-fold table in `fold_with_r1`).
+        // bit-fold table in `fold_with_challenge`).
         let c0 = build_col(vec![[true, false, true, false], [false, true, true, true]]);
         let c1 = build_col(vec![[false, false, true, true], [true, true, false, false]]);
         run_roundtrip(&[c0, c1], 1, |_| {}, |_| false, true);
@@ -1039,9 +1044,9 @@ mod tests {
         );
     }
 
-    /// Post-round-1 MLE values from `fold_with_r1(r_1)` are bit-identical
-    /// to what `fix_variables_with_config(&[r_1], cfg)` would produce on
-    /// the standard-path full-size MLEs.
+    /// Post-round-1 MLE values from `fold_with_challenge(&r_1)` are
+    /// bit-identical to what `fix_variables_with_config(&[r_1], cfg)`
+    /// would produce on the standard-path full-size MLEs.
     #[test]
     fn fast_path_fold_with_r1_matches_standard_fix_variables() {
         let cfg = &();
