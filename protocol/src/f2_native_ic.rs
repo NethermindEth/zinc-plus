@@ -688,16 +688,32 @@ where
                 let mut coeffs: Vec<F> = (0..D)
                     .map(|_| F::zero_with_cfg(field_cfg))
                     .collect();
+                // SAFETY invariant for `get_unchecked` below:
+                // * `row < usable_rows ≤ eq_table.len()` and
+                //   `row < col.evaluations.len() = num_rows`.
+                // * `d = bits.trailing_zeros() < D ≤ W_BITS = 64`
+                //   because `bp_to_u64::<D>` masks bits above
+                //   position `D-1`, and `coeffs.len() == D`.
                 for row in 0..usable_rows {
-                    let cell = &col.evaluations[row];
+                    let cell = unsafe { col.evaluations.get_unchecked(row) };
                     let mut bits = bp_to_u64::<D>(cell);
+                    debug_assert!(
+                        D == 64 || bits >> D == 0,
+                        "BinaryPoly<{D}> cell has bits above position {} — \
+                         get_unchecked_mut(d) below would UB",
+                        D - 1,
+                    );
+                    if bits == 0 {
+                        continue;
+                    }
+                    let eq_val = unsafe { eq_table.get_unchecked(row) };
                     while bits != 0 {
                         let d = bits.trailing_zeros() as usize;
                         #[allow(clippy::arithmetic_side_effects)]
                         {
                             bits &= bits - 1;
                         }
-                        coeffs[d] += &eq_table[row];
+                        unsafe { *coeffs.get_unchecked_mut(d) += eq_val };
                     }
                 }
                 DynamicPolynomialF::new_trimmed(coeffs)
@@ -724,17 +740,30 @@ where
                     s.saturating_add(usable_rows),
                 );
                 for j in s..max_j {
-                    let cell = &source.evaluations[j];
+                    let cell = unsafe { source.evaluations.get_unchecked(j) };
                     let mut bits = bp_to_u64::<D>(cell);
+                    debug_assert!(
+                        D == 64 || bits >> D == 0,
+                        "BinaryPoly<{D}> cell has bits above position {} — \
+                         get_unchecked_mut(d) below would UB",
+                        D - 1,
+                    );
+                    if bits == 0 {
+                        continue;
+                    }
+                    // `i = j - s` with `j ≥ s` and `j < s + usable_rows`,
+                    // so `i < usable_rows ≤ eq_table.len()`. `d < D` by
+                    // the bp_to_u64 mask, so `d < coeffs.len()`.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    let i = j - s;
+                    let eq_val = unsafe { eq_table.get_unchecked(i) };
                     while bits != 0 {
                         let d = bits.trailing_zeros() as usize;
                         #[allow(clippy::arithmetic_side_effects)]
                         {
                             bits &= bits - 1;
                         }
-                        #[allow(clippy::arithmetic_side_effects)]
-                        let i = j - s;
-                        coeffs[d] += &eq_table[i];
+                        unsafe { *coeffs.get_unchecked_mut(d) += eq_val };
                     }
                 }
                 DynamicPolynomialF::new_trimmed(coeffs)
