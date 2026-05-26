@@ -463,6 +463,7 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
         .expect("prove for verifier bench should succeed")
     };
 
+    let public_binary_cols = &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB];
     group.bench_function(BenchmarkId::new("1-VerifyUAIR", id), |bench| {
         bench.iter_batched(
             || {
@@ -470,6 +471,15 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
                 ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(
                     &mut transcript,
                     &proof.commitment,
+                );
+                // Mirror the prover's `commit_and_absorb_f2_trace_with_virtuals`
+                // absorbtion order: root, then public cols. Without this
+                // the verifier's transcript diverges from the prover's at
+                // the first sampled field challenge (AlphaMismatch). Same
+                // pattern as the larger-grained benches at line ~1614.
+                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+                    &mut transcript,
+                    public_binary_cols,
                 );
                 transcript
             },
@@ -497,6 +507,10 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
                     &mut transcript,
                     &proof.commitment,
                 );
+                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
+                    &mut transcript,
+                    public_binary_cols,
+                );
                 let subclaim =
                     ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_uair(
                         &mut transcript,
@@ -510,12 +524,18 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
                 (transcript, subclaim)
             },
             |(mut transcript, subclaim)| {
-                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_open(
+                // Bench's proof is built via `prove_f2_full_with_bit_ops`
+                // with `sha_f2_bit_op_virtuals()` (W_SHR3_W, W_SHR10_W
+                // skipped from commit, derived from W_W). The verifier
+                // mirror needs the same overlay to reconstruct their
+                // MLE evals at the open point.
+                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_open_with_virtuals(
                     &mut transcript,
                     &fx.pp,
                     &proof.commitment,
                     &proof.open,
                     &subclaim,
+                    &sha_f2_bit_op_virtuals(),
                 )
                 .expect("open verify should succeed");
                 black_box(());
