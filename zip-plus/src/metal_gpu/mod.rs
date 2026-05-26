@@ -198,13 +198,20 @@ impl MetalContext {
         encoder.set_buffer(1, Some(out_buf), 0);
         encoder.set_buffer(2, Some(params_buf), 0);
 
+        // Removed the artificial `min(256)` cap. Let the pipeline's
+        // own `max_total_threads_per_threadgroup` win (already
+        // accounts for kernel resource use). The previous 256 cap
+        // had been re-bench-validated on the artificial 480-row
+        // workload (regressed +9% at nvars=16); revisiting on the
+        // realistic shape (post-`6e40edd`) to see if the verdict
+        // changes when the surrounding work mix is heavier and the
+        // GPU bench's noise floor is lower relative to total Prove.
         let exec_width = pipeline.thread_execution_width();
         let max_threads = pipeline.max_total_threads_per_threadgroup();
-        let threads_per_threadgroup = if exec_width >= 32 {
-            let t = (max_threads / exec_width) * exec_width;
-            t.min(256)
+        let threads_per_threadgroup = if exec_width >= 1 {
+            (max_threads / exec_width) * exec_width
         } else {
-            max_threads.min(256)
+            max_threads
         } as u64;
         let num_threadgroups =
             (num_cols as u64 + threads_per_threadgroup - 1) / threads_per_threadgroup;
