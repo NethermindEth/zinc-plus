@@ -587,6 +587,43 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Investigated, didn't help
 
+### Fast u64 scatter in `scatter_matrix_into_gpu_slab` for F2PackU64 cells (rejected)
+- **Hypothesis (from optimization survey)**: the per-cell write in
+  `zip-plus/src/merkle.rs::scatter_matrix_into_gpu_slab` goes through
+  `cell.write_transcription_bytes_exact(dst)`, which for
+  `BinaryU64Poly<D>` expands to
+  `dst.copy_from_slice(&value.to_le_bytes())`. Replacing it with
+  `ptr::write_unaligned::<u64>(dst.cast(), cell.pack_u64().to_le())`
+  removes the slice creation and the `[u8;8]` intermediate.
+  Estimated impact: 2–5% Commit wall time (revised down from the
+  audit's 5–15%).
+- **Implementation**: added a `FastScatterCell` trait in
+  `zip-plus/src/merkle.rs` with a default body using
+  `write_transcription_bytes_exact`, plus an override for
+  `BinaryU64Poly<D>` using direct unaligned u64 write. Threaded
+  through `ZipTypes::Cw` as a bound; default-body impls for the
+  other Cw types (`BinaryRefPoly<D>`, `DensePolynomial<R, D>`,
+  `i128`, `Int<K>`). Bound propagation also required adding
+  `FastScatterCell` to the generic `CwR` bound in
+  `protocol/benches/e2e.rs:220-227`.
+- **Measurement (criterion `--save-baseline` / `--baseline`,
+  nvars=22, `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench                              | Before   | After    | Δ      | criterion verdict |
+  |------------------------------------|----------|----------|--------|-------------------|
+  | Commit-Fused-GPU-Inline/nvars=22   | 584.19 ms | 586.67 ms | +0.42% | no change (p=0.19) |
+
+  Reverted. LLVM was already optimising the
+  `to_le_bytes`+`copy_from_slice` pattern down to equivalent
+  instructions; the architectural cost (new trait + impls in
+  4 files + bound propagation through `ZipTypes::Cw`) wasn't
+  justified by zero measured benefit.
+- **Lesson**: when the optimization is "remove indirection LLVM
+  should already see through," prefer measurement before
+  architectural changes. The audit's 5–15% estimate was
+  speculative — LLVM's IR-level optimisation of small fixed-size
+  byte copies is mature on both x86_64 and aarch64.
+
 ### `F2NativeIc::prove_linear` loop inversion + bit-d masks (rejected — wrong approach; superseded by `54a564b`)
 - **Status note**: the *target* (`prove_linear`'s XOR-fold) turned
   out to be a real optimization opportunity at the realistic
@@ -708,42 +745,14 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
-### Fast u64 scatter in `scatter_matrix_into_gpu_slab` for F2PackU64 cells
-- **What**: `zip-plus/src/merkle.rs::scatter_matrix_into_gpu_slab`
-  currently routes per-cell writes through
-  `cell.write_transcription_bytes_exact(dst)`, which (for
-  `BinaryU64Poly<D>` via `delegate_const_transcribable` → u64)
-  expands to `dst.copy_from_slice(&value.to_le_bytes())`. LLVM
-  should fuse this into a single 8-byte unaligned store, but
-  inspecting the trip through `slice::from_raw_parts_mut` +
-  `to_le_bytes` + `copy_from_slice` suggests there is still some
-  overhead from the slice-fattening and the unknown alignment of
-  `dst`. An explicit `ptr::write_unaligned::<u64>(...)` after
-  `cell.pack_u64().to_le()` removes the slice creation, the
-  `[u8;8]` intermediate, and the trait-method indirection.
-- **Why deferred (not implemented)**: the scatter is generic over
-  `R: ConstTranscribable`, called from a generic `ZipPlus::commit_grouped`
-  that runs for BOTH the F_2 path (cells = `BinaryPoly<64>`,
-  F2PackU64) and the integer path (cells = `Int<3>`, NOT F2PackU64).
-  Adding `F2PackU64` to the scatter's bounds breaks the integer
-  callers. Stable Rust has no way to specialise the scatter
-  on-the-fly without either (a) `min_specialization` (nightly),
-  (b) a split commit pipeline (`commit_grouped_f2` + `commit_grouped_int`),
-  or (c) `TypeId`-based dispatch with `R: 'static`.
-- **How to apply** (when picked up): the simplest stable route is
-  to add a `scatter_matrix_into_gpu_slab_u64<R: F2PackU64 + ConstTranscribable>`
-  sibling function in `merkle.rs`, then either (i) split `commit_grouped`
-  into an `_f2` variant with a tighter `Zt::Cw: F2PackU64` bound
-  that calls the new scatter, or (ii) plumb a "fast scatter" trait
-  method on `ZipTypes` with a default impl that calls the slow
-  scatter and a `BinaryPoly<D>`-side override.
-- **Expected impact**: estimated 2–5% of Commit wall time. Smaller
-  than the 5–15% the optimization audit estimated — LLVM does most
-  of the work already; the win is mostly from removing the slice
-  construction and bounds-check structure rather than from changing
-  the actual store width.
-- **Soundness**: none. Pure compile-time refactor; the bit pattern
-  written is identical.
+### Fast u64 scatter in `scatter_matrix_into_gpu_slab` (rejected on second-pass measurement)
+- **Status**: implemented in a temporary branch state via a new
+  `FastScatterCell` trait (default body using
+  `write_transcription_bytes_exact`, override for `BinaryU64Poly<D>`
+  using `ptr::write_unaligned::<u64>(dst, self.pack_u64().to_le())`),
+  added as a bound on `ZipTypes::Cw`. Compiled clean, 13/13 F_2 lib
+  tests passed, but criterion A/B showed **no measurable change**
+  — reverted. See entry under "Investigated, didn't help" below.
 
 ### Hadamard discharge for the 13 + 3 column-level relations (step 5 of 5)
 - **What**: an external `(x + X·c) ⊙ (y + X·c) = c + X·c` (in
