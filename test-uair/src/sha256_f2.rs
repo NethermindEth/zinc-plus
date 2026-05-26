@@ -278,11 +278,31 @@ pub mod cols {
     pub const NUM_KAPPA: usize = 13;
 
     // === Chained-compression layout ===
-    pub const NUM_COMPRESSIONS: usize = 7;
     pub const ROWS_PER_COMP: usize = 68;
     pub const ROUNDS_PER_COMP: usize = 64;
-    pub const ACTIVE_ROWS: usize = NUM_COMPRESSIONS * ROWS_PER_COMP + 4;
-    /// `2^MIN_NUM_VARS >= ACTIVE_ROWS`: 7·68+4 = 480 ≤ 512 = 2^9.
+
+    /// Number of chained SHA-256 compressions packed into a trace of
+    /// `2^num_vars` rows. The trace lays out `num_compressions(nv)`
+    /// blocks of `ROWS_PER_COMP = 68` rows, plus a 4-row final
+    /// init-prefix anchor, and zero-pads the rest. Scales with
+    /// `num_vars` so the bench's effective workload tracks the trace
+    /// size; at the minimum (`MIN_NUM_VARS = 9`) this evaluates to 7.
+    #[inline]
+    pub const fn num_compressions(num_vars: usize) -> usize {
+        // `((2^nv) − 4) / 68`: largest `N` with `N·ROWS_PER_COMP + 4 ≤ 2^nv`.
+        ((1usize << num_vars) - 4) / ROWS_PER_COMP
+    }
+
+    /// Number of rows actually written by the witness generator at
+    /// `num_vars`; the remaining `2^num_vars − active_rows(nv)` rows
+    /// are zero-padded.
+    #[inline]
+    pub const fn active_rows(num_vars: usize) -> usize {
+        num_compressions(num_vars) * ROWS_PER_COMP + 4
+    }
+
+    /// Smallest `num_vars` that fits one SHA-256 compression
+    /// (`num_compressions(9) = 7`, `active_rows(9) = 480 ≤ 512`).
     pub const MIN_NUM_VARS: usize = 9;
 }
 
@@ -712,13 +732,12 @@ where
         let n = 1usize << num_vars;
         assert!(
             num_vars >= cols::MIN_NUM_VARS,
-            "trace too small for {} chained compressions: need num_vars ≥ {}, got {}",
-            cols::NUM_COMPRESSIONS,
+            "trace too small for one SHA-256 compression: need num_vars ≥ {}, got {}",
             cols::MIN_NUM_VARS,
             num_vars,
         );
 
-        let big_n = cols::NUM_COMPRESSIONS;
+        let big_n = cols::num_compressions(num_vars);
         let rpc = cols::ROWS_PER_COMP;
         let rounds = cols::ROUNDS_PER_COMP;
 
