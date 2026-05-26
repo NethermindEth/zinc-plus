@@ -66,6 +66,67 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Scale chained-compression count with `num_vars` (commit `6e40edd`)
+- **What**: `NUM_COMPRESSIONS: usize = 7` was a hardcoded constant
+  set for the minimum `num_vars = 9`. At every larger `num_vars`,
+  the trace still produced only 7 compressions (480 active rows)
+  and zero-padded the rest. Replaced with
+  `pub const fn num_compressions(num_vars) -> usize`, computed as
+  `((1 << num_vars) − 4) / ROWS_PER_COMP` — the largest `N` such
+  that `N · 68 + 4 ≤ 2^num_vars`. The witness generator now uses
+  `let big_n = cols::num_compressions(num_vars)`.
+- **Why this matters for past results**: every prior benchmark in
+  this branch (and presumably in `claude/gkr-virtual-cols`, which
+  has the same hardcoded constant) was measuring a 480-active-row
+  workload at every nvars — 99.99% zero-padded at nvars=22. All
+  optimization rankings and impact estimates from the audit were
+  derived on that artificial shape. The realistic numbers shift
+  the picture substantially.
+- **Realistic-workload measurements** (criterion `--features
+  parallel,simd,unchecked,metal_gpu`, post-fix):
+
+  | nvars | Old Prove (480 active) | New Prove (realistic) | Active rows |
+  |-------|------------------------|-----------------------|-------------|
+  | 16    | 30.62 ms               | 47.18 ms (+54%)       | ~65 K       |
+  | 20    | 437.7 ms               | 672.1 ms (+54%)       | ~1.1 M      |
+  | 22    | 2.251 s                | 4.372 s (+94%)        | ~4.19 M     |
+
+  At nvars=22 component breakdown:
+  | Region                      | Time     | % of Prove |
+  |-----------------------------|----------|------------|
+  | UAIR-FULL                   | 1.004 s  | 23.0%      |
+  | └ UAIR-a-F2NativeIC (= `prove_linear`) | 420.4 ms | 9.6% |
+  | Commit (micro)              | 768.5 ms | 17.6%      |
+  | └ Commit-Fused-GPU-Inline   | 581.6 ms | 13.3%      |
+  | Open + misc                 | ~2.60 s  | ~59%       |
+
+  UAIR is now the largest single phase; Open dominates the bucket
+  after. `prove_linear` is **9.6% of Prove** — up from 1.1% on the
+  artificial shape.
+- **Implications for previously-recorded audit verdicts**:
+  - The "Investigated, didn't help" entry for the audit's #4
+    (`F2NativeIc::prove_linear` loop inversion) was decided on the
+    artificial 1.1% number. The target is now 9.6% e2e; the
+    specific approach the audit proposed is still wrong (see that
+    entry), but `prove_linear` is now a meaningful optimization
+    target and needs a different approach. Re-investigation
+    pending.
+  - The "skip zero rows" alternative I floated alongside #4 is
+    **dead** — at realistic shape every row is active.
+  - The GPU-cap A/B (commit `31c422b` reverted in `58d2124`)
+    used the artificial shape — the +9% regression at nvars=16
+    may or may not hold at realistic shape, but the revert was
+    correct given the data we had.
+  - The "1.5× commit/open regression vs `claude/gkr-virtual-cols`"
+    earlier estimate was also on the artificial shape. The
+    realistic comparison requires patching the same scaling fix
+    onto `claude/gkr-virtual-cols` and re-benching — not done in
+    this session.
+- **Verification**: 13/13 F_2 protocol lib tests pass at nvars=9
+  (where `num_compressions(9) = 7`, unchanged); 19/19 test-uair
+  lib tests pass. Compile clean under
+  `--features parallel,simd,unchecked,metal_gpu`.
+
 ### Parallelise SHA F_2 witness gen post-loop builders (commit `<TBD>`)
 - **What**: in `test-uair/src/sha256_f2.rs::generate_random_trace`,
   switch the per-row builder loops that run *after* the
