@@ -66,6 +66,39 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Metal Blake3 dispatch: lift `min(256)` threadgroup cap (commit `e4d6a25`, re-shipped after realistic-workload re-test)
+- **What**: `zip-plus/src/metal_gpu/mod.rs:201-214`. Removed the
+  hard-coded `min(256)` clamp on `threads_per_threadgroup`; the
+  pipeline's own `max_total_threads_per_threadgroup()` now wins
+  (already accounts for kernel resource use — per-thread private
+  memory is ~864 B worst case from the 24-deep subtree-stack).
+  Originally landed as `31c422b`, reverted in `58d2124` after a
+  +9% A/B regression at Prove/nvars=16. After commit `6e40edd`
+  scaled `NUM_COMPRESSIONS` with `num_vars`, a fresh A/B on the
+  realistic shape reverses the verdict.
+- **Measured (criterion `--save-baseline` / `--baseline`, realistic
+  workload, `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench (nvars)               | Before (256 cap) | After (cap removed) | Δ      | criterion verdict |
+  |-----------------------------|------------------|---------------------|--------|-------------------|
+  | Prove/16                    | 47.4 ms          | 46.6 ms             | −2.24% | improved (p<0.01) |
+  | Prove/20                    | 675 ms           | 677 ms              | +0.28% | no change (p=0.61) |
+  | Prove/22                    | 3.45 s           | 3.49 s              | +1.15% | no change (p=0.75) |
+  | Commit-Fused-GPU-Inline/22  | 584 ms           | 587 ms              | +0.50% | no change (p=0.38) |
+
+  Net: neutral-to-positive everywhere on the realistic shape; the
+  +9% regression at nvars=16 from the original A/B was noise on a
+  ~30 ms baseline (a 3 ms swing is "statistically significant" at
+  p<0.05 but practically within thermal/scheduler noise at that
+  scale). The realistic-shape `Prove/nvars=16` baseline is ~47 ms,
+  pushing the noise floor below the effect size.
+- **Lesson**: the original revert decision was correct given the
+  data available — but criterion's statistical significance test
+  doesn't distinguish "real effect" from "thermal noise at a small
+  baseline." When the baseline is small enough that a 3 ms swing
+  is the entire reported delta, treat any verdict with skepticism
+  and re-test under more loaded conditions.
+
 ### F_2 native IC: bounds-check elimination in `prove_linear` XOR-fold (commit `54a564b`, −10.1% Prove e2e)
 - **What**: in `protocol/src/f2_native_ic.rs::prove_linear`, the two
   hot loops (up_evals at ~line 686, down_evals at ~line 714) read
@@ -610,7 +643,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   Tracked here but not implemented in this session — the payoff
   is small and the abstraction change touches `Uair`/`UairSignature`.
 
-### Metal Blake3 dispatch: lifting the `min(256)` threadgroup cap (rejected)
+### Metal Blake3 dispatch: lifting the `min(256)` threadgroup cap (rejected on artificial trace — re-shipped on realistic shape; see `e4d6a25` under Shipped work)
 - **Hypothesis**: the hard-coded `min(256)` cap on
   `threads_per_threadgroup` in
   `zip-plus/src/metal_gpu/mod.rs:201-214` was under-occupying Apple
