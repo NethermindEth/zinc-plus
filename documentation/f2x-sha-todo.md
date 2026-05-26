@@ -66,6 +66,84 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Chained-Binius rewrite of C5–C11 with packed `PA_C` (steps 2+3 of 5, commit `<TBD>`)
+- **What** — full structural alignment of the SHA-256 F_2 UAIR with the
+  `sha-f2x-doc` spec at the AIR-shape level, modulo the still-deferred
+  Hadamard discharge (step 5):
+  1. `protocol/src/f2_native_ic.rs` — replaced the zero-stub at
+     `prove_linear` and `prove_combined` (lines that used to push
+     `DynamicPolynomialF::ZERO` / `F2RowExpr::zero()` for each bit-op
+     spec) with proper per-cell `BitOp::Rot(c)` / `BitOp::ShiftR(c)`
+     materialisation. For `prove_linear` (the MLE-first path the SHA
+     F_2 UAIR takes), bit-op virtuals' MLE eval coefficients are a
+     re-indexing of the source column's `up_evals` coefficients —
+     `O(D)` per spec, no extra per-cell loop. For `prove_combined`,
+     per-row bits flow through `v.rotate_left(c)` / `v >> c`. Unlocks
+     UAIR-internal `BitOpSpec` end-to-end for any F_2 UAIR (the
+     verifier-side machinery in `verifier.rs` / `prover.rs` was
+     already in place; only the F_2-native IC fast path lagged).
+  2. `test-uair/src/sha256_f2.rs` — full rewrite of C5–C11:
+     - **Columns**: dropped the 6 CSA-majority columns (`W_M_W1`,
+       `W_M_W2`, `W_M_T1_{1..4}`), the 7 per-add full-carry columns
+       (`W_C_{W,T1,T2,A,E,FF_A,FF_E}`), and the 7 scalar compensator
+       columns (`PA_C_{W,T1,T2,A,E,FF_A,FF_E}`). Added 6
+       chained-Binius intermediate-sum columns (`W_W_S{1,2}`,
+       `W_T1_S{1..4}`) per doc §3.7 Definition 1 and 1 packed
+       compensator column `PA_C` (bits 0..12 hold the 13 per-step κ
+       compensators per the doc's `binius-packing` allocation; bits
+       13..31 are zero). Total column delta: 14 public + 27
+       committed = 41 → 8 public + 20 committed = 28 (−13).
+     - **Constraints**: replaced the 7 polynomial CSA-flattened
+       `LinSum` checks with 13 per-step `BiniusAdd` LSB scalar
+       constraints (doc §3.6 `BiniusAdd`): each is
+       `(target + x + y + κ_k) ∈ (X)`, where κ_k is bit j_k of
+       `PA_C`. Bit extraction via 12 internal `BitOpSpec`s
+       (`SHR^j(PA_C)` for j ∈ {1..12}; κ_0 uses `PA_C` directly).
+     - **Ideal**: added `Sha256F2Ideal::LsbX` for the principal
+       ideal `(X)` (coefficient at position 0 = 0, positions 1..31
+       unconstrained). `RotXw1` keeps C1–C4; `ShiftX32` from step 1
+       is dormant but kept as a variant for the eventual Hadamard
+       wiring.
+     - **Witness gen**: dropped `binius_carry` / `csa_step`
+       helpers; replaced CSA layers with chained `wrapping_add`
+       calls materialising the partial sums. `PA_C` builder packs
+       13 per-step LSB residues (= 0 on rows where the witness is
+       consistent with the binary add, residue otherwise).
+- **Why** — direct shape parity with the doc's column and constraint
+  layout, with the per-step structure that step 5 (external Hadamard
+  discharge) can plug into without further rewrites. The CSA-flattened
+  LinSum was a closed-form trick that didn't generalise.
+- **Status vs. soundness** — step 2+3 swaps one AIR-level-incomplete
+  scheme for another; both rely on honest witnesses for bits 1..31
+  of each addition. The 13 per-step LSB checks pin only bit 0; bits
+  1..31 are pinned by the column-level Hadamard
+  `(x + X·c) ⊙ (y + X·c) = c + X·c` in `F_shift`, which is still
+  external/deferred per doc §3.4. AND-side Hadamards (C12–C14) are
+  also deferred. **No new soundness regression**: the prior CSA-
+  flattened LinSum was equally AIR-level-incomplete (the CSA
+  majority columns and final carries were under-constrained by the
+  algebraic identity).
+- **Verification** — `cargo test -p zinc-protocol --features parallel
+  --lib f2_prove::tests` (12 tests, all pass, incl.
+  `prove_then_verify_sha256_f2_roundtrips`); `cargo test -p
+  zinc-test-uair --lib sha256_f2` (4 tests, all pass). Benches build
+  clean.
+- **Out of scope (steps 4+5 still open)**:
+  - Step 4 (the LSB check unfold of `BiniusAdd`) — *folded into this
+    change*, since the AIR-level half of `BiniusAdd` is exactly the
+    LSB check; the Hadamard half is step 5.
+  - Step 5 — wire up the external Hadamard-product discharge
+    (`(x + X·c) ⊙ (y + X·c) = c + X·c` in `F_shift`) for the 13
+    addition-side and 3 AND-side relations. Will need:
+    - the `W_β` packed carry-out column (deferred along with step 5
+      — committing it without consumers wastes commit cost),
+    - virtual carry word `c` reconstruction (bits 0..30 from
+      `SHR^1` of XOR-of-(target,x,y); bit 31 = β_k from `W_β`),
+    - a Hadamard-product PIOP. Mechanism is a separate design pass.
+- **Caveat carried over** — `cargo build -p zinc-protocol` *without*
+  `--features parallel` still fails in `f2_prove.rs:603` from
+  `cfg_iter!` shape, pre-existing.
+
 ### C5–C11 modular-addition constraints moved into `F_shift = F_2[X]/(X^32)` (commit `<TBD>`)
 - **What**: `test-uair/src/sha256_f2.rs`. Step 1 of aligning the F_2
   SHA-256 UAIR with `documentation/sha-f2x-doc/`.
@@ -334,55 +412,46 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
-### Chained-Binius rewrite of C5–C11 (doc-spec alignment, step 2 of 5)
-- **What**: replace the impl's CSA-flattened LinSum constraints
-  (one per modular-add, 7 total) with the doc's per-step `BiniusAdd`
-  construction (one LSB check + one column-level Hadamard relation
-  per binary step, 13 total across all chains). This is step 2 of
-  the 5-step spec-alignment plan; step 1 (ideal split + `F_shift`
-  swap) shipped above.
-- **Why it matters**: the doc's chained-Binius scheme is the
-  canonical form — clean per-step structure that maps directly to
-  the (still-deferred) Hadamard-product check. The CSA-flattened
-  form is a closed-form trick that's harder to relate to the
-  Hadamard mechanism. Step 2 also brings the column layout closer
-  to the doc's 19-committed + 5-public ideal (vs current 27 + 14).
-- **Why deferred**: doing step 2 *alone* makes the column count
-  *worse* before getting better. The doc's layout assumes
-  - bit-level packing of the 13 `β_k` carry-outs into a single
-    `W_β` column, and
-  - bit-level packing of the 13 `κ_k` LSB compensators into a
-    single `PA_C` column.
-  Both packings require a SHIFT primitive (`SHR^j` to extract bit
-  `j`) — the doc's "design parameter" for shifted-column access
-  (cf. `sha-f2x-doc/sections/arithmetization.tex` Lemma
-  `shr-virtual`). Without that primitive on this branch, step 2
-  alone would expand 27 committed columns → ~33 (6 chained
-  intermediates + 13 unpacked `β` columns instead of 1 packed)
-  and 14 public bit-poly → ~20 (13 unpacked `κ` columns instead
-  of 1 packed). Step 3 (packing via SHIFT) then claws those back
-  down to the doc shape.
-- **Why this is bundled with step 5**: in isolation, the per-step
-  algebraic constraint of `BiniusAdd` is just the one-bit LSB
-  check `(t + x + y + κ)[0] = 0`. The full pinning of bits 1..31
-  of the addition lives in the column-level Hadamard `(x + X·c) ⊙
-  (y + X·c) = c + X·c`, which is deferred to an external
-  mechanism. Without step 5 (Hadamard discharge), step 2's AIR is
-  no *more* sound than the current CSA-flattened impl — both rely
-  on honest witnesses for addition correctness at bits 1..31, and
-  both achieve algebraic-level soundness only when the external
-  Hadamard check lands. So the natural batching is `step 2 + step
-  3 + step 5` as one atomic chained-Binius cutover, not a sequence
-  of three separate column-bloating rewrites.
-- **Estimated effort**: rough — 500-800 lines of changes across
-  `test-uair/src/sha256_f2.rs` (column layout, witness gen,
-  constraint impl, module docs). The constraint side adds a third
-  `Sha256F2Ideal::LsbX` variant (principal ideal `(X)` — bit 0 is
-  zero, bits 1..31 unconstrained) and unfolds C5/C6 each into
-  multiple per-step constraints. The witness gen materialises
-  the intermediate sums via chained binary addition and computes
-  per-step `β_k`, `κ_k`. The bulk of the LOC is just structural
-  expansion, not algorithmic novelty.
+### Hadamard discharge for the 13 + 3 column-level relations (step 5 of 5)
+- **What**: an external `(x + X·c) ⊙ (y + X·c) = c + X·c` (in
+  `F_shift`) check for each of the 13 chained-`BiniusAdd` binary
+  steps (C5–C11), plus the 3 AND-flavoured relations
+  (C12 = `W_E ⊙ W_E^{↓1}`, C13 = `(1 − W_E) ⊙ W_E^{↓2}`,
+  C14 the `Maj` Hadamard from doc §3.5). Total 16 Hadamard
+  relations.
+- **Why it matters**: this is the last piece of AIR-level soundness
+  for the chained-Binius construction. Without it, bits 1..31 of
+  every modular addition (and every AND output) are honest-prover-
+  only at the AIR layer. Steps 1–3 shipped the surrounding
+  algebraic shape (ideal split, packed `PA_C`, 13 LSB checks via
+  bit-op-virtual `SHR^j(PA_C)`); step 5 is the actual soundness
+  load-bearer.
+- **Inputs / outputs at the AIR layer**:
+  - For each addition step, the Hadamard inputs are virtual:
+    bits 0..30 of `c` = `SHR^1` of XOR-of-(target, x, y); bit 31
+    of `c` = β_k, a committed bit (`W_β`, packed analogously to
+    `PA_C`; not yet a primary column on this branch — would be
+    added with step 5).
+  - For each AND step, inputs are free linear combinations of
+    `W_E`, `W_A` (and their shifts) per doc §3.5.
+  - Output is the per-row Hadamard product, which the
+    constraint side declares equals the right-hand side
+    (`c + X·c` for adds; the committed AND-result column for
+    AND/Maj).
+- **What's needed**: a PIOP-layer Hadamard-product check on
+  column-level commitments. Distinct from per-cell SHR/Rot
+  (already shipped) and from row-shift virtuals — Hadamard is a
+  per-bit product across two columns, not a re-indexing.
+  Concrete protocol shape is a separate design pass; placeholder
+  references include the doc's §3.4 ("mechanism left as a design
+  parameter") and the Binius literature's Hadamard-via-grand-
+  product approach.
+- **Adjacent column work that lands with step 5**: commit `W_β`
+  as a primary column (1 packed bit-poly_32, bits 0..12 used for
+  the 13 β_k); add 12 internal `BitOpSpec`s for `SHR^j(W_β)`
+  bit extraction (mirrors the `PA_C` setup). Until then, β
+  values are unconstrained — the deferred Hadamard would be the
+  thing that pins them.
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

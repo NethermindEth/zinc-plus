@@ -68,7 +68,7 @@ use zinc_piop::ideal_check::{Proof as IcProof, ProverState as IcProverState};
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
-    ConstraintBuilder, Uair,
+    BitOp, ConstraintBuilder, Uair,
     ideal::{Ideal, IdealCheck, IdealCheckError, ImpossibleIdeal},
 };
 use zinc_utils::from_ref::FromRef;
@@ -506,13 +506,22 @@ where
                         }
                     })
                     .collect();
-                // Bit-op virtual columns: not supported in this F_2-
-                // native path yet (the SHA F_2 UAIR has zero bit-ops
-                // by design — its committed Σ/σ/SHR-aux columns
-                // absorb what would otherwise be bit-ops). Pad with
-                // zeros to match the down layout.
-                for _ in 0..bit_op_count {
-                    down_vals.push(F2RowExpr::zero());
+                // Bit-op virtual columns: apply per-cell `Rot(c)` /
+                // `ShiftR(c)` bitwise to the source row's u64 packed
+                // bits (treating each cell as `BinaryPoly<32>`). Same
+                // semantics as `apply_bit_op_u32` in `f2_prove.rs`,
+                // inlined here so this crate doesn't depend on the
+                // protocol's wrapper module.
+                for spec in sig.bit_op_specs() {
+                    let source_bits = bp_to_u64::<D>(
+                        &binary_trace[spec.source_col()].evaluations[row_idx],
+                    );
+                    let v = source_bits as u32;
+                    let transformed = match spec.op() {
+                        BitOp::Rot(c) => v.rotate_left(c) as u64,
+                        BitOp::ShiftR(c) => (v >> c) as u64,
+                    };
+                    down_vals.push(F2RowExpr::from_bits(transformed));
                 }
 
                 let up_row = zinc_uair::TraceRow::from_slice_with_layout(
@@ -732,11 +741,47 @@ where
             })
             .collect();
 
-        // Bit-op virtual columns: not supported in this F_2-native
-        // path yet (the SHA F_2 UAIR has zero by design); pad with
-        // zero polynomials so the down-row layout indexes correctly.
-        for _ in 0..bit_op_count {
-            down_evals.push(DynamicPolynomialF::ZERO);
+        // Bit-op virtual columns: per-cell `Rot(c)` / `ShiftR(c)`
+        // applied bitwise within each cell of the source column. Since
+        // the op is row-local, the result column's MLE coefficients
+        // are a re-indexing of the source column's MLE coefficients
+        // (already computed into `up_evals`): if `MLE(source)(z) =
+        // Σ_d source_coeff[d] · X^d`, then `MLE(op(source))(z) =
+        // Σ_d op_coeff[d] · X^d` with
+        //   `BitOp::ShiftR(c)`: op_coeff[d] = source_coeff[d + c] for d < D − c, 0 otherwise
+        //   `BitOp::Rot(c)`:    op_coeff[d] = source_coeff[(d − c) mod D]
+        // (since `result[j][d] = source[j][shift-or-rot-of d]` per
+        // cell and the MLE accumulation `Σ_j eq[j] · ·` commutes with
+        // the d-indexed re-shuffle).
+        let bit_op_specs = sig.bit_op_specs();
+        for spec in bit_op_specs {
+            let source_coeffs = &up_evals[spec.source_col()].coeffs;
+            let mut coeffs: Vec<F> = (0..D)
+                .map(|_| F::zero_with_cfg(field_cfg))
+                .collect();
+            match spec.op() {
+                BitOp::ShiftR(c) => {
+                    let c = c as usize;
+                    if c < D {
+                        for d in 0..D - c {
+                            let src_d = d + c;
+                            if src_d < source_coeffs.len() {
+                                coeffs[d] = source_coeffs[src_d].clone();
+                            }
+                        }
+                    }
+                }
+                BitOp::Rot(c) => {
+                    let c = c as usize;
+                    for d in 0..D {
+                        let src_d = (d + D - c) % D;
+                        if src_d < source_coeffs.len() {
+                            coeffs[d] = source_coeffs[src_d].clone();
+                        }
+                    }
+                }
+            }
+            down_evals.push(DynamicPolynomialF::new_trimmed(coeffs));
         }
 
         // ---- Run constraints ONCE on column-evaluated values ----
