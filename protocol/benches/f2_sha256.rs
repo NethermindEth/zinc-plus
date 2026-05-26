@@ -152,6 +152,14 @@ fn sha_f2_bit_op_virtuals() -> Vec<F2BitOpVirtualSpec> {
     ]
 }
 
+// K-virtuals are unavailable on this branch (Group 8 dropped). Stub
+// returns an empty list so the post-Group-8 prove/verify entry points
+// (`prove_f2_full_pre_paired_with_bit_ops`, etc.) compile and run
+// with num_k = 0 — all witness cols treated as non-K.
+fn sha_f2_k_virtuals() -> Vec<F2KVirtualSpec> {
+    Vec::new()
+}
+
 // ---------------------------------------------------------------------------
 // Proof-size measurement.
 //
