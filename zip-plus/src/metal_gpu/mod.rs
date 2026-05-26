@@ -198,13 +198,18 @@ impl MetalContext {
         encoder.set_buffer(1, Some(out_buf), 0);
         encoder.set_buffer(2, Some(params_buf), 0);
 
+        // Use the pipeline's own max — Metal computes this from the
+        // kernel's actual register/private-memory footprint, so it
+        // already accounts for the multi-chunk Blake3 subtree stack
+        // (~768 B/thread worst case). Round down to a multiple of the
+        // execution width so we don't leave a partial simdgroup at
+        // the tail.
         let exec_width = pipeline.thread_execution_width();
         let max_threads = pipeline.max_total_threads_per_threadgroup();
-        let threads_per_threadgroup = if exec_width >= 32 {
-            let t = (max_threads / exec_width) * exec_width;
-            t.min(256)
+        let threads_per_threadgroup = if exec_width >= 1 {
+            (max_threads / exec_width) * exec_width
         } else {
-            max_threads.min(256)
+            max_threads
         } as u64;
         let num_threadgroups =
             (num_cols as u64 + threads_per_threadgroup - 1) / threads_per_threadgroup;
