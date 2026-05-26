@@ -1872,8 +1872,13 @@ pub fn build_lifted_eq_tensor(
     } else {
         vec![BinaryFieldGF192::one()]
     };
+    // q0 is small (≤ num_rows entries; typically 8 for SHA F_2): keep
+    // sequential. q1 is large (≤ 2^{num_vars - log2(num_rows)} entries;
+    // ~524 K at nvars=22) and `basis.lift` is a 192×192 F_2
+    // matrix-vec multiply per call (~600 ops); parallelise it so this
+    // step doesn't single-thread the rest of Open.
     let q0: Vec<BinaryF2Poly<3>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
-    let q1: Vec<BinaryF2Poly<3>> = q1_gf.iter().map(|g| basis.lift(g)).collect();
+    let q1: Vec<BinaryF2Poly<3>> = cfg_iter!(q1_gf).map(|g| basis.lift(g)).collect();
     (q0, q1)
 }
 
