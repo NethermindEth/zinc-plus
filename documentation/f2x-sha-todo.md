@@ -66,6 +66,46 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### PMULL-accelerated `f2_poly_mul` (commit `613de5d`, −21.5% Prove e2e, −92.4% coherence check)
+- **What**: `poly/src/univariate/binary_f2_wide.rs::f2_poly_mul<W_A, W_B, W_OUT>`
+  was a bit-by-bit schoolbook: for each set bit of `a`, XOR a
+  word-shifted `b` into the accumulator (`xor_shifted`). Replaced
+  with a word-level schoolbook using
+  `binary_gf128::clmul_64x64` (PMULL on aarch64, PCLMUL on x86_64,
+  scalar fallback otherwise): for each `(ai, bi)` pair, one 64×64
+  carryless multiply produces a 128-bit partial product whose two
+  halves XOR into `acc[ai+bi]` and `acc[ai+bi+1]`.
+- **Why this matters**: the audit had categorised this as a
+  verify-only optimisation ("coherence-check `<3,7,10>` mults at
+  row_len scale"). In practice `f2_poly_mul` is used heavily by
+  the **prover's** `prove_f2_open` too — multiple shapes
+  (`<1,3,4>` / `<3,4,7>` / `<3,7,10>`) inside the encoding-
+  consistency assembly + the per-column `b_vector` / `combined_row`
+  builds. All shapes get the same ~5–10× speedup.
+- **Measured (criterion `--save-baseline` / `--baseline`, nvars=22,
+  `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench                          | Before  | After    | Δ      |
+  |--------------------------------|---------|----------|--------|
+  | Prove e2e                      | 3.17 s  | 2.49 s   | **−21.5%** |
+  | VerifyOpen-d-Coherence/nv=22   | 46.3 ms | 3.53 ms  | **−92.4%** (13×) |
+
+  Both p < 0.01.
+- **Implementation detail**: made `binary_gf128::clmul_64x64`
+  `pub(crate)` so `binary_f2_wide` could reuse the existing
+  hardware-dispatched helper (avoids duplicating the aarch64/x86_64
+  cfg dance). Added `a_word == 0` / `b_word == 0` early-skip in
+  each inner iteration so sparse high-order words don't pay PMULL
+  cost.
+- **Lesson**: the audit's "verify-only" claim was wrong because it
+  didn't trace the function's call sites. A grep for
+  `f2_poly_mul` in `protocol/src/` would have surfaced 11+ call
+  sites in `prove_f2_open` / `verify_f2_open_with_virtuals`. When
+  an audit recommends a function-level change, verify the
+  function's actual call graph before sizing the impact.
+- **Verification**: 93/93 zinc-poly lib tests pass under
+  `--features simd`; 13/13 F_2 protocol lib tests pass.
+
 ### Metal Blake3 dispatch: lift `min(256)` threadgroup cap (commit `e4d6a25`, re-shipped after realistic-workload re-test)
 - **What**: `zip-plus/src/metal_gpu/mod.rs:201-214`. Removed the
   hard-coded `min(256)` clamp on `threads_per_threadgroup`; the
