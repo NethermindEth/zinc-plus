@@ -66,31 +66,6 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
-### Metal Blake3 dispatch: lift hard-coded `min(256)` threadgroup cap (commit `31c422b`)
-- **What**: `zip-plus/src/metal_gpu/mod.rs:201-214`. The Blake3
-  hash-kernel dispatch was rounding the threadgroup size down to a
-  multiple of `thread_execution_width` and then capping it at 256,
-  regardless of what the pipeline itself reported as
-  `max_total_threads_per_threadgroup`. Removed the artificial cap;
-  the runtime's own limit (which already accounts for the kernel's
-  per-thread private-memory and register footprint) now wins.
-- **Why**: at SHA-256 F_2 nvars≥16, `num_cols` (= num_leaves) is in
-  the 10⁴–10⁵ range, so the dispatch was using one threadgroup per
-  256 leaves — likely under-occupying Apple Silicon GPUs that support
-  ≥ 512 threads/threadgroup for kernels of this resource shape. The
-  kernel's worst-case per-thread private memory is ~864 B (the
-  24-deep subtree-stack `uint[8]` + `stack_h[24]` + `cv[8]`); the
-  runtime already considers this when reporting max-threads, so the
-  hard cap was redundant.
-- **Verification**: `gpu_blake3_matches_cpu_for_various_sizes` and
-  `gpu_blake3_matches_cpu_for_large_leaves` pass; F_2 SHA-256 lib
-  tests 13/13 pass under
-  `--features parallel,simd,unchecked,metal_gpu`. Empirical bench
-  delta not measured in this session — expected: lower GPU dispatch
-  overhead, ~10–30% Blake3 throughput improvement on Apple Silicon
-  per `metal_gpu::tests::gpu_blake3_matches_cpu_for_large_leaves`-
-  shaped workloads.
-
 ### Parallelise SHA F_2 witness gen post-loop builders (commit `<TBD>`)
 - **What**: in `test-uair/src/sha256_f2.rs::generate_random_trace`,
   switch the per-row builder loops that run *after* the
@@ -469,6 +444,51 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Investigated, didn't help
+
+### Metal Blake3 dispatch: lifting the `min(256)` threadgroup cap (rejected)
+- **Hypothesis**: the hard-coded `min(256)` cap on
+  `threads_per_threadgroup` in
+  `zip-plus/src/metal_gpu/mod.rs:201-214` was under-occupying Apple
+  Silicon GPUs at SHA-256 F_2 nvars≥16 where `num_cols` is in the
+  10⁴–10⁵ range. Lifting the cap so the pipeline's own
+  `max_total_threads_per_threadgroup()` wins would (per the
+  optimization-survey agent's estimate) give 10–30% Blake3 throughput
+  improvement.
+- **Test**: removed the `.min(256)` clamp; the dispatch now uses
+  `(max_threads / exec_width) * exec_width` directly. Both
+  `gpu_blake3_matches_cpu_*` equivalence tests and 13/13 F_2 lib
+  tests still passed.
+- **Measurement (A/B with criterion `--save-baseline` /
+  `--baseline`,** target `Zinc+ F_2 SHA-256/Prove/nvars=(16|20|22)`,
+  10 samples + warmup, `--features parallel,simd,unchecked,metal_gpu`):
+
+  | nvars | Before (cap=256) | After (cap removed) | Δ      | criterion verdict |
+  |-------|------------------|---------------------|--------|-------------------|
+  | 16    | 30.62 ms         | 33.12 ms            | +9.34% | regressed         |
+  | 20    | 437.7 ms         | 434.3 ms            | −0.76% | within noise      |
+  | 22    | 2.251 s          | 2.245 s             | −0.24% | no change         |
+
+  Net: clear regression at the smallest GPU-active nvars, neutral
+  at larger nvars.
+- **Why it didn't help**: the assumption that the cap was the
+  binding constraint was wrong. At nvars=16 the commit produces only
+  ~4096 leaves (= 4096 work-items). With threadgroup_size = max
+  (1024 on M-series), that's 4 threadgroups total — too few to
+  occupy all GPU cores. The original 256-thread cap produced 16
+  threadgroups at nvars=16, balancing per-threadgroup occupancy
+  against having enough threadgroups for the dispatcher to spread
+  across cores. At nvars=20+ both threadgroup sizes produce enough
+  threadgroups to saturate the GPU, so the cap is invisible. The
+  256 was empirically well-tuned.
+- **Lesson**: don't lift kernel-dispatch caps without measuring at
+  the smallest expected workload size — Apple's
+  `max_total_threads_per_threadgroup` reports a *per-threadgroup
+  ceiling*, not the optimal threadgroup size for a given total work
+  count. The two interact via cores-per-GPU.
+- **If revisited**: a size-dependent rule could potentially do
+  better than either fixed choice — e.g. clamp so
+  `num_threadgroups ≥ 2 × core_count`, then use the largest
+  threadgroup that satisfies that. Not pursued in this session.
 
 ### GPU warm-up dispatch (rejected)
 - **Hypothesis**: the 320 ms gap between `Commit` (isolated, 577 ms)
