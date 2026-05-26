@@ -66,6 +66,51 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Commit slab: 64 MB capacity floor after GPU dispatch (commit `7550055`, RSS hygiene)
+- **What**: `zip-plus/src/pcs/phase_commit.rs::commit_grouped`'s
+  GPU branch caches a process-wide `Vec<u8>` (`COMMIT_SLAB_SCRATCH`)
+  that grows on demand but was never shrunk. At SHA-256 F_2
+  nvars=22 the slab reaches ~768 MB and stays there for the life
+  of the process, even after smaller-nvars commits. Added
+  `slab.shrink_to(64 * 1024 * 1024)` after the GPU dispatch +
+  Merkle tree build, before releasing the Mutex.
+- **Behaviour**:
+  - `slab.shrink_to(min_cap)` sets `capacity = max(len, min_cap)`.
+    `slab.len() == required` post-resize, so capacity becomes
+    `max(required, 64 MB)` after the shrink.
+  - `required > 64 MB` (e.g., nvars=22): no-op, no realloc.
+    Steady-state same-nvars hot loops pay nothing.
+  - `required ≤ 64 MB` (e.g., nvars=16 with our commit shape):
+    capacity shrinks to 64 MB, releasing the historical peak.
+- **Limitation**: this only releases memory when the *current*
+  commit is small. The "ran nvars=22 once, now idle" case still
+  holds the ~768 MB. Releasing across idle periods would need an
+  explicit release API (a `pub fn release_commit_slab_scratch()`
+  on `ZipPlus` that callers invoke between batches).
+- **Measured (criterion `--save-baseline` / `--baseline`, nvars=22,
+  `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench                          | Before   | After    | Δ      | verdict |
+  |--------------------------------|----------|----------|--------|---------|
+  | Commit-Fused-GPU-Inline/nv=22  | 583.4 ms | 585.1 ms | +0.30% | no change (p=0.57) |
+  | Prove/nvars=22                 | 2.54 s   | 2.47 s   | −2.74% | no change (p=0.58) |
+
+  Initial Prove A/B run reported a +13% regression with p=0.02
+  but a `[+3%, +24%]` confidence interval; the re-run gave
+  −2.74% with p=0.58. Prove at nvars=22 has high run-to-run
+  variance (10 samples × ~2.5 s each, with thermal/scheduler
+  effects across 25–40 s of bench wall time). The Commit micro
+  is the direct test of the change and shows no change in either
+  run — confirming the shrink is no-op at nvars=22 as expected.
+- **Verification**: 13/13 F_2 lib tests pass.
+- **Lesson recorded**: at this nvars Prove takes long enough to
+  swing 10%+ between criterion sample sets. For changes whose
+  direct test (here: Commit micro) shows no change, trust that
+  signal over a noisy higher-level bench. See also the GPU
+  threadgroup-cap revert/re-ship saga, where the same
+  "statistically significant" verdict turned out to be noise on
+  a too-small baseline.
+
 ### PMULL-accelerated `f2_poly_mul` (commit `613de5d`, −21.5% Prove e2e, −92.4% coherence check)
 - **What**: `poly/src/univariate/binary_f2_wide.rs::f2_poly_mul<W_A, W_B, W_OUT>`
   was a bit-by-bit schoolbook: for each set bit of `a`, XOR a
