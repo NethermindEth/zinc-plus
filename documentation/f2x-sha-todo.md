@@ -66,6 +66,54 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### F_2 native IC: bounds-check elimination in `prove_linear` XOR-fold (commit `54a564b`, −10.1% Prove e2e)
+- **What**: in `protocol/src/f2_native_ic.rs::prove_linear`, the two
+  hot loops (up_evals at ~line 686, down_evals at ~line 714) read
+  `coeffs[d] += &eq_table[row]` per set bit. Each access carried a
+  bounds check that LLVM couldn't eliminate (the loop control
+  structure doesn't make the bounds provable from rustc's vantage).
+  Replaced with `get_unchecked_mut(d)` / `get_unchecked(row)` after
+  proving the indices safe:
+  - `d < D`: `bp_to_u64::<D>(cell)` masks bits above position `D−1`
+    (`BinaryPoly<D>` invariant — all constructors mask; `Mul` is
+    `unimplemented!()` so multiplication can't break it).
+    `debug_assert!(D == 64 || bits >> D == 0)` guards the invariant.
+  - `row < eq_table.len()` and `row < col.evaluations.len()` by the
+    outer `for row in 0..usable_rows` bound and the trace shape.
+  - In the shifts loop: `i = j − s` with `j ≥ s` and
+    `j < s + usable_rows`, so `i < usable_rows`.
+
+  Also hoisted `eq_val = eq_table.get_unchecked(row)` out of the
+  inner `while bits != 0` loop and added a `bits == 0 → continue`
+  short-circuit so the eq_table load is skipped on zero cells.
+- **Why**: the audit's #4 had been dismissed at the artificial
+  480-row workload as "1.1% Prove ceiling, not worth it." After the
+  realistic-shape bench fix (commit `6e40edd`), the real ceiling
+  was 9.6% Prove. The agent's specific proposal (loop inversion +
+  bit-d masks) was still wrong (more iterations, big memory cost,
+  no efficient NEON masked XOR-reduce — see the entry below in
+  "Investigated, didn't help"). But the target was real, and the
+  XOR-fold had per-iteration overhead LLVM wasn't eliding.
+- **Measured (criterion `--save-baseline` / `--baseline`, nvars=22,
+  `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench                          | Before   | After    | Δ      |
+  |--------------------------------|----------|----------|--------|
+  | UAIR-a-F2NativeIC (= `prove_linear`) | 446.0 ms | 359.2 ms | **−19.4%** |
+  | UAIR-FULL                      | 1.045 s  | 951.6 ms | **−8.9%**  |
+  | Prove e2e                      | 3.90 s   | 3.51 s   | **−10.1%** |
+
+  All three criterion-verdict "Performance has improved" with
+  p < 0.01. 13/13 F_2 lib tests still pass.
+- **Bounds-eliding scope is local**: only the inner XOR-fold's two
+  loads. The cell load, the bit-iter primitives (`trailing_zeros`,
+  `bits &= bits − 1`), and the GF(2^192) XOR itself are unchanged.
+  This kind of micro-tweak shouldn't normally yield 19% — the
+  size of the win is a signal that LLVM was paying a real
+  per-iteration cost for the bounds checks at the inner-loop's
+  unrolled-shape; possibly the bounds check defeated some
+  vectorisation or register allocation.
+
 ### Scale chained-compression count with `num_vars` (commit `6e40edd`)
 - **What**: `NUM_COMPRESSIONS: usize = 7` was a hardcoded constant
   set for the minimum `num_vars = 9`. At every larger `num_vars`,
@@ -506,7 +554,15 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Investigated, didn't help
 
-### `F2NativeIc::prove_linear` loop inversion + bit-d masks (rejected — wrong target)
+### `F2NativeIc::prove_linear` loop inversion + bit-d masks (rejected — wrong approach; superseded by `54a564b`)
+- **Status note**: the *target* (`prove_linear`'s XOR-fold) turned
+  out to be a real optimization opportunity at the realistic
+  workload — see the "F_2 native IC: bounds-check elimination in
+  `prove_linear` XOR-fold" entry under Shipped work (`54a564b`,
+  −10.1% Prove e2e). The agent's specific *approach* (loop
+  inversion + precomputed bit-d masks) is still rejected for the
+  reasons below; bounds-check elimination on the existing
+  sparse-iter shape gave the win instead.
 - **Hypothesis (from optimization survey)**: the per-bit
   `coeffs[d] += &eq_table[row]` accumulation in
   `protocol/src/f2_native_ic.rs:686-705` (and the analogous shifts
