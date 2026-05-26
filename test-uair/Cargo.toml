@@ -16,9 +16,16 @@ crypto-primitives = { workspace = true }
 itertools = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true, optional = true }
 zinc-poly = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
+
+[features]
+# Enable rayon-based parallel witness generation. Propagates the same
+# `parallel` flag to `zinc-utils` so its `cfg_into_iter!` / `cfg_iter!`
+# macros pick the rayon path inside this crate.
+parallel = ["dep:rayon", "zinc-utils/parallel"]
 
 [lints]
 workspace = true

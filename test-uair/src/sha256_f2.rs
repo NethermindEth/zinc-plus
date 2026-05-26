@@ -97,7 +97,11 @@ use zinc_uair::{
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
 };
+use zinc_utils::{cfg_into_iter, cfg_iter};
 use zinc_utils::from_ref::FromRef;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::GenerateRandomTrace;
 
@@ -900,23 +904,50 @@ where
         }
 
         // ---- Per-row derived columns ---------------------------------
-        let sigma0_vals: Vec<u32> = a_vals.iter().copied().map(big_sigma0).collect();
-        let sigma1_vals: Vec<u32> = e_vals.iter().copied().map(big_sigma1).collect();
-        let sig0_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma0).collect();
-        let sig1_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma1).collect();
-        let shr3_w_vals: Vec<u32> = w_vals.iter().copied().map(|w| w >> 3).collect();
-        let shr10_w_vals: Vec<u32> = w_vals.iter().copied().map(|w| w >> 10).collect();
+        // Each of these is `O(n)` work over `n = 2^num_vars` rows with
+        // no inter-row dependencies (Σ/σ/SHR are per-cell; Ch/Maj use
+        // a small fixed row window). The `cfg_*_iter!(_, MIN_LEN)`
+        // form caps rayon's split granularity at `MIN_LEN` rows per
+        // task — at `n = 2^9 = 512` (test fixture) the whole job is
+        // smaller than MIN_LEN and runs on a single thread, avoiding
+        // rayon's task-spawn overhead; at `n ≥ 2^16` chunks divide
+        // cleanly across cores.
+        const PAR_MIN_LEN: usize = 1 << 12; // 4096 rows per parallel chunk
+        let sigma0_vals: Vec<u32> = cfg_iter!(a_vals, PAR_MIN_LEN)
+            .copied()
+            .map(big_sigma0)
+            .collect();
+        let sigma1_vals: Vec<u32> = cfg_iter!(e_vals, PAR_MIN_LEN)
+            .copied()
+            .map(big_sigma1)
+            .collect();
+        let sig0_vals: Vec<u32> = cfg_iter!(w_vals, PAR_MIN_LEN)
+            .copied()
+            .map(small_sigma0)
+            .collect();
+        let sig1_vals: Vec<u32> = cfg_iter!(w_vals, PAR_MIN_LEN)
+            .copied()
+            .map(small_sigma1)
+            .collect();
+        let shr3_w_vals: Vec<u32> = cfg_iter!(w_vals, PAR_MIN_LEN)
+            .copied()
+            .map(|w| w >> 3)
+            .collect();
+        let shr10_w_vals: Vec<u32> = cfg_iter!(w_vals, PAR_MIN_LEN)
+            .copied()
+            .map(|w| w >> 10)
+            .collect();
 
         // Per-row Ch / Maj operands. We populate on every row (not
         // just SHA-active ones) to keep the trace honest; off-active
         // rows don't participate in any constraint.
-        let u_ef_vals: Vec<u32> = (0..n)
+        let u_ef_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
             .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
             .collect();
-        let u_neg_e_g_vals: Vec<u32> = (0..n)
+        let u_neg_e_g_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
             .map(|t| if t >= 2 { (!e_vals[t]) & e_vals[t - 2] } else { 0 })
             .collect();
-        let maj_vals: Vec<u32> = (0..n)
+        let maj_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
             .map(|t| {
                 if t >= 2 {
                     maj(a_vals[t], a_vals[t - 1], a_vals[t - 2])
@@ -937,7 +968,7 @@ where
         let load = |arr: &[u32], idx: usize| -> u32 { if idx < n { arr[idx] } else { 0 } };
         let lsb = |x: u32| -> u32 { x & 1 };
 
-        let pa_c_vals: Vec<u32> = (0..n)
+        let pa_c_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
             .map(|k| {
                 let mut v = 0u32;
                 // C5 — W chain (3 steps; LSB checks (target + x + y)[0] = 0).

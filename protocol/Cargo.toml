@@ -36,7 +36,7 @@ workspace = true
 
 
 [features]
-parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
+parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel", "zinc-test-uair/parallel"]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []
 # Metal GPU Blake3 leaf-hash path in the commit phase. macOS-only.

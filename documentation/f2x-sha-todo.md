@@ -66,6 +66,59 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Parallelise SHA F_2 witness gen post-loop builders (commit `<TBD>`)
+- **What**: in `test-uair/src/sha256_f2.rs::generate_random_trace`,
+  switch the per-row builder loops that run *after* the
+  sequential compression rounds to `cfg_iter!` / `cfg_into_iter!`
+  with a `PAR_MIN_LEN = 4096`-row split threshold:
+  - 6 Σ / σ / SHR derived columns
+    (`sigma0_vals`, `sigma1_vals`, `sig0_vals`, `sig1_vals`,
+    `shr3_w_vals`, `shr10_w_vals`)
+  - 3 Ch / Maj operands (`u_ef_vals`, `u_neg_e_g_vals`, `maj_vals`)
+  - 1 packed-`PA_C` compensator builder (the largest single
+    loop: 13 per-step κ-residue extractions per row across all
+    `2^num_vars` rows)
+  Plumbing: new `parallel` feature on `zinc-test-uair`
+  (`rayon` optional dep + `zinc-utils/parallel` propagation);
+  `zinc-protocol`'s `parallel` feature now also enables
+  `zinc-test-uair/parallel`. The 4096-row min_len keeps small
+  fixtures (`nvars = 9`, `n = 512`) on the single-thread path so
+  rayon's task-spawn overhead doesn't dominate.
+- **Why**: the step-2+3 chained-Binius rewrite traded the prior
+  CSA-flattened impl's bounded-active-row CSA work for an
+  unconditional `O(n)` packed-`PA_C` builder. At `nvars = 22` this
+  alone caused a ~170 ms (+170%) regression in `WitnessGen`, the
+  only stage that got slower in step 2+3. The post-loop builders
+  are embarrassingly parallel — each row is independent — so the
+  fix is mechanical: `cfg_into_iter!(0..n, MIN_LEN)`.
+- **Measured impact** (Apple M-series, `--features
+  parallel,simd,unchecked`, vs the `pre-step23` baseline saved
+  before any of the alignment work):
+  | nvars | Stage      | Pre step-2+3 | Post step-2+3 + parallel | Δ      |
+  |-------|------------|--------------|--------------------------|--------|
+  | 9     | WitnessGen | 76.2 µs      | 12.1 µs                  | −84%   |
+  | 9     | Prove      | 2.83 ms      | 2.71 ms                  | −5%    |
+  | 9     | Verify     | 2.58 ms      | 1.89 ms                  | −26%   |
+  | 20    | WitnessGen | 25.7 ms      | 12.8 ms                  | −50%   |
+  | 20    | Prove      | 888 ms       | 543 ms                   | −39%   |
+  | 20    | Verify     | 148 ms       | 112 ms                   | −24%   |
+  | 22    | WitnessGen | 102.7 ms     | 53.3 ms                  | −49%   |
+  | 22    | Prove      | 6.96 s       | 4.09 s                   | −41%   |
+  | 22    | Verify     | 585 ms       | 453 ms                   | −22%   |
+
+  Net wall clock at `nvars = 22`: 7.65 s → 4.60 s, **−40%**.
+- **Verification**: all 12 `f2_prove::tests` pass.
+- **Out of scope (not pursued)**: the sequential compression
+  loop (`for j in 16..rpc { ... }` plus the round-update body)
+  is *not* parallelised — each iteration depends on prior rows'
+  outputs (`w_vals[t - 16]`, `a_vals[k + 3]`, etc.), so the
+  inter-row dependency chain rules out a straight `par_iter`.
+  A per-compression `cfg_join!` across the 7 independent
+  compressions would help (each compression block of 68 rows is
+  independent up to the H_0 input), but at `nvars = 22` the
+  sequential compression work is already dwarfed by the
+  post-loop O(n) builders, so the payoff is small.
+
 ### Chained-Binius rewrite of C5–C11 with packed `PA_C` (steps 2+3 of 5, commit `<TBD>`)
 - **What** — full structural alignment of the SHA-256 F_2 UAIR with the
   `sha-f2x-doc` spec at the AIR-shape level, modulo the still-deferred
