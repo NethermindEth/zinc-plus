@@ -242,6 +242,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
                     num_leaves,
                     leaf_bytes,
                 );
+                // Release excess capacity above a 64 MB floor so a
+                // long-running service that proves at varying nvars
+                // doesn't hold the historical peak (~768 MB at SHA F_2
+                // nvars=22) forever. `shrink_to` is a no-op if
+                // `slab.capacity() <= max(slab.len(), 64 MB)`, so
+                // steady-state same-nvars commits pay nothing.
+                const SLAB_CAPACITY_FLOOR: usize = 64 * 1024 * 1024;
+                slab.shrink_to(SLAB_CAPACITY_FLOOR);
                 drop(slab);
                 (cw_matrices, tree)
             } else {
