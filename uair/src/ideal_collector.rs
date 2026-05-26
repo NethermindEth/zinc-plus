@@ -1,7 +1,7 @@
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
-    ConstraintBuilder, TraceRow, Uair,
+    ConstraintBuilder, ConstraintRing, TraceRow, Uair,
     dummy_semiring::DummySemiring,
     ideal::{Ideal, IdealCheck, IdealCheckError},
 };
@@ -10,6 +10,7 @@ use crate::{
 /// ideals used in a `Uair`.
 pub struct IdealCollector<I: Ideal> {
     pub ideals: Vec<IdealOrZero<I>>,
+    pub tags: Vec<ConstraintRing>,
 }
 
 impl<I: Ideal> IdealCollector<I> {
@@ -19,6 +20,7 @@ impl<I: Ideal> IdealCollector<I> {
     pub fn new(num_constraints: usize) -> Self {
         Self {
             ideals: Vec::with_capacity(num_constraints),
+            tags: Vec::with_capacity(num_constraints),
         }
     }
 }
@@ -48,10 +50,22 @@ where
 
     fn assert_in_ideal(&mut self, _expr: Self::Expr, ideal: &Self::Ideal) {
         self.ideals.push(ideal.clone());
+        self.tags.push(ConstraintRing::Z);
+    }
+
+    fn assert_in_ideal_typed(
+        &mut self,
+        _expr: Self::Expr,
+        ideal: &Self::Ideal,
+        ring: ConstraintRing,
+    ) {
+        self.ideals.push(ideal.clone());
+        self.tags.push(ring);
     }
 
     fn assert_zero(&mut self, _expr: Self::Expr) {
         self.ideals.push(IdealOrZero::zero());
+        self.tags.push(ConstraintRing::Z);
     }
 }
 
@@ -100,5 +114,70 @@ impl<I: Ideal> IdealCheck<DummySemiring> for IdealOrZero<I> {
     fn contains(&self, _value: &DummySemiring) -> Result<bool, IdealCheckError> {
         // Do nothing.
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        PublicColumnLayout, TotalColumnLayout,
+        ideal::ImpossibleIdeal,
+    };
+
+    #[derive(Clone)]
+    struct TypedCollectorUair;
+
+    impl Uair for TypedCollectorUair {
+        type Ideal = ImpossibleIdeal;
+        type Scalar = DummySemiring;
+
+        fn signature() -> crate::UairSignature {
+            crate::UairSignature::new(
+                TotalColumnLayout::new(0, 0, 0),
+                PublicColumnLayout::new(0, 0, 0),
+                vec![],
+                vec![],
+            )
+        }
+
+        fn constrain_general<B, FromR, MulByScalar, IFromR>(
+            b: &mut B,
+            _up: TraceRow<B::Expr>,
+            _down: TraceRow<B::Expr>,
+            from_ref: FromR,
+            _mbs: MulByScalar,
+            ideal_from_ref: IFromR,
+        ) where
+            B: ConstraintBuilder,
+            FromR: Fn(&Self::Scalar) -> B::Expr,
+            MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+            IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        {
+            b.assert_in_ideal_typed(
+                from_ref(&DummySemiring),
+                &ideal_from_ref(&ImpossibleIdeal),
+                ConstraintRing::Fp,
+            );
+            b.assert_zero(from_ref(&DummySemiring));
+            b.assert_in_ideal(
+                from_ref(&DummySemiring),
+                &ideal_from_ref(&ImpossibleIdeal),
+            );
+        }
+    }
+
+    #[test]
+    fn collect_ideals_records_parallel_tags() {
+        let collector = collect_ideals::<TypedCollectorUair>(3);
+
+        assert_eq!(collector.ideals.len(), 3);
+        assert_eq!(
+            collector.tags,
+            vec![ConstraintRing::Fp, ConstraintRing::Z, ConstraintRing::Z]
+        );
+        assert!(matches!(collector.ideals[0], IdealOrZero::NonZero(_)));
+        assert!(collector.ideals[1].is_zero_ideal());
+        assert!(matches!(collector.ideals[2], IdealOrZero::NonZero(_)));
     }
 }

@@ -21,6 +21,13 @@ use crate::ideal::{Ideal, IdealCheck};
 
 pub use lookup_types::{LookupColumnSpec, LookupTableType};
 
+/// Per-constraint ring tag for typed constraint collection.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ConstraintRing {
+    Z,
+    Fp,
+}
+
 /// The abstract interface to constraint building logic.
 /// In essence it allows to create constraints modulo ideals.
 pub trait ConstraintBuilder {
@@ -35,9 +42,33 @@ pub trait ConstraintBuilder {
     /// Add a constraint saying that `expr` belongs to the ideal `ideal`.
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
 
+    /// Add a constraint tagged for a specific ring in the typed-constraint
+    /// flow. Builders that do not care about tags can keep the existing
+    /// semantics by falling back to `assert_in_ideal`.
+    fn assert_in_ideal_typed(
+        &mut self,
+        expr: Self::Expr,
+        ideal: &Self::Ideal,
+        _ring: ConstraintRing,
+    ) {
+        self.assert_in_ideal(expr, ideal);
+    }
+
     /// Add a constraint saying that `expr` is equal to zero which is
     /// the same as saying that `expr` belongs to the zero ideal.
     fn assert_zero(&mut self, expr: Self::Expr);
+
+    /// Builders may override this to skip work for inactive typed rings.
+    #[inline(always)]
+    fn is_active_for(&self, _ring: ConstraintRing) -> bool {
+        true
+    }
+
+    /// Builders may override this to skip zero-ideal constraints.
+    #[inline(always)]
+    fn is_active_for_zero_ideal(&self) -> bool {
+        true
+    }
 }
 
 /// Specifies a shifted column
@@ -610,6 +641,23 @@ pub trait Uair: Clone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{dummy_semiring::DummySemiring, ideal::ImpossibleIdeal};
+
+    #[derive(Default)]
+    struct TypedFallbackBuilder {
+        non_zero_constraints: usize,
+    }
+
+    impl ConstraintBuilder for TypedFallbackBuilder {
+        type Expr = DummySemiring;
+        type Ideal = ImpossibleIdeal;
+
+        fn assert_in_ideal(&mut self, _expr: Self::Expr, _ideal: &Self::Ideal) {
+            self.non_zero_constraints += 1;
+        }
+
+        fn assert_zero(&mut self, _expr: Self::Expr) {}
+    }
 
     fn signature_with_mixed_shifts() -> UairSignature {
         UairSignature::new(
@@ -669,5 +717,23 @@ mod tests {
     fn bit_op_specs_reject_count_at_cell_width() {
         let _ = signature_with_mixed_shifts()
             .with_bit_op_specs(8, vec![BitOpSpec::new(0, BitOp::Rot(8))]);
+    }
+
+    #[test]
+    fn typed_assertion_defaults_to_plain_assert_in_ideal() {
+        let mut builder = TypedFallbackBuilder::default();
+
+        builder.assert_in_ideal_typed(DummySemiring, &ImpossibleIdeal, ConstraintRing::Fp);
+
+        assert_eq!(builder.non_zero_constraints, 1);
+    }
+
+    #[test]
+    fn skip_hints_default_to_active() {
+        let builder = TypedFallbackBuilder::default();
+
+        assert!(builder.is_active_for(ConstraintRing::Z));
+        assert!(builder.is_active_for(ConstraintRing::Fp));
+        assert!(builder.is_active_for_zero_ideal());
     }
 }
