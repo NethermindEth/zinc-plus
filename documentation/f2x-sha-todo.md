@@ -66,6 +66,39 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Parallelise q1 lift in `build_lifted_eq_tensor` (commit `d8c14d0`, −86% LiftedEqTensor, −27% Prove e2e)
+- **What**: `build_lifted_eq_tensor` (in `protocol/src/f2_prove.rs`)
+  built the q1 lifted-eq tensor via a plain
+  `q1_gf.iter().map(|g| basis.lift(g)).collect()`. At SHA-256 F_2
+  nvars=22 with num_rows=8, q1 has 2^{22−3} = 524 288 entries, each
+  one a 192×192 F_2 matrix-vec multiply (`AlphaPolyBasis::lift`,
+  ~600 ops per call). All single-threaded.
+- **Fix**: switched the q1 collect to
+  `cfg_iter!(q1_gf).map(...).collect()`. The lift is
+  data-independent across entries, so the parallelism is
+  straight-line. q0 stayed sequential (it's only ≤ num_rows
+  entries, ~8 — rayon spawn overhead dominates).
+- **Measured (criterion `--save-baseline` / `--baseline`,
+  nvars=22, `--features parallel,simd,unchecked,metal_gpu`)**:
+
+  | Bench                          | Before    | After    | Δ      |
+  |--------------------------------|-----------|----------|--------|
+  | Open-b-LiftedEqTensor/nv=22    | 163.2 ms  | 22.8 ms  | **−86.1%** (7.1×) |
+  | Prove e2e/nvars=22             | 3.11 s    | 2.27 s   | **−27.3%** |
+
+  Both p < 0.01. The 7.1× lift speedup matches the parallelism
+  factor on M-series (8 cores). Prove e2e baseline of 3.11s was
+  on the high end of run-to-run variance; conservative bound on
+  the change is −18.5% (lower CI endpoint).
+- **Bonus**: `verify_f2_open_with_virtuals` also calls
+  `build_lifted_eq_tensor` (line 2237). Verifier gets the same
+  parallel speedup for free.
+- **Lesson**: scan for `.iter().map().collect()` patterns on
+  large data where the per-element work is non-trivial — they're
+  free parallelism wins. The audit missed this; finding it took
+  a per-Open-micro bench breakdown to see that LiftedEqTensor
+  was eating 161 ms out of ~745 ms Open.
+
 ### Commit slab: 64 MB capacity floor after GPU dispatch (commit `7550055`, RSS hygiene)
 - **What**: `zip-plus/src/pcs/phase_commit.rs::commit_grouped`'s
   GPU branch caches a process-wide `Vec<u8>` (`COMMIT_SLAB_SCRATCH`)
