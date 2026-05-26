@@ -303,7 +303,7 @@ fn clmul_128x128(a: &[u64; 2], b: &[u64; 2]) -> [u64; 4] {
 /// PCLMUL; correctness mirror of the hardware path so tests stay
 /// deterministic).
 #[inline]
-fn clmul_64x64(a: u64, b: u64) -> [u64; 2] {
+pub(crate) fn clmul_64x64(a: u64, b: u64) -> [u64; 2] {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         // SAFETY: NEON+CRYPTO are enabled at compile time. `vmull_p64`
