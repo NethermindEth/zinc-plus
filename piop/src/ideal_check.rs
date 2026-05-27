@@ -5,11 +5,12 @@ mod structs;
 
 pub use structs::*;
 
-use crate::projections::{ColumnMajorTrace, RowMajorTrace, column_major_to_row_major};
+use crate::projections::{
+    ColumnMajorTrace, ProjectedScalars, RowMajorTrace, column_major_to_row_major,
+};
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use num_traits::ConstZero;
-use std::collections::HashMap;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError, univariate::dynamic::over_field::DynamicPolynomialF,
@@ -54,7 +55,7 @@ pub trait IdealCheckProtocol: Uair {
     fn prove_mle_first<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
-        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ProjectedScalars<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -83,7 +84,7 @@ pub trait IdealCheckProtocol: Uair {
     fn prove_combined<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
-        projected_scalars: &HashMap<Self::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ProjectedScalars<Self::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -142,7 +143,7 @@ where
     fn prove_mle_first<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -237,7 +238,7 @@ where
     fn prove_combined<F>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
-        projected_scalars: &HashMap<U::Scalar, DynamicPolynomialF<F>>,
+        projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,

@@ -32,6 +32,22 @@ pub enum ProjectedTrace<F: PrimeField> {
     ColumnMajor(ColumnMajorTrace<F>),
 }
 
+#[derive(Clone, Debug)]
+pub struct ProjectedScalars<From: Semiring, To: Clone> {
+    inner: HashMap<From, To>,
+}
+
+impl<From: Semiring, To: Clone> ProjectedScalars<From, To> {
+    // TODO(alex): Maybe return results?
+    #[inline]
+    pub fn get(&self, scalar: &From) -> Option<To> {
+        // TODO(alex): Lookup key often is DensePolynomial<R, 32> which is relatively
+        //             expensive to hash. If this becomes a bottleneck we can consider
+        //             using e.g. a raw point cache or something.
+        self.inner.get(scalar).cloned()
+    }
+}
+
 /// Project a multi-typed trace onto F[X], returning a row-indexed (transposed)
 /// matrix. Result: `trace[row][col]` where columns are ordered as binary_poly,
 /// arbitrary_poly, int.
@@ -374,27 +390,29 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
 /// Project scalars of a UAIR onto F[X].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
-) -> HashMap<U::Scalar, DynamicPolynomialF<F>> {
+) -> ProjectedScalars<U::Scalar, DynamicPolynomialF<F>> {
     let uair_scalars = collect_scalars::<U>();
 
     // TODO(Ilia): if there's a lot of scalars
     //             we should do this in parallel probably.
-    uair_scalars
+    let inner = uair_scalars
         .into_iter()
         .map(|scalar| {
             let mut dynamic_poly = project(&scalar);
             dynamic_poly.trim();
             (scalar, dynamic_poly)
         })
-        .collect()
+        .collect();
+
+    ProjectedScalars { inner }
 }
 
 /// Project scalars of a UAIR along F[X] -> F.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
-    scalars: HashMap<R, DynamicPolynomialF<F>>,
+    scalars: ProjectedScalars<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
-) -> Result<HashMap<R, F>, (R, F, EvaluationError)> {
+) -> Result<ProjectedScalars<R, F>, (R, F, EvaluationError)> {
     // TODO(Ilia): Parallelising this might be good for big UAIRs.
     //             We'd conditionally route between sequential and parallel
     //             projection depending on how many scalars the UAIR has.
@@ -402,6 +420,7 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
     let zero = F::zero_with_cfg(projecting_element.cfg());
 
     let max_coeffs_len = scalars
+        .inner
         .values()
         .map(|poly| poly.degree().map_or(0, |d| d + 1))
         .max()
@@ -410,7 +429,8 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, max_coeffs_len);
 
-    Ok(scalars
+    let inner = scalars
+        .inner
         .into_iter()
         .map(|(scalar, value)| {
             let deg = value.degree().map_or(0, |d| d + 1);
@@ -424,7 +444,9 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
                 .expect("inner product cannot fail here"),
             )
         })
-        .collect())
+        .collect();
+
+    Ok(ProjectedScalars { inner })
 }
 
 #[cfg(test)]
