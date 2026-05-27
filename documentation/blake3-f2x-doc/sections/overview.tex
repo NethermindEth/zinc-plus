@@ -1,0 +1,198 @@
+% ===========================================================================
+\section{Blake3 overview and target relation}\label{sec:overview}
+% ===========================================================================
+
+We briefly recall Blake3's compression function to fix notation, then
+state the relation our $\F_2[X]$-AIR arithmetises. Compared with
+SHA-256, Blake3's primitive set is strictly smaller: only
+$32$-bit modular addition, bitwise $\XOR$, and four fixed
+right-rotations $\ROTR^{16}, \ROTR^{12}, \ROTR^{8}, \ROTR^{7}$.
+
+\paragraph{Words and bit operations.}
+A \emph{word} is an integer $x \in [0\mathbin{..}2^{32}-1]$ with bit
+decomposition $x = \sum_{i=0}^{31} x_i\, 2^i$, $x_i \in \{0,1\}$. The
+operations $\XOR$ and $\ROTR^r$ for $r \in \{1,\dots,31\}$ are defined
+coefficient-wise on bits in the standard way. We write $\bitpoly{32}$
+for the set of \emph{bit-polynomials}
+$\bp{x}(X) := \sum_{i=0}^{31} x_i X^i \in \F_2[X]$. The map
+$\psi_{2}: \bitpoly{32} \to [0\mathbin{..}2^{32}-1]$ defined by
+$\psi_{2}(\bp{x}) := \bp{x}(2)$ (after lifting to $\Z[X]$) is a
+bijection. Blake3 uses neither $\AND$, $\NOT$, $\SHR$, nor $\SHL$.
+
+\paragraph{Ambient ring.}
+All constraints live in $\F_2[X]$, modulo two principal-ideal
+quotients chosen by the operation being arithmetised:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item Rotation identities for $\ROTR^{16}, \ROTR^{12}, \ROTR^{8},
+        \ROTR^{7}$ live in $\Frot = \F_2[X]/(X^{32}-1)$, the natural
+        quotient for cyclic rotations.
+  \item Modular-addition identities for sums modulo $2^{32}$ live in
+        $\Fshift = \F_2[X]/(X^{32})$, where multiplication by~$X$
+        coincides with $\SHL^{1}$ as a genuine ring operation.
+\end{itemize}
+Rotations and $\XOR$ are exact in $\F_2[X]$ and require no overflow
+witness; modular addition is arithmetised by the per-step Binius
+identity of \texttt{sha-f2x-doc}'s \Cref{F2:lem:binius-vc}, restated here
+as \Cref{lem:b3-binius-vc} for self-containment. The handling of
+$\ROTR^r$ at the PIOP layer (committed shifted column, rotation
+predicate, lookup) is left as a design parameter, identical to
+\texttt{sha-f2x-doc}.
+
+\paragraph{Initialization constants.}
+Blake3 uses the same eight $32$-bit constants $\mathrm{IV} = (\mathrm{IV}_0,
+\dots, \mathrm{IV}_7)$ as SHA-256:
+\begin{align*}
+\mathrm{IV}_0 &= \texttt{0x6a09e667}, & \mathrm{IV}_1 &= \texttt{0xbb67ae85}, &
+\mathrm{IV}_2 &= \texttt{0x3c6ef372}, & \mathrm{IV}_3 &= \texttt{0xa54ff53a}, \\
+\mathrm{IV}_4 &= \texttt{0x510e527f}, & \mathrm{IV}_5 &= \texttt{0x9b05688c}, &
+\mathrm{IV}_6 &= \texttt{0x1f83d9ab}, & \mathrm{IV}_7 &= \texttt{0x5be0cd19}.
+\end{align*}
+Only $\mathrm{IV}_0, \dots, \mathrm{IV}_3$ appear inside the
+compression's local state initialization (slots $v_8, \dots, v_{11}$);
+$\mathrm{IV}_4, \dots, \mathrm{IV}_7$ enter only as the default initial
+chaining value at the root of a hash invocation.
+
+\paragraph{The $\Gmix$ mixing function.}
+Blake3's $\Gmix$ takes a $16$-word working state
+$v = (v_0, \dots, v_{15})$, four state indices $a, b, c, d \in
+\{0, \dots, 15\}$, and two message words $x, y$, and updates the four
+state positions $v_a, v_b, v_c, v_d$ in place via
+\begin{equation}\label{eq:g-mix}
+\Gmix(v; a, b, c, d; x, y):
+\quad
+\begin{aligned}
+v_a &\;\leftarrow\; (v_a + v_b + x) \bmod 2^{32}, \\
+v_d &\;\leftarrow\; \ROTR^{16}(v_d \,\XOR\, v_a), \\
+v_c &\;\leftarrow\; (v_c + v_d) \bmod 2^{32}, \\
+v_b &\;\leftarrow\; \ROTR^{12}(v_b \,\XOR\, v_c), \\
+v_a &\;\leftarrow\; (v_a + v_b + y) \bmod 2^{32}, \\
+v_d &\;\leftarrow\; \ROTR^{8}(v_d \,\XOR\, v_a), \\
+v_c &\;\leftarrow\; (v_c + v_d) \bmod 2^{32}, \\
+v_b &\;\leftarrow\; \ROTR^{7}(v_b \,\XOR\, v_c).
+\end{aligned}
+\end{equation}
+Each $\Gmix$ thus performs $4$ modular sums (two of arity $3$ on
+$v_a$, two of arity $2$ on $v_c$), $4$ rotation-of-$\XOR$ composites
+(updating $v_b, v_d$), and reads $2$ message words.
+
+\paragraph{One round.}
+A Blake3 round runs eight $\Gmix$ invocations on a fixed schedule of
+indices: four \emph{column} mixings and four \emph{diagonal} mixings:
+\begin{align*}
+&\Gmix(v;0,4, 8,12; m_{\pi(0)}, m_{\pi(1)}), \quad
+ \Gmix(v;1,5, 9,13; m_{\pi(2)}, m_{\pi(3)}), \\
+&\Gmix(v;2,6,10,14; m_{\pi(4)}, m_{\pi(5)}), \quad
+ \Gmix(v;3,7,11,15; m_{\pi(6)}, m_{\pi(7)}), \\
+&\Gmix(v;0,5,10,15; m_{\pi(8)}, m_{\pi(9)}), \quad
+ \Gmix(v;1,6,11,12; m_{\pi(10)}, m_{\pi(11)}), \\
+&\Gmix(v;2,7, 8,13; m_{\pi(12)}, m_{\pi(13)}), \quad
+ \Gmix(v;3,4, 9,14; m_{\pi(14)}, m_{\pi(15)}).
+\end{align*}
+The message permutation $\pi$ depends on the round index $r \in
+\{0, \dots, 6\}$ and is given by the public table $\mathrm{MSG\_SCHEDULE}$
+of the reference implementation; round~$0$ uses the identity
+$\pi(j) = j$.
+
+\paragraph{Compression function.}
+Given an input chaining value $\mathrm{cv} = (\mathrm{cv}_0, \dots,
+\mathrm{cv}_7)$, a $16$-word message block $(m_0, \dots, m_{15})$, a
+$64$-bit block counter $t$ (split into $t_\mathrm{lo} = t \bmod
+2^{32}$ and $t_\mathrm{hi} = \lfloor t / 2^{32} \rfloor$), a byte count
+$\ell \in [0\mathbin{..}64]$, and a flags word $f$, Blake3 forms the
+initial working state
+\begin{equation}\label{eq:v-init}
+v^{(0)} \;=\; \bigl(
+   \mathrm{cv}_0, \mathrm{cv}_1, \mathrm{cv}_2, \mathrm{cv}_3,
+   \mathrm{cv}_4, \mathrm{cv}_5, \mathrm{cv}_6, \mathrm{cv}_7,
+   \mathrm{IV}_0, \mathrm{IV}_1, \mathrm{IV}_2, \mathrm{IV}_3,
+   t_\mathrm{lo}, t_\mathrm{hi}, \ell, f
+\bigr),
+\end{equation}
+runs $7$ rounds (rounds $0$ through $6$, in order), and produces a new
+chaining value via the feed-forward $\XOR$
+\begin{equation}\label{eq:feed-forward}
+\mathrm{cv}'_i \;=\; v^{(7)}_i \,\XOR\, v^{(7)}_{i+8}, \qquad
+i \in \{0, \dots, 7\},
+\end{equation}
+where $v^{(7)}$ denotes the working state after the seventh round.
+
+\begin{remark}[Feed-forward is $\XOR$, not addition]
+\label{rem:feed-forward-xor}
+A critical structural feature for the $\F_2[X]$ arithmetisation:
+Blake3's feed-forward \eqref{eq:feed-forward} is a bitwise
+$\XOR$, not a modular addition. SHA-256's feed-forward $H_{i+1}
+\equiv H_i + (a_{65}, \dots, h_{65}) \pmod{2^{32}}$ requires a
+component-wise modular sum, which over $\F_2[X]$ costs eight binary
+Binius steps per compression (\Cref{F2:con:ff-a}, \Cref{F2:con:ff-e} of
+\texttt{sha-f2x-doc}). Blake3's $\XOR$ feed-forward is a free
+$\F_2[X]$-linear combination of committed columns and contributes
+\emph{zero} additional Hadamards.
+\end{remark}
+
+\paragraph{Chained compressions.}
+A Blake3 hash invocation drives the compression function repeatedly,
+threading the output chaining value of one block into the input
+chaining value of the next. The implementation arithmetises $N :=
+\mathrm{NUM\_COMPRESSIONS}$ chained compressions in a single trace,
+identically to \texttt{sha-f2x-doc}: given a sequence of message
+blocks $(M^{(i)})_{i \in [0,N)}$, a sequence of per-block parameters
+$(t^{(i)}, \ell^{(i)}, f^{(i)})_{i \in [0,N)}$, and an initial
+chaining value $\mathrm{cv}^{(0)} \in [0\mathbin{..}2^{32}-1]^8$, define
+$\mathrm{cv}^{(i+1)}$ as the output of the $i$-th compression on input
+$(\mathrm{cv}^{(i)}, M^{(i)}, t^{(i)}, \ell^{(i)}, f^{(i)})$. The
+terminal value $\mathrm{cv}^{(N)}$ is pinned as a public boundary.
+
+\paragraph{Target relation.}
+We arithmetise the chained-compression relation
+\begin{equation}\label{eq:rel-b3}
+\mathrm{REL}_{\textsc{blake3}_N} \;:=\;
+\left\{(\mathbf{i},\mathbf{x};\mathbf{w}) \;\middle|\;
+\begin{aligned}
+&\mathbf{i} = (\mathrm{IV}, \mathrm{MSG\_SCHEDULE}), \\
+&\mathbf{x} = \bigl(\mathrm{cv}^{(0)},\,
+                    (M^{(i)}, t^{(i)}, \ell^{(i)}, f^{(i)})_{i \in [0,N)},\,
+                    \mathrm{cv}^{(N)}\bigr), \\
+&\mathbf{w} = \bigl(v^{(r),(i)}\bigr)_{r \in [0,7],\, i \in [0,N)}
+              \text{ — per-round working states}, \\
+&v^{(0),(i)} \text{ matches \eqref{eq:v-init} with the $i$-th inputs}, \\
+&v^{(r+1),(i)} \text{ is the result of one round on } v^{(r),(i)}, \\
+&\mathrm{cv}^{(i+1)}_j = v^{(7),(i)}_j \,\XOR\, v^{(7),(i)}_{j+8}
+   \text{ for } j \in [0,8).
+\end{aligned}\right\}.
+\end{equation}
+The remainder of this document constructs an $\F_2[X]$-AIR instance
+$(\mathbf{i}_{\text{air}},\mathbf{x}_{\text{air}};\mathbf{w}_{\text{air}})$
+that lies in the corresponding $\F_2[X]$-AIR relation if and only if
+the input witness lies in $\mathrm{REL}_{\textsc{blake3}_N}$.
+
+\paragraph{Comparison with \texttt{sha-f2x-doc}.}
+The arithmetisation toolkit is identical: $\XOR$ is $\F_2[X]$
+addition, rotations are multiplication in $\Frot$, modular addition
+uses the Binius virtual-carry gadget of
+\Cref{lem:b3-binius-vc} in $\Fshift$. Blake3's narrower primitive
+set produces a smaller AIR along four axes:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item \emph{No $\AND$.} Blake3's round logic never uses $\AND$,
+        $\NOT$, $\Ch$, or $\Maj$. The three $\AND$-flavoured Hadamard
+        relations (C12--C14 of \texttt{sha-f2x-doc}) and their
+        committed $\bp{W_{u_{ef}}}, \bp{W_{u_{\neg e, g}}},
+        \bp{W_{\Maj}}$ columns vanish entirely.
+  \item \emph{No $\SHR$.} The four rotation amounts $\{16, 12, 8, 7\}$
+        are all genuine rotations; Blake3 uses no logical right shifts.
+        The dedicated $\bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$ committed
+        columns and the deferred $\SHR$-access mechanism of
+        \texttt{sha-f2x-doc} are unneeded.
+  \item \emph{No overflow witnesses, structurally.} As in
+        \texttt{sha-f2x-doc}, the ambient $\F_2[X]$ ring already
+        reduces colliding bits modulo $2$, eliminating the
+        $\Q[X]$-lift overhang.
+  \item \emph{Free feed-forward.} The $\XOR$ feed-forward
+        \eqref{eq:feed-forward} contributes no binary Binius steps;
+        \texttt{sha-f2x-doc}'s C\ref{F2:con:ff-a}--C\ref{F2:con:ff-e}
+        feed-forward additions have no analogue here.
+\end{itemize}
+What remains is a single arithmetisation problem: how to discharge the
+$4$ modular sums per $\Gmix$ (with arities $3, 2, 3, 2$ as listed in
+\eqref{eq:g-mix}). We solve this with the chained-Binius gadget of
+\Cref{F2:sec:mod-add-chain}; counts are made explicit in
+\Cref{sec:summary}.

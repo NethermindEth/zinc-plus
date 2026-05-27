@@ -1,0 +1,300 @@
+% ===========================================================================
+\section{Arithmetising the Blake3 building blocks over $\F_2[X]$}\label{sec:arith}
+% ===========================================================================
+
+We collect the lemmas that translate each Blake3 building block into
+an $\F_2[X]$-constraint. The toolkit is inherited from
+\texttt{sha-f2x-doc}'s \Cref{sec:arith}: rotations are multiplications
+in $\Frot$, $\XOR$ is $\F_2[X]$ addition, and modular addition uses
+the per-step Binius identity with virtual carry in $\Fshift$. The
+constructions appear in a strictly smaller form than in SHA-256: only
+single-rotation identities are needed (no triple-rotation $\Sigma$ or
+$\sigma$ identities), no $\SHR$ access mechanism is required, and no
+$\AND$ Hadamards arise.
+
+Throughout this section, all polynomials are bit-polynomials in
+$\bitpoly{32} \subset \F_2[X]$. Two quotient rings appear:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item Rotation identities live in $\Frot = \F_2[X]/(X^{32}-1)$.
+  \item Modular-addition identities live in $\Fshift = \F_2[X]/(X^{32})$.
+\end{itemize}
+
+\subsection{Rotations}\label{sec:rot}
+
+\begin{lemma}[Rotation as multiplication in $\Frot$]\label{lem:b3-rot}
+For any $\bp{u} \in \bitpoly{32}$ and $0 \le r < 32$,
+$$
+\widehat{\ROTR^{r}(u)} \;=\; X^{32-r}\cdot \bp{u} \qquad \text{in } \Frot.
+$$
+Equivalently, for $\bp{u}, \bp{v} \in \bitpoly{32}$,
+$\bp{v} - X^{32-r}\cdot \bp{u} \in (X^{32}-1)$ in $\F_2[X]$ iff
+$\bp{v} = \widehat{\ROTR^{r}(u)}$.
+\end{lemma}
+
+This is the $\F_2$-coefficient specialisation of Lemma~8.7 of the
+Zinc+ paper, and the same statement as \Cref{F2:lem:rot} of
+\texttt{sha-f2x-doc}. The four rotation constants Blake3 uses are
+\begin{equation}\label{eq:b3-rho}
+\rho_{16}(X) := X^{16}, \quad
+\rho_{12}(X) := X^{20}, \quad
+\rho_{8}(X)  := X^{24}, \quad
+\rho_{7}(X)  := X^{25}, \quad \text{in } \F_2[X].
+\end{equation}
+
+\begin{remark}[Single-monomial rotation pins]\label{rem:b3-monomial}
+Unlike SHA-256, where $\Sigma_0, \Sigma_1, \sigma_0, \sigma_1$ are
+$\XOR$'s of three rotations and consequently the pinning constants
+$\rho_0(X), \rho_1(X), \rho_{\sigma_0}(X), \rho_{\sigma_1}(X)$ of
+\Cref{F2:sec:big-sigma,F2:sec:small-sigma} of \texttt{sha-f2x-doc} are
+\emph{trinomial} polynomials in $\F_2[X]$, Blake3's rotations are
+\emph{isolated} — each $\Gmix$ step rotates a single $\XOR$-pair by
+one of the four fixed amounts. Pinning constants are therefore single
+monomials \eqref{eq:b3-rho}. No additional $\SHR$ summand appears (in
+contrast to $\sigma_0, \sigma_1$ which carry a $\SHR^3, \SHR^{10}$
+term).
+\end{remark}
+
+\subsection{$\XOR$ composites: virtual columns by construction}
+\label{sec:b3-virtual}
+
+Every $\XOR$ in Blake3 occurs inside a rotation argument:
+$\ROTR^{16}(v_d \,\XOR\, v_a)$,
+$\ROTR^{12}(v_b \,\XOR\, v_c)$,
+$\ROTR^{8}(v_d \,\XOR\, v_a)$,
+$\ROTR^{7}(v_b \,\XOR\, v_c)$
+(per $\Gmix$ in \eqref{eq:g-mix}), and once again in the feed-forward
+\eqref{eq:feed-forward}. In $\F_2[X]$, both the inner $\XOR$ and the
+outer rotation are linear operations (the $\XOR$ at the polynomial
+level, the rotation via \Cref{lem:b3-rot}). The composite
+$\ROTR^{r}(\bp{u} + \bp{v}) = X^{32-r}\cdot (\bp{u} + \bp{v}) =
+X^{32-r}\bp{u} + X^{32-r}\bp{v}$ in $\Frot$ is therefore a
+\emph{free $\F_2[X]$-linear combination} of any committed
+representatives of $\bp{u}$ and $\bp{v}$.
+
+\begin{remark}[No dedicated rotation-result columns]\label{rem:no-rot-cols}
+This is the main structural simplification over
+\texttt{sha-f2x-doc}. There, the four committed columns
+$\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}},
+\bp{W_{\sigma_1}}$ store rotation/shift results because each is the
+$\XOR$ of three rotations and feeds into a downstream modular sum;
+committing the result keeps that downstream sum at a manageable
+arity. Blake3's rotations are isolated $\XOR$-of-two-words composites
+and each appears as a single addend in a downstream $\Gmix$ modular
+sum. Materialising the rotation result as a free linear
+combination — rather than as a committed column — keeps the
+downstream sum's arity at $\le 3$ and saves four committed columns
+per row.
+\end{remark}
+
+\subsection{Bitwise $\AND$: absent in Blake3}\label{sec:b3-no-and}
+
+For completeness we record the structural fact that Blake3's
+compression function uses no $\AND$ operation. Consequently:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item The Hadamard-product relation $\bp{w} = \bp{u}\,\had\,\bp{v}$
+        of \Cref{F2:sec:and-hadamard} of \texttt{sha-f2x-doc} does
+        \emph{not} arise in the Blake3 round logic.
+  \item There are no $\Ch, \Maj$-flavoured committed witnesses; the
+        three columns $\bp{W_{u_{ef}}}, \bp{W_{u_{\neg e, g}}},
+        \bp{W_{\Maj}}$ of \texttt{sha-f2x-doc} have no analogue in
+        this construction.
+  \item The only Hadamard relations in this arithmetisation are the
+        addition-side ones produced by the chained-Binius modular-add
+        gadget of \Cref{sec:b3-mod-add,sec:b3-mod-add-chain}.
+\end{itemize}
+
+\subsection{Modular addition via the per-step Binius identity in
+\texorpdfstring{$\Fshift$}{F2[X]/(X\^{}32)}}\label{sec:b3-mod-add}
+
+We restate the modular-addition primitive of \texttt{sha-f2x-doc}'s
+\Cref{F2:lem:binius-vc} so the present document is self-contained;
+nothing about the gadget is Blake3-specific.
+
+We work in the quotient ring $\Fshift = \F_2[X]/(X^{32})$. In this
+ring, multiplication by~$X$ coincides with the $\SHL^{1}$ operation on
+$\bitpoly{32}$: for $\bp{c} \in \bitpoly{32}$, the image of
+$X\cdot\bp{c}$ in $\Fshift$ satisfies $(X\cdot\bp{c})[0] = 0$ and
+$(X\cdot\bp{c})[i] = \bp{c}[i-1]$ for $i = 1,\dots,31$, with bit
+$\bp{c}[31]$ dropped by the quotient. Multiplication by~$X$ is
+therefore a genuine ring operation in $\Fshift$; the ideal $(X^{32})$
+absorbs the high-bit overflow automatically.
+
+\begin{lemma}[Two-input modular addition via Binius with virtual carry]
+\label{lem:b3-binius-vc}
+Let $\bp{a}, \bp{b}, \bp{s} \in \bitpoly{32}$. Then
+$\psi_2(\bp{s}) \equiv \psi_2(\bp{a}) + \psi_2(\bp{b}) \pmod{2^{32}}$
+if and only if there exists $\beta \in \F_2$ such that, defining
+$\bp{c} \in \bitpoly{32}$ by
+\begin{equation}\label{eq:b3-c-virtual}
+\bp{c}[i] \;:=\; \bigl(\bp{s} + \bp{a} + \bp{b}\bigr)[\,i+1\,]
+\quad \text{for } i = 0,\dots,30, \qquad
+\bp{c}[31] \;:=\; \beta,
+\end{equation}
+the two constraints
+\begin{align}
+\bp{s} &= \bp{a} + \bp{b} + X\cdot\bp{c} \qquad \text{in } \Fshift, \label{eq:b3-binius-linear}\\
+(\bp{a} + X\cdot\bp{c}) \had (\bp{b} + X\cdot\bp{c})
+   &= \bp{c} + X\cdot\bp{c} \qquad \text{in } \Fshift \label{eq:b3-binius-had}
+\end{align}
+both hold. Under the virtualisation \eqref{eq:b3-c-virtual} the linear
+identity \eqref{eq:b3-binius-linear} carries a single bit of
+non-trivial content: bits $1, \dots, 31$ hold automatically (since
+$(X\cdot\bp{c})[i] = \bp{c}[i-1] = (\bp{s} + \bp{a} + \bp{b})[i]$ for
+$i = 1, \dots, 31$ by construction), so \eqref{eq:b3-binius-linear}
+reduces to the bit-$0$ equation
+\begin{equation}\label{eq:b3-binius-lsb}
+\bigl(\bp{s} + \bp{a} + \bp{b}\bigr)[0] \;=\; 0,
+\end{equation}
+which is what the verifier actually checks (augmented with a $1$-bit
+public compensator on inactive rows; see \Cref{rem:b3-bin-lsb-comp}).
+\end{lemma}
+
+\begin{proof}
+Identical to the proof of \texttt{sha-f2x-doc}'s
+\Cref{F2:lem:binius-vc}; the gadget is independent of the surrounding
+hash function.
+\end{proof}
+
+\begin{remark}[Why one committed bit is irreducible]\label{rem:b3-beta-needed}
+The lower $31$ bits of $\bp{c}$ are $\F_2$-linear functions of
+$(\bp{s}, \bp{a}, \bp{b})$ and are therefore free at the commitment
+layer. The top bit $\bp{c}[31]$, in contrast, is the
+carry-\emph{out} of bit~$31$: a non-$\F_2$-linear function of
+$(\bp{a}, \bp{b})$ that the modular sum $\bp{s}$ has discarded.
+Committing $\beta$ as a single $\F_2$ bit per binary step per row is
+unavoidable.
+\end{remark}
+
+\begin{remark}[Public LSB compensator for inactive rows]\label{rem:b3-bin-lsb-comp}
+On rows where the modular-sum identity is meaningful, the LSB
+equation $\bp{s}[0] = \bp{a}[0] + \bp{b}[0]$ is automatic (no carry
+into bit~$0$). On inactive rows the witness cells may hold arbitrary
+garbage, so the LSB constraint is augmented with a public compensator
+$\kappa \in \F_2$ supported on bit~$0$ only:
+\begin{equation}\label{eq:b3-lsb-comp}
+\bigl(\bp{s} + \bp{a} + \bp{b}\bigr)[0] \;+\; \kappa \;=\; 0.
+\end{equation}
+The verifier checks $\kappa = 0$ on every active row of the binary
+step's row set (see \Cref{cons:b3-public-checks}); on inactive rows
+the prover sets $\kappa$ to absorb the LSB residue.
+\end{remark}
+
+\begin{proposition}[Per-add commitment cost]\label{prop:b3-binius-count}
+The two-input modular-addition gadget of \Cref{lem:b3-binius-vc}
+commits exactly one $\F_2$ bit per row (the carry-out $\beta$) and
+enforces one column-level Hadamard relation \eqref{eq:b3-binius-had}
+together with one $\F_2$-linear LSB check \eqref{eq:b3-lsb-comp}. For
+an $n$-input modular sum, the UAIR layer (\Cref{sec:uair})
+materialises $n - 2$ intermediate-sum bit-poly columns and applies
+\Cref{lem:b3-binius-vc} once per binary step, for a total of $n - 1$
+committed carry bits and $n - 1$ Hadamard relations per addition.
+\end{proposition}
+
+\subsection{Chaining for $3$-input modular sums}\label{sec:b3-mod-add-chain}
+
+\Cref{lem:b3-binius-vc} arithmetises the binary primitive only. Blake3
+uses two arities of modular sum, both within $\Gmix$: arity $2$ (one
+per $v_c$-update step) and arity $3$ (one per $v_a$-update step,
+absorbing the message word $x$ or $y$). The arity-$2$ sums are handled
+by a single binary Binius step. The arity-$3$ sums chain two binary
+steps with one intermediate-sum bit-poly column, following
+\Cref{F2:def:chain} of \texttt{sha-f2x-doc}.
+
+\begin{definition}[Chained-sum schedule for $\Gmix$]\label{def:b3-chain}
+Let $\bp{a}_1, \bp{a}_2, \bp{a}_3 \in \bitpoly{32}$. The arity-$3$
+modular sum
+$\bp{s} \equiv \bp{a}_1 + \bp{a}_2 + \bp{a}_3 \pmod{2^{32}}$ is
+arithmetised by materialising one intermediate-sum column
+$\bp{s}_{(1)} \in \bitpoly{32}$ and the binary recurrences
+\begin{align*}
+\bp{s}_{(1)} &\equiv \bp{a}_1 + \bp{a}_2 \pmod{2^{32}}, \\
+\bp{s}       &\equiv \bp{s}_{(1)} + \bp{a}_3 \pmod{2^{32}}.
+\end{align*}
+Two applications of \Cref{lem:b3-binius-vc} suffice: step~$1$ on
+$(\bp{a}_1, \bp{a}_2, \bp{s}_{(1)})$ with committed carry-out
+$\beta_1$, step~$2$ on $(\bp{s}_{(1)}, \bp{a}_3, \bp{s})$ with
+committed carry-out $\beta_2$. The arity-$2$ case is the special case
+$n = 2$: no intermediate, one carry-out bit, one binary step.
+\end{definition}
+
+\begin{proposition}[Per-$\Gmix$ commitment cost]\label{prop:b3-gmix-count}
+A single $\Gmix$ invocation of \eqref{eq:g-mix} commits, per row:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $2$ intermediate-sum bit-polynomial columns
+        (one per arity-$3$ sum), and
+  \item $6$ carry-out $\F_2$ bits per row (two per arity-$3$ sum, one
+        per arity-$2$ sum; packable into a shared bit-poly slot),
+\end{itemize}
+and enforces $6$ column-level Hadamard relations
+\eqref{eq:b3-binius-had} (one per binary step) together with $6$ LSB
+checks \eqref{eq:b3-lsb-comp} (each augmented with a $1$-bit public
+compensator).
+
+\emph{Irreducibility.} Neither the intermediate-sum columns nor the
+carry-out bits can be virtualised, by the same arguments as
+\Cref{F2:rem:beta-needed} and \Cref{F2:prop:binius-chain-count} of
+\texttt{sha-f2x-doc}: intermediate sums depend non-$\F_2$-linearly on
+the lower-bit carry chain of their inputs, and the carry-out bit is
+the top bit of that same non-linear chain.
+\end{proposition}
+
+\subsection{The feed-forward $\XOR$}\label{sec:b3-ff}
+
+The Blake3 chaining-value feed-forward \eqref{eq:feed-forward} is
+$\mathrm{cv}'_i = v^{(7)}_i \,\XOR\, v^{(7)}_{i+8}$ for $i \in [0, 8)$.
+In $\F_2[X]$ this reads
+\begin{equation}\label{eq:b3-ff-f2x}
+\widehat{\mathrm{cv}'_i} \;=\; \widehat{v^{(7)}_i} \;+\; \widehat{v^{(7)}_{i+8}}
+\qquad \text{in } \F_2[X], \qquad i \in [0, 8).
+\end{equation}
+This is a free $\F_2[X]$-linear combination of two committed
+final-state cells. It contributes \emph{zero} Binius steps, \emph{zero}
+Hadamards, and \emph{zero} committed columns: the new chaining-value
+cell needed to seed compression $i+1$ is virtual at every constraint
+that consumes it. The PIOP-layer mechanism that makes the right-hand
+side accessible at the consuming row (the next compression's init
+prefix) is the same row-shift / boundary-read mechanism used for the
+$\Gmix$ input reads (\Cref{sec:b3-state-access}), and is a design
+parameter of the AIR layer.
+
+\subsection{The state-access mechanism}\label{sec:b3-state-access}
+
+Every $\Gmix$ invocation reads four state-position values
+$v_a, v_b, v_c, v_d$ before writing them. The positions $(a, b, c, d)$
+depend on which of the eight per-round $\Gmix$ invocations is being
+performed (column~$0\ldots3$, then diagonal~$0\ldots3$, per
+\Cref{sec:overview}). Concretely: if the trace lays out one row per
+$\Gmix$ in execution order, the input value $v_p$ at row $t$ is the
+output value of position $p$ produced by the most recent earlier row
+that wrote position $p$, or — if no earlier row in the same
+compression wrote $p$ — the init value supplied to slot $p$ via
+\eqref{eq:v-init}.
+
+The mapping
+\begin{equation}\label{eq:b3-row-of-last-write}
+r(t, p) \;:=\; \max\bigl\{\, t' \le t \;:\; \text{$\Gmix$ at row $t'$ writes position $p$} \,\bigr\}
+\end{equation}
+is deterministic, depending only on the static $\Gmix$ schedule and
+the round-permutation table $\mathrm{MSG\_SCHEDULE}$. Read access to
+$v_p$ at row $t$ is a fixed (row-dependent) row-offset lookup
+$t - r(t, p)$ into a committed state column. Its discharge mechanism
+at the PIOP layer — committed shifted column, row-shift predicate
+gadget, lookup argument — is left as a design parameter of the
+arithmetisation, identical to the treatment of the $\Sigma_i / \sigma_i$
+input shifts in \texttt{sha-f2x-doc}.
+
+\begin{remark}[State access vs.\ SHA-256's shift-register]\label{rem:b3-vs-sha-shift}
+SHA-256's working state has a clean shift-register structure: the
+registers $(b, c, d)$ are forward shifts of $a$, and $(f, g, h)$ are
+forward shifts of $e$ (\Cref{F2:rem:shift-register} of
+\texttt{sha-f2x-doc}). All in-round state reads are therefore single
+\emph{uniform} forward shifts of the two committed $a$- and
+$e$-registers. Blake3's working state has no such uniform structure:
+each $\Gmix$'s four input positions $(a, b, c, d)$ change from one
+$\Gmix$ to the next according to the column/diagonal schedule and the
+per-round message permutation. The row-offset table $r(t, p)$ is
+non-uniform but static — known at circuit-construction time — and
+the verifier-side mechanism can amortise it just as
+\texttt{sha-f2x-doc}'s constraint evaluator amortises the
+$\bp{x}^{\downarrow \Delta}$ forward shifts.
+\end{remark}

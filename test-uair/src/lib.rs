@@ -1,4 +1,5 @@
 #![allow(clippy::arithmetic_side_effects)] // UAIRs should not care about overflows
+pub mod blake3_f2;
 pub mod ecdsa;
 pub mod ecdsa_addition;
 pub mod ecdsa_affine;
@@ -14,6 +15,9 @@ pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
 pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
+pub use blake3_f2::{
+    Blake3F2Ideal, Blake3F2Uair, blake3_f2_project_ideal, blake3_f2_project_scalar,
+};
 pub use sha256_f2::{
     Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal, sha256_f2_project_scalar,
 };

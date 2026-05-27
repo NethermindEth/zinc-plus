@@ -1,0 +1,652 @@
+% ===========================================================================
+\section{Full $\F_2[X]$-AIR}\label{sec:uair}
+% ===========================================================================
+
+We assemble the building blocks of \Cref{sec:arith} into a complete
+$\F_2[X]$-AIR for the chained-compression relation \eqref{eq:rel-b3}.
+The arithmetisation toolkit (rotation pins, Binius adders, $\XOR$ as
+free $\F_2[X]$-linear combination) is identical to
+\texttt{sha-f2x-doc}'s; what is different here is the trace shape
+(one row per $\Gmix$ rather than one row per SHA-round-update), the
+column inventory (no $\AND$-result columns, no
+$\Sigma_i / \sigma_i$ rotation-result columns), and the absence of
+modular-addition feed-forward.
+
+\subsection{Trace shape}\label{sec:b3-trace-shape}
+
+Fix $N := \mathrm{NUM\_COMPRESSIONS}$ and
+$\mathrm{ROWS\_PER\_COMP} := 60$ ($4$ init-prefix rows $+$ $56$
+$\Gmix$ rows, where $56 = 7\,\text{rounds} \cdot 8\,\Gmix\text{'s per round}$).
+Compression $i \in [0, N)$ occupies rows $[\,60i,\,60(i+1)\,)$; a
+$4$-row $\mathrm{cv}^{(N)}$ output prefix occupies $[\,60N,\,60N+4\,)$.
+The total $\mathrm{ACTIVE\_ROWS} := 60N + 4$, and trace length is
+$n := 2^{\nu}$ with $\nu$ the smallest integer satisfying $2^{\nu} \ge
+\mathrm{ACTIVE\_ROWS}$.
+
+\paragraph{Row sets.}
+The row sets used by the constraint families below:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item \emph{Init-prefix}
+        $\mathcal{T}_{\mathrm{init}} := \bigcup_{i \in [0,N]} [\,60i,\,60i + 4\,)$
+        (includes the $\mathrm{cv}^{(N)}$ output prefix as $i = N$).
+  \item \emph{$\Gmix$-active}
+        $\mathcal{T}_{\Gmix} := \bigcup_{i \in [0,N)} [\,60i + 4,\,60(i+1)\,)$
+        (the $56$ $\Gmix$ rows of each compression).
+  \item \emph{Round-$r$ slice}
+        $\mathcal{T}_{\Gmix}^{(r)} :=
+        \bigcup_{i \in [0,N)} [\,60i + 4 + 8r,\,60i + 4 + 8(r+1)\,)$
+        for $r \in [0, 7)$ (the $8$ rows hosting round $r$'s $\Gmix$ calls).
+  \item \emph{Junction-stitch}
+        $\mathcal{T}_{\mathrm{stitch}} :=
+        \bigcup_{i \in [1,N]} [\,60i,\,60i + 4\,)$
+        (init-prefix rows of compressions $i \ge 1$ and the output prefix,
+        which inherit their cv values from the prior compression's
+        $\Gmix$ chain).
+\end{itemize}
+$\mathcal{T}_{\mathrm{stitch}}$ is a subset of $\mathcal{T}_{\mathrm{init}}$:
+it excludes only the init prefix of compression $0$, whose cv is the
+public boundary $\mathrm{cv}^{(0)}$ and is pinned to public input
+directly.
+
+\subsection{Column layout}\label{sec:b3-cols}
+
+Every trace cell holds a bit-polynomial in $\bitpoly{32} \subset
+\F_2[X]$. The commitment is taken in an $\F_2[X]$-native PCS (specific
+choice deferred); consequently the booleanity constraint is
+structurally automatic.
+
+\paragraph{Public bit-polynomial columns ($5$).}
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Column} & \textbf{Role} \\
+\midrule
+$\col{PA\_CV\_LO}$ & Chaining-value boundary (low half): holds
+   $\mathrm{cv}^{(i)}_0, \mathrm{cv}^{(i)}_1, \mathrm{cv}^{(i)}_2,
+   \mathrm{cv}^{(i)}_3$ at the four init-prefix rows of compression
+   $i$, for every $i \in [0, N]$ (so the output prefix $i = N$ holds
+   $\mathrm{cv}^{(N)}_{0..3}$). \\
+$\col{PA\_CV\_HI}$ & Chaining-value boundary (high half): holds
+   $\mathrm{cv}^{(i)}_4, \mathrm{cv}^{(i)}_5, \mathrm{cv}^{(i)}_6,
+   \mathrm{cv}^{(i)}_7$ analogously. \\
+$\col{PA\_IV}$ & Init-prefix slots $v_8, v_9, v_{10}, v_{11}$, equal
+   to $\mathrm{IV}_0, \mathrm{IV}_1, \mathrm{IV}_2, \mathrm{IV}_3$ on
+   every compression's init prefix (public constant; identical
+   pattern on every $i$). \\
+$\col{PA\_PARAMS}$ & Init-prefix slots $v_{12}, v_{13}, v_{14},
+   v_{15}$ for compression $i$, equal to $t^{(i)}_{\mathrm{lo}},
+   t^{(i)}_{\mathrm{hi}}, \ell^{(i)}, f^{(i)}$ at the four init
+   rows. \\
+$\col{PA\_M}$ & Per-block message words: at compression $i$, the $16$
+   words $M^{(i)}_0, \dots, M^{(i)}_{15}$ occupy the $16$ message-seed
+   rows defined in \Cref{rem:b3-msg-layout}. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{Public LSB-only compensator column ($1$).}
+$\col{PA\_C}$. Under the chained-Binius treatment of each $\Gmix$
+(\Cref{sec:b3-mod-add,sec:b3-mod-add-chain}), every $\Gmix$ row hosts
+six binary modular-addition steps; each contributes a $1$-bit LSB
+compensator (\Cref{rem:b3-bin-lsb-comp}). We pack the six per-step
+compensator bits into bit positions $0, \dots, 5$ of a single
+$\bitpoly{32}$ column $\col{PA\_C}$; bits $6, \dots, 31$ are zero
+(verifier-checked) on every row. Bit $j \in \{0, \dots, 5\}$ is zero
+on every $\Gmix$-active row (\Cref{cons:b3-public-checks}).
+
+\paragraph{Public selectors ($3$, $\{0,1\}$-valued public columns).}
+$S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{STITCH}}, S_{\mathrm{MSG-INIT}}$,
+with supports $\mathcal{T}_{\mathrm{init}}, \mathcal{T}_{\mathrm{stitch}},
+\mathcal{T}_{\mathrm{msg}}$ respectively, where
+$\mathcal{T}_{\mathrm{msg}} := \bigcup_{i \in [0,N)} [\,60i + 4,\,60i + 20\,)$
+is the first $16$ rows of each compression's $\Gmix$ window
+(coincidentally also the rows of round $0$ and the first half of
+round $1$, since $16 = 8 + 8$; this is a layout convention chosen by
+\Cref{rem:b3-msg-layout}). Per-round message permutations are
+realised via fixed row-offset reads (\Cref{sec:b3-state-access}).
+
+\paragraph{Committed witness columns ($28$, post $\kappa$-lift refactor).}
+We organise the witnesses into two layers: \emph{primary} columns
+($10$, the trace-shape data — output state, chain intermediates,
+inner rotation intermediates) and \emph{$\kappa$-compensator}
+columns ($18$, introduced by \Cref{sec:b3-kappa-lift} to bring the
+effective max constraint degree down to $1$). The packed carry-out
+$\bp{W_\beta}$ of the earlier draft has been dropped — it was
+unconstrained at the AIR level and only used by the Hadamard
+discharge layer.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.30\linewidth} >{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Column} & \textbf{Role} \\
+\midrule
+\multicolumn{2}{l}{\textit{Output-state columns ($4$): the four positions written by this row's $\Gmix$}} \\[1pt]
+$\bp{W_{v_a^{(2)}}}$ & Final value of $v_a$ produced by the $\Gmix$ at this row \\
+$\bp{W_{v_b^{(2)}}}$ & Final value of $v_b$ produced (rotation pin \Cref{con:b3-rot-vb}) \\
+$\bp{W_{v_c^{(2)}}}$ & Final value of $v_c$ produced \\
+$\bp{W_{v_d^{(2)}}}$ & Final value of $v_d$ produced (rotation pin \Cref{con:b3-rot-vd}) \\
+\midrule
+\multicolumn{2}{l}{\textit{$v_a$-chain ($3$ columns)}} \\[1pt]
+$\bp{W_{s_a^{(1)}}}$ & Chained-Binius intermediate of $\Gmix$'s first arity-$3$ sum: $\bp{W_{s_a^{(1)}}} \equiv v_a + v_b \pmod{2^{32}}$ \\
+$\bp{W_{v_a^{(1)}}}$ & Output of the first arity-$3$ sum: $\bp{W_{v_a^{(1)}}} \equiv \bp{W_{s_a^{(1)}}} + x \pmod{2^{32}}$ \\
+$\bp{W_{s_a^{(2)}}}$ & Chained-Binius intermediate of $\Gmix$'s second arity-$3$ sum: $\bp{W_{s_a^{(2)}}} \equiv \bp{W_{v_a^{(1)}}} + \bp{W_{b'}} \pmod{2^{32}}$ \\
+\midrule
+\multicolumn{2}{l}{\textit{$v_c$-chain ($1$ column)}} \\[1pt]
+$\bp{W_{v_c^{(1)}}}$ & Inner $v_c$-value: $\bp{W_{v_c^{(1)}}} \equiv v_c + \bp{W_{d'}} \pmod{2^{32}}$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Inner rotation intermediates ($2$ columns; \Cref{rem:b3-inner-rotation-cells})}} \\[1pt]
+$\bp{W_{d'}}$ & $\ROTR^{16}$ of $(v_d \oplus \bp{W_{v_a^{(1)}}})$; feeds mod-2 step at $\bp{W_{v_c^{(1)}}}$. Pinned by \Cref{con:b3-rot-dprime}. \\
+$\bp{W_{b'}}$ & $\ROTR^{12}$ of $(v_b \oplus \bp{W_{v_c^{(1)}}})$; feeds arity-3 step at $\bp{W_{s_a^{(2)}}}$. Pinned by \Cref{con:b3-rot-bprime}. \\
+\midrule
+\multicolumn{2}{l}{\textit{$\kappa$-LSB packed compensators ($2$; \Cref{sec:b3-kappa-lift})}} \\[1pt]
+$\bp{W_{\kappa^{\mathrm{LSB}}_A}}$ & Packed LSB $\kappa$ for the $24$ phase-A LSB BiniusAdd checks. Bit $6g + s \in [0, 24)$ (for $g \in [0,4), s \in [0,6)$) is the $\kappa$ compensator absorbing the LSB residual of G-slot $g$'s step-$s$ check. Bits $24..31$ unused. Accessed at constraint time via the $\SHR^{j}$ bit-op virtuals declared by the signature. \\
+$\bp{W_{\kappa^{\mathrm{LSB}}_B}}$ & Same for phase B. \\
+\midrule
+\multicolumn{2}{l}{\textit{$\kappa$-rotation compensators ($16$, full-$32$-bit each; \Cref{sec:b3-kappa-lift})}} \\[1pt]
+$\bp{W^{C_1}_{\kappa,\Phi,g}}$ & For each phase $\Phi \in \{A, B\}$ and each $g \in [0, 4)$, a $\bitpoly{32}$ column absorbing the residual of constraint $C_1$ on G-slot $g$. On the phase's anchor rows the $\kappa$-zero pin (\Cref{cons:b3-kappa-zero}) forces it to $0$ so the constraint binds; on every other row it equals $\ROTR^{16}(v_d^{\mathrm{in}} \oplus \bp{W_{v_a^{(1)}}}) \oplus \bp{W_{d'}}$ taken at that row's lookahead positions. \\
+$\bp{W^{C_2}_{\kappa,\Phi,g}}$ & Same for $C_2$, absorbing $\ROTR^{12}(v_b^{\mathrm{in}} \oplus \bp{W_{v_c^{(1)}}}) \oplus \bp{W_{b'}}$. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{remark}[Why the inner rotation intermediates are committed,
+not virtual]\label{rem:b3-inner-rotation-cells}
+An earlier sketch of this design treated $v_d^{(1)} = \ROTR^{16}(v_d
+\oplus v_a^{(1)})$ and $v_b^{(1)} = \ROTR^{12}(v_b \oplus v_c^{(1)})$
+as virtual columns expressed as scalar multiplications $X^{16}\cdot(v_d
++ v_a^{(1)})$ and $X^{20}\cdot(v_b + v_c^{(1)})$ in $\Frot$. That works
+for the rotation pin (whose ambient ideal is $(X^{32} - 1)$, the same
+quotient that turns scalar multiplication by a monomial into a
+rotation), but it \emph{fails} for the LSB $\mathrm{BiniusAdd}$ check.
+The LSB check lives in $\F_2[X]$ (= no quotient); a scalar product
+$z\cdot X^{16}$ in $\F_2[X]$ has bit-$0$ coefficient identically zero
+(no monomial of degree $< 16$ in the product), whereas the BiniusAdd
+identity demands the bit-$0$ coefficient of the rotated term equal
+$z[16]$ — the wrap-around bit that the rotation brings down to
+position 0. The mismatch makes every step that takes a rotated value
+as an addend fail the $(X)$-ideal check at half the anchor rows on
+honest data. Committing $\bp{W_{d'}}, \bp{W_{b'}}$ as bit-poly cells
+whose contents are the actual rotated values lets the LSB check
+read the wrap-around bit from the committed bit-$0$ and pass on
+honest data. The pinning that the rotation is correctly performed
+moves into the rotation pin family of \Cref{con:b3-rot-dprime,con:b3-rot-bprime},
+which checks $X^{16}\cdot(v_d + v_a^{(1)}) \equiv \bp{W_{d'}}$ in
+$\Frot$ — exactly the place where scalar-multiplication-as-rotation
+\emph{is} semantically valid.
+\end{remark}
+
+\paragraph{Virtual values inside a $\Gmix$ row.}
+Of the four \emph{inner} values produced by the $\Gmix$ chain
+\eqref{eq:g-mix} between the first and last halves —
+$v_a^{(1)}, v_b^{(1)}, v_c^{(1)}, v_d^{(1)}$ — and the two further
+inner-rotation outputs $v_d^{(2)}, v_b^{(2)}$ produced by the
+second-half rotations:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+\item $\bp{W_{v_a^{(1)}}}, \bp{W_{v_c^{(1)}}}$ are committed
+      (mod-sum outputs that depend non-$\F_2$-linearly on the carry
+      chain; cf.\ \Cref{prop:b3-binius-count});
+\item $\bp{W_{d'}} = v_d^{(1)}$ and $\bp{W_{b'}} = v_b^{(1)}$ are
+      committed as the inner-rotation intermediates of
+      \Cref{rem:b3-inner-rotation-cells};
+\item $v_d^{(2)} = \bp{W_{v_d^{(2)}}}$ is the slot-$d$ output cell
+      itself — also a committed rotation result;
+\item $v_b^{(2)} = \bp{W_{v_b^{(2)}}}$ is the slot-$b$ output cell
+      analogously.
+\end{itemize}
+All rotation-bearing cells are therefore committed; the LSB
+$\mathrm{BiniusAdd}$ checks for steps VC1, SA2, VC2 (the three steps
+whose addends include a rotation) read those committed cells
+directly rather than computing scalar products virtually.
+
+\begin{remark}[Packing convention for $\beta$ and compensator bits]
+\label{rem:b3-binius-packing}
+The six per-step carry-out bits $\beta_\bullet$ and the six per-step
+LSB compensator bits are packed at \emph{matching} fixed positions of
+$\bp{W_\beta}$ and $\col{PA\_C}$ respectively:
+\begin{center}
+\small
+\begin{tabular}{cl}
+\toprule
+\textbf{Bit position $j$} & \textbf{Binary step within this row's $\Gmix$} \\
+\midrule
+$0$ & $v_a$-chain step $1$: $\bp{W_{s_a^{(1)}}} \equiv v_a + v_b \pmod{2^{32}}$ \\
+$1$ & $v_a$-chain step $2$: $\bp{W_{v_a^{(1)}}} \equiv \bp{W_{s_a^{(1)}}} + x \pmod{2^{32}}$ \\
+$2$ & $v_c$-chain step $1$: $\bp{W_{v_c^{(1)}}} \equiv v_c + \bp{W_{d'}} \pmod{2^{32}}$ \\
+$3$ & $v_a$-chain step $3$: $\bp{W_{s_a^{(2)}}} \equiv \bp{W_{v_a^{(1)}}} + \bp{W_{b'}} \pmod{2^{32}}$ \\
+$4$ & $v_a$-chain step $4$: $\bp{W_{v_a^{(2)}}} \equiv \bp{W_{s_a^{(2)}}} + y \pmod{2^{32}}$ \\
+$5$ & $v_c$-chain step $2$: $\bp{W_{v_c^{(2)}}} \equiv \bp{W_{v_c^{(1)}}} + \bp{W_{v_d^{(2)}}} \pmod{2^{32}}$ \\
+$6$--$31$ & zero (verifier-checked on every row) \\
+\bottomrule
+\end{tabular}
+\end{center}
+All six positions gate to the same row set ($\mathcal{T}_{\Gmix}$), so
+the verifier amortises the per-bit row-set zero check into one $O(n)$
+sweep of $\col{PA\_C}$ alongside the $\bp{W_\beta}$ high-bits-zero
+check.
+\end{remark}
+
+\begin{remark}[Message layout]\label{rem:b3-msg-layout}
+The simplest layout pins the $16$ message words of compression $i$
+into $\col{PA\_M}$ at the first $16$ rows of compression $i$'s
+$\Gmix$-active window: $\col{PA\_M}\rowidx{60i + 4 + j} = \bp{M^{(i)}_j}$
+for $j \in [0, 16)$. The $\Gmix$ at $\Gmix$-row index $k$ (i.e.\ trace
+row $t = 60i + 4 + k$) of compression $i$ then reads its two message
+words $m_{\pi_r(2k)}, m_{\pi_r(2k+1)}$ via fixed row-offset lookups
+into $\col{PA\_M}$, with the offsets determined by the public
+$\mathrm{MSG\_SCHEDULE}$ table for round $r = \lfloor k / 8 \rfloor$.
+The row-offset lookup mechanism is the same design parameter as the
+state-access mechanism (\Cref{sec:b3-state-access}); the offsets
+themselves are static, known at circuit-construction time.
+\end{remark}
+
+\begin{remark}[Virtual columns]\label{rem:b3-virtual-cols}
+Free linear combinations of committed columns enter the constraints
+at three places:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $\bp{v_b^{(1)}}, \bp{v_d^{(1)}}$ inside the $\Gmix$ row, per
+        \eqref{eq:b3-inner-virtual};
+  \item the per-step virtual carry word $\bp{c}_\bullet$ of each
+        Binius binary step: bits $0..30$ are $\SHR^{1}$ of the
+        $\F_2$-linear combination $\bp{\mathrm{target}} +
+        \bp{a} + \bp{b}$ for that step (cf.\
+        \Cref{eq:b3-c-virtual}), and bit $31$ is the step's committed
+        carry-out bit $\beta_\bullet$ (a fixed position of $\bp{W_\beta}$);
+  \item the next-row state-input reads $v_a, v_b, v_c, v_d$ for the
+        $\Gmix$ at row $t$, read via the row-offset lookup
+        mechanism (\Cref{sec:b3-state-access}) from prior rows of
+        $\bp{W_{v_a^{(2)}}}, \bp{W_{v_b^{(2)}}}, \bp{W_{v_c^{(2)}}},
+        \bp{W_{v_d^{(2)}}}$ or from public init cells.
+\end{itemize}
+Each virtual access is an $\F_2[X]$-linear combination over committed
+trace cells and incurs no extra commitment.
+\end{remark}
+
+\paragraph{Counting summary (post $\kappa$-lift).}
+Public side: $6$ bit-poly boundary/parameter columns and $4$ public
+selectors ($S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{PHASE-A}},
+S_{\mathrm{PHASE-B}}, S_{\mathrm{STITCH}}$), for $10$ public columns
+in total. (The packed LSB compensator $\col{PA\_C}$ of the earlier
+draft has been moved into the witness side as $\bp{W_{\kappa^{\mathrm{LSB}}_{A,B}}}$
+since it is prover-chosen.) Witness side: $10$ primary committed
+columns + $18$ $\kappa$ compensators = $28$. The $\kappa$ layer roughly
+doubles the trace footprint vs.\ the earlier draft but turns the
+effective max degree from $2$ to $1$ — see \Cref{sec:b3-kappa-lift}
+for the trade-off vs.\ the prover dispatch.
+
+\subsection{$\kappa$-lift to effective degree $1$}\label{sec:b3-kappa-lift}
+
+\paragraph{Why we $\kappa$-lift.}
+Each $\Gmix$ row's $48$ LSB BiniusAdd checks and its $32$ rotation
+pins (= $32$ per anchor row, counting C1–C4 across $4$ G-slots in
+each phase) are naturally written as
+\[
+S_{\mathrm{PHASE-\Phi}}(t) \cdot \mathrm{residual}_{\bullet}(t)
+\;\in\;
+\mathcal{I}_{\bullet},
+\quad \mathcal{I}_{\bullet} \in \{(X),\, (X^{32}-1)\}.
+\]
+The selector multiplication makes every such constraint degree-$2$
+in the trace MLEs. Because every constraint listed above uses a
+non-zero ideal, the F$_2$ IC's \texttt{effective\_max\_degree} check
+sees degree $2$ and dispatches the prover to the row-major lane —
+$O(2^{\nu} \cdot |\text{constraints}|)$ per-row expression
+evaluations. The MLE-first (degree-$1$) lane, which is dramatically
+faster, requires that every \emph{non-zero-ideal} constraint be
+degree $\le 1$.
+
+\paragraph{The lift.}
+We introduce \emph{$\kappa$ compensator} witness columns that absorb
+each constraint's residual, replacing the selector multiplication
+with a free additive term:
+\begin{align}
+&\text{(LSB):}\quad
+\bigl(\mathrm{target} + x + y +
+\SHR^{j}(\bp{W_{\kappa^{\mathrm{LSB}}_\Phi}})\bigr)
+\in (X), \label{eq:b3-kappa-lsb}\\
+&\text{($C_1, C_2$ rotation):}\quad
+\bigl(\mathrm{rotated\_combo} - \bp{W_{\bullet}}
++ \bp{W^{C_i}_{\kappa,\Phi,g}}\bigr)
+\in (X^{32}-1). \label{eq:b3-kappa-rot}
+\end{align}
+Each \eqref{eq:b3-kappa-lsb}, \eqref{eq:b3-kappa-rot} is now degree
+$1$ in the trace MLEs (the $\kappa$ term appears with coefficient
+$1$, no multiplication by a selector). To preserve the binding on
+the active phase's anchor rows we add an \emph{$\kappa$-zero pin}
+in the zero ideal:
+\begin{equation}\label{cons:b3-kappa-zero}
+S_{\mathrm{PHASE-\Phi}}(t) \cdot \bp{W_{\kappa,\bullet,\Phi,\cdot}}(t)
+\;=\; 0
+\quad\text{for every $\kappa$ column.}
+\end{equation}
+Constraint \eqref{cons:b3-kappa-zero} is \texttt{assert\_zero}: its
+raw degree is $2$ but it lives in the zero ideal, so
+\texttt{count\_effective\_max\_degree} skips it. On a phase-$\Phi$
+anchor row ($S_{\mathrm{PHASE-\Phi}} = 1$) the $\kappa$ column is
+pinned to zero and the additive form \eqref{eq:b3-kappa-lsb} /
+\eqref{eq:b3-kappa-rot} reduces to the original binding identity.
+On every other row, the prover sets $\kappa$ to whatever value
+absorbs the residual into the ideal, and the constraint is
+vacuously satisfied.
+
+\paragraph{Row-local rotation pins (C3, C4).}
+The two rotation pins that involve only same-row cells —
+\begin{align}
+&\bigl(X^{24} \cdot (\bp{W_{d'}} + \bp{W_{v_a^{(2)}}}) - \bp{W_{v_d^{(2)}}}\bigr)
+\in (X^{32}-1),\\
+&\bigl(X^{25} \cdot (\bp{W_{b'}} + \bp{W_{v_c^{(2)}}}) - \bp{W_{v_b^{(2)}}}\bigr)
+\in (X^{32}-1)
+\end{align}
+— don't need a $\kappa$ compensator. They are emitted once each
+(not per-G, not per-phase), with no selector, and hold at every row
+by trace construction. On $\Gmix$-active rows the honest G-mix
+arithmetic forces the identity; on init / output prefix rows the
+witness generator chooses
+$\bp{W_{d'}}[r] := \mathrm{ROTL}^{8}(\bp{W_{v_d^{(2)}}}[r]) \oplus
+\bp{W_{v_a^{(2)}}}[r]$ and the symmetric assignment for $\bp{W_{b'}}$.
+
+\paragraph{Effect on dispatch.}
+With the $\kappa$ layer in place
+\texttt{count\_effective\_max\_degree::<U>()} reports $1$ and the
+F$_2$ IC dispatches through \texttt{prove\_linear}. At $\nu = 22$ the
+end-to-end prove time drops from \mbox{$\sim 48$\,s} (row-major
+dispatch) to \mbox{$\sim 6$\,s} (MLE-first dispatch) — an
+\mbox{$8\times$} speedup at the cost of $\sim 2.6\times$ the witness
+column count.
+
+\subsection{Constraints}\label{sec:b3-constraints}
+
+We organise constraints into four classes:
+
+\begin{enumerate}[label=(\Alph*)]
+  \item \textbf{Rotation pins} for the committed
+        $\bp{W_{v_b^{(2)}}}$ and $\bp{W_{v_d^{(2)}}}$ output-state
+        columns, stated as polynomial congruences modulo $X^{32}-1$ in
+        $\F_2[X]$.
+  \item \textbf{Modular-addition constraints} — one chained-Binius
+        pack of six binary steps per $\Gmix$ row, consisting of the
+        $v_a$-chain ($4$ binary steps) and the $v_c$-chain ($2$ binary
+        steps) per \Cref{rem:b3-binius-packing}. Each binary step
+        contributes one $\F_2$-linear LSB check and one column-level
+        Hadamard relation in $\Fshift$.
+  \item \textbf{Junction-stitch constraints} — free $\F_2[X]$-linear
+        pins of $\col{PA\_CV\_LO}, \col{PA\_CV\_HI}$ at the init
+        prefix of compressions $i \ge 1$ to the XOR of two
+        final-state cells from compression $i-1$'s $\Gmix$ chain.
+  \item \textbf{Boundary pinning} — init-prefix and message-init
+        zero-ideal pins for the public boundary cells of
+        $\col{PA\_CV\_LO}, \col{PA\_CV\_HI}, \col{PA\_IV},
+        \col{PA\_PARAMS}, \col{PA\_M}$.
+\end{enumerate}
+
+We use the shorthand
+\begin{equation}\label{eq:b3-binius-add-template}
+\mathrm{BiniusAdd}\bigl(\bp{t};\; \bp{x}, \bp{y};\; \beta;\; \kappa\bigr)
+\;:\equiv\;
+\begin{cases}
+(\bp{t} + \bp{x} + \bp{y} + \kappa \cdot 1)[0] = 0, \\[2pt]
+(\bp{x} + X\cdot\bp{c}) \had (\bp{y} + X\cdot\bp{c}) = \bp{c} + X\cdot\bp{c}
+\;\;\text{in } \Fshift,
+\end{cases}
+\end{equation}
+where $\beta \in \F_2$ is the step's committed carry-out (a fixed bit
+of $\bp{W_\beta}$ per \Cref{rem:b3-binius-packing}), $\kappa \in \F_2$
+is the step's LSB compensator (a fixed bit of $\col{PA\_C}$), and
+$\bp{c} \in \bitpoly{32}$ is the virtual carry word
+$\bp{c}[i] := (\bp{t} + \bp{x} + \bp{y})[i+1]$ for $i = 0, \dots, 30$
+with $\bp{c}[31] := \beta$ (\Cref{eq:b3-c-virtual},
+\Cref{rem:b3-virtual-cols}). Each $\mathrm{BiniusAdd}$ unfolds into
+one $\F_2$ LSB equation (gated by its row set, here uniformly
+$\mathcal{T}_{\Gmix}$) and one column-level Hadamard relation in
+$\Fshift$.
+
+For brevity below we write $v_a, v_b, v_c, v_d \in \bitpoly{32}$ for
+this row's input-state cells (read via row-offset lookup per
+\Cref{sec:b3-state-access}; see the active-row identification in
+\Cref{rem:b3-state-access-rows}) and $x, y \in \bitpoly{32}$ for the
+two message words this $\Gmix$ consumes (read via row-offset lookup
+into $\col{PA\_M}$ per \Cref{rem:b3-msg-layout}). The virtual inner
+values $\bp{v_d^{(1)}}, \bp{v_b^{(1)}}$ are given by
+\eqref{eq:b3-inner-virtual}.
+
+% --- (A) Rotation pins ---------------------------------------------------
+
+\paragraph{(A) Rotation pins for $\bp{W_{d'}}, \bp{W_{b'}}, \bp{W_{v_d^{(2)}}}, \bp{W_{v_b^{(2)}}}$.}
+
+These bind the four committed rotation cells of every $\Gmix$ row to
+their $\XOR$-and-rotate definitions. By \Cref{lem:b3-rot}, each
+rotation is multiplication by a single monomial in $\Frot$. For every
+$\Gmix$-active row $t$:
+\begin{align}
+\bigl(v_d\rowidx{t} + \bp{W_{v_a^{(1)}}}\rowidx{t}\bigr) \cdot X^{16}
+   \;-\; \bp{W_{d'}}\rowidx{t}
+   &\in (X^{32}-1) \quad \text{in } \F_2[X], \tag{C1}\label{con:b3-rot-dprime}\\
+\bigl(v_b\rowidx{t} + \bp{W_{v_c^{(1)}}}\rowidx{t}\bigr) \cdot X^{20}
+   \;-\; \bp{W_{b'}}\rowidx{t}
+   &\in (X^{32}-1) \quad \text{in } \F_2[X], \tag{C2}\label{con:b3-rot-bprime}\\
+\bigl(\bp{W_{d'}}\rowidx{t} + \bp{W_{v_a^{(2)}}}\rowidx{t}\bigr) \cdot X^{24}
+   \;-\; \bp{W_{v_d^{(2)}}}\rowidx{t}
+   &\in (X^{32}-1) \quad \text{in } \F_2[X], \tag{C3}\label{con:b3-rot-vd}\\
+\bigl(\bp{W_{b'}}\rowidx{t} + \bp{W_{v_c^{(2)}}}\rowidx{t}\bigr) \cdot X^{25}
+   \;-\; \bp{W_{v_b^{(2)}}}\rowidx{t}
+   &\in (X^{32}-1) \quad \text{in } \F_2[X]. \tag{C4}\label{con:b3-rot-vb}
+\end{align}
+Each is a single-monomial congruence in $\Frot$ pinning one committed
+cell ($\bp{W_{d'}}, \bp{W_{b'}}, \bp{W_{v_d^{(2)}}}, \bp{W_{v_b^{(2)}}}$)
+to a free $\F_2[X]$-linear combination of the other committed cells.
+
+\begin{remark}[Why four rotation pins, not two]
+\label{rem:b3-four-rotation-pins}
+The earlier sketch had only two rotation pins (for $\bp{W_{v_d^{(2)}}}$
+and $\bp{W_{v_b^{(2)}}}$), treating the inner-rotation results
+$v_d^{(1)}, v_b^{(1)}$ as virtual scalar products. The LSB
+$\mathrm{BiniusAdd}$ check then required bit-$0$ semantics that
+scalar products in $\F_2[X]$ do not satisfy
+(\Cref{rem:b3-inner-rotation-cells}). Committing the inner-rotation
+results as $\bp{W_{d'}}$ and $\bp{W_{b'}}$ adds two cells per
+$\Gmix$ row and two more rotation pins (C1, C2) — the cells make the
+LSB check correct, and the pins keep them bound to the honest
+$\ROTR^{16}, \ROTR^{12}$ values.
+\end{remark}
+
+\begin{remark}[No $\Sigma_i / \sigma_i$ rotation pins]\label{rem:b3-no-sigma}
+\Cref{con:b3-rot-dprime,con:b3-rot-bprime,con:b3-rot-vd,con:b3-rot-vb}
+are the only rotation pins in this arithmetisation. Each is a
+single-monomial congruence in $\Frot$, binding one committed cell to
+a free $\F_2[X]$-linear combination. The analogous
+\texttt{sha-f2x-doc} constraints are
+$\mathrm{C1}$--$\mathrm{C4}$, which pin four committed
+rotation/shift-result columns ($\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}},
+\bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$) using \emph{trinomial}
+constants. Blake3's rotation use stays single-monomial — same pin
+count as SHA-256, but each pin involves a single-monomial constant
+rather than a trinomial.
+\end{remark}
+
+% --- (B) Modular-addition constraints ------------------------------------
+
+\paragraph{(B) Modular-addition constraints.}
+
+The six binary modular-add steps per $\Gmix$ row are listed below.
+Carry-out and compensator bits at \Cref{rem:b3-binius-packing}'s
+positions are denoted $\beta_j := \bp{W_\beta}\rowidx{t}[j]$ and
+$\kappa_j := \col{PA\_C}\rowidx{t}[j]$. For every $\Gmix$-active row
+$t$:
+\begin{align}
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{s_a^{(1)}}}\rowidx{t};\;
+    v_a, v_b;\; \beta_0,\; \kappa_0\bigr), \tag{C5}\label{con:b3-mod-sa1}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{v_a^{(1)}}}\rowidx{t};\;
+    \bp{W_{s_a^{(1)}}}\rowidx{t},\, x;\; \beta_1,\; \kappa_1\bigr), \tag{C6}\label{con:b3-mod-va1}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{v_c^{(1)}}}\rowidx{t};\;
+    v_c,\, \bp{W_{d'}}\rowidx{t};\; \beta_2,\; \kappa_2\bigr), \tag{C7}\label{con:b3-mod-vc1}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{s_a^{(2)}}}\rowidx{t};\;
+    \bp{W_{v_a^{(1)}}}\rowidx{t},\, \bp{W_{b'}}\rowidx{t};\; \beta_3,\; \kappa_3\bigr), \tag{C8}\label{con:b3-mod-sa2}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{v_a^{(2)}}}\rowidx{t};\;
+    \bp{W_{s_a^{(2)}}}\rowidx{t},\, y;\; \beta_4,\; \kappa_4\bigr), \tag{C9}\label{con:b3-mod-va2}\\
+\mathrm{BiniusAdd}\bigl(
+    &\bp{W_{v_c^{(2)}}}\rowidx{t};\;
+    \bp{W_{v_c^{(1)}}}\rowidx{t},\, \bp{W_{v_d^{(2)}}}\rowidx{t};\; \beta_5,\; \kappa_5\bigr), \tag{C10}\label{con:b3-mod-vc2}
+\end{align}
+Every rotation-bearing addend ($\bp{W_{d'}}, \bp{W_{b'}},
+\bp{W_{v_d^{(2)}}}$) is a committed cell whose contents are the actual
+rotated value — pinned by family A. The LSB $\mathrm{BiniusAdd}$
+identity then reads the wrap-around bit from each cell's bit-$0$
+directly, sidestepping the scalar-product-vs-rotation mismatch
+described in \Cref{rem:b3-inner-rotation-cells}. We refer
+to the pack \Cref{con:b3-mod-sa1}--\Cref{con:b3-mod-vc2} collectively
+as \emph{C\ref{con:b3-gmix}}: \label{con:b3-gmix}\(\text{C}_{\Gmix}
+:= \text{C5} \wedge \text{C6} \wedge \dots \wedge \text{C10}\).
+
+\begin{remark}[State-access mechanism: which row each input came from]
+\label{rem:b3-state-access-rows}
+At $\Gmix$-active row $t = 60i + 4 + k$ (round $r = \lfloor k/8 \rfloor$,
+intra-round index $k_0 = k \bmod 8 \in [0, 8)$), the four
+input-state cells $v_a, v_b, v_c, v_d$ on the right-hand sides of
+\Cref{con:b3-mod-sa1,con:b3-mod-vc1} (and inside the virtual
+\eqref{eq:b3-virtual-recap}) come from one of the following sources:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item the init prefix of compression $i$ ($\col{PA\_CV\_LO},
+        \col{PA\_CV\_HI}, \col{PA\_IV}, \col{PA\_PARAMS}$ at rows
+        $60i, \dots, 60i + 3$), if the position $p \in \{a,b,c,d\}$
+        has not yet been written by a prior $\Gmix$ in this
+        compression; or
+  \item a prior $\Gmix$-row's output cell
+        ($\bp{W_{v_a^{(2)}}}, \bp{W_{v_b^{(2)}}}, \bp{W_{v_c^{(2)}}},
+        \bp{W_{v_d^{(2)}}}$ at row $r(t, p)$, per
+        \eqref{eq:b3-row-of-last-write}), otherwise.
+\end{itemize}
+The mapping $(t, p) \mapsto (\text{source column}, \text{source row})$
+is determined entirely by the public column/diagonal $\Gmix$ schedule
+and is constant across all $i \in [0, N)$. The PIOP-layer mechanism
+that materialises these row-offset reads is left as a design parameter
+of the arithmetisation (cf.\ \Cref{sec:b3-state-access}).
+\end{remark}
+
+% --- (C) Junction-stitch constraints ------------------------------------
+
+\paragraph{(C) Junction-stitch (feed-forward $\XOR$).}
+
+These pin the input chaining value of compression $i \ge 1$ to the
+feed-forward $\XOR$ \eqref{eq:b3-ff-f2x} of compression $i-1$'s final
+state. Concretely, for $i \in [1, N]$ and $j \in [0, 4)$ (using the
+output prefix as $i = N$ for the boundary check
+$\mathrm{cv}^{(N)}$):
+\begin{align}
+S_{\mathrm{STITCH}}\rowidx{60i + j} \cdot \bigl(
+   \col{PA\_CV\_LO}\rowidx{60i + j}
+   \;-\; \bp{W_{v_\bullet^{(2)}}}\rowidx{r_\mathrm{fin}(i-1, j)}
+   \;-\; \bp{W_{v_\bullet^{(2)}}}\rowidx{r_\mathrm{fin}(i-1, j+8)}
+\bigr) &= 0, \tag{C11}\label{con:b3-stitch-lo}\\
+S_{\mathrm{STITCH}}\rowidx{60i + j} \cdot \bigl(
+   \col{PA\_CV\_HI}\rowidx{60i + j}
+   \;-\; \bp{W_{v_\bullet^{(2)}}}\rowidx{r_\mathrm{fin}(i-1, j+4)}
+   \;-\; \bp{W_{v_\bullet^{(2)}}}\rowidx{r_\mathrm{fin}(i-1, j+12)}
+\bigr) &= 0. \tag{C12}\label{con:b3-stitch-hi}
+\end{align}
+Here $r_\mathrm{fin}(i, p) := r(60(i+1)-1, p)$ is the trace row of
+the last $\Gmix$ in compression $i$ that wrote position $p$ (a static
+row offset back into compression $i$'s $\Gmix$ window), and
+$\bp{W_{v_\bullet^{(2)}}}$ denotes whichever of
+$\bp{W_{v_a^{(2)}}}, \bp{W_{v_b^{(2)}}}, \bp{W_{v_c^{(2)}}},
+\bp{W_{v_d^{(2)}}}$ corresponds to position $p$'s role within that
+final $\Gmix$. The right-hand side is a free $\F_2[X]$-linear
+combination of committed cells: no Binius gadget, no Hadamard, no
+$\beta$ bit.
+
+\begin{remark}[XOR feed-forward saves one Binius pack relative to
+\texttt{sha-f2x-doc}]
+\label{rem:b3-ff-savings}
+The analogues in \texttt{sha-f2x-doc} are
+\Cref{F2:con:ff-a,F2:con:ff-e}, each of which is a $\mathrm{BiniusAdd}$ on
+the junction window because SHA-256's feed-forward is modular
+addition. Blake3's $\XOR$ feed-forward saves $8$ binary Binius steps
+per compression ($8$ output cv components, one BiniusAdd each in
+\texttt{sha-f2x-doc}), or $0$ vs.\ $2$ packed positions of the
+carry-out column — \texttt{sha-f2x-doc} bits $11, 12$ for the two SHA
+feed-forwards have no analogue in $\bp{W_\beta}$.
+\end{remark}
+
+% --- (D) Boundary pinning ------------------------------------------------
+
+\paragraph{(D) Boundary pinning.}
+
+The public columns' values are pinned to public input at the
+appropriate row sets. For every init-prefix row $t = 60i + j$ with
+$i \in [0, N]$ and $j \in [0, 4)$:
+\begin{align}
+S_{\mathrm{INIT-PREFIX}}\rowidx{t} \cdot \bigl(\col{PA\_IV}\rowidx{t} - \widehat{\mathrm{IV}_j}\bigr) &= 0, \tag{C13}\label{con:b3-init-iv}\\
+S_{\mathrm{INIT-PREFIX}}\rowidx{t} \cdot \bigl(\col{PA\_PARAMS}\rowidx{t} - \widehat{P^{(i)}_j}\bigr) &= 0, \tag{C14}\label{con:b3-init-params}
+\end{align}
+where $P^{(i)} := (t^{(i)}_{\mathrm{lo}}, t^{(i)}_{\mathrm{hi}},
+\ell^{(i)}, f^{(i)})$ are the per-block parameters. For compression
+$0$ specifically, the boundary $\mathrm{cv}^{(0)}$ is pinned via
+\Cref{con:b3-init-cv0} below; for $i \ge 1$ the cv values are
+determined by \Cref{con:b3-stitch-lo,con:b3-stitch-hi} above (no
+public input).
+\begin{align}
+\bigl(1 - S_{\mathrm{STITCH}}\rowidx{60i + j}\bigr) \cdot
+S_{\mathrm{INIT-PREFIX}}\rowidx{60i + j} \cdot
+\bigl(\col{PA\_CV\_LO}\rowidx{60i + j} - \widehat{\mathrm{cv}^{(0)}_j}\bigr) &= 0, \tag{C15}\label{con:b3-init-cv0}\\
+\bigl(1 - S_{\mathrm{STITCH}}\rowidx{60i + j}\bigr) \cdot
+S_{\mathrm{INIT-PREFIX}}\rowidx{60i + j} \cdot
+\bigl(\col{PA\_CV\_HI}\rowidx{60i + j} - \widehat{\mathrm{cv}^{(0)}_{j+4}}\bigr) &= 0. \tag{C16}\label{con:b3-init-cv1}
+\end{align}
+The factor $(1 - S_{\mathrm{STITCH}})$ restricts \Cref{con:b3-init-cv0,con:b3-init-cv1}
+to compression~$0$'s init prefix (since $S_{\mathrm{STITCH}}$ is $1$
+on init-prefix rows of compressions $i \ge 1$ and $0$ on
+compression~$0$'s).
+
+For every message-init row $t = 60i + 4 + j$ with $j \in [0, 16)$:
+\begin{equation}\tag{C17}\label{con:b3-msg-init}
+S_{\mathrm{MSG-INIT}}\rowidx{t} \cdot \bigl(\col{PA\_M}\rowidx{t} - \widehat{M^{(i)}_j}\bigr) \;=\; 0.
+\end{equation}
+
+These are zero-ideal constraints in $\F_2[X]$, gated by public boolean
+selectors.
+
+\subsection{Verifier-side structural checks}\label{cons:b3-public-checks}
+
+The verifier discharges the following row-wise checks directly on
+\texttt{public\_trace} before the algebraic sumcheck begins:
+\begin{itemize}[leftmargin=2em]
+  \item Public bit-poly columns ($\col{PA\_CV\_LO}, \col{PA\_CV\_HI},
+        \col{PA\_IV}, \col{PA\_PARAMS}, \col{PA\_M}, \col{PA\_C}$) lie
+        in $\bitpoly{32}$ coefficient-wise.
+  \item Selectors $S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{STITCH}},
+        S_{\mathrm{MSG-INIT}}$ take their declared support values.
+  \item $\col{PA\_C}\rowidx{t}[j] = 0$ for $j \in \{0, \dots, 5\}$ on
+        every $\Gmix$-active row $t$, and
+        $\col{PA\_C}\rowidx{t}[j] = 0$ for $j \in \{6, \dots, 31\}$ on
+        every row.
+  \item $\col{PA\_IV}$ matches the declared IV bytes on every
+        init-prefix row (a stronger form of
+        \Cref{con:b3-init-iv} —  same check, executed in $O(n)$ on the
+        public trace rather than in the algebraic sumcheck).
+\end{itemize}
+All are $O(n)$ inspections amortised into the verifier's normal
+public-trace iteration.
+
+\subsection{Composition with downstream UAIRs}\label{sec:b3-compose}
+
+The layout exposes:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $\col{PA\_CV\_LO}\rowidx{0..4}$ and $\col{PA\_CV\_HI}\rowidx{0..4}$,
+        the input chaining value $\mathrm{cv}^{(0)}$;
+  \item $\col{PA\_CV\_LO}\rowidx{60N..60N+4}$ and
+        $\col{PA\_CV\_HI}\rowidx{60N..60N+4}$, the output chaining
+        value $\mathrm{cv}^{(N)}$;
+  \item $\col{PA\_M}\rowidx{60i+4..60i+20}$ for $i \in [0,N)$, the
+        per-block message words;
+  \item $\col{PA\_PARAMS}\rowidx{60i..60i+4}$ for $i \in [0,N)$, the
+        per-block counter/length/flags;
+\end{itemize}
+all as public input cells. A downstream UAIR can consume any of these
+from this $\F_2[X]$-AIR's public input without any in-circuit
+cross-binding constraint, regardless of which arithmetisation produced
+the Blake3 stage.

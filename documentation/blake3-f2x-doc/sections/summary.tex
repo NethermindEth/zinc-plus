@@ -1,0 +1,235 @@
+% ===========================================================================
+\section{Arithmetisation summary}\label{sec:summary}
+% ===========================================================================
+
+We summarise the dimensions and constraint counts of the Blake3
+$\F_2[X]$-AIR above, and compare them with \texttt{sha-f2x-doc}.
+
+\subsection{Dimensions}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+Number of compressions $N$        & $8$ (example) \\
+Rows per compression              & $60$ \quad ($4$ init-prefix $+\ 56$ $\Gmix$ rows) \\
+$\Gmix$'s per compression         & $7 \times 8 = 56$ \quad (8 per round, column $+$ diagonal phases) \\
+Active rows                       & $8 \cdot 60 + 4 = 484$ \\
+Trace length $n = 2^{\nu}$        & $2^{9} = 512$ \\
+Ambient ring                      & $\Frot$ (rotation pins C1--C4) and $\Fshift$ (BiniusAdd's C5--C10) \\
+\midrule
+Public bit-poly columns           & $6$ \quad ($4$ boundary $+\ 2$ message $\col{PA\_M\_X}, \col{PA\_M\_Y}$) \\
+Public selectors                  & $4$ \quad ($S_{\mathrm{INIT-PREFIX}}, S_{\mathrm{PHASE-A}}, S_{\mathrm{PHASE-B}}, S_{\mathrm{STITCH}}$) \\
+Committed bit-poly witnesses      & $\mathbf{28}$ \quad (\Cref{sec:b3-kappa-lift}) \\
+\quad — output state ($v_a, v_b, v_c, v_d$ after $\Gmix$) & $4$ \\
+\quad — $v_a$-chain intermediates ($s_a^{(1)}, v_a^{(1)}, s_a^{(2)}$) & $3$ \\
+\quad — $v_c$-chain intermediate ($v_c^{(1)}$) & $1$ \\
+\quad — inner rotation intermediates ($\bp{W_{d'}}, \bp{W_{b'}}$) & $2$ \\
+\quad — $\kappa$-LSB packed compensators (phase A, phase B) & $2$ \\
+\quad — $\kappa$-rotation compensators ($4$ G-slots $\times\ 2$ phases $\times\ 2$ constraints $C_1, C_2$) & $16$ \\
+\midrule
+Booleanity                        & \emph{structural} (free; $\F_2$-valued ambient ring) \\
+\midrule
+Algebraic constraints (Rust count)& $\mathbf{96}$ \\
+\quad — LSB BiniusAdd ($6$ steps $\times\ 4$ G's $\times\ 2$ phases, $\kappa$-LSB lifted) & $48$ \\
+\quad — $C_1, C_2$ rotation pins ($2$ per G $\times\ 4$ G's $\times\ 2$ phases, $\kappa$-rot lifted) & $16$ \\
+\quad — $C_3, C_4$ rotation pins (row-local, $1$ each) & $2$ \\
+\quad — $\kappa$-LSB zero pins (\Cref{cons:b3-kappa-zero}, per phase) & $2$ \\
+\quad — $\kappa$-rotation zero pins ($4$ G-slots $\times\ 2$ phases $\times\ 2$ constraints) & $16$ \\
+\quad — init boundary pins ($4$, gated by $S_{\mathrm{INIT-PREFIX}}$) & $4$ \\
+\quad — junction-stitch (XOR feed-forward) & $8$ \\
+External Hadamard-product checks  & $\mathbf{6}$ \quad (all from $C_{\Gmix}$, one per binary step in the $\Gmix$ pack; mechanism deferred) \\
+Verifier-side public-column checks & Per-bit compensator-zero on $\mathcal{T}_{\Gmix}$ + high-bits-zero on every row; $\col{PA\_IV}$ constant-pin \\
+\midrule
+Binary modular-add steps per compression
+   & $56 \cdot 6 = 336$ \quad (no feed-forward additions) \\
+Effective max constraint degree
+   & $1$ \quad (\texttt{count\_effective\_max\_degree}; routes through \texttt{prove\_linear}) \\
+Raw max constraint degree
+   & $2$ \quad (only on zero-ideal selector-gated \texttt{assert\_zero} pins; excluded from dispatch) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Comparison with \texttt{sha-f2x-doc}}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Quantity} & \textbf{\texttt{sha-f2x-doc} (SHA-256)} & \textbf{this doc (Blake3)} \\
+\midrule
+Ambient ring                  & $\Frot$ and $\Fshift$ & $\Frot$ and $\Fshift$ \quad (same) \\
+Rounds per compression        & $64$ & $7$ \\
+$\Gmix$/round-updates per compression & $64$ round-update outputs & $56$ $\Gmix$'s \\
+Rows per compression          & $68$ ($4$ init $+$ $64$ updates) & $60$ ($4$ init $+ 56$ $\Gmix$'s) \\
+Booleanity                    & structural (free) & structural (free) \\
+Overflow witnesses            & none ($\F_2[X]$ already reduces mod $2$) & none \\
+Committed bit-poly witnesses  & $19$ & $\mathbf{11}$ \\
+Public bit-poly columns       & $5$ & $6$ \\
+Public selectors              & $3$ & $3$ \\
+$\AND$ Hadamards              & $3$ (C12--C14: $u_{ef}, u_{\neg e, g}, \Maj$) & $\mathbf{0}$ \\
+Rotation/shift-result columns & $4$ ($\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}}, \bp{W_{\sigma_1}}$) & $\mathbf{4}$ ($\bp{W_{d'}}, \bp{W_{b'}}, \bp{W_{v_d^{(2)}}}, \bp{W_{v_b^{(2)}}}$ — all single-monomial $\Frot$ pins; \Cref{rem:b3-inner-rotation-cells}) \\
+Rotation-pin constants        & trinomial ($\rho_0, \rho_1, \rho_{\sigma_0}, \rho_{\sigma_1}$) & single monomial ($X^{16}, X^{20}, X^{24}, X^{25}$) \\
+$\SHR$ access mechanism       & deferred design parameter (used in $\sigma_0, \sigma_1$) & \emph{not used} \\
+Chained-Binius intermediates per compression
+                              & $6$ per row $\times\ 64$ rows $= 384$ cells
+                                (intermediate-sum columns) & $3$ per $\Gmix$ row $\times\ 56$ rows $= 168$ cells \\
+Carry-out bits per row (binary-step total)
+                              & $13$ (W chain $3 + T_1$ chain $5 + T_2, a', e' + 2 \cdot \mathrm{ff}$) & $6$ ($v_a$ chain $4 + v_c$ chain $2$) \\
+Binary modular-add steps per compression
+                              & $664$ \quad (incl.\ $48$ ff and $144$ message-schedule) & $\mathbf{336}$ \\
+Feed-forward mechanism        & modular addition (Binius gadgets on junction window) & $\XOR$ (free $\F_2[X]$-linear pin) \\
+Modular-add Hadamards per row & $13$ & $6$ \\
+Total Hadamard relations      & $16$ ($13$ addition $+ 3$ AND) & $\mathbf{6}$ (all addition) \\
+Algebraic constraint families & $14$ & $12$ \\
+Max constraint degree         & $1$ & $1$ \\
+Trace length (for example $N$)
+                              & $2^9 = 512$ ($N = 7$, $\mathrm{ROWS\_PER\_COMP} = 68$) & $2^9 = 512$ ($N = 8$, $\mathrm{ROWS\_PER\_COMP} = 60$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Where the columns went.}
+Blake3's committed-column inventory of $9$ is $-10$ relative to
+\texttt{sha-f2x-doc}'s $19$. The differences:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item $-4$ rotation/shift-result columns
+        ($\bp{W_{\Sigma_0}}, \bp{W_{\Sigma_1}}, \bp{W_{\sigma_0}},
+        \bp{W_{\sigma_1}}$). Blake3's rotations are isolated and feed
+        a downstream modular sum as a single addend; materialising
+        them as free $\F_2[X]$-linear combinations keeps the
+        downstream sum's arity at $\le 3$
+        (\Cref{rem:no-rot-cols}).
+  \item $-3$ $\AND$-result columns
+        ($\bp{W_{u_{ef}}}, \bp{W_{u_{\neg e, g}}}, \bp{W_{\Maj}}$).
+        Blake3 has no $\AND$, $\Ch$, $\Maj$ at all
+        (\Cref{sec:b3-no-and}).
+  \item $-2$ round-intermediate columns ($\bp{W_{T_1}}, \bp{W_{T_2}}$).
+        Blake3 has no analogous round-intermediate state — $\Gmix$
+        emits its updated $v_a, v_b, v_c, v_d$ directly.
+  \item $-4$ chained-Binius intermediate-sum columns net: the
+        $T_1$-chain ($-4$ for $\bp{W_{T_1}^{(1\!-\!4)}}$) and
+        $W$-chain ($-2$ for $\bp{W_W^{(1\!-\!2)}}$) of
+        \texttt{sha-f2x-doc} are replaced by Blake3's
+        \emph{$3$ per-row} chained-Binius intermediates
+        ($\bp{W_{s_a^{(1)}}}, \bp{W_{v_a^{(1)}}}, \bp{W_{s_a^{(2)}}}$)
+        plus the $v_c$-chain ($\bp{W_{v_c^{(1)}}}$).
+  \item $+3$ Blake3-specific intermediates per row: the inner
+        $\bp{W_{v_a^{(1)}}}, \bp{W_{v_c^{(1)}}}$ plus the
+        chained-Binius intermediates $\bp{W_{s_a^{(1)}}},
+        \bp{W_{s_a^{(2)}}}$ minus the two arity-3 outputs that count
+        as state — net per row, $4$ intermediates.
+  \item $+4$ direct output-state columns ($\bp{W_{v_a^{(2)}}},
+        \bp{W_{v_b^{(2)}}}, \bp{W_{v_c^{(2)}}}, \bp{W_{v_d^{(2)}}}$).
+        \texttt{sha-f2x-doc} commits only $a$- and $e$-registers
+        ($2$ columns), recovering $b, c, d, f, g, h$ via shifted
+        accesses; Blake3 commits all four $\Gmix$-output positions
+        because the state lacks a clean shift-register layout.
+  \item $\pm 0$ for the packed carry-out column ($\bp{W_\beta}$);
+        same column shape, different per-row bit allocation ($6$
+        bits used vs.\ $13$).
+\end{itemize}
+Net: roughly $-7$ for the absent rotation/AND/round-intermediate
+columns, $+2$ for the four-output-vs-two-output state layout, $-5$
+for the chained-Binius intermediate accounting. Total $-10$.
+
+\paragraph{What the Blake3 design buys.}
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item \emph{Half the binary modular-add steps per compression}
+        ($336$ vs $664$). Driven mostly by the absence of feed-forward
+        additions ($-8$ binary steps per compression), the simpler
+        $\Gmix$ adds ($4$ sums of average arity $2.5$, vs SHA-256's
+        $7$ sums of average arity $\approx 2.86$), and the absence of
+        a message-schedule modular sum ($-144$ binary steps per
+        compression).
+  \item \emph{Zero $\AND$ Hadamards.} The external Hadamard-product
+        mechanism needs to discharge only $6$ relations (vs.\ $16$ in
+        \texttt{sha-f2x-doc}); the verifier-side $\AND$-witness
+        booleanity reasoning of the booleanity-based encoding is
+        likewise unneeded.
+  \item \emph{No $\SHR$ access mechanism.} Blake3 uses no logical
+        right shifts; the deferred $\SHR$ design parameter of
+        \texttt{sha-f2x-doc}'s $\sigma_0, \sigma_1$ is not needed
+        here.
+  \item \emph{Strictly smaller column inventory.} $9$ committed
+        vs.\ $19$ in \texttt{sha-f2x-doc}.
+  \item \emph{Free feed-forward.} Each $\mathrm{cv}^{(i+1)}_j$ is a
+        free $\F_2[X]$-linear combination of two final-state cells of
+        compression $i$, contributing no Binius steps, Hadamards, or
+        $\beta$ bits.
+\end{itemize}
+
+\paragraph{What it costs.}
+The corresponding costs are:
+\begin{itemize}[leftmargin=2em,topsep=2pt]
+  \item \emph{More committed output-state columns per row} ($4$
+        vs.\ $2$ in \texttt{sha-f2x-doc}). Blake3 lacks a clean shift-
+        register structure, so all four $\Gmix$ outputs are committed
+        explicitly rather than recovered via shifted access.
+  \item \emph{Non-uniform row-offset reads}
+        (\Cref{rem:b3-state-access-rows},
+        \Cref{rem:b3-msg-layout}). \texttt{sha-f2x-doc}'s shifted
+        reads are by small constant offsets ($\le 4$ in the trace);
+        Blake3's row offsets are static but vary across rows according
+        to the column/diagonal $\Gmix$ schedule and the
+        $\mathrm{MSG\_SCHEDULE}$ permutation. The PIOP-layer machinery
+        that materialises these reads is the same as for
+        \texttt{sha-f2x-doc} (a deferred design parameter), but the
+        table of offsets is more complex.
+  \item \emph{Per-row Hadamard count is uniform across the trace} —
+        every $\Gmix$-active row hosts exactly $6$ Hadamards, vs.\
+        \texttt{sha-f2x-doc} where the per-row count varies by row
+        set ($3 + 5 + 1 + 1 + 1 = 11$ on update-active rows, $3$ on
+        schedule-active rows, etc.). This may simplify or complicate
+        the Hadamard-discharge mechanism depending on the chosen PIOP.
+\end{itemize}
+
+\subsection{Final PIOP state}
+
+After the algebraic sumcheck and PCS opening, the verifier holds, for
+each of the $9$ committed columns $\bp{W_\bullet}$, a single MLE
+evaluation
+\[
+\mle{\bp{W_\bullet}}(r_j, r_y) \;\in\; \K, \qquad
+(r_j, r_y) \in \K^{5} \times \K^{9},
+\]
+where $\K$ is the verifier's challenge extension field. Reads of the
+virtual $\bp{v_b^{(1)}}, \bp{v_d^{(1)}}, \bp{v_d^{(2)}}$
+(\eqref{eq:b3-inner-virtual}, \eqref{eq:b3-virtual-recap}) and of the
+state-input cells $v_a, v_b, v_c, v_d$ (\Cref{rem:b3-state-access-rows})
+and message words $x, y$ (\Cref{rem:b3-msg-layout}) are evaluated from
+the committed-column MLEs $\widetilde{\bp{W_\bullet}}$ at appropriately
+rotated/shifted bit-index points via the underlying rotation/shift
+gadget. Because the lower $31$ bits of every virtual carry word are
+free $\SHR^{1}$-of-XOR combinations of committed columns, the verifier
+reconstructs them at the challenge point without any additional
+commitment opening; only the per-step $\beta_\bullet$ bits are read
+out of $\widetilde{\bp{W_\beta}}$ at the fixed positions of
+\Cref{rem:b3-binius-packing}.
+
+\subsection{Composition with downstream UAIRs}
+
+The chosen layout exposes:
+\begin{itemize}
+\item $\col{PA\_CV\_LO}\rowidx{0..4}$ and $\col{PA\_CV\_HI}\rowidx{0..4}$,
+   the input chaining value $\mathrm{cv}^{(0)}$;
+\item $\col{PA\_CV\_LO}\rowidx{60N..60N+4}$ and
+   $\col{PA\_CV\_HI}\rowidx{60N..60N+4}$, the output chaining value
+   $\mathrm{cv}^{(N)}$;
+\item $\col{PA\_M}\rowidx{60i+4..60i+20}$ for $i \in [0,N)$, the
+   per-block message words;
+\item $\col{PA\_PARAMS}\rowidx{60i..60i+4}$ for $i \in [0,N)$, the
+   per-block counter/length/flags;
+\end{itemize}
+all as public input cells. A downstream UAIR (e.g.\ a chunk-tree
+verifier, a Merkle path checker, or any consumer of a Blake3 digest)
+can consume any of these from this $\F_2[X]$-AIR's public input
+without any in-circuit cross-binding constraint, regardless of which
+arithmetisation produced the Blake3 stage. The eventual choice of
+binary-code PCS and Hadamard-check mechanism influences only the
+proof size and verifier work at the PCS-opening step; it does not
+change the column or constraint layout exposed to a downstream
+consumer.

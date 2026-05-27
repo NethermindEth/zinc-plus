@@ -1,0 +1,65 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{The Blake3 $\F_2[X]$-AIR \\
+       \large Binius-style arithmetisation over $\F_2[X]$}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Draft companion to \texttt{sha-f2x-doc}. This
+document arithmetises Blake3 over $\F_2[X]$ using the same Binius-style
+toolkit (rotations as multiplication in $\Frot$, modular addition via
+per-step Binius with virtual carry in $\Fshift$, free $\F_2[X]$-linear
+combinations for $\XOR$). Blake3's narrower set of primitives — no
+$\AND$, no $\SHR$, no overflow witnesses, and a feed-forward that is a
+plain $\XOR$ — yields a substantially smaller arithmetisation than
+SHA-256 over the same toolkit.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe a Blake3 arithmetisation that commits all witness columns
+as bit-polynomials in $\F_2[X]$. The design rests on three
+$\F_2[X]$-native primitives, all inherited verbatim from
+\texttt{sha-f2x-doc}: \emph{(i)}~$\XOR$ is polynomial addition in
+$\F_2[X]$ and is free at the commitment layer; \emph{(ii)}~the four
+fixed rotations $\ROTR^{16}, \ROTR^{12}, \ROTR^{8}, \ROTR^{7}$ that
+Blake3's $\Gmix$ mixing function uses are multiplications by the
+constant monomials $X^{16}, X^{20}, X^{24}, X^{25}$ in
+$\F_2[X]/(X^{32}-1)$; \emph{(iii)}~modular addition $\pmod{2^{32}}$ is
+arithmetised by the per-step Binius identity with virtual carry in
+$\F_2[X]/(X^{32})$, exactly as in \texttt{sha-f2x-doc}
+(\Cref{F2:lem:binius-vc}): each binary step commits one $\F_2$ carry-out
+bit and enforces one column-level Hadamard relation in $\Fshift$
+together with one $\F_2$-linear LSB compensator equation. Two-input
+sums use one binary step; three-input sums chain two binary steps with
+one committed intermediate-sum bit-poly column.
+
+In contrast to SHA-256, Blake3 has \emph{no} $\AND, \Ch, \Maj, \SHR$ or
+$\sigma_i, \Sigma_i$ operations and \emph{no} modular-addition
+feed-forward (Blake3's chaining-value feed-forward is $\XOR$, not
+modular addition). Consequently the present arithmetisation requires
+\emph{zero} non-addition Hadamards (vs.\ $3$ in
+\texttt{sha-f2x-doc}), \emph{zero} dedicated rotation/shift-result
+columns (vs.\ $4$), and \emph{zero} feed-forward Binius steps (vs.\
+$2$). The Hadamard relations that remain are all addition-side and
+are listed explicitly in \Cref{sec:uair}. The result is a constraint
+system whose final state is a single MLE-evaluation claim per
+committed column over the verifier's challenge extension field, with
+tight local soundness on every modular addition.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/arithmetization}
+\input{sections/uair}
+\input{sections/summary}
+
+\end{document}
