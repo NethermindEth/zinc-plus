@@ -66,6 +66,226 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### F_2 native IC: short-circuit `assert_zero` slots to `ZERO` in both builders (commit TBD)
+- **What**: in `protocol/src/f2_native_ic.rs`, `F2NativeMleFirstBuilder::assert_zero`
+  (used by `prove_linear`) and `F2NativeRowBuilder::assert_zero` (used
+  by `prove_combined`) now push `DynamicPolynomialF::ZERO` /
+  `F2RowExpr::zero()` instead of the actual constraint expression.
+  The expression itself is dropped on the floor. Mirrors the
+  `prove_hybrid` pattern in `piop/src/ideal_check.rs::prove_hybrid`
+  but at the builder level — sound for the F_2 protocol's flow
+  because the F_2 IC's `combined_mle_values` are used only for
+  transcript absorption, not as inputs to the downstream γ-batched
+  sumcheck (which operates on the trace columns, not on the IC's
+  per-constraint polynomials).
+- **Why**: for an honest prover, an `assert_zero` constraint
+  evaluates to the zero polynomial cell-wise on every row, and the
+  IC verifier's `verify_as_subprotocol` already filters zero-ideal
+  slots out of `batched_ideal_check`. Computing the (degree-2,
+  selector × residual) F[X] expression and absorbing its coefficients
+  was pure busywork in `prove_linear` — one `DynamicPolynomialF`
+  polynomial multiply + a 32-coefficient transcript absorb per
+  zero-ideal slot, scaled by `num_constraints`. The integer PIOP
+  builder explicitly notes the same optimization was reverted there
+  for sumcheck-consistency reasons in the integer setting; the F_2
+  protocol's structure makes it sound here (see "Why" above).
+- **Measured (criterion `--quick`, nvars=22, full perf feature set)**:
+
+  | Bench (Prove e2e) | Before | After  | Δ            |
+  |-------------------|-------:|-------:|-------------:|
+  | F_2 SHA-256       | 2.92 s | 2.22 s | **−24%** (high variance, [1.99 s, 3.14 s] band) |
+  | F_2 Blake3        | 5.90 s | 5.12 s | **−13%**     |
+
+  All 27 `zinc-test-uair` tests still pass; SHA + Blake3 e2e bench
+  paths complete with successful `verify_f2_uair` /
+  `verify_f2_open_with_virtuals`.
+- **Constraint mix at play**: SHA-256 has ~3 zero-ideal pins out of
+  ~17 constraints (~18%); Blake3 has 30 zero-ideal out of 96 (~31%).
+  Surprisingly SHA shows the larger win despite the lower zero-ideal
+  fraction — likely the per-slot polynomial product dominates more
+  for SHA's shape (fewer total constraints, so each slot is a
+  larger fraction of work).
+
+### SIMD-batched α-projection (commit TBD) — 2.07× on random, tied on real SHA-256
+- **What**: added two NEON-batched 4-cell α-projection kernels in
+  [`poly/src/univariate/binary_gf128.rs`](../poly/src/univariate/binary_gf128.rs)
+  plus a column-projection wrapper, wired into
+  [`f2_prove.rs:877`](../protocol/src/f2_prove.rs#L877) via
+  `project_column_with_powers`:
+  - **`eval_f2_poly_d_at_with_powers_simd_x4`** (dense): four cells in
+    lockstep, `D=32` unconditional iterations. Each iter does one
+    16-byte `vld1q_u64` of α^i shared across four accumulators, plus
+    four `vandq_u64(pw, mask_k)` + `veorq_u64` per accumulator. Scalar
+    fallback for non-aarch64 keeps the same shape with regular u64
+    XOR/AND.
+  - **`eval_f2_poly_d_at_with_powers_simd_x4_sparse`** (union-skip):
+    same body but iterates only positions present in
+    `cells[0] | cells[1] | cells[2] | cells[3]` via `trailing_zeros`,
+    paying loop-control overhead in exchange for skipping all-clear
+    bit positions.
+
+  Wired the **dense** variant into the prove path. Sparse stays
+  exported for future use on UAIRs with low cell-popcount/high cell
+  correlation.
+
+- **Why now**: the GF(2^192) → GF(2^128) field swap (entry below)
+  delivered the predicted 1.5–3.6× wins on every field-touching
+  micro-bench *except* `UAIR-b-AlphaProject` — the dominant single
+  phase at 1067 ms / nvars=22 (≈90% of UAIR). That kernel uses a
+  branchy `trailing_zeros` walk where one fewer XOR per set bit
+  (2 vs 3 u64 words for GF128 vs GF192) is invisible against
+  loop-control overhead. SIMD batching is the natural next lever to
+  amortise that overhead.
+
+- **Measured (criterion, `--features parallel,simd,unchecked`,
+  Apple M-series 8-core):**
+
+  Random 65 536-cell column (`binary_gf_compare::project_col_65536`):
+  | Kernel | Time | vs branchy |
+  |---|---|---|
+  | GF128 branchy | 883 µs | 1.00× |
+  | GF128 branchless | 603 µs | 1.46× |
+  | **GF128 SIMD-x4 dense** | **407 µs** | **2.17×** |
+  | GF128 SIMD-x4 sparse | 473 µs | 1.87× |
+
+  Real SHA-256 trace (`Micro/UAIR-b-AlphaProject/nvars=22`):
+  | Kernel | Time | vs branchy |
+  |---|---|---|
+  | GF128 branchy (baseline) | 1067 ms | 1.00× |
+  | GF128 SIMD-x4 dense | 1059–1085 ms | ~1.00× (tied within ±2% noise) |
+  | GF128 SIMD-x4 sparse | 1105 ms | 0.97× (regressed) |
+
+- **Why the random 2× win collapses to "tied" on real**: the prove
+  path's per-cell cost in branchy mode is `popcount(cell) × ~5 ops`.
+  On random 32-bit cells, avg popcount is 16, so branchy does ~80
+  ops/cell — matching the binary_gf_compare ~12.5 ns/cell. On the
+  actual SHA-256 trace, the same branchy kernel runs at ~6.2 ns/cell
+  (172 M cells in 1067 ms), implying real-cell avg popcount is closer
+  to ~8 — half of random. SIMD-x4 pays a fixed `D=32` cost per cell
+  regardless, so it can't undercut a branchy kernel already running
+  at 8-bit-per-cell speed.
+
+- **Why sparse regressed**: my hypothesis was that with avg
+  popcount~8 per cell, the union of 4 cells would stay well below
+  `D=32`. Measurement disagreed: union saturates near `D` on the
+  real trace (cells in the same column are mutually uncorrelated +
+  the column carries ~all 32 bit positions across its rows), so
+  sparse iterates ~`D` times anyway AND pays the loop-control
+  overhead. Lesson: low **per-cell** popcount ≠ low **union**
+  popcount when cells are independent.
+
+- **Tests**: three correctness tests in `binary_gf128.rs::tests`:
+  `simd_x4_matches_scalar_branchy_random` (64 random batches),
+  `simd_x4_matches_scalar_branchy_edges` (zero / all-ones /
+  single-bit-per-position), `simd_x4_sparse_matches_simd_x4`
+  (64 random + 4 adversarial), `project_column_matches_scalar_per_cell`
+  (column lengths covering every `len % 4` remainder).
+
+- **Decision**: keep dense SIMD-x4 wired in. The on-prove-path delta
+  is within noise but never negative across runs, and the random-
+  workload `2×` win means new UAIRs with denser bit distributions
+  (e.g. Blake3, Poseidon-over-F_2) get the speedup for free without
+  re-engineering the prove path.
+
+- **Open follow-ups**:
+  - The α-projection lever appears exhausted at this UAIR shape. The
+    next prove-e2e lever is not in this phase; candidates:
+    Blake3/Metal commit pipeline, IC sumcheck round work, witness-gen
+    in `test-uair/src/sha256_f2.rs`.
+  - If a future UAIR has high cell correlation (e.g. lookup-heavy
+    columns), `project_column_with_powers_sparse` may pay off. Kept
+    exported for that case.
+
+### Field swap GF(2^192) → GF(2^128) on the F_2 prover path (commit TBD)
+- **What**: swapped the projecting field from `BinaryFieldGF192`
+  (`Uint<3>` storage, FIPS 186-2 pentanomial, Toom-Cook 3-way clmul
+  over 6 inner PMULL/PCLMUL muls, 192×192 F_2 matrix inversion for
+  `AlphaPolyBasis`) to `BinaryFieldGF128` (`Uint<2>` storage, GHASH
+  pentanomial, Karatsuba 2-way clmul over 3 inner muls, 128×128
+  matrix inversion). Touched `poly/src/univariate/binary_gf128.rs`
+  (promoted from benchmark-only to production with full
+  `Field`/`PrimeField`/`InnerTransparentField` surface, `AlphaPolyBasis`,
+  `lift_f2_*_to_gf128`/`eval_f2_*_at`/`lift_bp_to_f2_poly_1`/
+  `lift_gf128_to_f2_poly_2`/`eval_bits_at`), deprecated
+  `binary_gf192` (kept alive only for `binary_gf_compare` bench),
+  and global type/module renames across `protocol/src/f2_prove.rs`,
+  `protocol/benches/f2_sha256.rs`, `protocol/src/f2_native_ic.rs`,
+  `piop/src/{ideal_check,sumcheck/multi_degree,projections}.rs`,
+  `test-uair/src/sha256_f2.rs`,
+  `poly/src/univariate/binary_f2_wide.rs`, and the
+  `f2_prove_plan.md` / `f2_open_plan.md` / `f2-prove-optimizations.md`
+  docs.
+- **Why**: the field-size choice was the dominant lever the F_2
+  prove path's hot loops have left. Algebraically the `BinaryF2Poly<W>`
+  widths in the open proof scale linearly with the projecting-field
+  bit width (each is `⌈(D + k·n − k)/64⌉` for some constant `k`),
+  so cutting `n` from 192 to 128 shrinks every wide-poly type and
+  every wide-poly multiplication kernel by the same factor.
+- **Width rescale in `F2OpenProof<D>`** (the single algebraic change
+  beyond mechanical s/192/128/):
+    | Slot | GF192 | GF128 | Bound (D=32) |
+    |---|---|---|---|
+    | `q_i'` (lift target) | `BinaryF2Poly<3>` | `BinaryF2Poly<2>` | 128 b |
+    | `b_g[i]` mid-product | `BinaryF2Poly<4>` | `BinaryF2Poly<3>` | D + n − 1 |
+    | `b_vector`, `combined_row` entry | `BinaryF2Poly<7>` | `BinaryF2Poly<5>` | D + 2n − 1 |
+    | `lifted_claim a'` | `BinaryF2Poly<10>` | `BinaryF2Poly<7>` | D + 3n − 2 |
+  Const-generic call sites (`f2_poly_mul::<3,7,10>`,
+  `f2_inner_product::<3,4,7>`, `encode_f2_lin_open::<7>`,
+  `eval_f2_wide_poly_at::<10>`, `absorb_f2_poly_slice::<7|10, _>`)
+  all rescaled by the same map.
+- **Measured wins** (criterion, `--features parallel,simd,unchecked`,
+  nvars=22, Apple M-series 8-core):
+
+    | Bench | GF192 | GF128 | Speedup |
+    |---|---|---|---|
+    | `binary_gf/mul` | 3 ns | 2 ns | 1.5× |
+    | `binary_gf/square` | 3 ns | 2 ns | 1.5× |
+    | `binary_gf/inverse` | 2.53 µs | 1.51 µs | 1.68× |
+    | `binary_gf/alpha_precompute` (D=32) | 277 ns | 178 ns | 1.56× |
+    | `binary_gf/project_col_65536/branchless` | 685 µs | 484 µs | 1.42× |
+    | `Micro/Open-a-AlphaBasis/nv=22` | 158.45 µs | 43.99 µs | **3.6×** |
+    | `Micro/Open-b-LiftedEqTensor/nv=22` | 22.64 ms | 13.82 ms | **1.64×** |
+    | `Micro/Open-d-CombinedRow/nv=22` | 101.33 ms | 76.20 ms | **1.33×** |
+    | `Micro/UAIR-c-Sumcheck/nv=22` | 28.64 ms | 19.10 ms | **1.50×** |
+    | `Micro/UAIR-b-AlphaProject/nv=22` | 1067 ms | 1065 ms | 1.00× ❌ |
+
+  Proof bytes (per `proof_size_breakdown` table, nvars=22):
+  `uair.alpha` 24 → 16, `uair.gamma` 24 → 16,
+  `open.lifted_claim` 80 → 56, `open.b_vector` 448 → 320.
+  Aggregate proof size shrinks ~150 KB at nvars=22 from these scalar
+  components (open.combined_row dominates total bytes and is
+  unaffected by the field swap — it's already F_2-poly-bound).
+
+- **Why prove e2e barely moved** (Δ ≈ 1% on `Prove/nvars=22`,
+  inside criterion's CI band): UAIR is dominated by
+  `UAIR-b-AlphaProject` (1065 ms ≈ 90% of UAIR), which uses the
+  **branchy** kernel `eval_f2_poly_d_at_with_powers` at
+  [`f2_prove.rs:885`](../protocol/src/f2_prove.rs#L885). That
+  kernel's per-set-bit work is dominated by `trailing_zeros` +
+  `bits &= bits - 1` + memory load; saving one XOR per set bit (2
+  vs 3 u64 words) is invisible. The branchless variant **does**
+  benefit (`project_col_branchless 1.42×`) but a previous experiment
+  showed it regresses ~8 ms on the actual SHA-256 trace (predictable
+  bits favour branch prediction) — see comment at
+  [`f2_prove.rs:868-876`](../protocol/src/f2_prove.rs#L868-L876).
+  Net: the field-size lever is pulled, but the dominant cost is
+  outside its reach. Next lever for prove latency would be a
+  SIMD-batched α-projection that processes 2–4 cells per iteration to
+  amortise the loop-control overhead, OR an alternative kernel shape
+  that benefits from the 2/3 word reduction.
+- **GF192 fate**: kept compiled, marked
+  `#[deprecated(note = "F_2 prover uses BinaryFieldGF128; binary_gf192
+  is kept only for the binary_gf_compare bench. ...")]` on
+  `pub mod binary_gf192;` in `poly/src/univariate.rs`.
+  `binary_gf_compare.rs` carries `#![allow(deprecated)]` so the
+  comparison bench keeps running.
+- **Out of scope** (deferred): soundness/security write-up updates in
+  `f2_prove_plan.md` / `f2_open_plan.md` — per-challenge SZ error
+  drops from `d/2^192` to `d/2^128`, still well above 100-bit total
+  but a formal sum-of-errors derivation across all FS draws is owed.
+  TODO already flagged at `binary_gf128.rs:31-56`. Itoh–Tsujii
+  inverse remains naive Fermat (no production hot path hits it).
+
 ### Parallelise q1 lift in `build_lifted_eq_tensor` (commit `d8c14d0`, −86% LiftedEqTensor, −27% Prove e2e)
 - **What**: `build_lifted_eq_tensor` (in `protocol/src/f2_prove.rs`)
   built the q1 lifted-eq tensor via a plain

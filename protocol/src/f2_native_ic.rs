@@ -371,8 +371,13 @@ impl ConstraintBuilder for F2NativeRowBuilder {
         self.values.push(expr);
     }
 
-    fn assert_zero(&mut self, expr: Self::Expr) {
-        self.values.push(expr);
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        // The per-row F_2[X] expression of an `assert_zero` constraint
+        // already evaluates to the all-zero bit pattern on every row
+        // for an honest prover. Skip computing the input expression
+        // and push a zero `F2RowExpr` so Step 2's per-(constraint,
+        // bit-position) bit-loop exits immediately for this slot.
+        self.values.push(F2RowExpr::zero());
     }
 }
 
@@ -865,11 +870,12 @@ where
 
 /// Constraint builder used by [`F2NativeIc::prove_linear`].
 ///
-/// Mirrors `zinc_piop::ideal_check::combined_poly_builder::CombinedPolyRowBuilder`
-/// (which is module-private). Both `assert_in_ideal` and `assert_zero`
-/// just collect the expression — for an honest prover, zero-ideal
-/// constraints will already evaluate to the zero polynomial through
-/// `U::constrain_general` and the per-constraint absorption matches.
+/// `assert_in_ideal` pushes the (linear-by-precondition) expression
+/// as-is. `assert_zero` short-circuits to `DynamicPolynomialF::ZERO`
+/// — the ideal element is known to vanish on the hypercube for an
+/// honest prover, so the prover absorbs zero and the verifier (which
+/// already filters zero-ideal slots out of the per-constraint ideal
+/// check) consumes zero in matching transcript shape.
 struct F2NativeMleFirstBuilder<F: PrimeField> {
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
@@ -890,8 +896,8 @@ impl<F: PrimeField> ConstraintBuilder for F2NativeMleFirstBuilder<F> {
         self.combined_evaluations.push(expr);
     }
 
-    fn assert_zero(&mut self, expr: Self::Expr) {
-        self.combined_evaluations.push(expr);
+    fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.combined_evaluations.push(DynamicPolynomialF::<F>::ZERO);
     }
 }
 
