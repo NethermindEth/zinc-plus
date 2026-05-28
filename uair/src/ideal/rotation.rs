@@ -67,7 +67,7 @@ impl<F: PrimeField, const W: usize> IdealCheck<DynamicPolynomialF<F>>
                     let root_modulus = F::modulus(generating_root.cfg());
                     if coeffs_modulus != root_modulus {
                         return Err(IdealCheckError(format!(
-                            "Coefficient modulus {coeffs_modulus} doesn not match generating root modulus {root_modulus}",
+                            "Coefficient modulus {coeffs_modulus} doesn't match generating root modulus {root_modulus}",
                         )));
                     }
                 }
