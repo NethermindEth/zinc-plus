@@ -197,6 +197,11 @@ where
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
+        // TODO(fq): Flavor-1 Fq[X] ideal projection. Currently
+        // CombinedPolyRowBuilder rejects assert_in_fq_ideal calls; the
+        // protocol layer guards against any UAIR with non-empty
+        // UairSignature::primes reaching this code path.
+        ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
@@ -340,6 +345,9 @@ where
         &project,
         |x, y| Some(project(y) * x),
         ImpossibleIdeal::from_ref,
+        // TODO(fq): Flavor-1 Fq[X] ideal projection. Same caveat as the
+        // row-major path above.
+        ImpossibleIdeal::from_ref,
     );
 
     let mut combined_evaluations = constraint_builder.combined_evaluations;
@@ -390,6 +398,7 @@ pub struct CombinedPolyRowBuilder<F: PrimeField> {
 impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type Expr = DynamicPolynomialF<F>;
     type Ideal = ImpossibleIdeal;
+    type FqIdeal = ImpossibleIdeal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.combined_evaluations.push(expr);
@@ -397,6 +406,20 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
 
     fn assert_zero(&mut self, expr: Self::Expr) {
         self.combined_evaluations.push(expr);
+    }
+
+    fn assert_in_fq_ideal(
+        &mut self,
+        _prime_index: usize,
+        _expr: Self::Expr,
+        _ideal: &Self::FqIdeal,
+    ) {
+        // TODO(fq): Flavor-1 Fq[X] constraint accumulation. The current
+        // combined-poly path projects values into DynamicPolynomialF<F> using
+        // the verifier-sampled random prime; an Fq[X] constraint needs a
+        // *deterministic* projection phi_{q_i} to a per-prime field
+        // configuration before reduction. Guarded at the protocol layer.
+        todo!("Fq[X] constraint accumulation in CombinedPolyRowBuilder");
     }
 }
 

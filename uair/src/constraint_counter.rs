@@ -29,6 +29,7 @@ impl ConstraintCounter {
 impl ConstraintBuilder for ConstraintCounter {
     type Expr = DummySemiring;
     type Ideal = ImpossibleIdeal;
+    type FqIdeal = ImpossibleIdeal;
 
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
@@ -39,6 +40,17 @@ impl ConstraintBuilder for ConstraintCounter {
     #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
     fn assert_zero(&mut self, _expr: Self::Expr) {
+        self.0 += 1;
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
+    fn assert_in_fq_ideal(
+        &mut self,
+        _prime_index: usize,
+        _expr: Self::Expr,
+        _ideal: &Self::FqIdeal,
+    ) {
         self.0 += 1;
     }
 }

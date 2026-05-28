@@ -50,6 +50,7 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     type Expr = F;
 
     type Ideal = ImpossibleIdeal;
+    type FqIdeal = ImpossibleIdeal;
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
@@ -59,5 +60,20 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
         self.fold_constraint(expr);
+    }
+
+    #[inline(always)]
+    fn assert_in_fq_ideal(
+        &mut self,
+        _prime_index: usize,
+        _expr: Self::Expr,
+        _ideal: &Self::FqIdeal,
+    ) {
+        // TODO(fq): Flavor-1 Fq[X] constraints will require a separate folding
+        // term over phi_{q_i}(expr); the current PIOP folds only the Q[X]
+        // family. Any UAIR with non-empty `UairSignature::primes` is rejected
+        // at the protocol layer before reaching this folder, so we panic
+        // loudly here as a defense-in-depth guard.
+        todo!("Fq[X] constraint accumulation in CPR folder");
     }
 }

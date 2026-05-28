@@ -21,7 +21,7 @@ use zinc_poly::{
 use zinc_uair::{
     BitOp, BitOpSpec, ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout,
     TraceRow, Uair, UairSignature, UairTrace,
-    ideal::{DegreeOneIdeal, ImpossibleIdeal},
+    ideal::{DegreeOneIdeal, ImpossibleIdeal, rotation::RotationIdeal},
 };
 use zinc_utils::from_ref::FromRef;
 
@@ -33,6 +33,7 @@ where
     R: Semiring + 'static,
 {
     type Ideal = ImpossibleIdeal; // Not used
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -41,13 +42,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
     {
@@ -141,6 +143,7 @@ where
     R: ConstSemiring + From<i32> + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -148,13 +151,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         _down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
@@ -215,6 +219,7 @@ where
     R: ConstSemiring + From<i8> + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -222,13 +227,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         _down: TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
@@ -264,6 +270,7 @@ where
     R: ConstSemiring + From<u32> + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -271,13 +278,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         _down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&Self::Scalar) -> B::Expr,
@@ -329,6 +337,7 @@ where
     R: ConstSemiring + From<u32> + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -337,13 +346,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&Self::Scalar) -> B::Expr,
@@ -462,6 +472,7 @@ where
     R: ConstSemiring + From<u32> + 'static,
 {
     type Ideal = <BigLinearUair<R> as Uair>::Ideal;
+    type FqIdeal = <BigLinearUair<R> as Uair>::FqIdeal;
     type Scalar = <BigLinearUair<R> as Uair>::Scalar;
 
     fn signature() -> UairSignature {
@@ -471,20 +482,30 @@ where
         UairSignature::new(total, public, shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&Self::Scalar) -> B::Expr,
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
     {
-        BigLinearUair::<R>::constrain_general(b, up, down, from_ref, mbs, ideal_from_ref)
+        BigLinearUair::<R>::constrain_general(
+            b,
+            up,
+            down,
+            from_ref,
+            mbs,
+            ideal_from_ref,
+            fq_ideal_from_ref,
+        )
     }
 }
 
@@ -525,6 +546,7 @@ where
     R: ConstSemiring + From<u32> + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -536,13 +558,14 @@ where
         UairSignature::new(total, PublicColumnLayout::default(), shifts, vec![])
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         _from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&Self::Scalar) -> B::Expr,
@@ -776,6 +799,7 @@ where
     R: Semiring + 'static,
 {
     type Ideal = ImpossibleIdeal;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -790,13 +814,14 @@ where
     // Constraints:
     //   a[i+1] = a[i] + b[i]  →  down[0] - up[0] - up[1] = 0
     //   c[i]   = b[i+2]       →  up[2] - down[1] = 0
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         builder: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         _ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
     {
@@ -961,6 +986,86 @@ where
     }
 }
 
+/// A UAIR exercising the new Flavor-1 $\mathbb{F}_2[X]$-constraint surface.
+///
+/// Encodes the SHA-256-style XOR-rotation identity from the paper
+/// (`eq:xor-rot-ff2-intro`):
+///
+/// $$
+///   \hat{v} = \mathrm{ROTR}^{r}(\hat{u})
+///   \iff
+///   \phi_2(\hat{v}) - X^{W-r} \cdot \phi_2(\hat{u}) \in (X^{W} - 1)
+///   \quad\text{in } \mathbb{F}_2[X],
+/// $$
+///
+/// where $\hat{u}, \hat{v}$ are the two `binary_poly` witness lanes (members
+/// of $\widehat{\mathrm{Bit}}^{<W} \subseteq \mathbb{Q}[X]$ at the paper
+/// level, of width $W=32$ here), $\phi_2$ is coefficient-wise reduction
+/// mod 2, and $r=1$ is the rotation amount.
+///
+/// In Flavor-1 (cf. plan): no new witness lane is introduced — the
+/// $\mathbb{F}_2[X]$ projection happens inside the PIOP, and the UAIR only
+/// declares the prime tuple `[2]` and emits a single
+/// [`ConstraintBuilder::assert_in_fq_ideal`] call.
+///
+/// Note: PIOP-side proving / verifying of $\mathbb{F}_q[X]$-constraints is
+/// guarded out at the protocol layer; this UAIR is intentionally **not**
+/// wired into the end-to-end protocol tests. It exercises only the
+/// UAIR-author surface (`count_constraints`, `count_constraint_degrees`,
+/// `collect_scalars`, `collect_ideals`).
+#[derive(Clone, Debug)]
+pub struct TestUairFqRotation<R>(PhantomData<R>);
+
+impl<R> Uair for TestUairFqRotation<R>
+where
+    R: ConstSemiring + From<u32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type FqIdeal = RotationIdeal<R, 32>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // Two binary_poly witness lanes: u = bp[0], v = bp[1].
+        let total = TotalColumnLayout::new(2, 0, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+            .with_primes(vec![2])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
+    {
+        // Rotation amount r = 1, cell width W = 32 (matching DensePolynomial
+        // and BinaryPoly bound). X^{W-r} = X^{31}: scalar polynomial with a
+        // 1 at coefficient index 31, zero elsewhere.
+        const W: usize = 32;
+        const R_SHIFT: usize = 1;
+        let mut x_w_minus_r_coeffs: [R; 32] = std::array::from_fn(|_| R::ZERO);
+        x_w_minus_r_coeffs[W - R_SHIFT] = R::ONE;
+        let x_w_minus_r = DensePolynomial::<R, 32>::new(x_w_minus_r_coeffs);
+
+        // u = up.binary_poly[0], v = up.binary_poly[1].
+        //   phi_2(v) - X^{W-r} * phi_2(u) ∈ (X^W - 1) over F_2[X].
+        b.assert_in_fq_ideal(
+            /* prime_index = */ 0,
+            up.binary_poly[1].clone()
+                - &mbs(&up.binary_poly[0], &x_w_minus_r).expect("mul-by-X^(W-r) overflow"),
+            &fq_ideal_from_ref(&RotationIdeal::<R, W>::new(R::ONE)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
@@ -968,6 +1073,7 @@ mod tests {
         collect_scalars::collect_scalars,
         constraint_counter::count_constraints,
         degree_counter::{count_constraint_degrees, count_max_degree},
+        ideal_collector::collect_ideals,
     };
 
     use super::*;
@@ -992,6 +1098,35 @@ mod tests {
         assert_uair_shape::<BigLinearUair<u32>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>>>(&[1, 1]);
         assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>>>(&[1, 1, 1]);
+        // TestUairFqRotation: a single F_2[X] linear constraint.
+        assert_uair_shape::<TestUairFqRotation<u32>>(&[1]);
+    }
+
+    /// `TestUairFqRotation` declares one prime (q = 2) on its signature and
+    /// emits exactly one $\mathbb{F}_2[X]$-ideal-membership constraint via
+    /// [`ConstraintBuilder::assert_in_fq_ideal`]. The `IdealCollector` must
+    /// route it into `fq_ideals` (tagged with `prime_index = 0`) and leave
+    /// the legacy `ideals` vector empty.
+    #[test]
+    fn test_fq_rotation_signature_and_collector() {
+        let sig = <TestUairFqRotation<u32> as Uair>::signature();
+        assert_eq!(sig.primes(), &[2]);
+
+        let collector = collect_ideals::<TestUairFqRotation<u32>>(1);
+        assert!(
+            collector.ideals.is_empty(),
+            "Q[X] ideal vector should be empty (no assert_in_ideal / assert_zero calls)"
+        );
+        assert_eq!(
+            collector.fq_ideals.len(),
+            1,
+            "exactly one F_q[X] ideal collected"
+        );
+        assert_eq!(
+            collector.fq_ideals[0].0,
+            0,
+            "F_q[X] ideal tagged with prime_index 0 (-> primes[0] = 2)"
+        );
     }
 
     #[test]

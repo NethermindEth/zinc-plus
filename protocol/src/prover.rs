@@ -316,6 +316,18 @@ where
         trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     ) -> Result<ProverFolded<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
         let uair_signature = U::signature();
+        // TODO(fq): Flavor-1 F_q[X] PIOP path. The protocol currently only
+        // proves the Q[X]-ideal-membership family of UAIR constraints; any
+        // UAIR declaring F_q[X]-constraints (non-empty `primes()`) needs a
+        // deterministic per-prime projection `phi_{q_i}` of the trace plus a
+        // parallel ideal-check / CPR group, none of which is implemented
+        // yet. Fail loudly here so misuse is obvious.
+        assert!(
+            uair_signature.primes().is_empty(),
+            "F_q[X] PIOP path NYI: UAIR declares primes {:?} but the prover \
+             only supports Q[X]-only constraints",
+            uair_signature.primes()
+        );
         let witness_trace = trace.witness(&uair_signature);
 
         let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)

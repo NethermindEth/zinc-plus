@@ -36,6 +36,7 @@ pub fn count_constraint_degrees<U: Uair>() -> Vec<usize> {
         |_| DegreeCountingSemiring::scalar(),
         |x, _| Some(*x),
         |_| ImpossibleIdeal,
+        |_| ImpossibleIdeal,
     );
 
     dc.degrees
@@ -51,12 +52,22 @@ pub(crate) struct ConstraintDegreeCollector {
 impl ConstraintBuilder for ConstraintDegreeCollector {
     type Expr = DegreeCountingSemiring;
     type Ideal = ImpossibleIdeal;
+    type FqIdeal = ImpossibleIdeal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
         self.degrees.push(expr.0);
     }
 
     fn assert_zero(&mut self, expr: Self::Expr) {
+        self.degrees.push(expr.0);
+    }
+
+    fn assert_in_fq_ideal(
+        &mut self,
+        _prime_index: usize,
+        expr: Self::Expr,
+        _ideal: &Self::FqIdeal,
+    ) {
         self.degrees.push(expr.0);
     }
 }

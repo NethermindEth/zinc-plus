@@ -158,6 +158,13 @@ where
         // * Non-linear non-zero-ideal goes through the row-major fallback
         // * Non-linear zero-ideal entries are zeroed afterwards.
         let ideal_collector = collect_ideals::<U>(num_constraints);
+        if !ideal_collector.fq_ideals.is_empty() {
+            // TODO(fq): Flavor-1 F_q[X] ideal-check prover path. Needs a
+            // separate per-prime projection `phi_{q_i}` of the trace plus a
+            // parallel combined-poly builder accumulating an F_q[X]-valued
+            // claim. See plan / paper Section "Zinc+ Compiler".
+            todo!("F_q[X] ideal-check prover path (MLE-first)");
+        }
         let degrees = count_constraint_degrees::<U>();
 
         let mut has_linear_nonzero: bool = false;
@@ -247,6 +254,11 @@ where
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
         let ideal_collector = collect_ideals::<U>(num_constraints);
+        if !ideal_collector.fq_ideals.is_empty() {
+            // TODO(fq): Flavor-1 F_q[X] ideal-check prover path
+            // (combined / row-major). Same caveat as `prove_mle_first`.
+            todo!("F_q[X] ideal-check prover path (combined)");
+        }
         let non_zero_indices: Vec<usize> = ideal_collector
             .ideals
             .iter()
@@ -313,6 +325,12 @@ where
         }
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
+        if !ideal_collector.fq_ideals.is_empty() {
+            // TODO(fq): Flavor-1 F_q[X] ideal-check verifier path. Needs to
+            // recompute per-prime projected ideals and check the claimed
+            // F_q[X]-valued combined-poly evaluations against them.
+            todo!("F_q[X] ideal-check verifier path");
+        }
 
         // Only check non-trivial ideals. For assert_zero constraints
         // the ideal is the zero ideal and the combined polynomial

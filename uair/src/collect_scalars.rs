@@ -30,6 +30,7 @@ pub fn collect_scalars<U: Uair>() -> HashSet<U::Scalar> {
             Some(DummySemiring)
         },
         |_| ImpossibleIdeal,
+        |_| ImpossibleIdeal,
     );
 
     scalars.into_inner()

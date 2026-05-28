@@ -38,6 +38,13 @@ use zinc_utils::{
     inner_transparent_field::InnerTransparentField, powers,
 };
 
+// TODO(fq): Flavor-1 F_q[X]-constraint integration. CPR currently builds a
+// single sumcheck group over the Q[X]-projected trace; supporting F_q[X]
+// constraints will require either a parallel CPR group per declared prime
+// (each over `phi_{q_i}(trace)`) or a unified group folding both families
+// together. Either way the sumcheck batching shape changes, which is why
+// the protocol-level guard rejects UAIRs with non-empty `primes()` before
+// reaching CPR.
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
@@ -204,6 +211,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 TraceRow::from_slice_with_layout(&mle_values[num_cols + 2..], down_layout),
                 project,
                 |x, y| Some(project(y) * x),
+                ImpossibleIdeal::from_ref,
+                // TODO(fq): Flavor-1 Fq[X] ideal projection. The
+                // ConstraintFolder rejects assert_in_fq_ideal at runtime; the
+                // protocol layer guards against any UAIR with non-empty
+                // UairSignature::primes reaching this code path.
                 ImpossibleIdeal::from_ref,
             );
 
@@ -466,6 +478,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             TraceRow::from_slice_with_layout(&full_down_evals, down_layout),
             project,
             |x, y| Some(project(y) * x),
+            ImpossibleIdeal::from_ref,
+            // TODO(fq): Flavor-1 Fq[X] ideal projection on the verifier side.
+            // The protocol layer guards against any UAIR with non-empty
+            // UairSignature::primes reaching this code path.
             ImpossibleIdeal::from_ref,
         );
 

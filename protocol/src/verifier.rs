@@ -281,10 +281,25 @@ where
     where
         IdealOverF: Ideal,
     {
+        assert!(
+            num_vars > 0,
+            "Attempt to verify a constant: num_vars must be > 0"
+        );
         let zip_proof = std::mem::take(&mut proof.zip);
+        let uair_signature = U::signature();
+        // TODO(fq): Flavor-1 F_q[X] PIOP path -- see prover's `step0_fold`.
+        // The verifier-side ideal-check / CPR currently has no per-prime
+        // projection branch; mirror the prover's loud-panic guard so any
+        // attempt to verify a F_q[X]-declaring UAIR fails up-front.
+        assert!(
+            uair_signature.primes().is_empty(),
+            "F_q[X] PIOP path NYI: UAIR declares primes {:?} but the verifier \
+             only supports Q[X]-only constraints",
+            uair_signature.primes()
+        );
         let mut base = VerifierBase {
             num_vars,
-            uair_signature: U::signature(),
+            uair_signature,
             public_trace,
             pcs_transcript: PcsVerifierTranscript {
                 fs_transcript: Blake3Transcript::default(),

@@ -31,6 +31,14 @@ pub trait ConstraintBuilder {
     type Expr: Semiring;
     /// The type of ideals used by the constraint builder.
     type Ideal: Ideal + IdealCheck<Self::Expr>;
+    /// Ideals living over $\mathbb{F}_{q_i}[X]$ for the prime tuple declared by
+    /// the surrounding [`UairSignature::primes`]. A single
+    /// `ConstraintBuilder` shares one runtime type for all primes; the prime
+    /// index is passed at the call site via
+    /// [`ConstraintBuilder::assert_in_fq_ideal`]. Builders that don't care
+    /// about $\mathbb{F}_q[X]$-constraints (counters, collectors, etc.) set
+    /// this to `ImpossibleIdeal`.
+    type FqIdeal: Ideal + IdealCheck<Self::Expr>;
 
     /// Add a constraint saying that `expr` belongs to the ideal `ideal`.
     fn assert_in_ideal(&mut self, expr: Self::Expr, ideal: &Self::Ideal);
@@ -38,6 +46,28 @@ pub trait ConstraintBuilder {
     /// Add a constraint saying that `expr` is equal to zero which is
     /// the same as saying that `expr` belongs to the zero ideal.
     fn assert_zero(&mut self, expr: Self::Expr);
+
+    /// Add a constraint saying that `expr`, after coefficient-wise reduction
+    /// mod $q_{\text{prime\_index}}$ (the paper's $\phi_{q_i}$), belongs to
+    /// the $\mathbb{F}_{q_i}[X]$-ideal `ideal`.
+    ///
+    /// `prime_index` indexes into [`UairSignature::primes`] and must be a
+    /// valid index for any UAIR that calls this method.
+    ///
+    /// # Flavor-1 scope (current implementation)
+    ///
+    /// `expr` is built only from the $\mathbb{Q}[X]$-typed `up`/`down` rows
+    /// supplied to [`Uair::constrain_general`] (i.e. projections of
+    /// $\hat{f}_0$ in `def:uairplus`); no new $\hat{f}_i$ witness lane is
+    /// introduced. The reduction $\phi_{q_i}$ is applied at proving / verifying
+    /// time by the PIOP layer, which is currently unimplemented for any UAIR
+    /// with non-empty [`UairSignature::primes`].
+    fn assert_in_fq_ideal(
+        &mut self,
+        prime_index: usize,
+        expr: Self::Expr,
+        ideal: &Self::FqIdeal,
+    );
 }
 
 /// Specifies a shifted column
@@ -265,6 +295,11 @@ pub struct UairSignature {
     /// Lookup specifications: which trace columns are constrained against
     /// which table types.
     lookup_specs: Vec<LookupColumnSpec>,
+    /// Prime powers $(q_1,\ldots,q_n)$ declared by this UAIR (the paper's
+    /// $\primetuple$ in `def:uairplus`). $\mathbb{F}_{q_i}[X]$-constraints
+    /// emitted via [`ConstraintBuilder::assert_in_fq_ideal`] reference these
+    /// by index. Empty for legacy single-$\mathbb{Q}[X]$ UAIRs.
+    primes: Vec<u64>,
 }
 
 impl UairSignature {
@@ -327,7 +362,28 @@ impl UairSignature {
             down_cols,
             witness_cols,
             lookup_specs,
+            primes: Vec::new(),
         }
+    }
+
+    /// Attach the prime-power tuple $(q_1,\ldots,q_n)$ that
+    /// $\mathbb{F}_{q_i}[X]$-constraints emitted by this UAIR live over.
+    ///
+    /// In the Flavor-1 slice of `def:uairplus` implemented today (cf. the
+    /// project plan for the Fq[X] extension), every
+    /// $\mathbb{F}_{q_i}[X]$-constraint reads only the projection
+    /// $\phi_{q_i}(\hat{f}_0)$ of the existing $\mathbb{Q}[X]$ witness lanes,
+    /// so no extra trace columns are introduced here -- the tuple only
+    /// records what primes the constraint dispatcher needs to project to.
+    pub fn with_primes(mut self, primes: Vec<u64>) -> Self {
+        self.primes = primes;
+        self
+    }
+
+    /// Prime-power tuple $(q_1,\ldots,q_n)$ declared by this UAIR. Empty for
+    /// legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
+    pub fn primes(&self) -> &[u64] {
+        &self.primes
     }
 
     /// Attach bit-op virtual column specs to the signature.
@@ -550,6 +606,12 @@ pub trait Uair: Clone {
     /// via the `FromRef` trait.
     type Ideal: Ideal;
 
+    /// The ideal type for $\mathbb{F}_{q_i}[X]$-constraints emitted via
+    /// [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs that do not declare
+    /// any primes (the legacy case) should set this to
+    /// [`ideal::ImpossibleIdeal`].
+    type FqIdeal: Ideal;
+
     /// The type of scalars of the UAIR.
     /// For now, we assume they are of
     /// the type "arbitrary polynomials".
@@ -582,18 +644,26 @@ pub trait Uair: Clone {
     ///   convenient to provide a closure instead of a `FromRef` implementation.
     /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
     ///   rationale as for `from_ref`.
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    /// - `ideal_from_ref`: a closure that turns a `Self::Ideal` into
+    ///   `B::Ideal` for the legacy $\mathbb{Q}[X]$-ideal-membership family.
+    /// - `fq_ideal_from_ref`: a closure that turns a `Self::FqIdeal` into
+    ///   `B::FqIdeal` for the new $\mathbb{F}_{q_i}[X]$-ideal-membership
+    ///   family emitted via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs
+    ///   without $\mathbb{F}_q[X]$-constraints can ignore this closure.
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         from_ref: FromR,
         mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         FromR: Fn(&Self::Scalar) -> B::Expr,
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
-        IFromR: Fn(&Self::Ideal) -> B::Ideal;
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal;
 
     // Same as `constrain_general` but `from_ref` and `mbs`
     // come from the trait implementations.
@@ -602,6 +672,7 @@ pub trait Uair: Clone {
         B: ConstraintBuilder,
         B::Expr: FromRef<Self::Scalar> + for<'b> MulByScalar<&'b Self::Scalar>,
         B::Ideal: FromRef<Self::Ideal>,
+        B::FqIdeal: FromRef<Self::FqIdeal>,
     {
         Self::constrain_general(
             b,
@@ -610,6 +681,7 @@ pub trait Uair: Clone {
             B::Expr::from_ref,
             |x, y| B::Expr::mul_by_scalar::<UNCHECKED>(x, y),
             B::Ideal::from_ref,
+            B::FqIdeal::from_ref,
         )
     }
 }

@@ -396,6 +396,14 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
 }
 
 /// Project scalars of a UAIR onto F[X].
+///
+/// TODO(fq): For Flavor-1 F_q[X]-constraints (scalars used inside
+/// `assert_in_fq_ideal`), this needs to be paralleled by a per-prime
+/// `project_scalars_to_fq_i` returning a `ProjectedScalars` keyed by
+/// `prime_index`. The current projection samples a random verifier prime
+/// (`get_random_field_cfg`); the F_q[X] path requires *deterministic*
+/// projections at each `q_i` in `UairSignature::primes()`. Deferred behind
+/// the PIOP-side `todo!()`s in `ideal_check::{prove_*,verify_as_subprotocol}`.
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
 ) -> ProjectedScalars<U::Scalar, DynamicPolynomialF<F>> {

@@ -1,5 +1,9 @@
 //! Booleanity (binary-polynomial lookup) argument.
 //!
+//! The booleanity group is prime-agnostic: the same `binary_poly` lanes are
+//! committed once and reused across all $\mathbb{F}_{q_i}[X]$ branches via
+//! the per-prime $\phi_{q_i}$ projections built at the protocol layer.
+//!
 //! Proves that every coefficient of every witness binary-polynomial column is
 //! a bit $\in \\{0,1\\}$. The argument is structured as a single
 //! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
