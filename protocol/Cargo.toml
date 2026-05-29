@@ -64,6 +64,17 @@ harness = false
 required-features = ["parallel", "simd", "unchecked"]
 
 [[bench]]
+name = "f2_sha256_rs"
+harness = false
+# Reed-Solomon-equivalent variant of `f2_sha256`: same code path, but
+# with `BENCH_NUM_OPENINGS = 200` instead of `987`, mirroring the
+# column-opening count an MDS code would let the protocol use. Groups
+# are suffixed " RS" to avoid Criterion baseline collisions with the
+# RAA bench. Pair with `cargo bench -p zinc-protocol --bench
+# f2_sha256_rs --features parallel,simd,unchecked`.
+required-features = ["parallel", "simd", "unchecked"]
+
+[[bench]]
 name = "f2_blake3"
 harness = false
 # Sibling to f2_sha256. Same perf-tuning requirements; pair with
