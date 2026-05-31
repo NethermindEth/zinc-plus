@@ -5888,4 +5888,85 @@ mod tests {
         assert_eq!(subclaim.virtual_column_evals.len(), 0);
     }
 
+    /// First real SHA-256 Hadamard relation discharged end-to-end on the
+    /// `sha256_f2` trace: **C12** `W_UEF = W_E ⊙ W_E^↓1` (the Ch[t] AND
+    /// `u_ef[t] = e[t] & e[t−1]`, `sha256_f2.rs`).
+    ///
+    /// Under the codebase `↓Δ = row i → col[i+Δ]` convention (`ShiftSpec`,
+    /// `build_shifted_bit_slice_mles`), the `i−1` fill is registered by
+    /// shifting the result column up too: at zerocheck row `t`,
+    /// `W_UEF^↓1[t] = W_E^↓1[t] & W_E[t]`. Pairs: `(W_E,0)` bound by the
+    /// second-mp discharge; `(W_E,1)` and `(W_UEF,1)` are row-shifted →
+    /// trusted (the honest-prover row-shift gap). Confirms the operand
+    /// machinery drives a real SHA AND relation honestly. (Zerocheck
+    /// rejection is covered by the synthetic operand tests; corrupting a
+    /// SHA `W_UEF` cell here could trip the IC first — `W_UEF` also feeds
+    /// the C6b adder — so we keep this to the honest milestone.)
+    #[test]
+    fn sha256_f2_c12_hadamard_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // C12 in the `i+Δ` convention: W_E^↓1 ⊙ W_E = W_UEF^↓1.
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        let specs = [F2HadamardSpec {
+            u: F2Operand::shifted(cols::W_E, 1),
+            v: F2Operand::col(cols::W_E),
+            w: F2Operand::shifted(cols::W_UEF, 1),
+        }];
+
+        // Prove + verify the bundled flow with C12 registered.
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("prove_f2_full_with_hadamard on SHA C12 should succeed");
+        assert!(proof.uair.hadamard_proof.is_some());
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &specs,
+            /* public_binary_trace */ &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("honest SHA C12 proof must verify");
+    }
+
 }

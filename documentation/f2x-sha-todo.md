@@ -1450,6 +1450,23 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     committed witness cols, so the operand machinery above can drive them;
     then the 13 adders). And the **sound row-shift discharge** (Issue 1) to
     close the `Δ ≠ 0` trust gap.
+  - **C12 WIRED & TESTED on real `sha256_f2`** (`sha256_f2_c12_hadamard_roundtrips`,
+    working tree): the first of the 16 SHA Hadamard relations discharges
+    e2e. **Row-shift direction (resolved):** the codebase `↓Δ` is
+    `row i → col[i+Δ]` (shipped operand `row_shift`,
+    `build_shifted_bit_slice_mles`, `ShiftSpec` `uair/src/lib.rs:44` — all
+    `i+Δ`). The SHA fills are written `i−Δ` (`u_ef[t]=e[t]&e[t−1]`,
+    `sha256_f2.rs:963`), so **plan Appendix A's literal table is `i−Δ` and
+    must be re-expressed in `i+Δ` by shifting the result column up**. C12
+    `W_UEF[t]=W_E[t]&W_E[t−1]` ⇒ register `u:W_E^↓1, v:W_E, w:W_UEF^↓1`
+    (verified honest sum 0). Pairs `(W_E,1)`/`(W_UEF,1)` are Δ≠0 → trusted.
+  - **C13/C14 next**: re-derive in `i+Δ` (shift so all source indices `≥ t`).
+    **C13 has a complement/zero-pad boundary subtlety**: the operand model
+    complements *outermost* (`1 ⊕ XOR(terms)`), so `¬(W_E^↓2)` is all-ones
+    at the zero-padded tail while the fill `u_neg_e_g` zero-pads — they
+    differ at the boundary. Detailed in handoff §5. **Always check the
+    honest zerocheck sum is 0 before trusting a registration.** Then the 13
+    adders (need X· + `W_β`).
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at
