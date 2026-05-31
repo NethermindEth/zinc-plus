@@ -5957,6 +5957,115 @@ mod tests {
         assert_eq!(subclaim.virtual_column_evals.len(), 0);
     }
 
+    /// Build the SHA-256 F_2 Hadamard relation layout from the UAIR's `cols`
+    /// constants + `num_vars` — the single place the SHA column indices meet
+    /// the production relation builder
+    /// ([`crate::f2_hadamard::Sha256F2HadamardLayout`]). The relation
+    /// *topology* (the 16 specs + masks) lives in the builder; this glue is
+    /// just the column-index plumbing.
+    fn sha256_f2_hadamard_layout(num_vars: usize) -> crate::f2_hadamard::Sha256F2HadamardLayout {
+        use zinc_test_uair::sha256_f2::cols;
+        crate::f2_hadamard::Sha256F2HadamardLayout {
+            num_vars,
+            rows_per_comp: cols::ROWS_PER_COMP,
+            rounds_per_comp: cols::ROUNDS_PER_COMP,
+            num_compressions: cols::num_compressions(num_vars),
+            pa_a: cols::PA_A,
+            pa_e: cols::PA_E,
+            pa_k: cols::PA_K,
+            w_a: cols::W_A,
+            w_e: cols::W_E,
+            w_w: cols::W_W,
+            w_sigma0: cols::W_SIGMA0,
+            w_sigma1: cols::W_SIGMA1,
+            w_sig0: cols::W_SIG0,
+            w_sig1: cols::W_SIG1,
+            w_uef: cols::W_UEF,
+            w_uneg_e_g: cols::W_UNEG_E_G,
+            w_maj: cols::W_MAJ,
+            w_t1: cols::W_T1,
+            w_t2: cols::W_T2,
+            w_w_s1: cols::W_W_S1,
+            w_w_s2: cols::W_W_S2,
+            w_t1_s1: cols::W_T1_S1,
+            w_t1_s2: cols::W_T1_S2,
+            w_t1_s3: cols::W_T1_S3,
+            w_t1_s4: cols::W_T1_S4,
+        }
+    }
+
+    /// All **16** SHA-256 Hadamard relations (3 ANDs + 13 adders) discharged
+    /// end-to-end on the real `sha256_f2` trace via a **single**
+    /// `prove/verify_f2_full_with_hadamard` call — the production path. The
+    /// specs + active-row masks are derived from
+    /// [`crate::f2_hadamard::Sha256F2HadamardLayout::relations`], not
+    /// hand-written. (Honest-prover: the shifted/adder operand parents are
+    /// trusted — see the ledger's soundness follow-up.)
+    #[test]
+    fn sha256_f2_full_hadamard_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // The 16 relations, derived from the SHA layout.
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        assert_eq!(and_specs.len(), 3);
+        assert_eq!(adder_specs.len(), 13);
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("prove_f2_full_with_hadamard on all 16 SHA relations should succeed");
+        assert!(proof.uair.hadamard_proof.is_some());
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("honest all-16 SHA Hadamard proof must verify");
+    }
+
     /// The three SHA-256 **AND** Hadamard relations C12/C13/C14 discharged
     /// end-to-end on the real `sha256_f2` trace (no `W_β`, no X·, columns
     /// already committed witness cols filled as correct ANDs):
@@ -6006,34 +6115,8 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // C12/C13/C14 re-expressed in the `i+Δ` convention.
-        use crate::f2_hadamard::{F2HadamardSpec, F2Operand, F2OperandTerm};
-        let xor2 = |c0: usize, s0: usize, c1: usize, s1: usize| {
-            F2Operand::xor(vec![
-                F2OperandTerm { col: c0, row_shift: s0 },
-                F2OperandTerm { col: c1, row_shift: s1 },
-            ])
-        };
-        let specs = [
-            // C12: W_E^↓1 ⊙ W_E = W_UEF^↓1.
-            F2HadamardSpec {
-                u: F2Operand::shifted(cols::W_E, 1),
-                v: F2Operand::col(cols::W_E),
-                w: F2Operand::shifted(cols::W_UEF, 1),
-            },
-            // C13: ¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2.
-            F2HadamardSpec {
-                u: F2Operand::shifted(cols::W_E, 2).complemented(),
-                v: F2Operand::col(cols::W_E),
-                w: F2Operand::shifted(cols::W_UNEG_E_G, 2),
-            },
-            // C14: (W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A).
-            F2HadamardSpec {
-                u: xor2(cols::W_A, 2, cols::W_A, 0),
-                v: xor2(cols::W_A, 1, cols::W_A, 0),
-                w: xor2(cols::W_MAJ, 2, cols::W_A, 0),
-            },
-        ];
+        // C12/C13/C14 from the production builder.
+        let specs = sha256_f2_hadamard_layout(num_vars).and_specs();
 
         // Prove + verify the bundled flow with C12/C13/C14 registered.
         let mut pt = Blake3Transcript::new();
@@ -6095,7 +6178,6 @@ mod tests {
             GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
             sha256_f2_project_scalar,
         };
-        use crate::f2_hadamard::{F2AdderSpec, F2OperandTerm};
 
         const D: usize = 32;
         type R = Int<4>;
@@ -6115,14 +6197,13 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        let tm = |col: usize, row_shift: usize| F2OperandTerm { col, row_shift };
-        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize)| {
-            F2AdderSpec::uniform(tm(t.0, t.1), tm(x.0, x.1), tm(y.0, y.1))
-        };
-        // target = x + y, shifts in i+Δ (from the IC `down_*` constraints).
-        let adders = [
-            adder((cols::W_T2, 0), (cols::W_SIGMA0, 0), (cols::W_MAJ, 0)), // C7 only
-        ];
+        // All 13 adders from the builder, but with the active-row masks
+        // CLEARED — a *uniform* registration the verifier must reject (the
+        // adders are row-selective; `target = x+y` doesn't hold off-chain).
+        let mut adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
+        for a in &mut adders {
+            a.active_rows.clear();
+        }
 
         // The prover still produces a proof (it doesn't self-check the
         // claimed sum); the verifier's zerocheck gate rejects it.
@@ -6187,7 +6268,6 @@ mod tests {
             GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
             sha256_f2_project_scalar,
         };
-        use crate::f2_hadamard::{F2AdderSpec, F2OperandTerm};
 
         const D: usize = 32;
         type R = Int<4>;
@@ -6207,43 +6287,9 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        let rpc = cols::ROWS_PER_COMP;
-        let big_n = cols::num_compressions(num_vars);
-        // Per-block active-row mask for `[start+lo, start+hi)`.
-        let mk_mask = |lo: usize, hi: usize| -> Vec<bool> {
-            let mut m = vec![false; poly_size];
-            for i in 0..big_n {
-                let start = i * rpc;
-                for r in (start + lo)..(start + hi).min(poly_size) {
-                    m[r] = true;
-                }
-            }
-            m
-        };
-        let tm = |col: usize, row_shift: usize| F2OperandTerm { col, row_shift };
-        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize), lo, hi| {
-            F2AdderSpec {
-                t: tm(t.0, t.1),
-                x: tm(x.0, x.1),
-                y: tm(y.0, y.1),
-                active_rows: mk_mask(lo, hi),
-            }
-        };
-        let adders = [
-            adder((cols::W_W_S1, 0), (cols::W_W, 0), (cols::W_SIG0, 1), 0, 52), // C5a
-            adder((cols::W_W_S2, 0), (cols::W_W_S1, 0), (cols::W_W, 9), 0, 52), // C5b
-            adder((cols::W_W, 16), (cols::W_W_S2, 0), (cols::W_SIG1, 14), 0, 52), // C5c
-            adder((cols::W_T1_S1, 0), (cols::W_E, 0), (cols::W_SIGMA1, 3), 0, 64), // C6a
-            adder((cols::W_T1_S2, 0), (cols::W_T1_S1, 0), (cols::W_UEF, 3), 0, 64), // C6b
-            adder((cols::W_T1_S3, 0), (cols::W_T1_S2, 0), (cols::W_UNEG_E_G, 3), 0, 64), // C6c
-            adder((cols::W_T1_S4, 0), (cols::W_T1_S3, 0), (cols::PA_K, 3), 0, 64), // C6d
-            adder((cols::W_T1, 3), (cols::W_T1_S4, 0), (cols::W_W, 3), 0, 64),  // C6e
-            adder((cols::W_T2, 0), (cols::W_SIGMA0, 0), (cols::W_MAJ, 0), 3, 67), // C7
-            adder((cols::W_A, 4), (cols::W_T1, 3), (cols::W_T2, 3), 0, 64),     // C8
-            adder((cols::W_E, 4), (cols::W_A, 0), (cols::W_T1, 3), 0, 64),      // C9
-            adder((cols::W_A, 4), (cols::W_A, 0), (cols::PA_A, 0), 64, 68),     // C10
-            adder((cols::W_E, 4), (cols::W_E, 0), (cols::PA_E, 0), 64, 68),     // C11
-        ];
+        // The 13 adders (with masks) from the production builder.
+        let adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
+        assert_eq!(adders.len(), 13);
         let sel: &[crate::f2_hadamard::F2AdderSpec] = &adders;
 
         let mut pt = Blake3Transcript::new();

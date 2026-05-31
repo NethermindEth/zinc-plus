@@ -1508,6 +1508,23 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     its *unshifted* operand (the S-column) is materialised, NOT at the
     target's storage row (the C6e off-by-shift that the bisect caught).
 
+### Production integration — the 16 relations derive from a layout builder
+- **Shipped**: `protocol::f2_hadamard::Sha256F2HadamardLayout` (struct of the
+  ~20 SHA column indices + `ROWS_PER_COMP`/`ROUNDS_PER_COMP`/`num_compressions`
+  + `num_vars`) with `and_specs()` / `adder_specs()` / `relations()`. The
+  relation **topology** (the i−Δ→i+Δ re-expression, the operand wirings, the
+  active-row mask ranges derived from `rows_per_comp`/`rounds_per_comp`)
+  lives here once, in the SHA-specific `f2_hadamard` module; the caller fills
+  the column indices from the SHA UAIR's `cols` (a thin glue) so there's **no
+  reverse `test-uair → protocol` dependency** and no duplicated indices.
+- **Why**: the 16 relations + masks were previously hand-written, duplicated
+  across the AND-only and adder-only e2e tests. Now there's a single source
+  of truth; `sha256_f2_full_hadamard_roundtrips` discharges **all 16** via
+  one `prove/verify_f2_full_with_hadamard` call built from
+  `layout.relations()`, and the focused AND/adder tests + the
+  row-selector-rejection test all consume the builder (masks cleared for the
+  latter). 50 protocol lib tests pass; clippy-clean.
+
 ### `f2_sha256` bench was stale — fixed (and a nvars=9 baseline)
 - **Found while running the bench** (`RUSTFLAGS="-C target-cpu=native"
   cargo bench --features "parallel simd unchecked" --bench f2_sha256 --

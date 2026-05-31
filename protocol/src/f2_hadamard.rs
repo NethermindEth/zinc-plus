@@ -159,6 +159,157 @@ impl F2AdderSpec {
     }
 }
 
+/// Column indices + row-layout constants of the SHA-256 `F_2[X]`
+/// arithmetization, parameterising the production builder for its **16
+/// Hadamard relations** (3 ANDs C12–C14 + 13 adders C5–C11). The caller
+/// fills the column indices from the SHA UAIR's `cols` so the relation
+/// *topology* — the `↓Δ = i+Δ` re-expression, the operand wirings, and the
+/// active-row masks — lives here once (in the SHA-specific
+/// `protocol::f2_hadamard` module), while the actual indices stay owned by
+/// the SHA UAIR (no reverse crate dependency). Feed [`Self::relations`]
+/// straight into `prove/verify_f2_full_with_hadamard`.
+///
+/// The active-row masks and AND/adder topology are documented + verified in
+/// `documentation/f2x-sha-todo.md` (the i−Δ→i+Δ re-derivation, the
+/// row-selectivity, and the per-relation mask ranges).
+#[derive(Clone, Copy, Debug)]
+pub struct Sha256F2HadamardLayout {
+    pub num_vars: usize,
+    /// `ROWS_PER_COMP` (68 for SHA-256): rows per compression block.
+    pub rows_per_comp: usize,
+    /// `ROUNDS_PER_COMP` (64): SHA rounds per compression.
+    pub rounds_per_comp: usize,
+    /// Number of compression blocks packed into `2^num_vars` rows.
+    pub num_compressions: usize,
+    pub pa_a: usize,
+    pub pa_e: usize,
+    pub pa_k: usize,
+    pub w_a: usize,
+    pub w_e: usize,
+    pub w_w: usize,
+    pub w_sigma0: usize,
+    pub w_sigma1: usize,
+    pub w_sig0: usize,
+    pub w_sig1: usize,
+    pub w_uef: usize,
+    pub w_uneg_e_g: usize,
+    pub w_maj: usize,
+    pub w_t1: usize,
+    pub w_t2: usize,
+    pub w_w_s1: usize,
+    pub w_w_s2: usize,
+    pub w_t1_s1: usize,
+    pub w_t1_s2: usize,
+    pub w_t1_s3: usize,
+    pub w_t1_s4: usize,
+}
+
+impl Sha256F2HadamardLayout {
+    /// All 16 SHA Hadamard relations: `(and_specs, adder_specs)`.
+    pub fn relations(&self) -> (Vec<F2HadamardSpec>, Vec<F2AdderSpec>) {
+        (self.and_specs(), self.adder_specs())
+    }
+
+    /// The 3 AND relations C12–C14, in the `↓Δ = i+Δ` convention (the SHA
+    /// fills are written `i−Δ`, so the result column is shifted up too).
+    pub fn and_specs(&self) -> Vec<F2HadamardSpec> {
+        let tm = |col, row_shift| F2OperandTerm { col, row_shift };
+        vec![
+            // C12: W_UEF[t]=W_E[t]&W_E[t−1] ⇒ W_E^↓1 ⊙ W_E = W_UEF^↓1.
+            F2HadamardSpec {
+                u: F2Operand::shifted(self.w_e, 1),
+                v: F2Operand::col(self.w_e),
+                w: F2Operand::shifted(self.w_uef, 1),
+            },
+            // C13: W_UNEG_E_G[t]=(¬W_E[t])&W_E[t−2]
+            //   ⇒ ¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2.
+            F2HadamardSpec {
+                u: F2Operand::shifted(self.w_e, 2).complemented(),
+                v: F2Operand::col(self.w_e),
+                w: F2Operand::shifted(self.w_uneg_e_g, 2),
+            },
+            // C14: Maj via (x⊕z)(y⊕z)=Maj(x,y,z)⊕z ⇒
+            //   (W_A^↓2⊕W_A) ⊙ (W_A^↓1⊕W_A) = (W_MAJ^↓2⊕W_A).
+            F2HadamardSpec {
+                u: F2Operand::xor(vec![tm(self.w_a, 2), tm(self.w_a, 0)]),
+                v: F2Operand::xor(vec![tm(self.w_a, 1), tm(self.w_a, 0)]),
+                w: F2Operand::xor(vec![tm(self.w_maj, 2), tm(self.w_a, 0)]),
+            },
+        ]
+    }
+
+    /// The 13 adder relations C5–C11 (`target = x + y`), each with a
+    /// per-relation active-row mask anchored at the row where its
+    /// *unshifted* S-column operand is materialised (per `rows_per_comp`
+    /// block).
+    pub fn adder_specs(&self) -> Vec<F2AdderSpec> {
+        let tm = |col, row_shift| F2OperandTerm { col, row_shift };
+        let adder =
+            |t: F2OperandTerm, x: F2OperandTerm, y: F2OperandTerm, lo: usize, hi: usize| {
+                F2AdderSpec {
+                    t,
+                    x,
+                    y,
+                    active_rows: self.active_mask(lo, hi),
+                }
+            };
+        let rnd = self.rounds_per_comp; // 64
+        let rpc = self.rows_per_comp; // 68
+        // SHA structural offsets: 16 = message-schedule seed window
+        // (C5 anchors at k=t−16); 3 = W_T1/W_T2 row-local offset (t=k+3).
+        let msg_window = 16usize;
+        let t1t2_off = 3usize;
+        // Active-row ranges per 68-row block (see the ledger):
+        //   C5   chain anchor k=t−16     → [0, rpc−16)
+        //   C6/C8/C9 round anchor k      → [0, rnd)
+        //   C7   row-local at t=k+3      → [3, rnd+3)
+        //   C10/C11 digest feed-forward  → [rnd, rpc)
+        let c5 = (0, rpc.saturating_sub(msg_window));
+        let cround = (0, rnd);
+        let c7 = (t1t2_off, rnd.saturating_add(t1t2_off));
+        let cdigest = (rnd, rpc);
+        vec![
+            // C5 — message-schedule chain.
+            adder(tm(self.w_w_s1, 0), tm(self.w_w, 0), tm(self.w_sig0, 1), c5.0, c5.1), // C5a
+            adder(tm(self.w_w_s2, 0), tm(self.w_w_s1, 0), tm(self.w_w, 9), c5.0, c5.1), // C5b
+            adder(tm(self.w_w, 16), tm(self.w_w_s2, 0), tm(self.w_sig1, 14), c5.0, c5.1), // C5c
+            // C6 — T_1 chain.
+            adder(tm(self.w_t1_s1, 0), tm(self.w_e, 0), tm(self.w_sigma1, 3), cround.0, cround.1), // C6a
+            adder(tm(self.w_t1_s2, 0), tm(self.w_t1_s1, 0), tm(self.w_uef, 3), cround.0, cround.1), // C6b
+            adder(tm(self.w_t1_s3, 0), tm(self.w_t1_s2, 0), tm(self.w_uneg_e_g, 3), cround.0, cround.1), // C6c
+            adder(tm(self.w_t1_s4, 0), tm(self.w_t1_s3, 0), tm(self.pa_k, 3), cround.0, cround.1), // C6d
+            adder(tm(self.w_t1, 3), tm(self.w_t1_s4, 0), tm(self.w_w, 3), cround.0, cround.1), // C6e
+            // C7 — T_2 (row-local).
+            adder(tm(self.w_t2, 0), tm(self.w_sigma0, 0), tm(self.w_maj, 0), c7.0, c7.1), // C7
+            // C8/C9 — a'/e' round update.
+            adder(tm(self.w_a, 4), tm(self.w_t1, 3), tm(self.w_t2, 3), cround.0, cround.1), // C8
+            adder(tm(self.w_e, 4), tm(self.w_a, 0), tm(self.w_t1, 3), cround.0, cround.1), // C9
+            // C10/C11 — digest feed-forward.
+            adder(tm(self.w_a, 4), tm(self.w_a, 0), tm(self.pa_a, 0), cdigest.0, cdigest.1), // C10
+            adder(tm(self.w_e, 4), tm(self.w_e, 0), tm(self.pa_e, 0), cdigest.0, cdigest.1), // C11
+        ]
+    }
+
+    /// Per-block active-row mask `[start+lo, start+hi)` over `2^num_vars`
+    /// rows (`start = i·rows_per_comp`, `i ∈ 0..num_compressions`).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn active_mask(&self, lo: usize, hi: usize) -> Vec<bool> {
+        let n = 1usize << self.num_vars;
+        let mut m = vec![false; n];
+        for i in 0..self.num_compressions {
+            let start = i * self.rows_per_comp;
+            for slot in m
+                .iter_mut()
+                .take((start + hi).min(n))
+                .skip((start + lo).min(n))
+            {
+                *slot = true;
+            }
+        }
+        m
+    }
+}
+
 /// Read column `term.col` at row `r + term.row_shift` as a `u64` bitmask
 /// (low `D` bits), zero past the trace tail (the `↓Δ` convention).
 #[inline]
