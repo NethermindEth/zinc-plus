@@ -16,6 +16,7 @@
 //! or bit-shifts (Δ = 0). Shifts, virtual operands, and the `W_β` carry
 //! column land in later phases (see the plan).
 
+use crypto_primitives::Field;
 use zinc_piop::lookup::booleanity::compute_bit_slices_flat;
 use zinc_piop::lookup::hadamard::{
     HadamardError, HadamardTriple, finalize_hadamard_prover, finalize_hadamard_verifier,
@@ -23,9 +24,9 @@ use zinc_piop::lookup::hadamard::{
 };
 use zinc_piop::sumcheck::SumCheckError;
 use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
-use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_poly::univariate::binary::BinaryPoly;
-use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
+use zinc_poly::univariate::binary_gf128::{BinaryFieldGF128, project_column_with_powers};
 use zinc_transcript::traits::Transcript;
 
 type Gf = BinaryFieldGF128;
@@ -173,6 +174,39 @@ pub fn verify_f2_hadamard_phase<const D: usize>(
     )?;
 
     Ok((distinct, r_star_h))
+}
+
+/// Compute the α-projected MLE evaluation of each `distinct` column at
+/// `r_star` — the `parent_eval` that the recombination check
+/// ([`zinc_piop::lookup::booleanity::verify_bit_decomposition_consistency`])
+/// ties the per-slice evals to. `alpha_pows` must be `[1, α, …, α^{D-1}]`.
+///
+/// In Wiring R the prover computes these *after* α (so they share α with
+/// the main projection) and ships them in the proof; the verifier
+/// recombines `Σ_b α^b·v_b(r*_H) == parent_eval`. NOTE: until the
+/// discharge opens these at `r*_H` via the (Issue-1) two-point
+/// multipoint-eval, the parent evals are prover-supplied/trusted — the
+/// in-flow check is completeness/honest-prover only.
+pub fn alpha_parent_evals<const D: usize>(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    distinct: &[usize],
+    alpha_pows: &[BinaryFieldGF128],
+    r_star: &[BinaryFieldGF128],
+) -> Vec<BinaryFieldGF128> {
+    let zero_inner = *BinaryFieldGF128::zero().inner();
+    distinct
+        .iter()
+        .map(|&c| {
+            let proj = project_column_with_powers::<D>(&columns[c].evaluations, alpha_pows);
+            let mle = DenseMultilinearExtension::from_evaluations_vec(
+                columns[c].num_vars,
+                proj.iter().map(|x| *x.inner()).collect(),
+                zero_inner,
+            );
+            mle.evaluate_with_config(r_star, &())
+                .expect("parent α-eval at r*_H should succeed")
+        })
+        .collect()
 }
 
 #[cfg(test)]
