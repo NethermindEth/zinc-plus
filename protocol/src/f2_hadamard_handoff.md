@@ -166,35 +166,46 @@ ledger's **Issue 1** also needs) — one open instead of two.
   the honest zerocheck sum is 0. **Lesson: always check the honest sum is 0
   to confirm a registration's boundary handling.**
 
-### 5b. NEXT — the 13 adder relations (C5–C11)
+### 5b. The 13 adder relations (C5–C11) — operand machinery DONE, blocked on a row-selector
 
-These are `(x + X·c) ⊙ (y + X·c) = c + X·c` (Appendix A; `+`/`⊙` are XOR/AND
-at the bit level). **All three pieces interlock — design them together:**
+`(x + X·c) ⊙ (y + X·c) = c + X·c` (Appendix A; the Binius carry identity
+verifying `t = x + y`).
 
-- **X· bit-shift** in operands: a bit-index reindex `b ↦ b+1` (drop bit
-  `D−1`, zero bit 0). Add a `bit_shift` field to `F2OperandTerm`; handle it
-  in `build_operand_slices` (per-row mask `<<1 & all_ones`). **Discharge
-  subtlety**: `ψ_α(X·c)(r*_H) = α·(ψ_α(c) − α^{D-1}·c_{D-1})` — the parent
-  needs the source column's **top bit-slice eval** `c_{D-1}(r*_H)`, which is
-  *not* a full-column α-eval (so it's not in `hadamard_pair_evals`). Either
-  ship/bind it separately, or — cleaner — note `c_{D-1}` is exactly `W_β`'s
-  bit (see below), so it ties back into the carry column.
-- **Carry word `c`** is a *virtual* column, NOT a simple `(col, Δ)`: bits
-  `0..30 = SHR¹(t ⊕ x ⊕ y)` (XOR of three committed cols, then right-shift
-  by 1) and bit `31 = W_β`. The current `F2Operand` can't express
-  `SHR¹(...)` + a bit-31 splice — **the operand model needs a richer term**
-  (a `SHR^k` bit-shift, and bit-selection / splicing one column's bit into
-  another's position). This is the bulk of the adder work.
-- **`W_β` carry column** (`f2_hadamard_plan.md` §4.5): add `cols::W_BETA`
-  to `test-uair/src/sha256_f2.rs` (mirror the `PA_C` setup) — 1 packed col,
-  bits `0..12 = β_k = Maj(a[31], b[31], D[31])`, plus the missing
-  `ShiftSpec`s. The 3 ANDs needed none of this; the 13 adders need it.
+**✅ DONE — adder operand machinery** (`F2AdderSpec`, synthetic tests
+`adder_round_trips` / `adder_rejects_wrong_sum`). **Key simplification vs
+the plan**: the carry `c = SHR¹(t⊕x⊕y)` on bits `0..D−2`, and the top bit
+`c[D−1] = β = Maj(x_{D−1}, y_{D−1}, (t⊕x⊕y)_{D−1})` is **computed** (the
+overflow carry) — so **no committed `W_β` and no X· bit-shift in the operand
+model are needed**; `build_adder_operand_columns` builds `U,V,W` per row
+directly. Because `c` is *defined* from `t⊕x⊕y`, the zerocheck verifies the
+carry recurrence (hence `t=x+y`), not a tautology. The operands' parents are
+shipped **trusted** (`F2Proof.hadamard_adder_parents`) — honest-prover. The
+`adder_specs` param is threaded through the whole prove/verify chain; the 13
+i+Δ specs are written out in `sha256_f2_adders_need_row_selector`.
 
-Recommended order: (1) extend the operand model with `SHR^k`/`X·`/bit-splice
-+ their parent formulas, unit-test synthetically (mirror the existing
-operand tests); (2) add `W_β`; (3) register one adder (e.g. C10
-`W_A^↓4 ⊙ W_A = PA_A`, simplest) and check the honest sum is 0; (4) the
-rest. **Re-derive each in the `i+Δ` convention and verify the honest sum.**
+**⚠️ BLOCKED — the SHA adders are ROW-SELECTIVE.** Registering them on real
+`sha256_f2` **fails the honest zerocheck** (`NonZeroClaimedSum`, even for the
+simplest row-local C7 `W_T2 = W_SIGMA0 + W_MAJ` — see the test). The adders'
+`target = x+y` holds only on each chain/anchor's **active rows**: the trace
+zeroes the S-columns (`W_*_S*`, the targets) off-chain while the inputs
+(`W_W`, `W_E`, …) stay non-zero, and the IC's LSB
+`assert_in_ideal(target+x+y+κ)` still holds there only because the `κ`
+(PA_C) compensator absorbs it. A **uniform** Hadamard zerocheck constrains
+*every* row, so it catches the off-chain mismatch. (Tell: C8 and C10 both
+target `W_A^↓4` — disjoint active rows.)
+
+**NEXT STEP — per-relation active-row selector.** Multiply each relation's
+zerocheck term by an indicator MLE `sel_k(x)` (1 on active rows, 0 else):
+`Σ_x eq(x,r)·Σ_k γ'^k·sel_k(x)·Σ_b σ^b(U⊙V−W)` (degree 3 → 4, still fine).
+The selectors are **public** (derivable from the SHA anchor-row layout —
+`ROWS_PER_COMP`, the chain anchor rows in `sha256_f2.rs`), so the verifier
+computes them; no commitment. To do it: (1) per adder, extract its active
+row set from `sha256_f2.rs` (the chain/anchor `r` ranges); (2) build a
+`{0,1}` selector MLE per relation; (3) extend `prepare_hadamard_group` /
+`finalize_hadamard_*` (`piop/src/lookup/hadamard.rs`) so each relation's
+term carries its `sel` factor; (4) flip `sha256_f2_adders_need_row_selector`
+to assert acceptance. The AND relations (C12–C14) needed no selector — their
+fills are uniform over all rows.
 
 ### 5c. Soundness follow-up
 

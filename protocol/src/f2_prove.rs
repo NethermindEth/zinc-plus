@@ -130,6 +130,14 @@ pub struct F2Proof {
     /// evals are bound to the commitment by the second-mp discharge; the
     /// `Δ ≠ 0` pair evals are trusted until a row-shift discharge lands.
     pub hadamard_pair_evals: Vec<BinaryFieldGF128>,
+    /// Trusted parent evals `ψ_α(operand)(r*_H)` of the **adder** relations'
+    /// operands (`U_0, V_0, W_0, U_1, …`, 3 per [`crate::f2_hadamard::F2AdderSpec`]).
+    /// The adder operands are derived from committed columns but their
+    /// parents are shipped trusted (the carry `β` + bit-shifts break the
+    /// pair-eval algebra) — honest-prover-first; a sound discharge (committed
+    /// `W_β` + row/bit-shift binding) is the follow-up. Empty when there are
+    /// no adder relations.
+    pub hadamard_adder_parents: Vec<BinaryFieldGF128>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::prove_f2_uair`].
@@ -350,6 +358,8 @@ where
     Hadamard(crate::f2_hadamard::F2HadamardVerifyError),
     #[error("hadamard parent-eval count {got} ≠ distinct columns {expected}")]
     HadamardParentEvalCountMismatch { got: usize, expected: usize },
+    #[error("hadamard adder-parent count {got} ≠ 3·(num adders) {expected}")]
+    HadamardAdderParentCountMismatch { got: usize, expected: usize },
     #[error("hadamard recombination failed: {0}")]
     HadamardRecombination(
         zinc_piop::lookup::booleanity::BooleanityError<BinaryFieldGF128>,
@@ -789,6 +799,7 @@ where
             trace,
             &[],
             &[],
+            &[],
             num_vars,
             project_scalar,
         )?;
@@ -814,11 +825,13 @@ where
     /// existing zero-copy `ManuallyDrop` reinterpret for the
     /// `evaluate_with_config` call, so only one copy per col is
     /// paid).
+    #[allow(clippy::too_many_arguments)]
     pub fn prove_f2_uair_with_groups(
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<
@@ -938,6 +951,7 @@ where
             transcript,
             &extended_binary_poly,
             hadamard_specs,
+            adder_specs,
             &ic_state.evaluation_point,
             num_vars,
         );
@@ -961,11 +975,24 @@ where
         // bit-slice evals (Wiring R); the `Δ = 0` pair evals are bound to
         // the commitment by the second-mp discharge (the `Δ ≠ 0` ones are
         // trusted until a row-shift discharge lands).
-        let (hadamard_proof, hadamard_pair_evals, hadamard_rstar, hadamard_pairs) = match hadamard_phase {
-            Some((had_proof, pairs, r_star_h)) => {
+        let (
+            hadamard_proof,
+            hadamard_pair_evals,
+            hadamard_adder_parents,
+            hadamard_rstar,
+            hadamard_pairs,
+        ) = match hadamard_phase {
+            Some((had_proof, pairs, r_star_h, adder_cols)) => {
                 let pair_evals = crate::f2_hadamard::pair_alpha_evals::<D>(
                     &extended_binary_poly,
                     &pairs,
+                    &alpha_pows,
+                    &r_star_h,
+                );
+                // Trusted parents of the adder operands: project the built
+                // operand columns at α, eval at r*_H.
+                let adder_parents = crate::f2_hadamard::adder_operand_alpha_evals::<D>(
+                    &adder_cols,
                     &alpha_pows,
                     &r_star_h,
                 );
@@ -974,9 +1001,12 @@ where
                 for v in &pair_evals {
                     transcript.absorb_random_field(v, &mut buf);
                 }
-                (Some(had_proof), pair_evals, r_star_h, pairs)
+                for v in &adder_parents {
+                    transcript.absorb_random_field(v, &mut buf);
+                }
+                (Some(had_proof), pair_evals, adder_parents, r_star_h, pairs)
             }
-            None => (None, Vec::new(), Vec::new(), Vec::new()),
+            None => (None, Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         };
         // SIMD-batched 4-cell projection via `project_column_with_powers`:
         // chunks the column into groups of 4, dispatches each group
@@ -1245,6 +1275,7 @@ where
                 column_evals_at_rstar: all_col_evals,
                 hadamard_proof,
                 hadamard_pair_evals,
+                hadamard_adder_parents,
             },
             subclaim,
             projected_trace_inner,
@@ -1282,6 +1313,7 @@ where
             proof,
             virtual_specs,
             &[],
+            &[],
             num_vars,
             num_primary_columns,
             project_ideal,
@@ -1298,11 +1330,13 @@ where
     /// evals — soundness for the verifier's "virtual = linear combo"
     /// derivation. Mismatch surfaces as
     /// [`F2VerifyError::VirtualEvalMismatch`].
+    #[allow(clippy::too_many_arguments)]
     pub fn verify_f2_uair_with_groups<IdealOverF>(
         transcript: &mut impl Transcript,
         proof: &F2Proof,
         virtual_specs: &[F2VirtualBpSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -1329,8 +1363,9 @@ where
 
         // -- Step 2.5: Hadamard zerocheck verify (Wiring R) -------
         // Mirrors the prover: runs before α. No-op when empty.
+        let has_hadamard = !hadamard_specs.is_empty() || !adder_specs.is_empty();
         let (hadamard_pairs, hadamard_rstar): (Vec<(usize, usize)>, Vec<BinaryFieldGF128>) =
-            if !hadamard_specs.is_empty() {
+            if has_hadamard {
                 let hp = proof
                     .hadamard_proof
                     .as_ref()
@@ -1339,6 +1374,7 @@ where
                     transcript,
                     hp,
                     hadamard_specs,
+                    adder_specs,
                     &ic_evaluation_point,
                     num_vars,
                 )
@@ -1356,12 +1392,14 @@ where
         }
 
         // -- Step 3.5: Hadamard discharge recombination -----------
-        // Mirror the prover: absorb the per-pair α-evals (after α), derive
-        // each operand's parent eval from them (XOR-additive in ψ_α), then
-        // recombine `Σ_b α^b·v_b == parent` to tie the operand bit-slices to
-        // the pair evals. (The `Δ = 0` pair evals are bound to the
-        // commitment by the second-mp discharge; `Δ ≠ 0` are trusted.)
-        if !hadamard_pairs.is_empty() {
+        // Mirror the prover: absorb the AND per-pair α-evals then the
+        // trusted adder operand parents (after α), derive each AND operand's
+        // parent (XOR-additive in ψ_α), append the trusted adder parents,
+        // then recombine `Σ_b α^b·v_b == parent` to tie every operand's
+        // bit-slices to its parent. (`Δ = 0` AND pairs are bound to the
+        // commitment by the second-mp discharge; `Δ ≠ 0` AND pairs and ALL
+        // adder parents are trusted — honest-prover-first.)
+        if has_hadamard {
             let hp = proof
                 .hadamard_proof
                 .as_ref()
@@ -1372,18 +1410,31 @@ where
                     expected: hadamard_pairs.len(),
                 });
             }
+            let expected_adder_parents = adder_specs.len().saturating_mul(3);
+            if proof.hadamard_adder_parents.len() != expected_adder_parents {
+                return Err(F2VerifyError::HadamardAdderParentCountMismatch {
+                    got: proof.hadamard_adder_parents.len(),
+                    expected: expected_adder_parents,
+                });
+            }
             let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
             for v in &proof.hadamard_pair_evals {
                 transcript.absorb_random_field(v, &mut buf);
             }
+            for v in &proof.hadamard_adder_parents {
+                transcript.absorb_random_field(v, &mut buf);
+            }
             let alpha_pows = zinc_poly::univariate::binary_gf128::alpha_powers(&alpha, D);
-            let operand_parents = crate::f2_hadamard::derive_operand_parents(
+            // AND operand parents (derived) first, then the trusted adder
+            // operand parents — matching the prover's operand ordering.
+            let mut operand_parents = crate::f2_hadamard::derive_operand_parents(
                 hadamard_specs,
                 &hadamard_pairs,
                 &proof.hadamard_pair_evals,
                 &alpha_pows,
             );
+            operand_parents.extend_from_slice(&proof.hadamard_adder_parents);
             zinc_piop::lookup::booleanity::verify_bit_decomposition_consistency(
                 &operand_parents,
                 &hp.bit_slice_evals,
@@ -2847,6 +2898,7 @@ where
             commitment,
             virtual_specs,
             &[],
+            &[],
             num_vars,
             project_scalar,
             num_column_openings,
@@ -2873,6 +2925,7 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
@@ -2893,6 +2946,7 @@ where
             commitment,
             virtual_specs,
             hadamard_specs,
+            adder_specs,
             num_vars,
             project_scalar,
             num_column_openings,
@@ -2914,6 +2968,7 @@ where
         commitment: ZipPlusCommitment,
         virtual_specs: &[F2VirtualBpSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
@@ -2926,6 +2981,7 @@ where
                 trace,
                 virtual_specs,
                 hadamard_specs,
+                adder_specs,
                 num_vars,
                 project_scalar,
             )?;
@@ -3194,6 +3250,7 @@ where
             commitment,
             virtual_specs,
             &[],
+            &[],
             num_vars,
             project_scalar,
             num_column_openings,
@@ -3268,6 +3325,7 @@ where
             virtual_specs,
             bit_op_specs,
             &[],
+            &[],
             public_binary_trace,
             num_vars,
             num_primary_columns,
@@ -3289,6 +3347,7 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
         num_primary_columns: usize,
@@ -3305,6 +3364,7 @@ where
             virtual_specs,
             bit_op_specs,
             hadamard_specs,
+            adder_specs,
             public_binary_trace,
             num_vars,
             num_primary_columns,
@@ -3328,6 +3388,7 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
         num_primary_columns: usize,
@@ -3351,6 +3412,7 @@ where
             &proof.uair,
             virtual_specs,
             hadamard_specs,
+            adder_specs,
             num_vars,
             num_primary_columns,
             project_ideal,
@@ -4138,6 +4200,7 @@ mod tests {
             column_evals_at_rstar,
             hadamard_proof: None,
             hadamard_pair_evals: Vec::new(),
+            hadamard_adder_parents: Vec::new(),
         })
     }
 
@@ -4467,6 +4530,7 @@ mod tests {
                 &trace,
                 &[],
                 &specs,
+                &[],
                 num_vars,
                 project_scalar,
             )
@@ -4479,6 +4543,7 @@ mod tests {
             &proof,
             &[],
             &specs,
+            &[],
             num_vars,
             /* num_primary_columns */ 3,
             |_ideal| ImpossibleIdeal,
@@ -4500,6 +4565,7 @@ mod tests {
                 &trace_bad,
                 &[],
                 &specs,
+                &[],
                 num_vars,
                 project_scalar,
             )
@@ -4512,6 +4578,7 @@ mod tests {
             &proof_bad,
             &[],
             &specs,
+            &[],
             num_vars,
             3,
             |_ideal| ImpossibleIdeal,
@@ -5333,6 +5400,7 @@ mod tests {
                 /* virtual_specs */ &[],
                 /* bit_op_specs  */ &[],
                 &specs,
+                /* adder_specs */ &[],
                 num_vars,
                 project_scalar,
                 /* num_column_openings */ 4,
@@ -5350,6 +5418,7 @@ mod tests {
                 /* virtual_specs */ &[],
                 /* bit_op_specs  */ &[],
                 &specs,
+                /* adder_specs */ &[],
                 /* public_binary_trace */ &[],
                 num_vars,
                 /* num_primary_columns */ 3,
@@ -5534,7 +5603,7 @@ mod tests {
         let prove = |trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
             let mut pt = Blake3Transcript::new();
             ZincPlusPiopF2::<F2Types<D>, HadOpF2Uair, D>::prove_f2_full_with_hadamard(
-                &mut pt, &pp, trace, &[], &[], &specs, num_vars, project_scalar, 4,
+                &mut pt, &pp, trace, &[], &[], &specs, &[], num_vars, project_scalar, 4,
             )
             .expect("prove_f2_full_with_hadamard should succeed")
         };
@@ -5543,7 +5612,7 @@ mod tests {
             ZincPlusPiopF2::<F2Types<D>, HadOpF2Uair, D>::verify_f2_full_with_hadamard::<
                 ImpossibleIdeal,
             >(
-                &mut vt, &pp, proof, &[], &[], &specs, &[], num_vars, 5, |_ideal| ImpossibleIdeal,
+                &mut vt, &pp, proof, &[], &[], &specs, &[], &[], num_vars, 5, |_ideal| ImpossibleIdeal,
             )
         };
 
@@ -5975,6 +6044,7 @@ mod tests {
             /* virtual_specs */ &[],
             /* bit_op_specs  */ &[],
             &specs,
+            /* adder_specs */ &[],
             num_vars,
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
@@ -5990,12 +6060,108 @@ mod tests {
             /* virtual_specs */ &[],
             /* bit_op_specs  */ &[],
             &specs,
+            /* adder_specs */ &[],
             /* public_binary_trace */ &trace.binary_poly[..cols::NUM_BIN_PUB],
             num_vars,
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
         .expect("honest SHA C12/C13/C14 proof must verify");
+    }
+
+    /// DOCUMENTS the row-selectivity gap for the SHA-256 adders C5–C11.
+    ///
+    /// Each adder is `target = x + y` (the IC `assert_in_ideal` pins the
+    /// LSB via the `κ` compensator; the Hadamard would pin bits 1..31 via
+    /// the Binius carry identity). But the adders are **row-selective**:
+    /// `target = x + y` holds only on each chain/anchor's active rows — the
+    /// trace zeroes the S-columns elsewhere while the inputs stay non-zero,
+    /// and the IC's LSB still holds there only because `κ` absorbs it. A
+    /// **uniform** Hadamard zerocheck (what's built) therefore sees a
+    /// **non-zero** claimed sum even on an honest trace (verified here with
+    /// the simplest row-local adder C7 `W_T2 = W_SIGMA0 + W_MAJ`).
+    ///
+    /// Registering the adders soundly needs a per-relation **active-row
+    /// selector** — multiply each relation's term by an indicator MLE so
+    /// the zerocheck only constrains its active rows (degree 3 → 4). That
+    /// selector machinery is the next step (see the ledger / handoff §5b).
+    /// This test asserts the current (rejected) behaviour so a future
+    /// selector implementation flips it to acceptance knowingly.
+    #[test]
+    fn sha256_f2_adders_need_row_selector() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+        use crate::f2_hadamard::{F2AdderSpec, F2OperandTerm};
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let tm = |col: usize, row_shift: usize| F2OperandTerm { col, row_shift };
+        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize)| F2AdderSpec {
+            t: tm(t.0, t.1),
+            x: tm(x.0, x.1),
+            y: tm(y.0, y.1),
+        };
+        // target = x + y, shifts in i+Δ (from the IC `down_*` constraints).
+        let adders = [
+            adder((cols::W_T2, 0), (cols::W_SIGMA0, 0), (cols::W_MAJ, 0)), // C7 only
+        ];
+
+        // The prover still produces a proof (it doesn't self-check the
+        // claimed sum); the verifier's zerocheck gate rejects it.
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            /* hadamard_specs */ &[],
+            &adders,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+        )
+        .expect("prove on SHA adders should succeed");
+
+        let mut vt = Blake3Transcript::new();
+        let res = ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            &[],
+            &[],
+            /* hadamard_specs */ &[],
+            &adders,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        );
+        assert!(
+            matches!(res, Err(F2FullVerifyError::Uair(F2VerifyError::Hadamard(_)))),
+            "a uniform SHA adder registration must (currently) be rejected — \
+             the adders are row-selective and need an active-row selector; got {res:?}",
+        );
     }
 
 }

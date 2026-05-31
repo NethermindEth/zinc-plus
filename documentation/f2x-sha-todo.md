@@ -1469,8 +1469,43 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     products vanish → honest sum 0. `(W_E,0)`/`(W_A,0)` bound; `Δ≠0` pairs
     trusted (row-shift gap). Lesson logged: **always check the honest
     zerocheck sum is 0 to confirm a registration's boundary handling.**
-  - **Next: the 13 adder relations** (C5–C11), which need the **X·
-    bit-shift** + **`W_β`** (below).
+  - **ADDER OPERAND MACHINERY SHIPPED (`F2AdderSpec`, working tree)**: the
+    13 adder relations C5–C11 are `(x + X·c) ⊙ (y + X·c) = c + X·c` (Binius
+    carry identity). `F2AdderSpec { t, x, y: F2OperandTerm }` +
+    `build_adder_operand_columns` build `U,V,W` per row from the three
+    committed columns, with the carry `c = SHR¹(t⊕x⊕y)` on bits `0..D−2` and
+    `c[D−1] = β = Maj(x_{D−1}, y_{D−1}, (t⊕x⊕y)_{D−1})` **computed** (the
+    overflow carry — so **no committed `W_β` is needed for completeness**;
+    `W_β`/X·-bit-shift were the plan's route but computing `β` is simpler).
+    Because `c` is *defined* from `t⊕x⊕y`, the zerocheck genuinely verifies
+    `t = x+y` (the carry recurrence), not a tautology — confirmed by the
+    synthetic tests `adder_round_trips` (honest accept) + `adder_rejects_wrong_sum`.
+    Threaded through prove/verify (`adder_specs` param on the phase, the
+    group fns, `_full_impl`, `_full_with_hadamard`); `F2Proof` gained
+    `hadamard_adder_parents` (the operands' **trusted** parents at `r*_H` —
+    the carry `β` + bit-shifts break the pair-eval algebra, so adders are
+    honest-prover, no Δ=0 binding).
+  - **⚠️ ROW-SELECTIVITY BLOCKER (the SHA adders are NOT uniform)**: registering
+    the 13 adders on real `sha256_f2` **fails the honest zerocheck**
+    (`NonZeroClaimedSum`, verified by `sha256_f2_adders_need_row_selector`,
+    even for the simplest row-local C7 `W_T2 = W_SIGMA0 + W_MAJ`). Root
+    cause: the adders are **row-selective** — `target = x + y` holds only on
+    each chain/anchor's active rows; the trace zeroes the S-columns (target)
+    elsewhere while the inputs (`W_W`, `W_E`, …) stay non-zero, and the IC's
+    LSB `assert_in_ideal(target+x+y+κ)` still holds there only because the
+    `κ` (PA_C) compensator absorbs it. A **uniform** Hadamard zerocheck
+    constrains *every* row, so it sees the inactive-row mismatch. (Evidence
+    that C8 and C10 both target `W_A^↓4` — they apply on disjoint row sets.)
+    **Next step = a per-relation active-row selector**: multiply each
+    relation's zerocheck term by an indicator MLE `sel_k(x)` (1 on active
+    rows, 0 else; degree 3 → 4). The selectors are public/derivable from the
+    SHA anchor-row layout (`ROWS_PER_COMP` / chain anchors in `sha256_f2.rs`);
+    extract the active-row set per adder, build the indicators, extend
+    `prepare_hadamard_group`'s `comb_fn` with the `sel` factor. Then the 13
+    adders register cleanly (the operand machinery + the i+Δ specs in the
+    test are ready — see `sha256_f2_adders_need_row_selector` for the
+    13 specs). The AND relations didn't need this (their fills are uniform
+    over all rows).
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

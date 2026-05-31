@@ -29,6 +29,8 @@
 //! with the ledger's Issue 1; honest-prover-first per plan §6).
 
 use crypto_primitives::Field;
+use crypto_primitives::boolean::Boolean;
+use zinc_piop::lookup::booleanity::compute_bit_slices_flat;
 use zinc_piop::lookup::hadamard::{
     HadamardError, HadamardTriple, finalize_hadamard_prover, finalize_hadamard_verifier,
     prepare_hadamard_group, prepare_hadamard_verifier,
@@ -110,6 +112,114 @@ impl F2HadamardSpec {
             w: F2Operand::col(w_col),
         }
     }
+}
+
+/// A SHA-256 **adder** relation, verifying `t = x + y (mod 2^D)` via the
+/// Binius carry identity `(x + X·c) ⊙ (y + X·c) = c + X·c`, where `c` is
+/// the carry word of the addition. `t`, `x`, `y` are committed columns
+/// (each optionally row-shifted). The carry is *defined* from them:
+/// `c[b] = (t ⊕ x ⊕ y)[b+1]` for `b < D−1` (`= SHR¹(t⊕x⊕y)`), and the top
+/// bit `c[D−1] = β = Maj(x[D−1], y[D−1], (t⊕x⊕y)[D−1])` (the overflow
+/// carry, computed). The three Hadamard operands `U = x⊕X·c`, `V = y⊕X·c`,
+/// `W = c⊕X·c` are built per row and checked by the zerocheck — meaningful
+/// because `c` is defined from `t⊕x⊕y`, so the relation holds iff the carry
+/// recurrence (hence `t = x+y`) does.
+///
+/// **Honest-prover-first**: the operands are derived from the committed
+/// columns but their parents at `r*_H` are shipped **trusted** (the `β`
+/// bit and the bit-shifts break the simple pair-eval algebra). Binding
+/// them — committing `W_β` and a sound row/bit-shift discharge — is the
+/// follow-up (`f2_hadamard_plan.md` §4.5 / §6, ledger Issue 1).
+#[derive(Clone, Copy, Debug)]
+pub struct F2AdderSpec {
+    pub t: F2OperandTerm,
+    pub x: F2OperandTerm,
+    pub y: F2OperandTerm,
+}
+
+/// Read column `term.col` at row `r + term.row_shift` as a `u64` bitmask
+/// (low `D` bits), zero past the trace tail (the `↓Δ` convention).
+#[inline]
+fn shifted_cell<const D: usize>(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    term: F2OperandTerm,
+    r: usize,
+    n: usize,
+) -> u64 {
+    match r.checked_add(term.row_shift).filter(|&v| v < n) {
+        Some(s) => cell_mask::<D>(&columns[term.col].evaluations[s]),
+        None => 0,
+    }
+}
+
+/// Build a `BinaryPoly<D>` cell from the low `D` bits of `m`.
+#[inline]
+fn cell_from_mask<const D: usize>(m: u64) -> BinaryPoly<D> {
+    let coeffs: [Boolean; D] = std::array::from_fn(|i| Boolean::new((m >> i) & 1 != 0));
+    BinaryPoly::<D>::new(coeffs)
+}
+
+/// Build the three packed operand columns `[U, V, W]` of an adder relation
+/// (column-major over rows). See [`F2AdderSpec`] for the construction.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_adder_operand_columns<const D: usize>(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    spec: &F2AdderSpec,
+    num_vars: usize,
+) -> [DenseMultilinearExtension<BinaryPoly<D>>; 3] {
+    let n = 1usize << num_vars;
+    let mask = all_ones_mask::<D>();
+    let top = D - 1;
+    let mut u = Vec::with_capacity(n);
+    let mut v = Vec::with_capacity(n);
+    let mut w = Vec::with_capacity(n);
+    for r in 0..n {
+        let tv = shifted_cell::<D>(columns, spec.t, r, n);
+        let xv = shifted_cell::<D>(columns, spec.x, r, n);
+        let yv = shifted_cell::<D>(columns, spec.y, r, n);
+        let z = (tv ^ xv ^ yv) & mask;
+        // β = Maj of the three top bits (the overflow carry).
+        let xb = (xv >> top) & 1;
+        let yb = (yv >> top) & 1;
+        let zb = (z >> top) & 1;
+        let beta = (xb & yb) | (xb & zb) | (yb & zb);
+        // c = SHR¹(z) on bits 0..D−2, c[D−1] = β.
+        let c = ((z >> 1) | (beta << top)) & mask;
+        let xc = (c << 1) & mask; // X·c (bit D−1 drops, bit 0 = 0)
+        u.push(cell_from_mask::<D>((xv ^ xc) & mask));
+        v.push(cell_from_mask::<D>((yv ^ xc) & mask));
+        w.push(cell_from_mask::<D>((c ^ xc) & mask));
+    }
+    let mk = |evals: Vec<BinaryPoly<D>>| DenseMultilinearExtension {
+        evaluations: evals,
+        num_vars,
+    };
+    [mk(u), mk(v), mk(w)]
+}
+
+/// α-projected MLE eval at `r_star` of each built adder operand column —
+/// the **trusted** parent the recombination ties the operand slices to.
+/// `alpha_pows` must be `[1, α, …, α^{D-1}]`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn adder_operand_alpha_evals<const D: usize>(
+    adder_operand_columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    alpha_pows: &[Gf],
+    r_star: &[Gf],
+) -> Vec<Gf> {
+    let zero_inner = Gf::zero().into_inner();
+    adder_operand_columns
+        .iter()
+        .map(|col| {
+            let proj = project_column_with_powers::<D>(&col.evaluations, alpha_pows);
+            let mle = DenseMultilinearExtension::from_evaluations_vec(
+                col.num_vars,
+                proj.iter().map(|x| *x.inner()).collect(),
+                zero_inner.clone(),
+            );
+            mle.evaluate_with_config(r_star, &())
+                .expect("adder operand α-eval at r*_H should succeed")
+        })
+        .collect()
 }
 
 /// Proof data produced by the Hadamard phase: the zerocheck proof plus the
@@ -230,29 +340,44 @@ fn build_operand_slices<const D: usize>(
         .collect()
 }
 
-/// Build the full operand-slice MLE set for the zerocheck: for each
-/// relation `k`, the slices of `U_k, V_k, W_k` concatenated (so operand
-/// index `3k+j` owns slices `[(3k+j)·D, (3k+j+1)·D)`).
+/// Build the full operand-slice MLE set for the zerocheck: the AND specs'
+/// operand slices first (`U_k, V_k, W_k` per spec), then the adder specs'
+/// (`U_j, V_j, W_j` per adder, built via [`build_adder_operand_columns`] +
+/// [`compute_bit_slices_flat`]). Operand index `3k+i` owns slices
+/// `[(3k+i)·D, (3k+i+1)·D)`. Also returns the built adder operand packed
+/// columns (3 per adder, in order) — the caller projects them at α after
+/// it is sampled to get the trusted adder parents.
 fn build_all_operand_slices<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
     num_vars: usize,
-) -> Vec<DenseMultilinearExtension<Inner>> {
+) -> (
+    Vec<DenseMultilinearExtension<Inner>>,
+    Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+) {
+    let cfg = ();
     let mut out = Vec::new();
     for spec in specs {
         for operand in operands(spec) {
             out.extend(build_operand_slices::<D>(columns, operand, num_vars));
         }
     }
-    out
+    let mut adder_cols = Vec::with_capacity(adder_specs.len().saturating_mul(3));
+    for spec in adder_specs {
+        let uvw = build_adder_operand_columns::<D>(columns, spec, num_vars);
+        out.extend(compute_bit_slices_flat::<Gf, D>(&uvw, &cfg));
+        adder_cols.extend(uvw);
+    }
+    (out, adder_cols)
 }
 
 /// One `HadamardTriple` per relation, indexing the operand-slice groups
 /// laid out by [`build_all_operand_slices`] (`U_k = 3k`, `V_k = 3k+1`,
 /// `W_k = 3k+2`).
 #[allow(clippy::arithmetic_side_effects)]
-fn relations_into_triples(specs: &[F2HadamardSpec]) -> Vec<HadamardTriple> {
-    (0..specs.len())
+fn relations_into_triples(num_relations: usize) -> Vec<HadamardTriple> {
+    (0..num_relations)
         .map(|k| HadamardTriple {
             u_col: 3 * k,
             v_col: 3 * k + 1,
@@ -330,24 +455,34 @@ pub fn pair_alpha_evals<const D: usize>(
 }
 
 /// Prover half of the Wiring-R Hadamard phase. Returns `None` when there
-/// are no relations. On success returns the proof plus the distinct
-/// `(col, row_shift)` pair list and the Hadamard sumcheck point `r*_H` —
-/// the caller needs both after α to compute the pair α-evals at `r*_H` for
-/// the recombination discharge.
+/// are no relations. On success returns the proof, the distinct
+/// `(col, row_shift)` pair list (for the AND specs), the Hadamard sumcheck
+/// point `r*_H`, and the built adder operand packed columns (3 per adder,
+/// in order) — the caller needs all of these after α: the pairs to compute
+/// the AND pair-evals, and the adder columns to compute the trusted adder
+/// operand parents.
 pub fn prove_f2_hadamard_phase<const D: usize>(
     transcript: &mut impl Transcript,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
     ic_evaluation_point: &[Gf],
     num_vars: usize,
-) -> Option<(F2HadamardProof, Vec<(usize, usize)>, Vec<Gf>)> {
-    if specs.is_empty() {
+) -> Option<(
+    F2HadamardProof,
+    Vec<(usize, usize)>,
+    Vec<Gf>,
+    Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+)> {
+    if specs.is_empty() && adder_specs.is_empty() {
         return None;
     }
     let cfg = ();
     let pairs = distinct_pairs(specs);
-    let bit_slice_mles = build_all_operand_slices::<D>(columns, specs, num_vars);
-    let relations = relations_into_triples(specs);
+    let (bit_slice_mles, adder_cols) =
+        build_all_operand_slices::<D>(columns, specs, adder_specs, num_vars);
+    let num_relations = specs.len().saturating_add(adder_specs.len());
+    let relations = relations_into_triples(num_relations);
 
     let (group, ancillary) =
         prepare_hadamard_group::<Gf, D>(transcript, bit_slice_mles, &relations, ic_evaluation_point, &cfg)
@@ -368,25 +503,29 @@ pub fn prove_f2_hadamard_phase<const D: usize>(
         },
         pairs,
         r_star_h,
+        adder_cols,
     ))
 }
 
 /// Verifier half: checks the zerocheck (claimed sum zero + round
 /// consistency + closing eval) and returns `(distinct_pairs, r*_H)`. The
-/// caller then derives the operand parents via [`derive_operand_parents`]
-/// (from the per-pair evals) and runs
+/// caller then derives the AND operand parents via [`derive_operand_parents`]
+/// (from the per-pair evals), appends the trusted adder operand parents, and
+/// runs
 /// [`zinc_piop::lookup::booleanity::verify_bit_decomposition_consistency`]
 /// against `proof.bit_slice_evals` to pin the operand slices.
 pub fn verify_f2_hadamard_phase<const D: usize>(
     transcript: &mut impl Transcript,
     proof: &F2HadamardProof,
     specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
     ic_evaluation_point: &[Gf],
     num_vars: usize,
 ) -> Result<(Vec<(usize, usize)>, Vec<Gf>), F2HadamardVerifyError> {
     let cfg = ();
     let pairs = distinct_pairs(specs);
-    let relations = relations_into_triples(specs);
+    let num_relations = specs.len().saturating_add(adder_specs.len());
+    let relations = relations_into_triples(num_relations);
 
     let claimed = proof.sumcheck_proof.claimed_sums()[0];
     let ancillary = prepare_hadamard_verifier::<Gf, D>(
@@ -449,30 +588,35 @@ mod tests {
     }
 
     /// Drive an honest prove → verify → recombination round-trip for a set
-    /// of operand specs over the given columns, at a test α. Panics if any
-    /// stage fails. Returns nothing — the asserts are the test.
+    /// of AND + adder specs over the given columns, at a test α. Panics if
+    /// any stage fails. Returns nothing — the asserts are the test.
     fn round_trip<const D: usize>(
         columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
         specs: &[F2HadamardSpec],
+        adder_specs: &[F2AdderSpec],
         num_vars: usize,
     ) {
         let ic = ic_point();
         let mut pt = Blake3Transcript::new();
-        let (proof, pairs_p, rstar_p) =
-            prove_f2_hadamard_phase::<D>(&mut pt, columns, specs, &ic, num_vars).unwrap();
+        let (proof, pairs_p, rstar_p, adder_cols) =
+            prove_f2_hadamard_phase::<D>(&mut pt, columns, specs, adder_specs, &ic, num_vars)
+                .unwrap();
 
         let mut vt = Blake3Transcript::new();
         let (pairs_v, rstar_v) =
-            verify_f2_hadamard_phase::<D>(&mut vt, &proof, specs, &ic, num_vars).unwrap();
+            verify_f2_hadamard_phase::<D>(&mut vt, &proof, specs, adder_specs, &ic, num_vars)
+                .unwrap();
         assert_eq!(pairs_p, pairs_v);
         assert_eq!(rstar_p, rstar_v);
 
-        // Recombination at a test α: derive operand parents from the
-        // pair evals, then check the sent operand slices recombine to them.
+        // Recombination at a test α: AND operand parents derived from the
+        // pair evals, adder operand parents from the built columns (trusted);
+        // then check the sent operand slices recombine to them.
         let alpha = Gf::from_words([0x9E37_79B9, 0x1234_5678]);
         let pows = alpha_powers(&alpha, D);
         let pair_evals = pair_alpha_evals::<D>(columns, &pairs_v, &pows, &rstar_v);
-        let parents = derive_operand_parents(specs, &pairs_v, &pair_evals, &pows);
+        let mut parents = derive_operand_parents(specs, &pairs_v, &pair_evals, &pows);
+        parents.extend(adder_operand_alpha_evals::<D>(&adder_cols, &pows, &rstar_v));
         verify_bit_decomposition_consistency(&parents, &proof.bit_slice_evals, &alpha, D)
             .expect("operand recombination");
     }
@@ -489,7 +633,7 @@ mod tests {
             col_from_u32s::<D>(&v),
             col_from_u32s::<D>(&w),
         ];
-        round_trip::<D>(&columns, &[F2HadamardSpec::plain(0, 1, 2)], num_vars);
+        round_trip::<D>(&columns, &[F2HadamardSpec::plain(0, 1, 2)], &[], num_vars);
     }
 
     #[test]
@@ -508,7 +652,7 @@ mod tests {
             v: F2Operand::shifted(0, 1),
             w: F2Operand::col(1),
         };
-        round_trip::<D>(&columns, &[spec], num_vars);
+        round_trip::<D>(&columns, &[spec], &[], num_vars);
     }
 
     #[test]
@@ -534,7 +678,7 @@ mod tests {
             v: F2Operand::col(1),
             w: F2Operand::col(2),
         };
-        round_trip::<D>(&columns, &[spec], num_vars);
+        round_trip::<D>(&columns, &[spec], &[], num_vars);
     }
 
     #[test]
@@ -573,7 +717,7 @@ mod tests {
                 F2OperandTerm { col: 0, row_shift: 2 },
             ]),
         };
-        round_trip::<D>(&columns, &[spec], num_vars);
+        round_trip::<D>(&columns, &[spec], &[], num_vars);
     }
 
     #[test]
@@ -592,10 +736,10 @@ mod tests {
         let specs = [F2HadamardSpec::plain(0, 1, 2)];
         let ic = ic_point();
         let mut pt = Blake3Transcript::new();
-        let (proof, _, _) =
-            prove_f2_hadamard_phase::<D>(&mut pt, &columns, &specs, &ic, num_vars).unwrap();
+        let (proof, _, _, _) =
+            prove_f2_hadamard_phase::<D>(&mut pt, &columns, &specs, &[], &ic, num_vars).unwrap();
         let mut vt = Blake3Transcript::new();
-        let rejected = verify_f2_hadamard_phase::<D>(&mut vt, &proof, &specs, &ic, num_vars);
+        let rejected = verify_f2_hadamard_phase::<D>(&mut vt, &proof, &specs, &[], &ic, num_vars);
         assert!(matches!(
             rejected,
             Err(F2HadamardVerifyError::Hadamard(
@@ -609,6 +753,66 @@ mod tests {
         const D: usize = 4;
         let mut pt = Blake3Transcript::new();
         let cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = vec![];
-        assert!(prove_f2_hadamard_phase::<D>(&mut pt, &cols, &[], &ic_point(), 3).is_none());
+        assert!(
+            prove_f2_hadamard_phase::<D>(&mut pt, &cols, &[], &[], &ic_point(), 3).is_none()
+        );
+    }
+
+    #[test]
+    fn adder_round_trips() {
+        // Honest t = x + y (mod 2^D): the Binius carry relation holds, so
+        // the zerocheck sum is 0 and the recombination ties the (trusted)
+        // operand parents.
+        const D: usize = 4;
+        let num_vars = 3;
+        let mask: u32 = (1 << D) - 1;
+        let x = [0b1011u32, 0b0110, 0b1111, 0b0001, 0b1010, 0b0101, 0b1100, 0b0011];
+        let y = [0b1101u32, 0b1010, 0b0111, 0b1001, 0b0110, 0b1111, 0b1000, 0b0101];
+        let t: Vec<u32> = x.iter().zip(&y).map(|(a, b)| (a.wrapping_add(*b)) & mask).collect();
+        let columns = [
+            col_from_u32s::<D>(&t),
+            col_from_u32s::<D>(&x),
+            col_from_u32s::<D>(&y),
+        ];
+        let adder = F2AdderSpec {
+            t: F2OperandTerm { col: 0, row_shift: 0 },
+            x: F2OperandTerm { col: 1, row_shift: 0 },
+            y: F2OperandTerm { col: 2, row_shift: 0 },
+        };
+        round_trip::<D>(&columns, &[], &[adder], num_vars);
+    }
+
+    #[test]
+    fn adder_rejects_wrong_sum() {
+        // t ≠ x + y ⇒ the carry recurrence fails ⇒ non-zero claimed sum.
+        const D: usize = 4;
+        let num_vars = 3;
+        let mask: u32 = (1 << D) - 1;
+        let x = [0b1011u32, 0b0110, 0b1111, 0b0001, 0b1010, 0b0101, 0b1100, 0b0011];
+        let y = [0b1101u32, 0b1010, 0b0111, 0b1001, 0b0110, 0b1111, 0b1000, 0b0101];
+        let mut t: Vec<u32> = x.iter().zip(&y).map(|(a, b)| (a.wrapping_add(*b)) & mask).collect();
+        t[0] ^= 0b10; // break t = x + y at a non-LSB bit (so a carry differs)
+        let columns = [
+            col_from_u32s::<D>(&t),
+            col_from_u32s::<D>(&x),
+            col_from_u32s::<D>(&y),
+        ];
+        let adder = [F2AdderSpec {
+            t: F2OperandTerm { col: 0, row_shift: 0 },
+            x: F2OperandTerm { col: 1, row_shift: 0 },
+            y: F2OperandTerm { col: 2, row_shift: 0 },
+        }];
+        let ic = ic_point();
+        let mut pt = Blake3Transcript::new();
+        let (proof, _, _, _) =
+            prove_f2_hadamard_phase::<D>(&mut pt, &columns, &[], &adder, &ic, num_vars).unwrap();
+        let mut vt = Blake3Transcript::new();
+        let rejected = verify_f2_hadamard_phase::<D>(&mut vt, &proof, &[], &adder, &ic, num_vars);
+        assert!(matches!(
+            rejected,
+            Err(F2HadamardVerifyError::Hadamard(
+                HadamardError::NonZeroClaimedSum { .. }
+            ))
+        ));
     }
 }
