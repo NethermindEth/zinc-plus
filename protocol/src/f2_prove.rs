@@ -16,18 +16,18 @@
 //! 2. **Step 1 (prime projection)** — mute. The trace is already in
 //!    `F_2[X]`; there is no `Z[X] → F_q[X]` reduction step.
 //!
-//! 3. **Step 2 (ideal check over GF(2^192)[X])** — run
-//!    `IdealCheckProtocol::prove_combined::<BinaryFieldGF192>` on
-//!    the trace lifted via the trivial `F_2 ⊂ GF(2^192)`
+//! 3. **Step 2 (ideal check over GF(2^128)[X])** — run
+//!    `IdealCheckProtocol::prove_combined::<BinaryFieldGF128>` on
+//!    the trace lifted via the trivial `F_2 ⊂ GF(2^128)`
 //!    coefficient embedding.
 //!
 //! 4. **Step 3 (evaluation projection `ψ_α`)** — sample
-//!    `α ∈ GF(2^192)` and substitute `X = α` in the trace, producing
-//!    `Vec<DenseMultilinearExtension<BinaryFieldGF192>>`. The IC's
-//!    `DynamicPolynomialF<BinaryFieldGF192>`-valued combined-MLE
-//!    values are likewise evaluated at α to land in `GF(2^192)`.
+//!    `α ∈ GF(2^128)` and substitute `X = α` in the trace, producing
+//!    `Vec<DenseMultilinearExtension<BinaryFieldGF128>>`. The IC's
+//!    `DynamicPolynomialF<BinaryFieldGF128>`-valued combined-MLE
+//!    values are likewise evaluated at α to land in `GF(2^128)`.
 //!
-//! 5. **Step 4 (sumcheck over GF(2^192))** — run
+//! 5. **Step 4 (sumcheck over GF(2^128))** — run
 //!    [`MultiDegreeSumcheck`] on the projected trace. The IC's
 //!    evaluation point becomes the `eq`-style randomness for a
 //!    zerocheck-shaped group; the sumcheck reduces a single
@@ -59,7 +59,7 @@ use zinc_uair::ideal_collector::IdealOrZero;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_gf192::BinaryFieldGF192,
+        binary::BinaryPoly, binary_f2_wide::BinaryF2Poly, binary_gf128::BinaryFieldGF128,
         dynamic::over_field::DynamicPolynomialF,
     },
 };
@@ -80,9 +80,9 @@ use rayon::prelude::*;
 /// verifier sees up to (but not including) the MLE evaluation claims
 /// being themselves proved.
 ///
-/// `ic_proof` is the ideal-check proof over `GF(2^192)[X]`.
+/// `ic_proof` is the ideal-check proof over `GF(2^128)[X]`.
 /// `sumcheck_proof` is the multi-degree sumcheck proof over
-/// `GF(2^192)` — γ-batched into a single degree-2 group, so the
+/// `GF(2^128)` — γ-batched into a single degree-2 group, so the
 /// proof contains exactly one round-polynomial sequence (versus
 /// one per primary+virtual column in the pre-batched layout).
 /// `alpha` is the evaluation-projection challenge. `gamma` is the
@@ -99,35 +99,35 @@ use rayon::prelude::*;
 /// sumcheck's batched expected evaluation.
 #[derive(Clone, Debug)]
 pub struct F2Proof {
-    pub ic_proof: IcProof<BinaryFieldGF192>,
-    pub sumcheck_proof: MultiDegreeSumcheckProof<BinaryFieldGF192>,
-    /// `α ∈ GF(2^192)` — the evaluation-projection challenge, drawn
+    pub ic_proof: IcProof<BinaryFieldGF128>,
+    pub sumcheck_proof: MultiDegreeSumcheckProof<BinaryFieldGF128>,
+    /// `α ∈ GF(2^128)` — the evaluation-projection challenge, drawn
     /// from the transcript after the IC. Recorded here as a
     /// convenience; the verifier could equivalently re-derive it.
-    pub alpha: BinaryFieldGF192,
-    /// `γ ∈ GF(2^192)` — the per-column batching challenge, drawn
+    pub alpha: BinaryFieldGF128,
+    /// `γ ∈ GF(2^128)` — the per-column batching challenge, drawn
     /// from the transcript after α (and after the α-projected
     /// trace is conceptually fixed via the IC's earlier absorbs).
     /// The sumcheck reduces a single degree-2 group whose
     /// `weighted_col(y) = Σ_g γ^g · col_g(y)`.
-    pub gamma: BinaryFieldGF192,
+    pub gamma: BinaryFieldGF128,
     /// Per-column MLE evaluations at `r*` (primary cols first,
     /// then virtual cols). Sent in the proof so the γ-batched
     /// sumcheck output (`eq(r*, r) · Σ_g γ^g · col_g(r*)`) can be
     /// checked against `Σ_g γ^g · column_evals_at_rstar[g]` after
     /// dividing by `eq(r*, r)`.
-    pub column_evals_at_rstar: Vec<BinaryFieldGF192>,
+    pub column_evals_at_rstar: Vec<BinaryFieldGF128>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::prove_f2_uair`].
 #[derive(Debug, thiserror::Error)]
 pub enum F2ProveError<U: Uair> {
     #[error("ideal-check failed: {0}")]
-    IdealCheck(zinc_piop::ideal_check::IdealCheckError<BinaryFieldGF192, U::Ideal>),
+    IdealCheck(zinc_piop::ideal_check::IdealCheckError<BinaryFieldGF128, U::Ideal>),
     #[error("evaluation projection failed: {0}")]
     EvalProjection(zinc_poly::EvaluationError),
     #[error("multipoint-eval prove failed: {0}")]
-    MultipointEval(MultipointEvalError<BinaryFieldGF192>),
+    MultipointEval(MultipointEvalError<BinaryFieldGF128>),
 }
 
 /// Verifier subclaim emitted by [`ZincPlusPiopF2::verify_f2_uair`]: the
@@ -152,11 +152,11 @@ pub enum F2ProveError<U: Uair> {
 /// [`F2VirtualBpSpec`] linear-combo definition.
 #[derive(Clone, Debug)]
 pub struct F2VerifierSubclaim {
-    pub ic_evaluation_point: Vec<BinaryFieldGF192>,
-    pub alpha: BinaryFieldGF192,
-    pub sumcheck_point: Vec<BinaryFieldGF192>,
-    pub primary_column_evals: Vec<BinaryFieldGF192>,
-    pub virtual_column_evals: Vec<BinaryFieldGF192>,
+    pub ic_evaluation_point: Vec<BinaryFieldGF128>,
+    pub alpha: BinaryFieldGF128,
+    pub sumcheck_point: Vec<BinaryFieldGF128>,
+    pub primary_column_evals: Vec<BinaryFieldGF128>,
+    pub virtual_column_evals: Vec<BinaryFieldGF128>,
 }
 
 /// One virtual binary_poly column for an F_2 UAIR: an
@@ -297,13 +297,13 @@ where
     IdealOverF: zinc_uair::ideal::Ideal,
 {
     #[error("ideal-check verification failed: {0}")]
-    IdealCheck(zinc_piop::ideal_check::IdealCheckError<BinaryFieldGF192, IdealOverF>),
+    IdealCheck(zinc_piop::ideal_check::IdealCheckError<BinaryFieldGF128, IdealOverF>),
     #[error("sumcheck verification failed: {0}")]
-    Sumcheck(SumCheckError<BinaryFieldGF192>),
+    Sumcheck(SumCheckError<BinaryFieldGF128>),
     #[error("α drawn from transcript ({transcript}) disagrees with proof.alpha ({proof})")]
     AlphaMismatch {
-        transcript: BinaryFieldGF192,
-        proof: BinaryFieldGF192,
+        transcript: BinaryFieldGF128,
+        proof: BinaryFieldGF128,
     },
     #[error("eq(r*, r) = 0 — sumcheck point coincides with IC point, cannot derive MLE claims")]
     DegenerateEq,
@@ -313,16 +313,16 @@ where
         "γ-batched sumcheck mismatch: expected {expected:?}, got eq(r*, r)·Σ γ^g·col_g(r*) = {got:?}"
     )]
     BatchedSumcheckMismatch {
-        expected: BinaryFieldGF192,
-        got: BinaryFieldGF192,
+        expected: BinaryFieldGF128,
+        got: BinaryFieldGF128,
     },
     #[error(
         "virtual column eval mismatch at index {virtual_idx}: sumcheck-extracted ({sumcheck:?}) ≠ derived from primary evals ({derived:?})"
     )]
     VirtualEvalMismatch {
         virtual_idx: usize,
-        sumcheck: BinaryFieldGF192,
-        derived: BinaryFieldGF192,
+        sumcheck: BinaryFieldGF128,
+        derived: BinaryFieldGF128,
     },
     #[error("internal: U::Uair phantom")]
     _Uair(std::marker::PhantomData<U>),
@@ -355,13 +355,13 @@ pub const PACKED_STORAGE_WIDTH: usize = 64;
 /// of `LEAF_GROUP_SIZE×` on the column-values portion of the proof,
 /// partly offset by a shorter Merkle path (`log2(group_size)` fewer
 /// sibling hashes per opening).
-pub const LEAF_GROUP_SIZE: usize = 8;
+pub const LEAF_GROUP_SIZE: usize = 1;
 
 /// All-`F_2` ZincTypes-like trait. Mirrors [`ZincTypes`](crate::ZincTypes)
 /// but drops the `ArbitraryZt`/`IntZt` lanes (an all-`F_2` UAIR has
 /// neither) and the prime-modulus / challenge / projecting-element
 /// machinery (`F_2[X]` doesn't get reduced via a random prime; the
-/// projecting element is sampled directly in `GF(2^192)`).
+/// projecting element is sampled directly in `GF(2^128)`).
 pub trait F2ZincTypes<const DEGREE_PLUS_ONE: usize>: Clone + Debug {
     /// Zip+ types for the (paired) binary polynomial trace columns.
     /// Cells are `BinaryPoly<PACKED_STORAGE_WIDTH>`: the protocol
@@ -459,16 +459,16 @@ pub fn materialize_f2_virtual_bp_cols<const D: usize>(
 /// Derive virtual binary_poly column MLE evaluations at `r*` from
 /// the primary column evals at `r*` and the F_2-linear combo specs.
 /// Mirrors [`materialize_f2_virtual_bp_cols`]'s arithmetic at the
-/// MLE-evaluation level: F_2 addition (= GF(2^192) addition) of the
+/// MLE-evaluation level: F_2 addition (= GF(2^128) addition) of the
 /// referenced primary evals.
 pub fn derive_f2_virtual_evals_at(
-    primary_evals: &[BinaryFieldGF192],
+    primary_evals: &[BinaryFieldGF128],
     virtual_specs: &[F2VirtualBpSpec],
-) -> Vec<BinaryFieldGF192> {
+) -> Vec<BinaryFieldGF128> {
     virtual_specs
         .iter()
         .map(|spec| {
-            let mut acc = BinaryFieldGF192::zero();
+            let mut acc = BinaryFieldGF128::zero();
             for &col_idx in &spec.primary_col_indices {
                 acc += &primary_evals[col_idx];
             }
@@ -484,17 +484,17 @@ pub fn derive_f2_virtual_evals_at(
 /// degree-2 sumcheck's `comb_fn` reduces to `eq · weighted_col`
 /// (one multiplication per slot). Computed in parallel by row.
 fn build_gamma_weighted_col(
-    projected_trace: &[DenseMultilinearExtension<BinaryFieldGF192>],
-    gamma: &BinaryFieldGF192,
-) -> DenseMultilinearExtension<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> {
+    projected_trace: &[DenseMultilinearExtension<BinaryFieldGF128>],
+    gamma: &BinaryFieldGF128,
+) -> DenseMultilinearExtension<<BinaryFieldGF128 as crypto_primitives::Field>::Inner> {
     debug_assert!(!projected_trace.is_empty(), "expected ≥1 projected column");
     let num_vars = projected_trace[0].num_vars;
     let num_rows = projected_trace[0].evaluations.len();
-    let zero_inner = *BinaryFieldGF192::zero().inner();
+    let zero_inner = *BinaryFieldGF128::zero().inner();
 
     // Precompute γ^0, γ^1, …, γ^{G-1}.
-    let mut gamma_pows: Vec<BinaryFieldGF192> = Vec::with_capacity(projected_trace.len());
-    let mut acc = BinaryFieldGF192::one();
+    let mut gamma_pows: Vec<BinaryFieldGF128> = Vec::with_capacity(projected_trace.len());
+    let mut acc = BinaryFieldGF128::one();
     for _ in 0..projected_trace.len() {
         gamma_pows.push(acc);
         acc *= gamma;
@@ -505,7 +505,7 @@ fn build_gamma_weighted_col(
     let row_indices: Vec<usize> = (0..num_rows).collect();
     let evals: Vec<_> = cfg_iter!(row_indices)
         .map(|&i| {
-            let mut sum = BinaryFieldGF192::zero();
+            let mut sum = BinaryFieldGF128::zero();
             for (g, col) in projected_trace.iter().enumerate() {
                 let cell = col.evaluations[i];
                 sum += gamma_pows[g] * cell;
@@ -519,7 +519,7 @@ fn build_gamma_weighted_col(
 
 /// Round-1 fast path for the γ-batched `eq · weighted_col` group.
 ///
-/// Round-1 standard cost: ~5 GF(2^192) multiplications per slot
+/// Round-1 standard cost: ~5 GF(2^128) multiplications per slot
 /// (three `comb_fn` calls plus boundary extrapolation for two
 /// MLEs). This fast path reduces that to ~2 multiplications per
 /// slot by exploiting two structural facts:
@@ -540,12 +540,12 @@ fn build_gamma_weighted_col(
 ///    p₁(2) = eq(2, r₀) · ((1 + 2) · S_A + 2 · S_B)
 ///    ```
 ///
-///    where `2 = F::from(2)` in GF(2^192) (NOT zero — the
+///    where `2 = F::from(2)` in GF(2^128) (NOT zero — the
 ///    bit-pattern convention makes `F::from(2)` the field element
 ///    `X`, not the integer 2, which is `0` in characteristic 2).
 ///
 /// **Total fast-path cost** (per round-1 invocation): `2 · 2^{n-1}`
-/// GF(2^192) multiplications plus O(1) scalar arithmetic, versus
+/// GF(2^128) multiplications plus O(1) scalar arithmetic, versus
 /// `5 · 2^{n-1}` for the standard path — a ~60 % per-slot saving
 /// at round 1.
 ///
@@ -554,18 +554,18 @@ fn build_gamma_weighted_col(
 /// framework's rounds 2..n untouched. The framework's
 /// `skip_next_fold` flag then prevents a double-fold in round 2.
 pub struct F2EqColRound1FastPath {
-    pub eq_table: Vec<<BinaryFieldGF192 as Field>::Inner>,
-    pub weighted_col: Vec<<BinaryFieldGF192 as Field>::Inner>,
-    pub r_0: BinaryFieldGF192,
+    pub eq_table: Vec<<BinaryFieldGF128 as Field>::Inner>,
+    pub weighted_col: Vec<<BinaryFieldGF128 as Field>::Inner>,
+    pub r_0: BinaryFieldGF128,
     pub num_vars: usize,
 }
 
-impl Round1FastPath<BinaryFieldGF192> for F2EqColRound1FastPath {
+impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
     #[allow(clippy::arithmetic_side_effects)]
     fn round_1_message(
         &self,
-        config: &<BinaryFieldGF192 as PrimeField>::Config,
-    ) -> Round1Output<BinaryFieldGF192> {
+        config: &<BinaryFieldGF128 as PrimeField>::Config,
+    ) -> Round1Output<BinaryFieldGF128> {
         let half = 1usize << (self.num_vars - 1);
         debug_assert_eq!(self.eq_table.len(), 2 * half);
         debug_assert_eq!(self.weighted_col.len(), 2 * half);
@@ -579,39 +579,39 @@ impl Round1FastPath<BinaryFieldGF192> for F2EqColRound1FastPath {
         let row_indices: Vec<usize> = (0..half).collect();
         let (s_a, s_b) = cfg_iter!(row_indices)
             .map(|&b_prime| {
-                // Wrap into BinaryFieldGF192 so `+` is GF(2^192) XOR,
+                // Wrap into BinaryFieldGF128 so `+` is GF(2^128) XOR,
                 // not raw Uint integer-add (which would overflow).
-                let eq_lo = BinaryFieldGF192::new_unchecked_with_cfg(
+                let eq_lo = BinaryFieldGF128::new_unchecked_with_cfg(
                     self.eq_table[2 * b_prime].clone(),
                     config,
                 );
-                let eq_hi = BinaryFieldGF192::new_unchecked_with_cfg(
+                let eq_hi = BinaryFieldGF128::new_unchecked_with_cfg(
                     self.eq_table[2 * b_prime + 1].clone(),
                     config,
                 );
                 let e = eq_lo + eq_hi;
-                let a = BinaryFieldGF192::new_unchecked_with_cfg(
+                let a = BinaryFieldGF128::new_unchecked_with_cfg(
                     self.weighted_col[2 * b_prime].clone(),
                     config,
                 );
-                let b = BinaryFieldGF192::new_unchecked_with_cfg(
+                let b = BinaryFieldGF128::new_unchecked_with_cfg(
                     self.weighted_col[2 * b_prime + 1].clone(),
                     config,
                 );
                 (e * a, e * b)
             })
             .reduce(
-                || (BinaryFieldGF192::zero(), BinaryFieldGF192::zero()),
+                || (BinaryFieldGF128::zero(), BinaryFieldGF128::zero()),
                 |acc, x| (acc.0 + x.0, acc.1 + x.1),
             );
 
-        let one = BinaryFieldGF192::one();
+        let one = BinaryFieldGF128::one();
         // F::from(2) under the bit-pattern convention is the field
         // element "X" (the second power-of-X basis element) — NOT
         // zero. Critical: integer-2 in characteristic 2 is 0, but
         // F::from(2) is non-zero by convention so Lagrange-style
         // boundary points work.
-        let two = BinaryFieldGF192::from_with_cfg(2u64, config);
+        let two = BinaryFieldGF128::from_with_cfg(2u64, config);
         let r_0 = self.r_0.clone();
 
         let p1_at_0 = (one.clone() + r_0.clone()) * s_a.clone();
@@ -634,25 +634,25 @@ impl Round1FastPath<BinaryFieldGF192> for F2EqColRound1FastPath {
     #[allow(clippy::arithmetic_side_effects)]
     fn fold_with_r1(
         self: Box<Self>,
-        r_1: &BinaryFieldGF192,
-        config: &<BinaryFieldGF192 as PrimeField>::Config,
-    ) -> Vec<DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>> {
+        r_1: &BinaryFieldGF128,
+        config: &<BinaryFieldGF128 as PrimeField>::Config,
+    ) -> Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> {
         let half = 1usize << (self.num_vars - 1);
-        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let zero_inner = *BinaryFieldGF128::zero().inner();
 
         // MLE fold at variable 0: folded[b'] = (1 - r_1) · low[b'] + r_1 · high[b'].
         // In char-2, equivalently: folded[b'] = low + r_1 · (high + low).
-        let fold = |table: &[<BinaryFieldGF192 as Field>::Inner]|
-            -> Vec<<BinaryFieldGF192 as Field>::Inner>
+        let fold = |table: &[<BinaryFieldGF128 as Field>::Inner]|
+            -> Vec<<BinaryFieldGF128 as Field>::Inner>
         {
             let row_indices: Vec<usize> = (0..half).collect();
             cfg_iter!(row_indices)
                 .map(|&i| {
-                    let lo = BinaryFieldGF192::new_unchecked_with_cfg(
+                    let lo = BinaryFieldGF128::new_unchecked_with_cfg(
                         table[2 * i].clone(),
                         config,
                     );
-                    let hi = BinaryFieldGF192::new_unchecked_with_cfg(
+                    let hi = BinaryFieldGF128::new_unchecked_with_cfg(
                         table[2 * i + 1].clone(),
                         config,
                     );
@@ -697,17 +697,17 @@ where
     /// lanes must be empty (asserted by `project_f2_trace_row_major`).
     ///
     /// `project_scalar` lifts each UAIR scalar from
-    /// `U::Scalar` to `DynamicPolynomialF<BinaryFieldGF192>` (the
-    /// `GF(2^192)[X]` form the IC's combined-poly machinery
+    /// `U::Scalar` to `DynamicPolynomialF<BinaryFieldGF128>` (the
+    /// `GF(2^128)[X]` form the IC's combined-poly machinery
     /// expects). For an F_2-typed UAIR with `U::Scalar = BinaryPoly<D>`
-    /// the natural choice is per-coefficient `F_2 ⊂ GF(2^192)`
+    /// the natural choice is per-coefficient `F_2 ⊂ GF(2^128)`
     /// embedding; for UAIRs with no scalars (e.g. `assert_zero`-only)
     /// the closure is never invoked.
     pub fn prove_f2_uair(
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<(F2Proof, F2VerifierSubclaim), F2ProveError<U>> {
         // No virtual columns. Use [`Self::prove_f2_uair_with_groups`]
         // with explicit `virtual_specs` for UAIRs that declare virtual
@@ -733,7 +733,7 @@ where
     /// from the same transcript and lets the caller chain into
     /// [`Self::prove_f2_open`] without re-running the IC + sumcheck
     /// on a verifier shim), and the α-projected trace MLEs in
-    /// `BinaryFieldGF192::Inner` form. The projected trace is
+    /// `BinaryFieldGF128::Inner` form. The projected trace is
     /// surfaced so callers running the downstream multipoint-eval
     /// phase (e.g. [`Self::prove_f2_full_with_bit_ops`]) can reuse
     /// it instead of re-projecting; callers that don't need it can
@@ -748,12 +748,12 @@ where
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<
         (
             F2Proof,
             F2VerifierSubclaim,
-            Vec<DenseMultilinearExtension<<BinaryFieldGF192 as Field>::Inner>>,
+            Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>>,
         ),
         F2ProveError<U>,
     > {
@@ -787,10 +787,10 @@ where
             std::borrow::Cow::Owned(all_binary_poly_cols)
         };
 
-        // -- Step 2: Ideal check over GF(2^192)[X] -----------------
+        // -- Step 2: Ideal check over GF(2^128)[X] -----------------
         //
         // F_2-native path: skip the per-cell lift to
-        // `DynamicPolynomialF<GF(2^192)>` and evaluate constraint
+        // `DynamicPolynomialF<GF(2^128)>` and evaluate constraint
         // expressions row-by-row in 64-bit bit-poly arithmetic
         // (XORs and carryless shifts of `u64`s). The combined
         // polynomial's per-coefficient MLE-evaluation at the IC
@@ -804,8 +804,8 @@ where
         // same scalar: bit `i` set iff the scalar's i-th coefficient
         // is non-zero — for SHA-F_2 where scalars have F_2-coefficient
         // (0/1) values, this matches the `project_scalar` output
-        // exactly (coefficient 0 ↔ GF(2^192) zero ↔ bit 0;
-        // coefficient 1 ↔ GF(2^192) one ↔ bit 1).
+        // exactly (coefficient 0 ↔ GF(2^128) zero ↔ bit 0;
+        // coefficient 1 ↔ GF(2^128) one ↔ bit 1).
         let project_scalar_to_bits =
             |s: &U::Scalar| -> u64 {
                 let projected = project_scalar(s);
@@ -814,7 +814,7 @@ where
                     if i >= 64 {
                         break;
                     }
-                    if !<BinaryFieldGF192 as crypto_primitives::PrimeField>::is_zero(c) {
+                    if !<BinaryFieldGF128 as crypto_primitives::PrimeField>::is_zero(c) {
                         #[allow(clippy::arithmetic_side_effects)]
                         {
                             bits |= 1u64 << i;
@@ -833,19 +833,19 @@ where
         // TinyF2Uair test fixtures may not be, hence the gate.
         let effective_degree = zinc_uair::degree_counter::count_effective_max_degree::<U>();
         let (ic_proof, ic_state) = if effective_degree <= 1 {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF192, _, D>(
+            crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
                 transcript,
                 &extended_binary_poly,
                 num_constraints,
                 num_vars,
                 &field_cfg,
-                |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF192> {
+                |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF128> {
                     let _ = cfg;
                     project_scalar(s)
                 },
             )
         } else {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
+            crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
                 transcript,
                 &extended_binary_poly,
                 num_constraints,
@@ -856,46 +856,103 @@ where
         };
 
         // -- Step 3: Evaluation projection (X = α) -----------------
-        let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
         // Precompute α^0, α^1, ..., α^{D-1} once outside the per-cell
         // loop. With ~21K cells per SHA F_2 trace (41 cols × 512 rows),
-        // this drops the per-cell cost from D=32 GF(2^192)
+        // this drops the per-cell cost from D=32 GF(2^128)
         // multiplications to just bit-selected XOR-adds — saving ~670K
         // field multiplications across the whole projection.
-        let alpha_pows: Vec<BinaryFieldGF192> =
-            zinc_poly::univariate::binary_gf192::alpha_powers(&alpha, D);
-        // Keeps the branchy `if bit { acc += pow }` form: SHA-256
-        // trace bits are predictable enough that the branch predictor
-        // handles the per-bit conditional well. The branchless variant
-        // `eval_f2_poly_d_at_with_powers_branchless` wins by ~10× on
-        // *random* inputs (see `binary_gf_compare::project_col_65536`)
-        // but regressed ~8 ms on the actual prover, presumably because
-        // it pays the extra ANDs unconditionally and the input bit
-        // pattern isn't adversarial enough to recoup the cost. Revisit
-        // if we benchmark on a UAIR whose cells are closer to uniform.
-        let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> =
-            cfg_iter!(&*extended_binary_poly)
-                .map(|col| {
-                    let evals_at_alpha: Vec<BinaryFieldGF192> = col
-                        .evaluations
-                        .iter()
-                        .map(|cell| {
-                            zinc_poly::univariate::binary_gf192
-                                ::eval_f2_poly_d_at_with_powers::<D>(cell, &alpha_pows)
-                        })
-                        .collect();
-                    DenseMultilinearExtension::from_evaluations_vec(
-                        col.num_vars,
-                        evals_at_alpha,
-                        BinaryFieldGF192::zero(),
-                    )
-                })
-                .collect();
+        let alpha_pows: Vec<BinaryFieldGF128> =
+            zinc_poly::univariate::binary_gf128::alpha_powers(&alpha, D);
+        // SIMD-batched 4-cell projection via `project_column_with_powers`:
+        // chunks the column into groups of 4, dispatches each group
+        // through `eval_f2_poly_d_at_with_powers_simd_x4` (NEON 4-way
+        // XOR on aarch64, scalar branchless fallback elsewhere), and
+        // handles the residual `len % 4` cells through the scalar
+        // branchy kernel. The 4-cell batch amortises the α-load and
+        // (on NEON) replaces 2 scalar XORs per accumulator update
+        // with one `veorq_u64`.
+        //
+        // A/B history on `Micro/UAIR-b-AlphaProject/nvars=22`
+        // (Apple M-series, 8 cores, --features parallel,simd,unchecked):
+        //   - branchy (per-cell `eval_f2_poly_d_at_with_powers`):
+        //     1.0656 s  (baseline)
+        //   - dense SIMD-x4 (this):
+        //     1.0588 s  (-0.6% vs branchy; p<0.05, statistically
+        //                significant but practically marginal — real
+        //                SHA-256 cells have low popcount, leaving
+        //                little room for dense-D=32 to improve)
+        //   - sparse SIMD-x4 (union-bit skip):
+        //     1.1048 s  (+3.7% vs branchy; the union of 4 real-trace
+        //                cells saturates near D, so the per-iter loop
+        //                control overhead outweighs the iter savings)
+        // On `binary_gf_compare::project_col_65536/GF128_*` (random
+        // 65536-cell column), dense SIMD-x4 is **2.07×** faster than
+        // branchy — future UAIRs with denser bit patterns can lean on
+        // this kernel directly. See ledger entry "SIMD-batched
+        // α-projection" in `documentation/f2x-sha-todo.md`.
+        // GPU fast-path for the α-projection. At nvars=22 the CPU
+        // implementation was ~1.07 s (the dominant single phase of
+        // UAIR, ~97% of UAIR-FULL). The GPU kernel
+        // (`zip_plus::metal_gpu::project_columns_with_powers_gpu_batched`)
+        // dispatches the inner per-cell masked-XOR loop to Metal as a
+        // single command buffer containing one compute encoder per
+        // column, with a single `wait_until_completed` at the end.
+        // Falls back to the CPU path when the `metal_gpu` feature is
+        // off (Linux CI, etc.).
+        //
+        // History: the first GPU patch issued one command-buffer
+        // per column with its own wait, leaving ~400 ms of residual
+        // per-launch overhead on top of the ~milliseconds of actual
+        // kernel time. The batched-dispatch variant collapses those
+        // 50 round-trips into one.
+        let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = {
+            #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+            {
+                let column_inputs: Vec<&[BinaryPoly<D>]> = extended_binary_poly
+                    .iter()
+                    .map(|col| col.evaluations.as_slice())
+                    .collect();
+                let outputs =
+                    zip_plus::metal_gpu::project_columns_with_powers_gpu_batched::<D>(
+                        &column_inputs,
+                        &alpha_pows,
+                    );
+                extended_binary_poly
+                    .iter()
+                    .zip(outputs)
+                    .map(|(col, evals_at_alpha)| {
+                        DenseMultilinearExtension::from_evaluations_vec(
+                            col.num_vars,
+                            evals_at_alpha,
+                            BinaryFieldGF128::zero(),
+                        )
+                    })
+                    .collect()
+            }
+            #[cfg(not(all(feature = "metal_gpu", target_os = "macos")))]
+            {
+                cfg_iter!(&*extended_binary_poly)
+                    .map(|col| {
+                        let evals_at_alpha =
+                            zinc_poly::univariate::binary_gf128::project_column_with_powers::<D>(
+                                &col.evaluations,
+                                &alpha_pows,
+                            );
+                        DenseMultilinearExtension::from_evaluations_vec(
+                            col.num_vars,
+                            evals_at_alpha,
+                            BinaryFieldGF128::zero(),
+                        )
+                    })
+                    .collect()
+            }
+        };
 
         // -- Step 4a: γ-batching challenge ------------------------
         //
-        // Sample γ ∈ GF(2^192) AFTER the IC + α absorbs so it can
+        // Sample γ ∈ GF(2^128) AFTER the IC + α absorbs so it can
         // depend on the trace and the projection point but not on
         // the sumcheck transcript. Build the single batched MLE
         // `weighted_col(y) = Σ_g γ^g · col_g(y)` over the full
@@ -908,7 +965,7 @@ where
         // weighted_col is `num_total · 2^num_vars` field mults,
         // dominated by the per-round savings as soon as num_total
         // exceeds a small constant.
-        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
         let eq_r =
             zinc_poly::utils::build_eq_x_r_inner(&ic_state.evaluation_point, &field_cfg)
@@ -922,7 +979,7 @@ where
         // the post-round-1 folded MLEs so the framework can skip
         // the round-2 entry fold.
         // Move the eq table and γ-weighted col into the fast path
-        // — both are large `Vec<<BinaryFieldGF192 as Field>::Inner>`s
+        // — both are large `Vec<<BinaryFieldGF128 as Field>::Inner>`s
         // (~96 MB each at nvars=22) and the local bindings aren't
         // used after this point, so cloning is pure waste. Saves
         // ~75 ms at SHA-256 F_2 nvars=22.
@@ -937,12 +994,12 @@ where
             // `poly` is empty — fold_with_r1 supplies the round-2
             // MLEs and the framework sets `skip_next_fold`.
             Vec::new(),
-            Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+            Box::new(|v: &[BinaryFieldGF128]| v[0] * v[1]),
             fast_path,
         );
 
         let (sumcheck_proof, prover_states) =
-            MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
+            MultiDegreeSumcheck::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
                 vec![group],
                 num_vars,
@@ -952,34 +1009,34 @@ where
         // -- Derive the prover-side subclaim --------------------
         let sumcheck_point = prover_states[0].randomness.clone();
         // Per-column (primary + virtual) MLE evals at r*. Independent
-        // across columns and each eval is O(2^num_vars) GF(2^192)
+        // across columns and each eval is O(2^num_vars) GF(2^128)
         // ops, so this is one of the heavier outer loops — fan out
         // across rayon workers.
         //
         // Note: `projected_trace` is **preserved** here (we now return
         // it so the caller can run the multipoint-eval phase without
         // re-α-projecting). For each col we clone its
-        // `Vec<BinaryFieldGF192>` once into a workspace (paying one
+        // `Vec<BinaryFieldGF128>` once into a workspace (paying one
         // copy ~`24 B × 2^num_vars` per col) and then ManuallyDrop the
-        // clone — `BinaryFieldGF192` is `#[repr(transparent)]` around
-        // `<BinaryFieldGF192 as Field>::Inner` (`Uint<3>`), so the
+        // clone — `BinaryFieldGF128` is `#[repr(transparent)]` around
+        // `<BinaryFieldGF128 as Field>::Inner` (`Uint<2>`), so the
         // bytes are layout-identical and we can rebuild the `Vec` at
         // the inner type. The clone is the cost of preserving
         // `projected_trace`; saves ~one α-projection (`~D × 2^num_vars`
         // F-adds per col) in `prove_f2_full_with_bit_ops`'s
         // multipoint-eval phase.
-        let zero_inner = *BinaryFieldGF192::zero().inner();
-        let all_col_evals: Vec<BinaryFieldGF192> = cfg_iter!(&projected_trace)
+        let zero_inner = *BinaryFieldGF128::zero().inner();
+        let all_col_evals: Vec<BinaryFieldGF128> = cfg_iter!(&projected_trace)
             .map(|col| {
                 let num_vars = col.num_vars;
-                // Per-col clone of the Vec<BinaryFieldGF192> evaluations.
+                // Per-col clone of the Vec<BinaryFieldGF128> evaluations.
                 // The clone is moved into `inner_mle` and then consumed
                 // by `evaluate_with_config`; `projected_trace` itself
                 // is untouched.
-                let cloned_evals: Vec<BinaryFieldGF192> = col.evaluations.clone();
-                let inner_evals: Vec<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> = {
-                    // SAFETY: BinaryFieldGF192 is #[repr(transparent)]
-                    // around <BinaryFieldGF192 as Field>::Inner (Uint<3>),
+                let cloned_evals: Vec<BinaryFieldGF128> = col.evaluations.clone();
+                let inner_evals: Vec<<BinaryFieldGF128 as crypto_primitives::Field>::Inner> = {
+                    // SAFETY: BinaryFieldGF128 is #[repr(transparent)]
+                    // around <BinaryFieldGF128 as Field>::Inner (Uint<2>),
                     // so the Vec's storage layout is identical. We move
                     // the cloned Vec out (ManuallyDrop) and rebuild
                     // it under the inner element type.
@@ -987,7 +1044,7 @@ where
                     let (ptr, len, cap) = (me.as_mut_ptr(), me.len(), me.capacity());
                     unsafe {
                         Vec::from_raw_parts(
-                            ptr.cast::<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>(),
+                            ptr.cast::<<BinaryFieldGF128 as crypto_primitives::Field>::Inner>(),
                             len,
                             cap,
                         )
@@ -999,7 +1056,7 @@ where
                     zero_inner,
                 );
                 <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                    BinaryFieldGF192,
+                    BinaryFieldGF128,
                 >>::evaluate_with_config(
                     inner_mle, &sumcheck_point, &field_cfg
                 )
@@ -1010,7 +1067,7 @@ where
         // Absorb the per-column evals so any downstream PCS-open
         // challenges depend on them — guards against a malicious
         // prover swapping the per-column values after sumcheck.
-        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+        let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
             as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
         for v in &all_col_evals {
             transcript.absorb_random_field(v, &mut buf);
@@ -1028,29 +1085,29 @@ where
             virtual_column_evals: virtual_evals.to_vec(),
         };
 
-        // Convert `projected_trace` from `DenseMLE<BinaryFieldGF192>`
-        // to `DenseMLE<<BinaryFieldGF192 as Field>::Inner>` so callers
+        // Convert `projected_trace` from `DenseMLE<BinaryFieldGF128>`
+        // to `DenseMLE<<BinaryFieldGF128 as Field>::Inner>` so callers
         // can feed it straight into `MultipointEval::prove_as_subprotocol`
         // (which is generic over `F: InnerTransparentField` and expects
         // `&[DenseMLE<F::Inner>]`). Per col we transmute the `Vec`
         // via the same `ManuallyDrop` trick used for the
-        // column_evals_at_rstar pass above — `BinaryFieldGF192` is
-        // `#[repr(transparent)]` around `Uint<3>` so the bytes are
+        // column_evals_at_rstar pass above — `BinaryFieldGF128` is
+        // `#[repr(transparent)]` around `Uint<2>` so the bytes are
         // identical and this is zero-copy.
         let projected_trace_inner: Vec<
-            DenseMultilinearExtension<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>,
+            DenseMultilinearExtension<<BinaryFieldGF128 as crypto_primitives::Field>::Inner>,
         > = projected_trace
             .into_iter()
             .map(|col| {
                 let num_vars = col.num_vars;
-                let inner_evals: Vec<<BinaryFieldGF192 as crypto_primitives::Field>::Inner> = {
+                let inner_evals: Vec<<BinaryFieldGF128 as crypto_primitives::Field>::Inner> = {
                     let mut me = core::mem::ManuallyDrop::new(col.evaluations);
                     let (ptr, len, cap) = (me.as_mut_ptr(), me.len(), me.capacity());
-                    // SAFETY: BinaryFieldGF192 is #[repr(transparent)]
-                    // around Uint<3>; the storage layout is identical.
+                    // SAFETY: BinaryFieldGF128 is #[repr(transparent)]
+                    // around Uint<2>; the storage layout is identical.
                     unsafe {
                         Vec::from_raw_parts(
-                            ptr.cast::<<BinaryFieldGF192 as crypto_primitives::Field>::Inner>(),
+                            ptr.cast::<<BinaryFieldGF128 as crypto_primitives::Field>::Inner>(),
                             len,
                             cap,
                         )
@@ -1101,7 +1158,7 @@ where
     ) -> Result<F2VerifierSubclaim, F2VerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         Self::verify_f2_uair_with_groups(
             transcript,
@@ -1133,13 +1190,13 @@ where
     ) -> Result<F2VerifierSubclaim, F2VerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
         let num_total = num_primary_columns + virtual_specs.len();
 
-        let ic_subclaim: IcVerifierSubclaim<BinaryFieldGF192> =
+        let ic_subclaim: IcVerifierSubclaim<BinaryFieldGF128> =
             <U as IdealCheckProtocol>::verify_as_subprotocol::<_, IdealOverF, _>(
                 transcript,
                 proof.ic_proof.clone(),
@@ -1151,7 +1208,7 @@ where
             .map_err(F2VerifyError::IdealCheck)?;
         let ic_evaluation_point = ic_subclaim.evaluation_point;
 
-        let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
         if alpha != proof.alpha {
             return Err(F2VerifyError::AlphaMismatch {
                 transcript: alpha,
@@ -1165,9 +1222,9 @@ where
         // round polys), then closes the chain by computing
         // `Σ_g γ^g · column_evals_at_rstar[g]` and checking
         // `eq(r*, r_IC) · that_sum == sumcheck_expected_eval`.
-        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
-        let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
+        let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF128>::verify_as_subprotocol(
             transcript,
             num_vars,
             &proof.sumcheck_proof,
@@ -1194,7 +1251,7 @@ where
         // Check the γ-batched sumcheck output against the
         // prover-supplied per-column evals.
         // expected_eval == eq(r*, r_IC) · Σ_g γ^g · col_g(r*)
-        let one = BinaryFieldGF192::one();
+        let one = BinaryFieldGF128::one();
         let eq_at_rstar_r = zinc_poly::utils::eq_eval(
             &sumcheck_point,
             &ic_evaluation_point,
@@ -1205,7 +1262,7 @@ where
             return Err(F2VerifyError::DegenerateEq);
         }
         // Horner-fold: Σ_g γ^g · col_g(r*) = col_0(r*) + γ·(col_1(r*) + γ·(...))
-        let mut batched = BinaryFieldGF192::zero();
+        let mut batched = BinaryFieldGF128::zero();
         for v in proof.column_evals_at_rstar.iter().rev() {
             batched = batched * gamma + *v;
         }
@@ -1219,7 +1276,7 @@ where
 
         // Absorb per-column evals into the transcript (mirror of
         // prover) so subsequent PCS-open challenges depend on them.
-        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+        let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
             as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
         for v in &proof.column_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
@@ -1499,11 +1556,11 @@ where
 // supporting the evaluation-consistency check. The verifier:
 //
 //   1. Re-derives `(q_0, q_1)` from the sumcheck's final point `r*`,
-//      computing the eq-tensor in `GF(2^192)` and lifting each entry
-//      to `BinaryF2Poly<3>` (the canonical degree-<192 representative).
+//      computing the eq-tensor in `GF(2^128)` and lifting each entry
+//      to `BinaryF2Poly<2>` (the canonical degree-<192 representative).
 //   2. Checks `Σ_i q_0[i] · b_g[i] = a_g'` in `F_2[X]` (evaluation
 //      consistency).
-//   3. Checks `ψ_α(a_g') = a_g` in `GF(2^192)` (the lift discharge).
+//   3. Checks `ψ_α(a_g') = a_g` in `GF(2^128)` (the lift discharge).
 //
 // **Proximity not yet bound.** This slice provides the lift +
 // evaluation-consistency portion. The proximity check — that `b_g`
@@ -1518,7 +1575,7 @@ where
 ///
 /// **Single-open semantics.** Instead of sending per-column
 /// `(a_g', b_g, combined_row_g)` triples, the prover draws a
-/// transcript-fresh GF(2^192) challenge `γ_g` for each committed
+/// transcript-fresh GF(2^128) challenge `γ_g` for each committed
 /// primary column and folds the per-column data into a **single**
 /// `(a', b', combined_row')` bundle:
 ///
@@ -1537,9 +1594,9 @@ where
 /// against per-column tampering follows from Schwartz-Zippel over
 /// the random γ_g.
 ///
-/// Widths: `a' ∈ BinaryF2Poly<10>` (≥ D + 2·192 - 1 + 192 - 1 =
+/// Widths: `a' ∈ BinaryF2Poly<7>` (≥ D + 2·192 - 1 + 192 - 1 =
 /// 606 bits for D=32); `b'` and `combined_row'` entries in
-/// `BinaryF2Poly<7>` (≥ D + 2·192 - 1 = 414 bits).
+/// `BinaryF2Poly<5>` (≥ D + 2·192 - 1 = 414 bits).
 //
 // TODO: when `feature(generic_const_exprs)` stabilises, parameterise
 // these widths over `D` and `μ_eq` so the BinaryF2Poly<W> sizes
@@ -1549,11 +1606,11 @@ where
 #[derive(Clone, Debug)]
 pub struct F2OpenProof<const D: usize> {
     /// `a' = Σ_g γ_g · a_g' ∈ F_2[X]`.
-    pub lifted_claim: BinaryF2Poly<10>,
+    pub lifted_claim: BinaryF2Poly<7>,
     /// `b'[i] = Σ_g γ_g · b_g[i]`. `num_rows` entries.
-    pub b_vector: Vec<BinaryF2Poly<7>>,
+    pub b_vector: Vec<BinaryF2Poly<5>>,
     /// `combined_row'[j] = Σ_g γ_g · combined_row_g[j]`. `row_len` entries.
-    pub combined_row: Vec<BinaryF2Poly<7>>,
+    pub combined_row: Vec<BinaryF2Poly<5>>,
     /// One entry per opened codeword column. Each entry holds the
     /// column's `batch_size · num_rows` codeword cells (concatenated
     /// per-poly in commit order) plus a Merkle proof.
@@ -1748,8 +1805,8 @@ pub enum F2OpenError {
         "lift discharge failed: ψ_α(a') ({computed:?}) ≠ Σ_g γ_g · a_g ({expected:?})"
     )]
     LiftDischarge {
-        computed: BinaryFieldGF192,
-        expected: BinaryFieldGF192,
+        computed: BinaryFieldGF128,
+        expected: BinaryFieldGF128,
     },
     #[error("F2OpenProof.b_vector has length {got}, expected {expected}")]
     BvecLenMismatch { expected: usize, got: usize },
@@ -1820,8 +1877,8 @@ pub fn sample_column_idx(transcript: &mut impl Transcript, codeword_len: usize) 
     idx
 }
 
-/// Build `(q_0, q_1)` over `GF(2^192)` then lift each entry to
-/// `BinaryF2Poly<3>` *via the α-dependent inverse lift*. Mirrors
+/// Build `(q_0, q_1)` over `GF(2^128)` then lift each entry to
+/// `BinaryF2Poly<2>` *via the α-dependent inverse lift*. Mirrors
 /// `zip-plus`'s `point_to_tensor` split convention: `q_0` has length
 /// `num_rows` (built from the last `log2(num_rows)` entries of
 /// `point`); `q_1` has length `row_len = 2^{point.len() -
@@ -1840,22 +1897,22 @@ pub fn sample_column_idx(transcript: &mut impl Transcript, codeword_len: usize) 
 /// representative satisfies that *only* when α is the field's
 /// quotient generator `X` (mod P); for a transcript-fresh α the
 /// inverse lift solves `Σ_j c_j · α^j = q_i[k]` for the unique
-/// coefficient vector `c ∈ F_2^{192}` and returns
+/// coefficient vector `c ∈ F_2^{128}` and returns
 /// `q_i'[k] = Σ_j c_j X^j`. See `AlphaPolyBasis` in
-/// [`binary_gf192`](zinc_poly::univariate::binary_gf192) for the
+/// [`binary_gf128`](zinc_poly::univariate::binary_gf128) for the
 /// linear-algebra detail.
 ///
 /// `basis` is the precomputed lift table (one per α, shared across
-/// all `q_i[k]` entries to amortise the 192×192 F_2 matrix inverse).
+/// all `q_i[k]` entries to amortise the 128×128 F_2 matrix inverse).
 ///
 /// Public so per-region benches can time `q0`/`q1` construction in
 /// isolation; not part of the verified protocol surface.
 #[allow(clippy::type_complexity)]
 pub fn build_lifted_eq_tensor(
     num_rows: usize,
-    point: &[BinaryFieldGF192],
-    basis: &zinc_poly::univariate::binary_gf192::AlphaPolyBasis,
-) -> (Vec<BinaryF2Poly<3>>, Vec<BinaryF2Poly<3>>) {
+    point: &[BinaryFieldGF128],
+    basis: &zinc_poly::univariate::binary_gf128::AlphaPolyBasis,
+) -> (Vec<BinaryF2Poly<2>>, Vec<BinaryF2Poly<2>>) {
     assert!(num_rows.is_power_of_two());
     let split = point.len() - (num_rows.ilog2() as usize);
     let (hi, lo) = point.split_at(split);
@@ -1864,21 +1921,21 @@ pub fn build_lifted_eq_tensor(
         zinc_poly::utils::build_eq_x_r_vec(lo, &field_cfg)
             .expect("build_eq_x_r_vec on lo")
     } else {
-        vec![BinaryFieldGF192::one()]
+        vec![BinaryFieldGF128::one()]
     };
     let q1_gf = if !hi.is_empty() {
         zinc_poly::utils::build_eq_x_r_vec(hi, &field_cfg)
             .expect("build_eq_x_r_vec on hi")
     } else {
-        vec![BinaryFieldGF192::one()]
+        vec![BinaryFieldGF128::one()]
     };
     // q0 is small (≤ num_rows entries; typically 8 for SHA F_2): keep
     // sequential. q1 is large (≤ 2^{num_vars - log2(num_rows)} entries;
-    // ~524 K at nvars=22) and `basis.lift` is a 192×192 F_2
+    // ~524 K at nvars=22) and `basis.lift` is a 128×128 F_2
     // matrix-vec multiply per call (~600 ops); parallelise it so this
     // step doesn't single-thread the rest of Open.
-    let q0: Vec<BinaryF2Poly<3>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
-    let q1: Vec<BinaryF2Poly<3>> = cfg_iter!(q1_gf).map(|g| basis.lift(g)).collect();
+    let q0: Vec<BinaryF2Poly<2>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
+    let q1: Vec<BinaryF2Poly<2>> = cfg_iter!(q1_gf).map(|g| basis.lift(g)).collect();
     (q0, q1)
 }
 
@@ -1892,7 +1949,7 @@ where
     /// Reduces the per-column MLE evaluation claims emitted by the
     /// sumcheck to a single F_2[X] opening: the prover folds each
     /// per-column `(a_g', b_g, combined_row_g)` triple by random
-    /// challenges `γ_g ∈ GF(2^192)` into the bundled
+    /// challenges `γ_g ∈ GF(2^128)` into the bundled
     /// `(a', b', combined_row')` carried in [`F2OpenProof`]. The
     /// verifier discharges every column's claim via a single
     /// `ψ_α(a') = Σ_g γ_g · a_g` check; soundness over per-column
@@ -1909,8 +1966,8 @@ where
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         commit_hint: &ZipPlusHint<BinaryPoly<PACKED_STORAGE_WIDTH>>,
         trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
-        sumcheck_point: &[BinaryFieldGF192],
-        alpha: &BinaryFieldGF192,
+        sumcheck_point: &[BinaryFieldGF128],
+        alpha: &BinaryFieldGF128,
         num_column_openings: usize,
     ) -> F2OpenProof<D> {
         let num_rows = pp.num_rows;
@@ -1919,7 +1976,7 @@ where
         let num_cols = trace_binary_cols.len();
         assert!(num_rows.is_power_of_two());
 
-        let basis = zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(alpha);
+        let basis = zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(alpha);
         let (q0, q1) = build_lifted_eq_tensor(num_rows, sumcheck_point, &basis);
         debug_assert_eq!(q1.len(), row_len);
         debug_assert_eq!(q0.len(), num_rows);
@@ -1928,18 +1985,18 @@ where
         // Drawn early so a', b', combined_row' depend on γ. (γ is
         // the only cross-column entropy in the open; coeffs comes
         // later for proximity.)
-        let gamma_gf: Vec<BinaryFieldGF192> =
+        let gamma_gf: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_cols, &());
-        let gamma: Vec<BinaryF2Poly<3>> =
+        let gamma: Vec<BinaryF2Poly<2>> =
             gamma_gf.iter().map(|g| basis.lift(g)).collect();
 
         // -- Step 7.2: per-column intermediates, folded into b'/a'.
         //
         // For each committed column g:
-        //   b_g[i] := Σ_j q_1'[j] · M_w_g[i, j]      (BinaryF2Poly<4>)
-        //   a_g'   := Σ_i q_0'[i] · b_g[i]           (BinaryF2Poly<7>)
-        //   b'[i] += γ_g · b_g[i]                    (BinaryF2Poly<7>)
-        //   a'    += γ_g · a_g'                      (BinaryF2Poly<10>)
+        //   b_g[i] := Σ_j q_1'[j] · M_w_g[i, j]      (BinaryF2Poly<3>)
+        //   a_g'   := Σ_i q_0'[i] · b_g[i]           (BinaryF2Poly<5>)
+        //   b'[i] += γ_g · b_g[i]                    (BinaryF2Poly<5>)
+        //   a'    += γ_g · a_g'                      (BinaryF2Poly<7>)
         //
         // Parallel structure: each (column, row) pair contributes
         // independently to `b'` and (via `a_g'`) to `a'`. We
@@ -1947,7 +2004,7 @@ where
         // partial `(b_g, a_g_scaled)` results, then merge serially.
         // The per-row work within a column stays sequential (row_len
         // is small in the deployed shape).
-        let per_col_results: Vec<(Vec<BinaryF2Poly<7>>, BinaryF2Poly<10>)> =
+        let per_col_results: Vec<(Vec<BinaryF2Poly<5>>, BinaryF2Poly<7>)> =
             cfg_iter!(trace_binary_cols)
                 .enumerate()
                 .map(|(g, col)| {
@@ -1957,38 +2014,38 @@ where
                         "trace column evaluation count must equal num_rows × row_len"
                     );
 
-                    let mut b_g_scaled: Vec<BinaryF2Poly<7>> =
+                    let mut b_g_scaled: Vec<BinaryF2Poly<5>> =
                         Vec::with_capacity(num_rows);
-                    let mut b_g: Vec<BinaryF2Poly<4>> = Vec::with_capacity(num_rows);
+                    let mut b_g: Vec<BinaryF2Poly<3>> = Vec::with_capacity(num_rows);
                     for i in 0..num_rows {
                         let row_slice =
                             &col.evaluations[i * row_len..(i + 1) * row_len];
                         let row_lifted: Vec<BinaryF2Poly<1>> = row_slice
                             .iter()
                             .map(
-                                zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>,
+                                zinc_poly::univariate::binary_gf128::lift_bp_to_f2_poly_1::<D>,
                             )
                             .collect();
-                        let entry: BinaryF2Poly<4> =
-                            zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 3, 4>(
+                        let entry: BinaryF2Poly<3> =
+                            zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 2, 3>(
                                 &row_lifted, &q1,
                             );
                         // γ_g · b_g[i], to be merged into b'[i].
-                        let scaled: BinaryF2Poly<7> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
+                        let scaled: BinaryF2Poly<5> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 3, 5>(
                                 &gamma[g], &entry,
                             );
                         b_g_scaled.push(scaled);
                         b_g.push(entry);
                     }
 
-                    let a_g_prime: BinaryF2Poly<7> =
-                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
+                    let a_g_prime: BinaryF2Poly<5> =
+                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<2, 3, 5>(
                             &q0, &b_g,
                         );
                     // γ_g · a_g', to be merged into a'.
-                    let a_scaled: BinaryF2Poly<10> =
-                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                    let a_scaled: BinaryF2Poly<7> =
+                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
                             &gamma[g], &a_g_prime,
                         );
                     (b_g_scaled, a_scaled)
@@ -1996,9 +2053,9 @@ where
                 .collect();
 
         // Serial merge: ~`num_cols` u64 XORs per row. Cheap.
-        let mut b_prime: Vec<BinaryF2Poly<7>> =
-            vec![BinaryF2Poly::<7>::zero(); num_rows];
-        let mut a_prime: BinaryF2Poly<10> = BinaryF2Poly::<10>::zero();
+        let mut b_prime: Vec<BinaryF2Poly<5>> =
+            vec![BinaryF2Poly::<5>::zero(); num_rows];
+        let mut a_prime: BinaryF2Poly<7> = BinaryF2Poly::<7>::zero();
         for (b_g_scaled, a_scaled) in per_col_results {
             for i in 0..num_rows {
                 b_prime[i] += b_g_scaled[i].clone();
@@ -2008,13 +2065,13 @@ where
 
         // Absorb (b', a') into the transcript so subsequent challenges
         // depend on them.
-        absorb_f2_poly_slice::<7, _>(transcript, b_prime.iter());
-        absorb_f2_poly_slice::<10, _>(transcript, core::iter::once(&a_prime));
+        absorb_f2_poly_slice::<5, _>(transcript, b_prime.iter());
+        absorb_f2_poly_slice::<7, _>(transcript, core::iter::once(&a_prime));
 
         // -- Step 7.3: proximity coefficients ----------------------
-        let coeffs_gf: Vec<BinaryFieldGF192> =
+        let coeffs_gf: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_rows, &());
-        let coeffs: Vec<BinaryF2Poly<3>> =
+        let coeffs: Vec<BinaryF2Poly<2>> =
             coeffs_gf.iter().map(|g| basis.lift(g)).collect();
 
         // -- Step 7.4: combined_row' = Σ_g γ_g · (Σ_i coeffs[i] · M_w_g[i, *])
@@ -2022,7 +2079,7 @@ where
         // Parallelise across the outer (g) loop: each column produces
         // an independent length-`row_len` contribution to
         // `combined_row`. Merge serially.
-        let per_col_combined: Vec<Vec<BinaryF2Poly<7>>> = cfg_iter!(trace_binary_cols)
+        let per_col_combined: Vec<Vec<BinaryF2Poly<5>>> = cfg_iter!(trace_binary_cols)
             .enumerate()
             .map(|(g, col)| {
                 // Loop-reorder: outer over `i` (rows), inner over `j`
@@ -2041,19 +2098,19 @@ where
                 // then a final pass multiplies each by `γ_g` (W=7).
                 // Same total work, dramatically better cache + register
                 // behaviour at large `nvars`.
-                let mut col_partial: Vec<BinaryF2Poly<4>> =
-                    vec![BinaryF2Poly::<4>::zero(); row_len];
+                let mut col_partial: Vec<BinaryF2Poly<3>> =
+                    vec![BinaryF2Poly::<3>::zero(); row_len];
                 for i in 0..num_rows {
                     let row_slice =
                         &col.evaluations[i * row_len..(i + 1) * row_len];
                     let coeff_i = &coeffs[i];
                     for j in 0..row_len {
                         let cell =
-                            zinc_poly::univariate::binary_gf192::lift_bp_to_f2_poly_1::<D>(
+                            zinc_poly::univariate::binary_gf128::lift_bp_to_f2_poly_1::<D>(
                                 &row_slice[j],
                             );
-                        let prod: BinaryF2Poly<4> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                        let prod: BinaryF2Poly<3> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
                                 &cell, coeff_i,
                             );
                         col_partial[j] += prod;
@@ -2065,23 +2122,23 @@ where
                 col_partial
                     .into_iter()
                     .map(|entry| {
-                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 4, 7>(
+                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 3, 5>(
                             &gamma[g], &entry,
                         )
                     })
-                    .collect::<Vec<BinaryF2Poly<7>>>()
+                    .collect::<Vec<BinaryF2Poly<5>>>()
             })
             .collect();
 
-        let mut combined_row: Vec<BinaryF2Poly<7>> =
-            vec![BinaryF2Poly::<7>::zero(); row_len];
+        let mut combined_row: Vec<BinaryF2Poly<5>> =
+            vec![BinaryF2Poly::<5>::zero(); row_len];
         for col_contrib in per_col_combined {
             for j in 0..row_len {
                 combined_row[j] += col_contrib[j].clone();
             }
         }
 
-        absorb_f2_poly_slice::<7, _>(transcript, combined_row.iter());
+        absorb_f2_poly_slice::<5, _>(transcript, combined_row.iter());
 
         // -- Step 7.5: sample column indices + Merkle opens --------
         //
@@ -2238,27 +2295,27 @@ where
 
         // -- Re-derive γ_g ----------------------------------------
         let basis =
-            zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(&subclaim.alpha);
+            zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(&subclaim.alpha);
         let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
-        let gamma_gf: Vec<BinaryFieldGF192> =
+        let gamma_gf: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_cols, &());
-        let gamma: Vec<BinaryF2Poly<3>> =
+        let gamma: Vec<BinaryF2Poly<2>> =
             gamma_gf.iter().map(|g| basis.lift(g)).collect();
 
         // Absorb (b', a') as the prover did.
-        absorb_f2_poly_slice::<7, _>(transcript, proof.b_vector.iter());
-        absorb_f2_poly_slice::<10, _>(
+        absorb_f2_poly_slice::<5, _>(transcript, proof.b_vector.iter());
+        absorb_f2_poly_slice::<7, _>(
             transcript,
             core::iter::once(&proof.lifted_claim),
         );
 
         // -- Check 1: evaluation consistency in F_2[X] -------------
         //    Σ_i q_0[i] · b'[i]  =  a'.
-        let recomputed_a_prime: BinaryF2Poly<10> = {
-            let mut acc = BinaryF2Poly::<10>::zero();
+        let recomputed_a_prime: BinaryF2Poly<7> = {
+            let mut acc = BinaryF2Poly::<7>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<10> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                let prod: BinaryF2Poly<7> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
                         &q0[i],
                         &proof.b_vector[i],
                     );
@@ -2270,14 +2327,14 @@ where
             return Err(F2OpenError::EvalConsistency);
         }
 
-        // -- Check 2: lift discharge in GF(2^192) ------------------
+        // -- Check 2: lift discharge in GF(2^128) ------------------
         //    ψ_α(a')  =  Σ_g γ_g_gf · a_g  (g ranges over WITNESS
         // primary cols only — public cols aren't in this batch).
-        let psi = zinc_poly::univariate::binary_gf192::eval_f2_wide_poly_at::<10>(
+        let psi = zinc_poly::univariate::binary_gf128::eval_f2_wide_poly_at::<7>(
             &proof.lifted_claim,
             &subclaim.alpha,
         );
-        let mut expected = BinaryFieldGF192::zero();
+        let mut expected = BinaryFieldGF128::zero();
         for g in 0..num_cols {
             let mut term = gamma_gf[g];
             term *= &witness_primary_evals[g];
@@ -2291,21 +2348,21 @@ where
         }
 
         // -- Re-derive coeffs + absorb combined_row ---------------
-        let coeffs_gf: Vec<BinaryFieldGF192> =
+        let coeffs_gf: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_rows, &());
-        let coeffs: Vec<BinaryF2Poly<3>> =
+        let coeffs: Vec<BinaryF2Poly<2>> =
             coeffs_gf.iter().map(|g| basis.lift(g)).collect();
-        absorb_f2_poly_slice::<7, _>(transcript, proof.combined_row.iter());
+        absorb_f2_poly_slice::<5, _>(transcript, proof.combined_row.iter());
 
         // -- Check 3: coherence ------------------------------------
         //    <combined_row', q_1>  =  <coeffs, b'>  in F_2[X]<10>.
         // `q1` (W=3) is ~96 set bits vs `combined_row` (W=7) at ~224
         // — pass the smaller as `a` to minimise schoolbook iterations.
-        let lhs: BinaryF2Poly<10> = {
-            let mut acc = BinaryF2Poly::<10>::zero();
+        let lhs: BinaryF2Poly<7> = {
+            let mut acc = BinaryF2Poly::<7>::zero();
             for j in 0..row_len {
-                let prod: BinaryF2Poly<10> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                let prod: BinaryF2Poly<7> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
                         &q1[j],
                         &proof.combined_row[j],
                     );
@@ -2313,11 +2370,11 @@ where
             }
             acc
         };
-        let rhs: BinaryF2Poly<10> = {
-            let mut acc = BinaryF2Poly::<10>::zero();
+        let rhs: BinaryF2Poly<7> = {
+            let mut acc = BinaryF2Poly::<7>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<10> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                let prod: BinaryF2Poly<7> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
                         &coeffs[i],
                         &proof.b_vector[i],
                     );
@@ -2337,9 +2394,9 @@ where
         // Public columns are not part of this equation — the verifier
         // validates their MLE evals at r* upstream from `public_trace`
         // (in `verify_f2_full_with_bit_ops`), not via this open.
-        let encoded: Vec<BinaryF2Poly<7>> = pp
+        let encoded: Vec<BinaryF2Poly<5>> = pp
             .linear_code
-            .encode_f2_lin_open::<7>(&proof.combined_row);
+            .encode_f2_lin_open::<5>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
         // γ is witness-local: gamma[g] corresponds to the g-th
@@ -2448,8 +2505,8 @@ where
                 let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
                 let local_col = &opened.column_values
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
-                let mut weighted_col: Vec<BinaryF2Poly<4>> =
-                    vec![BinaryF2Poly::<4>::zero(); num_rows];
+                let mut weighted_col: Vec<BinaryF2Poly<3>> =
+                    vec![BinaryF2Poly::<3>::zero(); num_rows];
 
                 // Witness primary + bit-op virtual contributions:
                 // cells from the opened paired storage matrices.
@@ -2467,8 +2524,8 @@ where
 
                         // Primary lo contribution.
                         let lo_lifted = BinaryF2Poly::<1>::from_words([lo_cell]);
-                        let prod_lo: BinaryF2Poly<4> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                        let prod_lo: BinaryF2Poly<3> =
+                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
                                 &lo_lifted, &gamma[wit_local_lo],
                             );
                         weighted_col[i] += prod_lo;
@@ -2478,8 +2535,8 @@ where
                         for spec in &virtuals_by_source[wit_local_lo] {
                             let v_cell = apply_bit_op_u32(lo_cell, spec.op);
                             let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
-                            let prod_v: BinaryF2Poly<4> =
-                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                            let prod_v: BinaryF2Poly<3> =
+                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
                                     &v_lifted, &gamma[spec.col_idx],
                                 );
                             weighted_col[i] += prod_v;
@@ -2489,8 +2546,8 @@ where
                             let hi_cell = packed_bits >> 32;
                             // Primary hi contribution.
                             let hi_lifted = BinaryF2Poly::<1>::from_words([hi_cell]);
-                            let prod_hi: BinaryF2Poly<4> =
-                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                            let prod_hi: BinaryF2Poly<3> =
+                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
                                     &hi_lifted, &gamma[wit_local_hi],
                                 );
                             weighted_col[i] += prod_hi;
@@ -2500,8 +2557,8 @@ where
                             for spec in &virtuals_by_source[wit_local_hi] {
                                 let v_cell = apply_bit_op_u32(hi_cell, spec.op);
                                 let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
-                                let prod_v: BinaryF2Poly<4> =
-                                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 3, 4>(
+                                let prod_v: BinaryF2Poly<3> =
+                                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
                                         &v_lifted, &gamma[spec.col_idx],
                                     );
                                 weighted_col[i] += prod_v;
@@ -2509,8 +2566,8 @@ where
                         }
                     }
                 }
-                let actual_at_j: BinaryF2Poly<7> =
-                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<3, 4, 7>(
+                let actual_at_j: BinaryF2Poly<5> =
+                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<2, 3, 5>(
                         &coeffs,
                         &weighted_col,
                     );
@@ -2542,8 +2599,8 @@ where
     /// `pp` defines the commit shape (`num_vars`, row layout,
     /// linear code). `num_vars` is the MLE arity for the witness
     /// trace. `project_scalar` lifts UAIR scalars from `U::Scalar`
-    /// to `DynamicPolynomialF<GF(2^192)>` (typically the
-    /// per-coefficient F_2 ⊂ GF(2^192) embedding).
+    /// to `DynamicPolynomialF<GF(2^128)>` (typically the
+    /// per-coefficient F_2 ⊂ GF(2^128) embedding).
     /// `num_column_openings` controls the proximity-check
     /// soundness — see
     /// [`zip_plus::code::raa_f2::recommended_num_column_openings`].
@@ -2553,7 +2610,7 @@ where
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
     ) -> Result<F2FullProof<D>, F2ProveError<U>> {
         Self::prove_f2_full_with_bit_ops(
@@ -2582,7 +2639,7 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
     ) -> Result<F2FullProof<D>, F2ProveError<U>> {
         // Step 0: commit primary cols + absorb root. Bit-op virtual
@@ -2631,7 +2688,7 @@ where
         // is needed here (that's the followup the prior multipoint-
         // eval commit flagged in documentation/f2x-sha-todo.md).
         let (mp_proof, mp_prover_state) =
-            MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
+            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
                 &projected_trace_for_mp,
                 &subclaim.sumcheck_point,
@@ -2650,12 +2707,12 @@ where
         // multipoint-eval verifier consistency check at r_0; the
         // witness-primary slice is additionally bound by the F_2 PCS
         // open below.
-        let open_evals_at_r_0: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(
+        let open_evals_at_r_0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(
             projected_trace_for_mp
         )
         .map(|col| {
             <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                BinaryFieldGF192,
+                BinaryFieldGF128,
             >>::evaluate_with_config(col, &r_0, &())
             .expect("MLE evaluation at r_0 should succeed")
         })
@@ -2669,7 +2726,7 @@ where
         // multipoint-eval.
         let mut buf_r0 = vec![
             0u8;
-            <<BinaryFieldGF192 as Field>::Inner
+            <<BinaryFieldGF128 as Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
         ];
         for v in &open_evals_at_r_0 {
@@ -2725,7 +2782,7 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
     ) -> Result<F2FullProof<D>, F2ProveError<U>> {
         let sig = U::signature();
@@ -2761,7 +2818,7 @@ where
         // `prove_f2_uair_with_groups` above, so no re-projection is
         // performed.
         let (mp_proof, mp_prover_state) =
-            MultipointEval::<BinaryFieldGF192>::prove_as_subprotocol(
+            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
                 &projected_trace_for_mp,
                 &subclaim.sumcheck_point,
@@ -2773,12 +2830,12 @@ where
             .map_err(F2ProveError::MultipointEval)?;
         let r_0 = mp_prover_state.eval_point;
 
-        let open_evals_at_r_0: Vec<BinaryFieldGF192> = zinc_utils::cfg_into_iter!(
+        let open_evals_at_r_0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(
             projected_trace_for_mp
         )
         .map(|col| {
             <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                BinaryFieldGF192,
+                BinaryFieldGF128,
             >>::evaluate_with_config(col, &r_0, &())
             .expect("MLE evaluation at r_0 should succeed")
         })
@@ -2786,7 +2843,7 @@ where
 
         let mut buf_r0 = vec![
             0u8;
-            <<BinaryFieldGF192 as Field>::Inner
+            <<BinaryFieldGF128 as Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
         ];
         for v in &open_evals_at_r_0 {
@@ -2833,7 +2890,7 @@ where
     ) -> Result<F2VerifierSubclaim, F2FullVerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         Self::verify_f2_full_with_bit_ops(
             transcript,
@@ -2873,7 +2930,7 @@ where
     ) -> Result<F2VerifierSubclaim, F2FullVerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         // Step 0: absorb the commitment, then the public columns —
         // same order as the prover's
@@ -2914,25 +2971,25 @@ where
                 public_binary_trace.len(),
                 num_pub_bin,
             );
-            let alpha_pows: Vec<BinaryFieldGF192> =
-                zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
+            let alpha_pows: Vec<BinaryFieldGF128> =
+                zinc_poly::univariate::binary_gf128::alpha_powers(&subclaim.alpha, D);
             // Parallel map to per-col computed evals (independent
             // across cols; heavy α-project + MLE-eval), then a
             // sequential equality scan emits the structured error.
-            let computed_evals: Vec<BinaryFieldGF192> =
+            let computed_evals: Vec<BinaryFieldGF128> =
                 cfg_iter!(public_binary_trace)
                     .map(|col| {
                         let field_cfg = ();
-                        let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                        let evals_at_alpha: Vec<BinaryFieldGF128> = col
                             .evaluations
                             .iter()
                             .map(|cell| {
-                                zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                                zinc_poly::univariate::binary_gf128::eval_f2_poly_d_at_with_powers::<D>(
                                     cell, &alpha_pows,
                                 )
                             })
                             .collect();
-                        let zero_inner = *BinaryFieldGF192::zero().inner();
+                        let zero_inner = *BinaryFieldGF128::zero().inner();
                         let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                             col.num_vars,
                             evals_at_alpha.iter().map(|x| *x.inner()).collect(),
@@ -2940,7 +2997,7 @@ where
                         );
                         <DenseMultilinearExtension<_>
                             as zinc_poly::mle::MultilinearExtensionWithConfig<
-                                BinaryFieldGF192,
+                                BinaryFieldGF128,
                             >>::evaluate_with_config(
                             inner_mle,
                             &subclaim.sumcheck_point,
@@ -2970,7 +3027,7 @@ where
         // the prover-supplied `proof.open_evals_at_r_0` against the
         // reduction. The witness-primary slice of
         // `open_evals_at_r_0` is what the F_2 PCS open at r_0 binds.
-        let mp_subclaim = MultipointEval::<BinaryFieldGF192>::verify_as_subprotocol(
+        let mp_subclaim = MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol(
             transcript,
             proof.multipoint_eval.clone(),
             &subclaim.sumcheck_point,
@@ -2987,7 +3044,7 @@ where
         // prover's absorb).
         let mut buf_r0 = vec![
             0u8;
-            <<BinaryFieldGF192 as Field>::Inner
+            <<BinaryFieldGF128 as Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
         ];
         for v in &proof.open_evals_at_r_0 {
@@ -3008,21 +3065,21 @@ where
         // recomputation against `public_binary_trace`. Same shape as
         // the at-r* check above, just at the new point.
         if num_pub_bin > 0 {
-            let alpha_pows_r0: Vec<BinaryFieldGF192> =
-                zinc_poly::univariate::binary_gf192::alpha_powers(&subclaim.alpha, D);
-            let computed_evals_r0: Vec<BinaryFieldGF192> = cfg_iter!(public_binary_trace)
+            let alpha_pows_r0: Vec<BinaryFieldGF128> =
+                zinc_poly::univariate::binary_gf128::alpha_powers(&subclaim.alpha, D);
+            let computed_evals_r0: Vec<BinaryFieldGF128> = cfg_iter!(public_binary_trace)
                 .map(|col| {
                     let field_cfg = ();
-                    let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                    let evals_at_alpha: Vec<BinaryFieldGF128> = col
                         .evaluations
                         .iter()
                         .map(|cell| {
-                            zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at_with_powers::<D>(
+                            zinc_poly::univariate::binary_gf128::eval_f2_poly_d_at_with_powers::<D>(
                                 cell, &alpha_pows_r0,
                             )
                         })
                         .collect();
-                    let zero_inner = *BinaryFieldGF192::zero().inner();
+                    let zero_inner = *BinaryFieldGF128::zero().inner();
                     let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                         col.num_vars,
                         evals_at_alpha.iter().map(|x| *x.inner()).collect(),
@@ -3030,7 +3087,7 @@ where
                     );
                     <DenseMultilinearExtension<_>
                         as zinc_poly::mle::MultilinearExtensionWithConfig<
-                            BinaryFieldGF192,
+                            BinaryFieldGF128,
                         >>::evaluate_with_config(inner_mle, &r_0, &field_cfg)
                     .expect("MLE evaluation on r_0 should succeed")
                 })
@@ -3071,7 +3128,7 @@ where
 
         // Finalise multipoint-eval check: verify the sumcheck-
         // reduction is internally consistent with `open_evals_at_r_0`.
-        MultipointEval::<BinaryFieldGF192>::verify_subclaim(
+        MultipointEval::<BinaryFieldGF128>::verify_subclaim(
             &mp_subclaim,
             &proof.open_evals_at_r_0,
             /* shifts */ &[],
@@ -3138,11 +3195,11 @@ pub struct F2FullProof<const D: usize> {
     /// open point `r_0`. Today's invocation passes no shifted-col
     /// inputs; the proof gains one degree-2 sumcheck over `num_vars`
     /// rounds.
-    pub multipoint_eval: MultipointEvalProof<BinaryFieldGF192>,
+    pub multipoint_eval: MultipointEvalProof<BinaryFieldGF128>,
     /// Per-column MLE evals at `r_0` (primary cols first, then
     /// virtual), bound by the multipoint-eval consistency check and
     /// — for the witness-primary slice — by [`Self::open`] below.
-    pub open_evals_at_r_0: Vec<BinaryFieldGF192>,
+    pub open_evals_at_r_0: Vec<BinaryFieldGF128>,
     pub open: F2OpenProof<D>,
 }
 
@@ -3155,7 +3212,7 @@ where
     #[error("IC + sumcheck verification failed: {0}")]
     Uair(F2VerifyError<U, IdealOverF>),
     #[error("multipoint-eval verification failed: {0}")]
-    MultipointEval(MultipointEvalError<BinaryFieldGF192>),
+    MultipointEval(MultipointEvalError<BinaryFieldGF128>),
     #[error("F_2[X] open verification failed: {0}")]
     Open(F2OpenError),
     #[error(
@@ -3164,8 +3221,8 @@ where
     )]
     PublicColumnEvalMismatch {
         public_col_idx: usize,
-        computed: BinaryFieldGF192,
-        claimed: BinaryFieldGF192,
+        computed: BinaryFieldGF128,
+        claimed: BinaryFieldGF128,
     },
     #[error(
         "public column {public_col_idx}: claimed MLE eval at r_0 ({claimed:?}) doesn't match \
@@ -3173,8 +3230,8 @@ where
     )]
     PublicColumnEvalMismatchAtR0 {
         public_col_idx: usize,
-        computed: BinaryFieldGF192,
-        claimed: BinaryFieldGF192,
+        computed: BinaryFieldGF128,
+        claimed: BinaryFieldGF128,
     },
     #[error(
         "virtual column {virtual_idx}: claimed MLE eval at r_0 ({claimed:?}) doesn't match \
@@ -3182,8 +3239,8 @@ where
     )]
     VirtualColumnEvalMismatchAtR0 {
         virtual_idx: usize,
-        derived: BinaryFieldGF192,
-        claimed: BinaryFieldGF192,
+        derived: BinaryFieldGF128,
+        claimed: BinaryFieldGF128,
     },
     #[error(
         "open_evals_at_r_0 has length {got}, expected {expected} (= num_primary + num_virtual)"
@@ -3249,7 +3306,7 @@ mod tests {
     /// The test does NOT verify the proof against a verifier — that
     /// would require a parallel `verify_f2_uair` and is the next
     /// slice. The prover-side test confirms (a) the pipeline runs
-    /// without panicking against a real F_2 UAIR + GF(2^192) field,
+    /// without panicking against a real F_2 UAIR + GF(2^128) field,
     /// (b) the wire format of the resulting proof is internally
     /// consistent, and (c) all transcript draws (IC challenge, α,
     /// sumcheck round challenges) are exercised by a real
@@ -3302,15 +3359,15 @@ mod tests {
             // `collect_scalars` returns an empty set and this
             // closure is never called. Provide a sensible default:
             // lift `BinaryPoly<32>` → `DynamicPolynomialF<GF192>` via
-            // the F_2 ⊂ GF(2^192) per-coefficient embedding.
-            |scalar: &BinaryPoly<32>| -> DynamicPolynomialF<BinaryFieldGF192> {
-                let coeffs: Vec<BinaryFieldGF192> = scalar
+            // the F_2 ⊂ GF(2^128) per-coefficient embedding.
+            |scalar: &BinaryPoly<32>| -> DynamicPolynomialF<BinaryFieldGF128> {
+                let coeffs: Vec<BinaryFieldGF128> = scalar
                     .iter()
                     .map(|b| {
                         if b.into_inner() {
-                            BinaryFieldGF192::one()
+                            BinaryFieldGF128::one()
                         } else {
-                            BinaryFieldGF192::zero()
+                            BinaryFieldGF128::zero()
                         }
                     })
                     .collect();
@@ -3325,7 +3382,7 @@ mod tests {
         let num_constraints = count_constraints::<TinyF2Uair>();
         assert_eq!(proof.ic_proof.combined_mle_values.len(), num_constraints);
         for v in &proof.ic_proof.combined_mle_values {
-            assert_eq!(v, &DynamicPolynomialF::<BinaryFieldGF192>::ZERO);
+            assert_eq!(v, &DynamicPolynomialF::<BinaryFieldGF128>::ZERO);
         }
 
         // γ-batched: a SINGLE degree-2 group `[eq_r, weighted_col]`
@@ -3349,10 +3406,10 @@ mod tests {
         // isn't the trivial zero (which would indicate the
         // transcript flow is broken — Blake3 of a non-trivial
         // state is overwhelmingly likely to produce a non-zero
-        // 192-bit element).
+        // 128-bit element).
         assert!(
             !proof.alpha.is_zero(),
-            "α should be a non-zero GF(2^192) challenge; got {}",
+            "α should be a non-zero GF(2^128) challenge; got {}",
             proof.alpha
         );
     }
@@ -3366,7 +3423,7 @@ mod tests {
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF192> + Sync,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<F2Proof, F2ProveError<U>>
     where
         U: Uair + 'static,
@@ -3377,15 +3434,15 @@ mod tests {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
 
-        let row_major_trace = project_f2_trace_row_major::<BinaryFieldGF192, _, _, D>(
+        let row_major_trace = project_f2_trace_row_major::<BinaryFieldGF128, _, _, D>(
             trace,
             &field_cfg,
         );
 
         let scalars =
-            zinc_piop::projections::project_scalars::<BinaryFieldGF192, U>(|s| project_scalar(s));
+            zinc_piop::projections::project_scalars::<BinaryFieldGF128, U>(|s| project_scalar(s));
 
-        let (ic_proof, ic_state) = <U as IdealCheckProtocol>::prove_combined::<BinaryFieldGF192>(
+        let (ic_proof, ic_state) = <U as IdealCheckProtocol>::prove_combined::<BinaryFieldGF128>(
             transcript,
             &row_major_trace,
             &scalars,
@@ -3395,28 +3452,28 @@ mod tests {
         )
         .map_err(F2ProveError::IdealCheck)?;
 
-        let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
-        let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = trace
+        let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = trace
             .binary_poly
             .iter()
             .map(|col| {
-                let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                let evals_at_alpha: Vec<BinaryFieldGF128> = col
                     .evaluations
                     .iter()
                     .map(|cell| {
-                        zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(cell, &alpha)
+                        zinc_poly::univariate::binary_gf128::eval_f2_poly_d_at::<D>(cell, &alpha)
                     })
                     .collect();
                 DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     evals_at_alpha,
-                    BinaryFieldGF192::zero(),
+                    BinaryFieldGF128::zero(),
                 )
             })
             .collect();
 
-        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
         let eq_r = zinc_poly::utils::build_eq_x_r_inner(
             &ic_state.evaluation_point,
@@ -3428,11 +3485,11 @@ mod tests {
         let group = MultiDegreeSumcheckGroup::new(
             2,
             vec![eq_r, weighted_col],
-            Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+            Box::new(|v: &[BinaryFieldGF128]| v[0] * v[1]),
         );
 
         let (sumcheck_proof, prover_states) =
-            MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
+            MultiDegreeSumcheck::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
                 vec![group],
                 num_vars,
@@ -3440,17 +3497,17 @@ mod tests {
             );
 
         let sumcheck_point = prover_states[0].randomness.clone();
-        let column_evals_at_rstar: Vec<BinaryFieldGF192> = projected_trace
+        let column_evals_at_rstar: Vec<BinaryFieldGF128> = projected_trace
             .iter()
             .map(|col| {
-                let zero_inner = *BinaryFieldGF192::zero().inner();
+                let zero_inner = *BinaryFieldGF128::zero().inner();
                 let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     col.evaluations.iter().map(|x| *x.inner()).collect(),
                     zero_inner,
                 );
                 <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                    BinaryFieldGF192,
+                    BinaryFieldGF128,
                 >>::evaluate_with_config(
                     inner_mle, &sumcheck_point, &field_cfg
                 )
@@ -3458,7 +3515,7 @@ mod tests {
             })
             .collect();
 
-        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+        let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
             as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
         for v in &column_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
@@ -3485,7 +3542,7 @@ mod tests {
     where
         U: Uair + 'static,
         IdealOverF: zinc_uair::ideal::Ideal
-            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF192>>,
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
@@ -3501,7 +3558,7 @@ mod tests {
         .map_err(F2VerifyError::IdealCheck)?;
         let ic_evaluation_point = ic_subclaim.evaluation_point;
 
-        let alpha: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
         if alpha != proof.alpha {
             return Err(F2VerifyError::AlphaMismatch {
                 transcript: alpha,
@@ -3509,9 +3566,9 @@ mod tests {
             });
         }
 
-        let gamma: BinaryFieldGF192 = transcript.get_field_challenge(&field_cfg);
+        let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
-        let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
+        let md_subclaims = MultiDegreeSumcheck::<BinaryFieldGF128>::verify_as_subprotocol(
             transcript,
             num_vars,
             &proof.sumcheck_proof,
@@ -3534,7 +3591,7 @@ mod tests {
             });
         }
 
-        let one = BinaryFieldGF192::one();
+        let one = BinaryFieldGF128::one();
         let eq_at_rstar_r = zinc_poly::utils::eq_eval(
             &sumcheck_point,
             &ic_evaluation_point,
@@ -3544,7 +3601,7 @@ mod tests {
         if eq_at_rstar_r.is_zero() {
             return Err(F2VerifyError::DegenerateEq);
         }
-        let mut batched = BinaryFieldGF192::zero();
+        let mut batched = BinaryFieldGF128::zero();
         for v in proof.column_evals_at_rstar.iter().rev() {
             batched = batched * gamma + *v;
         }
@@ -3556,7 +3613,7 @@ mod tests {
             });
         }
 
-        let mut buf = vec![0u8; <<BinaryFieldGF192 as crypto_primitives::Field>::Inner
+        let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
             as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
         for v in &proof.column_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
@@ -3603,10 +3660,10 @@ mod tests {
             int: vec![].into(),
         };
 
-        let project_scalar = |scalar: &BinaryPoly<32>| -> DynamicPolynomialF<BinaryFieldGF192> {
-            let coeffs: Vec<BinaryFieldGF192> = scalar
+        let project_scalar = |scalar: &BinaryPoly<32>| -> DynamicPolynomialF<BinaryFieldGF128> {
+            let coeffs: Vec<BinaryFieldGF128> = scalar
                 .iter()
-                .map(|b| if b.into_inner() { BinaryFieldGF192::one() } else { BinaryFieldGF192::zero() })
+                .map(|b| if b.into_inner() { BinaryFieldGF128::one() } else { BinaryFieldGF128::zero() })
                 .collect();
             DynamicPolynomialF { coeffs }
         };
@@ -3636,13 +3693,13 @@ mod tests {
 
         // Cross-check: column_mle_evals should match each column's
         // projected MLE evaluated at `r*` directly.
-        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let zero_inner = *BinaryFieldGF128::zero().inner();
         for (g, expected) in subclaim.primary_column_evals.iter().enumerate() {
             let projected_col_inner_evals: Vec<_> = trace.binary_poly[g]
                 .evaluations
                 .iter()
                 .map(|cell| {
-                    *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
+                    *zinc_poly::univariate::binary_gf128::eval_f2_poly_d_at::<D>(
                         cell,
                         &subclaim.alpha,
                     )
@@ -3697,7 +3754,7 @@ mod tests {
             int: vec![].into(),
         };
 
-        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
+        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF128>::ZERO;
 
         let mut prover_transcript = Blake3Transcript::new();
         let mut proof = prove_f2_uair_for_tests::<TinyF2Uair, D>(
@@ -3709,7 +3766,7 @@ mod tests {
         .expect("prove should succeed");
 
         // Mutate α — verifier should reject.
-        proof.alpha = proof.alpha + BinaryFieldGF192::one();
+        proof.alpha = proof.alpha + BinaryFieldGF128::one();
 
         let mut verifier_transcript = Blake3Transcript::new();
         let err = verify_f2_uair_for_tests::<TinyF2Uair, _>(
@@ -3853,7 +3910,7 @@ mod tests {
         // prove_f2_uair is gated on the F2ZincTypes bound which is
         // already satisfied above — we use the shim to also avoid
         // dragging the bound into the call-site verbosity).
-        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
+        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF128>::ZERO;
         let proof = prove_f2_uair_for_tests::<TinyF2Uair, D>(
             &mut prover_transcript,
             &trace,
@@ -3879,13 +3936,13 @@ mod tests {
         .expect("verify should succeed");
 
         // Sanity: column MLE claims at r* match direct evaluation.
-        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let zero_inner = *BinaryFieldGF128::zero().inner();
         for (g, expected) in subclaim.primary_column_evals.iter().enumerate() {
             let projected_inner: Vec<_> = trace.binary_poly[g]
                 .evaluations
                 .iter()
                 .map(|cell| {
-                    *zinc_poly::univariate::binary_gf192::eval_f2_poly_d_at::<D>(
+                    *zinc_poly::univariate::binary_gf128::eval_f2_poly_d_at::<D>(
                         cell,
                         &subclaim.alpha,
                     )
@@ -3913,7 +3970,7 @@ mod tests {
     //   1. Build a satisfied F_2 trace + a sumcheck point r*.
     //   2. Run the prover-side computation of (a_g', b_g) per column.
     //   3. Verifier checks eval-consistency Σ_i q_0' · b_g = a_g' in
-    //      F_2[X] and lift discharge ψ_α(a_g') = a_g in GF(2^192).
+    //      F_2[X] and lift discharge ψ_α(a_g') = a_g in GF(2^128).
     //
     // The subclaim that feeds in here is constructed end-to-end
     // (commit → IC → α → sumcheck → verify), so this is the first
@@ -3953,7 +4010,7 @@ mod tests {
 
         // -- Run the full IC + sumcheck pipeline to produce a subclaim.
         let project_scalar =
-            |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
+            |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF128>::ZERO;
         let mut prover_transcript = Blake3Transcript::new();
         let proof = prove_f2_uair_for_tests::<TinyF2Uair, D>(
             &mut prover_transcript,
@@ -4053,7 +4110,7 @@ mod tests {
             int: vec![].into(),
         };
 
-        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
+        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF128>::ZERO;
         let mut pt = Blake3Transcript::new();
         let proof = prove_f2_uair_for_tests::<TinyF2Uair, D>(&mut pt, &trace, num_vars, project_scalar)
             .expect("prove should succeed");
@@ -4095,7 +4152,7 @@ mod tests {
         // Flip the lowest bit of the (γ-batched) lifted claim a'.
         let mut tampered_words = *open_proof.lifted_claim.words();
         tampered_words[0] ^= 1;
-        open_proof.lifted_claim = BinaryF2Poly::<10>::from_words(tampered_words);
+        open_proof.lifted_claim = BinaryF2Poly::<7>::from_words(tampered_words);
 
         let mut open_vt = Blake3Transcript::new();
         ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::absorb_commitment(&mut open_vt, &comm);
@@ -4150,7 +4207,7 @@ mod tests {
             int: vec![].into(),
         };
 
-        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF192>::ZERO;
+        let project_scalar = |_: &BinaryPoly<32>| DynamicPolynomialF::<BinaryFieldGF128>::ZERO;
         let mut pt = Blake3Transcript::new();
         let proof =
             prove_f2_uair_for_tests::<TinyF2Uair, D>(&mut pt, &trace, num_vars, project_scalar)
@@ -4195,26 +4252,26 @@ mod tests {
         //     combined_row' is bound (via Merkle + encoding consistency) to
         //     the genuine M_w while b' now isn't; or
         //   - the lift discharge ψ_α(a') = Σ_g γ_g · a_g fails, because
-        //     the rebased a' projects to a different GF(2^192) value.
+        //     the rebased a' projects to a different GF(2^128) value.
         let mut tampered_b = *open_proof.b_vector[0].words();
         tampered_b[0] ^= 1;
-        open_proof.b_vector[0] = BinaryF2Poly::<7>::from_words(tampered_b);
+        open_proof.b_vector[0] = BinaryF2Poly::<5>::from_words(tampered_b);
         // Re-derive a' = Σ_i q_0[i] · b'[i] over F_2[X]<10>.
-        let basis = zinc_poly::univariate::binary_gf192::AlphaPolyBasis::new(&subclaim.alpha);
+        let basis = zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(&subclaim.alpha);
         let (q0, _q1) = {
             let split = subclaim.sumcheck_point.len() - (num_rows.ilog2() as usize);
             let (hi, lo) = subclaim.sumcheck_point.split_at(split);
             let q0_gf = zinc_poly::utils::build_eq_x_r_vec(lo, &()).unwrap();
             let q1_gf = zinc_poly::utils::build_eq_x_r_vec(hi, &()).unwrap();
-            let q0: Vec<BinaryF2Poly<3>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
-            let q1: Vec<BinaryF2Poly<3>> = q1_gf.iter().map(|g| basis.lift(g)).collect();
+            let q0: Vec<BinaryF2Poly<2>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
+            let q1: Vec<BinaryF2Poly<2>> = q1_gf.iter().map(|g| basis.lift(g)).collect();
             (q0, q1)
         };
         open_proof.lifted_claim = {
-            let mut acc = BinaryF2Poly::<10>::zero();
+            let mut acc = BinaryF2Poly::<7>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<10> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<3, 7, 10>(
+                let prod: BinaryF2Poly<7> =
+                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
                         &q0[i],
                         &open_proof.b_vector[i],
                     );
@@ -4290,7 +4347,7 @@ mod tests {
             &trace,
             /* virtual_specs */ &[],
             num_vars,
-            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            |_| DynamicPolynomialF::<BinaryFieldGF128>::ZERO,
             /* num_column_openings */ 4,
         )
         .expect("prove_f2_full should succeed");
@@ -4366,7 +4423,7 @@ mod tests {
             &trace,
             &[],
             num_vars,
-            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            |_| DynamicPolynomialF::<BinaryFieldGF128>::ZERO,
             4,
         )
         .expect("prove should succeed");
@@ -4374,7 +4431,7 @@ mod tests {
         // Flip a bit in a'.
         let mut tampered = *proof.open.lifted_claim.words();
         tampered[0] ^= 1;
-        proof.open.lifted_claim = BinaryF2Poly::<10>::from_words(tampered);
+        proof.open.lifted_claim = BinaryF2Poly::<7>::from_words(tampered);
 
         let mut vt = Blake3Transcript::new();
         let err = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::verify_f2_full(
@@ -4522,7 +4579,7 @@ mod tests {
             &trace,
             &virtual_specs,
             num_vars,
-            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            |_| DynamicPolynomialF::<BinaryFieldGF128>::ZERO,
             4,
         )
         .expect("prove_f2_full with virtual col should succeed");
@@ -4607,7 +4664,7 @@ mod tests {
             &trace,
             &virtual_specs,
             num_vars,
-            |_| DynamicPolynomialF::<BinaryFieldGF192>::ZERO,
+            |_| DynamicPolynomialF::<BinaryFieldGF128>::ZERO,
             4,
         )
         .expect("prove should succeed with correct specs");

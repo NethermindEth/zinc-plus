@@ -1,0 +1,228 @@
+\section{Soundness}
+\label{sec:soundness}
+
+We argue informally that \Cref{cons:open} preserves the
+knowledge-soundness error of the host PIOP up to negligible additive
+terms. The argument enumerates failure modes accessible to a
+malicious prover and bounds each.
+
+\subsection{Threat model}
+
+Fix a malicious prover $\mathcal{P}^*$ that, after committing
+$(M_{\mathrm{cw}, g})_{g=1}^{K}$ honestly to a witness
+$\widetilde{w} \ne w$ (or refusing to honor the commitment in some
+other way), aims to make $\mathcal{V}$ accept a wrong tuple
+$(a_1, \ldots, a_K)$.
+
+We assume the host PIOP through end-of-sumcheck is knowledge-sound:
+the $(a_1, \ldots, a_K, r^*, \alpha)$ delivered to Step~7 is, on an
+accepted run, the honest evaluation of $\widetilde{w}$ at $r^*$ after
+$\psia$, with cheating probability at most
+$\epsilon_{\mathrm{pre}}$. Step~7 is the part we analyse.
+
+Let $\epsilon_{\mathrm{open}}$ denote the soundness error of
+\Cref{cons:open}. We show
+\[
+  \epsilon_{\mathrm{open}}
+  \;\le\;
+  \underbrace{\frac{K \cdot (\Dval + 3 \cdot 192)}{2^{192}}}_{\text{Schwartz–Zippel on $\gamma$}}
+  \;+\;
+  \underbrace{\frac{n_{\mathrm{rows}} \cdot (\Dval + 2 \cdot 192)}{2^{192}}}_{\text{Schwartz–Zippel on $c$}}
+  \;+\;
+  \underbrace{\Bigl(\tfrac{1+\delta}{2}\Bigr)^{t}}_{\text{Brakedown proximity at $t$ queries}}
+  \;+\;
+  \negligible(\lambda),
+\]
+where $\delta$ is the minimum relative distance of the deployed code
+and $t$ the column-opening parameter.
+
+\subsection{Failure modes}
+
+A cheating prover $\mathcal{P}^*$ can fail Check~1--4 in at most four
+distinct ways, corresponding to where the dishonest data first
+diverges from the honest construction.
+
+\paragraph{(F1) Wrong codeword: $M_{\mathrm{cw}, g}$ is not the
+encoding of any witness row vector for some $g$.} The commit-time
+Merkle root pins $M_{\mathrm{cw}, g}$ at column-open time. The
+honest-encoding fraction of $M_{\mathrm{cw}, g}$ is a codeword;
+\Cref{cons:open}'s Check~4 — encoding consistency at sampled column
+$j_k$ — fails if and only if $M_{\mathrm{cw}, g}$ is not a valid
+$\encode$-image at column $j_k$. By the standard Brakedown analysis,
+the soundness error is $\le ((1+\delta)/2)^t$ where $\delta$ is the
+relative minimum distance of the code and $t$ is the number of opened
+columns. With \texttt{RaaF2Code} at rate $1/4$ and $t = 987$, this is
+the term targeted by the protocol's column-opening parameter.
+
+\paragraph{(F2) Wrong combined row: $\mathrm{cr}'$ is not the
+prover's stated $\gamma$-batched, $c$-folded combination of the
+codewords.} Suppose $\mathcal{P}^*$ sends some
+$\mathrm{cr}'^{\,\dagger} \ne \mathrm{cr}'_{\mathrm{honest}}$ to the
+transcript. By \Cref{lem:f2x-linearity}, the encoding map commutes
+through both the $\gamma$ and $c$ folds:
+\[
+  \encode(\mathrm{cr}'_{\mathrm{honest}})[j]
+  \;=\;
+  \sum_i c'[i] \sum_g \gamma_g' \cdot M_{\mathrm{cw}, g}[i, j]
+  \qquad \text{for every } j \in [n_{\mathrm{cw}}].
+\]
+The Check~4(b) identity therefore holds for the honest
+$\mathrm{cr}'_{\mathrm{honest}}$ at every $j$. For the dishonest
+$\mathrm{cr}'^{\,\dagger}$ to satisfy it at sampled $j_1, \ldots, j_t$,
+$\mathrm{cr}'^{\,\dagger} - \mathrm{cr}'_{\mathrm{honest}}$ must
+agree with the all-zeros codeword on $t$ columns, which by code
+minimum distance happens only if
+$\mathrm{cr}'^{\,\dagger} = \mathrm{cr}'_{\mathrm{honest}}$ on those
+$t$ rows — but the sampling distribution makes this a Brakedown-style
+proximity check on $\mathrm{cr}'^{\,\dagger}$. The bound is again
+$\le ((1+\delta)/2)^t$, absorbed into the (F1) term.
+
+\paragraph{(F3) Wrong $b'$: $b' \ne$ the $\gamma$-batched
+$q_1'$-fold of the witness rows.} Check~3 (coherence) ties
+$\mathrm{cr}'$ and $b'$ through the bilinear identity
+\[
+  \sum_j \mathrm{cr}'[j] \cdot q_1'[j]
+  \;=\;
+  \sum_i c'[i] \cdot b'[i].
+\]
+For honest $(\mathrm{cr}', b')$ this is an algebraic identity:
+\begin{align*}
+  \sum_j \mathrm{cr}'_{\mathrm{honest}}[j] \cdot q_1'[j]
+  &= \sum_j \Bigl( \sum_g \gamma_g' \cdot \sum_i c'[i] \cdot M_{w_g}[i, j] \Bigr) q_1'[j] \\
+  &= \sum_i c'[i] \cdot \sum_g \gamma_g' \cdot \Bigl(\sum_j M_{w_g}[i, j] \cdot q_1'[j]\Bigr) \\
+  &= \sum_i c'[i] \cdot \sum_g \gamma_g' \cdot b_{g, \mathrm{honest}}[i]
+  \;=\; \sum_i c'[i] \cdot b'_{\mathrm{honest}}[i].
+\end{align*}
+For dishonest $b'$ to satisfy Check~3 against an
+$(\mathrm{cr}', q_1', c')$ that the verifier has otherwise
+constrained to be honest (by (F1) for $\mathrm{cr}'$, by the lift
+construction for $q_1', c'$), it must hit a single $\polyring$-linear
+equation. The probability of this over $c$ (a fresh transcript draw
+\emph{after} $b'$ is committed) is, by Schwartz–Zippel applied to the
+nonzero polynomial $\mathrm{cr}'^{\,\dagger}_{\mathrm{honest}} -
+\mathrm{cr}'$ paired with $q_1'$:
+\[
+  \Pr_c\Bigl[\text{Check~3 holds for dishonest } b'\Bigr]
+  \;\le\;
+  \frac{\deg_X}{2^{192}}
+  \;\le\;
+  \frac{n_{\mathrm{rows}} \cdot (\Dval + 2 \cdot 192)}{2^{192}},
+\]
+where $\deg_X$ is the total $X$-degree of the verification polynomial.
+
+\paragraph{(F4) Wrong $a'$: $a' \ne$ the $\gamma$-batched
+$q_0'$-fold of the $b_g$.} Check~1 (evaluation consistency) ties
+$a'$ and $b'$ through
+\[
+  a' \;=\; \sum_i q_0'[i] \cdot b'[i].
+\]
+This is a deterministic $\polyring$-identity (no fresh randomness
+between $b'$ commit and $a'$ verification). Tampering $a'$ without
+also tampering $b'$ fails Check~1 directly. Tampering both $a'$ and
+$b'$ consistently with each other is exactly (F3) augmented by a
+matching adjustment to $a'$.
+
+\paragraph{(F5) Wrong $(a_1, \ldots, a_K)$: the post-sumcheck claims
+do not match $\psia$ of the honest evaluation.} This is bounded by
+$\epsilon_{\mathrm{pre}}$ and is outside Step~7. \Cref{cons:open}
+binds $a'$ to $(a_1, \ldots, a_K)$ via Check~2:
+\[
+  \psia(a') \;=\; \sum_g \gamma_g \cdot a_g.
+\]
+For honest $a'$, the chain
+$\psia(a') = \psia(\sum_g \gamma_g' \cdot a_g') = \sum_g \gamma_g \cdot
+\psia(a_g') = \sum_g \gamma_g \cdot a_g$ holds (by
+\Cref{cor:lift-commutes} and the honest construction of $a_g'$).
+For dishonest $(a_1, \ldots, a_K)$ — assuming
+$\widetilde{w}$ is fixed and $\widetilde{a}_g := \mle{\psia(\widetilde{w}_g)}(r^*)$ is
+the honest evaluation — the discrepancy is $\Delta_g := a_g -
+\widetilde{a}_g$ for some non-zero vector $\Delta$. Check~2 then requires
+$\sum_g \gamma_g \cdot \Delta_g = 0$ in $\GFt$, a single
+$\GFt$-linear equation in the random $\gamma$. By Schwartz–Zippel on
+$\gamma$ (drawn after $a'$ is fixed),
+\[
+  \Pr_\gamma\Bigl[\text{Check~2 holds for dishonest } (a_g)\Bigr]
+  \;\le\;
+  \frac{1}{2^{192}}.
+\]
+\textbf{This is the per-column batching gain:} regardless of $K$, a
+single $\GFt$-batching equation pins all $K$ claims simultaneously.
+
+\subsection{Composing the four bounds}
+
+A successful cheat is a path through at least one of (F1)--(F4) on
+top of (F5). By union bound,
+\[
+  \epsilon_{\mathrm{open}}
+  \;\le\;
+  \underbrace{\frac{1}{2^{192}}}_{(\text{F5}) \text{ via Check 2}}
+  \;+\;
+  \underbrace{\frac{n_{\mathrm{rows}} \cdot (\Dval + 2\cdot 192)}{2^{192}}}_{(\text{F3}) \text{ via Check 3}}
+  \;+\;
+  \underbrace{\Bigl(\frac{1+\delta}{2}\Bigr)^{t}}_{(\text{F1}), (\text{F2}) \text{ via Check 4}}.
+\]
+
+\subsection{Quantitative summary}
+
+\begin{proposition}[Soundness, informal]
+\label{prop:soundness}
+\Cref{cons:open}, run on a transcript that has reached the end of the
+sumcheck honestly with error $\le \epsilon_{\mathrm{pre}}$, has Step-7
+soundness error at most
+\[
+  \epsilon_{\mathrm{pre}}
+  \;+\;
+  \frac{(n_{\mathrm{rows}} + 1)(\Dval + 2 \cdot 192) + 1}{2^{192}}
+  \;+\;
+  \Bigl(\frac{1+\delta}{2}\Bigr)^{t},
+\]
+where $\delta$ is the relative minimum distance of \texttt{RaaF2Code}
+and $t = $ \texttt{recommended\_num\_column\_openings}(REP=4) = 987.
+\end{proposition}
+
+For $\Dval = 32$ and $\nu = 16$ (i.e., $n_{\mathrm{rows}} =
+n_{\mathrm{cols}} = 2^{8}$ in the matrix decomposition), the
+algebraic terms aggregate to $\le 2^{-176}$, well below the
+column-opening term. The column-opening term dominates the soundness
+budget, as in the integer path.
+
+\subsection{Why no fresh extraction is needed}
+
+The Step-7 messages $(a', b', \mathrm{cr}', \mathrm{col\_values}_k,
+\pi_k)$ are not commitments: they are values of polynomial
+identities or pre-existing committed data. A knowledge extractor for
+the augmented PIOP runs the host extractor unchanged to recover the
+witness $w$, then \emph{constructs} the honest values of
+$(a', b', \mathrm{cr}')$ deterministically from $w$, $r^*$, $\alpha$,
+$\gamma$, $c$. The extractor does not need any additional rewinding
+beyond what the host already does.
+
+\subsection{Subfield-collision corner case}
+
+\Cref{lem:generic-basis} shows the lift table is well-defined with
+overwhelming probability over $\alpha$. The implementation aborts on
+the failure event (which is structurally detected during
+Gauss--Jordan inversion). The protocol-level response is to resample
+$\alpha$ from the transcript via a redrawn challenge — equivalently,
+to skip the unworkable $\alpha$ via a deterministic re-derivation
+rule. The probability of a redraw is $\le 2^{-95}$ per attempt, so
+the expected number of attempts is $1 + 2^{-95} \ll 1.01$.
+
+\subsection{Caveats}
+
+Two caveats on the analysis:
+
+\paragraph{Schwartz–Zippel on $\polyring$.} The bounds for (F3) and
+(F4) use Schwartz–Zippel on polynomials in $\polyring$, viewed as
+polynomials in the formal variable $X$. The bound on a non-zero
+polynomial of $X$-degree $\le D$ vanishing at $X = \alpha$ is
+$D / 2^{192}$; this is the standard bound and tight up to
+$2 \cdot D / 2^{192}$ when one counts the field-extension structure
+carefully. We use the simpler bound throughout for clarity.
+
+\paragraph{Cryptographic random oracle.} The Fiat–Shamir transcript
+is assumed to behave as a random oracle. The reductions to
+Schwartz–Zippel implicitly assume that the relevant transcript
+challenges are drawn from a uniform distribution over $\GFt$,
+independent of the prover's prior transcript activity beyond the
+absorbed material.

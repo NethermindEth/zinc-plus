@@ -1,0 +1,188 @@
+\section{The $\alpha$-Dependent Lift}
+\label{sec:lift}
+
+We construct the right inverse of $\psia$ on its restriction to
+$\polyringat{192}$. The opening protocol will lift each
+$\GFt$-element appearing in the tensor-decomposed evaluation point
+$q_0, q_1$ through this map; the only $\GFt$-elements that need the
+lift are those drawn fresh from the transcript inside Step~7.
+
+\subsection{Why the bit-pattern lift fails}
+
+\begin{definition}[Bit-pattern lift]
+\label{def:bitlift}
+For $g \in \GFt$, the \emph{bit-pattern lift} of $g$ is its canonical
+degree-$<192$ representative
+\[
+  g_{\mathrm{rep}}(X) \;=\; \sum_{i=0}^{191} g_i \cdot X^i \;\in\; \polyringat{192},
+\]
+where $g_i$ is the $i$-th bit of the binary expansion of $g$
+(equivalently, the coefficient of $X^i$ in any polynomial in the
+equivalence class of $g$ modulo $P$).
+\end{definition}
+
+\begin{remark}
+\label{rem:bit-pattern-failure}
+$\psia(g_{\mathrm{rep}}) = \sum_i g_i \cdot \alpha^i \in \GFt$. This
+equals $g$ if and only if $\alpha$ is the equivalence class of the
+formal $X$ in $\F_2[X]/(P)$ — that is, the field's quotient generator.
+For a transcript-fresh $\alpha$ this happens with probability
+$2^{-192}$.
+\end{remark}
+
+For a generic transcript-fresh $\alpha$ the bit-pattern lift therefore
+does \emph{not} satisfy the round-trip $\psia \circ (\,\cdot\,)_{\mathrm{rep}}
+= \mathrm{id}_{\GFt}$. The construction's verifier checks
+$\psia(a') \stackrel{?}{=} a$, which collapses to the round-trip identity
+under bit-pattern lift and the substitutions
+$a = q_1^\top \cdot \psia(M_w) \cdot q_2$,
+$a' = q_1'^\top \cdot M_w \cdot q_2'$ — so the bit-pattern lift is
+unsound here.
+
+\subsection{The polynomial basis and its inverse}
+
+We replace the bit-pattern lift with the unique $\F_2$-linear
+\emph{inverse-of-evaluation} lift. The key observation is that
+$\GFt$ is a vector space of dimension $192$ over $\F_2$, and the
+family
+\[
+  \mathcal{B}_\alpha \;:=\; \big\{1,\,\alpha,\,\alpha^2,\,\ldots,\,\alpha^{191}\big\}
+\]
+generates $\GFt$ as an $\F_2$-vector space for an overwhelming
+fraction of $\alpha$.
+
+\begin{lemma}[Generic invertibility]
+\label{lem:generic-basis}
+For $\alpha \in \GFt$ uniform, $\mathcal{B}_\alpha$ is an
+$\F_2$-basis of $\GFt$ with probability at least
+$1 - 2^{-95}$.
+\end{lemma}
+
+\begin{proof}
+$\mathcal{B}_\alpha$ fails to be a basis iff $\alpha$ lies in a
+proper subfield of $\GFt$. The proper subfields are
+$\F_{2^d}$ for $d \mid 192, d < 192$. The largest is $\F_{2^{96}}$
+(when $96 \mid 192$); its order is $2^{96}$. Including all proper
+subfields and using the inclusion-exclusion bound
+$\big|\bigcup_{d \mid 192, d < 192} \F_{2^d}\big| \le 2^{96} + 2^{64}
++ \cdots \le 2 \cdot 2^{96}$, the probability of bad $\alpha$ is
+$\le 2 \cdot 2^{96} / 2^{192} = 2^{-95}$.
+\end{proof}
+
+For $\alpha$ with $\mathcal{B}_\alpha$ a basis, the $\F_2$-linear map
+$\Phi_\alpha : \F_2^{192} \to \GFt$, $c \mapsto \sum_{i} c_i \alpha^i$,
+is a bijection. We identify $\F_2^{192}$ with $\polyringat{192}$ by
+$c \leftrightarrow \sum_i c_i X^i$; under this identification,
+$\Phi_\alpha = \psia$ restricted to $\polyringat{192}$.
+
+\begin{definition}[Inverse lift]
+\label{def:invlift}
+Let $\lift := \psia^{-1}|_{\polyringat{192}} : \GFt \to \polyringat{192}$
+denote the unique $\F_2$-linear inverse of $\Phi_\alpha$. Explicitly,
+for $g \in \GFt$, $\lift(g)$ is the unique
+$\sum_i c_i X^i \in \polyringat{192}$ with
+$\sum_i c_i \alpha^i = g$ in $\GFt$.
+\end{definition}
+
+\begin{proposition}[Defining property]
+\label{prop:lift-roundtrip}
+For every $g \in \GFt$,
+$\psia\big(\lift(g)\big) = g$. The lift is $\F_2$-linear:
+$\lift(g_1 + g_2) = \lift(g_1) + \lift(g_2)$.
+\end{proposition}
+
+\begin{proof}
+First identity by definition. Linearity follows from
+$\psia$ being $\F_2$-linear and $\lift$ being its inverse on a
+basis.
+\end{proof}
+
+\subsection{Computing the lift}
+
+We give a concrete algorithm. Let $M_\alpha \in \F_2^{192 \times 192}$
+denote the matrix whose $j$-th \emph{column} is the bit-vector
+representation of $\alpha^j \in \GFt$, $j = 0, \ldots, 191$. Then
+\[
+  M_\alpha \cdot c \;=\; (\Phi_\alpha(c))_{\mathrm{rep}}
+  \qquad \text{for any column vector } c \in \F_2^{192}.
+\]
+By \Cref{lem:generic-basis}, $M_\alpha$ is invertible over $\F_2$
+with probability $\ge 1 - 2^{-95}$ over $\alpha$, and the lift is
+\[
+  \lift(g) \;=\; M_\alpha^{-1} \cdot g_{\mathrm{rep}} \;\in\; \F_2^{192}.
+\]
+
+\begin{construction}[Inverse-lift table]
+\label{cons:invlift}
+On input $\alpha \in \GFt$:
+\begin{enumerate}[leftmargin=2em]
+  \item Compute the powers $1, \alpha, \alpha^2, \ldots, \alpha^{191}$
+    by $191$ multiplications in $\GFt$, each at most a $192\times 192$
+    bit carryless multiply followed by reduction modulo $P$.
+  \item Assemble $M_\alpha \in \F_2^{192 \times 192}$, storing each
+    column as three $64$-bit words.
+  \item Compute $M_\alpha^{-1}$ over $\F_2$ by Gauss--Jordan
+    elimination on an augmented $[M_\alpha \mid I]$. If the algorithm
+    fails (pivoting cannot proceed), $\alpha$ is in the negligible
+    fraction of \Cref{lem:generic-basis}; abort and resample.
+  \item Per-entry, $\lift(g) = M_\alpha^{-1} \cdot g_{\mathrm{rep}}$
+    is computed as $192$ bitwise inner products of $192$-bit row
+    vectors, each in $O(1)$ word operations.
+\end{enumerate}
+The table $M_\alpha^{-1}$ is built once per transcript $\alpha$ and
+shared between prover and verifier.
+\end{construction}
+
+\paragraph{Cost.} Construction~\ref{cons:invlift} runs in:
+\begin{itemize}[leftmargin=2em]
+  \item $191$ $\GFt$-multiplications (powers of $\alpha$) — bounded
+    by a constant per multiplication;
+  \item $\Theta(192^3 / 64) \approx 10^5$ word-level operations for
+    the Gauss--Jordan inversion;
+  \item $\Theta(192)$ word XORs per per-entry lift, of which there are
+    at most $O(n_{\mathrm{rows}} + n_{\mathrm{cols}})$ in the
+    opening (the lengths of the $q_0, q_1$ tensors).
+\end{itemize}
+
+\subsection{Soundness consequence}
+
+\begin{corollary}[Lift commutes with $\psia$]
+\label{cor:lift-commutes}
+For any $u_1, \ldots, u_k \in \GFt$ and any polynomial-multiplication
+expression $p(\cdot) \in \polyring[Y_1, \ldots, Y_k]$,
+\[
+  \psia\!\big(p\big(\lift(u_1), \ldots, \lift(u_k)\big)\big)
+  \;=\;
+  p(u_1, \ldots, u_k) \;\in\; \GFt,
+\]
+where the inner $p(\lift(u_1), \ldots, \lift(u_k))$ is evaluated in
+$\polyring$ (no reduction) and the outer $\psia$ projects.
+\end{corollary}
+
+\begin{proof}
+$\psia$ is an $\F_2$-algebra homomorphism, so it commutes with sums
+and products in $\polyring$. By \Cref{prop:lift-roundtrip},
+$\psia(\lift(u_i)) = u_i$ for every $i$. Therefore
+$\psia(p(\lift(u_1), \ldots, \lift(u_k))) =
+p(\psia(\lift(u_1)), \ldots, \psia(\lift(u_k))) =
+p(u_1, \ldots, u_k)$.
+\end{proof}
+
+\Cref{cor:lift-commutes} is the operative form: \emph{any
+polynomial expression in $\GFt$-elements equals the $\psia$-projection
+of the same expression evaluated over $\polyring$ on the lifted
+inputs.} The construction's verifier exploits this in
+\Cref{sec:construction} to discharge the MLE-evaluation claim
+$a = q_1^\top \cdot \psia(M_w) \cdot q_2$ by reducing it to the
+identity $\psia(a') = a$ on a single lifted polynomial $a' \in
+\polyring$ which the proximity check binds to the commitment.
+
+\paragraph{Witness cells stay in $\cellring$.} A subtle but crucial
+point: the witness cells $M_{w, b}$ in the matrix identity
+$a = q_0^\top \cdot \psia(M_w) \cdot q_1$ are already polynomials in
+$\polyringat{\Dval} \subset \polyring$; their $\psia$-image is
+$\psia(M_{w,b}) = M_{w,b}(\alpha) \in \GFt$, which is the
+\emph{evaluation} of the polynomial $M_{w,b}$ at $\alpha$ — exactly
+what $\psia$ does on polynomial input. The lift therefore acts only on
+the $q_0, q_1$ entries (the transcript-fresh $\GFt$-randomness); the
+witness side carries through unchanged.

@@ -1,5 +1,5 @@
-//! Benchmark: prototype `BinaryFieldGF128` vs the production
-//! `BinaryFieldGF192`. Covers the primitives that dominate the F_2
+//! Benchmark: the (now-production) `BinaryFieldGF128` vs the
+//! deprecated `BinaryFieldGF192`. Covers the primitives that dominate the F_2
 //! proving path's hot loops:
 //!
 //! - `mul`     (single-element, throughput in scalar loop)
@@ -13,11 +13,11 @@
 //! - `project_col` (one column of 2^16 cells, D=32 bits each, XOR-only inner)
 //! - `project_trace` (41 cols × 2^16 cells; matches `prove_f2_uair`'s shape)
 //!
-//! A full `ideal-check` GF128 port is the next step — gated on
-//! implementing the `Semiring`/`Field`/`PrimeField`/`InnerTransparentField`/
-//! `ConstTranscribable` trait surface on `BinaryFieldGF128`. Until that
-//! lands, the α-projection numbers are the cleanest signal for the
-//! field-size win on the IC side.
+//! After the GF128 trait surface (`Semiring`/`Field`/`PrimeField`/
+//! `InnerTransparentField`/`ConstTranscribable`) was promoted to
+//! production, the F_2 prover path itself runs on GF128; this bench
+//! kept its GF192 baseline so we can keep watching the field-size
+//! win on the IC + α-projection side.
 //!
 //! Run:
 //! ```sh
@@ -25,11 +25,15 @@
 //! ```
 
 #![allow(non_local_definitions)]
+// GF192 is the deprecated baseline this bench compares against; silence
+// the deprecation warnings at the bench level.
+#![allow(deprecated)]
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use zinc_poly::univariate::F2PackU64;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::{
     self as gf128, BinaryFieldGF128,
@@ -235,6 +239,68 @@ fn bench_project_col(c: &mut Criterion) {
                     black_box(cell),
                     &pows192,
                 );
+            }
+            black_box(acc)
+        });
+    });
+    // SIMD-batched 4-cell: branchless body, NEON-vectorised on aarch64.
+    // One α-load shared across 4 accumulators per `i`. Beats both the
+    // scalar branchy form (loop overhead amortised 4×) and the scalar
+    // branchless form (NEON XOR is 1 op vs 2 scalar XORs) once the
+    // batch hides the per-iteration ILP.
+    group.bench_function("GF128_simd_x4", |bench| {
+        bench.iter(|| {
+            let mut acc = BinaryFieldGF128::zero();
+            let mut chunks = cells.chunks_exact(4);
+            for chunk in &mut chunks {
+                let packed = [
+                    chunk[0].pack_u64(),
+                    chunk[1].pack_u64(),
+                    chunk[2].pack_u64(),
+                    chunk[3].pack_u64(),
+                ];
+                let r = gf128::eval_f2_poly_d_at_with_powers_simd_x4::<D>(
+                    black_box(packed),
+                    &pows128,
+                );
+                acc += &r[0];
+                acc += &r[1];
+                acc += &r[2];
+                acc += &r[3];
+            }
+            for cell in chunks.remainder() {
+                acc += &gf128::eval_f2_poly_d_at_with_powers::<D>(black_box(cell), &pows128);
+            }
+            black_box(acc)
+        });
+    });
+    // SIMD-batched 4-cell + union-bit skip: same NEON body as `simd_x4`
+    // but iterates only positions where ≥1 cell has the bit set
+    // (`trailing_zeros` over `cells[0]|...|cells[3]`). Wins on low-popcount
+    // cells (e.g. SHA-256 trace columns) where the union is well below
+    // `D`; loses on random/high-popcount where the union saturates.
+    group.bench_function("GF128_simd_x4_sparse", |bench| {
+        bench.iter(|| {
+            let mut acc = BinaryFieldGF128::zero();
+            let mut chunks = cells.chunks_exact(4);
+            for chunk in &mut chunks {
+                let packed = [
+                    chunk[0].pack_u64(),
+                    chunk[1].pack_u64(),
+                    chunk[2].pack_u64(),
+                    chunk[3].pack_u64(),
+                ];
+                let r = gf128::eval_f2_poly_d_at_with_powers_simd_x4_sparse::<D>(
+                    black_box(packed),
+                    &pows128,
+                );
+                acc += &r[0];
+                acc += &r[1];
+                acc += &r[2];
+                acc += &r[3];
+            }
+            for cell in chunks.remainder() {
+                acc += &gf128::eval_f2_poly_d_at_with_powers::<D>(black_box(cell), &pows128);
             }
             black_box(acc)
         });

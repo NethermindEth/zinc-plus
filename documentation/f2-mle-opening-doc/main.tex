@@ -1,0 +1,53 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{Discharging GF($2^{192}$) MLE-Evaluation Claims via an
+       $\F_2[X]$ Lift-and-Project Opening \\
+       \large As deployed in the Zinc+ reference codebase}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{AI generated report from our codebase. In ongoing revision and edition from authors.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe the final step of the all-$\F_2$ variant of the Zinc+
+PIOP: discharging the multilinear-extension evaluation claims that
+the protocol's sumcheck emits over the binary field $\GFt$. The claims
+have the form $\MLE{[\psia(v)]}(r^*) = a$ with
+$r^* \in \GFt^{\nu}$, $a \in \GFt$, and $v$ a committed witness
+column over the cell ring $\cellring = \F_2[X]/(X^{32})$. Naively
+adapting the integer-typed Zip+ opening fails: the integer-side
+lift exploits the ring homomorphism $\Z \to \F_q$, which has no
+counterpart for $\F_2[X] \to \GFt$ at a generic $\alpha$. Our
+construction instead lifts the row-folded MLE values to (unreduced)
+polynomials in $\F_2[X]$, runs the Zip+ proximity check entirely
+in $\F_2[X]$-arithmetic against the existing $\F_2$-RAA codeword
+matrix, and discharges each per-column claim by one local
+evaluation at $\alpha$. The lift is the unique inverse of the
+$\F_2$-linear map $c \mapsto \sum_i c_i \alpha^i$, computed once per
+$\alpha$ via a $192\times 192$ matrix inversion over $\F_2$. A
+$\gamma$-batching step folds the per-column claims into a single
+$\F_2[X]$-opening triple, leaving the proof linear in the
+column-opening parameter and \emph{constant} in the number of
+committed columns. We give the construction, sketch its soundness,
+and report concrete proof-size accounting.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/introduction}
+\input{sections/setting}
+\input{sections/lift}
+\input{sections/construction}
+\input{sections/soundness}
+\input{sections/cost}
+
+\end{document}

@@ -1,0 +1,258 @@
+\section{The Construction}
+\label{sec:construction}
+
+We describe the $\F_2$-variant Step~7 in five sub-stages:
+$\gamma$-batching of per-column claims, lifted-row computation,
+proximity-coefficient sampling, $\F_2[X]$ encoding consistency
+through the Merkle tree, and the verifier's four-check closing
+identity.
+
+The protocol is run on a single transcript shared with the preceding
+phases (commit, ideal check, evaluation projection, sumcheck). The
+prover and verifier inputs are:
+\begin{itemize}[leftmargin=2em]
+  \item the inverse-lift table $\lift = \psia^{-1}|_{\polyringat{192}}$,
+    derived from the transcript-fresh $\alpha \in \GFt$ via
+    \Cref{cons:invlift};
+  \item the sumcheck endpoint $r^* \in \GFt^{\nu}$ and the per-column
+    MLE evaluation claims $a_1, \ldots, a_K \in \GFt$;
+  \item the prover additionally has the witness $w_1, \ldots, w_K \in
+    \cellring^n$ and the codeword matrices
+    $M_{\mathrm{cw}, g} \in \cellring^{n_{\mathrm{rows}} \times
+    n_{\mathrm{cw}}}$ with their Merkle tree.
+\end{itemize}
+
+\subsection{Tensor decomposition of $r^*$}
+\label{sec:tensor}
+
+Split $r^* = (r_0^*, r_1^*) \in \GFt^{\nu_0} \times \GFt^{\nu_1}$
+along the matrix shape (\Cref{sec:setting}). Compute the eq-tensor
+factors $q_0 \in \GFt^{n_{\mathrm{rows}}}$, $q_1 \in
+\GFt^{n_{\mathrm{cols}}}$ via the standard $\eq$-MLE construction
+over $\GFt$, then lift each entry through $\lift$ to obtain
+\[
+  q_0' \;\in\; \polyringat{192}^{n_{\mathrm{rows}}},
+  \qquad
+  q_1' \;\in\; \polyringat{192}^{n_{\mathrm{cols}}}.
+\]
+Both prover and verifier perform this step identically — the only
+inputs are $r^*$, $\alpha$, and the lift table.
+
+\subsection{$\gamma$-batching}
+\label{sec:gamma-batch}
+
+The prover draws $K$ challenges $\gamma_1, \ldots, \gamma_K \in \GFt$
+from the transcript (transcript order: after the commit absorption
+and after the sumcheck's transcript activity, before any opening data
+is sent), and lifts each through $\lift$ to obtain
+$\gamma_1', \ldots, \gamma_K' \in \polyringat{192}$.
+
+The intuition is: instead of sending a per-column triple
+$(a_g', b_g, \mathrm{combined\_row}_g)$, the prover folds the $K$
+triples into a single triple by the random linear combination
+$\sum_g \gamma_g' \cdot (\text{column-}g\text{ contribution})$.
+Soundness against per-column tampering is then by Schwartz–Zippel
+over the $\gamma_g$.
+
+\subsection{Lifted row and column folds}
+\label{sec:folds}
+
+For each primary column $g \in \{1, \ldots, K\}$ the prover computes,
+over $\polyring$:
+\begin{align*}
+  b_g[i] &\;:=\; \sum_{j \in \{0,1\}^{\nu_1}} q_1'[j] \cdot M_{w_g}[i, j]
+    & i \in \{0,1\}^{\nu_0}, \\
+  a_g' &\;:=\; \sum_{i \in \{0,1\}^{\nu_0}} q_0'[i] \cdot b_g[i].
+\end{align*}
+Both are $\F_2[X]$-arithmetic computations (carryless polynomial
+multiplication, XOR-accumulation). Widths:
+$b_g[i] \in \polyringat{\Dval + 192 - 1}$ (deployed: stored in
+$\polyringat{256}$), $a_g' \in \polyringat{\Dval + 2 \cdot 192 - 2}$
+(deployed: $\polyringat{448}$). The $a_g'$ and $b_g$ are
+\emph{intermediates} — they are not sent.
+
+The $\gamma$-batched versions are
+\begin{equation}
+  \label{eq:gamma-batch}
+  a' \;:=\; \sum_{g=1}^{K} \gamma_g' \cdot a_g' \;\in\; \polyringat{\Dval + 3\cdot 192 - 3},
+  \qquad
+  b'[i] \;:=\; \sum_{g=1}^{K} \gamma_g' \cdot b_g[i] \;\in\; \polyringat{\Dval + 2\cdot 192 - 2}.
+\end{equation}
+The prover writes $a' \in \polyring$ and the vector $b' \in
+\polyring^{n_{\mathrm{rows}}}$ to the transcript.
+
+\subsection{Proximity coefficients and the combined row}
+
+After absorbing $(a', b')$, the prover draws $n_{\mathrm{rows}}$
+fresh proximity challenges $c_1, \ldots, c_{n_{\mathrm{rows}}} \in
+\GFt$, lifts each through $\lift$ to obtain $c' \in
+\polyringat{192}^{n_{\mathrm{rows}}}$, and computes the
+\emph{$\gamma$-batched combined row}
+\begin{equation}
+  \label{eq:combined-row}
+  \mathrm{cr}'[j] \;:=\; \sum_{g=1}^{K} \gamma_g' \cdot
+    \sum_{i \in \{0,1\}^{\nu_0}} c'[i] \cdot M_{w_g}[i, j],
+  \qquad j \in \{0,1\}^{\nu_1},
+\end{equation}
+in $\polyringat{\Dval + 2 \cdot 192 - 2}$. The prover writes $\mathrm{cr}'$
+to the transcript.
+
+\subsection{Column openings via the Merkle tree}
+
+After absorbing $\mathrm{cr}'$, the prover draws $t$ column indices
+$j_1, \ldots, j_t \in \{0, \ldots, n_{\mathrm{cw}} - 1\}$ from the
+transcript, where $t$ is the protocol-fixed column-opening parameter.
+For each $j_k$ the prover writes:
+\begin{enumerate}[leftmargin=2em]
+  \item the codeword column $\big(M_{\mathrm{cw}, g}[i, j_k]\big)_{g, i}
+    \in \cellring^{K \cdot n_{\mathrm{rows}}}$, with the per-column
+    cells concatenated in commit order;
+  \item the Merkle authentication path for leaf $j_k$, computed against
+    the commit-time Merkle tree.
+\end{enumerate}
+
+\subsection{Verifier checks}
+\label{sec:checks}
+
+The verifier holds $(a_1, \ldots, a_K)$, $r^*$, $\alpha$, the lift
+table, and the proof's transmitted data $a' \in \polyring$, $b' \in
+\polyring^{n_{\mathrm{rows}}}$, $\mathrm{cr}' \in
+\polyring^{n_{\mathrm{cols}}}$, and per-opened-column $(j_k, \mathrm{col\_values}_k,
+\pi_k)$. It re-derives $q_0', q_1', \gamma_g', c'$ from the
+transcript identically to the prover, then runs four algebraic checks
+plus one Merkle check per opened column.
+
+\begin{construction}[Lift-and-project open over {$\F_2[X]$}]
+\label{cons:open}
+The verifier runs the four checks below in sequence; on any failure
+it rejects.
+
+\emph{Check 1 (evaluation consistency).}
+\[
+  \sum_{i \in \{0,1\}^{\nu_0}} q_0'[i] \cdot b'[i] \;\stackrel{?}{=}\; a'
+  \qquad \text{in } \polyring.
+\]
+
+\emph{Check 2 (lift discharge).}
+\[
+  \psia(a') \;\stackrel{?}{=}\; \sum_{g=1}^{K} \gamma_g \cdot a_g
+  \qquad \text{in } \GFt.
+\]
+
+\emph{Check 3 (coherence).}
+\[
+  \sum_{j \in \{0,1\}^{\nu_1}} \mathrm{cr}'[j] \cdot q_1'[j]
+  \;\stackrel{?}{=}\;
+  \sum_{i \in \{0,1\}^{\nu_0}} c'[i] \cdot b'[i]
+  \qquad \text{in } \polyring.
+\]
+
+\emph{Check 4 (encoding consistency at each opened column).}
+For every opened column index $j_k$:
+\begin{itemize}[leftmargin=2em, label=---]
+  \item Merkle: $\pi_k$ verifies $\mathrm{col\_values}_k$ against
+    the commitment root and leaf index $j_k$.
+  \item Encoding identity:
+    $\encode(\mathrm{cr}')[j_k] = \sum_{i \in \{0,1\}^{\nu_0}}
+    c'[i] \cdot \sum_{g=1}^{K} \gamma_g' \cdot \mathrm{col\_values}_k[g, i]$
+    in $\polyring$, where $\encode$ is the deployed RAA encoder applied
+    to $\polyring$-valued rows (see \Cref{lem:f2x-linearity}).
+\end{itemize}
+
+Accept iff Checks 1--4 all pass.
+\end{construction}
+
+\subsection{Why the checks are well-typed}
+
+We trace the widths of the polynomial expressions:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Check 1.} $q_0' \in \polyringat{192}$, $b' \in
+    \polyringat{\Dval + 2 \cdot 192 - 2}$. Product:
+    $\polyringat{\Dval + 3 \cdot 192 - 3}$. Sum: same. $a' \in
+    \polyringat{\Dval + 3 \cdot 192 - 3}$. Both sides live in the same
+    polynomial ring; equality is bit-exact.
+  \item \textbf{Check 2.} Both sides in $\GFt$; equality bit-exact
+    after mod-$P$ reduction (implicit in $\GFt$-arithmetic).
+  \item \textbf{Check 3.} Same width as Check 1.
+  \item \textbf{Check 4.} $\mathrm{cr}' \in \polyringat{\Dval + 2
+    \cdot 192 - 2}$ before encoding; $\encode$ is $\polyring$-linear
+    so the encoded entries stay in the same ring. RHS: $c' \in
+    \polyringat{192}$, $\gamma_g' \in \polyringat{192}$,
+    $\mathrm{col\_values}_k[g, i] \in \cellring \subset
+    \polyringat{\Dval}$. Per-summand width:
+    $\polyringat{\Dval + 2 \cdot 192 - 2}$. Sum: same.
+\end{itemize}
+All arithmetic is over $\polyring$ throughout; no $\GFt$-reduction is
+performed inside the proximity check.
+
+\subsection{Why Check~2 closes the loop}
+
+Checks 1, 3, 4 are entirely $\polyring$-arithmetic identities that
+bind $a'$, $b'$, $\mathrm{cr}'$ to the committed codeword matrix.
+Check~2 then ties this $\polyring$-typed chain back to the
+$\GFt$-typed claims $(a_1, \ldots, a_K)$ that the protocol owes the
+verifier. To see this, apply \Cref{cor:lift-commutes} to the
+left-hand side of Check~1:
+\[
+  \psia\!\left(\sum_i q_0'[i] \cdot b'[i]\right)
+  \;=\;
+  \sum_i q_0[i] \cdot \psia(b'[i])
+  \;=\;
+  \sum_i q_0[i] \cdot \sum_g \gamma_g \cdot \psia(b_g[i]).
+\]
+Each $\psia(b_g[i])$ in turn satisfies, by linearity of $\psia$ and
+the structure of $b_g$,
+\[
+  \psia(b_g[i]) \;=\;
+  \sum_j q_1[j] \cdot \psia(M_{w_g}[i, j]),
+\]
+so the full chain yields
+\[
+  \psia(a')
+  \;=\;
+  \sum_g \gamma_g \cdot \big( q_0^\top \cdot \psia(M_{w_g}) \cdot q_1 \big)
+  \;=\;
+  \sum_g \gamma_g \cdot a_g.
+\]
+For honest data this is an identity, so Check~2 holds. For dishonest
+data, by Schwartz–Zippel on $\gamma$ (drawn after the commit),
+Check~2 catches any mismatch with overwhelming probability.
+
+\subsection{Pseudocode summary}
+
+\begin{construction}[Step~7 prover]
+\label{cons:prover}
+On input transcript $\mathcal{T}$, witness $(w_1, \ldots, w_K)$, commit
+hint $(M_{\mathrm{cw}, g}, \mathrm{tree})$, $r^*$, $\alpha$, $K$
+columns, and column-opening parameter $t$:
+\begin{enumerate}[leftmargin=2em]
+  \item Build $\lift$ via \Cref{cons:invlift} from $\alpha$.
+  \item Compute $q_0', q_1'$ from $r^*$ via \Cref{sec:tensor}.
+  \item Draw $\gamma_1, \ldots, \gamma_K \leftarrow \mathcal{T}$; lift to $\gamma_g'$.
+  \item For each $g$: compute $b_g, a_g'$ as in \Cref{sec:folds}; accumulate
+    $a' \mathrel{+}= \gamma_g' \cdot a_g'$, $b'[i] \mathrel{+}= \gamma_g' \cdot b_g[i]$.
+  \item Write $(a', b')$ to $\mathcal{T}$.
+  \item Draw $c_1, \ldots, c_{n_{\mathrm{rows}}} \leftarrow \mathcal{T}$; lift to $c'$.
+  \item Compute $\mathrm{cr}'$ via \cref{eq:combined-row}; write to $\mathcal{T}$.
+  \item For $k = 1, \ldots, t$: draw $j_k \leftarrow \mathcal{T}$; emit
+    $(j_k, \mathrm{col\_values}_k, \pi_k)$ from the codeword matrices and
+    Merkle tree.
+\end{enumerate}
+\end{construction}
+
+\begin{construction}[Step~7 verifier]
+\label{cons:verifier}
+On input transcript $\mathcal{T}$, commit root, $(a_1, \ldots, a_K)$,
+$r^*$, $\alpha$, proof $(a', b', \mathrm{cr}', \{(j_k,
+\mathrm{col\_values}_k, \pi_k)\}_{k=1}^{t})$:
+\begin{enumerate}[leftmargin=2em]
+  \item Build $\lift$ via \Cref{cons:invlift} from $\alpha$.
+  \item Compute $q_0', q_1', \gamma_g', c'$ from $\mathcal{T}$
+    identically to the prover.
+  \item Absorb $(a', b', \mathrm{cr}')$ in transcript order.
+  \item Run Checks~1--3 of \Cref{cons:open}. On any failure, reject.
+  \item For $k = 1, \ldots, t$: draw $j_k \leftarrow \mathcal{T}$, run
+    Check~4 of \Cref{cons:open}. On any failure, reject.
+  \item Accept.
+\end{enumerate}
+\end{construction}

@@ -614,32 +614,32 @@ where
 
 // ---------------------------------------------------------------------------
 // Scalar projection: lift a `Self::Scalar = DensePolynomial<R, 32>` to
-// `DynamicPolynomialF<BinaryFieldGF192>`.
+// `DynamicPolynomialF<BinaryFieldGF128>`.
 //
 // We treat each `R` coefficient as `0` or `1` in F_2 (using `is_zero`
 // since the trace generator only ever puts 0/1 there for rho_sig*,
-// rho_lsig*, X), then embed F_2 ⊂ GF(2^192) trivially.
+// rho_lsig*, X), then embed F_2 ⊂ GF(2^128) trivially.
 // ---------------------------------------------------------------------------
 
 /// Project a scalar polynomial in `R[X]` whose coefficients are 0 or 1
 /// (the only values the F_2[X] UAIR uses) to a
-/// `DynamicPolynomialF<BinaryFieldGF192>` for the F_2 IC pipeline.
+/// `DynamicPolynomialF<BinaryFieldGF128>` for the F_2 IC pipeline.
 pub fn sha256_f2_project_scalar<R>(
     scalar: &DensePolynomial<R, 32>,
-) -> DynamicPolynomialF<zinc_poly::univariate::binary_gf192::BinaryFieldGF192>
+) -> DynamicPolynomialF<zinc_poly::univariate::binary_gf128::BinaryFieldGF128>
 where
     R: Semiring + num_traits::Zero,
 {
-    use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;
+    use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
     let cfg = ();
-    let coeffs: Vec<BinaryFieldGF192> = scalar
+    let coeffs: Vec<BinaryFieldGF128> = scalar
         .coeffs
         .iter()
         .map(|c| {
             if num_traits::Zero::is_zero(c) {
-                BinaryFieldGF192::zero_with_cfg(&cfg)
+                BinaryFieldGF128::zero_with_cfg(&cfg)
             } else {
-                BinaryFieldGF192::one_with_cfg(&cfg)
+                BinaryFieldGF128::one_with_cfg(&cfg)
             }
         })
         .collect();

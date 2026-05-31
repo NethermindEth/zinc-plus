@@ -21,8 +21,12 @@ use crate::{
     pcs::structs::ZipTypes,
     utils::shuffle_seeded,
 };
-use crypto_primitives::PrimeField;
+use crypto_primitives::{DenseRowMatrix, PrimeField};
+use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
+use zinc_utils::{cfg_chunks, cfg_chunks_mut};
 use zinc_poly::univariate::{F2AddAssign, F2PackU64, binary_f2_wide::BinaryF2Poly};
 use zinc_utils::{from_ref::FromRef, mul};
 
@@ -37,6 +41,20 @@ pub struct RaaF2Code<Zt: ZipTypes, Config: RaaConfig, const REP: usize> {
     pub(crate) perm_2_seed: u64,
     pub(crate) perm_1: Vec<usize>,
     pub(crate) perm_2: Vec<usize>,
+    /// u32 mirror of `perm_1` for the Metal GPU RAA encoder dispatcher
+    /// (which binds permutations as `device const uint*`). Pre-built
+    /// at construction so the GPU path doesn't pay a per-call
+    /// `Vec<u32>` allocation; permutations are constant for the life
+    /// of the code. The dispatcher caches the corresponding GPU
+    /// `MTLBuffer` by the slab's pointer identity, so a steady-state
+    /// prove run uploads each permutation exactly once.
+    ///
+    /// Memory cost: `codeword_len * 4` bytes per perm = 8 MB at
+    /// SHA-256 F_2 nvars=22 (16 MB across both perms).
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub(crate) perm_1_u32: Vec<u32>,
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub(crate) perm_2_u32: Vec<u32>,
     phantom: PhantomData<(Zt, Config)>,
 }
 
@@ -89,12 +107,27 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, RE
         let mut perm_2: Vec<usize> = (0..codeword_len).collect();
         shuffle_seeded(&mut perm_2, PERM_2_SEED);
 
+        #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+        let perm_1_u32: Vec<u32> = perm_1
+            .iter()
+            .map(|&i| u32::try_from(i).expect("perm index > u32::MAX"))
+            .collect();
+        #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+        let perm_2_u32: Vec<u32> = perm_2
+            .iter()
+            .map(|&i| u32::try_from(i).expect("perm index > u32::MAX"))
+            .collect();
+
         Self {
             row_len,
             perm_1_seed: PERM_1_SEED,
             perm_2_seed: PERM_2_SEED,
             perm_1,
             perm_2,
+            #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+            perm_1_u32,
+            #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+            perm_2_u32,
             phantom: PhantomData,
         }
     }
@@ -234,6 +267,59 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> RaaF2Code<Zt, Config, RE
 
         debug_assert_eq!(buf.len(), codeword_len);
         buf.into_iter().map(Out::unpack_u64).collect()
+    }
+
+    /// GPU encode `num_rows` independent codewords through the RAA F_2
+    /// pipeline in a single Metal command buffer.
+    ///
+    /// `data` is a row-major matrix of `num_rows × codeword_len` u64
+    /// cells, with the input row pre-written into the first `row_len`
+    /// columns of every row. On return the entire `data` slab holds
+    /// the encoded matrix, bit-for-bit identical to looping the CPU
+    /// path `encode_into_with_scratch` `num_rows` times.
+    ///
+    /// `block_size` is the prefix-XOR phase-1 strip width; pass `0`
+    /// to use a default (1024) that empirically balances
+    /// phase-1 vs phase-3 launch sizes at SHA-256 nvars=22.
+    ///
+    /// Falls back to a per-row CPU loop when `metal_gpu` is off /
+    /// `target_os` is not macOS.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    pub fn encode_matrix_gpu_u64(
+        &self,
+        data: &mut [u64],
+        num_rows: usize,
+        block_size: usize,
+    ) {
+        let codeword_len = mul!(self.row_len, REP);
+        assert_eq!(
+            data.len(),
+            num_rows * codeword_len,
+            "encode_matrix_gpu_u64: data.len() ({}) != num_rows * codeword_len ({})",
+            data.len(),
+            num_rows * codeword_len,
+        );
+        let block_size = if block_size == 0 { 1024 } else { block_size };
+
+        let ctx = crate::metal_gpu::MetalContext::get();
+        // SAFETY:
+        //   * `data.as_mut_ptr()..+data.len()*8` is owned by the caller
+        //     and held alive for the duration of this call.
+        //   * `self.perm_1_u32` and `self.perm_2_u32` each have length
+        //     `codeword_len` and are alive for the duration of this call.
+        //   * The dispatcher blocks on `wait_until_completed` before
+        //     returning.
+        unsafe {
+            ctx.raa_f2_encode_matrix_gpu(
+                data.as_mut_ptr() as *mut u8,
+                num_rows,
+                self.row_len,
+                REP,
+                self.perm_1_u32.as_ptr(),
+                self.perm_2_u32.as_ptr(),
+                block_size,
+            );
+        }
     }
 }
 
@@ -408,6 +494,105 @@ where
         // Step 5: prefix-XOR on `dst_init`.
         f2_accumulate(dst_init);
     }
+
+    /// Override of [`LinearCode::encode_rows_batched`] that dispatches
+    /// the whole matrix encode to Metal in one command buffer when:
+    ///   * `metal_gpu` feature is on AND `target_os = "macos"`,
+    ///   * `simd` feature is on (so `BinaryPoly<W>` is the
+    ///     `#[repr(transparent)] u64`-backed `BinaryU64Poly<W>` rather
+    ///     than `BinaryRefPoly<W>`),
+    ///   * Both `Zt::Eval` and `Zt::Cw` are exactly 8 bytes each
+    ///     (matches `W = PACKED_STORAGE_WIDTH = 64` — the f2-clean
+    ///     SHA-256 commit shape).
+    ///
+    /// Falls back to the per-row CPU loop (the trait's default
+    /// behaviour) otherwise.
+    ///
+    /// Mirrors the structure of `LinearCode::encode_rows_batched`'s
+    /// default implementation for the CPU branch.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn encode_rows_batched(
+        &self,
+        evals: &[Zt::Eval],
+        num_rows: usize,
+        out: &mut DenseRowMatrix<std::mem::MaybeUninit<Zt::Cw>>,
+    ) {
+        let row_len = self.row_len;
+        let codeword_len = mul!(row_len, REP);
+        debug_assert_eq!(evals.len(), num_rows * row_len);
+        debug_assert_eq!(out.data.len(), num_rows * codeword_len);
+
+        #[cfg(all(
+            feature = "metal_gpu",
+            target_os = "macos",
+            feature = "simd",
+        ))]
+        {
+            // Static layout checks. On the BinaryPoly<64> path
+            // these are both `size_of == 8`, `align == 8`. If a
+            // future caller plugs in a different `Zt::Cw` we fall
+            // through to the CPU loop. The `if`s are const-folded
+            // away at monomorphisation.
+            let cw_8 = std::mem::size_of::<Zt::Cw>() == 8
+                && std::mem::align_of::<Zt::Cw>() >= std::mem::align_of::<u64>();
+            let eval_8 = std::mem::size_of::<Zt::Eval>() == 8
+                && std::mem::align_of::<Zt::Eval>() >= std::mem::align_of::<u64>();
+            if cw_8 && eval_8 {
+                // Reinterpret the output slab as `&mut [u64]`. Safe
+                // under the layout guarantees of the gating
+                // (BinaryU64Poly<W> = #[repr(transparent)] u64). The
+                // GPU dispatcher then fully writes every cell, after
+                // which the slab is "initialised" from Rust's
+                // perspective.
+                let out_slab: &mut [u64] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        out.data.as_mut_ptr() as *mut u64,
+                        num_rows * codeword_len,
+                    )
+                };
+                // Pre-fill the first `row_len` columns of each row
+                // with the input row's u64 cells. Treating
+                // `Zt::Eval` as `&[u64]` is sound by the same
+                // repr(transparent) guarantee.
+                let evals_u64: &[u64] = unsafe {
+                    std::slice::from_raw_parts(
+                        evals.as_ptr() as *const u64,
+                        evals.len(),
+                    )
+                };
+                for r in 0..num_rows {
+                    let dst_row = &mut out_slab[r * codeword_len..r * codeword_len + row_len];
+                    let src_row = &evals_u64[r * row_len..(r + 1) * row_len];
+                    dst_row.copy_from_slice(src_row);
+                    // Tail (columns row_len..codeword_len) will be
+                    // overwritten by `raa_f2_repeat`.
+                }
+                // GPU dispatch. block_size = 0 picks the dispatcher's
+                // default (1024).
+                self.encode_matrix_gpu_u64(out_slab, num_rows, 0);
+                return;
+            }
+        }
+
+        // CPU fallback: mirrors the trait's default `encode_rows_batched`
+        // (per-task chunked row loop with reused scratch).
+        const ROWS_PER_TASK: usize = 64;
+        let task_rows = ROWS_PER_TASK.min(num_rows.max(1));
+        let dst_block_stride = codeword_len * task_rows;
+        let src_block_stride = row_len * task_rows;
+
+        cfg_chunks_mut!(out.data, dst_block_stride)
+            .zip(cfg_chunks!(evals, src_block_stride))
+            .for_each(|(dst_block, src_block)| {
+                let mut scratch: Vec<Zt::Cw> = vec![Zt::Cw::zero(); codeword_len];
+                for (dst_row, src_row) in dst_block
+                    .chunks_mut(codeword_len)
+                    .zip(src_block.chunks(row_len))
+                {
+                    self.encode_into_with_scratch(src_row, &mut scratch, dst_row);
+                }
+            });
+    }
 }
 
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> Debug for RaaF2Code<Zt, Config, REP> {
@@ -541,5 +726,72 @@ mod tests {
         // Two 1's under XOR accumulation produce a codeword whose total
         // running-XOR (sum mod 2) is 0 — i.e. F_2 cancellation occurred.
         assert_eq!(total_xor, BinaryPoly::<D>::zero());
+    }
+
+    /// GPU RAA encoder must match the CPU `encode` byte-for-byte
+    /// across multiple parallel codewords. Tested with a sweep over
+    /// (num_rows, row_len) shapes and randomized inputs.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    #[test]
+    fn gpu_raa_encode_matches_cpu() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand::rngs::StdRng;
+        use zinc_poly::univariate::F2PackU64;
+
+        let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_CAFE_F00D);
+
+        for &(num_rows, row_len) in &[
+            (1usize, 8usize),
+            (4, 8),
+            (8, 16),
+            (1, 64),
+            (8, 64),
+            (3, 256),
+        ] {
+            let codeword_len = row_len * REP;
+            let code = Code::new(row_len);
+
+            // Build `num_rows` independent random rows of width
+            // `row_len` and encode each on the CPU as a reference.
+            let mut inputs: Vec<Vec<BinaryPoly<D>>> = Vec::with_capacity(num_rows);
+            let mut cpu_codewords: Vec<Vec<BinaryPoly<D>>> = Vec::with_capacity(num_rows);
+            for _ in 0..num_rows {
+                let row: Vec<BinaryPoly<D>> = (0..row_len)
+                    .map(|_| bp(rng.random::<u32>()))
+                    .collect();
+                let cw: Vec<BinaryPoly<D>> = code.encode(&row);
+                assert_eq!(cw.len(), codeword_len);
+                inputs.push(row);
+                cpu_codewords.push(cw);
+            }
+
+            // Pack inputs into a row-major u64 slab with the first
+            // `row_len` columns of each row containing the input.
+            // The kernel fills the rest.
+            let mut data: Vec<u64> = vec![0u64; num_rows * codeword_len];
+            for (r, row) in inputs.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    data[r * codeword_len + c] = cell.pack_u64();
+                }
+            }
+
+            // Dispatch the GPU encoder.
+            code.encode_matrix_gpu_u64(&mut data, num_rows, 0);
+
+            // Verify byte-equal codewords.
+            for (r, cpu_cw) in cpu_codewords.iter().enumerate() {
+                for (c, cpu_cell) in cpu_cw.iter().enumerate() {
+                    let gpu_u64 = data[r * codeword_len + c];
+                    let cpu_u64 = cpu_cell.pack_u64();
+                    assert_eq!(
+                        gpu_u64, cpu_u64,
+                        "mismatch at (row={r}, col={c}) for shape \
+                         (num_rows={num_rows}, row_len={row_len}): \
+                         cpu={cpu_u64:#018x} gpu={gpu_u64:#018x}"
+                    );
+                }
+            }
+        }
     }
 }

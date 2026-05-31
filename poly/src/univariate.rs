@@ -3,6 +3,10 @@ use zinc_utils::from_ref::FromRef;
 
 pub mod binary_f2_wide;
 pub mod binary_gf128;
+#[deprecated(
+    note = "F_2 prover uses BinaryFieldGF128; binary_gf192 is kept only for the binary_gf_compare bench. \
+            Switch new code to crate::univariate::binary_gf128."
+)]
 pub mod binary_gf192;
 pub mod binary_ref;
 pub mod binary_u64;

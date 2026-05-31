@@ -40,7 +40,7 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
         binary::{BinaryPoly, BinaryPolyInnerProduct},
-        binary_gf192::BinaryFieldGF192,
+        binary_gf128::BinaryFieldGF128,
         dense::{DensePolyInnerProduct, DensePolynomial},
     },
 };
@@ -105,6 +105,17 @@ impl RaaConfig for BenchRaaConfig {
 struct BenchF2Types<const D: usize>(PhantomData<()>);
 
 const REP: usize = 4;
+
+/// Number of column openings the prover sends to the verifier.
+/// **`987`** is the value returned by
+/// `recommended_num_column_openings(REP)` for RAA at REP=4 — the
+/// soundness-calibrated count under the RAA proximity gap.
+///
+/// The sibling bench `f2_sha256_rs.rs` keeps the same code path but
+/// drops this to `200` to estimate prover/verifier wall-time and
+/// proof size under a Reed-Solomon / MDS proximity bound. See that
+/// file's module docs for context.
+const BENCH_NUM_OPENINGS: usize = 987;
 
 impl<const D: usize> F2ZincTypes<D> for BenchF2Types<D> {
     // The commit-storage cell is `BinaryPoly<64>`: the protocol pairs
@@ -180,13 +191,13 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
     // -- commitment.root (32-byte Blake3 Merkle root) --
     let commitment: Vec<u8> = (*proof.commitment.root).to_vec();
 
-    // -- uair.alpha (BinaryFieldGF192::Inner = Uint<3>, 24 bytes) --
+    // -- uair.alpha (BinaryFieldGF128::Inner = Uint<2>, 16 bytes) --
     const ALPHA_BYTES: usize =
-        <<BinaryFieldGF192 as Field>::Inner as ConstTranscribable>::NUM_BYTES;
+        <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES;
     let mut alpha = vec![0u8; ALPHA_BYTES];
     proof.uair.alpha.inner().write_transcription_bytes_exact(&mut alpha);
 
-    // -- uair.gamma (γ-batching challenge, 24 bytes) --
+    // -- uair.gamma (γ-batching challenge, 16 bytes) --
     let mut gamma = vec![0u8; ALPHA_BYTES];
     proof.uair.gamma.inner().write_transcription_bytes_exact(&mut gamma);
 
@@ -198,7 +209,7 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
     let mut sumcheck = vec![0u8; proof.uair.sumcheck_proof.get_num_bytes()];
     proof.uair.sumcheck_proof.write_transcription_bytes_exact(&mut sumcheck);
 
-    // -- uair.column_evals_at_rstar (per-column GF(2^192) values) --
+    // -- uair.column_evals_at_rstar (per-column GF(2^128) values) --
     let mut col_evals_at_rstar = vec![0u8; proof.uair.column_evals_at_rstar.len() * ALPHA_BYTES];
     for (i, v) in proof.uair.column_evals_at_rstar.iter().enumerate() {
         v.inner().write_transcription_bytes_exact(
@@ -214,7 +225,7 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         .sumcheck_proof
         .write_transcription_bytes_exact(&mut mp_sumcheck);
 
-    // -- open_evals_at_r_0 (per-column GF(2^192) values) --
+    // -- open_evals_at_r_0 (per-column GF(2^128) values) --
     let mut open_evals_at_r_0 = vec![0u8; proof.open_evals_at_r_0.len() * ALPHA_BYTES];
     for (i, v) in proof.open_evals_at_r_0.iter().enumerate() {
         v.inner().write_transcription_bytes_exact(
@@ -222,13 +233,13 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         );
     }
 
-    // -- open.lifted_claim (BinaryF2Poly<10> = 80 bytes) --
+    // -- open.lifted_claim (BinaryF2Poly<7> = 80 bytes) --
     let mut lifted_claim = Vec::with_capacity(80);
     for w in proof.open.lifted_claim.words() {
         lifted_claim.extend_from_slice(&w.to_le_bytes());
     }
 
-    // -- open.b_vector (Vec<BinaryF2Poly<7>>, 7 × u64 = 56 bytes each) --
+    // -- open.b_vector (Vec<BinaryF2Poly<5>>, 7 × u64 = 56 bytes each) --
     let mut b_vector = Vec::with_capacity(proof.open.b_vector.len() * 56);
     for v in &proof.open.b_vector {
         for w in v.words() {
@@ -236,7 +247,7 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         }
     }
 
-    // -- open.combined_row (Vec<BinaryF2Poly<7>>) --
+    // -- open.combined_row (Vec<BinaryF2Poly<5>>) --
     let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * 56);
     for v in &proof.open.combined_row {
         for w in v.words() {
@@ -437,7 +448,7 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                     &fx.trace.binary_poly,
                     &subclaim.sumcheck_point,
                     &subclaim.alpha,
-                    recommended_num_column_openings(REP),
+                    BENCH_NUM_OPENINGS,
                 );
                 black_box(open_proof);
             },
@@ -458,7 +469,7 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
 
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
-            recommended_num_column_openings(REP),
+            BENCH_NUM_OPENINGS,
         )
         .expect("prove for verifier bench should succeed")
     };
@@ -553,7 +564,7 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
 //   a. RowMajorProject  — `project_f2_trace_row_major`
 //   b. ProjectScalars   — `zinc_piop::projections::project_scalars`
 //   c. ICProveCombined  — `<U as IdealCheckProtocol>::prove_combined`
-//   d. AlphaProject     — α draw + per-cell eval at α to GF(2^192)
+//   d. AlphaProject     — α draw + per-cell eval at α to GF(2^128)
 //   e. Sumcheck         — `MultiDegreeSumcheck::prove_as_subprotocol`
 // ---------------------------------------------------------------------------
 
@@ -571,7 +582,7 @@ fn sha_f2_scalar_to_bits(
         if i >= 64 {
             break;
         }
-        if !<BinaryFieldGF192 as PrimeField>::is_zero(c) {
+        if !<BinaryFieldGF128 as PrimeField>::is_zero(c) {
             bits |= 1u64 << i;
         }
     }
@@ -583,8 +594,8 @@ fn bench_micro_prover_uair(
     id: &str,
     fx: &ProverFixture,
 ) {
-    use zinc_poly::univariate::binary_gf192::{
-        alpha_powers, eval_f2_poly_d_at_with_powers,
+    use zinc_poly::univariate::binary_gf128::{
+        alpha_powers, eval_f2_poly_d_at_with_powers, project_column_with_powers,
     };
     use zinc_protocol::f2_native_ic::F2NativeIc;
 
@@ -629,6 +640,114 @@ fn bench_micro_prover_uair(
                 .map(|poly| ZipPlus::<BinZt, BinLc>::encode_rows(&fx.pp, poly))
                 .collect();
             black_box(cw_matrices);
+        });
+    });
+
+    // ---- 0b') Commit-Encode-RS: coefficient-wise FFT-based Reed-Solomon
+    //          encoding, the binary-field analog of `IprsCode`.
+    //
+    // Goal: measure raw RS encode throughput at the F_2 commit shape
+    // using the structurally-correct encoding: `D` independent
+    // GF(2^32) RS encodings, one per coefficient slot of each input
+    // cell. This mirrors what `IprsCode` does for integer cells (32
+    // independent i64 polynomial slots) but with the underlying ring
+    // swapped from `i64` to `BinaryElem32` (= `GF(2^32)` under
+    // bolt-rs's GHASH-style pentanomial).
+    //
+    // **Why coefficient-wise?** Each trace cell is a `BinaryPoly<D>`
+    // (D = 32 F_2 coefficients packed in a `u32`). The protocol's
+    // codeword cells need to preserve all D slots so the open phase
+    // can fold each coefficient slot independently. Packing all D
+    // bits into a single GF(2^32) field element (the obvious "one
+    // encode per cell" formulation, an earlier version of this entry)
+    // *mixes* coefficient slots via field multiplication — equivalent
+    // to bolt-rs's standalone usage but algebraically incompatible
+    // with the F_2 prover. The IPRS-equivalent encoding does D
+    // separate RS encodings instead; each per-slot output is then
+    // restacked into the wide codeword cell.
+    //
+    // Concretely, per (matrix, row):
+    //   for k in 0..D:
+    //       lane[k][j] = bit k of input cell at position j (embedded
+    //                    in GF(2^32) as the value 0 or 1)
+    //       rs.encode(lane[k])   →   codeword_len GF(2^32) values
+    //   Then codeword cell j = (out[0][j], out[1][j], ..., out[D-1][j]),
+    //   = D × 32 bits = 128 bytes per cell (vs 8 bytes for `RaaF2Code`).
+    //
+    // NOT a drop-in for the protocol — see
+    // `documentation/f2-prove-optimizations.md` § "RAA → RS swap" for
+    // the open-phase / soundness barriers. We only measure encode time.
+    //
+    // Rate: 1/2 (matches bolt-rs / ligerito's natural rate); RAA's
+    // sibling `Commit-Encode` uses rate 1/4.
+    //
+    // Encoder setup (twiddles + π polynomials) is built once outside
+    // `bench.iter`; per-encode work is measured.
+    #[cfg(feature = "bolt_rs_compare")]
+    group.bench_function(BenchmarkId::new("Commit-Encode-RS", id), |bench| {
+        use bolt_rs::{BinaryElem32, ReedSolomonEncoding};
+        use rayon::prelude::*;
+        use zinc_poly::univariate::F2PackU64;
+
+        let paired = zinc_protocol::f2_prove::pair_primary_witness_polys_pub::<D>(
+            &fx.trace.binary_poly,
+            zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB,
+            &sha_f2_bit_op_virtuals(),
+        );
+        let row_len = fx.pp.linear_code.row_len();
+        let num_rows = fx.pp.num_rows;
+        // RS at rate 1/2 — block_length = 2 × row_len.
+        let rs_block_length = row_len * 2;
+        // D = number of F_2 coefficient slots per cell. The bench uses
+        // `BinaryPoly<32>` halves of paired `BinaryPoly<64>` cells, so
+        // the meaningful slot count per *unpaired* matrix is 32. With
+        // pairing, each paired matrix carries 64 slots (two unpaired
+        // matrices stacked). We treat each paired matrix as 2 ×
+        // 32-slot RS-encoding tasks below.
+        const D_SLOTS: usize = 32;
+
+        let rs = ReedSolomonEncoding::<BinaryElem32>::new(row_len, rs_block_length);
+
+        // Pre-extract per-slot input vectors. For each paired matrix,
+        // for each of the 2 u32 halves (low/high of BinaryPoly<64>),
+        // for each row r ∈ 0..num_rows, for each coefficient slot
+        // k ∈ 0..D_SLOTS: build a Vec<BinaryElem32> of length row_len
+        // where entry j = bit k of cell at position (r, j) of that
+        // half. Total slot-vectors: |paired| × 2 × num_rows × D_SLOTS.
+        let lanes: Vec<Vec<BinaryElem32>> = paired
+            .iter()
+            .flat_map(|poly| {
+                let mut out: Vec<Vec<BinaryElem32>> =
+                    Vec::with_capacity(2 * num_rows * D_SLOTS);
+                for half in 0..2usize {
+                    for r in 0..num_rows {
+                        // Pre-pack the row's u32 halves once, then peel
+                        // bit k from each cell in the inner loop.
+                        let row_u32s: Vec<u32> = (0..row_len)
+                            .map(|j| {
+                                let bits = poly.evaluations[r * row_len + j].pack_u64();
+                                if half == 0 { bits as u32 } else { (bits >> 32) as u32 }
+                            })
+                            .collect();
+                        for k in 0..D_SLOTS {
+                            let lane: Vec<BinaryElem32> = row_u32s
+                                .iter()
+                                .map(|&v| BinaryElem32::from((v >> k) & 1))
+                                .collect();
+                            out.push(lane);
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+
+        bench.iter(|| {
+            // One RS encode per coefficient slot. par_iter lets rayon
+            // fan the ~5K lane-encodings across worker threads.
+            let encoded: Vec<Vec<BinaryElem32>> =
+                lanes.par_iter().map(|lane| rs.encode(lane)).collect();
+            black_box(encoded);
         });
     });
 
@@ -873,7 +992,7 @@ fn bench_micro_prover_uair(
 
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
-                        recommended_num_column_openings(REP),
+                        BENCH_NUM_OPENINGS,
                     )
                     .expect("setup prove");
                 drop(proof);
@@ -920,7 +1039,7 @@ fn bench_micro_prover_uair(
                 transcript
             },
             |mut transcript| {
-                let (proof, state) = F2NativeIc::<U>::prove_linear::<BinaryFieldGF192, _, D>(
+                let (proof, state) = F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
                     &mut transcript,
                     &fx.trace.binary_poly,
                     num_constraints,
@@ -947,7 +1066,7 @@ fn bench_micro_prover_uair(
                 transcript
             },
             |mut transcript| {
-                let (proof, state) = F2NativeIc::<U>::prove_combined::<BinaryFieldGF192, _, D>(
+                let (proof, state) = F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
                     &mut transcript,
                     &fx.trace.binary_poly,
                     num_constraints,
@@ -964,33 +1083,77 @@ fn bench_micro_prover_uair(
     // ---- b) AlphaProject (precomputed α-powers) ----
     //
     // Matches the current `prove_f2_uair_with_groups` body:
-    // compute `α^0..α^{D-1}` once, then per-cell bit-selected XOR-add.
+    // compute `α^0..α^{D-1}` once, then per-column projection via
+    // `project_column_with_powers` — the same function the prove
+    // path calls at `f2_prove.rs:899`. Previously this micro reproduced
+    // a serial scalar inner loop inline (`eval_f2_poly_d_at_with_powers`
+    // mapped over cells), which measured a slower variant than the prove
+    // path actually runs (SIMD-x4 chunked path) and gave no A/B signal
+    // for the GPU swap. Aligning the micro with the prove-path call
+    // makes `UAIR-b-AlphaProject` (CPU) vs `UAIR-b-AlphaProject-GPU`
+    // a clean direct comparison.
     group.bench_function(BenchmarkId::new("UAIR-b-AlphaProject", id), |bench| {
         bench.iter_batched(
             || {
                 let mut transcript = Blake3Transcript::new();
-                let alpha: BinaryFieldGF192 =
+                let alpha: BinaryFieldGF128 =
                     transcript.get_field_challenge(&field_cfg);
                 alpha
             },
             |alpha| {
                 let pows = alpha_powers(&alpha, D);
-                let projected: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = fx
+                let projected: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = fx
                     .trace
                     .binary_poly
                     .iter()
                     .map(|col| {
-                        let evals_at_alpha: Vec<BinaryFieldGF192> = col
-                            .evaluations
-                            .iter()
-                            .map(|cell| {
-                                eval_f2_poly_d_at_with_powers::<D>(cell, &pows)
-                            })
-                            .collect();
+                        let evals_at_alpha =
+                            project_column_with_powers::<D>(&col.evaluations, &pows);
                         DenseMultilinearExtension::from_evaluations_vec(
                             col.num_vars,
                             evals_at_alpha,
-                            BinaryFieldGF192::zero(),
+                            BinaryFieldGF128::zero(),
+                        )
+                    })
+                    .collect();
+                black_box(projected);
+            },
+            criterion::BatchSize::PerIteration,
+        );
+    });
+
+    // GPU sibling of UAIR-b-AlphaProject. Calls the Metal kernel via
+    // `project_column_with_powers_gpu` per column (mirrors the current
+    // prove-path's per-column dispatch). Used to measure the kernel
+    // in isolation, without the surrounding prove-path overhead.
+    //
+    // Gated on `metal_gpu` because the GPU dispatcher only exists when
+    // that feature is on.
+    #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
+    group.bench_function(BenchmarkId::new("UAIR-b-AlphaProject-GPU", id), |bench| {
+        bench.iter_batched(
+            || {
+                let mut transcript = Blake3Transcript::new();
+                let alpha: BinaryFieldGF128 =
+                    transcript.get_field_challenge(&field_cfg);
+                alpha
+            },
+            |alpha| {
+                let pows = alpha_powers(&alpha, D);
+                let projected: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = fx
+                    .trace
+                    .binary_poly
+                    .iter()
+                    .map(|col| {
+                        let evals_at_alpha =
+                            zip_plus::metal_gpu::project_column_with_powers_gpu::<D>(
+                                &col.evaluations,
+                                &pows,
+                            );
+                        DenseMultilinearExtension::from_evaluations_vec(
+                            col.num_vars,
+                            evals_at_alpha,
+                            BinaryFieldGF128::zero(),
                         )
                     })
                     .collect();
@@ -1015,17 +1178,17 @@ fn bench_micro_prover_uair(
         use zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheckGroup;
         use zinc_protocol::f2_prove::F2EqColRound1FastPath;
 
-        let alpha: BinaryFieldGF192 = {
+        let alpha: BinaryFieldGF128 = {
             let mut t = Blake3Transcript::new();
             t.get_field_challenge(&field_cfg)
         };
         let pows = alpha_powers(&alpha, D);
-        let projected: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = fx
+        let projected: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = fx
             .trace
             .binary_poly
             .iter()
             .map(|col| {
-                let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                let evals_at_alpha: Vec<BinaryFieldGF128> = col
                     .evaluations
                     .iter()
                     .map(|cell| eval_f2_poly_d_at_with_powers::<D>(cell, &pows))
@@ -1033,25 +1196,32 @@ fn bench_micro_prover_uair(
                 DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     evals_at_alpha,
-                    BinaryFieldGF192::zero(),
+                    BinaryFieldGF128::zero(),
                 )
             })
             .collect();
-        let ic_eval_point: Vec<BinaryFieldGF192> = (0..fx.num_vars)
-            .map(|i| BinaryFieldGF192::from_with_cfg(i as u64 + 1, &field_cfg))
+        let ic_eval_point: Vec<BinaryFieldGF128> = (0..fx.num_vars)
+            .map(|i| BinaryFieldGF128::from_with_cfg(i as u64 + 1, &field_cfg))
             .collect();
-        let gamma: BinaryFieldGF192 = {
+        let gamma: BinaryFieldGF128 = {
             let mut t = Blake3Transcript::new();
-            t.absorb_random_field(&alpha, &mut vec![0u8; 24]);
+            t.absorb_random_field(
+                &alpha,
+                &mut vec![
+                    0u8;
+                    <<BinaryFieldGF128 as Field>::Inner
+                        as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+                ],
+            );
             t.get_field_challenge(&field_cfg)
         };
 
-        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let zero_inner = *BinaryFieldGF128::zero().inner();
         let num_rows = projected[0].evaluations.len();
         let num_vars = projected[0].num_vars;
-        let mut gamma_pows: Vec<BinaryFieldGF192> = Vec::with_capacity(projected.len());
+        let mut gamma_pows: Vec<BinaryFieldGF128> = Vec::with_capacity(projected.len());
         {
-            let mut acc = BinaryFieldGF192::one();
+            let mut acc = BinaryFieldGF128::one();
             for _ in 0..projected.len() {
                 gamma_pows.push(acc);
                 acc *= &gamma;
@@ -1074,7 +1244,7 @@ fn bench_micro_prover_uair(
                 let evals_iter = 0..num_rows;
                 let weighted_evals: Vec<_> = evals_iter
                     .map(|i| {
-                        let mut sum = BinaryFieldGF192::zero();
+                        let mut sum = BinaryFieldGF128::zero();
                         for (g, col) in projected.iter().enumerate() {
                             sum += gamma_pows[g] * col.evaluations[i];
                         }
@@ -1095,7 +1265,7 @@ fn bench_micro_prover_uair(
                 let group = MultiDegreeSumcheckGroup::with_round_1_fast(
                     2,
                     Vec::new(),
-                    Box::new(|v: &[BinaryFieldGF192]| v[0] * v[1]),
+                    Box::new(|v: &[BinaryFieldGF128]| v[0] * v[1]),
                     fast_path,
                 );
                 let transcript = Blake3Transcript::new();
@@ -1103,7 +1273,7 @@ fn bench_micro_prover_uair(
             },
             |(groups, mut transcript)| {
                 let (proof, states) =
-                    MultiDegreeSumcheck::<BinaryFieldGF192>::prove_as_subprotocol(
+                    MultiDegreeSumcheck::<BinaryFieldGF128>::prove_as_subprotocol(
                         &mut transcript,
                         groups,
                         fx.num_vars,
@@ -1132,17 +1302,17 @@ fn bench_micro_prover_uair(
     group.bench_function(BenchmarkId::new("UAIR-d-ColEvalsAtRstar", id), |bench| {
         use zinc_poly::mle::MultilinearExtensionWithConfig;
 
-        let alpha: BinaryFieldGF192 = {
+        let alpha: BinaryFieldGF128 = {
             let mut t = Blake3Transcript::new();
             t.get_field_challenge(&field_cfg)
         };
         let pows = alpha_powers(&alpha, D);
-        let projected: Vec<DenseMultilinearExtension<BinaryFieldGF192>> = fx
+        let projected: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = fx
             .trace
             .binary_poly
             .iter()
             .map(|col| {
-                let evals_at_alpha: Vec<BinaryFieldGF192> = col
+                let evals_at_alpha: Vec<BinaryFieldGF128> = col
                     .evaluations
                     .iter()
                     .map(|cell| eval_f2_poly_d_at_with_powers::<D>(cell, &pows))
@@ -1150,17 +1320,17 @@ fn bench_micro_prover_uair(
                 DenseMultilinearExtension::from_evaluations_vec(
                     col.num_vars,
                     evals_at_alpha,
-                    BinaryFieldGF192::zero(),
+                    BinaryFieldGF128::zero(),
                 )
             })
             .collect();
         // A deterministic sumcheck-point stand-in — any field-typed
         // vector of length num_vars works; the per-column MLE-eval
         // cost is point-content-independent.
-        let sumcheck_point: Vec<BinaryFieldGF192> = (0..fx.num_vars)
-            .map(|i| BinaryFieldGF192::from_with_cfg(i as u64 + 13, &field_cfg))
+        let sumcheck_point: Vec<BinaryFieldGF128> = (0..fx.num_vars)
+            .map(|i| BinaryFieldGF128::from_with_cfg(i as u64 + 13, &field_cfg))
             .collect();
-        let zero_inner = *BinaryFieldGF192::zero().inner();
+        let zero_inner = *BinaryFieldGF128::zero().inner();
 
         bench.iter(|| {
             #[cfg(feature = "parallel")]
@@ -1169,7 +1339,7 @@ fn bench_micro_prover_uair(
             let it = projected.par_iter();
             #[cfg(not(feature = "parallel"))]
             let it = projected.iter();
-            let col_evals: Vec<BinaryFieldGF192> = it
+            let col_evals: Vec<BinaryFieldGF128> = it
                 .map(|col| {
                     let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
                         col.num_vars,
@@ -1177,7 +1347,7 @@ fn bench_micro_prover_uair(
                         zero_inner,
                     );
                     <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<
-                        BinaryFieldGF192,
+                        BinaryFieldGF128,
                     >>::evaluate_with_config(
                         inner_mle,
                         &sumcheck_point,
@@ -1236,7 +1406,7 @@ fn bench_micro_prover_uair(
 // MICRO breakdown: timing each sub-step inside `prove_f2_open`.
 //
 // Five sub-steps, in body order:
-//   a. AlphaBasis     — `AlphaPolyBasis::new(α)` (192×192 F_2 Gauss–
+//   a. AlphaBasis     — `AlphaPolyBasis::new(α)` (128×128 F_2 Gauss–
 //                       Jordan).
 //   b. LiftedEqTensor — `build_lifted_eq_tensor` for q_0, q_1.
 //   c. Folds          — parallel per-column γ-folds producing the
@@ -1252,7 +1422,7 @@ fn bench_micro_prover_open(
     fx: &ProverFixture,
 ) {
     use zinc_poly::univariate::binary_f2_wide::{f2_inner_product, f2_poly_mul};
-    use zinc_poly::univariate::binary_gf192::{AlphaPolyBasis, lift_bp_to_f2_poly_1};
+    use zinc_poly::univariate::binary_gf128::{AlphaPolyBasis, lift_bp_to_f2_poly_1};
     use zinc_protocol::f2_prove::build_lifted_eq_tensor;
     use zinc_poly::univariate::binary_f2_wide::BinaryF2Poly;
 
@@ -1286,7 +1456,7 @@ fn bench_micro_prover_open(
     let num_rows = fx.pp.num_rows;
     let row_len = fx.pp.linear_code.row_len();
     let num_cols = fx.trace.binary_poly.len();
-    let num_open = recommended_num_column_openings(REP);
+    let num_open = BENCH_NUM_OPENINGS;
     let codeword_len = fx.pp.linear_code.codeword_len();
 
     // ---- a) AlphaBasis ----
@@ -1312,15 +1482,15 @@ fn bench_micro_prover_open(
 
     // Build a deterministic γ vector (matching what the real open
     // draws after committing b'/a' — we just need representative
-    // dense GF(2^192) values lifted to BinaryF2Poly<3>).
-    let gamma: Vec<BinaryF2Poly<3>> = {
+    // dense GF(2^128) values lifted to BinaryF2Poly<2>).
+    let gamma: Vec<BinaryF2Poly<2>> = {
         let mut t = Blake3Transcript::new();
-        let g: Vec<BinaryFieldGF192> = t.get_field_challenges(num_cols, &field_cfg);
+        let g: Vec<BinaryFieldGF128> = t.get_field_challenges(num_cols, &field_cfg);
         g.iter().map(|x| basis.lift(x)).collect()
     };
-    let coeffs: Vec<BinaryF2Poly<3>> = {
+    let coeffs: Vec<BinaryF2Poly<2>> = {
         let mut t = Blake3Transcript::new();
-        let c: Vec<BinaryFieldGF192> = t.get_field_challenges(num_rows, &field_cfg);
+        let c: Vec<BinaryFieldGF128> = t.get_field_challenges(num_rows, &field_cfg);
         c.iter().map(|x| basis.lift(x)).collect()
     };
 
@@ -1333,25 +1503,25 @@ fn bench_micro_prover_open(
             let it = fx.trace.binary_poly.par_iter().enumerate();
             #[cfg(not(feature = "parallel"))]
             let it = fx.trace.binary_poly.iter().enumerate();
-            let per_col_results: Vec<(Vec<BinaryF2Poly<7>>, BinaryF2Poly<10>)> = it
+            let per_col_results: Vec<(Vec<BinaryF2Poly<5>>, BinaryF2Poly<7>)> = it
                 .map(|(g, col)| {
-                    let mut b_g_scaled: Vec<BinaryF2Poly<7>> = Vec::with_capacity(num_rows);
-                    let mut b_g: Vec<BinaryF2Poly<4>> = Vec::with_capacity(num_rows);
+                    let mut b_g_scaled: Vec<BinaryF2Poly<5>> = Vec::with_capacity(num_rows);
+                    let mut b_g: Vec<BinaryF2Poly<3>> = Vec::with_capacity(num_rows);
                     for i in 0..num_rows {
                         let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
                         let row_lifted: Vec<BinaryF2Poly<1>> =
                             row_slice.iter().map(lift_bp_to_f2_poly_1::<D>).collect();
-                        let entry: BinaryF2Poly<4> =
-                            f2_inner_product::<1, 3, 4>(&row_lifted, &q1);
-                        let scaled: BinaryF2Poly<7> =
-                            f2_poly_mul::<3, 4, 7>(&gamma[g], &entry);
+                        let entry: BinaryF2Poly<3> =
+                            f2_inner_product::<1, 2, 3>(&row_lifted, &q1);
+                        let scaled: BinaryF2Poly<5> =
+                            f2_poly_mul::<2, 3, 5>(&gamma[g], &entry);
                         b_g_scaled.push(scaled);
                         b_g.push(entry);
                     }
-                    let a_g_prime: BinaryF2Poly<7> =
-                        f2_inner_product::<3, 4, 7>(&q0, &b_g);
-                    let a_scaled: BinaryF2Poly<10> =
-                        f2_poly_mul::<3, 7, 10>(&gamma[g], &a_g_prime);
+                    let a_g_prime: BinaryF2Poly<5> =
+                        f2_inner_product::<2, 3, 5>(&q0, &b_g);
+                    let a_scaled: BinaryF2Poly<7> =
+                        f2_poly_mul::<2, 5, 7>(&gamma[g], &a_g_prime);
                     (b_g_scaled, a_scaled)
                 })
                 .collect();
@@ -1376,25 +1546,25 @@ fn bench_micro_prover_open(
             let it = fx.trace.binary_poly.par_iter().enumerate();
             #[cfg(not(feature = "parallel"))]
             let it = fx.trace.binary_poly.iter().enumerate();
-            let per_col: Vec<Vec<BinaryF2Poly<7>>> = it
+            let per_col: Vec<Vec<BinaryF2Poly<5>>> = it
                 .map(|(g, col)| {
-                    let mut col_partial: Vec<BinaryF2Poly<4>> =
-                        vec![BinaryF2Poly::<4>::zero(); row_len];
+                    let mut col_partial: Vec<BinaryF2Poly<3>> =
+                        vec![BinaryF2Poly::<3>::zero(); row_len];
                     for i in 0..num_rows {
                         let row_slice =
                             &col.evaluations[i * row_len..(i + 1) * row_len];
                         let coeff_i = &coeffs[i];
                         for j in 0..row_len {
                             let cell = lift_bp_to_f2_poly_1::<D>(&row_slice[j]);
-                            let prod: BinaryF2Poly<4> =
-                                f2_poly_mul::<1, 3, 4>(&cell, coeff_i);
+                            let prod: BinaryF2Poly<3> =
+                                f2_poly_mul::<1, 2, 3>(&cell, coeff_i);
                             col_partial[j] += prod;
                         }
                     }
                     col_partial
                         .into_iter()
-                        .map(|entry| f2_poly_mul::<3, 4, 7>(&gamma[g], &entry))
-                        .collect::<Vec<BinaryF2Poly<7>>>()
+                        .map(|entry| f2_poly_mul::<2, 3, 5>(&gamma[g], &entry))
+                        .collect::<Vec<BinaryF2Poly<5>>>()
                 })
                 .collect();
             black_box(per_col);
@@ -1443,21 +1613,21 @@ fn bench_micro_prover_open(
     // In `prove_f2_open` body order: after the (q0, q1) tensor and
     // before the per-column folds the prover draws `num_cols`
     // gamma_gf challenges and lifts each via `basis.lift(...)` to
-    // `BinaryF2Poly<3>`. After the b'/a' absorb it draws `num_rows`
-    // coeffs and does the same lift. Each `lift` is a 192-bit
+    // `BinaryF2Poly<2>`. After the b'/a' absorb it draws `num_rows`
+    // coeffs and does the same lift. Each `lift` is a 128-bit
     // F_2[X] basis-change (Gauss-Jordan-derived linear map) so the
     // aggregate cost is `(num_cols + num_rows) × lift_cost`.
     group.bench_function(BenchmarkId::new("Open-f-GammaCoeffsLift", id), |bench| {
         bench.iter_batched(
             || Blake3Transcript::new(),
             |mut transcript| {
-                let gamma_gf: Vec<BinaryFieldGF192> =
+                let gamma_gf: Vec<BinaryFieldGF128> =
                     transcript.get_field_challenges(num_cols, &field_cfg);
-                let gamma_lifted: Vec<BinaryF2Poly<3>> =
+                let gamma_lifted: Vec<BinaryF2Poly<2>> =
                     gamma_gf.iter().map(|g| basis.lift(g)).collect();
-                let coeffs_gf: Vec<BinaryFieldGF192> =
+                let coeffs_gf: Vec<BinaryFieldGF128> =
                     transcript.get_field_challenges(num_rows, &field_cfg);
-                let coeffs_lifted: Vec<BinaryF2Poly<3>> =
+                let coeffs_lifted: Vec<BinaryF2Poly<2>> =
                     coeffs_gf.iter().map(|g| basis.lift(g)).collect();
                 black_box((gamma_lifted, coeffs_lifted));
             },
@@ -1584,7 +1754,7 @@ fn bench_micro_prover_open(
                     &fx.trace.binary_poly[zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB..],
                     &subclaim.sumcheck_point,
                     &subclaim.alpha,
-                    recommended_num_column_openings(REP),
+                    BENCH_NUM_OPENINGS,
                 );
                 black_box(open_proof);
             },
@@ -1617,7 +1787,7 @@ fn bench_micro_verifier_uair(
 
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
-            recommended_num_column_openings(REP),
+            BENCH_NUM_OPENINGS,
         )
         .expect("prove")
     };
@@ -1674,12 +1844,12 @@ fn bench_micro_verifier_uair(
                         &field_cfg,
                     )
                     .expect("IC verify");
-                let _: BinaryFieldGF192 = t.get_field_challenge(&field_cfg); // alpha
-                let _: BinaryFieldGF192 = t.get_field_challenge(&field_cfg); // gamma
+                let _: BinaryFieldGF128 = t.get_field_challenge(&field_cfg); // alpha
+                let _: BinaryFieldGF128 = t.get_field_challenge(&field_cfg); // gamma
                 t
             },
             |mut transcript| {
-                let sc = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
+                let sc = MultiDegreeSumcheck::<BinaryFieldGF128>::verify_as_subprotocol(
                     &mut transcript,
                     fx.num_vars,
                     &proof.uair.sumcheck_proof,
@@ -1713,9 +1883,9 @@ fn bench_micro_verifier_uair(
                     &field_cfg,
                 )
                 .expect("IC");
-            let _: BinaryFieldGF192 = t.get_field_challenge(&field_cfg); // alpha
-            let _: BinaryFieldGF192 = t.get_field_challenge(&field_cfg); // gamma
-            let md = MultiDegreeSumcheck::<BinaryFieldGF192>::verify_as_subprotocol(
+            let _: BinaryFieldGF128 = t.get_field_challenge(&field_cfg); // alpha
+            let _: BinaryFieldGF128 = t.get_field_challenge(&field_cfg); // gamma
+            let md = MultiDegreeSumcheck::<BinaryFieldGF128>::verify_as_subprotocol(
                 &mut t,
                 fx.num_vars,
                 &proof.uair.sumcheck_proof,
@@ -1732,10 +1902,10 @@ fn bench_micro_verifier_uair(
         let evals = proof.uair.column_evals_at_rstar.clone();
 
         bench.iter(|| {
-            let one = BinaryFieldGF192::one();
+            let one = BinaryFieldGF128::one();
             let eq_at_rstar_r =
                 zinc_poly::utils::eq_eval(&sumcheck_point, &ic_eval_point, one).unwrap();
-            let mut batched = BinaryFieldGF192::zero();
+            let mut batched = BinaryFieldGF128::zero();
             for v in evals.iter().rev() {
                 batched = batched * gamma + *v;
             }
@@ -1756,7 +1926,7 @@ fn bench_micro_verifier_uair(
 //                         `num_rows × f2_poly_mul<3,7,10>` over the
 //                         prover-sent b' vector.
 //   c. LiftDischarge    — Check 2: `ψ_α(a') == Σ_g γ_g · col_g(r*)`.
-//                         γ-batched lift discharge in GF(2^192).
+//                         γ-batched lift discharge in GF(2^128).
 //   d. Coherence        — Check 3: `<combined_row', q1> == <coeffs, b'>`.
 //                         `row_len + num_rows` `f2_poly_mul<3,7,10>`.
 //   e. PerOpening       — Check 4: per-opening Merkle verify + γ-weighted
@@ -1770,7 +1940,7 @@ fn bench_micro_verifier_open(
     fx: &ProverFixture,
 ) {
     use zinc_poly::univariate::binary_f2_wide::{BinaryF2Poly, f2_inner_product, f2_poly_mul};
-    use zinc_poly::univariate::binary_gf192::{
+    use zinc_poly::univariate::binary_gf128::{
         AlphaPolyBasis, eval_f2_wide_poly_at, lift_bp_to_f2_poly_1,
     };
     use zinc_protocol::f2_prove::build_lifted_eq_tensor;
@@ -1786,7 +1956,7 @@ fn bench_micro_verifier_open(
 
             fx.num_vars,
             sha256_f2_project_scalar::<R>,
-            recommended_num_column_openings(REP),
+            BENCH_NUM_OPENINGS,
         )
         .expect("prove")
     };
@@ -1854,23 +2024,23 @@ fn bench_micro_verifier_open(
     let basis = AlphaPolyBasis::new(&subclaim.alpha);
     let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
     let (gamma_gf, gamma_lifted, coeffs_lifted): (
-        Vec<BinaryFieldGF192>,
-        Vec<BinaryF2Poly<3>>,
-        Vec<BinaryF2Poly<3>>,
+        Vec<BinaryFieldGF128>,
+        Vec<BinaryF2Poly<2>>,
+        Vec<BinaryF2Poly<2>>,
     ) = {
         let mut t = post_uair_transcript();
-        let gamma_gf: Vec<BinaryFieldGF192> =
+        let gamma_gf: Vec<BinaryFieldGF128> =
             t.get_field_challenges(num_cols, &field_cfg);
-        let gamma_lifted: Vec<BinaryF2Poly<3>> =
+        let gamma_lifted: Vec<BinaryF2Poly<2>> =
             gamma_gf.iter().map(|g| basis.lift(g)).collect();
-        zinc_protocol::f2_prove::absorb_f2_poly_slice::<7, _>(&mut t, proof.open.b_vector.iter());
-        zinc_protocol::f2_prove::absorb_f2_poly_slice::<10, _>(
+        zinc_protocol::f2_prove::absorb_f2_poly_slice::<5, _>(&mut t, proof.open.b_vector.iter());
+        zinc_protocol::f2_prove::absorb_f2_poly_slice::<7, _>(
             &mut t,
             core::iter::once(&proof.open.lifted_claim),
         );
-        let coeffs_gf: Vec<BinaryFieldGF192> =
+        let coeffs_gf: Vec<BinaryFieldGF128> =
             t.get_field_challenges(num_rows, &field_cfg);
-        let coeffs_lifted: Vec<BinaryF2Poly<3>> =
+        let coeffs_lifted: Vec<BinaryF2Poly<2>> =
             coeffs_gf.iter().map(|g| basis.lift(g)).collect();
         (gamma_gf, gamma_lifted, coeffs_lifted)
     };
@@ -1878,10 +2048,10 @@ fn bench_micro_verifier_open(
     // ---- b) EvalConsistency — Σ_i q0[i] · b'[i] == a' ----
     group.bench_function(BenchmarkId::new("VerifyOpen-b-EvalConsistency", id), |bench| {
         bench.iter(|| {
-            let mut acc = BinaryF2Poly::<10>::zero();
+            let mut acc = BinaryF2Poly::<7>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<10> =
-                    f2_poly_mul::<3, 7, 10>(&q0[i], &proof.open.b_vector[i]);
+                let prod: BinaryF2Poly<7> =
+                    f2_poly_mul::<2, 5, 7>(&q0[i], &proof.open.b_vector[i]);
                 acc += prod;
             }
             let ok = acc == proof.open.lifted_claim;
@@ -1892,8 +2062,8 @@ fn bench_micro_verifier_open(
     // ---- c) LiftDischarge — ψ_α(a') == Σ_g γ_g · primary_col_evals[g] ----
     group.bench_function(BenchmarkId::new("VerifyOpen-c-LiftDischarge", id), |bench| {
         bench.iter(|| {
-            let psi = eval_f2_wide_poly_at::<10>(&proof.open.lifted_claim, &subclaim.alpha);
-            let mut expected = BinaryFieldGF192::zero();
+            let psi = eval_f2_wide_poly_at::<7>(&proof.open.lifted_claim, &subclaim.alpha);
+            let mut expected = BinaryFieldGF128::zero();
             for g in 0..num_cols {
                 let mut term = gamma_gf[g];
                 term *= &subclaim.primary_column_evals[g];
@@ -1906,20 +2076,20 @@ fn bench_micro_verifier_open(
     // ---- d) Coherence — <combined_row, q1> == <coeffs, b'> ----
     group.bench_function(BenchmarkId::new("VerifyOpen-d-Coherence", id), |bench| {
         bench.iter(|| {
-            let lhs: BinaryF2Poly<10> = {
-                let mut acc = BinaryF2Poly::<10>::zero();
+            let lhs: BinaryF2Poly<7> = {
+                let mut acc = BinaryF2Poly::<7>::zero();
                 for j in 0..row_len {
-                    let prod: BinaryF2Poly<10> =
-                        f2_poly_mul::<3, 7, 10>(&q1[j], &proof.open.combined_row[j]);
+                    let prod: BinaryF2Poly<7> =
+                        f2_poly_mul::<2, 5, 7>(&q1[j], &proof.open.combined_row[j]);
                     acc += prod;
                 }
                 acc
             };
-            let rhs: BinaryF2Poly<10> = {
-                let mut acc = BinaryF2Poly::<10>::zero();
+            let rhs: BinaryF2Poly<7> = {
+                let mut acc = BinaryF2Poly::<7>::zero();
                 for i in 0..num_rows {
-                    let prod: BinaryF2Poly<10> =
-                        f2_poly_mul::<3, 7, 10>(&coeffs_lifted[i], &proof.open.b_vector[i]);
+                    let prod: BinaryF2Poly<7> =
+                        f2_poly_mul::<2, 5, 7>(&coeffs_lifted[i], &proof.open.b_vector[i]);
                     acc += prod;
                 }
                 acc
@@ -1935,7 +2105,7 @@ fn bench_micro_verifier_open(
     // (987 for the deployed REP=4 RAA F_2) iterations, each doing:
     //   - Merkle path verify against root
     //   - per-column F_2 cell lift to `BinaryF2Poly<1>` + γ-weighted
-    //     accumulate into `BinaryF2Poly<4>` (num_cols × num_rows mults)
+    //     accumulate into `BinaryF2Poly<3>` (num_cols × num_rows mults)
     //   - row-major inner product with `coeffs` (num_rows mults)
     //   - one encoded[column_idx] equality check
     //
@@ -1948,10 +2118,10 @@ fn bench_micro_verifier_open(
         // Pre-compute encoded combined_row once (the protocol caches
         // this across openings).
         use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
-        let encoded: Vec<BinaryF2Poly<7>> = fx
+        let encoded: Vec<BinaryF2Poly<5>> = fx
             .pp
             .linear_code
-            .encode_f2_lin_open::<7>(&proof.open.combined_row);
+            .encode_f2_lin_open::<5>(&proof.open.combined_row);
         let paired_batch = num_cols.div_ceil(2);
         let single_col_len = paired_batch * num_rows;
         bench.iter(|| {
@@ -1986,8 +2156,8 @@ fn bench_micro_verifier_open(
                 let local_col = &opened.column_values
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
                 let lo_mask: u64 = 0xFFFF_FFFFu64;
-                let mut weighted_col: Vec<BinaryF2Poly<4>> =
-                    vec![BinaryF2Poly::<4>::zero(); num_rows];
+                let mut weighted_col: Vec<BinaryF2Poly<3>> =
+                    vec![BinaryF2Poly::<3>::zero(); num_rows];
                 for p in 0..paired_batch {
                     let g_lo = 2 * p;
                     let g_hi = 2 * p + 1;
@@ -1995,19 +2165,19 @@ fn bench_micro_verifier_open(
                     for i in 0..num_rows {
                         let packed_bits = local_col[p * num_rows + i].pack_u64();
                         let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
-                        let prod_lo: BinaryF2Poly<4> =
-                            f2_poly_mul::<1, 3, 4>(&lo_lifted, &gamma_lifted[g_lo]);
+                        let prod_lo: BinaryF2Poly<3> =
+                            f2_poly_mul::<1, 2, 3>(&lo_lifted, &gamma_lifted[g_lo]);
                         weighted_col[i] += prod_lo;
                         if has_hi {
                             let hi_lifted = BinaryF2Poly::<1>::from_words([packed_bits >> 32]);
-                            let prod_hi: BinaryF2Poly<4> =
-                                f2_poly_mul::<1, 3, 4>(&hi_lifted, &gamma_lifted[g_hi]);
+                            let prod_hi: BinaryF2Poly<3> =
+                                f2_poly_mul::<1, 2, 3>(&hi_lifted, &gamma_lifted[g_hi]);
                             weighted_col[i] += prod_hi;
                         }
                     }
                 }
-                let actual_at_j: BinaryF2Poly<7> =
-                    f2_inner_product::<3, 4, 7>(&coeffs_lifted, &weighted_col);
+                let actual_at_j: BinaryF2Poly<5> =
+                    f2_inner_product::<2, 3, 5>(&coeffs_lifted, &weighted_col);
                 let ok = actual_at_j == encoded[opened.column_idx];
                 black_box(ok);
             });
@@ -2027,12 +2197,12 @@ fn bench_micro_verifier_open(
 /// inclusive. 9 is the SHA-256 F_2 UAIR's minimum (480 active rows
 /// fit in 2^9 = 512); larger values zero-pad and measure how the
 /// prover/verifier scale with the hypercube size.
-const NVARS_SWEEP: &[usize] = &[9,16,20,21,22];
+const NVARS_SWEEP: &[usize] = &[9,14,16,19,20,21,22];
 
 fn e2e_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
     // Large hypercubes (2^21 ≈ 2.1M rows × 41 cols of bit-poly cells +
-    // O(num_rows) GF(2^192) eq-table during prove + per-row IC
+    // O(num_rows) GF(2^128) eq-table during prove + per-row IC
     // workspace) push the per-iteration time into the multi-second
     // range. Criterion auto-reduces sample count when iter time is
     // long, but cap it explicitly to keep the run from blowing past
@@ -2064,7 +2234,7 @@ fn e2e_benches(c: &mut Criterion) {
 
                         num_vars,
                         sha256_f2_project_scalar::<R>,
-                        recommended_num_column_openings(REP),
+                        BENCH_NUM_OPENINGS,
                     )
                     .expect("prove_f2_full should succeed");
                 black_box(proof);
@@ -2083,7 +2253,7 @@ fn e2e_benches(c: &mut Criterion) {
 
                 num_vars,
                 sha256_f2_project_scalar::<R>,
-                recommended_num_column_openings(REP),
+                BENCH_NUM_OPENINGS,
             )
             .expect("prove for verifier bench should succeed")
         };
@@ -2128,7 +2298,7 @@ fn step_benches(c: &mut Criterion) {
 
 fn micro_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Micro");
-    let fx = setup_prover(22);
+    let fx = setup_prover(16);
     let id = format!("nvars={}", fx.num_vars);
     bench_micro_prover_uair(&mut group, &id, &fx);
     bench_micro_prover_open(&mut group, &id, &fx);

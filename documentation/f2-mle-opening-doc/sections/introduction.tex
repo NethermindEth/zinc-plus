@@ -1,0 +1,85 @@
+\section{Introduction}
+\label{sec:intro}
+
+The Zinc+ PIOP, in its integer instantiation, proves the satisfaction
+of an $\F_q[X]$-typed UAIR by reducing it through three transcript
+projections (prime projection, evaluation projection, multipoint
+evaluation) to a list of \emph{MLE evaluation claims}
+$\MLE[\psia(v_g)](r^*) = a_g$, one per committed trace column $v_g$.
+Those claims are discharged in the protocol's final step by the
+\emph{Zip+ opening}: a Brakedown-style proximity check that lifts each
+claim through the homomorphism $\Z \to \F_q$ to an integer-typed
+inner product, encodes the result through the same linear code used at
+commit time, and ties the inner product to the committed codeword
+matrix via Merkle column openings.
+
+\paragraph{The $\F_2$ variant.} A parallel variant of the protocol,
+designed for UAIRs whose every column is typed in
+$\cellring = \F_2[X]/(X^{\Dval})$, runs the analogous reduction with
+$\F_q$ replaced by the binary field $\GFt = \F_2[X]/(P(X))$ where
+$P(X) = X^{192} + X^7 + X^2 + X + 1$. The first six steps of the
+pipeline (commit, ideal check, evaluation projection, sumcheck) carry
+over almost mechanically — the ring of constants changes, the
+randomness changes, the arithmetic is unchanged in structure. The
+seventh step does not. The integer-side opening relies crucially on
+the ring homomorphism $\Z \to \F_q$, $n \mapsto n \bmod q$, which the
+proximity check uses to commute encoding through projection:
+\[
+  \encode\big(\,\textstyle\sum_i c_i \cdot \mathrm{row}_i \bmod q\,\big)
+  \;=\;
+  \big(\textstyle\sum_i c_i \cdot \encode(\mathrm{row}_i)\big) \bmod q.
+\]
+Translating this to $\F_2[X] \to \GFt$, $p(X) \mapsto p(\alpha)$ at a
+transcript-fresh $\alpha \in \GFt$ does not yield a useful identity:
+the canonical degree-$<192$ representative of a $\GFt$-element $g$
+evaluates at $\alpha$ to $g$ only when $\alpha$ happens to coincide
+with the field's quotient generator. For a generic $\alpha$ the bit
+patterns of $g$ and of its evaluation at $\alpha$ disagree.
+
+\paragraph{Our contribution.} We construct a Step~7 opening for the
+$\F_2$ variant that:
+\begin{enumerate}[leftmargin=2em]
+  \item Runs entirely in $\F_2[X]$-arithmetic, without ever passing
+    through $\GFt$ inside the proximity check.
+  \item Lifts each per-column MLE-evaluation claim $a_g \in \GFt$
+    to a single unreduced $\F_2[X]$ polynomial $a_g'$ of degree
+    $< D + 2\cdot 192 - 1$. The verifier discharges the original claim
+    by one local evaluation $\psia(a_g') \stackrel{?}{=} a_g$ in
+    $\GFt$.
+  \item Reuses the existing $\F_2$-RAA codeword matrix from commit
+    time. No re-commitment, no re-encoding: the code is uniformly
+    $\F_2[X]$-linear, so its action commutes through the lift.
+  \item Folds all per-column claims into a single $\F_2[X]$-opening
+    triple via a transcript-fresh $\GFt$-batching challenge
+    $\gamma$. The communication is then $O(1)$ in the number of
+    columns and linear in the row count and in the column-opening
+    parameter.
+\end{enumerate}
+The construction's load-bearing technical content is in the lift: the
+canonical bit-pattern map $\GFt \to \polyringat{192}$ does not invert
+the evaluation-at-$\alpha$ map at a generic $\alpha$, so we replace it
+with the unique $\F_2$-linear inverse, computed once per $\alpha$ via
+a $192 \times 192$ matrix inversion over $\F_2$. The cost of this
+inversion is amortised across an arbitrary number of per-entry lifts;
+the per-entry lift itself is a single $192$-bit dot product. See
+\Cref{sec:lift} for the analysis.
+
+\paragraph{Why the $\F_2$ pipeline.} The motivation for an all-$\F_2$
+variant is to eliminate the integer-arithmetic overhead from
+proofs over computations that are themselves naturally bit-oriented
+— hash functions, bit-wise circuits, ECDSA signature verification.
+The integer pipeline pays a constant-factor cost in the
+$\F_q[X]\to\F_q$ projection at every row of the trace; the $\F_2$
+variant eliminates this projection entirely. The price is paid at
+Step~7, where the bit-pattern shortcut available in the integer
+pipeline does not transfer; the construction of this document is the
+adapter that recovers the savings.
+
+\paragraph{Organisation.} \Cref{sec:setting} fixes the field, ring, and
+trace setup. \Cref{sec:lift} develops the $\alpha$-dependent inverse
+lift $\GFt \to \polyringat{192}$ that underwrites the construction.
+\Cref{sec:construction} gives the full $\gamma$-batched opening
+protocol, presented as four checks plus a Merkle-bound proximity step.
+\Cref{sec:soundness} sketches soundness, identifying the four failure
+modes and bounding each. \Cref{sec:cost} reports communication cost
+and concrete numbers for $\Dval = 32$, $\nu = 16$, rate $1/4$.

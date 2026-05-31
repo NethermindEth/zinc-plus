@@ -688,42 +688,58 @@ where
         // Parallelise across columns; per column we walk usable_rows
         // cells and XOR-add `eq[row]` into `coeffs[trailing_zeros(bits)]`
         // for each set bit.
-        let up_evals: Vec<DynamicPolynomialF<F>> = cfg_iter!(binary_trace)
-            .map(|col| {
-                let mut coeffs: Vec<F> = (0..D)
-                    .map(|_| F::zero_with_cfg(field_cfg))
-                    .collect();
-                // SAFETY invariant for `get_unchecked` below:
-                // * `row < usable_rows ≤ eq_table.len()` and
-                //   `row < col.evaluations.len() = num_rows`.
-                // * `d = bits.trailing_zeros() < D ≤ W_BITS = 64`
-                //   because `bp_to_u64::<D>` masks bits above
-                //   position `D-1`, and `coeffs.len() == D`.
-                for row in 0..usable_rows {
-                    let cell = unsafe { col.evaluations.get_unchecked(row) };
-                    let mut bits = bp_to_u64::<D>(cell);
-                    debug_assert!(
-                        D == 64 || bits >> D == 0,
-                        "BinaryPoly<{D}> cell has bits above position {} — \
-                         get_unchecked_mut(d) below would UB",
-                        D - 1,
-                    );
-                    if bits == 0 {
-                        continue;
-                    }
-                    let eq_val = unsafe { eq_table.get_unchecked(row) };
-                    while bits != 0 {
-                        let d = bits.trailing_zeros() as usize;
-                        #[allow(clippy::arithmetic_side_effects)]
-                        {
-                            bits &= bits - 1;
+        //
+        // History: a `BinaryFieldGF128`-specialised NEON SIMD-x4 kernel
+        // (`ic_accumulate_4cols_simd_x4_bf128` in
+        // `zinc_poly::univariate::binary_gf128`) was attempted to share
+        // `eq[i]` loads across 4 columns. On SHA-256 nvars=22 it
+        // *regressed* IC time by ~16% (312 ms → 362 ms). Two reasons:
+        // (a) the generic `+= eq_val` already auto-vectorises in
+        // monomorphic BF128 context (`ldp/eor/stp` on aarch64), and
+        // (b) IC is compute-bound, not bandwidth-bound (96 MB streamed
+        // per column × 41 cols ≈ 3.9 GB at ~200 GB/s LPDDR5x is a
+        // ~20 ms bandwidth floor, far below the observed 312 ms), so
+        // sharing `eq` loads didn't help. The kernel functions are
+        // retained in `binary_gf128.rs` for future experimentation but
+        // are no longer wired into the prove path.
+        let up_evals: Vec<DynamicPolynomialF<F>> = {
+            cfg_iter!(binary_trace)
+                .map(|col| {
+                    let mut coeffs: Vec<F> = (0..D)
+                        .map(|_| F::zero_with_cfg(field_cfg))
+                        .collect();
+                    // SAFETY invariant for `get_unchecked` below:
+                    // * `row < usable_rows ≤ eq_table.len()` and
+                    //   `row < col.evaluations.len() = num_rows`.
+                    // * `d = bits.trailing_zeros() < D ≤ W_BITS = 64`
+                    //   because `bp_to_u64::<D>` masks bits above
+                    //   position `D-1`, and `coeffs.len() == D`.
+                    for row in 0..usable_rows {
+                        let cell = unsafe { col.evaluations.get_unchecked(row) };
+                        let mut bits = bp_to_u64::<D>(cell);
+                        debug_assert!(
+                            D == 64 || bits >> D == 0,
+                            "BinaryPoly<{D}> cell has bits above position {} — \
+                             get_unchecked_mut(d) below would UB",
+                            D - 1,
+                        );
+                        if bits == 0 {
+                            continue;
                         }
-                        unsafe { *coeffs.get_unchecked_mut(d) += eq_val };
+                        let eq_val = unsafe { eq_table.get_unchecked(row) };
+                        while bits != 0 {
+                            let d = bits.trailing_zeros() as usize;
+                            #[allow(clippy::arithmetic_side_effects)]
+                            {
+                                bits &= bits - 1;
+                            }
+                            unsafe { *coeffs.get_unchecked_mut(d) += eq_val };
+                        }
                     }
-                }
-                DynamicPolynomialF::new_trimmed(coeffs)
-            })
-            .collect();
+                    DynamicPolynomialF::new_trimmed(coeffs)
+                })
+                .collect()
+        };
 
         // ---- Shifted columns (down_evals) ----
         //

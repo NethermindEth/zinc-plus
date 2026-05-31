@@ -580,27 +580,25 @@ mod tests {
     }
 
     /// Compile-time integration check: the `IdealCheckProtocol`
-    /// blanket impl resolves against `F = BinaryFieldGF192`, i.e. the
+    /// blanket impl resolves against `F = BinaryFieldGF128`, i.e. the
     /// synthetic `PrimeField` + `InnerTransparentField` impls on the
-    /// `GF(2^192)` field satisfy every bound the three IC entry
+    /// `GF(2^128)` field satisfy every bound the three IC entry
     /// points demand:
-    /// - `F: InnerTransparentField` (impl on `BinaryFieldGF192`).
-    /// - `F::Inner: ConstTranscribable` (via `Uint<3>` from
+    /// - `F: InnerTransparentField` (impl on `BinaryFieldGF128`).
+    /// - `F::Inner: ConstTranscribable` (via `Uint<2>` from
     ///   `crypto_primitives::crypto_bigint_uint`).
     /// - `F::Modulus: ConstTranscribable` (via the `()` impl added
     ///   to `zinc_transcript`).
     ///
     /// We take the method function pointers without invoking them.
     /// If any of the trait bounds fail to resolve, this stops
-    /// compiling — which is the real assertion. Building a
-    /// `GF(2^192)`-projected trace from an `F_2[X]`-typed UAIR is
-    /// the next plumbing step in the F_2 prove-path plan.
+    /// compiling — which is the real assertion.
     #[test]
-    fn ic_compiles_for_gf192() {
-        use zinc_poly::univariate::binary_gf192::BinaryFieldGF192;
+    fn ic_compiles_for_gf128() {
+        use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
 
         // Helper with the same trait bounds as the IC prover methods.
-        // Instantiating it with `F = BinaryFieldGF192` asserts at
+        // Instantiating it with `F = BinaryFieldGF128` asserts at
         // compile time that all three IC `prove_*` bounds resolve:
         //   - F: InnerTransparentField
         //   - F::Inner: ConstTranscribable
@@ -617,7 +615,7 @@ mod tests {
             U: IdealCheckProtocol,
         {
         }
-        _check_bounds::<BinaryFieldGF192, TestUairNoMultiplication<Int<5>>>();
+        _check_bounds::<BinaryFieldGF128, TestUairNoMultiplication<Int<5>>>();
     }
 
     // -- All-F_2 IC integration test --------------------------------
@@ -679,24 +677,24 @@ mod tests {
     }
 
     /// End-to-end smoke test: `IdealCheckProtocol::prove_combined`
-    /// runs against `F = BinaryFieldGF192` on a properly-shaped
-    /// `GF(2^192)`-projected all-`F_2` trace. The trace is built
+    /// runs against `F = BinaryFieldGF128` on a properly-shaped
+    /// `GF(2^128)`-projected all-`F_2` trace. The trace is built
     /// from two identical `BinaryPoly<32>` columns (satisfying the
     /// UAIR's `col_0 = col_1` constraint), projected via
     /// `project_f2_trace_row_major`, and fed into the IC.
     #[test]
-    fn ic_runs_against_gf192_with_f2_trace() {
+    fn ic_runs_against_gf128_with_f2_trace() {
         use crate::projections::{project_f2_trace_row_major, project_scalars};
         use ahash::AHasher;
         use rand::{Rng, rng};
         use std::{collections::HashMap, hash::BuildHasherDefault};
         use zinc_poly::{
             mle::DenseMultilinearExtension,
-            univariate::binary_gf192::BinaryFieldGF192,
+            univariate::binary_gf128::BinaryFieldGF128,
         };
         use zinc_uair::UairTrace;
 
-        type Gf192 = BinaryFieldGF192;
+        type Gf128 = BinaryFieldGF128;
 
         let num_vars: usize = 4;
         let poly_size = 1usize << num_vars; // 16 rows
@@ -724,9 +722,9 @@ mod tests {
             int: vec![].into(),
         };
 
-        // Project the trace to GF(2^192).
+        // Project the trace to GF(2^128).
         let row_major_trace =
-            project_f2_trace_row_major::<Gf192, BinaryPoly<32>, BinaryPoly<32>, 32>(
+            project_f2_trace_row_major::<Gf128, BinaryPoly<32>, BinaryPoly<32>, 32>(
                 &trace,
                 &(),
             );
@@ -735,13 +733,13 @@ mod tests {
         // constraint, so `collect_scalars` returns an empty set. The
         // resulting map is empty; the per-scalar projection closure
         // is never called.
-        let scalars: ScalarMap<<MinimalF2Uair as Uair>::Scalar, DynamicPolynomialF<Gf192>> =
-            project_scalars::<Gf192, MinimalF2Uair>(|scalar| {
-                // Lift `BinaryPoly<32>` → `DynamicPolynomialF<GF(2^192)>`
-                // via the per-coefficient F_2 ⊂ GF(2^192) embedding.
-                let coeffs: Vec<Gf192> = scalar
+        let scalars: ScalarMap<<MinimalF2Uair as Uair>::Scalar, DynamicPolynomialF<Gf128>> =
+            project_scalars::<Gf128, MinimalF2Uair>(|scalar| {
+                // Lift `BinaryPoly<32>` → `DynamicPolynomialF<GF(2^128)>`
+                // via the per-coefficient F_2 ⊂ GF(2^128) embedding.
+                let coeffs: Vec<Gf128> = scalar
                     .iter()
-                    .map(|b| if b.into_inner() { Gf192::one() } else { Gf192::zero() })
+                    .map(|b| if b.into_inner() { Gf128::one() } else { Gf128::zero() })
                     .collect();
                 DynamicPolynomialF { coeffs }
             });
@@ -753,7 +751,7 @@ mod tests {
         let num_constraints = count_constraints::<MinimalF2Uair>();
         let field_cfg = ();
 
-        let result = <MinimalF2Uair as IdealCheckProtocol>::prove_combined::<Gf192>(
+        let result = <MinimalF2Uair as IdealCheckProtocol>::prove_combined::<Gf128>(
             &mut transcript,
             &row_major_trace,
             &scalars,
@@ -770,7 +768,7 @@ mod tests {
         for v in &proof.combined_mle_values {
             assert_eq!(
                 v,
-                &DynamicPolynomialF::<Gf192>::ZERO,
+                &DynamicPolynomialF::<Gf128>::ZERO,
                 "zero-ideal constraint should emit DynamicPolynomialF::ZERO",
             );
         }

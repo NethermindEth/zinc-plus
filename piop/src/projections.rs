@@ -404,7 +404,7 @@ where
 /// dead in an all-`F_2` UAIR, and demanding those bounds would
 /// force every caller to also impl them on the target field even
 /// when the lanes carry no data. Used for the F_2 prove path with
-/// `F = BinaryFieldGF192`.
+/// `F = BinaryFieldGF128`.
 ///
 /// Panics if the trace has any arbitrary-poly or int columns —
 /// asserts the all-F_2 contract at construction time so a

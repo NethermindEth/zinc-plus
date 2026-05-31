@@ -19,6 +19,11 @@ zinc-primality = { workspace = true }
 zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
+# Optional: bolt-rs (ligerito-derived Reed-Solomon encoder) for the
+# `Commit-Encode-RS` micro bench. Local path dep, activated by the
+# `bolt_rs_compare` feature. Dev-only in spirit but declared as a
+# regular dep because cargo doesn't allow `optional` on dev-deps.
+bolt-rs = { path = "/Users/albertgarretafontelles/bolt-rs", default-features = false, optional = true }
 
 [lib]
 bench = false
@@ -49,6 +54,11 @@ iprs-rate-1-8 = []
 # Switch the IPRS bench code to inverse-rate 16 (rate 1/16). Takes precedence
 # over `iprs-rate-1-8` if both are enabled.
 iprs-rate-1-16 = []
+# Enable the `Commit-Encode-RS` micro bench entry that benchmarks
+# bolt-rs / ligerito-derived Reed-Solomon encoding at the same shape
+# as the F_2 commit `Commit-Encode` entry. Pulls in `bolt-rs` as a
+# local path dep; off by default.
+bolt_rs_compare = ["dep:bolt-rs"]
 
 [[bench]]
 name = "e2e"

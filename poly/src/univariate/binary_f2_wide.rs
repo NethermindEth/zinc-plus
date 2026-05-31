@@ -342,7 +342,7 @@ impl<const W: usize> FromRef<Boolean> for BinaryF2Poly<W> {
 // Used by the F_2[X] MLE-opening protocol to compute combined-row
 // values and the final lifted claim `a' = q_1'^T · M_w · q_2'` over
 // `F_2[X]` (no reduction). See `f2_open_plan.md` for the protocol
-// context and `lift_gf192_to_f2_poly_3` for the GF(2^192) → F_2[X]
+// context and `lift_gf128_to_f2_poly_2` for the GF(2^128) → F_2[X]
 // representative embedding.
 //
 // Output width `W_OUT` must be at least `W_A + W_B` so the

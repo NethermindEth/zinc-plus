@@ -140,7 +140,7 @@ let alpha_pows = alpha_powers(&alpha, D);            // D = 32
 let projected_trace = cfg_iter!(extended_trace.binary_poly)
     .map(|col| col.evaluations.iter()
         .map(|cell| eval_f2_poly_d_at_with_powers::<D>(cell, &alpha_pows))
-        .collect::<Vec<BinaryFieldGF192>>())
+        .collect::<Vec<BinaryFieldGF128>>())
     ...
 ```
 
@@ -156,17 +156,17 @@ for (i, c) in p.iter().enumerate() {     // D=32 iterations
 ```
 
 Per cell: 32 iterations of `BinaryU64PolyIter::next` + extract bit +
-branch + (maybe) `AddAssign` on `BinaryFieldGF192` (which read both
+branch + (maybe) `AddAssign` on `BinaryFieldGF128` (which read both
 operand words, XOR'd, and rebuilt a `Uint<3>` each time). At
 ~3.3M cells × 32 iter, that's ~100M branch + add operations.
 
 ### What changed
 
-[`poly/src/univariate/binary_gf192.rs:972-1001`](../poly/src/univariate/binary_gf192.rs#L972-L1001)
+[`poly/src/univariate/binary_gf128.rs:972-1001`](../poly/src/univariate/binary_gf128.rs#L972-L1001)
 — rewrite `eval_f2_poly_d_at_with_powers` to (a) read the cell via
 `F2PackU64::pack_u64()` in one shot, (b) walk only the set bits via
 `trailing_zeros` + `bits &= bits - 1`, and (c) accumulate into a raw
-`[u64; 3]` (no `BinaryFieldGF192`/`Uint<3>` rebuild per add):
+`[u64; 3]` (no `BinaryFieldGF128`/`Uint<3>` rebuild per add):
 
 ```rust
 let mut bits = p.pack_u64();
@@ -179,7 +179,7 @@ while bits != 0 {
     acc[2] ^= pw[2];
     bits &= bits - 1;
 }
-BinaryFieldGF192::from_words(acc)
+BinaryFieldGF128::from_words(acc)
 ```
 
 The same pattern is already used by `BinaryU64PolyInnerProduct`'s
@@ -200,7 +200,7 @@ reflects the pure per-cell speedup. The real
 ### Correctness
 
 New parity test
-[`poly/src/univariate/binary_gf192.rs::tests::eval_with_powers_matches_branchless`](../poly/src/univariate/binary_gf192.rs#L1721-L1755)
+[`poly/src/univariate/binary_gf128.rs::tests::eval_with_powers_matches_branchless`](../poly/src/univariate/binary_gf128.rs#L1721-L1755)
 pins the new form against the existing branchless reference across
 nine bit patterns. All 34 protocol e2e tests also still pass.
 
@@ -224,7 +224,7 @@ let scaled: BinaryF2Poly<7> = f2_poly_mul::<3, 4, 7>(&gamma[g], &per_col_entry);
 
 Two issues:
 
-1. **`lift_bp_to_f2_poly_1`** ([`poly/src/univariate/binary_gf192.rs:1232`](../poly/src/univariate/binary_gf192.rs#L1232))
+1. **`lift_bp_to_f2_poly_1`** ([`poly/src/univariate/binary_gf128.rs:1232`](../poly/src/univariate/binary_gf128.rs#L1232))
    ran the same per-bit-branch textbook loop as the old `eval_f2_poly_d_at_with_powers`:
 
    ```rust
@@ -243,7 +243,7 @@ Two issues:
 
 ### What changed
 
-**Lift fix** at [`poly/src/univariate/binary_gf192.rs:1232-1248`](../poly/src/univariate/binary_gf192.rs#L1232-L1248):
+**Lift fix** at [`poly/src/univariate/binary_gf128.rs:1232-1248`](../poly/src/univariate/binary_gf128.rs#L1232-L1248):
 one `pack_u64()` + a const-fold-able mask. ~10× faster per call.
 
 **Inline fuse** at [`protocol/src/f2_prove.rs:1818-1858`](../protocol/src/f2_prove.rs#L1818-L1858)
@@ -285,7 +285,7 @@ prove at [`protocol/src/f2_prove.rs:913-929`](../protocol/src/f2_prove.rs#L913-L
 builds per-column MLE evals at the sumcheck point `r*`:
 
 ```rust
-let all_col_evals: Vec<BinaryFieldGF192> = projected_trace
+let all_col_evals: Vec<BinaryFieldGF128> = projected_trace
     .iter()                              // <-- sequential
     .map(|col| {
         let inner_mle = DenseMultilinearExtension::from_evaluations_vec(
@@ -298,7 +298,7 @@ let all_col_evals: Vec<BinaryFieldGF192> = projected_trace
     .collect();
 ```
 
-Each eval is `O(2^num_vars)` GF(2^192) ops over `num_cols`
+Each eval is `O(2^num_vars)` GF(2^128) ops over `num_cols`
 independent columns — but the outer loop was `.iter()`, *sequential*,
 even though every other heavy outer loop in `prove_f2_uair_with_groups`
 uses `cfg_iter!`. Easy fix.
@@ -315,7 +315,7 @@ uses `cfg_iter!`. Easy fix.
 | `Micro/UAIR-d-ColEvalsAtRstar` | 3.85 ms | 1.43 ms | **2.7×** |
 
 A separate possible follow-up — zero-copy reinterpret of
-`Vec<BinaryFieldGF192>` as `Vec<Uint<3>>` via the `#[repr(transparent)]`
+`Vec<BinaryFieldGF128>` as `Vec<Uint<3>>` via the `#[repr(transparent)]`
 guarantee — would save another ~0.3 ms (the per-col 1.5 MB clone). Not
 pursued: the dominant cost in the 1.43 ms is the actual MLE-eval, not
 the clone.
@@ -373,7 +373,7 @@ After all branch work:
 
 1. **`Open-b-LiftedEqTensor` (2.83 ms, ~8%)** — builds the (q₀, q₁)
    tensors via `AlphaPolyBasis::lift`. Likely a function-call-heavy
-   GF(2^192) → F_2[X]<3> basis-change.
+   GF(2^128) → F_2[X]<3> basis-change.
 2. **`Open-c-Folds` and step 7.1 in `prove_f2_open`** — the *other*
    lift-and-inner-product site. Already benefits from the lift fix; its
    inner-product over `row_len` cells could be inlined the same way

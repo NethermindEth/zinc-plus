@@ -7,10 +7,10 @@ F_2 prove path lands at MLE evaluation claims of the form
 MLE[ψ_α(w_g)](r*) = a_g   for each committed column g,
 ```
 
-with `r* ∈ GF(2^192)^μ` and `a_g ∈ GF(2^192)`. `ψ_α : F_2[X] →
-GF(2^192)` is the ring homomorphism `X ↦ α` for a fixed transcript
+with `r* ∈ GF(2^128)^μ` and `a_g ∈ GF(2^128)`. `ψ_α : F_2[X] →
+GF(2^128)` is the ring homomorphism `X ↦ α` for a fixed transcript
 challenge `α`; `w_g : {0,1}^μ → F_2[X]<D>` is the witness column;
-`ψ_α(w_g) : {0,1}^μ → GF(2^192)` is its projection.
+`ψ_α(w_g) : {0,1}^μ → GF(2^128)` is its projection.
 
 This document plans the **next step**: discharging those claims via a
 "lift-and-project" reduction to a Zip+ open over `F_2[X]`. The
@@ -28,24 +28,24 @@ and reshape `w_g`'s evaluations into a `2^{μ_1} × 2^{μ_2}` matrix
 eq(b, r*) = q_1[b_1] · q_2[b_2]   for b = (b_1, b_2),
 ```
 
-where `q_1 ∈ GF(2^192)^{2^{μ_1}}` and `q_2 ∈ GF(2^192)^{2^{μ_2}}` are
+where `q_1 ∈ GF(2^128)^{2^{μ_1}}` and `q_2 ∈ GF(2^128)^{2^{μ_2}}` are
 the two halves of the eq-tensor (built by `build_eq_x_r` on the two
 halves of `r*` — exactly what `point_to_tensor` already does). The
 claim becomes
 
 ```
-(*)   q_1^T · ψ_α(M_{w_g}) · q_2 = a_g   in GF(2^192).
+(*)   q_1^T · ψ_α(M_{w_g}) · q_2 = a_g   in GF(2^128).
 ```
 
 ## The lift
 
-`GF(2^192) = F_2[X] / ⟨X^{192} + X^7 + X^2 + X + 1⟩`. We lift
-`q_1, q_2 ∈ GF(2^192)^*` to `q_1', q_2' ∈ F_2[X]<192>` so that
+`GF(2^128) = F_2[X] / ⟨X^{128} + X^7 + X^2 + X + 1⟩`. We lift
+`q_1, q_2 ∈ GF(2^128)^*` to `q_1', q_2' ∈ F_2[X]<128>` so that
 `ψ_α(q_i'[k]) = q_i[k]` for every entry. The witness matrix
 `M_{w_g}` is already in `F_2[X]<D>`.
 
 **Inverse-of-evaluation lift** (not bit-pattern). The naive
-"interpret each `q_i[k] ∈ GF(2^192)` as its canonical degree-<192
+"interpret each `q_i[k] ∈ GF(2^128)` as its canonical degree-<128
 representative in `F_2[X]`" is *not* the right lift for a
 transcript-fresh α — applying `ψ_α` to the canonical representative
 of `g` gives `(g_bits)(α) = Σ g_i · α^i`, which equals `g` only when
@@ -54,15 +54,15 @@ random α, that identity fails (and the verifier check
 `ψ_α(a') = a` fails accordingly).
 
 Correct construction: with overwhelming probability over a
-transcript-fresh α, `{1, α, α^2, …, α^{191}}` is an F_2-basis of
-`GF(2^192)`. The lift is the unique `c ∈ F_2^{192}` solving
+transcript-fresh α, `{1, α, α^2, …, α^{127}}` is an F_2-basis of
+`GF(2^128)`. The lift is the unique `c ∈ F_2^{128}` solving
 `Σ_j c_j · α^j = q_i[k]`; we set `q_i'[k] := Σ_j c_j X^j ∈
-F_2[X]<192>`. By construction `ψ_α(q_i'[k]) = q_i[k]`. The lift
-table (a 192×192 F_2 matrix inverse) is precomputed once per α and
+F_2[X]<128>`. By construction `ψ_α(q_i'[k]) = q_i[k]`. The lift
+table (a 128×128 F_2 matrix inverse) is precomputed once per α and
 reused across all `q_i[k]`. See
-[`AlphaPolyBasis`](../../poly/src/univariate/binary_gf192.rs) for
-the concrete implementation; cost is `O(192³)` F_2 ops for the
-inverse + `O(192²)` ops per entry.
+[`AlphaPolyBasis`](../../poly/src/univariate/binary_gf128.rs) for
+the concrete implementation; cost is `O(128³)` F_2 ops for the
+inverse + `O(128²)` ops per entry.
 
 Compute the **unreduced** product over `F_2[X]`:
 
@@ -70,12 +70,12 @@ Compute the **unreduced** product over `F_2[X]`:
 (**)  a_g' := q_1'^T · M_{w_g} · q_2'   in F_2[X].
 ```
 
-`a_g'` is a single F_2[X] polynomial of degree at most `(192 - 1) +
-(D - 1) + (192 - 1) = D + 381`. For `D = 32` that's degree ≤ 413
-(414 bits, ≈52 bytes serialised — vs 24 bytes for `a_g` in
-GF(2^192)).
+`a_g'` is a single F_2[X] polynomial of degree at most `(128 - 1) +
+(D - 1) + (128 - 1) = D + 253`. For `D = 32` that's degree ≤ 285
+(286 bits, ≈36 bytes serialised — vs 24 bytes for `a_g` in
+GF(2^128)).
 
-**Lift correctness.** `ψ_α` is a ring hom `F_2[X] → GF(2^192)`
+**Lift correctness.** `ψ_α` is a ring hom `F_2[X] → GF(2^128)`
 sending `X ↦ α`. Applying it to (**) coefficient-by-coefficient
 commutes through the products and sums:
 
@@ -89,7 +89,7 @@ commutes through the products and sums:
 So `(**) ∧ ψ_α(a_g') = a_g  ⇒  (*)`. The verifier discharge of (*) is
 therefore: (i) receive `a_g'`, (ii) verify (**) via a Zip+ open over
 `F_2[X]`, (iii) check `ψ_α(a_g') = a_g` (one polynomial evaluation
-in GF(2^192), ~414 multiplications by `α`).
+in GF(2^128), ~286 multiplications by `α`).
 
 ## Why this fits Zip+ unchanged in structure
 
@@ -101,10 +101,10 @@ than an `F_2[X]` lift. Concretely:
 |--------|--------------|-------------|
 | Witness type (`Eval`) | `Int<N>` | `BinaryPoly<D>` |
 | Codeword type (`Cw`) | `Int<K>` (widened) | `BinaryPoly<D>` (no widening — F_2 add is XOR) |
-| Challenge type (`Chal`) | `Int<N>` | `BinaryPoly<192>` (= GF(2^192) representative) |
-| Eval point (`Pt`) | `Int<N>` | `BinaryPoly<192>` |
-| Combined-row type (`CombR`) | `Int<M>` (further widened) | `BinaryPoly<223>` (= D + 192 − 1) |
-| Final claim type | `F_q` after `Z → F_q` projection | `GF(2^192)` after `F_2[X] → GF(2^192)` projection (`X = α`) |
+| Challenge type (`Chal`) | `Int<N>` | `BinaryPoly<128>` (= GF(2^128) representative) |
+| Eval point (`Pt`) | `Int<N>` | `BinaryPoly<128>` |
+| Combined-row type (`CombR`) | `Int<M>` (further widened) | `BinaryPoly<159>` (= D + 128 − 1) |
+| Final claim type | `F_q` after `Z → F_q` projection | `GF(2^128)` after `F_2[X] → GF(2^128)` projection (`X = α`) |
 | Verifier projection | `mod q` | `eval at α` |
 
 The structural analogy is exact: in both cases the prover commits in
@@ -133,13 +133,13 @@ For `D = 32`, `μ_1 = μ_2 = μ/2`, `num_rows = 2^{μ_1}`,
 |----------|------|------|-------|
 | Witness cell `M_{w_g}[i, j]` | `BinaryPoly<32>` | 32 | 4 |
 | Codeword cell (committed) | `BinaryPoly<32>` | 32 | 4 |
-| q_1', q_2' entry | `BinaryPoly<192>` | 192 | 24 |
-| Single product `q_1'[i] · M[i,j]` | `BinaryF2Poly<4>` (≥223 bits) | 256 | 32 |
-| Combined row entry `Σ_i q_1'[i] · M[i,j]` | `BinaryF2Poly<4>` | 256 | 32 |
-| Final `a_g'` | `BinaryF2Poly<7>` (≥414 bits) | 448 | 56 |
+| q_1', q_2' entry | `BinaryPoly<128>` | 128 | 16 |
+| Single product `q_1'[i] · M[i,j]` | `BinaryF2Poly<3>` (≥159 bits) | 192 | 24 |
+| Combined row entry `Σ_i q_1'[i] · M[i,j]` | `BinaryF2Poly<3>` | 192 | 24 |
+| Final `a_g'` | `BinaryF2Poly<5>` (≥286 bits) | 320 | 40 |
 
 The "rough" sizes use `BinaryF2Poly<W>`'s `64·W`-bit native packing.
-A tighter `BinaryPoly<223>` / `BinaryPoly<414>` would save a few
+A tighter `BinaryPoly<159>` / `BinaryPoly<286>` would save a few
 bytes per opening but require introducing those exact widths to the
 trait hierarchy. Recommended: use `BinaryF2Poly<W>` throughout, since
 it already exists and the F_2[X] multiplication kernel
@@ -153,7 +153,7 @@ The Zip+ `ZipTypes::EvalDotChal` / `CombDotChal` /
 `ArrCombRDotChal` slots need F_2[X] flavours:
 
 - **`EvalDotChal`**: `inner_product(eval: &BinaryPoly<D>, alphas:
-  &[BinaryPoly<192>]) -> BinaryF2Poly<W_CombR>`. For our setting
+  &[BinaryPoly<128>]) -> BinaryF2Poly<W_CombR>`. For our setting
   `degree_bound = 0`, so `alphas = [ONE]` and this collapses to the
   identity lift `BinaryPoly<D> ↪ BinaryF2Poly<W_CombR>`.
 - **`CombDotChal`**: Same shape, used inside `prove_pre_open_f` for
@@ -175,13 +175,13 @@ but in production code now — promote out of `#[cfg(test)]`):
 ```rust
 type Eval     = BinaryPoly<D>;
 type Cw       = BinaryPoly<D>;             // reuse the F_2 commit
-type Chal     = BinaryF2Poly<3>;           // GF(2^192) representative
-type Pt       = BinaryF2Poly<3>;
-type CombR    = BinaryF2Poly<4>;           // up to D + 192 - 1 bits
-type Comb     = BinaryF2Poly<4>;           // single-row combined entry
+type Chal     = BinaryF2Poly<2>;           // GF(2^128) representative
+type Pt       = BinaryF2Poly<2>;
+type CombR    = BinaryF2Poly<3>;           // up to D + 128 - 1 bits
+type Comb     = BinaryF2Poly<3>;           // single-row combined entry
 type EvalDotChal     = BinaryF2EvalDotChal<D>;
 type CombDotChal     = BinaryF2CombDotChal<D>;
-type ArrCombRDotChal = BinaryF2InnerProduct<4, 3, 7>;
+type ArrCombRDotChal = BinaryF2InnerProduct<3, 2, 5>;
 ```
 
 `Fmod`, `PrimeTest`, `NUM_COLUMN_OPENINGS` retain their integer-side
@@ -194,7 +194,7 @@ pick deterministic defaults).
 the new ZipTypes it needs the same impl, just with the new
 `CombR`/`Comb` flavours. The `encode` method is unchanged (still
 emits `BinaryPoly<D>` codewords). `encode_wide` needs to operate on
-`BinaryF2Poly<4>` rows (multiply each entry by `+ 1` polynomial
+`BinaryF2Poly<3>` rows (multiply each entry by `+ 1` polynomial
 constants — i.e., copy + XOR-accumulate). `encode_f` is unused in
 the F_2[X] path (no prime field involvement).
 
@@ -202,11 +202,11 @@ the F_2[X] path (no prime field involvement).
 
 The bound `F: PrimeField + FromWithConfig<Zt::CombR> + ...` that
 `ZipPlus::prove_f` requires expresses the verifier's final
-projection target. For us, F = `BinaryFieldGF192`. But the integer
+projection target. For us, F = `BinaryFieldGF128`. But the integer
 prove/verify path internally constructs the combined row in
 `F`-typed form (`prove_pre_open_f` line ~437), which conflates
 "the wider commit-domain type" with "the field". For F_2[X] we want
-those to be **the same wide type** (`BinaryF2Poly<4>`), and the
+those to be **the same wide type** (`BinaryF2Poly<3>`), and the
 projection to F happens only at the very end (`ψ_α(a_g')`).
 
 Cleanest approach: a parallel module
@@ -214,7 +214,7 @@ Cleanest approach: a parallel module
 mirrors `prove_f_inner` but operates entirely in `BinaryF2Poly<W>`
 arithmetic for the combined row, the b-vector, and the final eval.
 The verifier mirror lives in `phase_verify_f2.rs`. Both end with
-`a_g' ∈ BinaryF2Poly<7>` returned to the caller, who then performs
+`a_g' ∈ BinaryF2Poly<5>` returned to the caller, who then performs
 the `ψ_α(a_g') = a_g` check.
 
 ### Piece 5 — Lift step in the protocol layer
@@ -225,17 +225,17 @@ existing IC+sumcheck pipeline plus the commitments + hints, and run
 the F_2[X] Zip+ open per column. Output: the `a_g'`-bundle
 (plus the per-column Zip+ open proofs).
 
-The lift itself is trivial: `BinaryFieldGF192` already stores its
-data in `BinaryF2Poly<3>`-compatible form (a `Uint<3>` of 192 bits),
-so each `q_i` entry can be reinterpreted as `BinaryF2Poly<3>` with no
-arithmetic. A helper `BinaryFieldGF192 -> BinaryF2Poly<3>` is the
+The lift itself is trivial: `BinaryFieldGF128` already stores its
+data in `BinaryF2Poly<2>`-compatible form (a `Uint<2>` of 128 bits),
+so each `q_i` entry can be reinterpreted as `BinaryF2Poly<2>` with no
+arithmetic. A helper `BinaryFieldGF128 -> BinaryF2Poly<2>` is the
 only new conversion needed.
 
 ### Piece 6 — Final verifier `ψ_α` check
 
-`ψ_α(a_g')` evaluates a degree-≤413 polynomial in `BinaryF2Poly<7>`
-at `α ∈ GF(2^192)`. Use the existing `eval_f2_poly_d_at` machinery
-in [`poly/src/univariate/binary_gf192.rs`](../../poly/src/univariate/binary_gf192.rs);
+`ψ_α(a_g')` evaluates a degree-≤285 polynomial in `BinaryF2Poly<5>`
+at `α ∈ GF(2^128)`. Use the existing `eval_f2_poly_d_at` machinery
+in [`poly/src/univariate/binary_gf128.rs`](../../poly/src/univariate/binary_gf128.rs);
 it currently takes `BinaryPoly<D>` with `D ≤ 64`, so we'd add a
 `BinaryF2Poly<W>` variant that walks the `64·W` bits the same way.
 
@@ -256,8 +256,8 @@ Two soundness components combine:
    The only remaining adversarial strategy is to commit to a `M_w`
    that satisfies `ψ_α(M_w) ≠ ψ_α(w)` for the "real" witness — but
    `α` is a transcript challenge sampled *after* commit (Step 3 of
-   the prove pipeline), so this strategy has probability `≤ 192 ·
-   2^{-192}` per column (degree of `a_g'` over `|GF(2^192)|`).
+   the prove pipeline), so this strategy has probability `≤ 128 ·
+   2^{-128}` per column (degree of `a_g'` over `|GF(2^128)|`).
 
 ## Risks and open questions
 
@@ -275,19 +275,19 @@ Two soundness components combine:
    per opened column, plus a Merkle path; consistent with the
    integer-side budget at `D = 32`.
 3. **Combined-row transcription size.** Prover sends the `num_rows`
-   entries of the b-vector (each `BinaryF2Poly<4>` = 32 bytes). For
+   entries of the b-vector (each `BinaryF2Poly<3>` = 32 bytes). For
    `num_vars = 16`, `num_rows = 256`, that's 8 KB per column open
    — bigger than the integer protocol's b-vector (`Int<32>` = 8
    bytes/entry → 2 KB). Mitigation: pack the tightest width
-   (`ceil((D + 192) / 8)` = 28 bytes for `D=32`) instead of
+   (`ceil((D + 128) / 8)` = 20 bytes for `D=32`) instead of
    `64·4 = 32`; saves ~10%. Not a blocker.
-4. **`ψ_α` cost.** Verifier evaluates a degree-≤413 polynomial in
-   GF(2^192) — ~413 mults at ~24-byte each, microsecond-scale.
+4. **`ψ_α` cost.** Verifier evaluates a degree-≤285 polynomial in
+   GF(2^128) — ~285 mults at ~16-byte each, microsecond-scale.
    Negligible.
 5. **Quotient by the field reduction polynomial.** A subtle point:
-   `q_i'` is the *unique* degree-<192 representative of a
-   `GF(2^192)` element. The product `q_1'^T · M_w · q_2'` in
-   `F_2[X]` is computed *without* reducing modulo `X^{192} + X^7 +
+   `q_i'` is the *unique* degree-<128 representative of a
+   `GF(2^128)` element. The product `q_1'^T · M_w · q_2'` in
+   `F_2[X]` is computed *without* reducing modulo `X^{128} + X^7 +
    X^2 + X + 1`. The reduction only happens implicitly when the
    verifier computes `ψ_α(a_g')`. This is **deliberate** — if we
    reduced earlier, we'd lose information needed to discharge the
@@ -306,8 +306,8 @@ Two soundness components combine:
 1. **F_2[X] arithmetic widening.** Add `BinaryF2Poly<W>`
    multiplication accessors at widths 4 and 7. Add `eval_f2_wide_at`
    (the `BinaryF2Poly<W>`-typed analogue of `eval_f2_poly_d_at`)
-   in `binary_gf192.rs`. Unit tests: round-trip
-   `ψ_α(lift(g)) = g` for `g ∈ GF(2^192)`.
+   in `binary_gf128.rs`. Unit tests: round-trip
+   `ψ_α(lift(g)) = g` for `g ∈ GF(2^128)`.
 2. **F_2[X] inner-product traits.** `BinaryF2InnerProduct<W_A,
    W_B, W_OUT>` and the `EvalDotChal` / `CombDotChal` flavours
    that produce `BinaryF2Poly<W_OUT>` outputs. Unit-tested

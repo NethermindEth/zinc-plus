@@ -1,0 +1,146 @@
+\section{Setting and Notation}
+\label{sec:setting}
+
+\paragraph{Fields and cell ring.} Fix
+$P(X) = X^{192} + X^7 + X^2 + X + 1 \in \F_2[X]$ — the NIST FIPS 186-2
+pentanomial — and write
+\[
+  \GFt \;:=\; \F_2[X] \big/ \bigl(P(X)\bigr)
+\]
+for the binary field of size $2^{192}$. Fix a coefficient bound
+$\Dval = 32$ and define the \emph{cell ring}
+\[
+  \cellring \;:=\; \F_2[X]\big/(X^{\Dval}),
+\]
+a free $\F_2$-module of rank $\Dval$. We treat $\cellring$ as a
+subset of $\polyringat{\Dval} \subset \polyring$ throughout; the
+quotient $/(X^\Dval)$ is structural (it bounds the cell size) and is
+\emph{not} the source of any reduction in this document.
+
+\paragraph{The two roles of $X$.} The formal variable $X$ plays two
+distinct roles in the construction:
+\begin{itemize}[leftmargin=2em]
+  \item As the \emph{coefficient variable} of cells in $\cellring$
+    and of intermediate polynomials in $\polyring$. Operations on
+    cells (multiplication, evaluation) live here.
+  \item As the \emph{quotient generator} of $\GFt$. An element
+    $g \in \GFt$ has a unique degree-$<192$ representative
+    $g_{\mathrm{rep}}(X) \in \polyringat{192}$, the canonical lift.
+\end{itemize}
+The two roles are notationally the same letter $X$; they are
+distinguished structurally by the surrounding ring. When confusion is
+possible we write $g_{\mathrm{rep}}$ or $\polyringat{192}$ explicitly.
+
+\paragraph{Trace and witness.} Fix a row count $n = 2^{\nu}$ and a
+column count $K$. The witness is $K$ trace columns
+$w_1, \ldots, w_K \in \cellring^n$, each a length-$n$ vector of cells.
+For analysis we will arrange a single column $w$ as an
+$n_{\mathrm{rows}} \times n_{\mathrm{cols}}$ matrix
+$M_w$ with $n = n_{\mathrm{rows}} \cdot n_{\mathrm{cols}}$, both
+factors powers of two; the row index splits as
+$b = (b_0, b_1) \in \{0,1\}^{\nu_0} \times \{0,1\}^{\nu_1}$ with
+$\nu = \nu_0 + \nu_1$.
+
+\paragraph{Evaluation projection $\psia$.} Fix a transcript-fresh
+$\alpha \in \GFt$, drawn after the witness is committed. Define the
+$\F_2$-algebra homomorphism
+\[
+  \psia : \polyring \;\longrightarrow\; \GFt,
+  \qquad
+  \psia\!\big(\textstyle\sum_j c_j X^j\big) \;=\; \sum_j c_j \cdot \alpha^j \pmod{P}.
+\]
+Restricted to $\cellring \subset \polyringat{\Dval}$, $\psia$ is the
+PIOP's Step~3 projection — it replaces each cell by a single
+$\GFt$-element. We use the same symbol $\psia$ for the cell-wise
+application $\psia : \cellring^n \to \GFt^{\,n}$.
+
+\paragraph{Multilinear extension.} For $v \in \cellring^n$, the
+\emph{multilinear extension over $\GFt$} of $\psia(v)$ is the
+unique multilinear polynomial $\mle{\psia(v)} \in \GFt[Y_1,\ldots,Y_\nu]$
+with $\mle{\psia(v)}(b) = \psia(v_b)$ for every $b \in \{0,1\}^\nu$.
+Equivalently,
+\[
+  \mle{\psia(v)}(r) \;=\; \sum_{b \in \{0,1\}^\nu} \eq_b(r) \cdot \psia(v_b),
+  \qquad
+  \eq_b(r) := \prod_{k=1}^\nu \bigl(b_k r_k + (1 - b_k)(1 - r_k)\bigr) \in \GFt.
+\]
+
+\paragraph{The Step-7 input.} The protocol's pre-Step-7 output is the
+collection of \emph{MLE evaluation claims}
+\[
+  a_g \;=\; \mle{\psia(w_g)}(r^*) \;\in\; \GFt,
+  \qquad g = 1,\ldots,K,
+\]
+at a common sumcheck endpoint $r^* \in \GFt^{\nu}$. The verifier
+holds $(r^*, \alpha, a_1, \ldots, a_K)$ and the commitment root; the
+prover holds the full witness and the codeword matrices from commit.
+The goal of Step~7 is to certify each $a_g$ relative to the
+commitment.
+
+\paragraph{The eq-tensor.} For analysis we always assume the matrix
+shape above, so that the eq-MLE factorises as a tensor product:
+\[
+  \eq_b(r^*) \;=\; q_0[b_0]\cdot q_1[b_1],
+\]
+where $q_0 \in \GFt^{n_{\mathrm{rows}}}$, $q_1 \in
+\GFt^{n_{\mathrm{cols}}}$ are the two halves of the tensor
+decomposition. They are computed identically by prover and verifier
+from $r^*$ via the standard \texttt{build\_eq\_x\_r} routine. The
+matrix form of the MLE evaluation claim is
+\[
+  a_g \;=\; q_0^{\top}\, \psia(M_{w_g})\, q_1 \;\in\; \GFt,
+\]
+where $\psia(M_{w_g})$ is the matrix with $\psia(M_{w_g})_{b_0, b_1}
+= \psia(M_{w_g, (b_0, b_1)})$.
+
+\paragraph{Linear code.} The commit phase encodes each witness column
+row by row through an $\F_2$-linear code
+\[
+  \encode : \cellring^{n_{\mathrm{cols}}} \;\longrightarrow\;
+            \cellring^{n_{\mathrm{cw}}}, \qquad n_{\mathrm{cw}} = 4\cdot n_{\mathrm{cols}},
+\]
+deployed in Zinc+ as the rate-$1/4$ \texttt{RaaF2Code} (Repeat /
+permute / XOR-accumulate / permute / XOR-accumulate). Two facts about
+this code matter for what follows:
+
+\begin{lemma}[Linearity of the deployed code]
+\label{lem:f2x-linearity}
+The encoder $\encode : \cellring^{n_{\mathrm{cols}}} \to
+\cellring^{n_{\mathrm{cw}}}$ is $\F_2$-linear in the cell
+coordinate. Consequently it extends naturally to a
+$\polyring$-linear map
+$\encode : \polyring^{n_{\mathrm{cols}}} \to
+\polyring^{n_{\mathrm{cw}}}$ acting cell-wise on any wider cell
+ring $\polyringat{W} \supset \cellring$, and the diagram
+\[
+  \begin{array}{ccc}
+    \polyringat{W}^{n_{\mathrm{cols}}} & \xrightarrow{\;\encode\;} & \polyringat{W}^{n_{\mathrm{cw}}} \\
+    \downarrow{\scriptstyle c \cdot} & & \downarrow{\scriptstyle c \cdot} \\
+    \polyringat{W}^{n_{\mathrm{cols}}} & \xrightarrow{\;\encode\;} & \polyringat{W}^{n_{\mathrm{cw}}}
+  \end{array}
+\]
+commutes for every scalar $c \in \polyring$.
+\end{lemma}
+
+\begin{proof}
+The kernel of \texttt{RaaF2Code} consists of four steps: integer
+repetition (cell duplication into $\mathrm{REP}=4$ copies of the input
+row), index permutation (no per-cell arithmetic), and pre-fix XOR
+accumulation along the codeword. Repetition and permutation are
+$\F_2$-linear in the cell coordinate trivially; XOR-accumulation is
+$\F_2$-addition along the row, which is also $\F_2$-linear in the
+cell coordinate. Composition of $\F_2$-linear maps is $\F_2$-linear.
+Extending scalars from $\F_2$ to $\polyring$ preserves linearity
+because $\polyring$ is a flat $\F_2$-module: scalar multiplication by
+$c \in \polyring$ acts cell-wise, commutes with the XOR (which is
+$\F_2$-addition on coefficients), and commutes with permutation
+(which is positional). The commuting diagram follows.
+\end{proof}
+
+In particular \emph{the commit-time codeword matrix
+$M_{\mathrm{cw}, g}$, originally encoded under
+$\encode : \cellring^{n_{\mathrm{cols}}} \to
+\cellring^{n_{\mathrm{cw}}}$, is also the codeword of the same row
+under any wider $\encode : \polyringat{W}^{n_{\mathrm{cols}}} \to
+\polyringat{W}^{n_{\mathrm{cw}}}$.} The commitment is not re-issued
+for the Step~7 opening.
