@@ -1508,6 +1508,28 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     its *unshifted* operand (the S-column) is materialised, NOT at the
     target's storage row (the C6e off-by-shift that the bisect caught).
 
+### `f2_sha256` bench was stale — fixed (and a nvars=9 baseline)
+- **Found while running the bench** (`RUSTFLAGS="-C target-cpu=native"
+  cargo bench --features "parallel simd unchecked" --bench f2_sha256 --
+  "Steps"`): the bench didn't compile (5 `prove_f2_uair_with_groups` call
+  sites still used the pre-`hadamard_specs` signature — never updated since
+  `13c169e`, because benches aren't in the default `cargo build`/`test`),
+  and the `2-VerifyOpen` micro-bench **panicked** (`EvalConsistency`): it
+  verified the open at `r*`, but the full proof opens at the multipoint-eval
+  output point `r_0`. Fixed both: added the `&[]` hadamard/adder args, and
+  made `2-VerifyOpen` replicate the mp phase (mp `verify_as_subprotocol` →
+  absorb `open_evals_at_r_0` → subclaim at `r_0`) before timing the open.
+- **Baseline (nvars=9, 7-compression / 512-row fixture, M-series CPU,
+  `parallel simd unchecked`, no `metal_gpu`)** — prove: 1-Commit ≈ 272 µs,
+  2-UAIR ≈ 953 µs, 3-Open ≈ 660 µs (≈ 1.89 ms total); verify:
+  1-VerifyUAIR ≈ 113 µs, 2-VerifyOpen ≈ 702 µs (≈ 0.82 ms total). The
+  Hadamard/adder code is a **no-op on this path** (the bench registers no
+  relations), so these reflect the unchanged baseline. NB Criterion's
+  `change:` deltas are vs a stale saved baseline (and the Commit
+  "regression" is CPU-vs-`metal_gpu`-GPU) — read absolute numbers, not the
+  deltas. The `e2e` group (full prove/verify, nvars sweep to 22) and `micro`
+  group were not run here.
+
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at
   `r*` are extracted from the sumcheck transcript and **trusted**

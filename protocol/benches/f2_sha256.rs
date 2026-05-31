@@ -46,7 +46,7 @@ use zinc_poly::{
 };
 use zinc_primality::MillerRabin;
 use zinc_protocol::f2_prove::{
-    F2BitOpVirtualSpec, F2FullProof, F2VirtualBpSpec, F2ZincTypes,
+    F2BitOpVirtualSpec, F2FullProof, F2VerifierSubclaim, F2VirtualBpSpec, F2ZincTypes,
     ZincPlusPiopF2,
 };
 use zinc_uair::BitOp;
@@ -68,6 +68,7 @@ use zip_plus::{
 
 use zinc_piop::{
     ideal_check::IdealCheckProtocol,
+    multipoint_eval::MultipointEval,
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
 
@@ -406,6 +407,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &mut transcript,
                         &fx.trace,
                         &[] as &[F2VirtualBpSpec],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -433,6 +436,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
@@ -532,6 +537,40 @@ fn bench_verifier_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Pro
                         |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
                     )
                     .expect("UAIR verify should succeed");
+                // The full proof opens at the multipoint-eval output point
+                // `r_0`, not the sumcheck point `r*`. Advance the transcript
+                // through the mp phase (mirror `verify_f2_full_with_bit_ops`)
+                // so the open verifies at `r_0`. SHA has no XOR-virtual cols,
+                // so `open_evals_at_r_0` is exactly the primary col evals.
+                let mp_subclaim = MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol(
+                    &mut transcript,
+                    proof.multipoint_eval.clone(),
+                    &subclaim.sumcheck_point,
+                    &proof.uair.column_evals_at_rstar,
+                    &[],
+                    &[],
+                    fx.num_vars,
+                    &(),
+                )
+                .expect("mp verify should succeed");
+                let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+                let mut buf = vec![
+                    0u8;
+                    <<BinaryFieldGF128 as Field>::Inner
+                        as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+                ];
+                for v in &proof.open_evals_at_r_0 {
+                    transcript.absorb_random_field(v, &mut buf);
+                }
+                let subclaim = F2VerifierSubclaim {
+                    ic_evaluation_point: subclaim.ic_evaluation_point,
+                    alpha: subclaim.alpha,
+                    sumcheck_point: r_0,
+                    primary_column_evals: proof.open_evals_at_r_0.clone(),
+                    virtual_column_evals: Vec::new(),
+                    hadamard_rstar: Vec::new(),
+                    hadamard_pairs: Vec::new(),
+                };
                 (transcript, subclaim)
             },
             |(mut transcript, subclaim)| {
@@ -1391,6 +1430,8 @@ fn bench_micro_prover_uair(
                         &mut transcript,
                         &fx.trace,
                         &[] as &[F2VirtualBpSpec],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -1444,6 +1485,8 @@ fn bench_micro_prover_open(
             ::prove_f2_uair_with_groups(
                 &mut t,
                 &fx.trace,
+                &[],
+                &[],
                 &[],
                 fx.num_vars,
                 sha256_f2_project_scalar::<R>,
@@ -1739,6 +1782,8 @@ fn bench_micro_prover_open(
                     ::prove_f2_uair_with_groups(
                         &mut t,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
