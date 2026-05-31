@@ -66,6 +66,51 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### `LEAF_GROUP_SIZE` 8 → 1 to shrink `open.opened/values` 8× (commit `<TBD>`, measurements pending)
+- **What**: `protocol/src/f2_prove.rs::LEAF_GROUP_SIZE` flipped from
+  `8` to `1`. With group size 1 each Merkle leaf hashes exactly one
+  paired-storage column stack (`paired_batch × num_rows × 8 B`),
+  so an opening ships one column of cells instead of eight. The
+  lower layers (`zip-plus::pcs::phase_commit::commit_grouped`,
+  `MerkleTree::new_from_column_groups`) are fully parameterised
+  over `group_size`; the only invariant is power-of-two, which 1
+  satisfies. No other code changes needed — every call site
+  references the constant, not the literal `8`.
+- **Why**: the `open.opened/values` region of the proof was
+  ~4.34 MB at the bench's nvars=22 shape (`987 openings × 8
+  LEAF_GROUP_SIZE × 9 paired_batch × 8 num_rows × 8 B/cell`).
+  The `LEAF_GROUP_SIZE` factor exists purely to amortise Blake3
+  setup during commit; the wire-side cost is a `LEAF_GROUP_SIZE×`
+  bloat on values, partly offset by `log2(LEAF_GROUP_SIZE)`
+  fewer Merkle siblings per opening.
+- **Expected proof-size delta** (analytic, nvars=22, 987 openings):
+  - `open.opened/values`: 4.34 MB → 555 KB (−3.8 MB).
+  - `open.opened/merkle`: +3 siblings × 987 openings × 32 B
+    (Blake3 hash) ≈ +95 KB.
+  - **Net: ~−3.7 MB on the dominant proof region.**
+- **Expected prove-time cost**: Blake3 leaf hashing loses 8× of
+  its setup amortisation — each leaf hashes 72 B (one paired
+  column stack) instead of 576 B, so per-byte throughput
+  collapses on the Metal-Blake3 leaf kernel and the CPU fallback.
+  Leaf count grows 8× (`codeword_len / 1` instead of
+  `codeword_len / 8`), and the Merkle tree gains 3 internal
+  levels.
+- **Verification**: 12/12 F_2 lib tests pass
+  (`cargo test -p zinc-protocol --lib f2_prove --release`),
+  including `prove_then_verify_sha256_f2_roundtrips` and the
+  full `prove_then_verify_f2_full_*` suite.
+- **Measurements pending**: still need to bench
+  `Zinc+ F_2 SHA-256/Commit*` and `Prove e2e` at nvars=22 to
+  confirm the prover-time regression is acceptable for the
+  ~3.7 MB proof-size win. If the commit-time hit exceeds the
+  proof-size benefit, this entry should move to "Investigated,
+  didn't help" and the constant should revert.
+- **How to bench**: `cargo bench -p zinc-protocol --bench
+  f2_sha256 --features parallel,simd,unchecked,metal_gpu --
+  "Zinc\+ F_2 SHA-256/"` and compare against the previous
+  baseline. Look at `Commit-Fused-GPU-Inline`, `Prove`, and
+  the proof-size breakdown for `open.opened/{values,merkle}`.
+
 ### F_2 native IC: short-circuit `assert_zero` slots to `ZERO` in both builders (commit TBD)
 - **What**: in `protocol/src/f2_native_ic.rs`, `F2NativeMleFirstBuilder::assert_zero`
   (used by `prove_linear`) and `F2NativeRowBuilder::assert_zero` (used
@@ -1132,6 +1177,166 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   bit extraction (mirrors the `PA_C` setup). Until then, β
   values are unconstrained — the deferred Hadamard would be the
   thing that pins them.
+
+### ψ_α-projected sumcheck term for Hadamard discharge — proves convolution, not coefficient-wise (design pass on step 5)
+- **What (proposed)**: leave the 16 Hadamard relations unprocessed
+  in the IC (already the state on this branch — C12–C14 are
+  witness-only, the adds pin only the LSB via the `(X)` ideal), then
+  *after* the ψ_α projection add one extra batched-sumcheck term
+  `∑_x (ψ(v)·ψ(u) − ψ(w))·eq(x, r) = 0`, reusing the IC point `r`
+  (already in `GF(2^128)^μ`, so the proposer's "ψ(r)" is a no-op).
+  Attractive because it reuses the already-projected trace and the
+  existing degree-2 sumcheck + lift-and-project open with near-zero
+  extra commitment — would be the cheapest possible discharge.
+- **Why it does not work as written**: ψ_α is an `F_2`-algebra
+  homomorphism `F_2[X] → GF(2^128)`, so `ψ(v)·ψ(u) = ψ(v·u)` with
+  `·` the **polynomial / convolution** product in `F_2[X]`. The
+  SHA Hadamards (AND, Maj, and the Binius adder identity
+  `(â + X·ĉ) ⊙ (b̂ + X·ĉ) = ĉ + X·ĉ`) are **coefficient-wise** (`⊙`),
+  *not* convolution. So even for an honest prover,
+  `ψ(v)·ψ(u) − ψ(w) ≠ 0` when `w = v ⊙ u`. Counterexample:
+  `v = u = 1 + X` gives `ψ(v)·ψ(u) = (1+α)² = 1 + α²` (char 2),
+  but `ψ(v ⊙ u) = ψ(1 + X) = 1 + α`, and `1 + α² ≠ 1 + α` for
+  `α ∉ F_2`. The term proves the wrong relation (per-row
+  convolution). The Binius carry identity in particular *requires*
+  per-coefficient idempotency `c_i² = c_i`, which convolution (`ĉ²`)
+  destroys — so convolution can never stand in for the adder ⊙.
+- **Corrected direction**: the sumcheck *shape* is right; the fix is
+  to NOT collapse the bit-axis with ψ_α for the Hadamard columns.
+  Expand the `D = 32` coefficient positions into 5 extra sumcheck
+  variables, so `V, U, W` become MLEs over `{0,1}^{μ+5}` and
+  `W(x,b) = V(x,b)·U(x,b)` is a genuine elementwise product; then
+  `∑_{x,b} (V·U − W)·eq((x,b),(r,ρ)) = 0` is sound + complete (the
+  standard Binius AND zerocheck). Cost: the open must expose
+  **bit-level MLE evaluations** at a `(μ+5)`-point — a multilinear /
+  eq functional of each cell's bits, not the α-power functional ψ_α —
+  same lift-and-project machinery, different weights; and the
+  Hadamard sumcheck has arity `μ+5`, so it likely runs as a
+  *separate* sumcheck (groups in `MultiDegreeSumcheck` share
+  `num_vars`) rather than folded into the μ-var eq·col group. The
+  row-axis of its eq can still reuse the IC's `r`, so the "reuse r"
+  instinct survives.
+- **Correction-polynomial variant (also rejected)**: compute
+  `f = ∑_x (u_x·v_x − w_x)·eq(x,r)` in the X-domain during the IC (a
+  degree-≤62 poly in X, cheap to send), then check
+  `∑_x (ψ(u)ψ(v) − ψ(w))·eq(x,r) = ψ(f)` in the projected sumcheck.
+  Fails: the LHS *is* `f★(α)` for `f★ = ∑_x (u_x·v_x − w_x)·eq(x,r)`
+  the committed columns' true convolution discrepancy, so the check
+  only forces `f = f★` (SZ over α) — `f` is pinned to whatever the
+  committed `w` produces, making the term a tautology that constrains
+  `w` not at all. Deeper reason: `ψ(u)ψ(v)` only ever exposes the 63
+  convolution coefficients `c_n = ∑_{j+k=n} u_j v_k`; the AND diagonal
+  `∑_i u_i v_i` is provably not a function of them (it lives on the
+  main diagonal the product polynomial doesn't carry), so no X-domain
+  `f` — itself just another convolution object — can recover it. The
+  coefficient index must be a live sumcheck variable. (If `f` is read
+  as the coefficient-wise `∑_x (u_x⊙v_x − w_x)·eq`, the IC cannot even
+  form it — ⊙ is not a ring op in F_2[X] — and it collapses to the
+  original broken `=0`.)
+- **General impossibility (covers the "check f's F_2-coefficients
+  are 0" variant and every X-domain variant)**: everything the
+  ψ/IC view exposes about a Hadamard pair is a function of the
+  *convolution* `u·v` (and of `w`). Convolution does not determine
+  the Hadamard. Witness: `u = 1+X, v = 1+X³` vs `u' = 1+X², v' =
+  1+X+X²` have the **same** product `u·v = u'·v' = 1+X+X³+X⁴`, but
+  **different** coefficient-wise products `u⊙v = 1` vs `u'⊙v' =
+  1+X²`. Put `w := 1`: the honest instance `(u,v,w)` (here `w=u⊙v`)
+  and the false instance `(u',v',w)` (here `w≠u'⊙v'`) produce
+  *identical* `ψ(u)ψ(v)`, `ψ(w)`, and `f = ∑(u·v−w)·eq` — every
+  coefficient, including the F_2 parts. No predicate on those can
+  accept one and reject the other, so no such check is sound.
+  Separately, "f's F_2-coefficients = 0" also breaks **completeness**:
+  the honest `f★` is the (nonzero) cross-term discrepancy and its
+  F_2-components are generically nonzero, so it rejects honest
+  provers. Bottom line: the coefficient index must be a live
+  sumcheck variable; convolution-domain tricks cannot recover the
+  diagonal.
+- **Status**: semantics confirmed = coefficient-wise / bitwise AND
+  (case 3). **Chosen design = per-coefficient-slice zerocheck,
+  booleanity-style** (full plan: `protocol/src/f2_hadamard_plan.md`).
+  Run a μ-var degree-3 zerocheck
+  `∑_x eq(x,r)·∑_k∑_b (γ')^k σ^b (U_{k,b}·V_{k,b} − W_{k,b}) = 0` over
+  the bit-slice MLEs, reusing the booleanity infrastructure
+  (`piop/src/lookup/booleanity.rs`: `build_shifted_bit_slice_mles`,
+  `build_virtual_booleanity_mles`, `finalize_booleanity_*`,
+  `verify_bit_decomposition_consistency`) with the self-product
+  `v(v−1)` swapped for the cross-product `U·V − W`. The 32 slice evals
+  per column ride **one** column opening via the recombination check
+  `∑_b a^b v_b(r*) = parent_eval` — no per-slice openings.
+  - **F_2-specific subtlety**: the recombination element must be fresh
+    *after* the bit-slice evals (SZ over a degree-31 poly in `a` pins
+    all slices). The integer path reuses its early Step-3 projection
+    (`prover.rs:520`) and is sound only because its bit-slices also feed
+    the whole CPR; our Hadamard bit-slices are touched only by this
+    check, so they need their own fresh binding. Fix: either run the
+    Hadamard sumcheck before α (reuse α, Wiring R) or sample a fresh `a`
+    + a second `ψ_a` open (Wiring F). Both reuse the existing open.
+  - **Alternative (documented, not chosen)**: bit-axis expansion — a
+    (μ+5)-var zerocheck folding the bit axis, discharged by an
+    eq-over-bits open. Smaller proof (one bit-MLE eval/col vs D
+    slice-evals/col) but needs a new sumcheck arity + a new per-cell
+    open contraction. Revisit if proof size dominates.
+  - **Prereqs**: `W_β` carry column (absent on this branch; needed for
+    the 13 adders, not the 3 ANDs); missing `W_E ↓1,↓2` / `W_A ↓1,↓2`
+    shifted-bit-slice specs; row-shift discharge for shifted operands
+    (shared with Issue 1 below).
+  - Supersedes the bare "add one ψ-projected term" idea for AND/adder.
+  - **Progress (Wiring R chosen)**: A0 landed — the piop cross-product
+    zerocheck at `piop/src/lookup/hadamard.rs`
+    (`prepare/finalize_hadamard_{group,prover,verifier}` +
+    `HadamardTriple`), mirroring `booleanity.rs` with the self-product
+    `v(v−1)` swapped for `U·V − W`. Degree-3 single group, γ'/σ-batched.
+    Unit test passes (honest `W=U⊙V` accepted; flipped `W` ⇒ non-zero
+    claimed sum, rejected by the `claimed_sum==0` gate) and is
+    clippy-clean. Committed `a110d32`.
+  - **Progress: A1 core landed** (`ade7ab9`) —
+    `protocol/src/f2_hadamard.rs`: `prove_f2_hadamard_phase` /
+    `verify_f2_hadamard_phase` + `F2HadamardSpec`. Builds Δ=0 bit-slices
+    for the distinct referenced columns via `compute_bit_slices_flat`
+    (NOT `build_shifted_bit_slice_mles` — that asserts shift ≠ 0;
+    `uair/src/lib.rs:259`), runs the degree-3 group, and exposes
+    per-slice evals tied to the committed columns by
+    `verify_bit_decomposition_consistency`. Tests over real
+    `BinaryPoly<D>` columns: honest round-trip incl. the
+    `Σ_b α^b v_b(r*_H)` recombination at a test α, corrupt-W rejected,
+    empty-specs no-op. Requires the `parallel` feature (the F_2 path's
+    round-1 fast path uses rayon `reduce`).
+  - **A1 wiring DONE (working tree, NOT committed)**: the Hadamard
+    zerocheck phase is threaded into `prove_f2_uair_with_groups` /
+    `verify_f2_uair_with_groups` *before* α (Wiring R), reusing
+    `ic_state.evaluation_point` as `r`. Added `F2Proof.hadamard_proof:
+    Option<F2HadamardProof>`, a `hadamard_specs` param on both group
+    fns (existing callers pass `&[]` → no-op), and two
+    `F2VerifyError` variants (`MissingHadamardProof`, `Hadamard`). New
+    e2e test `hadamard_phase_roundtrips_in_flow` (3-col `HadF2Uair`,
+    trace with `W = U⊙V`, driven through the real group fns via
+    `F2Types<D>`): honest round-trip accepts, a flipped `W` bit is
+    rejected with `F2VerifyError::Hadamard`. **All 37 protocol lib
+    tests pass** (`--features parallel`).
+    - **Not committed**: `f2_prove.rs` carries ~600 lines of
+      pre-existing uncommitted GF128-refactor WIP from before this
+      session; the ~80 Hadamard lines are interleaved and can't be
+      isolated without interactive staging. Commit needs the owner to
+      either land the WIP or accept a bundled commit. (A0 `a110d32`
+      and A1-core `ade7ab9` were committable because they were new /
+      clean files.)
+  - **A3/A4 discharge wired in-flow (trusted; working tree)**: the
+    prover computes each Hadamard column's α-eval at `r*_H`
+    (`alpha_parent_evals`, committed `390c846`), absorbs them, and ships
+    them in `F2Proof.hadamard_parent_evals`; the verifier recombines
+    `Σ_b α^b·v_b == parent_eval` (`verify_bit_decomposition_consistency`)
+    after α (Wiring R, so α is fresh w.r.t. the bit-slice evals). The
+    in-flow round-trip test now exercises the recombination; all 37
+    protocol lib tests pass. The `f2_prove.rs` threading is still
+    uncommitted (entangled with the GF128 WIP — option 1: lands after
+    the WIP).
+  - **Soundness gap remaining (next step)**: `parent_evals` are
+    prover-supplied (trusted) — NOT yet PCS-opened at `r*_H`, so the
+    in-flow check is honest-prover only (a malicious prover could ship
+    consistent fake parent/slice evals). The sound version opens the
+    parent evals at `r*_H` via the two-point multipoint-eval (shared
+    with Issue 1). After that: shifted/virtual operands (row-shift
+    discharge) and the `W_β` carry column for the 13 adder relations.
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

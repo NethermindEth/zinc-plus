@@ -117,6 +117,16 @@ pub struct F2Proof {
     /// checked against `Σ_g γ^g · column_evals_at_rstar[g]` after
     /// dividing by `eq(r*, r)`.
     pub column_evals_at_rstar: Vec<BinaryFieldGF128>,
+    /// Wiring-R Hadamard zerocheck proof — `Some` iff the prover was
+    /// given non-empty `hadamard_specs` (coefficient-wise `W = U ⊙ V`
+    /// relations). `None` for UAIRs without such relations.
+    pub hadamard_proof: Option<crate::f2_hadamard::F2HadamardProof>,
+    /// α-projected MLE evals at the Hadamard sumcheck point `r*_H` of the
+    /// distinct columns the relations reference (sorted-distinct order).
+    /// Empty when `hadamard_proof` is `None`. The verifier recombines
+    /// these against the bit-slice evals; they are prover-supplied
+    /// (trusted) until the discharge PCS-opens them at `r*_H`.
+    pub hadamard_parent_evals: Vec<BinaryFieldGF128>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::prove_f2_uair`].
@@ -324,6 +334,16 @@ where
         sumcheck: BinaryFieldGF128,
         derived: BinaryFieldGF128,
     },
+    #[error("hadamard proof missing for declared specs")]
+    MissingHadamardProof,
+    #[error("hadamard phase verification failed: {0}")]
+    Hadamard(crate::f2_hadamard::F2HadamardVerifyError),
+    #[error("hadamard parent-eval count {got} ≠ distinct columns {expected}")]
+    HadamardParentEvalCountMismatch { got: usize, expected: usize },
+    #[error("hadamard recombination failed: {0}")]
+    HadamardRecombination(
+        zinc_piop::lookup::booleanity::BooleanityError<BinaryFieldGF128>,
+    ),
     #[error("internal: U::Uair phantom")]
     _Uair(std::marker::PhantomData<U>),
 }
@@ -718,6 +738,7 @@ where
             transcript,
             trace,
             &[],
+            &[],
             num_vars,
             project_scalar,
         )?;
@@ -747,6 +768,7 @@ where
         transcript: &mut impl Transcript,
         trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<
@@ -855,6 +877,20 @@ where
             )
         };
 
+        // -- Step 2.5: Hadamard zerocheck (Wiring R) ---------------
+        // Discharge coefficient-wise `W = U ⊙ V` relations *before* α is
+        // sampled, so α (drawn next) is fresh w.r.t. the bit-slice evals.
+        // No-op when `hadamard_specs` is empty. The distinct-column list
+        // and `r*_H` (the discharge recombination inputs) land with the
+        // discharge phase; here we keep only the zerocheck proof.
+        let hadamard_phase = crate::f2_hadamard::prove_f2_hadamard_phase::<D>(
+            transcript,
+            &extended_binary_poly,
+            hadamard_specs,
+            &ic_state.evaluation_point,
+            num_vars,
+        );
+
         // -- Step 3: Evaluation projection (X = α) -----------------
         let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
@@ -865,6 +901,30 @@ where
         // field multiplications across the whole projection.
         let alpha_pows: Vec<BinaryFieldGF128> =
             zinc_poly::univariate::binary_gf128::alpha_powers(&alpha, D);
+
+        // -- Step 3.5: Hadamard discharge — α-evals at r*_H --------
+        // Compute each Hadamard column's α-projected MLE eval at the
+        // Hadamard sumcheck point, absorb them, and ship them; the
+        // verifier recombines `Σ_b α^b·v_b == parent_eval`. α is fresh
+        // w.r.t. the bit-slice evals (Wiring R), so the binding is sound
+        // once these are PCS-opened at r*_H (deferred — trusted now).
+        let (hadamard_proof, hadamard_parent_evals) = match hadamard_phase {
+            Some((had_proof, distinct, r_star_h)) => {
+                let parent = crate::f2_hadamard::alpha_parent_evals::<D>(
+                    &extended_binary_poly,
+                    &distinct,
+                    &alpha_pows,
+                    &r_star_h,
+                );
+                let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
+                    as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+                for v in &parent {
+                    transcript.absorb_random_field(v, &mut buf);
+                }
+                (Some(had_proof), parent)
+            }
+            None => (None, Vec::new()),
+        };
         // SIMD-batched 4-cell projection via `project_column_with_powers`:
         // chunks the column into groups of 4, dispatches each group
         // through `eval_f2_poly_d_at_with_powers_simd_x4` (NEON 4-way
@@ -1128,6 +1188,8 @@ where
                 alpha,
                 gamma,
                 column_evals_at_rstar: all_col_evals,
+                hadamard_proof,
+                hadamard_parent_evals,
             },
             subclaim,
             projected_trace_inner,
@@ -1164,6 +1226,7 @@ where
             transcript,
             proof,
             virtual_specs,
+            &[],
             num_vars,
             num_primary_columns,
             project_ideal,
@@ -1184,6 +1247,7 @@ where
         transcript: &mut impl Transcript,
         proof: &F2Proof,
         virtual_specs: &[F2VirtualBpSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -1208,12 +1272,62 @@ where
             .map_err(F2VerifyError::IdealCheck)?;
         let ic_evaluation_point = ic_subclaim.evaluation_point;
 
+        // -- Step 2.5: Hadamard zerocheck verify (Wiring R) -------
+        // Mirrors the prover: runs before α. No-op when empty.
+        let hadamard_distinct: Option<Vec<usize>> = if !hadamard_specs.is_empty() {
+            let hp = proof
+                .hadamard_proof
+                .as_ref()
+                .ok_or(F2VerifyError::MissingHadamardProof)?;
+            let (distinct, _r_star_h) = crate::f2_hadamard::verify_f2_hadamard_phase::<D>(
+                transcript,
+                hp,
+                hadamard_specs,
+                &ic_evaluation_point,
+                num_vars,
+            )
+            .map_err(F2VerifyError::Hadamard)?;
+            Some(distinct)
+        } else {
+            None
+        };
+
         let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
         if alpha != proof.alpha {
             return Err(F2VerifyError::AlphaMismatch {
                 transcript: alpha,
                 proof: proof.alpha,
             });
+        }
+
+        // -- Step 3.5: Hadamard discharge recombination -----------
+        // Mirror the prover: absorb the parent evals (after α), then
+        // recombine `Σ_b α^b·v_b == parent_eval` to tie the bit-slice
+        // evals to the columns. (Parent evals are trusted until the
+        // discharge PCS-opens them at r*_H.)
+        if let Some(distinct) = &hadamard_distinct {
+            let hp = proof
+                .hadamard_proof
+                .as_ref()
+                .ok_or(F2VerifyError::MissingHadamardProof)?;
+            if proof.hadamard_parent_evals.len() != distinct.len() {
+                return Err(F2VerifyError::HadamardParentEvalCountMismatch {
+                    got: proof.hadamard_parent_evals.len(),
+                    expected: distinct.len(),
+                });
+            }
+            let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+            for v in &proof.hadamard_parent_evals {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            zinc_piop::lookup::booleanity::verify_bit_decomposition_consistency(
+                &proof.hadamard_parent_evals,
+                &hp.bit_slice_evals,
+                &alpha,
+                D,
+            )
+            .map_err(F2VerifyError::HadamardRecombination)?;
         }
 
         // γ is sampled BEFORE the sumcheck, mirroring the prover's
@@ -2663,6 +2777,7 @@ where
                 transcript,
                 trace,
                 virtual_specs,
+                &[],
                 num_vars,
                 project_scalar,
             )?;
@@ -2803,6 +2918,7 @@ where
                 transcript,
                 trace,
                 virtual_specs,
+                &[],
                 num_vars,
                 project_scalar,
             )?;
@@ -3527,6 +3643,8 @@ mod tests {
             alpha,
             gamma,
             column_evals_at_rstar,
+            hadamard_proof: None,
+            hadamard_parent_evals: Vec::new(),
         })
     }
 
@@ -3724,6 +3842,152 @@ mod tests {
         assert_eq!(subclaim.sumcheck_point.len(), num_vars);
         assert_eq!(subclaim.ic_evaluation_point.len(), num_vars);
         assert_eq!(subclaim.primary_column_evals.len(), 2);
+    }
+
+    /// Three binary columns, no algebraic constraints — the
+    /// `W = U ⊙ V` relation is discharged purely by the Wiring-R
+    /// Hadamard phase, not the IC.
+    #[derive(Clone, Debug, Default)]
+    struct HadF2Uair;
+
+    impl Uair for HadF2Uair {
+        type Ideal = ImpossibleIdeal;
+        type Scalar = BinaryPoly<32>;
+
+        fn signature() -> UairSignature {
+            UairSignature::new(
+                TotalColumnLayout::new(3, 0, 0),
+                PublicColumnLayout::default(),
+                vec![],
+                vec![],
+                vec![],
+            )
+        }
+
+        fn constrain_general<B, FromR, MulByScalar, IFromR>(
+            _b: &mut B,
+            _up: TraceRow<B::Expr>,
+            _down: TraceRow<B::Expr>,
+            _from_ref: FromR,
+            _mbs: MulByScalar,
+            _ideal_from_ref: IFromR,
+        ) where
+            B: ConstraintBuilder,
+            FromR: Fn(&Self::Scalar) -> B::Expr,
+            MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+            IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        {
+            // No algebraic constraints; the Hadamard relation between
+            // columns 0,1,2 is enforced by the Wiring-R phase.
+        }
+    }
+
+    /// End-to-end through the real `prove_f2_uair_with_groups` /
+    /// `verify_f2_uair_with_groups`: an honest `W = U ⊙ V` trace
+    /// round-trips, and flipping a bit of `W` makes the in-flow
+    /// Hadamard zerocheck reject.
+    #[test]
+    fn hadamard_phase_roundtrips_in_flow() {
+        const D: usize = 32;
+        let num_vars: usize = 4;
+        let poly_size = 1usize << num_vars;
+        let mut r = rng();
+
+        fn project_scalar(scalar: &BinaryPoly<32>) -> DynamicPolynomialF<BinaryFieldGF128> {
+            DynamicPolynomialF {
+                coeffs: scalar
+                    .iter()
+                    .map(|b| {
+                        if b.into_inner() {
+                            BinaryFieldGF128::one()
+                        } else {
+                            BinaryFieldGF128::zero()
+                        }
+                    })
+                    .collect(),
+            }
+        }
+
+        let u_words: Vec<u32> = (0..poly_size).map(|_| r.random::<u32>()).collect();
+        let v_words: Vec<u32> = (0..poly_size).map(|_| r.random::<u32>()).collect();
+        let w_words: Vec<u32> = u_words.iter().zip(&v_words).map(|(a, b)| a & b).collect();
+        let mk = |words: &[u32]| {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                words.iter().map(|&x| BinaryPoly::<D>::from(x)).collect(),
+                BinaryPoly::default(),
+            )
+        };
+        let trace: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![mk(&u_words), mk(&v_words), mk(&w_words)].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+
+        let specs = [crate::f2_hadamard::F2HadamardSpec {
+            u_col: 0,
+            v_col: 1,
+            w_col: 2,
+        }];
+
+        // -- honest prove → verify --
+        let mut pt = Blake3Transcript::new();
+        let (proof, _subclaim, _proj) =
+            ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::prove_f2_uair_with_groups(
+                &mut pt,
+                &trace,
+                &[],
+                &specs,
+                num_vars,
+                project_scalar,
+            )
+            .expect("hadamard prove");
+        assert!(proof.hadamard_proof.is_some());
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::verify_f2_uair_with_groups::<ImpossibleIdeal>(
+            &mut vt,
+            &proof,
+            &[],
+            &specs,
+            num_vars,
+            /* num_primary_columns */ 3,
+            |_ideal| ImpossibleIdeal,
+        )
+        .expect("hadamard verify");
+
+        // -- corrupt W: in-flow Hadamard zerocheck must reject --
+        let mut w_bad = w_words.clone();
+        w_bad[0] ^= 1;
+        let trace_bad: UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> = UairTrace {
+            binary_poly: vec![mk(&u_words), mk(&v_words), mk(&w_bad)].into(),
+            arbitrary_poly: vec![].into(),
+            int: vec![].into(),
+        };
+        let mut pt2 = Blake3Transcript::new();
+        let (proof_bad, _, _) =
+            ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::prove_f2_uair_with_groups(
+                &mut pt2,
+                &trace_bad,
+                &[],
+                &specs,
+                num_vars,
+                project_scalar,
+            )
+            .expect("prove still produces a proof for a corrupt trace");
+        let mut vt2 = Blake3Transcript::new();
+        let res = ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::verify_f2_uair_with_groups::<
+            ImpossibleIdeal,
+        >(
+            &mut vt2,
+            &proof_bad,
+            &[],
+            &specs,
+            num_vars,
+            3,
+            |_ideal| ImpossibleIdeal,
+        );
+        assert!(matches!(res, Err(F2VerifyError::Hadamard(_))));
     }
 
     /// Tampering with the proof's α should yield an AlphaMismatch
