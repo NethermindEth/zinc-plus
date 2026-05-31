@@ -298,6 +298,66 @@ GF128 WIP lands. Line-level call sites (the `MultipointEval` + `open`
 invocations in `prove_f2_full_with_bit_ops`, and `prove_f2_open`'s point
 parameter) to confirm at implementation time.
 
+## 5.7.1 Concrete implementation of Approach A (derived from the pipeline)
+
+Read of `prove_f2_full_with_bit_ops` (around `f2_prove.rs:2775-2873`) — the
+existing single discharge is:
+```
+let (uair_proof, subclaim, projected_trace_for_mp) =
+    prove_f2_uair_with_groups(.., &[] /*hadamard_specs*/, ..)?;
+let (mp_proof, mp_state) = MultipointEval::prove_as_subprotocol(
+    transcript, &projected_trace_for_mp, &subclaim.sumcheck_point,
+    &uair_proof.column_evals_at_rstar, &[], &[], &());
+let r_0 = mp_state.eval_point;
+let open_evals_at_r_0 = projected_trace_for_mp.map(eval at r_0);  // absorbed
+let open = prove_f2_open(transcript, pp, &hint, &trace.binary_poly[num_pub_bin..], &r_0, &alpha, n);
+F2FullProof { commitment, uair, multipoint_eval: mp_proof, open_evals_at_r_0, open }
+```
+
+Two findings that shape the work:
+1. **`prove_f2_full_with_bit_ops` passes `&[]` for `hadamard_specs`** — so the
+   discharge must be threaded here too (its callers — benches `f2_sha256`/
+   `f2_blake3`, test-uair — then pass `&[]`, OR add a `_with_hadamard`
+   entry variant to avoid the cross-crate ripple).
+2. **Avoid subset-column mapping**: `prove_f2_open` opens a *contiguous*
+   witness slice, and the Hadamard columns are a non-contiguous subset.
+   Simplest correct first cut: the second multipoint-eval collapses **all**
+   projected columns at `r*_H` (prover evals every projected col at `r*_H`,
+   not just the Hadamard ones) → `r_0^H`, then `prove_f2_open` opens the
+   **same full witness slice** at `r_0^H`. The Hadamard `parent_evals` are
+   then a subset of the recovered evals. Wasteful (opens the witness twice,
+   at `r_0` and `r_0^H`) but reuses the existing pattern verbatim; optimise
+   to a subset later.
+
+**Ordering / where recombination lives**: the trusted recombination
+(`verify_bit_decomposition_consistency`) currently runs inside
+`verify_f2_uair_with_groups` against `proof.hadamard_parent_evals`. Keep it
+there; make it *sound* by adding, in `verify_f2_full_with_bit_ops` after the
+second mp+open, the binding check **opened-col-evals-at-`r*_H`[Hadamard
+subset] == `proof.uair.hadamard_parent_evals`**. That ties the trusted
+parent-evals to the commitment without moving the recombination across
+layers.
+
+**Edits**:
+- `prove_f2_uair_with_groups`: return `r*_H` (the Hadamard sumcheck point)
+  + the distinct Hadamard column indices (currently dropped) — needed by
+  `prove_f2_full` for the second pass. (3 internal callers updated.)
+- `F2FullProof`: `+ hadamard_multipoint_eval`, `+ hadamard_open_evals_at_r0h`,
+  `+ hadamard_open` (all `Option`, `None` when no Hadamard).
+- `prove_f2_full_with_bit_ops` (+ `_pre_paired` variant): `+ hadamard_specs`
+  param; after the main open, run the second mp+open at `r*_H` and populate
+  the new fields.
+- `verify_f2_full_with_bit_ops`: `+ hadamard_specs`; verify the second
+  mp+open, recover col-evals at `r*_H`, run the subset-equality binding
+  check above.
+- e2e test: extend a full `commit → prove_f2_full → verify_f2_full` test
+  (the `F2Types`/`HadF2Uair` harness) with `hadamard_specs`; assert a
+  tampered `hadamard_parent_evals` is rejected by the binding check (not
+  just a flipped `W` by the zerocheck).
+
+This is a sizeable full-pipeline change (~200+ lines + a commit/open e2e
+test); landing it in one focused pass keeps `f2_prove.rs` committable.
+
 ## 7. Phased implementation
 - **Phase A — foundation in isolation (Wiring R).** Synthetic UAIR: one
   relation `W = U ⊙ V`, three primary committed columns, no shifts.
