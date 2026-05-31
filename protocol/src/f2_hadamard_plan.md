@@ -175,14 +175,18 @@ row-axis eq.
 
 ## 5. Components
 
-### 5.1 Bit-slice + operand MLEs (`f2_prove.rs`, reuse `booleanity.rs`)
-Register `ShiftedBitSliceSpec`s for every (column, Δ) the operands use
-and `VirtualBoolSpec`s for the `F_2`-linear operand combinations, then
-call `build_shifted_bit_slice_mles` / `build_virtual_booleanity_mles`.
-The `X·c` bit-shift is a bit-index reindex (`b ↦ b+1`, drop bit 31, zero
-bit 0); add it as a small variant of the shifted-slice builder or fold
-it into the `VirtualBoolSpec` source indexing. Carry word `c`: bits
-0..30 = `SHR¹(t+x+y)` (XOR of three slices, then bit-shift), bit 31 =
+### 5.1 Bit-slice + operand MLEs (`f2_hadamard.rs`)
+**SHIPPED for row-shift / XOR / complement** (see the ledger entry
+"OPERAND MACHINERY SHIPPED"). **Correction to the original sketch below**:
+`+`/`1−` are F_2[X] addition (bitwise **XOR**), so operand slices are built
+by XOR-ing source bits at the bit level (`build_operand_slices`), **not**
+via `build_virtual_booleanity_mles` (which does F-addition and would yield
+`2` for `1+1`). The pair-eval discharge uses `ψ_α(A⊕B)=ψ_α(A)+ψ_α(B)`.
+*Original sketch (superseded for the XOR case):* register
+`ShiftedBitSliceSpec`s for every `(column, Δ)`. The `X·c` bit-shift is a
+bit-index reindex (`b ↦ b+1`, drop bit 31, zero bit 0) — **not yet
+implemented**; add a `bit_shift` field to `F2OperandTerm`. Carry word `c`:
+bits 0..30 = `SHR¹(t+x+y)` (XOR of three slices, then bit-shift), bit 31 =
 `W_β` (§5.4).
 
 ### 5.2 The degree-3 Hadamard group (`f2_prove.rs` → `multi_degree.rs`)

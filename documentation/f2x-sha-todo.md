@@ -1399,10 +1399,57 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     the main mp+open block (~60 lines each) — a `*_mp_and_open_at_point`
     helper would DRY it but threads ~13 params; left inline for review
     clarity. (c) `{0,1}`-slice round-1 fast path for the degree-3 zerocheck.
-  - **Still open after this**: shifted/virtual operands (row-shift
-    discharge, shared with Issue 1) and the `W_β` carry column for the 13
-    adder relations; then register the 16 SHA relations (plan Appendix A)
-    and run e2e on `sha256_f2`.
+  - **OPERAND MACHINERY SHIPPED (Phase B — row-shift / XOR / complement,
+    working tree on `f2-clean`)**: `F2HadamardSpec` generalised from three
+    plain column indices to three **operands**. An operand is the bitwise
+    XOR of `(col, ↓Δ row-shift)` terms, optionally bitwise-complemented
+    (`1−`). This covers the SHA AND relations C12–C14 (Appendix A):
+    `W_E ⊙ W_E^↓1`, `(1−W_E) ⊙ W_E^↓2`, and the Maj combo
+    `(W_A + W_A^↓2) ⊙ (W_A^↓1 + W_A^↓2) = (W_MAJ + W_A^↓2)`.
+    - **`+`/`1−` are F_2[X] addition (bitwise XOR), NOT F-linear sums** —
+      so operand bit-slices are built by XOR-ing source bits at the bit
+      level (`build_operand_slices`, a `{0,1}`-valued F MLE), *not* via the
+      integer prover's `build_virtual_booleanity_mles` (which does
+      F-addition and would give `2` for `1+1`). **Correction to plan §5.1**,
+      which suggested reusing `build_virtual_booleanity_mles` — wrong for
+      AND operands. The zerocheck itself
+      (`piop/src/lookup/hadamard.rs`) is operand-agnostic: it just needs `D`
+      slices per operand, laid out `U_0,V_0,W_0,U_1,…`.
+    - **Discharge** (`f2_hadamard.rs`): because ψ_α is an F_2-algebra hom,
+      `ψ_α(A ⊕ B) = ψ_α(A) + ψ_α(B)`, so each operand's parent eval at
+      `r*_H` derives *linearly* from the per-`(col, Δ)` evals plus the
+      complement constant `Σ_{b<D} α^b`. The prover ships one trusted eval
+      per distinct `(col, Δ)` **pair** (`F2Proof.hadamard_pair_evals`,
+      renamed from `hadamard_parent_evals`); the verifier derives operand
+      parents (`derive_operand_parents`) and recombines via
+      `verify_bit_decomposition_consistency`. `F2VerifierSubclaim`'s
+      `hadamard_distinct: Vec<usize>` became `hadamard_pairs: Vec<(usize,
+      usize)>`.
+    - **Soundness**: the binding check (`verify_f2_full_impl`) ties each
+      `Δ = 0` pair eval to the bound `hadamard_evals_at_rstar_h[col]` (the
+      second-mp discharge), so `Δ = 0`-only operands — including the
+      complemented `(1−col)` since the `Σα^b` const is deterministic — are
+      **fully sound**. `Δ ≠ 0` pair evals are prover-supplied / **trusted**
+      (MLE eval doesn't commute with row shifts; the row-shift discharge is
+      shared with Issue 1, honest-prover-first per plan §6). So among
+      C12–C14, the complement-only sub-expressions are sound and the
+      shifted ones are honest-prover.
+    - **Tests**: `f2_hadamard.rs` unit tests (plain / row-shift / complement
+      / Maj-combo round-trips + corrupt-W rejection) and a full-flow e2e
+      `prove_then_verify_f2_full_with_operand_hadamards_roundtrips`
+      (5-col `HadOpF2Uair`, three relations one per operand kind, through
+      `prove/verify_f2_full_with_hadamard`): honest accept + flipped-W
+      reject. **43 protocol lib tests pass**; clippy-clean on the changed
+      files.
+  - **Still open after this**: the **X· bit-shift** in operands (a bit-index
+    reindex `b ↦ b+1`, drop bit D-1, zero bit 0 — needed for the adder
+    operands `x + X·c`; its parent derivation is `α·(ψ_α(c) − α^{D-1}·c_{D-1})`,
+    not yet implemented), the **`W_β` carry column** for the 13 adder
+    relations, then **register the 16 SHA relations on `sha256_f2`**
+    (C12–C14 first — they need no `W_β` and their columns are already
+    committed witness cols, so the operand machinery above can drive them;
+    then the 13 adders). And the **sound row-shift discharge** (Issue 1) to
+    close the `Δ ≠ 0` trust gap.
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

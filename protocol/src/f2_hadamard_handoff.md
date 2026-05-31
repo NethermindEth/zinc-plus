@@ -141,20 +141,37 @@ ledger's **Issue 1** also needs) — one open instead of two.
 
 ## 5. NEXT TASK — real SHA-256 relations (shifts, `W_β`, register the 16)
 
-The current tests use a synthetic shift-free `HadF2Uair`. The real
-SHA-256 relations (Appendix A) need:
-- **Shifts / virtual operands**: `↓Δ` row-shifts, `X·` bit-shifts, `1−`,
-  `A+A^↓2`. Bit-shifts and `F_2`-linear combos fold into the bit-slice
-  MLEs (reuse `build_virtual_booleanity_mles` / the bit-axis). **Row
-  shifts need a row-shift discharge** — MLE evaluation does *not* commute
-  with row shifts; this is shared with the ledger's **Issue 1**
-  (currently the multipoint-eval is degenerate/single-point).
-  Honest-prover-first is acceptable to get e2e first.
+> **STATUS UPDATE (operand machinery SHIPPED — Phase B).** `↓Δ`
+> row-shifts, `1−` complement, and `A+A^↓2` XOR combos are **done**:
+> `F2HadamardSpec` now takes three `F2Operand`s (XOR of `(col, ↓Δ)` terms,
+> optional complement); `f2_hadamard.rs` builds operand slices at the bit
+> level and discharges them (Δ=0 bound, Δ≠0 trusted). Unit + full-flow
+> tests pass (43 lib tests). Ledger entry: "OPERAND MACHINERY SHIPPED".
+> **Key correction**: `+`/`1−` are bitwise **XOR**, so operand slices are
+> built via XOR, NOT `build_virtual_booleanity_mles` (F-addition → wrong).
+> Remaining below: the **X· bit-shift**, **`W_β`**, and **registering the
+> 16 relations on real `sha256_f2`**.
+
+The synthetic tests cover the operand kinds. The real SHA-256 relations
+(Appendix A) still need:
+- **X· bit-shift** in operands (a bit-index reindex `b ↦ b+1`, drop bit
+  `D−1`, zero bit 0 — for the adder operands `x + X·c`). Add a `bit_shift`
+  field to `F2OperandTerm`, handle it in `build_operand_slices` (shift the
+  per-row mask) and in `derive_operand_parents` (the parent gains
+  `α·(ψ_α(c) − α^{D-1}·c_{D-1})` — needs the source's top bit-slice eval,
+  so thread the operand's per-bit evals through). Row-shifts are done; this
+  is the remaining operand primitive.
 - **`W_β` carry column** (`f2_hadamard_plan.md` §4.5): required for the 13
   adder relations; the 3 AND relations (C12/C13/C14) work without it. Add
   it to `test-uair/src/sha256_f2.rs` (mirror the `PA_C` setup) + the
   missing `ShiftSpec`s.
-- Then register the 16 relations (Appendix A) and run e2e on `sha256_f2`.
+- **Register C12/C13/C14 on `sha256_f2` first** — they need no `W_β`, no
+  X·, and their columns (`W_E`, `W_A`, `W_UEF`, `W_MAJ`, `W_UNEG_E_G`) are
+  already committed witness cols filled as correct ANDs (`sha256_f2.rs`).
+  Drive `prove/verify_f2_full_with_hadamard` with three operand specs
+  (mirror `prove_then_verify_f2_full_with_operand_hadamards_roundtrips`,
+  using absolute SHA column indices). Then the 13 adders.
+- **Row-shift discharge** (Issue 1) to make the `Δ ≠ 0` pairs sound.
 
 ---
 
@@ -164,8 +181,8 @@ SHA-256 relations (Appendix A) need:
   (the F_2 round-1 fast path uses rayon `reduce`). Plain
   `cargo test -p zinc-protocol --lib` FAILS to build; always pass the
   feature.
-- Hadamard tests: `cargo test -p zinc-protocol --features parallel --lib hadamard`
-  (3 tests). Full: `… --features parallel --lib` (37 tests, ~40s).
+- Hadamard tests: `cargo test -p zinc-protocol --features parallel --lib f2_hadamard`
+  (6 operand tests). Full: `… --features parallel --lib` (43 tests, ~40s).
 - piop: `cargo test -p zinc-piop --lib hadamard`.
 - Clippy is strict (denies `arithmetic_side_effects`, `unwrap_used`,
   lossy casts, …). Put `#[allow(clippy::arithmetic_side_effects)]` on hot
