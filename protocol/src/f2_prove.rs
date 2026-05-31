@@ -5888,22 +5888,30 @@ mod tests {
         assert_eq!(subclaim.virtual_column_evals.len(), 0);
     }
 
-    /// First real SHA-256 Hadamard relation discharged end-to-end on the
-    /// `sha256_f2` trace: **C12** `W_UEF = W_E ⊙ W_E^↓1` (the Ch[t] AND
-    /// `u_ef[t] = e[t] & e[t−1]`, `sha256_f2.rs`).
+    /// The three SHA-256 **AND** Hadamard relations C12/C13/C14 discharged
+    /// end-to-end on the real `sha256_f2` trace (no `W_β`, no X·, columns
+    /// already committed witness cols filled as correct ANDs):
+    ///   C12 `u_ef[t]   = e[t] & e[t−1]`,
+    ///   C13 `u_neg[t]  = (¬e[t]) & e[t−2]`,
+    ///   C14 `maj[t]    = Maj(a[t], a[t−1], a[t−2])`  (`sha256_f2.rs`).
     ///
-    /// Under the codebase `↓Δ = row i → col[i+Δ]` convention (`ShiftSpec`,
-    /// `build_shifted_bit_slice_mles`), the `i−1` fill is registered by
-    /// shifting the result column up too: at zerocheck row `t`,
-    /// `W_UEF^↓1[t] = W_E^↓1[t] & W_E[t]`. Pairs: `(W_E,0)` bound by the
-    /// second-mp discharge; `(W_E,1)` and `(W_UEF,1)` are row-shifted →
-    /// trusted (the honest-prover row-shift gap). Confirms the operand
-    /// machinery drives a real SHA AND relation honestly. (Zerocheck
-    /// rejection is covered by the synthetic operand tests; corrupting a
-    /// SHA `W_UEF` cell here could trip the IC first — `W_UEF` also feeds
-    /// the C6b adder — so we keep this to the honest milestone.)
+    /// Registered in the codebase `↓Δ = row i → col[i+Δ]` convention
+    /// (`ShiftSpec`, `build_shifted_bit_slice_mles`). The fills are written
+    /// `i−Δ`, so each is re-expressed `i+Δ` (substitute `t → t+Δ_max`,
+    /// shifting the result column up too):
+    ///   C12 ⇒ `W_E^↓1 ⊙ W_E = W_UEF^↓1`,
+    ///   C13 ⇒ `¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2`,
+    ///   C14 ⇒ `(W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A)`
+    ///         (the Binius identity `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
+    /// The complement/combo boundary (where the shifted column zero-pads,
+    /// rows `t ≥ n−2`) lands in the zero slack region, so the honest
+    /// zerocheck sum is 0. `Δ = 0` base cols (`W_E`, `W_A`) are bound by the
+    /// second-mp discharge; the `Δ ≠ 0` shifted pairs are trusted (the
+    /// honest-prover row-shift gap). (Zerocheck rejection is covered by the
+    /// synthetic operand tests; corrupting a SHA result cell here could
+    /// trip the IC first — these cols also feed the adder chain.)
     #[test]
-    fn sha256_f2_c12_hadamard_roundtrips() {
+    fn sha256_f2_and_hadamards_roundtrips() {
         use crypto_primitives::crypto_bigint_int::Int;
         use zinc_test_uair::sha256_f2::cols;
         use zinc_test_uair::{
@@ -5929,15 +5937,36 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // C12 in the `i+Δ` convention: W_E^↓1 ⊙ W_E = W_UEF^↓1.
-        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
-        let specs = [F2HadamardSpec {
-            u: F2Operand::shifted(cols::W_E, 1),
-            v: F2Operand::col(cols::W_E),
-            w: F2Operand::shifted(cols::W_UEF, 1),
-        }];
+        // C12/C13/C14 re-expressed in the `i+Δ` convention.
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand, F2OperandTerm};
+        let xor2 = |c0: usize, s0: usize, c1: usize, s1: usize| {
+            F2Operand::xor(vec![
+                F2OperandTerm { col: c0, row_shift: s0 },
+                F2OperandTerm { col: c1, row_shift: s1 },
+            ])
+        };
+        let specs = [
+            // C12: W_E^↓1 ⊙ W_E = W_UEF^↓1.
+            F2HadamardSpec {
+                u: F2Operand::shifted(cols::W_E, 1),
+                v: F2Operand::col(cols::W_E),
+                w: F2Operand::shifted(cols::W_UEF, 1),
+            },
+            // C13: ¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2.
+            F2HadamardSpec {
+                u: F2Operand::shifted(cols::W_E, 2).complemented(),
+                v: F2Operand::col(cols::W_E),
+                w: F2Operand::shifted(cols::W_UNEG_E_G, 2),
+            },
+            // C14: (W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A).
+            F2HadamardSpec {
+                u: xor2(cols::W_A, 2, cols::W_A, 0),
+                v: xor2(cols::W_A, 1, cols::W_A, 0),
+                w: xor2(cols::W_MAJ, 2, cols::W_A, 0),
+            },
+        ];
 
-        // Prove + verify the bundled flow with C12 registered.
+        // Prove + verify the bundled flow with C12/C13/C14 registered.
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
             &mut pt,
@@ -5950,7 +5979,7 @@ mod tests {
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_hadamard on SHA C12 should succeed");
+        .expect("prove_f2_full_with_hadamard on SHA C12/C13/C14 should succeed");
         assert!(proof.uair.hadamard_proof.is_some());
 
         let mut vt = Blake3Transcript::new();
@@ -5966,7 +5995,7 @@ mod tests {
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
-        .expect("honest SHA C12 proof must verify");
+        .expect("honest SHA C12/C13/C14 proof must verify");
     }
 
 }

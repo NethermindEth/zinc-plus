@@ -165,33 +165,30 @@ The synthetic tests cover the operand kinds. The real SHA-256 relations
   adder relations; the 3 AND relations (C12/C13/C14) work without it. Add
   it to `test-uair/src/sha256_f2.rs` (mirror the `PA_C` setup) + the
   missing `ShiftSpec`s.
-- **Register C12/C13/C14 on `sha256_f2`** — they need no `W_β`, no X·, and
-  their columns (`W_E`, `W_A`, `W_UEF`, `W_MAJ`, `W_UNEG_E_G`) are already
-  committed witness cols filled as correct ANDs (`sha256_f2.rs`). Drive
-  `prove/verify_f2_full_with_hadamard` with operand specs using absolute
-  SHA column indices.
-  - **✅ C12 DONE & TESTED** (`sha256_f2_c12_hadamard_roundtrips`): the
-    first real SHA Hadamard relation discharges e2e. **Row-shift DIRECTION
-    (resolved):** the codebase `↓Δ` is **`row i → col[i+Δ]`** (operand
-    `row_shift`, `build_shifted_bit_slice_mles`, `ShiftSpec`
-    `uair/src/lib.rs:44` — all `i+Δ`), but the SHA fills are written `i−Δ`
-    (`u_ef[t]=e[t]&e[t−1]`, `u_neg_e_g[t]=(¬e[t])&e[t−2]`,
-    `maj[t]=Maj(a[t],a[t−1],a[t−2])`, `sha256_f2.rs:963`). So **Appendix
-    A's literal table is `i−Δ` and must be re-expressed in `i+Δ` by
-    shifting the result column up.** C12 `W_UEF[t]=W_E[t]&W_E[t−1]` ⇒
-    register **`u: W_E^↓1, v: W_E, w: W_UEF^↓1`** (verified honest sum 0).
-  - **C13/C14 NEXT** — re-derive each in `i+Δ` (substitute `t → t+Δ_max`
-    so every source index is `≥ t`; result column shifts up too → its pair
-    eval is trusted, fine). **⚠️ C13 complement/zero-pad subtlety:** the
-    operand model applies `complement` *outermost* (`operand = 1 ⊕ XOR(terms)`),
-    so `F2Operand::shifted(W_E,2).complemented()` is `¬(W_E^↓2)`, which at
-    the zero-padded tail is **all-ones**, whereas the fill
-    `u_neg_e_g[t]=(¬e[t])&e[t−2]` zero-pads (`=0` for `t<2`). These differ
-    at the boundary → the honest zerocheck would be nonzero there. Resolve
-    by shifting C13 so the complement's row is `≥ t` and the boundary lands
-    where `e[t−2]→0` masks it, OR confirm against the honest sum. **Always
-    check the honest zerocheck sum is 0 before trusting a registration.**
-    Then the 13 adders.
+- **✅ C12/C13/C14 DONE & TESTED on `sha256_f2`**
+  (`sha256_f2_and_hadamards_roundtrips`): the **three SHA AND relations**
+  discharge e2e (3 of 16). **Row-shift DIRECTION (resolved):** the codebase
+  `↓Δ` is **`row i → col[i+Δ]`** (operand `row_shift`,
+  `build_shifted_bit_slice_mles`, `ShiftSpec` `uair/src/lib.rs:44`), but the
+  SHA fills are written `i−Δ` (`u_ef[t]=e[t]&e[t−1]`,
+  `u_neg_e_g[t]=(¬e[t])&e[t−2]`, `maj[t]=Maj(a[t],a[t−1],a[t−2])`,
+  `sha256_f2.rs:963`). So **Appendix A's literal table is `i−Δ` and was
+  re-expressed `i+Δ`** (substitute `t → t+Δ_max`, shift the result column
+  up too):
+  - C12 ⇒ `u: W_E^↓1, v: W_E, w: W_UEF^↓1`
+  - C13 ⇒ `u: ¬(W_E^↓2), v: W_E, w: W_UNEG_E_G^↓2`
+  - C14 ⇒ `u: W_A^↓2⊕W_A, v: W_A^↓1⊕W_A, w: W_MAJ^↓2⊕W_A`
+        (Binius identity `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
+  The **C13 complement / C14 combo boundary** (where the shifted column
+  zero-pads, rows `t ≥ n−2`, so `¬(W_E^↓2)` becomes all-ones / `W_A^↓2⊕W_A`
+  becomes `W_A`) lands in the **zero slack region** (`generate_random_trace`
+  zero-inits then fills only the active rows), so the un-shifted term
+  `W_E[t]`/`W_A[t]` is 0 there and the products vanish → honest zerocheck
+  sum is 0. `(W_E,0)`/`(W_A,0)` bound; the `Δ≠0` pairs trusted (row-shift
+  gap). **Always check the honest sum is 0 before trusting a registration**
+  — that's what confirmed the boundary lands in the slack.
+- **Then the 13 adder relations** (C5–C11, plan Appendix A) — these are
+  what's left, and they need the **X· bit-shift** + **`W_β`** below.
 - **Row-shift discharge** (Issue 1) to make the `Δ ≠ 0` pairs sound.
 
 ---
