@@ -139,14 +139,16 @@ ledger's **Issue 1** also needs) — one open instead of two.
 
 ---
 
-## 5. NEXT TASK — real SHA-256 relations (shifts, `W_β`, register the 16)
+## 5. ✅ DONE — all 16 SHA-256 Hadamard relations discharged e2e
 
-> **STATUS UPDATE.** The operand machinery (Phase B) AND the **3 SHA AND
-> relations C12/C13/C14** are **done and tested on real `sha256_f2`** (44
-> lib tests). What's left in §5: the **13 adder relations** (C5–C11), which
-> need the **X· bit-shift** + the **`W_β` carry column** + the **carry-word
-> construction** — a single interlocked design (below). Ledger entries:
-> "OPERAND MACHINERY SHIPPED", "C12/C13/C14 WIRED & TESTED".
+> **STATUS UPDATE.** **All 16 SHA Hadamard relations now discharge e2e on
+> the real `sha256_f2` trace** (3 ANDs C12–C14 + 13 adders C5–C11; 49 lib
+> tests). The adder carry `β` is computed (no committed `W_β` needed) and
+> the row-selectivity is handled by `F2AdderSpec::active_rows` masks — see
+> §5a (ANDs) and §5b (adders). Remaining = **soundness hardening** (§5c):
+> the row/bit-shifted operands and the adder operands are honest-prover
+> (trusted parents); binding them is the ledger's Issue 1. Ledger entries:
+> "OPERAND MACHINERY SHIPPED", "C12/C13/C14 WIRED", "ROW-SELECTIVITY SOLVED".
 
 ### 5a. DONE — operand machinery + the 3 AND relations
 
@@ -166,7 +168,7 @@ ledger's **Issue 1** also needs) — one open instead of two.
   the honest zerocheck sum is 0. **Lesson: always check the honest sum is 0
   to confirm a registration's boundary handling.**
 
-### 5b. The 13 adder relations (C5–C11) — operand machinery DONE, blocked on a row-selector
+### 5b. The 13 adder relations (C5–C11) — DONE (all 16 SHA relations e2e)
 
 `(x + X·c) ⊙ (y + X·c) = c + X·c` (Appendix A; the Binius carry identity
 verifying `t = x + y`).
@@ -183,29 +185,30 @@ shipped **trusted** (`F2Proof.hadamard_adder_parents`) — honest-prover. The
 `adder_specs` param is threaded through the whole prove/verify chain; the 13
 i+Δ specs are written out in `sha256_f2_adders_need_row_selector`.
 
-**⚠️ BLOCKED — the SHA adders are ROW-SELECTIVE.** Registering them on real
-`sha256_f2` **fails the honest zerocheck** (`NonZeroClaimedSum`, even for the
-simplest row-local C7 `W_T2 = W_SIGMA0 + W_MAJ` — see the test). The adders'
-`target = x+y` holds only on each chain/anchor's **active rows**: the trace
-zeroes the S-columns (`W_*_S*`, the targets) off-chain while the inputs
-(`W_W`, `W_E`, …) stay non-zero, and the IC's LSB
-`assert_in_ideal(target+x+y+κ)` still holds there only because the `κ`
-(PA_C) compensator absorbs it. A **uniform** Hadamard zerocheck constrains
-*every* row, so it catches the off-chain mismatch. (Tell: C8 and C10 both
-target `W_A^↓4` — disjoint active rows.)
+**✅ DONE — ALL 13 ADDERS WIRED e2e** (`sha256_f2_all_adders_with_selectors_roundtrips`).
+Combined with C12–C14, **all 16 SHA Hadamard relations now discharge e2e**.
 
-**NEXT STEP — per-relation active-row selector.** Multiply each relation's
-zerocheck term by an indicator MLE `sel_k(x)` (1 on active rows, 0 else):
-`Σ_x eq(x,r)·Σ_k γ'^k·sel_k(x)·Σ_b σ^b(U⊙V−W)` (degree 3 → 4, still fine).
-The selectors are **public** (derivable from the SHA anchor-row layout —
-`ROWS_PER_COMP`, the chain anchor rows in `sha256_f2.rs`), so the verifier
-computes them; no commitment. To do it: (1) per adder, extract its active
-row set from `sha256_f2.rs` (the chain/anchor `r` ranges); (2) build a
-`{0,1}` selector MLE per relation; (3) extend `prepare_hadamard_group` /
-`finalize_hadamard_*` (`piop/src/lookup/hadamard.rs`) so each relation's
-term carries its `sel` factor; (4) flip `sha256_f2_adders_need_row_selector`
-to assert acceptance. The AND relations (C12–C14) needed no selector — their
-fills are uniform over all rows.
+The adders are **row-selective** — `target = x+y` holds only on each
+chain/anchor's active rows; the trace zeroes the S-columns off-chain while
+inputs stay non-zero (the IC's LSB still holds there via the `κ`/PA_C
+compensator). The fix is **`F2AdderSpec::active_rows`** (a per-row mask): the
+builder zeroes `U,V,W` off-active, so the per-row term is `0⊙0−0 = 0`. Since
+adder parents are trusted (honest-prover), the zeroing rides the same trust —
+**no verifier-side selector or zerocheck change needed** (simpler than the
+indicator-MLE route I first sketched). The masks are public structural
+properties of the SHA layout; per 68-row block (`start = i·ROWS_PER_COMP`):
+C5a/b/c `[start,start+52)`; C6a–e/C8/C9 `[start,start+64)` (anchored where
+the *unshifted* S-column operand lives — even when target/inputs are
+row-shifted); C7 `[start+3,start+67)` (its target `W_T2` is unshifted);
+C10/C11 `[start+64,start+68)`. (`sha256_f2_adders_need_row_selector` still
+documents that the *un*masked registration is rejected.)
+
+**Soundness note**: the adders are **honest-prover** — the operand parents
+are trusted (`F2Proof.hadamard_adder_parents`) and the active-row masks are
+prover-applied. A sound discharge (binding the adder operands to the
+committed `t,x,y`, e.g. via a committed `W_β` + a row/bit-shift discharge)
+is the remaining hardening, shared with the ledger's Issue 1 (the AND
+relations are already sound for their `Δ=0` parts).
 
 ### 5c. Soundness follow-up
 

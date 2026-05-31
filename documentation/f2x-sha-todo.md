@@ -1485,27 +1485,28 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     `hadamard_adder_parents` (the operands' **trusted** parents at `r*_H` —
     the carry `β` + bit-shifts break the pair-eval algebra, so adders are
     honest-prover, no Δ=0 binding).
-  - **⚠️ ROW-SELECTIVITY BLOCKER (the SHA adders are NOT uniform)**: registering
-    the 13 adders on real `sha256_f2` **fails the honest zerocheck**
-    (`NonZeroClaimedSum`, verified by `sha256_f2_adders_need_row_selector`,
-    even for the simplest row-local C7 `W_T2 = W_SIGMA0 + W_MAJ`). Root
-    cause: the adders are **row-selective** — `target = x + y` holds only on
-    each chain/anchor's active rows; the trace zeroes the S-columns (target)
-    elsewhere while the inputs (`W_W`, `W_E`, …) stay non-zero, and the IC's
-    LSB `assert_in_ideal(target+x+y+κ)` still holds there only because the
-    `κ` (PA_C) compensator absorbs it. A **uniform** Hadamard zerocheck
-    constrains *every* row, so it sees the inactive-row mismatch. (Evidence
-    that C8 and C10 both target `W_A^↓4` — they apply on disjoint row sets.)
-    **Next step = a per-relation active-row selector**: multiply each
-    relation's zerocheck term by an indicator MLE `sel_k(x)` (1 on active
-    rows, 0 else; degree 3 → 4). The selectors are public/derivable from the
-    SHA anchor-row layout (`ROWS_PER_COMP` / chain anchors in `sha256_f2.rs`);
-    extract the active-row set per adder, build the indicators, extend
-    `prepare_hadamard_group`'s `comb_fn` with the `sel` factor. Then the 13
-    adders register cleanly (the operand machinery + the i+Δ specs in the
-    test are ready — see `sha256_f2_adders_need_row_selector` for the
-    13 specs). The AND relations didn't need this (their fills are uniform
-    over all rows).
+  - **ROW-SELECTIVITY SOLVED — ALL 13 ADDERS WIRED e2e (3+13 = 16/16 SHA
+    relations done)** (`sha256_f2_all_adders_with_selectors_roundtrips`).
+    The adders are **row-selective** — `target = x + y` holds only on each
+    chain/anchor's active rows; the trace zeroes the S-columns (targets)
+    off-chain while the inputs stay non-zero, and the IC's LSB
+    `assert_in_ideal(target+x+y+κ)` still holds there only via the `κ` (PA_C)
+    compensator. A uniform zerocheck would reject (documented by
+    `sha256_f2_adders_need_row_selector`, which still asserts the *un*masked
+    rejection). **Fix = `F2AdderSpec::active_rows`** (per-row mask): the
+    builder zeroes `U,V,W` off-active so the per-row term is `0⊙0−0 = 0`.
+    Since adder parents are trusted (honest-prover), the zeroing rides the
+    same trust — **no verifier-side selector / zerocheck change needed**
+    (simpler than the indicator-MLE route). The masks are a public
+    structural property of the SHA layout — per 68-row block
+    (`start = i·ROWS_PER_COMP`): C5a/b/c `[start, start+52)`;
+    C6a–e/C8/C9 `[start, start+64)` (anchored where the unshifted S-column
+    operand lives — even C6e/C8 whose target is row-shifted); C7
+    `[start+3, start+67)` (its target `W_T2` is unshifted); C10/C11
+    `[start+64, start+68)` (digest feed-forward). The 13 i+Δ specs + masks
+    are in the test. **Lesson**: anchor each adder's mask at the row where
+    its *unshifted* operand (the S-column) is materialised, NOT at the
+    target's storage row (the C6e off-by-shift that the bisect caught).
 
 ### Sound discharge for K-virtual MLE evaluations at r* (Issue 1)
 - **What**: currently the 7 K-virtual cols' MLE evaluations at

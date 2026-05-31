@@ -130,11 +130,33 @@ impl F2HadamardSpec {
 /// bit and the bit-shifts break the simple pair-eval algebra). Binding
 /// them — committing `W_β` and a sound row/bit-shift discharge — is the
 /// follow-up (`f2_hadamard_plan.md` §4.5 / §6, ledger Issue 1).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct F2AdderSpec {
     pub t: F2OperandTerm,
     pub x: F2OperandTerm,
     pub y: F2OperandTerm,
+    /// Per-row **active** mask: `active_rows[r] = false` zeroes the operands
+    /// `U,V,W` at row `r`, so the zerocheck's per-row term is `0⊙0−0 = 0`
+    /// there. Empty ⇒ all rows active. This handles SHA's **row-selective**
+    /// adders: `target = x + y` holds only on each chain/anchor's active
+    /// rows (the trace zeroes the S-columns off-chain while inputs stay
+    /// non-zero), so a uniform zerocheck would otherwise reject an honest
+    /// trace. The mask is a public structural property of the SHA layout
+    /// (the caller supplies it); the adder operands are trusted regardless
+    /// (honest-prover), so the zeroing rides the same trust.
+    pub active_rows: Vec<bool>,
+}
+
+impl F2AdderSpec {
+    /// An adder active on every row (no row-selection).
+    pub fn uniform(t: F2OperandTerm, x: F2OperandTerm, y: F2OperandTerm) -> Self {
+        Self {
+            t,
+            x,
+            y,
+            active_rows: Vec::new(),
+        }
+    }
 }
 
 /// Read column `term.col` at row `r + term.row_shift` as a `u64` bitmask
@@ -173,7 +195,16 @@ fn build_adder_operand_columns<const D: usize>(
     let mut u = Vec::with_capacity(n);
     let mut v = Vec::with_capacity(n);
     let mut w = Vec::with_capacity(n);
+    let masked = !spec.active_rows.is_empty();
     for r in 0..n {
+        // Row-selective adders: zero the operands on inactive rows so the
+        // per-row term is `0⊙0−0 = 0`.
+        if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+            u.push(cell_from_mask::<D>(0));
+            v.push(cell_from_mask::<D>(0));
+            w.push(cell_from_mask::<D>(0));
+            continue;
+        }
         let tv = shifted_cell::<D>(columns, spec.t, r, n);
         let xv = shifted_cell::<D>(columns, spec.x, r, n);
         let yv = shifted_cell::<D>(columns, spec.y, r, n);
@@ -774,10 +805,48 @@ mod tests {
             col_from_u32s::<D>(&x),
             col_from_u32s::<D>(&y),
         ];
+        let adder = F2AdderSpec::uniform(
+            F2OperandTerm { col: 0, row_shift: 0 },
+            F2OperandTerm { col: 1, row_shift: 0 },
+            F2OperandTerm { col: 2, row_shift: 0 },
+        );
+        round_trip::<D>(&columns, &[], &[adder], num_vars);
+    }
+
+    #[test]
+    fn row_selective_adder_round_trips() {
+        // Models a SHA-style row-selective adder: `t = x + y` holds only on
+        // the active rows (0..4); rows 4..8 carry garbage `t` (≠ x+y). The
+        // `active_rows` mask zeroes the operands off-active so the uniform
+        // zerocheck still sees sum 0. (Without the mask this trace's
+        // zerocheck would be non-zero — see `adder_rejects_wrong_sum`.)
+        const D: usize = 4;
+        let num_vars = 3;
+        let n = 1usize << num_vars;
+        let mask: u32 = (1 << D) - 1;
+        let x = [0b1011u32, 0b0110, 0b1111, 0b0001, 0b1010, 0b0101, 0b1100, 0b0011];
+        let y = [0b1101u32, 0b1010, 0b0111, 0b1001, 0b0110, 0b1111, 0b1000, 0b0101];
+        // Active rows 0..4: honest sum. Inactive rows 4..8: garbage t.
+        let active: Vec<bool> = (0..n).map(|r| r < 4).collect();
+        let t: Vec<u32> = (0..n)
+            .map(|r| {
+                if active[r] {
+                    (x[r].wrapping_add(y[r])) & mask
+                } else {
+                    (x[r] ^ 0b101) & mask // garbage ≠ x + y
+                }
+            })
+            .collect();
+        let columns = [
+            col_from_u32s::<D>(&t),
+            col_from_u32s::<D>(&x),
+            col_from_u32s::<D>(&y),
+        ];
         let adder = F2AdderSpec {
             t: F2OperandTerm { col: 0, row_shift: 0 },
             x: F2OperandTerm { col: 1, row_shift: 0 },
             y: F2OperandTerm { col: 2, row_shift: 0 },
+            active_rows: active,
         };
         round_trip::<D>(&columns, &[], &[adder], num_vars);
     }
@@ -797,11 +866,11 @@ mod tests {
             col_from_u32s::<D>(&x),
             col_from_u32s::<D>(&y),
         ];
-        let adder = [F2AdderSpec {
-            t: F2OperandTerm { col: 0, row_shift: 0 },
-            x: F2OperandTerm { col: 1, row_shift: 0 },
-            y: F2OperandTerm { col: 2, row_shift: 0 },
-        }];
+        let adder = [F2AdderSpec::uniform(
+            F2OperandTerm { col: 0, row_shift: 0 },
+            F2OperandTerm { col: 1, row_shift: 0 },
+            F2OperandTerm { col: 2, row_shift: 0 },
+        )];
         let ic = ic_point();
         let mut pt = Blake3Transcript::new();
         let (proof, _, _, _) =

@@ -6116,10 +6116,8 @@ mod tests {
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
         let tm = |col: usize, row_shift: usize| F2OperandTerm { col, row_shift };
-        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize)| F2AdderSpec {
-            t: tm(t.0, t.1),
-            x: tm(x.0, x.1),
-            y: tm(y.0, y.1),
+        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize)| {
+            F2AdderSpec::uniform(tm(t.0, t.1), tm(x.0, x.1), tm(y.0, y.1))
         };
         // target = x + y, shifts in i+Δ (from the IC `down_*` constraints).
         let adders = [
@@ -6162,6 +6160,122 @@ mod tests {
             "a uniform SHA adder registration must (currently) be rejected — \
              the adders are row-selective and need an active-row selector; got {res:?}",
         );
+    }
+
+    /// **All 13 SHA-256 adder relations C5–C11** discharged end-to-end on
+    /// the real `sha256_f2` trace via the **active-row masks**
+    /// (`F2AdderSpec::active_rows`). Each adder is `target = x + y` (Binius
+    /// carry identity); it holds only on its chain/anchor's active rows
+    /// (`generate_random_trace`), so off-active the operands are zeroed and
+    /// the uniform zerocheck sum stays 0. Active rows per 68-row block
+    /// (`start = i·ROWS_PER_COMP`):
+    ///   - C5a/b/c (W-schedule chain, anchor `k=t−16`): `[start, start+52)`
+    ///   - C6a–e / C8 / C9 (round chain, anchored at `k=start+j`):
+    ///         `[start, start+64)` (anchored where the unshifted S-column
+    ///         operand lives, even when target/inputs are row-shifted)
+    ///   - C7 (target `W_T2` is unshifted, row-local at `t=k+3`):
+    ///         `[start+3, start+67)`
+    ///   - C10 / C11 (digest feed-forward):               `[start+64, start+68)`
+    /// Completes the 16 SHA Hadamard relations (3 ANDs + 13 adders).
+    /// (Adder parents are trusted — honest-prover; a sound discharge for the
+    /// row/bit-shifts is the ledger's Issue-1 follow-up.)
+    #[test]
+    fn sha256_f2_all_adders_with_selectors_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+        use crate::f2_hadamard::{F2AdderSpec, F2OperandTerm};
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let rpc = cols::ROWS_PER_COMP;
+        let big_n = cols::num_compressions(num_vars);
+        // Per-block active-row mask for `[start+lo, start+hi)`.
+        let mk_mask = |lo: usize, hi: usize| -> Vec<bool> {
+            let mut m = vec![false; poly_size];
+            for i in 0..big_n {
+                let start = i * rpc;
+                for r in (start + lo)..(start + hi).min(poly_size) {
+                    m[r] = true;
+                }
+            }
+            m
+        };
+        let tm = |col: usize, row_shift: usize| F2OperandTerm { col, row_shift };
+        let adder = |t: (usize, usize), x: (usize, usize), y: (usize, usize), lo, hi| {
+            F2AdderSpec {
+                t: tm(t.0, t.1),
+                x: tm(x.0, x.1),
+                y: tm(y.0, y.1),
+                active_rows: mk_mask(lo, hi),
+            }
+        };
+        let adders = [
+            adder((cols::W_W_S1, 0), (cols::W_W, 0), (cols::W_SIG0, 1), 0, 52), // C5a
+            adder((cols::W_W_S2, 0), (cols::W_W_S1, 0), (cols::W_W, 9), 0, 52), // C5b
+            adder((cols::W_W, 16), (cols::W_W_S2, 0), (cols::W_SIG1, 14), 0, 52), // C5c
+            adder((cols::W_T1_S1, 0), (cols::W_E, 0), (cols::W_SIGMA1, 3), 0, 64), // C6a
+            adder((cols::W_T1_S2, 0), (cols::W_T1_S1, 0), (cols::W_UEF, 3), 0, 64), // C6b
+            adder((cols::W_T1_S3, 0), (cols::W_T1_S2, 0), (cols::W_UNEG_E_G, 3), 0, 64), // C6c
+            adder((cols::W_T1_S4, 0), (cols::W_T1_S3, 0), (cols::PA_K, 3), 0, 64), // C6d
+            adder((cols::W_T1, 3), (cols::W_T1_S4, 0), (cols::W_W, 3), 0, 64),  // C6e
+            adder((cols::W_T2, 0), (cols::W_SIGMA0, 0), (cols::W_MAJ, 0), 3, 67), // C7
+            adder((cols::W_A, 4), (cols::W_T1, 3), (cols::W_T2, 3), 0, 64),     // C8
+            adder((cols::W_E, 4), (cols::W_A, 0), (cols::W_T1, 3), 0, 64),      // C9
+            adder((cols::W_A, 4), (cols::W_A, 0), (cols::PA_A, 0), 64, 68),     // C10
+            adder((cols::W_E, 4), (cols::W_E, 0), (cols::PA_E, 0), 64, 68),     // C11
+        ];
+        let sel: &[crate::f2_hadamard::F2AdderSpec] = &adders;
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            /* hadamard_specs */ &[],
+            sel,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+        )
+        .expect("prove on SHA adders (masked) should succeed");
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            &[],
+            &[],
+            /* hadamard_specs */ &[],
+            sel,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("honest masked SHA adders proof must verify");
     }
 
 }
