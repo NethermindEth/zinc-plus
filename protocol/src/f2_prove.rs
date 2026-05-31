@@ -167,6 +167,11 @@ pub struct F2VerifierSubclaim {
     pub sumcheck_point: Vec<BinaryFieldGF128>,
     pub primary_column_evals: Vec<BinaryFieldGF128>,
     pub virtual_column_evals: Vec<BinaryFieldGF128>,
+    /// Hadamard sumcheck point `r*_H` (empty when there are no Hadamard
+    /// specs). The sound discharge opens the parent-evals at this point.
+    pub hadamard_rstar: Vec<BinaryFieldGF128>,
+    /// Distinct Hadamard column indices (sorted; empty when none).
+    pub hadamard_distinct: Vec<usize>,
 }
 
 /// One virtual binary_poly column for an F_2 UAIR: an
@@ -908,7 +913,7 @@ where
         // verifier recombines `Σ_b α^b·v_b == parent_eval`. α is fresh
         // w.r.t. the bit-slice evals (Wiring R), so the binding is sound
         // once these are PCS-opened at r*_H (deferred — trusted now).
-        let (hadamard_proof, hadamard_parent_evals) = match hadamard_phase {
+        let (hadamard_proof, hadamard_parent_evals, hadamard_rstar, hadamard_distinct) = match hadamard_phase {
             Some((had_proof, distinct, r_star_h)) => {
                 let parent = crate::f2_hadamard::alpha_parent_evals::<D>(
                     &extended_binary_poly,
@@ -921,9 +926,9 @@ where
                 for v in &parent {
                     transcript.absorb_random_field(v, &mut buf);
                 }
-                (Some(had_proof), parent)
+                (Some(had_proof), parent, r_star_h, distinct)
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), Vec::new(), Vec::new()),
         };
         // SIMD-batched 4-cell projection via `project_column_with_powers`:
         // chunks the column into groups of 4, dispatches each group
@@ -1143,6 +1148,8 @@ where
             sumcheck_point,
             primary_column_evals: primary_evals.to_vec(),
             virtual_column_evals: virtual_evals.to_vec(),
+            hadamard_rstar,
+            hadamard_distinct,
         };
 
         // Convert `projected_trace` from `DenseMLE<BinaryFieldGF128>`
@@ -1274,23 +1281,23 @@ where
 
         // -- Step 2.5: Hadamard zerocheck verify (Wiring R) -------
         // Mirrors the prover: runs before α. No-op when empty.
-        let hadamard_distinct: Option<Vec<usize>> = if !hadamard_specs.is_empty() {
-            let hp = proof
-                .hadamard_proof
-                .as_ref()
-                .ok_or(F2VerifyError::MissingHadamardProof)?;
-            let (distinct, _r_star_h) = crate::f2_hadamard::verify_f2_hadamard_phase::<D>(
-                transcript,
-                hp,
-                hadamard_specs,
-                &ic_evaluation_point,
-                num_vars,
-            )
-            .map_err(F2VerifyError::Hadamard)?;
-            Some(distinct)
-        } else {
-            None
-        };
+        let (hadamard_distinct, hadamard_rstar): (Vec<usize>, Vec<BinaryFieldGF128>) =
+            if !hadamard_specs.is_empty() {
+                let hp = proof
+                    .hadamard_proof
+                    .as_ref()
+                    .ok_or(F2VerifyError::MissingHadamardProof)?;
+                crate::f2_hadamard::verify_f2_hadamard_phase::<D>(
+                    transcript,
+                    hp,
+                    hadamard_specs,
+                    &ic_evaluation_point,
+                    num_vars,
+                )
+                .map_err(F2VerifyError::Hadamard)?
+            } else {
+                (Vec::new(), Vec::new())
+            };
 
         let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
         if alpha != proof.alpha {
@@ -1305,15 +1312,15 @@ where
         // recombine `Σ_b α^b·v_b == parent_eval` to tie the bit-slice
         // evals to the columns. (Parent evals are trusted until the
         // discharge PCS-opens them at r*_H.)
-        if let Some(distinct) = &hadamard_distinct {
+        if !hadamard_distinct.is_empty() {
             let hp = proof
                 .hadamard_proof
                 .as_ref()
                 .ok_or(F2VerifyError::MissingHadamardProof)?;
-            if proof.hadamard_parent_evals.len() != distinct.len() {
+            if proof.hadamard_parent_evals.len() != hadamard_distinct.len() {
                 return Err(F2VerifyError::HadamardParentEvalCountMismatch {
                     got: proof.hadamard_parent_evals.len(),
-                    expected: distinct.len(),
+                    expected: hadamard_distinct.len(),
                 });
             }
             let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
@@ -1425,6 +1432,8 @@ where
             sumcheck_point,
             primary_column_evals: primary_evals,
             virtual_column_evals: virtual_evals_derived,
+            hadamard_rstar,
+            hadamard_distinct,
         })
     }
 
@@ -3263,6 +3272,8 @@ where
             sumcheck_point: r_0,
             primary_column_evals: primary_evals_at_r_0.to_vec(),
             virtual_column_evals: virtual_evals_at_r_0_derived,
+            hadamard_rstar: Vec::new(),
+            hadamard_distinct: Vec::new(),
         };
 
         // Step 7: γ-batched open verifier at r_0.
@@ -3746,6 +3757,8 @@ mod tests {
             sumcheck_point,
             primary_column_evals: proof.column_evals_at_rstar.clone(),
             virtual_column_evals: Vec::new(),
+            hadamard_rstar: Vec::new(),
+            hadamard_distinct: Vec::new(),
         })
     }
 
