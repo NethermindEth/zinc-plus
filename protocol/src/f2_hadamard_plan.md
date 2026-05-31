@@ -1,6 +1,11 @@
 # F_2 SHA-256 Hadamard discharge — implementation plan
 
-Status: design accepted, not yet implemented. Goal: discharge SHA-256's
+Status: A0, A1-core, A1-wiring, and the **trusted** in-flow discharge are
+implemented and tested (commits `a110d32`, `ade7ab9`, `390c846`; the
+`f2_prove.rs` threading is in the working tree, **uncommitted** —
+entangled with the in-flight GF128 `f2_prove` WIP, lands after it per
+"option 1"). Remaining: the **sound** discharge (§5.7 below), then
+shifted/virtual operands and `W_β`. Goal: discharge SHA-256's
 16 column-level Hadamard (coefficient-wise / bitwise-AND) relations
 `W = U ⊙ V` on the all-`F_2` prover path.
 
@@ -240,6 +245,58 @@ Hadamard path consumes bit-slices, not packed down-rows.)
    (`binary_gf128.rs:31-56`).
 
 ---
+
+## 5.7 Sound discharge of the Hadamard parent-evals (the soundness step)
+
+The in-flow discharge as wired today ships `F2Proof.hadamard_parent_evals`
+(the α-evals at `r*_H`) as **trusted** prover values: the verifier
+recombines `Σ_b α^b·v_b == parent_eval`, but `parent_eval` itself is not
+bound to the commitment. So the in-flow check is honest-prover/
+completeness only. To make it sound, **open the parent-evals at `r*_H`
+against the PCS.**
+
+Recall the existing pipeline (`F2FullProof`, `prove/verify_f2_full_with_bit_ops`):
+the main sumcheck's per-column evals at `r*` are collapsed to one point
+`r_0` by `MultipointEval`, then `prove_f2_open` opens at `r_0`. The
+Hadamard parent-evals are at a **different** point `r*_H`, so they need
+their own discharge.
+
+**Approach A (recommended first cut): a second multipoint-eval + open at
+`r*_H`, reusing existing machinery.**
+- Expose `r*_H` out of `prove_f2_uair_with_groups` (it currently drops it
+  after computing the parent-evals) — add it to `F2VerifierSubclaim` or
+  return it alongside `projected_trace_inner`.
+- In `prove_f2_full_with_bit_ops`, after the main `r_0` multipoint-eval +
+  open, run a **second** `MultipointEval::prove_as_subprotocol` over the
+  Hadamard-column subset of `projected_trace_inner` at `r*_H` → a point
+  `r_0^H`, then a second `prove_f2_open` at `r_0^H` (same commitment /
+  shared Merkle).
+- `F2FullProof` gains `hadamard_multipoint_eval`,
+  `hadamard_open_evals_at_r0h`, `hadamard_open` (mirroring
+  `multipoint_eval` / `open_evals_at_r_0` / `open`).
+- `verify_f2_full_with_bit_ops` mirrors: verify the Hadamard
+  multipoint-eval + open to recover the **opened** parent-evals at `r*_H`,
+  and feed THOSE into `verify_bit_decomposition_consistency` instead of
+  the trusted `F2Proof.hadamard_parent_evals` (which then becomes
+  redundant, or is kept and checked equal to the opened values).
+
+**Approach B (one fewer Merkle pass): a two-point multipoint-eval** that
+folds claims at both `r*` and `r*_H` into a single `r_0`, then one open.
+This is exactly the "proper" multipoint-eval the ledger's **Issue 1**
+also needs (it's currently degenerate / single-point), so doing B serves
+both. Heavier to build than A.
+
+**Cost**: A adds one μ-var degree-2 multipoint sumcheck + one open of the
+~handful of Hadamard columns (Merkle shared). **Test**: extend the full
+`commit → prove_f2_full_with_bit_ops → verify_f2_full_with_bit_ops` e2e
+(the `F2Types`/`HadF2Uair` harness) so a tampered `parent_eval` is
+rejected by the open (not just a flipped `W` by the zerocheck).
+
+**Caveat**: this is a substantial full-pipeline change living entirely in
+the currently-uncommittable `f2_prove.rs`; cleanest to execute after the
+GF128 WIP lands. Line-level call sites (the `MultipointEval` + `open`
+invocations in `prove_f2_full_with_bit_ops`, and `prove_f2_open`'s point
+parameter) to confirm at implementation time.
 
 ## 7. Phased implementation
 - **Phase A — foundation in isolation (Wiring R).** Synthetic UAIR: one
