@@ -141,55 +141,65 @@ ledger's **Issue 1** also needs) — one open instead of two.
 
 ## 5. NEXT TASK — real SHA-256 relations (shifts, `W_β`, register the 16)
 
-> **STATUS UPDATE (operand machinery SHIPPED — Phase B).** `↓Δ`
-> row-shifts, `1−` complement, and `A+A^↓2` XOR combos are **done**:
-> `F2HadamardSpec` now takes three `F2Operand`s (XOR of `(col, ↓Δ)` terms,
-> optional complement); `f2_hadamard.rs` builds operand slices at the bit
-> level and discharges them (Δ=0 bound, Δ≠0 trusted). Unit + full-flow
-> tests pass (43 lib tests). Ledger entry: "OPERAND MACHINERY SHIPPED".
-> **Key correction**: `+`/`1−` are bitwise **XOR**, so operand slices are
-> built via XOR, NOT `build_virtual_booleanity_mles` (F-addition → wrong).
-> Remaining below: the **X· bit-shift**, **`W_β`**, and **registering the
-> 16 relations on real `sha256_f2`**.
+> **STATUS UPDATE.** The operand machinery (Phase B) AND the **3 SHA AND
+> relations C12/C13/C14** are **done and tested on real `sha256_f2`** (44
+> lib tests). What's left in §5: the **13 adder relations** (C5–C11), which
+> need the **X· bit-shift** + the **`W_β` carry column** + the **carry-word
+> construction** — a single interlocked design (below). Ledger entries:
+> "OPERAND MACHINERY SHIPPED", "C12/C13/C14 WIRED & TESTED".
 
-The synthetic tests cover the operand kinds. The real SHA-256 relations
-(Appendix A) still need:
-- **X· bit-shift** in operands (a bit-index reindex `b ↦ b+1`, drop bit
-  `D−1`, zero bit 0 — for the adder operands `x + X·c`). Add a `bit_shift`
-  field to `F2OperandTerm`, handle it in `build_operand_slices` (shift the
-  per-row mask) and in `derive_operand_parents` (the parent gains
-  `α·(ψ_α(c) − α^{D-1}·c_{D-1})` — needs the source's top bit-slice eval,
-  so thread the operand's per-bit evals through). Row-shifts are done; this
-  is the remaining operand primitive.
-- **`W_β` carry column** (`f2_hadamard_plan.md` §4.5): required for the 13
-  adder relations; the 3 AND relations (C12/C13/C14) work without it. Add
-  it to `test-uair/src/sha256_f2.rs` (mirror the `PA_C` setup) + the
-  missing `ShiftSpec`s.
-- **✅ C12/C13/C14 DONE & TESTED on `sha256_f2`**
-  (`sha256_f2_and_hadamards_roundtrips`): the **three SHA AND relations**
-  discharge e2e (3 of 16). **Row-shift DIRECTION (resolved):** the codebase
-  `↓Δ` is **`row i → col[i+Δ]`** (operand `row_shift`,
-  `build_shifted_bit_slice_mles`, `ShiftSpec` `uair/src/lib.rs:44`), but the
-  SHA fills are written `i−Δ` (`u_ef[t]=e[t]&e[t−1]`,
-  `u_neg_e_g[t]=(¬e[t])&e[t−2]`, `maj[t]=Maj(a[t],a[t−1],a[t−2])`,
-  `sha256_f2.rs:963`). So **Appendix A's literal table is `i−Δ` and was
-  re-expressed `i+Δ`** (substitute `t → t+Δ_max`, shift the result column
-  up too):
-  - C12 ⇒ `u: W_E^↓1, v: W_E, w: W_UEF^↓1`
-  - C13 ⇒ `u: ¬(W_E^↓2), v: W_E, w: W_UNEG_E_G^↓2`
-  - C14 ⇒ `u: W_A^↓2⊕W_A, v: W_A^↓1⊕W_A, w: W_MAJ^↓2⊕W_A`
-        (Binius identity `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
-  The **C13 complement / C14 combo boundary** (where the shifted column
-  zero-pads, rows `t ≥ n−2`, so `¬(W_E^↓2)` becomes all-ones / `W_A^↓2⊕W_A`
-  becomes `W_A`) lands in the **zero slack region** (`generate_random_trace`
-  zero-inits then fills only the active rows), so the un-shifted term
-  `W_E[t]`/`W_A[t]` is 0 there and the products vanish → honest zerocheck
-  sum is 0. `(W_E,0)`/`(W_A,0)` bound; the `Δ≠0` pairs trusted (row-shift
-  gap). **Always check the honest sum is 0 before trusting a registration**
-  — that's what confirmed the boundary lands in the slack.
-- **Then the 13 adder relations** (C5–C11, plan Appendix A) — these are
-  what's left, and they need the **X· bit-shift** + **`W_β`** below.
-- **Row-shift discharge** (Issue 1) to make the `Δ ≠ 0` pairs sound.
+### 5a. DONE — operand machinery + the 3 AND relations
+
+- `F2HadamardSpec` takes three `F2Operand`s (XOR of `(col, ↓Δ)` terms,
+  optional complement); `f2_hadamard.rs` builds operand slices at the bit
+  level (XOR — **NOT** `build_virtual_booleanity_mles`, which does
+  F-addition → `2` for `1+1`) and discharges them (Δ=0 bound by the
+  second-mp, Δ≠0 trusted). **Row-shift convention: `↓Δ = row i → col[i+Δ]`**
+  (`ShiftSpec` `uair/src/lib.rs:44`); the SHA fills are `i−Δ`, so each
+  relation is re-expressed `i+Δ` by shifting the result column up:
+  - C12 `u: W_E^↓1, v: W_E, w: W_UEF^↓1`
+  - C13 `u: ¬(W_E^↓2), v: W_E, w: W_UNEG_E_G^↓2`
+  - C14 `u: W_A^↓2⊕W_A, v: W_A^↓1⊕W_A, w: W_MAJ^↓2⊕W_A`
+        (Binius `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
+  The complement/combo boundary at rows `t ≥ n−2` lands in the **zero
+  slack** (`generate_random_trace` zero-inits, fills only active rows), so
+  the honest zerocheck sum is 0. **Lesson: always check the honest sum is 0
+  to confirm a registration's boundary handling.**
+
+### 5b. NEXT — the 13 adder relations (C5–C11)
+
+These are `(x + X·c) ⊙ (y + X·c) = c + X·c` (Appendix A; `+`/`⊙` are XOR/AND
+at the bit level). **All three pieces interlock — design them together:**
+
+- **X· bit-shift** in operands: a bit-index reindex `b ↦ b+1` (drop bit
+  `D−1`, zero bit 0). Add a `bit_shift` field to `F2OperandTerm`; handle it
+  in `build_operand_slices` (per-row mask `<<1 & all_ones`). **Discharge
+  subtlety**: `ψ_α(X·c)(r*_H) = α·(ψ_α(c) − α^{D-1}·c_{D-1})` — the parent
+  needs the source column's **top bit-slice eval** `c_{D-1}(r*_H)`, which is
+  *not* a full-column α-eval (so it's not in `hadamard_pair_evals`). Either
+  ship/bind it separately, or — cleaner — note `c_{D-1}` is exactly `W_β`'s
+  bit (see below), so it ties back into the carry column.
+- **Carry word `c`** is a *virtual* column, NOT a simple `(col, Δ)`: bits
+  `0..30 = SHR¹(t ⊕ x ⊕ y)` (XOR of three committed cols, then right-shift
+  by 1) and bit `31 = W_β`. The current `F2Operand` can't express
+  `SHR¹(...)` + a bit-31 splice — **the operand model needs a richer term**
+  (a `SHR^k` bit-shift, and bit-selection / splicing one column's bit into
+  another's position). This is the bulk of the adder work.
+- **`W_β` carry column** (`f2_hadamard_plan.md` §4.5): add `cols::W_BETA`
+  to `test-uair/src/sha256_f2.rs` (mirror the `PA_C` setup) — 1 packed col,
+  bits `0..12 = β_k = Maj(a[31], b[31], D[31])`, plus the missing
+  `ShiftSpec`s. The 3 ANDs needed none of this; the 13 adders need it.
+
+Recommended order: (1) extend the operand model with `SHR^k`/`X·`/bit-splice
++ their parent formulas, unit-test synthetically (mirror the existing
+operand tests); (2) add `W_β`; (3) register one adder (e.g. C10
+`W_A^↓4 ⊙ W_A = PA_A`, simplest) and check the honest sum is 0; (4) the
+rest. **Re-derive each in the `i+Δ` convention and verify the honest sum.**
+
+### 5c. Soundness follow-up
+
+- **Row-shift discharge** (Issue 1) to make the `Δ ≠ 0` pairs sound (today
+  trusted). Shared with the ledger's Issue 1 / the two-point multipoint-eval.
 
 ---
 
