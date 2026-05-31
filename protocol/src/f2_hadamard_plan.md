@@ -1,13 +1,16 @@
 # F_2 SHA-256 Hadamard discharge — implementation plan
 
-Status: A0, A1-core, A1-wiring, and the **trusted** in-flow discharge are
-implemented and tested (commits `a110d32`, `ade7ab9`, `390c846`; the
-`f2_prove.rs` threading is in the working tree, **uncommitted** —
-entangled with the in-flight GF128 `f2_prove` WIP, lands after it per
-"option 1"). Remaining: the **sound** discharge (§5.7 below), then
-shifted/virtual operands and `W_β`. Goal: discharge SHA-256's
-16 column-level Hadamard (coefficient-wise / bitwise-AND) relations
-`W = U ⊙ V` on the all-`F_2` prover path.
+Status: A0, A1-core, A1-wiring, the in-flow discharge, **and the SOUND
+discharge (§5.7 below) are implemented and tested** (38 protocol lib
+tests green, clippy-clean; working tree on `f2-clean`). Commits
+`a110d32`, `ade7ab9`, `390c846` for A0–A4; the sound discharge
+(`prove/verify_f2_full_with_hadamard`, the `F2FullProof.hadamard_*`
+fields, the binding check) is in the working tree — see the ledger entry
+"SOUND DISCHARGE SHIPPED" in `documentation/f2x-sha-todo.md`. Remaining:
+shifted/virtual operands + row-shift discharge and `W_β`, then register
+the 16 relations. Goal: discharge SHA-256's 16 column-level Hadamard
+(coefficient-wise / bitwise-AND) relations `W = U ⊙ V` on the all-`F_2`
+prover path.
 
 **Chosen approach (v2): per-coefficient-slice zerocheck, reusing the
 booleanity bit-slice machinery.** This supersedes both (a) the rejected

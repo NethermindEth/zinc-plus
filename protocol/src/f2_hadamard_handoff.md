@@ -1,10 +1,20 @@
 # Handoff — F_2 SHA-256 Hadamard discharge
 
 You are taking over the coefficient-wise Hadamard (bitwise-AND) discharge
-for the all-`F_2` SHA-256 prover. It is **implemented and working
-end-to-end at the honest-prover / completeness level, fully committed**
-on branch `f2-clean`. Your job: make it **sound**, then extend it to the
-real SHA-256 relations.
+for the all-`F_2` SHA-256 prover. The per-slice zerocheck AND **the sound
+PCS discharge (§4 below) are now implemented, tested (38 protocol lib
+tests green), and clippy-clean** on branch `f2-clean` (working tree —
+commit it). Your job: extend it to the **real SHA-256 relations**
+(shifts / virtual operands, the `W_β` carry column, then register the 16
+relations) — see **§5**, which is now the next task.
+
+> **STATUS UPDATE (sound discharge SHIPPED).** §4's "next task" is done.
+> `prove_f2_full_with_hadamard` / `verify_f2_full_with_hadamard` exist;
+> `F2FullProof` carries the four `hadamard_*` discharge fields; the
+> verifier's binding check + the up-eval-absorb make the in-flow
+> recombination sound. Full write-up in the ledger
+> (`documentation/f2x-sha-todo.md`, entry "SOUND DISCHARGE SHIPPED").
+> Read §4 for *what it does*; jump to §5 for *what's next*.
 
 ---
 
@@ -76,64 +86,60 @@ Working tree is clean; all 37 `zinc-protocol` lib tests pass.
 
 ---
 
-## 3. Current soundness posture (the gap you're closing)
+## 3. Soundness posture — NOW SOUND (gap closed)
 
 The in-flow recombination check
 `Σ_b α^b·v_b(r*_H) == parent_eval` (`verify_bit_decomposition_consistency`)
-ties the per-slice evals to `parent_evals`, **but `parent_evals` are
-prover-supplied / trusted** — they are not yet PCS-opened at `r*_H`. So a
-malicious prover could ship mutually-consistent fake parent+slice evals.
-Today's check is therefore **completeness / honest-prover only**. Making
-it sound is the next task.
+ties the per-slice evals to `parent_evals`. `parent_evals` **used to be**
+prover-supplied / trusted (honest-prover-only). They are now bound to the
+commitment by the second mp+open at `r*_H` plus the verifier's binding
+check `hadamard_evals_at_rstar_h[distinct] == parent_evals` (§4). The
+recombination is therefore **sound**. (The remaining honest-prover-only
+piece is *row-shift* discharge for shifted operands — Phase B/C, §5 +
+ledger Issue 1 — not the AND discharge itself.)
 
 ---
 
-## 4. NEXT TASK — sound discharge (Approach A). Full detail in §5.7.1.
+## 4. DONE — sound discharge (Approach A). Full detail in §5.7.1.
 
-Open the `parent_evals` at `r*_H` against the commitment. **The plumbing
-is done** (`r*_H` + distinct columns are in `F2VerifierSubclaim`).
-Remaining, all in `protocol/src/f2_prove.rs`:
+`parent_evals` are now opened at `r*_H` against the commitment. What
+shipped (all in `protocol/src/f2_prove.rs`):
 
-1. **`F2FullProof`** (`struct` ~`3307`): add
-   `hadamard_multipoint_eval: Option<MultipointEvalProof<BinaryFieldGF128>>`,
-   `hadamard_open_evals_at_r0h: Vec<BinaryFieldGF128>`,
-   `hadamard_open: Option<F2OpenProof<D>>`. Set them `None`/empty at the
-   two existing `F2FullProof {…}` constructions (in
-   `prove_f2_full_with_bit_ops` and `prove_f2_full_pre_paired_with_bit_ops`).
-2. **New `_with_hadamard` variants — do NOT change the existing
-   signatures** (≈15 bench call sites depend on them: see
-   `protocol/benches/f2_{sha256,sha256_rs,blake3}.rs`). Refactor the body
-   of `prove_f2_full_with_bit_ops` into a private
-   `prove_f2_full_impl(.., hadamard_specs)`; the existing entry calls it
-   with `&[]`, a new `prove_f2_full_with_hadamard` calls it with the
-   specs. Same shape for verify.
-3. **Second mp+open** (in the prove impl, *after* the main mp+open — copy
-   the pattern at ~`2805-2865`): if `hadamard_specs` non-empty, evaluate
-   **all** projected columns at `subclaim.hadamard_rstar`, run a second
-   `MultipointEval::prove_as_subprotocol(transcript, &projected_cols,
-   &hadamard_rstar, &all_col_evals_at_rstar_h, &[], &[], &())` → `r_0^H`,
-   then `prove_f2_open(…, &trace.binary_poly[num_pub_bin..], &r_0^H,
-   &alpha, n)`. Collapsing *all* columns (not just the Hadamard subset)
-   reuses the contiguous-witness-slice open verbatim and avoids
-   subset-column mapping. Populate the new `F2FullProof` fields.
-4. **Verify impl**: verify the second mp+open, recover the column evals at
-   `r*_H`, then add the **binding check**: the `hadamard_distinct`-indexed
-   subset of those opened evals must equal `proof.uair.hadamard_parent_evals`.
-   Keep the existing trusted recombination in `verify_f2_uair_with_groups`
-   as-is; this binding is what upgrades it to sound.
-5. **e2e test**: model on `prove_then_verify_f2_full_roundtrips` (~`4571`)
-   and `verify_f2_full_rejects_tampered_open` (~`4650`), but drive it
-   through the `_with_hadamard` variants with an `F2HadamardSpec`. Assert a
-   tampered `hadamard_parent_evals` entry is rejected by the binding check
-   (not just a flipped `W` caught by the zerocheck).
+1. **`F2FullProof`** gained FOUR fields (all `None`/empty without
+   Hadamard): `hadamard_multipoint_eval: Option<MultipointEvalProof>`,
+   **`hadamard_evals_at_rstar_h: Vec<Gf>`** (every projected column's eval
+   at `r*_H` — the second mp's `up_evals`; this one is *not* in the
+   original §5.7.1 list but is **required** — the verifier needs the
+   up-evals and they get bound transitively),
+   `hadamard_open_evals_at_r0h: Vec<Gf>`, `hadamard_open: Option<F2OpenProof>`.
+2. **`prove_f2_full_with_hadamard` / `verify_f2_full_with_hadamard`** added;
+   existing `*_with_bit_ops` (+ pre-paired) signatures **unchanged** (benches
+   untouched). Bodies factored into private `prove_f2_full_impl` /
+   `verify_f2_full_impl(.., hadamard_specs)` (old entries pass `&[]`).
+3. **Second mp+open** after the main one: evaluate all projected cols at
+   `r*_H`, **absorb those up-evals** (soundness-critical — see below), run a
+   second `MultipointEval` → `r_0^H`, then `prove_f2_open` on the same
+   witness slice at `r_0^H`.
+4. **Verify**: mirror, then binding check
+   `hadamard_evals_at_rstar_h[distinct] == proof.uair.hadamard_parent_evals`.
+   The in-flow recombination is kept as-is; the binding makes it sound.
+5. **e2e test** `prove_then_verify_f2_full_with_hadamard_roundtrips`
+   (HadF2Uair): honest round-trip + 4 tamper rejections.
 
-Alternative (heavier, optimization): a single **two-point** multipoint-eval
-folding `r*` and `r*_H` into one `r_0` — this is the "proper"
-multipoint-eval the ledger's **Issue 1** also needs.
+⚠️ **Soundness detail you must preserve if you touch this**: the second
+mp's `up_evals` (`hadamard_evals_at_rstar_h`) are absorbed into the
+transcript **before** the second mp samples γ (both sides), mirroring how
+`prove_f2_uair_with_groups` absorbs `column_evals_at_rstar` before the main
+mp. Without that absorb the per-column up-evals aren't SZ-pinned and the
+binding is defeatable. Don't drop it.
+
+Optimisation left open (ledger): collapse only the Hadamard subset, or
+fold `r*`+`r*_H` into one two-point multipoint-eval (the "proper" mp the
+ledger's **Issue 1** also needs) — one open instead of two.
 
 ---
 
-## 5. After the sound discharge
+## 5. NEXT TASK — real SHA-256 relations (shifts, `W_β`, register the 16)
 
 The current tests use a synthetic shift-free `HadF2Uair`. The real
 SHA-256 relations (Appendix A) need:
