@@ -1469,7 +1469,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   ever revived" note) or slice *width* (tower-subfield representation), not
   slice *count*.
 
-### Specialised fused Hadamard sumcheck prover for rounds 2..n (✅ SHIPPED, commit `9505876` — −13% discharge at nvars=16, byte-identical, size-gated)
+### Specialised fused Hadamard sumcheck prover for rounds 2..n (✅ SHIPPED, commits `9505876` + `7a27606` — −24.5% discharge at nvars=16, byte-identical, size-gated)
 - **✅ SHIPPED RESULT (commit `9505876`)**: built exactly the fix below. Added
   an opt-in `RoundPolyEvaluator` hook to `ProverState`/`MultiDegreeSumcheckGroup`
   (`prove_round` uses it for the round-poly evals instead of the generic
@@ -1485,13 +1485,34 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   stays on the generic path. Byte-identity gated by `fused_matches_generic_large`
   (nvars=14, fused active) + `fast_path_matches_generic` (nvars=3, round-1 only);
   60 piop + 9 f2_hadamard tests green.
-- **Follow-up — the win is partial (≈13%), so the discharge is also arithmetic-
-  bound, not purely the gather.** The remaining ~479 ms at nvars=16 is ~200 M
-  GF(2^128) muls (the degree-3 `eq·(U·V−W)` evals over 1536 slices). Next lever:
-  **SIMD-batch the GF128 arithmetic** (the codebase already has x4 `psi_α`
-  CLMUL batching) — process the 4 boundary points / multiple `(k,b)` per
-  instruction. Bigger, separate effort. Also: tune `FUSED_MIN_VARS` (measure the
-  12–15 crossover) and `CHUNK` (512).
+- **✅ FOLLOW-UP SHIPPED — coefficient-form round poly (commit `7a27606`)**: the
+  eval-form above lifted U,V,W to the 4 boundary points before multiplying (14
+  muls/(k,b,pt)). Since the comb structure is known, compute the round poly's
+  **coefficients** directly instead: per `(k,b)` the degree-2 `U·V−W` coeffs
+  come from the two folded halves via **Karatsuba** (`p0=u0·v0`, `p2=Δu·Δv`,
+  `p1=u1·v1−p0−p2` — cross term free), then subtract `W`, accumulate weighted
+  coeffs `g=(g0,g1,g2)` per point, multiply by the linear `eq_pt`, and evaluate
+  the resulting cubic at `{0,1,X,X+1}` once at the end. **6 muls/(k,b,pt) vs
+  14.** The generic comb can't (black box); the specialised evaluator can.
+  Byte-identical (same cubic). **nvars=16 discharge: 554 → eval-form 479 → coeff
+  429 → +Karatsuba 418 ms (−24.5%)**, Prove-Hadamard 600 → 464 ms; nvars=9
+  unchanged. 60 piop + 9 f2_hadamard tests green.
+- **SIMD finding (why literal lane-batching was NOT the lever on aarch64)**: the
+  discharge muls are *general* GF(2^128)×GF(2^128) (`vmull_p64`/`pclmulqdq` via
+  Karatsuba `clmul_128x128` + reduce). The existing x4 `psi_α` kernels win only
+  because **one operand is a bit** (0/1 → a select, no CLMUL); the discharge has
+  no bit operand post-fold, so that trick doesn't apply, and the CLMUL units are
+  throughput-bound (NEON has no 4-wide CLMUL). The portable lever is **fewer
+  muls** (the coeff form above), not wider SIMD. Tellingly, the 2× mul cut
+  (14→6) bought only ~12% wall-clock → the bottleneck has **shifted off
+  arithmetic** onto memory traffic / `F` clones / the per-point `g` read-modify-
+  write. **Next levers (open):** (a) cut `F::Inner` clones in the hot loop
+  (read once, work on stack); (b) lazy/deferred GF128 reduction — accumulate
+  unreduced `clmul_128x128` outputs (XOR), reduce once per coeff (reduction is
+  GF(2)-linear ⇒ byte-identical) — needs `clmul_128x128`/reduce exposed `pub`
+  from `poly`; (c) exploit round-2's `{0,1,r1,1−r1}` slice values (small-value,
+  round-2-only — ~50% of the work, but edges toward the removed skip prover).
+  Also still open: tune `FUSED_MIN_VARS` (12–15 crossover) and `CHUNK` (512).
 - **Original profiling + design (for context):**
 - **Profiling (2026-06, nvars=16, `parallel simd unchecked`, this box)**: the
   Hadamard discharge is **~92% of the whole prove** — `Prove-NoHadamard` ≈ 46
