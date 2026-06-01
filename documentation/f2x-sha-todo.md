@@ -1401,6 +1401,48 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 - **Optional (only if revived)**: generalise `num_skip` past 2 (`v`-dim grid +
   multidim bind/sum) — moot unless the bit-packed prefix above lands first.
 
+### ⭐ Univariate skip / small-characteristic packed sumcheck — the Binius scaling lever we're MISSING (IDENTIFIED; big, verifier-visible protocol change)
+- **Why this matters**: the whole discharge runs the sumcheck in **GF(2¹²⁸)**,
+  but its bit-slices `U_b,V_b,W_b` are **GF(2)-valued** on the hypercube — i.e.
+  base-field witness, extension-field sumcheck. That's precisely the regime the
+  **univariate skip** (Gruen; used by Binius64) exploits: "fuse several Boolean
+  variables into a single higher-degree variable… when `F` is a degree-`2k`
+  extension of `B`, extension-field multiplications drop from ~`n` to ~`n/2k`,
+  **practical savings up to 128× for GF(2)→GF(2¹²⁸)**." Binius64 has "an
+  advanced univariate skip variant… for proving **bitwise-AND constraints**" —
+  exactly our Hadamard. Binius also does per-round arithmetic in the 8-bit
+  **Rijndael field** "where possible", not GF(2¹²⁸). **We do neither.** Our
+  scaling is `O(2ⁿ·K·D)` *GF(2¹²⁸)* muls; Binius keeps the dominant rounds in
+  GF(2)/GF(2⁸).
+- **Correction to the "small-value / multi-round-skip" entry above**: that entry
+  concluded skip was "compute-neutral / large-nvars-only / shelved". That verdict
+  applies to the **verifier-preserving Dao prefix** (byte-identical, and for
+  `d=3` most of the `4^v` grid is off-hypercube ⇒ still big-field ⇒ limited).
+  It does **NOT** apply to the **univariate skip**, which is a *different,
+  verifier-visible* protocol (the fused variable has degree ~`d·2^k`; the
+  verifier does one univariate check) and is the one that gets the tower-depth
+  reduction. We never attempted the univariate skip. Do not let the shelved
+  byte-identical prefix imply the univariate skip is also a dead end — it's the
+  opposite.
+- **What it would take (why it's big, not a drop-in)**: unlike the fused
+  evaluator (byte-identical, opt-in `RoundPolyEvaluator`), this **changes the
+  proof and the verifier** — a new sumcheck sub-protocol (prover does a
+  small-field univariate evaluation / FFT over the fused rounds; verifier checks
+  a high-degree univariate; fresh soundness argument). It also wants the
+  discharge arithmetic in a small tower subfield (GF(2)/GF(2⁸)), which touches
+  the field plumbing. Realistic gain: **multi-× to ~order-of-magnitude on the
+  discharge** (vs the 24.5% the byte-identical fused prover got), since the
+  discharge is ~92% of the nvars=16 prove and is GF(2¹²⁸)-mul-bound.
+- **Next step**: a focused **design pass** before any code — read Binius's AND
+  univariate-skip variant + the small-characteristic sumcheck cost model, map it
+  onto our degree-3 `eq·Σγ^k σ^b(U_bV_b−W_b)` comb (how many vars to fuse, the
+  degree blowup, the verifier check, soundness), and estimate the concrete win +
+  effort. Sources: Dao et al. eprint 2026/587 (also `cs.nyu.edu/~zd2131`);
+  Bagad et al. "Sum-Check over Fields of Small Characteristic" eprint 2024/1046;
+  "Packed Sumcheck over Fields of Small Characteristic" eprint 2025/719;
+  binius.xyz blueprint (Univariate Skip / Rijndael Zerocheck / ANDs);
+  irreducible.com "Slicing Up Binary Towers"; LambdaClass "Binius Part 2".
+
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
   the group via `MultiDegreeSumcheckGroup::new(3, …)` — no fast path) and
