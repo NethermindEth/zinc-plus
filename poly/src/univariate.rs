@@ -9,10 +9,12 @@ pub mod binary_gf128;
 )]
 pub mod binary_gf192;
 pub mod binary_ref;
+pub mod binary_subspace;
 pub mod binary_u64;
 pub mod dense;
 pub mod dynamic;
 pub mod nat_evaluation;
+pub mod oblong_and;
 
 /// In-place `F_2` addition for `F_2[X]`-typed values. Unlike `AddAssign`
 /// on the binary-poly types — which models the coefficients as the

@@ -7,6 +7,50 @@ instead of 1536 slices and the bit dimension is handled by a univariate-skip
 round. Reference implementation: the local repo `~/binius64`,
 `crates/prover/src/and_reduction/` + `crates/verifier/src/protocols/bitand.rs`.*
 
+## Progress (2026-06-01) — Phases A + B DONE: standalone oblong AND zerocheck works end-to-end (naive GF128)
+
+**Landed** (working tree, `poly` crate, 14 tests green, full lib suite 135 passed,
+clippy-clean, no prover path touched):
+- `poly/src/univariate/binary_subspace.rs` — P2 (`BinarySubspace`) + P3
+  (`lagrange_evals`, `extrapolate_over_subspace`, `evaluate_univariate`). Ports of
+  binius64 `math/src/{binary_subspace,univariate}.rs` over `BinaryFieldGF128`.
+- `poly/src/univariate/oblong_and.rs` — the additive-NTT word extension
+  (`AdditiveNtt::{new,extend_word,fold_word_at}`, `base_lagrange_at`), the Phase-1
+  `univariate_round_message`, **and the full standalone protocol**
+  `prove_oblong_and` / `verify_oblong_and` (round message → fold at `z` → Phase-2
+  eq-weighted degree-≤3 sumcheck → closing `a·b−c==eval`), `eq_indicator`,
+  `AndCheckOutput`, `OblongError`. **Naive GF(2¹²⁸)**, no GF(2⁸) lookup yet.
+  `SKIPPED_VARS=5`, `WORD_BITS=32`.
+
+**De-risked**:
+- The **field is directly compatible** (§0 empirically confirmed; Open-Q #1
+  resolved for the GF(2¹²⁸) path — our monomial/LSB-first basis with the standard
+  `{X⁰…X⁵}` subspace is self-consistent; binius byte-matching only matters for the
+  GF(2⁸) embedding + cross-checking binius vectors).
+- The **whole protocol is correct over our GHASH field**: the Phase-1 cross-check
+  (`round_message_matches_folded_sum_claim`) AND the full prove→verify round-trip
+  (`full_round_trip_accepts_honest`, n=4/6/8) pass; corrupting a C bit is rejected
+  at round 0; a tampered closing eval fails the final check. (Found+fixed one bug:
+  `eq_indicator` was big-endian vs `fold_low`'s low-bit-first binding.)
+- The **memory win is structural/real already**: 48 packed word-columns (post-fold
+  48 GF128 MLEs) vs 1536 GF128 bit-slices = the ×D=32 data-volume cut.
+
+**Remaining (next sessions), in order:**
+1. **GF(2⁸) speed (P1 + P4)**: a `GF(2⁸)` (AES) subfield + `F₂`-embedding into our
+   GHASH `GF(2¹²⁸)`, and the `8×256×(WORD_BITS/16)` **byte-lookup NTT** so the NTT
+   + per-point products run in the 8-bit field (the naive path does them in
+   GF(2¹²⁸)). This is what makes the prover *fast*; needed for the Phase-D A/B.
+   Pick our own deterministic skip challenges (binius's `[0x2,0x4,0x10]` are
+   AES-basis). The standalone `verify_oblong_and` already accepts evals computed by
+   a faster NTT (same values), so this is a drop-in prover-side swap.
+2. **Fiat-Shamir**: replace the explicit `z`/`gammas` args with a `Blake3Transcript`
+   (prover absorbs the round message, samples `z`; absorbs each round poly, samples
+   `γ`). Mechanical; the math is settled.
+3. **Phase C** integration seam (§4, route B): tie the `a/b/c_eval` at `(z, γ)` to
+   the committed columns via the ψ_α recombination over the oblong point. The
+   architectural risk lives here.
+4. **Phase D**: all 16 relations (3 ANDs + 13 adders) + A/B at nvars=16/20.
+
 ## 0. The big de-risking facts (why this is a port, not a research project)
 
 - **Same field.** Binius64 `B128 = BinaryField128bGhash` has modulus

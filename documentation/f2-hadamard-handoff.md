@@ -4,6 +4,17 @@
 then go to the canonical ledger `documentation/f2x-sha-todo.md` and the design
 doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 
+> **▶ ACTIVE PLAN (2026-06-01): the "next lever" below is now being built as a
+> direct port of Binius64's oblong univariate zerocheck — see
+> `documentation/f2-hadamard-oblong-port-plan.md` (reference repo `~/binius64`).
+> Phases A+B are DONE: a **standalone oblong AND zerocheck works end-to-end over
+> our `GF(2¹²⁸)`** (`poly/src/univariate/{binary_subspace,oblong_and}.rs`,
+> 14 tests) — Phase-1 univariate-skip round message + Phase-2 eq-weighted
+> sumcheck + closing check; accepts honest, rejects corrupted; field confirmed
+> directly compatible. Naive GF(2¹²⁸) NTT (correctness, not speed yet).
+> Continue from the port plan's "Progress" + §5 (next: GF(2⁸) byte-lookup NTT
+> for prover speed, then Fiat-Shamir wiring, then the ψ_α integration seam).**
+
 ## TL;DR (the one thing to know)
 
 The Hadamard discharge is **~92% of the nvars=16 prove** and is **memory-

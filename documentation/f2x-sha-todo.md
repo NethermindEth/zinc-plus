@@ -75,6 +75,72 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong univariate AND zerocheck — Phase A primitives + standalone Phase-1+2 prove/verify (working tree)
+- **What**: first landed slice of the Binius64 **oblong univariate zerocheck**
+  port (plan: `documentation/f2-hadamard-oblong-port-plan.md`), the verifier-
+  visible rearchitecture that replaces the memory-bound 1536-GF(2¹²⁸)-bit-slice
+  AND discharge with a **word-packed** check. Two new self-contained modules in
+  the `poly` crate, over our `BinaryFieldGF128` (no new field type yet):
+  - `poly/src/univariate/binary_subspace.rs` (plan P2+P3): `BinarySubspace`
+    (`F_2`-linear subspace by ordered monomial basis, `get(i)=Σ basis[j]·bit(i,j)`),
+    `lagrange_evals` + `extrapolate_over_subspace` (O(n) barycentric over the
+    additive subgroup), `evaluate_univariate`. Direct ports of binius64
+    `crates/math/src/{binary_subspace,univariate}.rs`.
+  - `poly/src/univariate/oblong_and.rs` (plan P4/P5, **naive GF(2¹²⁸) path**):
+    the additive-NTT word extension (`AdditiveNtt::extend_word` — interpolate a
+    word's 32 bits over the 32-point base domain, extrapolate to the 32-point
+    extension domain via precomputed Lagrange rows, select-and-XOR, no muls) and
+    the Phase-1 univariate-skip round message
+    `R₀(Z)=Σ_X (A·B−C)(Z,X)·eq(X;r)`, **and the full standalone protocol** for
+    one AND relation: `prove_oblong_and` / `verify_oblong_and` (round message →
+    fold operands at the univariate challenge `z` → Phase-2 **eq-weighted
+    degree-≤3 sumcheck** over the row vars → closing `a·b−c==eval` check),
+    plus `eq_indicator` / `AndCheckOutput` / `OblongError`. `SKIPPED_VARS=5`,
+    `WORD_BITS=32` (vs binius's 6/64 for 64-bit words). Challenges (`z`, the
+    per-round `γ`) are passed explicitly — Fiat-Shamir wiring is deferred to the
+    integration step.
+- **Why**: the discharge is memory-bandwidth-bound — it streams **1536 GF(2¹²⁸)
+  slices** (`16 relations × 3 operands × D=32`) per sumcheck round (≈1.5 GB at
+  nvars=16, 2.34× scaling — see `f2-hadamard-handoff.md`). The oblong protocol
+  keeps each operand as **one packed word-column** and handles the 32-bit
+  dimension with a single univariate-skip round, so the post-fold Phase-2 rounds
+  stream **48 GF(2¹²⁸) MLEs** instead of 1536 — exactly the **×D=32 data-volume
+  reduction** (the input is 128× smaller: u32 words vs GF(2¹²⁸) slices). This is
+  the only Binius-scale lever left after the byte-identical paths were closed
+  (`f2-hadamard-univariate-skip-design.md` §11).
+- **Result**: 14 new tests green (7 subspace + 7 oblong), full `zinc-poly` lib
+  suite 135 passed, new files clippy-clean. Gates met:
+  - **Phase-1 cross-check** (binius64's own `round_message_matches_folded_sum_claim`,
+    n=4/6/8): `R₀(z)` recovered from the round message (32 base zeros ++ 32
+    extension evals, extrapolated at random `z`) **equals** the brute-force folded
+    sum claim `Σ_X (A(z,X)B(z,X)−C(z,X))eq[X]`. `R₀` provably vanishes on the base
+    domain when `c=a&b`; `extend_word` matches per-point extrapolation.
+  - **Full standalone round-trip** (`full_round_trip_accepts_honest`, n=4/6/8):
+    Phase-1+2 prove→verify accepts honest ANDs, and the closing `a/b/c_eval`
+    match an independent MLE evaluation.
+  - **Soundness**: corrupting one C bit is rejected at **round 0** (base-domain
+    vanishing breaks ⇒ reconstructed `R₀(z)` ≠ true sum); a tampered closing eval
+    fails the final `(a·b−c)·eq` check.
+  - **One real bug found+fixed in-session**: the `eq_indicator` doubling was
+    big-endian (last `r` → bit 0) while `fold_low` binds bit 0 first; Phase-1's
+    internally-consistent cross-check masked it, the full round-trip's final
+    check caught it. Fixed to little-endian (bit `i` ↔ `r[i]`).
+  - **De-risks the core math + the field**: the oblong AND check is correct over
+    our GHASH field, confirming plan §0 (our `BinaryFieldGF128`, reduction `0x87`,
+    monomial LSB-first, is directly usable — no field-isomorphism rewrite; plan
+    Open-Q #1 resolved for the GF(2¹²⁸) path).
+- **NOT a perf change yet** — correctness-first infrastructure, no prover path
+  touched, and the **naive GF(2¹²⁸) NTT** (no byte-lookup). The *memory* win is
+  structural and already real: the oblong representation is **48 packed
+  word-columns** (post-fold: 48 GF(2¹²⁸) MLEs) vs **1536 GF(2¹²⁸) bit-slices** =
+  exactly the **×D=32** data-volume cut (input 128× smaller, u32 vs GF128). The
+  *wall-clock* win needs the remaining work, in order: (a) **GF(2⁸) byte-lookup
+  NTT** (binius `ntt_lookup.rs`) — the prover speed lever (runs NTT + products in
+  the 8-bit AES field; the naive path does them in GF(2¹²⁸)); (b) **Fiat-Shamir**
+  transcript wiring (challenges are explicit args today); (c) the **ψ_α
+  integration seam** (plan §4, the architectural risk). Then Phase-D A/B. Tasks
+  tracked in the port plan "Progress" + §5.
+
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1; working tree)
 - **What**: `HadamardRound1FastPath` (`piop/src/lookup/hadamard.rs`) + a
   `prepare_hadamard_group_with_fast` that takes **packed operand columns**
