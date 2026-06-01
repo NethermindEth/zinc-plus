@@ -176,7 +176,7 @@ where
     F::Inner: Send + Sync + Zero + Default + Clone,
 {
     #[allow(clippy::arithmetic_side_effects)]
-    fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
+    fn round_message(&self, _round: usize, _prior: &[F], config: &F::Config) -> Round1Output<F> {
         let zero = F::zero_with_cfg(config);
         let one = F::one_with_cfg(config);
         let half = 1usize << (self.num_vars - 1);
@@ -260,11 +260,12 @@ where
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn fold_with_r1(
+    fn fold(
         self: Box<Self>,
-        r_1: &F,
+        challenges: &[F],
         config: &F::Config,
     ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        let r_1 = &challenges[0];
         let one = F::one_with_cfg(config);
         let one_minus_r1 = one.clone() - r_1.clone();
         let half = 1usize << (self.num_vars - 1);

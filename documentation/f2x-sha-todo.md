@@ -1272,21 +1272,27 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   memory benefit dominates). The efficient multiproduct (Dao Procedure 1,
   `O(d log d)` vs `O(d²)` bb) is what keeps `v>1` from regressing; needed
   for a real win.
-- **Why it's a real build, not an increment**: the multi-degree sumcheck's
-  `Round1FastPath` hook (`piop/src/sumcheck/multi_degree.rs`) skips **one**
-  round only (`round_1_message` + `fold_with_r1`). Multi-round skip needs a
-  framework change (loop the fast path for `v` rounds, or a "prove from
-  round v+1" entry) **plus** the prefix-polynomial machinery (Procedures
-  1+2) **plus** the eq-opt — a multi-component effort touching shared piop
-  code. Verifier/proof are **unchanged** (same protocol), so the existing
-  `fast_path_matches_generic` byte-identity test extends to gate it — the
-  one big de-risk. (NB this is the verifier-preserving small-value variant,
-  NOT Binius64's univariate skip, which changes the proof/degree.)
-- **Recommended first increment**: a unit test that computes the `v=2`
-  prefix `q` and asserts its derived round-1+round-2 messages equal a
-  generic 2-round run's `group_messages` (validates the math before any
-  framework surgery), then the framework `v`-round-skip hook, then size-gate
-  + A/B at nvars=16/20.
+- **Framework groundwork — ✅ SHIPPED**: the `Round1FastPath` hook
+  (`piop/src/sumcheck/multi_degree.rs`) is generalised from one round to
+  **`num_skip()` rounds**: `round_message(round, prior)` for rounds
+  `1..=num_skip`, then a single `fold(challenges)`; the prover loop drives
+  the leading rounds then resumes the standard path at `num_skip+1`. It is
+  **byte-identical for `num_skip ∈ {0,1}`** (all existing fast paths +
+  generic groups), gated by the full piop+protocol suites (59+50 green). A
+  `MultiDegreeSumcheckProof::round_tails(group)` accessor was added so a
+  multi-round fast path can be validated round-by-round. Verifier/proof are
+  **unchanged** (same protocol) so `fast_path_matches_generic` extends to
+  gate the optimised version. (NB this is the verifier-preserving
+  small-value variant, NOT Binius64's univariate skip, which changes the
+  proof/degree.)
+- **Remaining (the actual optimisation)**: a `num_skip=v`
+  `HadamardRound1FastPath` that computes the `v`-variate prefix polynomial
+  `q` over the `{0,1,X,X+1}^v` grid (Dao Procedures 1+2 for the efficient
+  multiproduct, + the §6 eq-opt) and answers `round_message`/`fold` from it.
+  First increment: a unit test computing the `v=2` prefix and asserting its
+  round-1+round-2 messages equal a generic 2-round run's `round_tails`
+  (validates the math), then wire `num_skip=2`, then **size-gate** (`v=1`
+  for production nvars=9) + A/B at nvars=16/20.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds

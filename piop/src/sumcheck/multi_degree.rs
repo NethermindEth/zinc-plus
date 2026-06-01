@@ -51,25 +51,36 @@ pub struct Round1Output<F> {
 }
 
 /// Optional per-group hook that lets a degree group bypass the standard
-/// round-1 sumcheck loop. Used when the round-1 polynomial has a closed
-/// form (e.g. booleanity zerocheck on bit-slice MLEs that are 0/1
-/// pre-fold).
+/// sumcheck loop for its first `num_skip()` rounds. Used when those
+/// rounds' polynomials have a closed form (e.g. booleanity / Hadamard
+/// zerochecks on bit-slice MLEs that are 0/1 pre-fold). `num_skip() == 1`
+/// is the single-round case (the original "round-1 fast path").
 ///
 /// Contract:
-/// - `round_1_message` is invoked *before* the verifier samples `r_1`.
-///   It must produce the same message a faithful run of standard
+/// - `num_skip()` is the number of leading rounds the fast path handles
+///   (`>= 1`). The standard `prove_round` loop resumes at round
+///   `num_skip() + 1`.
+/// - `round_message(round, prior)` is invoked for `round = 1..=num_skip()`,
+///   *before* the verifier samples that round's challenge, with `prior` =
+///   the challenges `[r_1, .., r_{round-1}]` already sampled (empty for
+///   `round == 1`). It must produce the same message a faithful
 ///   `prove_round` would have emitted from the group's `poly`.
-/// - `fold_with_r1` is invoked *after* `r_1` is sampled. It consumes
-///   the fast-path data and returns the post-round-1 MLEs (size
-///   `2^(num_vars - 1)`), in the same order/shape the group's
-///   `comb_fn` expects. The framework places these into the prover
-///   state and sets `skip_next_fold = true` so the standard path does
-///   not double-fold them in round 2.
+/// - `fold(challenges)` is invoked *after* all `num_skip()` challenges are
+///   sampled, with `challenges = [r_1, .., r_{num_skip()}]`. It returns the
+///   post-skip MLEs (size `2^(num_vars - num_skip())`), in the order/shape
+///   the group's `comb_fn` expects. The framework places these into the
+///   prover state (`round = num_skip()`, `randomness = [r_1..r_{num_skip-1}]`)
+///   and sets `skip_next_fold = true` so the standard path does not
+///   double-fold them in the next round.
 pub trait Round1FastPath<F: PrimeField>: Send + Sync {
-    fn round_1_message(&self, config: &F::Config) -> Round1Output<F>;
-    fn fold_with_r1(
+    /// Number of leading rounds this fast path produces. Default 1.
+    fn num_skip(&self) -> usize {
+        1
+    }
+    fn round_message(&self, round: usize, prior: &[F], config: &F::Config) -> Round1Output<F>;
+    fn fold(
         self: Box<Self>,
-        r_1: &F,
+        challenges: &[F],
         config: &F::Config,
     ) -> Vec<DenseMultilinearExtension<F::Inner>>;
 }
@@ -97,9 +108,9 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
         }
     }
 
-    /// Construct a group whose round-1 message is produced by a custom
-    /// [`Round1FastPath`]. `poly` may be empty here — the fast path
-    /// supplies the post-round-1 MLEs via `fold_with_r1`.
+    /// Construct a group whose first `num_skip()` rounds are produced by a
+    /// custom [`Round1FastPath`]. `poly` may be empty here — the fast path
+    /// supplies the post-skip MLEs via `fold`.
     pub fn with_round_1_fast(
         degree: usize,
         poly: Vec<DenseMultilinearExtension<F::Inner>>,
@@ -134,6 +145,17 @@ impl<F> MultiDegreeSumcheckProof<F> {
     /// sums before running the sumcheck.
     pub fn claimed_sums(&self) -> &[F] {
         &self.claimed_sums
+    }
+
+    /// Per-round prover-message tails for group `g`: entry `i` is round
+    /// `i+1`'s `[s(1), s(2), .., s(degree)]`. Exposed so a fast path can be
+    /// validated round-by-round against a faithful `prove_round` run (the
+    /// `Round1FastPath`/multi-round-skip contract).
+    pub fn round_tails(&self, group: usize) -> Vec<&[F]> {
+        self.group_messages[group]
+            .iter()
+            .map(|m| m.0.tail_evaluations.as_slice())
+            .collect()
     }
 }
 
@@ -351,68 +373,97 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             fast_paths.push(group.round_1_fast);
         }
 
-        // ---- Round 1 ---------------------------------------------------
-        let mut round_1_msgs: Vec<SumcheckProverMsg<F>> = Vec::with_capacity(num_groups);
-        for ((state, comb_fn), fp_slot) in prover_states
-            .iter_mut()
-            .zip(comb_fns.iter())
-            .zip(fast_paths.iter())
-        {
-            let msg = if let Some(fp) = fp_slot {
-                let out = fp.round_1_message(config);
-                debug_assert_eq!(
-                    out.tail_evaluations.len(),
-                    state.max_degree,
-                    "fast-path round-1 tail must have length equal to group's degree"
-                );
-                state.asserted_sum = Some(out.asserted_sum);
-                state.round = 1;
-                SumcheckProverMsg(NatEvaluatedPolyWithoutConstant::new(out.tail_evaluations))
-            } else {
-                state.prove_round(&None, comb_fn, config)
-            };
-            round_1_msgs.push(msg);
-        }
-        for msg in &round_1_msgs {
-            transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
-        }
-        for (j, msg) in round_1_msgs.into_iter().enumerate() {
-            group_messages[j].push(msg);
-        }
-        let r_1: F = transcript.get_field_challenge(config);
-        transcript.absorb_random_field(&r_1, &mut buf);
-        let mut verifier_msg = Some(r_1.clone());
+        // Per-group leading-round skip count (0 = no fast path → fully
+        // standard). `max_skip` is how many leading rounds the mixed
+        // fast/standard loop below drives — `>= 1` (round 1 always runs
+        // there), capped at `num_vars`. `num_skip ∈ {0,1}` reproduces the
+        // original round-1-only behaviour exactly.
+        let num_skip: Vec<usize> = fast_paths
+            .iter()
+            .map(|fp| fp.as_ref().map_or(0, |f| f.num_skip()))
+            .collect();
+        let max_skip = num_skip.iter().copied().max().unwrap_or(0).clamp(1, num_vars);
 
-        // For fast-path groups, materialize the round-1-folded MLEs and
-        // mark the next standard fold to be skipped.
-        for (state, fp_slot) in prover_states.iter_mut().zip(fast_paths.iter_mut()) {
-            if let Some(fp) = fp_slot.take() {
-                let folded = fp.fold_with_r1(&r_1, config);
-                state.mles = folded;
-                state.skip_next_fold = true;
+        let mut challenges: Vec<F> = Vec::with_capacity(num_vars);
+        let mut verifier_msg: Option<F> = None;
+
+        // ---- Leading rounds 1..=max_skip ------------------------------
+        // A group with a fast path of skip `v` emits rounds `1..=v` via
+        // `round_message` (no per-round fold), then folds once via `fold`
+        // after its `v`-th challenge; the standard path resumes at round
+        // `v + 1`. Groups without a fast path run the standard `prove_round`
+        // each round here too (sequential over groups, but each round is
+        // internally parallel over the hypercube).
+        for round in 1..=max_skip {
+            let mut round_msgs: Vec<SumcheckProverMsg<F>> = Vec::with_capacity(num_groups);
+            for g in 0..num_groups {
+                let is_fast = num_skip[g] >= round && fast_paths[g].is_some();
+                let msg = if is_fast {
+                    let out = fast_paths[g]
+                        .as_ref()
+                        .expect("fast path present")
+                        .round_message(round, &challenges, config);
+                    debug_assert_eq!(
+                        out.tail_evaluations.len(),
+                        prover_states[g].max_degree,
+                        "fast-path round tail must have length equal to group's degree"
+                    );
+                    if round == 1 {
+                        prover_states[g].asserted_sum = Some(out.asserted_sum);
+                    }
+                    SumcheckProverMsg(NatEvaluatedPolyWithoutConstant::new(out.tail_evaluations))
+                } else {
+                    prover_states[g].prove_round(&verifier_msg, &comb_fns[g], config)
+                };
+                round_msgs.push(msg);
+            }
+
+            for msg in &round_msgs {
+                transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
+            }
+            for (j, msg) in round_msgs.into_iter().enumerate() {
+                group_messages[j].push(msg);
+            }
+
+            let r: F = transcript.get_field_challenge(config);
+            transcript.absorb_random_field(&r, &mut buf);
+            challenges.push(r.clone());
+            verifier_msg = Some(r);
+
+            // Fold any fast-path group whose skip count ends this round:
+            // leaves it at `round = num_skip`, `randomness = [r_1..r_{v-1}]`,
+            // `skip_next_fold = true` so the next `prove_round` resumes cleanly.
+            for g in 0..num_groups {
+                if num_skip[g] == round {
+                    if let Some(fp) = fast_paths[g].take() {
+                        let folded = fp.fold(&challenges, config);
+                        let state = &mut prover_states[g];
+                        state.mles = folded;
+                        state.round = round;
+                        state.randomness = challenges[..round.saturating_sub(1)].to_vec();
+                        state.skip_next_fold = true;
+                    }
+                }
             }
         }
 
-        // ---- Rounds 2..num_vars ---------------------------------------
-        for _ in 1..num_vars {
+        // ---- Rounds max_skip+1..num_vars (all standard) ---------------
+        for _ in max_skip..num_vars {
             // Parallel: each group computes its round polynomial independently
             let round_msgs: Vec<SumcheckProverMsg<F>> = cfg_iter_mut!(prover_states)
                 .zip(cfg_iter!(comb_fns))
                 .map(|(state, comb_fn)| state.prove_round(&verifier_msg, comb_fn, config))
                 .collect();
 
-            // Sequential: absorb in deterministic order, sample one shared challenge
             for msg in &round_msgs {
                 transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
             }
-
             for (j, msg) in round_msgs.into_iter().enumerate() {
                 group_messages[j].push(msg);
             }
 
             let next_verifier_msg = transcript.get_field_challenge(config);
             transcript.absorb_random_field(&next_verifier_msg, &mut buf);
-
             verifier_msg = Some(next_verifier_msg);
         }
 
