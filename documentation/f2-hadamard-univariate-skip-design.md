@@ -152,3 +152,105 @@ it is a foundational, verifier-visible, multi-week build (no prerequisite
 machinery exists), so the disciplined next step is the Phase-0 additive-NTT
 prototype to convert "up to 128×, realistically 4–16×" into a measured number
 before committing.
+
+## 8. RESOLUTION (got the Dao paper via `pdftotext`) — the technique is BYTE-IDENTICAL, and we built it in the WRONG FIELD
+
+The §1–7 framing above over-indexed on Binius's *verifier-visible* univariate
+skip. The Dao et al. paper (eprint 2026/587, extracted) shows the relevant
+technique is its **byte-identical cousin, the small-value sum-check prover**, and
+gives the exact cost:
+
+- **Speedup `Θ((d²κ)^{1/δ})`, `δ = log₂(d+1)`** (paper §4–5, l.1156). For our
+  **d=3 ⇒ δ=2 ⇒ speedup = 3√κ.**
+- **`κ ≈ N^{log₂3}` for tower fields with Karatsuba** (l.1152), `N` = extension
+  degree of big-field over small-field. So:
+  - small = GF(2): `N=128 ⇒ κ≈2180 ⇒ ~140×`, optimal skip `v*=log₄(9κ)≈7`;
+  - small = GF(2⁸): `N=16 ⇒ κ≈81 ⇒ ~27×`, `v*≈5`.
+- The off-hypercube extrapolation is **`Θ(d²)` `sb` (small×big) muls** (l.744),
+  *not* bb — this is the sign error in my §8-draft model: the witness stays
+  small, so a bit×GF(2¹²⁸) "mul" is a **select/conditional-XOR**, ~free, not a
+  CLMUL. Plus **delayed reduction** in the extension (l.609–620): accumulate
+  unreduced degree-`(2κ−2)` products, reduce once.
+- **It is verifier-preserving** (the paper's whole point vs the univariate skip):
+  the proof/degree are unchanged — so the existing byte-identity gate applies.
+
+**Why our removed skip prover (ce177a3..f615f7f) was 40–74× slower:** we built
+exactly Procedure 1 + the v-variate prefix, but executed **every** operation in
+GF(2¹²⁸). The 3√κ speedup is in **bb-equivalents** — it only appears if the
+early-round `{0,1}^v`-grid arithmetic is done in the **small field** (bit-packed
+GF(2) AND/XOR for ss, select for sb). We did ss in bb ⇒ all of the algorithm's
+*larger* op-count, none of the √κ discount ⇒ slower. Also, Procedure 1's
+*degree* win (Θ(d²)→Θ(d log d)) only helps `d≥4` (l.752); our `d=3` gets ~nothing
+from that sub-part — but the **small-value (ss/sb) win is separate and applies at
+d=3** (the 3√κ above).
+
+**Revised effort — MUCH smaller than §6 said, and byte-identical:**
+- No additive NTT, no GF(2⁸) tower *required* (GF(2) bit-packing suffices for
+  ss; GF(2⁸)/GFNI is an optional further lever), no verifier change, no new
+  soundness argument — the existing `fast_path_skip2_matches_generic`-style
+  byte-identity gate covers it.
+- The algorithm skeleton is recoverable from git (`ce177a3..f615f7f`).
+- The real work: reimplement the prefix's early-round arithmetic in **bit-packed
+  GF(2)** (ss = packed AND/XOR; sb = select into a GF(2¹²⁸) accumulator) with
+  **delayed reduction**, and pick `v` (~5–7). This is the thing the removed
+  version never did.
+
+**Caveats (why measure, not trust the 140×):** the speedup is asymptotic
+bb-equivalent. On aarch64 we have PMULL for GF(2¹²⁸) but **no GFNI/native tower
+mul** (paper l.2498–2505), so realizing cheap ss/sb depends on bit-packing
+quality; the off-hypercube grid is `Θ((d+1)^v)=Θ(d²κ)` cells (space ~20K at
+v=7) and its sb/bb tail is real; raw op-count is large even if bb-equivalent is
+small. Realistic win is "large but < 140×" — exactly what Phase-0 must measure.
+
+## 9. Phase 0 (REVISED) — measure the bit-packed small-value prefix
+
+Drop the additive-NTT/univariate-skip prototype (wrong technique). Instead:
+- **Resurrect** the removed prefix (`git show ce177a3..f615f7f`) as a throwaway,
+  and reimplement *just* its hottest path — the `{0,1}^v`-grid accumulation — in
+  **bit-packed GF(2)** (ss = u64/SIMD AND+XOR; sb into a GF(2¹²⁸) accumulator via
+  select), with delayed reduction, for `v≈5` at nvars=16, one relation.
+- **Measure** it (bb-equivalent *and* wall-clock) vs the `v` standard GF(2¹²⁸)
+  rounds it replaces. This directly tests whether the ss/sb arithmetic is cheap
+  enough on aarch64 to realize a meaningful fraction of 3√κ.
+- **Gate:** proceed to the full byte-identical small-value discharge only if the
+  prefix shows ≥~4× on the skipped rounds. (It's byte-identical, so integration
+  reuses the existing discharge verifier + recombination — far less than the
+  univariate-skip build in §6.)
+
+--- (historical: original §8 blocked-state notes follow) ---
+
+### Original §8 (now superseded by §8 RESOLUTION above)
+
+Attempting to scope the Phase-0 prototype surfaced a **mechanism gap**, not just
+a missing primitive. A first-principles cost reconstruction of the fused round
+for our degree-3, `K·D = 512`-term comb gives the **wrong sign**:
+
+- Fused round (fuse first `k` vars): the `2^k` *subspace* points are cheap (bit
+  products on `{0,1}^k`), but the `(d−1)·2^k` *off-subspace* points still seem to
+  need, per `(x', relation, bit)`, (i) an additive-NTT extrapolation of each
+  slice's degree-`<2^k` univariate `O(d·2^k·log)` and (ii) a GF(2¹²⁸) product —
+  totalling `≈ (d·log + d−1)·2ⁿ·K·D` big-field muls.
+- Standard first-`k` rounds: `≈ Σ_{i=2}^k 2^{n−i}·K·D·6 ≈ 3·2ⁿ·K·D` big-field
+  muls (round 2 dominates).
+- ⇒ my model says the fused round is **~8× WORSE**, contradicting the
+  established "univariate skip ⇒ up to 128× *fewer* extension-field muls."
+
+So I am **missing the real mechanism** — most likely how the off-subspace /
+product work stays small-field. The prime suspect is **packing the base-field
+witness into the tower** (Bagad et al. "Packed Sumcheck", eprint 2025/719; Hu et
+al. AND variant), so a single GF(2¹²⁸) mul does `2k` base-field lanes at once and
+the off-subspace products batch — that is what would flip the sign and yield the
+tower-depth (≤128×) win. I could not confirm this: the authoritative PDFs (Dao
+2026/587, Bagad 2024/1046, Gruen 2024/108, Hu 2025) do **not text-extract** via
+the available web tool (binary streams / HTTP 403), and the HTML blogs don't
+cover the product cost.
+
+**A prototype built from a misunderstood mechanism would give a misleading
+benchmark.** Before any Phase-0 code, resolve the product/packing mechanism —
+options: (a) obtain readable text of Bagad 2024/1046 §(packed) + Hu 2025 / Dao
+2026/587 §5; (b) a domain expert states how the off-subspace product cost is kept
+small-field. **Then** the contained Phase-0 (additive-NTT subspace
+evaluate/interpolate + one fused round, measured vs `k` standard rounds) becomes
+trustworthy. The additive NTT itself is well-defined and correctly implementable
+regardless; benchmarking it standalone gives the primitive's cost floor but NOT
+the end-to-end speedup (which needs the packing mechanism).

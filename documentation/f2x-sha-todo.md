@@ -1433,17 +1433,26 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   the field plumbing. Realistic gain: **multi-× to ~order-of-magnitude on the
   discharge** (vs the 24.5% the byte-identical fused prover got), since the
   discharge is ~92% of the nvars=16 prove and is GF(2¹²⁸)-mul-bound.
-- **Design pass — ✅ DONE: `documentation/f2-hadamard-univariate-skip-design.md`.**
-  Conclusion: direction is right (we're in the wrong arithmetic regime), win
-  ~4–16× on the discharge (ceiling 128×), but it's a **foundational,
-  verifier-visible, multi-week build** — the codebase has **no additive NTT over
-  binary fields, no GF(2⁸) tower subfield, no univariate-skip machinery** (the
-  `pntt/radix8` FFT is prime-field, for IPRS). Recommended gate: a **Phase-0
-  additive-NTT microbenchmark** (compute one fused round of our comb, measure vs
-  `k` standard rounds) to turn "4–16×" into a measured number before committing;
-  proceed only if ≥~4×. NOT byte-identical (needs a new accept/reject +
-  soundness gate, not the existing byte-identity tests). Sources: Dao et al.
-  eprint 2026/587 (also `cs.nyu.edu/~zd2131`);
+- **Design pass — ✅ DONE: `documentation/f2-hadamard-univariate-skip-design.md`
+  (see its §8 RESOLUTION).** Initial draft over-indexed on Binius's
+  verifier-VISIBLE univariate skip; extracting the Dao paper (`pdftotext` on
+  `cs.nyu.edu/~zd2131/papers/26-587.pdf` — eprint is Cloudflare-walled)
+  **corrected it**: the relevant technique is the **byte-identical** small-value
+  sum-check prover. Cost: speedup `Θ((d²κ)^{1/δ})`, `δ=log₂(d+1)`; for our **d=3
+  ⇒ 3√κ**; `κ≈N^{log₂3}` (Karatsuba tower) ⇒ ss=GF(2) `κ≈2180 ⇒ ~140×` (v\*≈7),
+  ss=GF(2⁸) `κ≈81 ⇒ ~27×` (v\*≈5). Off-hypercube extrapolation is `Θ(d²)` **sb**
+  (small×big = select), not bb — that's why the witness staying small is the
+  whole game. **This reframes the removed skip prover (ce177a3..f615f7f):** it
+  was byte-identical and we built Procedure 1 + the prefix correctly, but ran
+  **every op in GF(2¹²⁸)**, so we paid the larger op-count with none of the √κ
+  discount ⇒ 40–74× slower. The fix is doing the `{0,1}^v`-grid arithmetic in
+  **bit-packed GF(2)** (ss=AND/XOR, sb=select) with **delayed reduction** — no
+  additive NTT, no GF(2⁸) tower required, **no verifier change** (existing
+  byte-identity gate applies), skeleton recoverable from git. Revised Phase-0:
+  resurrect the prefix, reimplement its hot `{0,1}^v` accumulation in bit-packed
+  GF(2), measure vs the `v` standard GF(2¹²⁸) rounds (gate ≥~4×). Caveat: aarch64
+  has PMULL but no GFNI/native tower mul, so the real win is "large but < 140×" —
+  Phase-0 measures it. Sources: Dao et al. eprint 2026/587 (also `cs.nyu.edu/~zd2131`);
   Bagad et al. "Sum-Check over Fields of Small Characteristic" eprint 2024/1046;
   "Packed Sumcheck over Fields of Small Characteristic" eprint 2025/719;
   binius.xyz blueprint (Univariate Skip / Rijndael Zerocheck / ANDs);
