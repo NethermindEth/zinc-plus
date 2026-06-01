@@ -100,20 +100,26 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   rejects when the verifier binds to the wrong column, i.e. the tie has real
   soundness teeth, not just a tautological pass. **The architectural risk
   (does `ψ_z` compose with our operand/column structure?) is resolved.**
-- **Remaining for Phase C / D** (explicit challenges + in-memory tie today):
-  (a) **Fiat–Shamir** — sample `z`/`γ` from a `Blake3Transcript` (prover absorbs
-  the round message → `z`, each round poly → `γ`); (b) **fold the tie into the
-  multipoint-eval** — the binding is a **row-space opening at `γ`, not a joint
-  `(z, γ)` open**: `z` is the bit-recombination (it picks the `L_i(z)` weights
-  collapsing the `D` bit-slices, exactly as `α^b` does today), so the opened
-  object is the `ψ_z`-projected column opened at `γ`. The `ψ_z(col↓Δ)(γ)`
-  pair-evals fold into the **main multipoint-eval** (Δ=0 point claim, Δ≠0 shift
-  predicate, single open binds them) — the same "Approach B" the `ψ_α`
-  pair-evals already use in `f2_prove.rs`, with `L_i(z)`/`γ` for `α^b`/`r*`. The
-  §4-(i)/(ii) projection-point choice (z vs α for shared columns) is the cost
-  question. (c) **batch all 16 relations** (3 ANDs + 13 adders) into one oblong
-  zerocheck (Phase D) + the GF(2⁸)/eq-split prover swap, then A/B vs the current
-  fused discharge.
+- **Remaining for Phase C / D**:
+  - **(a) Fiat–Shamir ✅ DONE** (commit `7ed6318`) — `prove/verify_oblong_and_relation`
+    now take `&mut impl Transcript`; a `poly` `OblongChannel` trait (+ a
+    transcript-agnostic core) lets `protocol` supply a `Blake3` adapter, with the
+    explicit-challenge path kept as a `ReplayChannel` wrapper (poly tests
+    unchanged). The 6 Phase-C tests run with real same-seed transcripts.
+  - **(b) fold the tie into the multipoint-eval** — the binding is a **row-space
+    opening at `γ`, not a joint `(z, γ)` open**: `z` is the bit-recombination (it
+    picks the `L_i(z)` weights collapsing the `D` bit-slices, exactly as `α^b`
+    does today), so the opened object is the `ψ_z`-projected column opened at `γ`.
+    The `ψ_z(col↓Δ)(γ)` pair-evals (= `pair_alpha_evals` with `base_lagrange_at(z)`,
+    which the tie *already* computes) fold into the **main multipoint-eval** (Δ=0
+    point claim, Δ≠0 shift predicate, single open binds them) — the same
+    "Approach B" the `ψ_α` pair-evals use in `f2_prove.rs`. **This is the
+    production-integration step** (it edits `f2_prove`'s multipoint-eval assembly),
+    overlapping Phase D; the §4-(i)/(ii) projection-point choice (z vs α for
+    shared columns) is the cost question.
+  - **(c) batch all 16 relations** (3 ANDs + 13 adders) into one oblong zerocheck
+    (Phase D) + the GF(2⁸)/eq-split prover swap, then A/B vs the current fused
+    discharge.
 
 ### Oblong AND zerocheck — GF(2⁸) speed lever: subfield + embedding + byte-lookup NTT (working tree)
 - **What**: the prover-side speed prerequisite (plan P1 + P4) for the oblong AND

@@ -51,17 +51,21 @@ path touched):
   column — real soundness teeth, a drop-in reuse of the `ψ_α` machinery.
 
 **Remaining (next sessions), in order:**
-1. **Phase C finish** — (a) **Fiat-Shamir**: sample `z`/`γ` from a
-   `Blake3Transcript` in `protocol` (drop the explicit args); (b) **fold the tie
-   into the multipoint-eval** — the binding is a **row-space opening at `γ`, not a
-   joint `(z, γ)` open**. `z` is the bit-recombination (it picks the `L_i(z)`
+1. **Phase C finish** — (a) **Fiat-Shamir ✅ DONE** (commit `7ed6318`):
+   `prove/verify_oblong_and_relation` take `&mut impl Transcript`; a poly
+   `OblongChannel` trait + transcript-agnostic core, with `protocol` supplying the
+   `Blake3` adapter and the explicit path kept as a `ReplayChannel`. (b) **fold the
+   tie into the multipoint-eval** — the binding is a **row-space opening at `γ`,
+   not a joint `(z, γ)` open**. `z` is the bit-recombination (it picks the `L_i(z)`
    weights that collapse the `D` bit-slices, exactly as `α^b` does today), so the
    opened object is the `ψ_z`-projected column opened at the row point `γ`. The
-   `ψ_z(col↓Δ)(γ)` pair-evals fold into the **main multipoint-eval** (Δ=0 point
-   claim, Δ≠0 shift predicate, single open binds them) — the same "Approach B" the
-   `ψ_α` pair-evals already use in `f2_prove.rs`, with `L_i(z)`/`γ` for `α^b`/`r*`.
-   §4-(i)/(ii) (z vs α for shared columns) is the projection-point cost choice;
-   start with (i) (`z` only on the discharge columns) + the `↓Δ` shift opening.
+   `ψ_z(col↓Δ)(γ)` pair-evals (= `pair_alpha_evals` with `base_lagrange_at(z)`,
+   which the tie already computes) fold into the **main multipoint-eval** (Δ=0
+   point claim, Δ≠0 shift predicate, single open binds them) — the same "Approach
+   B" the `ψ_α` pair-evals use in `f2_prove.rs`. **This is the production-
+   integration step** (edits `f2_prove`'s multipoint-eval assembly), overlapping
+   Phase D; §4-(i)/(ii) (z vs α for shared columns) is the projection-point cost
+   choice — start with (i) (`z` only on the discharge columns) + the `↓Δ` shift.
 2. **eq-split (more speed)**: split the `n` row-vars into ≤3 **deterministic
    GF(2⁸)** skip challenges `{α,α²,α⁴}` (eq weighted in GF(2⁸), accumulated per
    `2^k`-word chunk) + the big-field remainder (embed + GF(2¹²⁸) eq once per

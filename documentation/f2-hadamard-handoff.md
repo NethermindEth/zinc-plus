@@ -14,10 +14,12 @@ doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 > pairs) makes the round message **2.56× faster** (99.6 vs 255 ns/word, nvars=16);
 > and **Phase C** (`protocol/src/f2_oblong_hadamard.rs`) wires one AND relation
 > into the discharge with the **`ψ_z` recombination tie** (reuses the `ψ_α`
-> machinery; round-trips for plain/shift/complement/Maj, rejects mis-wiring).
-> Continue from the port plan's "Progress" + §5 (next: finish Phase C — Fiat-Shamir
-> + the PCS open at `γ`; then the eq-split for more speed; then Phase D batching
-> + the A/B).**
+> machinery; round-trips for plain/shift/complement/Maj, rejects mis-wiring) and
+> is now **Fiat-Shamir** (real `Blake3` transcripts).
+> Continue from the port plan's "Progress" + §5. **Remaining Phase-C is the
+> production step**: fold the `ψ_z(col↓Δ)(γ)` pair-evals into `f2_prove`'s main
+> multipoint-eval (open at `γ`, Approach B), which overlaps Phase D's
+> multi-relation batching + the GF(2⁸)/eq-split prover swap + the A/B.**
 
 ## TL;DR (the one thing to know)
 
