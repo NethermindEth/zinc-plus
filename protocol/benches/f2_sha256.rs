@@ -2282,7 +2282,19 @@ fn bench_micro_verifier_open(
 /// prover/verifier scale with the hypercube size.
 const NVARS_SWEEP: &[usize] = &[9,14,16,19,20,21,22];
 
+/// `F2_ONLY=<group>` runs only the named criterion group (`e2e`, `steps`,
+/// `micro`, `hadamard`) and early-returns the rest. Criterion executes every
+/// group's body even under a `-- <filter>`, so without this the heavy `e2e`
+/// sweep (up to 2^22 rows) runs its `setup_prover` regardless of the filter —
+/// fatal on a memory-constrained box. Unset ⇒ all groups run as before.
+fn f2_skip_group(name: &str) -> bool {
+    std::env::var("F2_ONLY").is_ok_and(|only| only != name)
+}
+
 fn e2e_benches(c: &mut Criterion) {
+    if f2_skip_group("e2e") {
+        return;
+    }
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256");
     // Large hypercubes (2^21 ≈ 2.1M rows × 41 cols of bit-poly cells +
     // O(num_rows) GF(2^128) eq-table during prove + per-row IC
@@ -2371,6 +2383,9 @@ fn e2e_benches(c: &mut Criterion) {
 }
 
 fn step_benches(c: &mut Criterion) {
+    if f2_skip_group("steps") {
+        return;
+    }
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Steps");
     let fx = setup_prover(9);
     let id = format!("nvars={}", fx.num_vars);
@@ -2380,6 +2395,9 @@ fn step_benches(c: &mut Criterion) {
 }
 
 fn micro_benches(c: &mut Criterion) {
+    if f2_skip_group("micro") {
+        return;
+    }
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Micro");
     let fx = setup_prover(16);
     let id = format!("nvars={}", fx.num_vars);
@@ -2572,12 +2590,27 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
 }
 
 fn hadamard_benches(c: &mut Criterion) {
+    if f2_skip_group("hadamard") {
+        return;
+    }
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Hadamard");
     group.sample_size(10);
     // Small sweep: nvars=9 matches the Steps baseline; 16/20 show how the
     // per-relation zerocheck scales with 2^num_vars. Extend with the e2e
-    // NVARS_SWEEP if you want the full curve (slower).
+    // NVARS_SWEEP if you want the full curve (slower). `HAD_NVARS=16` (comma-
+    // separated) restricts the sweep — each point pays a full `setup_prover`,
+    // and nvars=20 needs ~13 GB (swaps on a 16 GB box), so scope it.
+    let only: Option<Vec<usize>> = std::env::var("HAD_NVARS").ok().map(|s| {
+        s.split(',')
+            .filter_map(|x| x.trim().parse::<usize>().ok())
+            .collect()
+    });
     for &num_vars in &[9usize, 16, 20] {
+        if let Some(only) = &only {
+            if !only.contains(&num_vars) {
+                continue;
+            }
+        }
         let fx = setup_prover(num_vars);
         let id = format!("nvars={num_vars}");
         bench_hadamard_compare(&mut group, &id, &fx);

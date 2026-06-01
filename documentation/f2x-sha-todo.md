@@ -1382,6 +1382,22 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   ≈ 6.4 GB at nvars=20) — so even a perfect rewrite is speculative. Do NOT
   pursue without a cost model showing the bit-packed prefix beats skip=1's
   already-fast-pathed round 1 + one materialised round 2.
+- **Memory measurement (2026-06, dev box) — refines the cost model**: the box
+  is **16 GB RAM with ~4.3 GB swap already in use**. skip=1's post-round-1
+  materialisation is `1536·2^(n-1)·16 B`: ~0.8 GB at nvars=16 (fits), **~12.9
+  GB at nvars=20 (swaps hard on 16 GB)**. So the bit-packed-skip cost model is
+  regime-dependent: **(a) nvars ≤ ~18 (fits RAM)** → skip=2 is compute-neutral
+  → no win, and at production **nvars=9 it's a compute *regression*** (6 MB of
+  slices, the per-prefix overhead dominates — this is why the removed version
+  was 40× slower at nvars=9); **(b) nvars ≥ ~19 (skip=1 swaps)** → halving
+  (skip=2 → 6.4 GB) / quartering (skip=3 → 3.2 GB) the slices can convert a
+  swap-thrashing prove into a RAM-resident one → potentially a **large**
+  wall-clock win (swap death, not arithmetic, is the cost there). **Net: a
+  bit-packed skip is a large-nvars-only (≥19), size-gated lever — worthless or
+  negative for the nvars=9 production default.** Only build it if large-batch
+  (nvars≥19) proving on memory-constrained machines is a real target;
+  otherwise the production-relevant levers are proof size (`LEAF_GROUP_SIZE`)
+  and the nvars=9 compute path.
 - **Optional (only if revived)**: generalise `num_skip` past 2 (`v`-dim grid +
   multidim bind/sum) — moot unless the bit-packed prefix above lands first.
 
@@ -1427,15 +1443,67 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   round-1 boolean-arithmetic win. Does NOT fully kill the nvars≥20 blowup —
   that needs **Phase 2** below.
 
-### Phase 2 — cut the Hadamard slice count via `(col,Δ)` dedup
-- **Where**: same path. The 16 relations' operands reference a small set of
-  underlying columns with overlap (e.g. `W_E` feeds C12/C13/C14; the adder
-  chains reuse `W_W`, `W_T1`, …), but `build_all_operand_slices` materialises
-  slices **per operand occurrence**, not per distinct `(col,Δ)`.
-- **Fix**: restructure the comb to operate on per-`(col,Δ)` slices with the
-  XOR/complement structure encoded in the comb coefficients, so each distinct
-  pair's slices are built once. Reduces memory + compute proportionally to the
-  dedup factor; pairs with Phase 1 to make nvars≥20 viable.
+### Phase 2 — cut the Hadamard slice count via `(col,Δ)` dedup (❌ INVESTIGATED — ~2% ceiling for SHA-256, NOT worth it)
+- **Where**: the post-round-1 `fold_with_r1` (`HadamardRound1FastPath`)
+  materialises one folded F-slice per `(operand_column, bit)` = `48 operands ×
+  32 bits = 1536` slices (the `12.9 GB`-at-nvars=20 cost, after the round-1
+  fast path already halved the pre-fold `24 GB`).
+- **Original plan (now seen to be partly infeasible)**: operate on
+  per-`(col,Δ)` slices with the XOR/complement structure encoded in the comb
+  *coefficients*, so shared pairs materialise once. **This only works for a
+  LINEAR comb.** The Hadamard comb is `U·V − W` — **quadratic** in the
+  operands; `U·V` cannot be factored into per-`(col,Δ)` slices because bit-level
+  XOR is nonlinear over `F` (`a⊕b = a+b−2ab`), so an operand bit-slice is a
+  genuinely new `{0,1}` column, not an `F`-combination of its terms' slices.
+  Only the linear `−W` term could share slices.
+- **Dedup ceiling measured against the real 16-relation layout**: the only
+  structurally-identical operands are **C12.V ≡ C13.V** (both `col(W_E)`) → 47
+  of 48 distinct. The 13 adders contribute 39 operands, each a *carry-computed*
+  column (`build_adder_operand_columns`) with a distinct `(t,x,y)` triple, so
+  no structural sharing. The underlying *committed* columns overlap heavily
+  (`W_E`, `W_W`, `W_T1`, …) but the materialised slices are XOR/carry compounds
+  of them, which don't. **Net: ~2% slice reduction (12.9 → 12.6 GB at
+  nvars=20) — not worth the comb-restructure + byte-identity re-gate.**
+- **Verdict**: shelved. The memory lever with real headroom is reducing slice
+  *size* (skip more rounds — but bit-packed, see the small-value entry's "If
+  ever revived" note) or slice *width* (tower-subfield representation), not
+  slice *count*.
+
+### Specialised fused Hadamard sumcheck prover for rounds 2..n (the real nvars=16 lever — IDENTIFIED, building)
+- **Profiling (2026-06, nvars=16, `parallel simd unchecked`, this box)**: the
+  Hadamard discharge is **~92% of the whole prove** — `Prove-NoHadamard` ≈ 46
+  ms vs `Prove-Hadamard` ≈ 600 ms (so the discharge alone is ~554 ms). The
+  base prove (Commit ~24 ms / UAIR-FULL ~13 ms / Open-FULL ~2.6 ms, from the
+  `micro` group) is a rounding error beside it. nvars=16 fits RAM (slices are
+  ~0.8 GB), so this is **not** the swap regime — it's the discharge's
+  rounds 2..n compute/access pattern.
+- **Confirmed bottleneck** (consistent with the rejected weight-precompute
+  entry, which was *also* measured at nvars=16): the generic
+  `ProverState::prove_round` rebuilds a **1537-element value array per
+  hypercube point** — `vals0[j]=poly[j][index]`, `vals1[j]=poly[j][index+1]`
+  over all `1 + 1536` MLEs — then calls the `comb_fn` 4× (degree-3 boundary
+  pts). That per-point **scattered gather across 1536 separate slice `Vec`s**
+  (latency-bound: 1536 live streams thrash cache + TLB) dominates; the CLMUL
+  arithmetic is cheap. Memory *streaming* alone would be ~50–100 ms; the 554 ms
+  is the scattered-gather + per-point framework overhead (scratch, dyn comb_fn).
+- **The fix — a standalone fused prover** (the discharge already runs as its
+  own single-group `prove_as_subprotocol(vec![group])`, so no batching to
+  preserve): swap the loop nest to **outer `(relation k, bit b)`, inner
+  hypercube point**. For each of the 512 `(k,b)` triples, stream its 3 slices
+  `U_{k,b}, V_{k,b}, W_{k,b}` (sequential, cache-friendly) and accumulate their
+  degree-3 contribution `w_{kb}·(U_b(X)V_b(X)−W_b(X))` into the 4 round-eval
+  accumulators; fold `eq_r(X)` in once at the end (it factors out of the `(k,b)`
+  sum). Each slice is still read once per round, but **sequentially per-slice**
+  instead of in a 1536-wide scatter — which is exactly the access pattern the
+  ledger says is needed. Precompute `w_{kb}=γ'^k·σ^b` (free here — no longer a
+  micro-opt on top of the bad gather). Fold slices in place per round.
+- **Correctness**: gate byte-identical against the generic path (extend the
+  existing `fast_path_matches_generic` style to all rounds). Verifier/proof
+  unchanged. **Expected**: removes the per-point 1537-gather → should cut a
+  large fraction of the 554 ms; measure via the `F2_ONLY=hadamard HAD_NVARS=16`
+  Prove-NoHadamard-vs-Hadamard split. Risk: if some residual is genuine
+  arithmetic, the win is smaller than hoped — but the access-pattern change is
+  the one thing the prior (rejected) micro-opt did NOT address.
 
 ### Fast u64 scatter in `scatter_matrix_into_gpu_slab` (rejected on second-pass measurement)
 - **Status**: implemented in a temporary branch state via a new
