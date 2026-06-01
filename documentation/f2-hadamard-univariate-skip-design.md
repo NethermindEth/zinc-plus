@@ -246,11 +246,53 @@ standard, but it's `2^v`-cheaper). So the **net** discharge speedup will be
 prove win), byte-identical. Phase 1 must measure the *full* prefix (grid
 included) to confirm the net.
 
-**Recommendation: GO.** The gate cleared decisively and the technique is
-byte-identical with the skeleton in git. Phase 1: resurrect + bit-pack the full
-v-variate prefix (grid + delayed reduction), gate it `fast_path_skip2_matches_
-generic`-style, A/B the net discharge speedup, then wire size-gated like the
-fused evaluator.
+**Recommendation (Phase 0): cleared the *ceiling* gate — but see §11, which
+walks it back after modelling the off-hypercube grid.**
+
+## 11. NET analysis (Phase-1 entry) — the ceiling is misleading for d=3; the byte-identical path is ~neutral
+
+Starting Phase 1, the first task is the *full* v-variate prefix, and modelling
+its dominant cost — the **off-hypercube grid** — reverses the Phase-0 optimism:
+
+- The v=2 prefix is a grid of `(d+1)² = 16` cells; only `2² = 4` are boolean.
+  The other **12 are off-hypercube**, where the operands are the *extrapolated*
+  multilinear values (not bits), so `U_b·V_b` there is a genuine field product,
+  not a free AND. Phase-0's 19× applies only to the 4 boolean cells.
+- Procedure 1's cost is `O(d^v)` **bb** per multiproduct (paper l.804). For our
+  comb that's per `(relation,bit)`: ~`3²=9` bb for `eq·U·V` + ~`2²=4` bb for
+  `eq·W` ≈ **13 bb/term**, vs the standard round's **~6 bb/term** (coeff-form).
+  Only the boolean base is `ss`. So at **d=3 the off-hypercube `bb` work
+  dominates** and the `ss` saving is a minority ⇒ net **~neutral-to-worse**, not
+  19×. The `3√κ` asymptotic needs the boolean cells to be a *majority* of the
+  Procedure-1 work, which happens at **higher d**, not d=3.
+- This reconciles everything: (a) the removed GF(2¹²⁸) prefix measured
+  "~neutral"; (b) the Dao headline wins (10.9×) are **high-degree** Spartan; (c)
+  Binius's AND win is **word-level (no `×D=32` bit-split) + the verifier-visible
+  univariate skip + GF(2⁸)**, *not* the byte-identical small-value prover.
+
+**Corrected conclusion:** the **byte-identical** small-value prover is **not the
+lever for our d=3 discharge** — it is ~neutral. The real Binius-scale win is the
+**verifier-visible rearchitecture**: (1) **word-level** AND constraints to drop
+the `×D=32` bit-slice factor (Binius's "64-fold smaller than bits"), and (2) the
+**univariate skip** — i.e. §1–6 of this doc, the *big, foundational,
+verifier-visible* build (new sumcheck protocol + verifier + soundness + GF(2⁸)
+tower + word-level constraint reshape). That is a multi-week, research-grade
+effort, not an incremental optimization.
+
+**Cheapest way to confirm before committing to the big build:** resurrect the
+removed GF(2¹²⁸) v=2 prefix (`git show f615f7f`) and measure its *actual* net at
+nvars=16 vs the shipped fused evaluator. If "~neutral" as modelled, the
+byte-identical path is closed and only the §1–6 rearchitecture remains. (Caveat:
+my cost models have oscillated this session; the `O(d^v)`-bb argument above is
+the most grounded, and it agrees with the prior empirical "~neutral".)
+
+**Net for this session:** shipped −24.5% byte-identical discharge
+(`9505876`+`7a27606`); validated that the small-field *inner comb* is 19×
+cheaper (Phase 0); and established that converting that into a *net* discharge
+win at d=3 requires the verifier-visible word-level + univariate-skip
+rearchitecture — the byte-identical shortcut does not pay. Treat the full build
+as a scoped, dedicated future effort guided by Binius's AND reduction + Dao
+Procedure 1.
 
 --- (historical: original §8 blocked-state notes follow) ---
 

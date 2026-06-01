@@ -1463,12 +1463,23 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   ns** (512 post-fold GF128 products) vs **`sv_packed_psi_x4` 137 ns** (bit
   operands: `(U&V)⊕W` packed + ψ_σ via the x4 NEON kernel + 17 bb) ⇒ **~19×** on
   M-series. This is the realized √κ on the inner comb — the part the removed skip
-  prover ran in `bb` (2594 ns), explaining its 40–74× slowdown. It's the
-  *ceiling* (excludes off-hypercube grid + only `v≈5–7` rounds skipped); net
-  discharge speedup est. **~5–15×** (→ 418 ms → ~30–80 ms, byte-identical) —
-  **GO.** Phase 1: resurrect + bit-pack the full v-variate prefix (grid + delayed
-  reduction), gate `fast_path_skip2_matches_generic`-style, A/B the net. See
-  `documentation/f2-hadamard-univariate-skip-design.md` §10.
+  prover ran in `bb` (2594 ns). BUT this is the **ceiling** — only the 4 boolean
+  cells of the `(d+1)²=16`-cell v=2 prefix; the **12 off-hypercube cells** use
+  *extrapolated* (non-bit) operands ⇒ genuine field products.
+- **Phase 1 NET analysis — ❌ byte-identical path is ~NEUTRAL for d=3 (walked
+  back the GO).** Procedure 1 costs `O(d^v)` bb/multiproduct ⇒ ~13 bb/term
+  (`eq·U·V` 9 + `eq·W` 4) vs the standard round's ~6 bb/term; only the boolean
+  base is `ss`, and at **d=3 the off-hypercube `bb` dominates** ⇒ net
+  ~neutral-to-worse, not 19×. (The `3√κ` asymptotic needs boolean cells to be a
+  *majority* of the work — true at high `d`, not d=3.) Reconciles: the removed
+  GF128 prefix was "~neutral"; Dao's 10.9× is **high-degree** Spartan; Binius's
+  AND win is **word-level (no `×D=32`) + verifier-visible univariate skip +
+  GF(2⁸)**, not the byte-identical small-value prover. **Corrected conclusion:**
+  the byte-identical shortcut does NOT pay for our d=3 discharge; the real
+  Binius-scale lever is the **verifier-visible word-level + univariate-skip
+  rearchitecture** (design doc §1–6 — multi-week, research-grade). Cheap confirm
+  before that big build: resurrect `f615f7f`'s GF128 v=2 prefix, measure net at
+  nvars=16. See `documentation/f2-hadamard-univariate-skip-design.md` §10–11.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
