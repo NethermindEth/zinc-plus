@@ -11,6 +11,15 @@ amend an existing one) so the next person doesn't redo the
 investigation from scratch. See the "How to use this doc" section
 at the bottom.
 
+> **▶ Hadamard-discharge performance — START at
+> [`documentation/f2-hadamard-handoff.md`](f2-hadamard-handoff.md).** It
+> orients the current state in one page: the discharge is ~92% of the
+> nvars=16 prove and **memory-bandwidth-bound** (1536 GF(2¹²⁸) slices, 2.34×
+> scaling); the shipped −24.5% fused evaluator; what's been ruled out; and the
+> next lever (**word-level AND reduction**, ~32× less data). Detail lives in
+> this ledger (the "ROOT CAUSE" + small-value/skip entries) and
+> `f2-hadamard-univariate-skip-design.md`.
+
 ---
 
 ## Fast-described sketch todo's
