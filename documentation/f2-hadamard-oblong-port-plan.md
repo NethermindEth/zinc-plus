@@ -7,9 +7,15 @@ instead of 1536 slices and the bit dimension is handled by a univariate-skip
 round. Reference implementation: the local repo `~/binius64`,
 `crates/prover/src/and_reduction/` + `crates/verifier/src/protocols/bitand.rs`.*
 
-## Progress (2026-06-01) — Phases A + B + GF(2⁸) speed lever + Phase-C ψ_z tie DONE
+## Progress (2026-06-02) — A,B + GF(2⁸) + Phase-C ψ_z tie + Fiat-Shamir + batched all-16 discharge + A/B
 
-**Landed** (working tree, 29 tests green — 23 `poly` + 6 `protocol`, no prover
+**Headline A/B** (`f2_sha256` bench `Discharge-Fused` vs `Discharge-Oblong`, same
+SHA columns + 16 relations): the **oblong word-packed discharge already beats the
+fused bit-slice one** — nvars=9 **1.40×** (3.61→2.58 ms), nvars=16 **1.14×**
+(385.7→339.7 ms) — and this is the **FLOOR** (naive GF(2¹²⁸), no GF(2⁸)/eq-split,
+no multipoint binding yet). See the ledger entry for the full table + caveats.
+
+**Landed** (working tree, 30+ tests green across `poly` + `protocol`, no prover
 path touched):
 - `poly/src/univariate/binary_subspace.rs` — P2 (`BinarySubspace`) + P3
   (`lagrange_evals`, `extrapolate_over_subspace`, `evaluate_univariate`). Ports of

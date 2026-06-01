@@ -75,6 +75,44 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong AND zerocheck — Phase D entry: batched all-16-relation discharge + A/B (oblong beats fused, naive)
+- **What**: the oblong discharge now covers **all 16 SHA relations in one
+  zerocheck**, is **Fiat–Shamir**, and there's a **discharge A/B** vs the current
+  fused bit-slice discharge.
+  - **Batching** (`prove/verify_oblong_and_batch`, `protocol/src/f2_oblong_hadamard.rs`):
+    stack the 3 ANDs then the 13 adders (Binius carry form, via
+    `build_adder_operand_columns`) into one oblong zerocheck — relation index as
+    the high row-vars, word index low, padded to a power-of-two relation count
+    with zero-operand relations. The batched ψ_z tie is
+    `a_eval = Σ_rel eq(rel; γ_rel)·ψ_z(operand_rel)(γ_word)` (`γ` splits into
+    `γ_word` low + `γ_rel` high); ANDs derive soundly from the pair evals, adders'
+    carry evals are recomputed (honest-prover, Issue 1).
+  - **Fiat–Shamir** (commit `7ed6318`): a poly `OblongChannel` trait +
+    transcript-agnostic core, with `protocol`'s `Blake3` adapter; explicit path
+    kept as a `ReplayChannel`.
+- **Measured discharge A/B** (Apple M4, `target-cpu=native`, `parallel simd
+  unchecked`) — `prove_f2_hadamard_phase` (fused, ψ_α, 1536 GF128 slices) vs
+  `prove_oblong_and_batch` (oblong, ψ_z, word-packed), same SHA columns + same 16
+  relations (`f2_sha256` bench, `Discharge-Fused`/`Discharge-Oblong`):
+
+  | nvars | fused | oblong | speedup |
+  |---|---|---|---|
+  | 9 | 3.61 ms | 2.58 ms | **1.40×** |
+  | 16 | 385.7 ms | 339.7 ms | **1.14×** |
+
+  **The oblong word-packed discharge already wins — and this is the FLOOR**: it's
+  the naive GF(2¹²⁸) NTT (no GF(2⁸) byte-lookup, which alone is 2.56× on the round
+  message; no eq-split), and the oblong arm doesn't yet produce its ψ_z pair-evals
+  (small) or bind via the multipoint-eval (plumbing, doesn't change discharge
+  prove cost). The win is larger at nvars=9 (cache-resident) than nvars=16 — at
+  nvars=16 the naive Phase-2 still streams the stacked GF128 MLEs, which is exactly
+  what GF(2⁸) + eq-split remove. 30+ tests green across `poly` + `protocol`.
+- **Remaining for the full Phase D**: (a) the **multipoint-eval binding** (task #7
+  part 2 — fold the ψ_z pair-evals into `f2_prove`, the production integration);
+  (b) the **GF(2⁸) + eq-split prover swap** (tasks already filed) to convert the
+  naive floor into the real win; (c) a sound carry binding for the adders
+  (Issue 1). Then the e2e `Prove` A/B.
+
 ### Oblong AND zerocheck — Phase C: ψ_z integration tie, one AND relation round-trips (working tree)
 - **What**: the oblong AND zerocheck wired into the F_2 Hadamard discharge for a
   single AND relation, with the **`ψ_z` recombination tie** that binds the
