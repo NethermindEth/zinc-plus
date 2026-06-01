@@ -30,7 +30,7 @@ use thiserror::Error;
 use zinc_poly::{
     EvaluationError,
     mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-    univariate::binary::BinaryPoly,
+    univariate::{binary::BinaryPoly, nat_evaluation::NatEvaluatedPoly},
     utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -322,6 +322,154 @@ where
     }
 }
 
+/// `eq(x, e) = (1−x)(1−e) + x·e` — the one-variable multilinear equality.
+#[inline]
+fn eq1<F: InnerTransparentField>(x: &F, e: &F, config: &F::Config) -> F {
+    let one = F::one_with_cfg(config);
+    (one.clone() - x.clone()) * (one - e.clone()) + x.clone() * e.clone()
+}
+
+/// `num_skip = 2` Hadamard fast path: the small-value prover skipping the
+/// **first two** sumcheck rounds. Holds the precomputed 2-variate prefix
+/// grid `q` over `U_3^2` (16 values, `q[i*4+j]`, `i` = var-0 axis, `j` =
+/// var-1 axis); `round_message` reads it (round 1 = `Σ_{X_2∈{0,1}} q`,
+/// round 2 = `q(r_1, ·)` via `NatEvaluatedPoly` interpolation in var 0), and
+/// `fold` bilinearly folds the packed operand corners + `eq_r` at
+/// `(r_1, r_2)` to the `2^(μ-2)`-size MLEs the `comb_fn` expects. The proof
+/// is identical to the standard path (same protocol) — see
+/// `fast_path_matches_generic`.
+pub struct HadamardPrefixFastPath<F: PrimeField, const D: usize> {
+    /// Packed operand columns (`U_k, V_k, W_k` per relation) — for `fold`.
+    operand_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+    /// Prefix grid `q` over `U_3^2`, flattened `q[i*4 + j]`.
+    prefix_q: Vec<F>,
+    /// Natural grid points `[0, 1, X, X+1]` (`= U_3`).
+    grid_pts: Vec<F>,
+    /// `eq` points for the two skipped vars (`ic[0]`, `ic[1]`).
+    ic0: F,
+    ic1: F,
+    /// `eq` over `ic[2..]` (the unskipped vars) — for `fold`'s `eq_r`.
+    eq_other_table: Vec<F::Inner>,
+    num_vars: usize,
+}
+
+impl<F, const D: usize> Round1FastPath<F> for HadamardPrefixFastPath<F, D>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
+    F::Inner: Send + Sync + Zero + Default + Clone,
+{
+    fn num_skip(&self) -> usize {
+        2
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn round_message(&self, round: usize, prior: &[F], config: &F::Config) -> Round1Output<F> {
+        let q = |i: usize, j: usize| self.prefix_q[i * 4 + j].clone();
+        if round == 1 {
+            // s_1(X_1) = Σ_{X_2 ∈ {0,1}} q(X_1, X_2).
+            let s1 = |i: usize| q(i, 0) + q(i, 1);
+            Round1Output {
+                asserted_sum: s1(0) + s1(1),
+                tail_evaluations: vec![s1(1), s1(2), s1(3)],
+            }
+        } else {
+            // round 2: s_2(X_2) = q(r_1, X_2) — interpolate q's var-0 column
+            // (evals at grid_pts = F::from(0..3)) to r_1 via NatEvaluatedPoly.
+            let r1 = &prior[0];
+            let aux = NatEvaluatedPoly::<F>::prepare_eval_aux(4, config);
+            let s2 = |j: usize| -> F {
+                NatEvaluatedPoly::new(vec![q(0, j), q(1, j), q(2, j), q(3, j)])
+                    .evaluate_at_point_with_aux(r1, &aux)
+                    .expect("non-empty interpolant")
+            };
+            Round1Output {
+                asserted_sum: F::zero_with_cfg(config), // unused for round > 1
+                tail_evaluations: vec![s2(1), s2(2), s2(3)],
+            }
+        }
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fold(
+        self: Box<Self>,
+        challenges: &[F],
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        let (r1, r2) = (&challenges[0], &challenges[1]);
+        let one = F::one_with_cfg(config);
+        // The four bilinear fold weights w_{a,c} = eq(r1,a)·eq(r2,c).
+        let omr1 = one.clone() - r1.clone();
+        let omr2 = one.clone() - r2.clone();
+        let w = [
+            omr1.clone() * omr2.clone(), // (X_1=0, X_2=0)
+            r1.clone() * omr2,           // (X_1=1, X_2=0)
+            omr1 * r2.clone(),           // (X_1=0, X_2=1)
+            r1.clone() * r2.clone(),     // (X_1=1, X_2=1)
+        ];
+        let zero = F::zero_with_cfg(config);
+        let half = 1usize << (self.num_vars - 2);
+
+        // eq_r folded over vars 0,1: eq(r1,ic0)·eq(r2,ic1)·E_other(x'').
+        let eq_scalar = eq1(r1, &self.ic0, config) * eq1(r2, &self.ic1, config);
+        let eq_folded: Vec<F::Inner> = cfg_iter!(self.eq_other_table)
+            .map(|e| {
+                (eq_scalar.clone() * F::new_unchecked_with_cfg(e.clone(), config)).into_inner()
+            })
+            .collect();
+
+        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(1 + self.operand_cols.len() * D);
+        mles.push(DenseMultilinearExtension {
+            num_vars: self.num_vars - 2,
+            evaluations: eq_folded,
+        });
+
+        // Each operand bit folds bilinearly: the four corners (rows
+        // 4x''+{0,1,2,3}) are {0,1}-valued, so the folded value is the sum
+        // of the weights `w` whose corner bit is set.
+        for col in &self.operand_cols {
+            let mut per_bit: Vec<Vec<F::Inner>> =
+                (0..D).map(|_| Vec::with_capacity(half)).collect();
+            for xpp in 0..half {
+                let base = 4 * xpp;
+                let c00 = &col.evaluations[base];
+                let c10 = &col.evaluations[base + 1];
+                let c01 = &col.evaluations[base + 2];
+                let c11 = &col.evaluations[base + 3];
+                for (bit_idx, (((b00, b10), b01), b11)) in c00
+                    .iter()
+                    .zip(c10.iter())
+                    .zip(c01.iter())
+                    .zip(c11.iter())
+                    .enumerate()
+                {
+                    let mut acc = zero.clone();
+                    if b00.into_inner() {
+                        acc = acc + w[0].clone();
+                    }
+                    if b10.into_inner() {
+                        acc = acc + w[1].clone();
+                    }
+                    if b01.into_inner() {
+                        acc = acc + w[2].clone();
+                    }
+                    if b11.into_inner() {
+                        acc = acc + w[3].clone();
+                    }
+                    per_bit[bit_idx].push(acc.into_inner());
+                }
+            }
+            for evals in per_bit {
+                mles.push(DenseMultilinearExtension {
+                    num_vars: self.num_vars - 2,
+                    evaluations: evals,
+                });
+            }
+        }
+        mles
+    }
+}
+
 /// Like [`prepare_hadamard_group`], but supplies a round-1
 /// [`HadamardRound1FastPath`] instead of materialising the bit-slice MLEs:
 /// takes the **packed** operand columns (`U_k, V_k, W_k` as `BinaryPoly<D>`,
@@ -330,6 +478,136 @@ where
 /// The `comb_fn` (rounds 2..n) is identical; only round 1 differs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prepare_hadamard_group_with_fast<F, const D: usize>(
+    transcript: &mut impl Transcript,
+    operand_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+    relations: &[HadamardTriple],
+    ic_evaluation_point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Option<(MultiDegreeSumcheckGroup<F>, HadamardProverAncillary)>, HadamardError<F>>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
+    F::Inner: ConstTranscribable + Send + Sync + Zero + Default + Clone,
+    F::Modulus: ConstTranscribable,
+{
+    prepare_hadamard_group_with_skip::<F, D>(
+        1,
+        transcript,
+        operand_cols,
+        relations,
+        ic_evaluation_point,
+        field_cfg,
+    )
+}
+
+/// Pack a `BinaryPoly<D>` cell into a `u64` bitmask (bit `i` = coefficient `i`).
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn cell_mask<const D: usize>(cell: &BinaryPoly<D>) -> u64 {
+    let mut m = 0u64;
+    for (i, c) in cell.iter().enumerate() {
+        if c.into_inner() {
+            m |= 1u64 << i;
+        }
+    }
+    m
+}
+
+/// Build the `v=2` prefix grid `q` over `U_3^2` (flattened `q[i*4 + j]`),
+/// `q[i][j] = Σ_{x''} eq(grid_i,ic0)·eq(grid_j,ic1)·E_other(x'')·
+/// Σ_k γ'^k Σ_b σ^b (U_{k,b}·V_{k,b} − W_{k,b})(grid_i, grid_j, x'')`, by
+/// direct bilinear interpolation of the packed operand corners. (Procedure-1
+/// efficiency swap is a follow-on — it produces the same `q`.)
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn build_prefix_q_v2<F, const D: usize>(
+    operand_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    relations: &[HadamardTriple],
+    gamma_powers: &[F],
+    sigma_powers: &[F],
+    grid_pts: &[F],
+    ic0: &F,
+    ic1: &F,
+    eq_other_table: &[F::Inner],
+    num_vars: usize,
+    config: &F::Config,
+) -> Vec<F>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig,
+    F::Inner: Clone,
+{
+    let zero = F::zero_with_cfg(config);
+    let one = F::one_with_cfg(config);
+    let half = 1usize << (num_vars - 2);
+    // T[i*4+j] = Σ_{x''} E_other(x'') · (comb sans the skipped-var eq factor).
+    let mut t = vec![zero.clone(); 16];
+    for xpp in 0..half {
+        let eo = F::new_unchecked_with_cfg(eq_other_table[xpp].clone(), config);
+        let base = 4 * xpp;
+        // Corner masks (rows base+{0,1,2,3}) for each operand column.
+        let masks: Vec<[u64; 4]> = operand_cols
+            .iter()
+            .map(|col| {
+                [
+                    cell_mask(&col.evaluations[base]),
+                    cell_mask(&col.evaluations[base + 1]),
+                    cell_mask(&col.evaluations[base + 2]),
+                    cell_mask(&col.evaluations[base + 3]),
+                ]
+            })
+            .collect();
+        for i in 0..4 {
+            let omsi = one.clone() - grid_pts[i].clone();
+            for j in 0..4 {
+                let omtj = one.clone() - grid_pts[j].clone();
+                // Bilinear weights for corners (X1,X2) ∈ {(0,0),(1,0),(0,1),(1,1)}.
+                let bw = [
+                    omsi.clone() * omtj.clone(),
+                    grid_pts[i].clone() * omtj.clone(),
+                    omsi.clone() * grid_pts[j].clone(),
+                    grid_pts[i].clone() * grid_pts[j].clone(),
+                ];
+                let bilin = |m: &[u64; 4], b: usize| -> F {
+                    let mut a = zero.clone();
+                    for (c, bwc) in bw.iter().enumerate() {
+                        if (m[c] >> b) & 1 == 1 {
+                            a = a + bwc.clone();
+                        }
+                    }
+                    a
+                };
+                let mut g = zero.clone();
+                for (k, tri) in relations.iter().enumerate() {
+                    let (um, vm, wm) = (&masks[tri.u_col], &masks[tri.v_col], &masks[tri.w_col]);
+                    let mut bit_acc = zero.clone();
+                    for b in 0..D {
+                        let (ub, vb, wb) = (bilin(um, b), bilin(vm, b), bilin(wm, b));
+                        bit_acc = bit_acc + sigma_powers[b].clone() * (ub * vb - wb);
+                    }
+                    g = g + gamma_powers[k].clone() * bit_acc;
+                }
+                t[i * 4 + j] = t[i * 4 + j].clone() + eo.clone() * g;
+            }
+        }
+    }
+    // Fold in the skipped-var eq factor: q[i][j] = eq(grid_i,ic0)·eq(grid_j,ic1)·T.
+    let mut q = vec![zero; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            q[i * 4 + j] =
+                eq1(&grid_pts[i], ic0, config) * eq1(&grid_pts[j], ic1, config) * t[i * 4 + j].clone();
+        }
+    }
+    q
+}
+
+/// Like [`prepare_hadamard_group_with_fast`], but skipping the first `skip`
+/// rounds (`skip ∈ {1, 2}`). `skip = 1` is the single-round
+/// [`HadamardRound1FastPath`]; `skip = 2` uses the prefix-polynomial
+/// [`HadamardPrefixFastPath`] (requires `num_vars >= 2`). The sampled `γ'`,
+/// `σ` and the `comb_fn` (rounds `skip+1..n`) are identical, so the proof is
+/// the same regardless of `skip`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn prepare_hadamard_group_with_skip<F, const D: usize>(
+    skip: usize,
     transcript: &mut impl Transcript,
     operand_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
     relations: &[HadamardTriple],
@@ -360,38 +638,73 @@ where
     let gamma_powers: Vec<F> = powers(gamma_prime, one.clone(), relations.len());
     let sigma_powers: Vec<F> = powers(sigma, one.clone(), D);
 
-    let eq_other_table: Vec<F::Inner> = if num_vars >= 2 {
-        build_eq_x_r_inner(&ic_evaluation_point[1..], field_cfg)?.evaluations
-    } else {
-        vec![one.inner().clone()]
-    };
-
-    let fast_path: Box<dyn Round1FastPath<F>> = Box::new(HadamardRound1FastPath::<F, D> {
-        operand_cols,
-        gamma_powers: gamma_powers.clone(),
-        sigma_powers: sigma_powers.clone(),
-        eq_other_table,
-        ic_ep_0: ic_evaluation_point[0].clone(),
-        num_vars,
-        num_relations: relations.len(),
-    });
-
+    // Build the comb_fn (rounds skip+1..n) — identical for every `skip`.
     let relations_vec = relations.to_vec();
+    let comb_gamma = gamma_powers.clone();
+    let comb_sigma = sigma_powers.clone();
+    let comb_zero = zero.clone();
     let comb_fn: CombFn<F> = Box::new(move |mle_values: &[F]| {
         let eq_r = mle_values[0].clone();
         let slices = &mle_values[1..];
-        let mut acc = zero.clone();
+        let mut acc = comb_zero.clone();
         for (k, tri) in relations_vec.iter().enumerate() {
-            let gpow = gamma_powers[k].clone();
+            let gpow = comb_gamma[k].clone();
             for b in 0..D {
                 let u = slices[tri.u_col * D + b].clone();
                 let v = slices[tri.v_col * D + b].clone();
                 let w = slices[tri.w_col * D + b].clone();
-                acc = acc + gpow.clone() * sigma_powers[b].clone() * (u * v - w);
+                acc = acc + gpow.clone() * comb_sigma[b].clone() * (u * v - w);
             }
         }
         acc * eq_r
     });
+
+    let fast_path: Box<dyn Round1FastPath<F>> = if skip <= 1 {
+        let eq_other_table: Vec<F::Inner> = if num_vars >= 2 {
+            build_eq_x_r_inner(&ic_evaluation_point[1..], field_cfg)?.evaluations
+        } else {
+            vec![one.inner().clone()]
+        };
+        Box::new(HadamardRound1FastPath::<F, D> {
+            operand_cols,
+            gamma_powers,
+            sigma_powers,
+            eq_other_table,
+            ic_ep_0: ic_evaluation_point[0].clone(),
+            num_vars,
+            num_relations: relations.len(),
+        })
+    } else {
+        assert_eq!(skip, 2, "only skip ∈ {{1, 2}} is implemented");
+        assert!(num_vars >= 2, "skip = 2 needs num_vars >= 2");
+        let eq_other_table: Vec<F::Inner> = if num_vars >= 3 {
+            build_eq_x_r_inner(&ic_evaluation_point[2..], field_cfg)?.evaluations
+        } else {
+            vec![one.inner().clone()]
+        };
+        let grid_pts: Vec<F> = (0..4).map(|m| F::from_with_cfg(m as u64, field_cfg)).collect();
+        let prefix_q = build_prefix_q_v2::<F, D>(
+            &operand_cols,
+            relations,
+            &gamma_powers,
+            &sigma_powers,
+            &grid_pts,
+            &ic_evaluation_point[0],
+            &ic_evaluation_point[1],
+            &eq_other_table,
+            num_vars,
+            field_cfg,
+        );
+        Box::new(HadamardPrefixFastPath::<F, D> {
+            operand_cols,
+            prefix_q,
+            grid_pts,
+            ic0: ic_evaluation_point[0].clone(),
+            ic1: ic_evaluation_point[1].clone(),
+            eq_other_table,
+            num_vars,
+        })
+    };
 
     Ok(Some((
         MultiDegreeSumcheckGroup::with_round_1_fast(3, Vec::new(), comb_fn, fast_path),
@@ -845,5 +1158,56 @@ mod tests {
             .map(|j| lagrange(&[q[0][j], q[1][j], q[2][j], q[3][j]], &r_1))
             .collect();
         assert_eq!(s2_tail.as_slice(), tails[1], "round-2 message mismatch");
+    }
+
+    /// End-to-end gate for the `num_skip=2` wiring: the prefix fast path
+    /// (operand columns) must produce a `MultiDegreeSumcheckProof`
+    /// byte-identical to the generic slice-based path — exercising the
+    /// prefix build, `round_message` for rounds 1+2, `fold`, and the
+    /// standard continuation at rounds 3+.
+    #[test]
+    fn fast_path_skip2_matches_generic() {
+        let cfg = &();
+        const D: usize = 4;
+        let num_vars = 4;
+        let relations = [HadamardTriple {
+            u_col: 0,
+            v_col: 1,
+            w_col: 2,
+        }];
+        let ic = vec![
+            Gf::from_words([3, 0]),
+            Gf::from_words([5, 0]),
+            Gf::from_words([7, 0]),
+            Gf::from_words([11, 0]),
+        ];
+        let n = 1usize << num_vars;
+        let u: Vec<u32> = (0..n).map(|i| (0xACE1u32.wrapping_mul(i as u32 + 1)) & 0xF).collect();
+        let v: Vec<u32> = (0..n).map(|i| (0x5A5Bu32.wrapping_mul(i as u32 + 3)) & 0xF).collect();
+        let w: Vec<u32> = u.iter().zip(&v).map(|(a, b)| a & b).collect();
+
+        // Generic (materialised slices).
+        let slices = build_slices::<D>(&[u.clone(), v.clone(), w.clone()], num_vars);
+        let mut pt_g = Blake3Transcript::new();
+        let (group_g, _) = prepare_hadamard_group::<Gf, D>(&mut pt_g, slices, &relations, &ic, cfg)
+            .unwrap()
+            .unwrap();
+        let (proof_g, _) =
+            MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(&mut pt_g, vec![group_g], num_vars, cfg);
+
+        // skip=2 prefix fast path (packed operand columns).
+        let cols = build_cols::<D>(&[u, v, w], num_vars);
+        let mut pt_f = Blake3Transcript::new();
+        let (group_f, _) =
+            prepare_hadamard_group_with_skip::<Gf, D>(2, &mut pt_f, cols, &relations, &ic, cfg)
+                .unwrap()
+                .unwrap();
+        let (proof_f, _) =
+            MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(&mut pt_f, vec![group_f], num_vars, cfg);
+
+        assert_eq!(
+            proof_g, proof_f,
+            "num_skip=2 prefix fast path must produce the identical proof"
+        );
     }
 }
