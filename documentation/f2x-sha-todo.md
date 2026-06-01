@@ -1285,14 +1285,26 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   gate the optimised version. (NB this is the verifier-preserving
   small-value variant, NOT Binius64's univariate skip, which changes the
   proof/degree.)
-- **Remaining (the actual optimisation)**: a `num_skip=v`
-  `HadamardRound1FastPath` that computes the `v`-variate prefix polynomial
-  `q` over the `{0,1,X,X+1}^v` grid (Dao Procedures 1+2 for the efficient
-  multiproduct, + the §6 eq-opt) and answers `round_message`/`fold` from it.
-  First increment: a unit test computing the `v=2` prefix and asserting its
-  round-1+round-2 messages equal a generic 2-round run's `round_tails`
-  (validates the math), then wire `num_skip=2`, then **size-gate** (`v=1`
-  for production nvars=9) + A/B at nvars=16/20.
+- **Math validated — ✅ (commit `eb3138a`)**: `prefix_v2_matches_generic`
+  computes the `v=2` prefix `q(X_1,X_2) = Σ_{x''} comb` over the
+  `{0,1,X,X+1}^2` grid, derives the round-1 message (`Σ_{X_2∈{0,1}} q`) and
+  round-2 message (Lagrange-interp `q`'s X_1-column to `r_1`), and asserts
+  both equal a generic 2-round run's `round_tails`. Passes — the small-value
+  `v>1` math is correct for our `eq_r·Σσ^b(U·V−W)` comb.
+- **Remaining — the fast-path wiring (next focused pass)**: a `num_skip=v`
+  Hadamard fast path that (a) precomputes the `v`-dim prefix grid `q`
+  (`4^v` field values) in `prepare_hadamard_group_with_fast` from the packed
+  operand columns; (b) `round_message(round, prior)`: bind dims `1..round-1`
+  to `prior` (Lagrange per dim), keep dim `round` at the 4 grid points, sum
+  dims `round+1..v` over `{0,1}` — read off `q`; (c) `fold([r_1..r_v])`:
+  multilinear-interp the `2^v` operand corners to `(r_1..r_v)` → the
+  `2^(μ-v)`-size slices + `eq_folded`. Subsumes `v=1` (the 1-dim prefix is
+  exactly today's `M(0..3)`). Then **size-gate** (`v=1` at production
+  nvars=9; raise `v` only where the materialised-slice memory
+  `1536·2^(μ-v)·16 B` matters) + A/B at nvars=16/20. Gated by
+  `fast_path_matches_generic` (proof stays byte-identical) — so correctness
+  is mechanical to verify; the risk is purely in the multidim bind/sum
+  bookkeeping. Effort ~150-200 lines.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
