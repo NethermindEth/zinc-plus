@@ -730,4 +730,120 @@ mod tests {
             "fast-path proof must be identical to the generic-path proof"
         );
     }
+
+    /// Validates the `v=2` small-value **prefix-polynomial** math (the core
+    /// of the multi-round-skip prover) in isolation, before any framework
+    /// wiring: compute `q(X_1,X_2) = Σ_{x''} comb(X_1,X_2,x'')` over the
+    /// `{0, 1, X, X+1}²` grid, derive the round-1 and round-2 messages from
+    /// it, and assert they equal a faithful generic 2-round run's
+    /// `round_tails`. A bug here localises to the prefix math, not the
+    /// sumcheck framework.
+    #[test]
+    fn prefix_v2_matches_generic() {
+        use crypto_primitives::FromWithConfig;
+        let cfg = &();
+        const D: usize = 4;
+        let num_vars = 4;
+        let relations = [HadamardTriple {
+            u_col: 0,
+            v_col: 1,
+            w_col: 2,
+        }];
+        let ic = vec![
+            Gf::from_words([3, 0]),
+            Gf::from_words([5, 0]),
+            Gf::from_words([7, 0]),
+            Gf::from_words([11, 0]),
+        ];
+        let n = 1usize << num_vars;
+        let u: Vec<u32> = (0..n).map(|i| (0xACE1u32.wrapping_mul(i as u32 + 1)) & 0xF).collect();
+        let v: Vec<u32> = (0..n).map(|i| (0x5A5Bu32.wrapping_mul(i as u32 + 3)) & 0xF).collect();
+        let w: Vec<u32> = u.iter().zip(&v).map(|(a, b)| a & b).collect();
+        let slices = build_slices::<D>(&[u, v, w], num_vars);
+
+        // Faithful generic run: capture round-1/2 message tails + r_1.
+        let mut pt = Blake3Transcript::new();
+        let (group, _) =
+            prepare_hadamard_group::<Gf, D>(&mut pt, slices.clone(), &relations, &ic, cfg)
+                .unwrap()
+                .unwrap();
+        let (proof, states) =
+            MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(&mut pt, vec![group], num_vars, cfg);
+        let tails = proof.round_tails(0);
+        let r_1 = states[0].randomness[0];
+
+        // Re-derive σ (prepare samples γ' then σ from a fresh transcript).
+        let mut st = Blake3Transcript::new();
+        let _gamma: Gf = st.get_field_challenge(cfg);
+        let sigma: Gf = st.get_field_challenge(cfg);
+        let sigma_powers = powers(sigma, Gf::one(), D);
+
+        // Grid points {0, 1, X, X+1} — the GF(2^128) sumcheck boundary.
+        let pts = [
+            Gf::zero(),
+            Gf::one(),
+            Gf::from_with_cfg(2u64, cfg),
+            Gf::from_with_cfg(3u64, cfg),
+        ];
+        let eq1 = |x: &Gf, e: &Gf| -> Gf {
+            (Gf::one() - *x) * (Gf::one() - *e) + *x * *e
+        };
+        // Bilinear interp of slice `s` over (X_1,X_2) at (pts[i],pts[j]),
+        // high vars fixed to x'' (rows x''·4 .. x''·4+3 = the 4 corners).
+        let slice_at = |s: usize, i: usize, j: usize, xpp: usize| -> Gf {
+            let base = 4 * xpp;
+            let lift = |idx: usize| Gf::new_unchecked_with_cfg(slices[s].evaluations[idx].clone(), cfg);
+            let (sx, tx) = (pts[i], pts[j]);
+            let oms = Gf::one() - sx;
+            let omt = Gf::one() - tx;
+            oms * omt * lift(base) + sx * omt * lift(base + 1) + oms * tx * lift(base + 2) + sx * tx * lift(base + 3)
+        };
+
+        // q[i][j] = Σ_{x''} eq_r(pts[i],pts[j],x'') · Σ_b σ^b (U_b·V_b − W_b)
+        let mut q = [[Gf::zero(); 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut acc = Gf::zero();
+                for xpp in 0..4 {
+                    let b2 = if xpp & 1 == 1 { Gf::one() } else { Gf::zero() };
+                    let b3 = if (xpp >> 1) & 1 == 1 { Gf::one() } else { Gf::zero() };
+                    let eq_r = eq1(&pts[i], &ic[0]) * eq1(&pts[j], &ic[1]) * eq1(&b2, &ic[2]) * eq1(&b3, &ic[3]);
+                    let mut inner = Gf::zero();
+                    for b in 0..D {
+                        let ub = slice_at(b, i, j, xpp);
+                        let vb = slice_at(D + b, i, j, xpp);
+                        let wb = slice_at(2 * D + b, i, j, xpp);
+                        inner = inner + sigma_powers[b] * (ub * vb - wb);
+                    }
+                    acc = acc + eq_r * inner;
+                }
+                q[i][j] = acc;
+            }
+        }
+
+        // s_1(p) = Σ_{X_2∈{0,1}} q(p, X_2), tail at p ∈ {1, X, X+1}.
+        let s1_tail: Vec<Gf> = (1..4).map(|i| q[i][0] + q[i][1]).collect();
+        assert_eq!(s1_tail.as_slice(), tails[0], "round-1 message mismatch");
+
+        // s_2(qq) = q(r_1, qq): Lagrange-interp q's X_1-column to r_1.
+        let lagrange = |col: &[Gf; 4], r: &Gf| -> Gf {
+            let mut acc = Gf::zero();
+            for a in 0..4 {
+                let mut num = Gf::one();
+                let mut den = Gf::one();
+                for k in 0..4 {
+                    if a != k {
+                        num = num * (*r - pts[k]);
+                        den = den * (pts[a] - pts[k]);
+                    }
+                }
+                acc = acc + col[a] * num * den.inverse();
+            }
+            acc
+        };
+        let s2_tail: Vec<Gf> = (1..4)
+            .map(|j| lagrange(&[q[0][j], q[1][j], q[2][j], q[3][j]], &r_1))
+            .collect();
+        assert_eq!(s2_tail.as_slice(), tails[1], "round-2 message mismatch");
+    }
 }
