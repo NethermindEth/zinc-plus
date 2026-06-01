@@ -1433,11 +1433,17 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   the field plumbing. Realistic gain: **multi-× to ~order-of-magnitude on the
   discharge** (vs the 24.5% the byte-identical fused prover got), since the
   discharge is ~92% of the nvars=16 prove and is GF(2¹²⁸)-mul-bound.
-- **Next step**: a focused **design pass** before any code — read Binius's AND
-  univariate-skip variant + the small-characteristic sumcheck cost model, map it
-  onto our degree-3 `eq·Σγ^k σ^b(U_bV_b−W_b)` comb (how many vars to fuse, the
-  degree blowup, the verifier check, soundness), and estimate the concrete win +
-  effort. Sources: Dao et al. eprint 2026/587 (also `cs.nyu.edu/~zd2131`);
+- **Design pass — ✅ DONE: `documentation/f2-hadamard-univariate-skip-design.md`.**
+  Conclusion: direction is right (we're in the wrong arithmetic regime), win
+  ~4–16× on the discharge (ceiling 128×), but it's a **foundational,
+  verifier-visible, multi-week build** — the codebase has **no additive NTT over
+  binary fields, no GF(2⁸) tower subfield, no univariate-skip machinery** (the
+  `pntt/radix8` FFT is prime-field, for IPRS). Recommended gate: a **Phase-0
+  additive-NTT microbenchmark** (compute one fused round of our comb, measure vs
+  `k` standard rounds) to turn "4–16×" into a measured number before committing;
+  proceed only if ≥~4×. NOT byte-identical (needs a new accept/reject +
+  soundness gate, not the existing byte-identity tests). Sources: Dao et al.
+  eprint 2026/587 (also `cs.nyu.edu/~zd2131`);
   Bagad et al. "Sum-Check over Fields of Small Characteristic" eprint 2024/1046;
   "Packed Sumcheck over Fields of Small Characteristic" eprint 2025/719;
   binius.xyz blueprint (Univariate Skip / Rijndael Zerocheck / ANDs);
