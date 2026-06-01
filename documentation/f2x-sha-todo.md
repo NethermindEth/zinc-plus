@@ -1477,9 +1477,17 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   GF(2⁸)**, not the byte-identical small-value prover. **Corrected conclusion:**
   the byte-identical shortcut does NOT pay for our d=3 discharge; the real
   Binius-scale lever is the **verifier-visible word-level + univariate-skip
-  rearchitecture** (design doc §1–6 — multi-week, research-grade). Cheap confirm
-  before that big build: resurrect `f615f7f`'s GF128 v=2 prefix, measure net at
-  nvars=16. See `documentation/f2-hadamard-univariate-skip-design.md` §10–11.
+  rearchitecture** (design doc §1–6 — multi-week, research-grade). See
+  `documentation/f2-hadamard-univariate-skip-design.md` §10–11.
+- **✅ EMPIRICAL CONFIRM (probe `bench_prefix_vs_standard_term`)**: per
+  `(relation,bit)` term — small-value v=2 prefix (Procedure-1 multiproduct +
+  extrapolation) **7.12 µs** vs standard fused coeff term (~6 GF128 muls)
+  **11.4 ns** ⇒ **~624× worse**. Dominated by ~4 `prepare_eval_aux`
+  `batch_invert` GF128 inversions + Vec allocs/term (the removed prover's 40–74×
+  overhead); even hoisted, the `O(d^v)`-bb floor is ~2× worse at d=3.
+  **Byte-identical small-value path is now empirically closed for d=3.** Only the
+  verifier-visible word-level + univariate-skip rearchitecture remains as the
+  Binius-scale lever.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds

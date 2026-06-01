@@ -286,6 +286,19 @@ byte-identical path is closed and only the §1–6 rearchitecture remains. (Cave
 my cost models have oscillated this session; the `O(d^v)`-bb argument above is
 the most grounded, and it agrees with the prior empirical "~neutral".)
 
+**✅ CONFIRMED empirically (probe `bench_prefix_vs_standard_term` in
+`poly/benches/binary_gf_compare.rs`, M-series):** per Hadamard `(relation,bit)`
+term — small-value v=2 prefix (Procedure 1 multiproduct `U·V` over `U_3^2` + `W`
+extrapolation) = **7.12 µs**, standard fused coeff term (~6 GF128 muls) =
+**11.4 ns** ⇒ **~624× worse**. As-implemented the prefix term is dominated by ~4
+`prepare_eval_aux` calls (each a GF(2¹²⁸) `batch_invert` field inversion) + Vec
+allocations — the exact per-scalar overhead behind the removed prover's 40–74×.
+Even hoisting that overhead away, the `O(d^v)`-bb floor (§11) is still ~2× worse
+at d=3. **Conclusion is now empirical, not just modelled: the byte-identical
+small-value path does NOT pay for the d=3 discharge — closed.** The only
+Binius-scale lever left is the verifier-visible word-level + univariate-skip
+rearchitecture (§1–6).
+
 **Net for this session:** shipped −24.5% byte-identical discharge
 (`9505876`+`7a27606`); validated that the small-field *inner comb* is 19×
 cheaper (Phase 0); and established that converting that into a *net* discharge

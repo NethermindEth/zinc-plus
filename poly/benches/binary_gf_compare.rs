@@ -32,12 +32,14 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use crypto_primitives::FromPrimitiveWithConfig;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use zinc_poly::univariate::F2PackU64;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::{
     self as gf128, BinaryFieldGF128,
 };
+use zinc_poly::univariate::nat_evaluation::{EvalAux, NatEvaluatedPoly};
 use zinc_poly::univariate::binary_gf192::{
     self as gf192, BinaryFieldGF192,
 };
@@ -428,6 +430,139 @@ fn bench_discharge_comb(c: &mut Criterion) {
     group.finish();
 }
 
+// --- Procedure 1 (Dao §4) — bench-local copy of the removed `multiproduct.rs`
+// (commit a388588), for the Phase-1 net probe below. ---------------------------
+
+#[allow(clippy::arithmetic_side_effects)]
+fn extrapolate_axis<F: FromPrimitiveWithConfig>(
+    evals: &[F],
+    sizes: &[usize],
+    axis: usize,
+    new_size: usize,
+    aux: &EvalAux<F>,
+    new_pts: &[F],
+) -> Vec<F> {
+    let old = sizes[axis];
+    let inner: usize = sizes[..axis].iter().product();
+    let outer: usize = sizes[axis + 1..].iter().product();
+    let mut out = vec![evals[0].clone(); inner * new_size * outer];
+    for o in 0..outer {
+        for i in 0..inner {
+            let col: Vec<F> = (0..old)
+                .map(|a| evals[(o * old + a) * inner + i].clone())
+                .collect();
+            let poly = NatEvaluatedPoly::new(col);
+            for a in 0..new_size {
+                let val = if a < old {
+                    poly.evaluations[a].clone()
+                } else {
+                    poly.evaluate_at_point_with_aux(&new_pts[a - old], aux)
+                        .expect("non-empty interpolant")
+                };
+                out[(o * new_size + a) * inner + i] = val;
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn multi_extrapolate<F: FromPrimitiveWithConfig>(
+    mut evals: Vec<F>,
+    v: usize,
+    k: usize,
+    d: usize,
+    config: &F::Config,
+) -> Vec<F> {
+    if k >= d {
+        return evals;
+    }
+    let aux = NatEvaluatedPoly::<F>::prepare_eval_aux(k + 1, config);
+    let new_pts: Vec<F> = ((k + 1)..=d).map(|m| F::from_with_cfg(m as u64, config)).collect();
+    let mut sizes = vec![k + 1; v];
+    for axis in 0..v {
+        evals = extrapolate_axis(&evals, &sizes, axis, d + 1, &aux, &new_pts);
+        sizes[axis] = d + 1;
+    }
+    evals
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn multi_product_eval<F: FromPrimitiveWithConfig>(
+    polys: &[Vec<F>],
+    v: usize,
+    config: &F::Config,
+) -> Vec<F> {
+    let d = polys.len();
+    assert!(d >= 1);
+    if d == 1 {
+        return polys[0].clone();
+    }
+    let m = d / 2;
+    let q_l = multi_product_eval(&polys[..m], v, config);
+    let q_r = multi_product_eval(&polys[m..], v, config);
+    let q_l = multi_extrapolate(q_l, v, m, d, config);
+    let q_r = multi_extrapolate(q_r, v, d - m, d, config);
+    q_l.iter().zip(&q_r).map(|(a, b)| a.clone() * b.clone()).collect()
+}
+
+/// PHASE-1 NET PROBE (see `documentation/f2-hadamard-univariate-skip-design.md`
+/// §11). Per Hadamard `(relation, bit)` term, the byte-identical small-value
+/// **v=2 prefix** does a Procedure-1 multiproduct `U·V` over the `U_3^2` grid
+/// plus a `W` extrapolation (this is `build_prefix_q_v2`'s per-term work — it
+/// answers 2 sumcheck rounds). The **standard** path (the shipped fused
+/// coeff-form evaluator) does ~6 GF(2¹²⁸) muls/term (Karatsuba) per round. The
+/// ratio is the per-term net: if the prefix term is ≫ the standard term, the
+/// byte-identical small-value prover is ~neutral-to-worse at d=3 (off-hypercube
+/// `bb` dominates), confirming the §11 analysis.
+fn bench_prefix_vs_standard_term(c: &mut Criterion) {
+    let mut group = c.benchmark_group("binary_gf/prefix_v2_vs_standard_term");
+    group.sample_size(50);
+    let cfg = &();
+    let mut rng = StdRng::seed_from_u64(0x9E_37_79_B9);
+    let bit = |x: u64| if x & 1 == 1 { BinaryFieldGF128::one() } else { BinaryFieldGF128::zero() };
+    // 4 boolean corners of U,V,W over {0,1}^2 (the small-value base is bits).
+    let u4: Vec<BinaryFieldGF128> = (0..4).map(|_| bit(rng.random())).collect();
+    let v4: Vec<BinaryFieldGF128> = (0..4).map(|_| bit(rng.random())).collect();
+    let w4: Vec<BinaryFieldGF128> = (0..4).map(|_| bit(rng.random())).collect();
+    // standard (post-fold) operands + weight: general GF128.
+    let (u0, u1) = (rand_gf128(&mut rng), rand_gf128(&mut rng));
+    let (v0, v1) = (rand_gf128(&mut rng), rand_gf128(&mut rng));
+    let (w0, w1) = (rand_gf128(&mut rng), rand_gf128(&mut rng));
+    let weight = rand_gf128(&mut rng);
+
+    // Small-value prefix per-term: multiproduct U·V over U_3^2 + W extrapolation.
+    group.bench_function("prefix_v2_term_procedure1", |bench| {
+        bench.iter(|| {
+            let uv = multi_product_eval(
+                &[black_box(u4.clone()), black_box(v4.clone())],
+                2,
+                cfg,
+            ); // U·V over U_2^2 (9 cells)
+            let uv = multi_extrapolate(uv, 2, 2, 3, cfg); // lift to U_3^2 (16 cells)
+            let w_ext = multi_extrapolate(black_box(w4.clone()), 2, 1, 3, cfg); // W → U_3^2
+            black_box((uv, w_ext))
+        });
+    });
+
+    // Standard per-term: Karatsuba degree-2 coeffs + 3 weight muls (~6 muls).
+    group.bench_function("standard_term_coeff_6mul", |bench| {
+        bench.iter(|| {
+            let u0 = black_box(u0);
+            let v0 = black_box(v0);
+            let p0 = u0 * v0;
+            let p2 = (black_box(u1) - u0) * (black_box(v1) - v0);
+            let p1 = black_box(u1) * black_box(v1) - p0 - p2;
+            let dw = black_box(w1) - black_box(w0);
+            let t0 = p0 - black_box(w0);
+            let t1 = p1 - dw;
+            let t2 = p2;
+            black_box((weight * t0, weight * t1, weight * t2))
+        });
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = compare;
     config = Criterion::default();
@@ -439,6 +574,7 @@ criterion_group! {
         bench_alpha_precompute,
         bench_project_col,
         bench_project_trace,
-        bench_discharge_comb
+        bench_discharge_comb,
+        bench_prefix_vs_standard_term
 }
 criterion_main!(compare);
