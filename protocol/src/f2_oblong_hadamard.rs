@@ -37,13 +37,15 @@
 //! by the single PCS open) — the same "Approach B" the `ψ_α` pair-evals already
 //! use (`f2_prove.rs`), with `L_i(z)`/`γ` for `α^b`/`r*`.
 
+use crypto_primitives::Field;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
 use zinc_poly::univariate::oblong_and::{
-    AdditiveNtt, AndCheckOutput, OblongAndProof, OblongError, WORD_BITS, base_lagrange_at,
-    prove_oblong_and, verify_oblong_and,
+    AdditiveNtt, AndCheckOutput, OblongAndProof, OblongChannel, OblongError, WORD_BITS,
+    base_lagrange_at, prove_oblong_and_channel, verify_oblong_and_channel,
 };
+use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
 use crate::f2_hadamard::{
     F2HadamardSpec, F2Operand, build_operand_column, cell_mask, derive_operand_parents,
@@ -51,6 +53,34 @@ use crate::f2_hadamard::{
 };
 
 type Gf = BinaryFieldGF128;
+
+/// [`OblongChannel`] adapter over a Fiat–Shamir [`Transcript`]: absorbs prover
+/// messages and samples `GF(2^128)` challenges. The transcript carries the
+/// challenges, so prover and verifier (mirroring the same absorb/sample order)
+/// agree without shipping `z`/`γ` in the proof.
+struct TranscriptChannel<'a, T: Transcript> {
+    transcript: &'a mut T,
+    buf: Vec<u8>,
+}
+
+impl<'a, T: Transcript> TranscriptChannel<'a, T> {
+    fn new(transcript: &'a mut T) -> Self {
+        let n_bytes = <<Gf as Field>::Inner as ConstTranscribable>::NUM_BYTES;
+        Self {
+            transcript,
+            buf: vec![0u8; n_bytes],
+        }
+    }
+}
+
+impl<'a, T: Transcript> OblongChannel for TranscriptChannel<'a, T> {
+    fn absorb(&mut self, scalars: &[Gf]) {
+        self.transcript.absorb_random_field_slice(scalars, &mut self.buf);
+    }
+    fn sample(&mut self) -> Gf {
+        self.transcript.get_field_challenge(&())
+    }
+}
 
 /// SHA-256 word width — the oblong "Z" (bit-index) dimension. The oblong port
 /// is specialised to `D = 32` (`WORD_BITS`).
@@ -81,40 +111,42 @@ fn operand_words(
 }
 
 /// Prover: run the oblong AND zerocheck for one relation `U ⊙ V = W` over the
-/// committed columns. Challenges are explicit (Fiat–Shamir is the follow-up).
-pub fn prove_oblong_and_relation(
+/// committed columns, with Fiat–Shamir challenges drawn from `transcript`.
+pub fn prove_oblong_and_relation<T: Transcript>(
+    transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     spec: &F2HadamardSpec,
     num_vars: usize,
-    r: &[Gf],
-    z: Gf,
-    gammas: &[Gf],
 ) -> OblongAndProof {
     let u = operand_words(columns, &spec.u, num_vars);
     let v = operand_words(columns, &spec.v, num_vars);
     let w = operand_words(columns, &spec.w, num_vars);
     let ntt = AdditiveNtt::new();
-    prove_oblong_and(&u, &v, &w, r, z, gammas, &ntt)
+    let mut ch = TranscriptChannel::new(transcript);
+    prove_oblong_and_channel(&mut ch, &u, &v, &w, &ntt)
 }
 
-/// Verifier: check the oblong zerocheck, then tie its operand evals to the
-/// committed columns via the `ψ_z` recombination (the existing `ψ_α` machinery
-/// with `base_lagrange_at(z)` weights and the row-point `γ`).
-pub fn verify_oblong_and_relation(
+/// Verifier: re-derive the challenges from `transcript`, check the oblong
+/// zerocheck, then tie its operand evals to the committed columns via the
+/// `ψ_z` recombination (the existing `ψ_α` machinery with `base_lagrange_at(z)`
+/// weights and the row-point `γ`, from the verified `eval_point = [z, γ…]`).
+pub fn verify_oblong_and_relation<T: Transcript>(
+    transcript: &mut T,
     proof: &OblongAndProof,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     spec: &F2HadamardSpec,
-    r: &[Gf],
-    z: Gf,
-    gammas: &[Gf],
+    num_vars: usize,
 ) -> Result<(), OblongVerifyError> {
-    let out: AndCheckOutput =
-        verify_oblong_and(proof, r, z, gammas).map_err(OblongVerifyError::Oblong)?;
+    let out: AndCheckOutput = {
+        let mut ch = TranscriptChannel::new(transcript);
+        verify_oblong_and_channel(&mut ch, proof, num_vars).map_err(OblongVerifyError::Oblong)?
+    };
 
     // ψ_z recombination. eval_point = [z, γ_0, …, γ_{n-1}]; the tie evaluates at
     // the row-point γ. Feed the Lagrange weights L_i(z) where ψ_α uses α^b.
-    let lagrange_z = base_lagrange_at(z).to_vec();
+    let z = out.eval_point[0];
     let gamma = &out.eval_point[1..];
+    let lagrange_z = base_lagrange_at(z).to_vec();
     let specs = std::slice::from_ref(spec);
     let pairs = distinct_pairs(specs);
     let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, gamma);
@@ -135,6 +167,7 @@ pub fn verify_oblong_and_relation(
 mod tests {
     use super::*;
     use crypto_primitives::boolean::Boolean;
+    use zinc_transcript::Blake3Transcript;
 
     fn col_from_u32s(patterns: &[u32]) -> DenseMultilinearExtension<BinaryPoly<D>> {
         use std::array;
@@ -152,18 +185,13 @@ mod tests {
         }
     }
 
-    fn gf(seed: u64) -> Gf {
-        let hi = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29) ^ 0x1234_5678_9ABC_DEF0;
-        Gf::from_words([seed ^ 0xA5A5_5A5A_0F0F_F0F0, hi])
-    }
-
-    /// Honest oblong prove → verify (zerocheck + ψ_z tie) for the given spec.
+    /// Honest oblong prove → verify (zerocheck + ψ_z tie) for the given spec,
+    /// with real Fiat–Shamir transcripts (fresh, same-seed) on each side.
     fn round_trip(columns: &[DenseMultilinearExtension<BinaryPoly<D>>], spec: &F2HadamardSpec, num_vars: usize) {
-        let r: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 * 13 + 1)).collect();
-        let z = gf(0xABCD_1234);
-        let gammas: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 * 17 + 100)).collect();
-        let proof = prove_oblong_and_relation(columns, spec, num_vars, &r, z, &gammas);
-        verify_oblong_and_relation(&proof, columns, spec, &r, z, &gammas)
+        let mut tp = Blake3Transcript::new();
+        let proof = prove_oblong_and_relation(&mut tp, columns, spec, num_vars);
+        let mut tv = Blake3Transcript::new();
+        verify_oblong_and_relation(&mut tv, &proof, columns, spec, num_vars)
             .expect("honest oblong round-trip + ψ_z tie");
     }
 
@@ -247,11 +275,10 @@ mod tests {
         let columns = [col_from_u32s(&U), col_from_u32s(&V), col_from_u32s(&w)];
         let spec = F2HadamardSpec::plain(0, 1, 2);
         let num_vars = 3;
-        let r: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 + 5)).collect();
-        let z = gf(0x9999);
-        let gammas: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 + 200)).collect();
-        let proof = prove_oblong_and_relation(&columns, &spec, num_vars, &r, z, &gammas);
-        let res = verify_oblong_and_relation(&proof, &columns, &spec, &r, z, &gammas);
+        let mut tp = Blake3Transcript::new();
+        let proof = prove_oblong_and_relation(&mut tp, &columns, &spec, num_vars);
+        let mut tv = Blake3Transcript::new();
+        let res = verify_oblong_and_relation(&mut tv, &proof, &columns, &spec, num_vars);
         assert!(
             matches!(res, Err(OblongVerifyError::Oblong(OblongError::RoundConsistency(_)))),
             "corrupt W must be rejected by the zerocheck, got {res:?}"
@@ -267,13 +294,13 @@ mod tests {
         let w: Vec<u32> = U.iter().zip(&V).map(|(a, b)| a & b).collect();
         let columns = [col_from_u32s(&U), col_from_u32s(&V), col_from_u32s(&w)];
         let num_vars = 3;
-        let r: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 + 3)).collect();
-        let z = gf(0x4242);
-        let gammas: Vec<Gf> = (0..num_vars).map(|i| gf(i as u64 + 300)).collect();
-        let proof = prove_oblong_and_relation(&columns, &F2HadamardSpec::plain(0, 1, 2), num_vars, &r, z, &gammas);
-        // Verify with W tied to column 0 (= U) instead of column 2 (= W).
+        let mut tp = Blake3Transcript::new();
+        let proof = prove_oblong_and_relation(&mut tp, &columns, &F2HadamardSpec::plain(0, 1, 2), num_vars);
+        // Verify with W tied to column 0 (= U) instead of column 2 (= W). The
+        // zerocheck still passes (same proof + transcript); the ψ_z tie rejects.
         let bad_spec = F2HadamardSpec::plain(0, 1, 0);
-        let res = verify_oblong_and_relation(&proof, &columns, &bad_spec, &r, z, &gammas);
+        let mut tv = Blake3Transcript::new();
+        let res = verify_oblong_and_relation(&mut tv, &proof, &columns, &bad_spec, num_vars);
         assert!(matches!(res, Err(OblongVerifyError::TieMismatch)), "got {res:?}");
     }
 }

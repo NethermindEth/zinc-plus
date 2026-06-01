@@ -279,29 +279,81 @@ fn fold_low(tbl: &[F], gamma: F) -> Vec<F> {
         .collect()
 }
 
-/// Prover for the standalone oblong AND zerocheck `A ⊙ B = C` (one relation).
+/// A Fiat–Shamir channel for the oblong AND zerocheck: absorb prover messages
+/// and sample `GF(2^128)` challenges. Kept transcript-agnostic so the `poly`
+/// crate has no transcript dependency — the `protocol` crate supplies a
+/// `Blake3Transcript` adapter, and [`ReplayChannel`] gives the
+/// explicit-challenge path used by the math tests.
+pub trait OblongChannel {
+    /// Absorb a prover message (the round message, or a round polynomial).
+    fn absorb(&mut self, scalars: &[F]);
+    /// Sample the next challenge.
+    fn sample(&mut self) -> F;
+}
+
+/// An [`OblongChannel`] that replays a fixed challenge sequence and ignores
+/// absorbs — the explicit-challenge path. The sequence is queried in sampling
+/// order: the `n` zerocheck challenges `r`, then the univariate-skip `z`, then
+/// the `n` Phase-2 sumcheck challenges `γ`.
+pub struct ReplayChannel {
+    seq: Vec<F>,
+    idx: usize,
+}
+
+impl ReplayChannel {
+    pub fn new(seq: Vec<F>) -> Self {
+        Self { seq, idx: 0 }
+    }
+
+    /// Build the replay sequence `[r…, z, γ…]` from explicit challenges.
+    fn from_challenges(r: &[F], z: F, gammas: &[F]) -> Self {
+        let mut seq = Vec::with_capacity(r.len().saturating_add(1).saturating_add(gammas.len()));
+        seq.extend_from_slice(r);
+        seq.push(z);
+        seq.extend_from_slice(gammas);
+        Self::new(seq)
+    }
+}
+
+impl OblongChannel for ReplayChannel {
+    fn absorb(&mut self, _scalars: &[F]) {}
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sample(&mut self) -> F {
+        let v = self.seq[self.idx];
+        self.idx += 1;
+        v
+    }
+}
+
+/// Prover for the oblong AND zerocheck `A ⊙ B = C` (one relation), driven by a
+/// Fiat–Shamir [`OblongChannel`]. The channel supplies the `n` zerocheck
+/// challenges `r` (first), then `z` (after the round message is absorbed), then
+/// each `γ` (after its round polynomial is absorbed) — so the challenges are not
+/// part of the returned proof.
 ///
-/// `*_words` are the packed operand columns (`2ⁿ` rows). `r` are the `n`
-/// row-variable zerocheck challenges; `z` is the univariate (bit) challenge;
-/// `gammas` are the `n` Phase-2 sumcheck challenges. (Challenges are passed
-/// explicitly here so the prototype's prove/verify share them without a
-/// transcript; Fiat-Shamir wiring is the integration step.)
+/// `*_words` are the packed operand columns (`2ⁿ` rows, `n = log2(len)`).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn prove_oblong_and(
+pub fn prove_oblong_and_channel<C: OblongChannel>(
+    ch: &mut C,
     a_words: &[u32],
     b_words: &[u32],
     c_words: &[u32],
-    r: &[F],
-    z: F,
-    gammas: &[F],
     ntt: &AdditiveNtt,
 ) -> OblongAndProof {
-    let n = r.len();
-    assert_eq!(a_words.len(), 1usize << n, "columns must have 2^n rows");
-    assert_eq!(gammas.len(), n, "need one sumcheck challenge per row variable");
+    let len = a_words.len();
+    let n = len.trailing_zeros() as usize;
+    assert_eq!(1usize << n, len, "columns must have a power-of-two row count");
+    assert_eq!(b_words.len(), len);
+    assert_eq!(c_words.len(), len);
 
-    let eq = eq_indicator(r);
+    // Zerocheck eq-randomness, sampled first.
+    let r: Vec<F> = (0..n).map(|_| ch.sample()).collect();
+    let eq = eq_indicator(&r);
+
+    // Phase 1: round message, then the univariate-skip challenge z.
     let round_message = univariate_round_message(a_words, b_words, c_words, &eq, ntt);
+    ch.absorb(&round_message);
+    let z = ch.sample();
 
     // Phase-1 → Phase-2 transition: fold each word at z into an MLE over rows.
     let lag_z = base_lagrange_at(z);
@@ -310,13 +362,17 @@ pub fn prove_oblong_and(
     let mut c: Vec<F> = c_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
     let mut eqt = eq;
 
+    // Phase 2: degree-≤3 sumcheck over the n row variables.
     let mut round_polys = Vec::with_capacity(n);
-    for &g in gammas {
-        round_polys.push(round_poly(&a, &b, &c, &eqt));
-        a = fold_low(&a, g);
-        b = fold_low(&b, g);
-        c = fold_low(&c, g);
-        eqt = fold_low(&eqt, g);
+    for _ in 0..n {
+        let g = round_poly(&a, &b, &c, &eqt);
+        ch.absorb(&g);
+        let gamma = ch.sample();
+        round_polys.push(g);
+        a = fold_low(&a, gamma);
+        b = fold_low(&b, gamma);
+        c = fold_low(&c, gamma);
+        eqt = fold_low(&eqt, gamma);
     }
 
     OblongAndProof {
@@ -328,41 +384,66 @@ pub fn prove_oblong_and(
     }
 }
 
-/// Verifier for the standalone oblong AND zerocheck. Reconstructs `R₀(z)` from
-/// the round message (base zeros ++ extension evals), runs the Phase-2
-/// sumcheck-consistency checks, and verifies the closing
-/// `(a·b − c)·eq(γ; r) = claim`.
-#[allow(clippy::arithmetic_side_effects)]
-pub fn verify_oblong_and(
-    proof: &OblongAndProof,
+/// Explicit-challenge prover: a thin wrapper over [`prove_oblong_and_channel`]
+/// with a [`ReplayChannel`]. `r`/`z`/`gammas` are the `n`+1+`n` challenges in
+/// sampling order. Used by the math tests; the `protocol` crate uses the
+/// channel form with a real transcript.
+pub fn prove_oblong_and(
+    a_words: &[u32],
+    b_words: &[u32],
+    c_words: &[u32],
     r: &[F],
     z: F,
     gammas: &[F],
+    ntt: &AdditiveNtt,
+) -> OblongAndProof {
+    let mut ch = ReplayChannel::from_challenges(r, z, gammas);
+    prove_oblong_and_channel(&mut ch, a_words, b_words, c_words, ntt)
+}
+
+/// Verifier for the oblong AND zerocheck, driven by a Fiat–Shamir
+/// [`OblongChannel`]. Samples `r`, reconstructs `R₀(z)` from the round message
+/// (base zeros ++ extension evals), runs the Phase-2 sumcheck-consistency checks
+/// (absorbing each round polynomial before sampling its `γ`, mirroring the
+/// prover), and verifies the closing `(a·b − c)·eq(γ; r) = claim`. `n` is the
+/// number of row variables.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn verify_oblong_and_channel<C: OblongChannel>(
+    ch: &mut C,
+    proof: &OblongAndProof,
+    n: usize,
 ) -> Result<AndCheckOutput, OblongError> {
-    let n = r.len();
     if proof.round_polys.len() != n {
         return Err(OblongError::Shape(proof.round_polys.len(), n));
     }
 
+    let r: Vec<F> = (0..n).map(|_| ch.sample()).collect();
+
     // Reconstruct R₀(z): the prover sends only the extension half; the base
     // half is zero iff the AND holds, so a corrupt C is caught right here at
     // round 0 (the reconstructed claim won't match g(0)+g(1)).
+    ch.absorb(&proof.round_message);
+    let z = ch.sample();
     let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
     let mut coeffs = vec![F::zero(); 2 * WORD_BITS];
     coeffs[WORD_BITS..].copy_from_slice(&proof.round_message);
     let mut claim = super::binary_subspace::extrapolate_over_subspace(&full, &coeffs, z);
 
     let dim2 = BinarySubspace::with_dim(2);
+    let mut gammas = Vec::with_capacity(n);
     for (k, g) in proof.round_polys.iter().enumerate() {
         if g[0] + g[1] != claim {
             return Err(OblongError::RoundConsistency(k));
         }
-        claim = super::binary_subspace::extrapolate_over_subspace(&dim2, g, gammas[k]);
+        ch.absorb(g);
+        let gamma = ch.sample();
+        claim = super::binary_subspace::extrapolate_over_subspace(&dim2, g, gamma);
+        gammas.push(gamma);
     }
 
     // Closing check: eq(γ; r) recomputed independently.
     let mut eq_star = F::one();
-    for (&g, &ri) in gammas.iter().zip(r) {
+    for (&g, &ri) in gammas.iter().zip(&r) {
         eq_star *= g * ri + (F::one() - g) * (F::one() - ri);
     }
     if (proof.a_eval * proof.b_eval - proof.c_eval) * eq_star != claim {
@@ -371,13 +452,25 @@ pub fn verify_oblong_and(
 
     let mut eval_point = Vec::with_capacity(n + 1);
     eval_point.push(z);
-    eval_point.extend_from_slice(gammas);
+    eval_point.extend_from_slice(&gammas);
     Ok(AndCheckOutput {
         a_eval: proof.a_eval,
         b_eval: proof.b_eval,
         c_eval: proof.c_eval,
         eval_point,
     })
+}
+
+/// Explicit-challenge verifier: a thin wrapper over
+/// [`verify_oblong_and_channel`] with a [`ReplayChannel`].
+pub fn verify_oblong_and(
+    proof: &OblongAndProof,
+    r: &[F],
+    z: F,
+    gammas: &[F],
+) -> Result<AndCheckOutput, OblongError> {
+    let mut ch = ReplayChannel::from_challenges(r, z, gammas);
+    verify_oblong_and_channel(&mut ch, proof, r.len())
 }
 
 #[cfg(test)]
