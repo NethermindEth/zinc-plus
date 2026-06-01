@@ -356,22 +356,27 @@ where
         debug_assert_eq!(mles.len(), 1 + self.relations.len() * 3 * D);
         let zero = F::zero_with_cfg(config);
         let half = 1usize << (num_vars - round); // number of point-pairs
-        // Degree-3 boundary points {0, 1, X, X+1}; x=0,1 read off directly,
-        // x=2,3 via `s0 + bp·(s1−s0)` (matches the generic Lagrange path).
-        let bp2 = F::from_with_cfg(2, config);
-        let bp3 = F::from_with_cfg(3, config);
+
         let eq = &mles[0].evaluations;
         let slices = &mles[1..];
         let relations = &self.relations;
         let weights = &self.weights;
 
-        // Chunk the hypercube points so each task streams a cache-resident
-        // sub-range of every slice (the local `g` stays in L1/L2) and the
-        // work parallelises — replacing the generic per-point scatter-gather
-        // across all 1536 slice `Vec`s.
+        // Work in COEFFICIENT space, not point-evaluations. The round poly is
+        //   M(X) = Σ_pt eq_pt(X) · Σ_{k,b} w_{k,b}·(U(X)·V(X) − W(X)),
+        // every slice linear in X. Per (k,b) the term U·V−W is a degree-2 poly
+        // whose coeffs come straight from the two folded halves (no lifting to
+        // boundary points): p0=u0·v0, p1=u0·Δv+Δu·v0, p2=Δu·Δv, then subtract
+        // W=(w0 + X·Δw). Accumulate the weighted coeffs g=(g0,g1,g2)=Σ w·t per
+        // point; multiplying by the linear eq_pt gives M's four coeffs. This is
+        // **7 muls/(k,b,pt)** vs the eval-form's 14 — it skips lifting U,V,W to
+        // the 4 boundary points. The generic comb can't do this (black box);
+        // the Hadamard structure is known here. Byte-identical: the same cubic
+        // M, evaluated at the same boundary points {0,1,X,X+1} at the end.
         const CHUNK: usize = 512;
         let n_chunks = half.div_ceil(CHUNK).max(1);
 
+        // Each chunk returns its partial of M's coeffs [m0, m1, m2, m3].
         let partials: Vec<[F; 4]> = cfg_into_iter!(0..n_chunks)
             .map(|c| {
                 let lo = c * CHUNK;
@@ -380,8 +385,8 @@ where
                     return [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
                 }
                 let clen = hi - lo;
-                // Pass 1: g[x·clen + (pt−lo)] = Σ_{k,b} w_{k,b}·(Uₓ·Vₓ − Wₓ).
-                let mut g = vec![zero.clone(); 4 * clen];
+                // Pass 1: G_pt coeffs (g0, g1, g2) in three contiguous bands.
+                let mut g = vec![zero.clone(); 3 * clen];
                 for (k, tri) in relations.iter().enumerate() {
                     for b in 0..D {
                         let w = &weights[k * D + b];
@@ -390,63 +395,72 @@ where
                         let ws = &slices[tri.w_col * D + b].evaluations;
                         for pt in lo..hi {
                             let li = pt - lo;
-                            let uu = lift4::<F>(u, pt, &bp2, &bp3, config);
-                            let vv = lift4::<F>(v, pt, &bp2, &bp3, config);
-                            let ww = lift4::<F>(ws, pt, &bp2, &bp3, config);
-                            for x in 0..4 {
-                                g[x * clen + li] +=
-                                    w.clone() * (uu[x].clone() * vv[x].clone() - ww[x].clone());
-                            }
+                            let u0 = F::new_unchecked_with_cfg(u[2 * pt].clone(), config);
+                            let u1 = F::new_unchecked_with_cfg(u[2 * pt + 1].clone(), config);
+                            let v0 = F::new_unchecked_with_cfg(v[2 * pt].clone(), config);
+                            let v1 = F::new_unchecked_with_cfg(v[2 * pt + 1].clone(), config);
+                            let w0 = F::new_unchecked_with_cfg(ws[2 * pt].clone(), config);
+                            let dw =
+                                F::new_unchecked_with_cfg(ws[2 * pt + 1].clone(), config) - w0.clone();
+                            // (U·V) coefficients via Karatsuba (3 muls): the
+                            // X² coeff is Δu·Δv, the X⁰ coeff u0·v0, and the X¹
+                            // coeff is u1·v1 − p0 − p2 (= u0·Δv + Δu·v0), so the
+                            // cross term costs no extra multiply.
+                            let p0 = u0.clone() * v0.clone();
+                            let p2 = (u1.clone() - u0) * (v1.clone() - v0);
+                            let p1 = u1 * v1 - p0.clone() - p2.clone();
+                            // Subtract W = w0 + Δw·X.
+                            let t0 = p0 - w0;
+                            let t1 = p1 - dw;
+                            let t2 = p2;
+                            g[li] += w.clone() * t0;
+                            g[clen + li] += w.clone() * t1;
+                            g[2 * clen + li] += w.clone() * t2;
                         }
                     }
                 }
-                // Pass 2: fold in the shared eq_r factor over this chunk.
-                let mut le = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+                // Pass 2: M_pt = eq_pt·G_pt; accumulate M's coeffs over the chunk.
+                let mut m = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
                 for pt in lo..hi {
                     let li = pt - lo;
-                    let ee = lift4::<F>(eq, pt, &bp2, &bp3, config);
-                    for x in 0..4 {
-                        le[x] += ee[x].clone() * g[x * clen + li].clone();
-                    }
+                    let e0 = F::new_unchecked_with_cfg(eq[2 * pt].clone(), config);
+                    let de =
+                        F::new_unchecked_with_cfg(eq[2 * pt + 1].clone(), config) - e0.clone();
+                    let g0 = g[li].clone();
+                    let g1 = g[clen + li].clone();
+                    let g2 = g[2 * clen + li].clone();
+                    m[0] += e0.clone() * g0.clone();
+                    m[1] += e0.clone() * g1.clone() + de.clone() * g0;
+                    m[2] += e0.clone() * g2.clone() + de.clone() * g1;
+                    m[3] += de * g2;
                 }
-                le
+                m
             })
             .collect();
 
-        // Sum the per-chunk partials (n_chunks is small).
-        let mut evals = vec![zero; 4];
+        // Sum the per-chunk partials → M's coefficients.
+        let mut m = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
         for p in &partials {
-            for (x, e) in evals.iter_mut().enumerate() {
-                *e += p[x].clone();
+            for (x, mc) in m.iter_mut().enumerate() {
+                *mc += p[x].clone();
             }
         }
-        evals
-    }
-}
 
-/// Lift a bit-slice's two folded halves at point-pair `pt` to its four
-/// degree-3 boundary values `[s(0), s(1), s(X), s(X+1)]`. Each MLE is linear
-/// in the round variable: `s(0)=s0`, `s(1)=s1`, `s(b)=s0 + b·(s1−s0)` for the
-/// off-hypercube points — the same convention as the generic prover, so the
-/// result is bit-identical.
-#[inline]
-#[allow(clippy::arithmetic_side_effects)]
-fn lift4<F: InnerTransparentField>(
-    s: &[F::Inner],
-    pt: usize,
-    bp2: &F,
-    bp3: &F,
-    config: &F::Config,
-) -> [F; 4] {
-    let s0 = F::new_unchecked_with_cfg(s[2 * pt].clone(), config);
-    let s1 = F::new_unchecked_with_cfg(s[2 * pt + 1].clone(), config);
-    let ds = s1.clone() - s0.clone();
-    [
-        s0.clone(),
-        s1,
-        s0.clone() + bp2.clone() * ds.clone(),
-        s0 + bp3.clone() * ds,
-    ]
+        // Evaluate the cubic M at {0, 1, X, X+1} → the four evals the framework
+        // expects (same boundary convention as the generic path ⇒ identical).
+        let horner = |t: &F| -> F {
+            m[0].clone()
+                + t.clone() * (m[1].clone() + t.clone() * (m[2].clone() + t.clone() * m[3].clone()))
+        };
+        let bp2 = F::from_with_cfg(2, config);
+        let bp3 = F::from_with_cfg(3, config);
+        vec![
+            m[0].clone(),
+            m[0].clone() + m[1].clone() + m[2].clone() + m[3].clone(),
+            horner(&bp2),
+            horner(&bp3),
+        ]
+    }
 }
 
 /// Like [`prepare_hadamard_group`], but supplies a round-1
