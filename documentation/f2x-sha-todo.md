@@ -1469,7 +1469,30 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   ever revived" note) or slice *width* (tower-subfield representation), not
   slice *count*.
 
-### Specialised fused Hadamard sumcheck prover for rounds 2..n (the real nvars=16 lever — IDENTIFIED, building)
+### Specialised fused Hadamard sumcheck prover for rounds 2..n (✅ SHIPPED, commit `9505876` — −13% discharge at nvars=16, byte-identical, size-gated)
+- **✅ SHIPPED RESULT (commit `9505876`)**: built exactly the fix below. Added
+  an opt-in `RoundPolyEvaluator` hook to `ProverState`/`MultiDegreeSumcheckGroup`
+  (`prove_round` uses it for the round-poly evals instead of the generic
+  per-point gather; fold + message formation unchanged ⇒ byte-identical).
+  `HadamardRoundEvaluator` loops `(relation,bit)`-outer / point-inner, streams
+  each triple's 3 slices, factors `eq_r` into a 2nd pass, precomputes
+  `γ'^k·σ^b`, and parallelises over point-chunks (local accumulator stays in
+  L1/L2). **Measured (M-series, `parallel simd unchecked`):** nvars=16 discharge
+  **554 → 479 ms (−13%)**, Prove-Hadamard 600 → 525 ms; nvars=9 unchanged.
+  **Size-gated at `num_vars >= 14`** (`FUSED_MIN_VARS`): the fused path wins once
+  the 1536 slices spill cache (≈200 MB at 14, ≈800 MB at 16) but its per-chunk
+  setup *regresses* tiny discharges (+~25% at nvars=9), so production nvars=9
+  stays on the generic path. Byte-identity gated by `fused_matches_generic_large`
+  (nvars=14, fused active) + `fast_path_matches_generic` (nvars=3, round-1 only);
+  60 piop + 9 f2_hadamard tests green.
+- **Follow-up — the win is partial (≈13%), so the discharge is also arithmetic-
+  bound, not purely the gather.** The remaining ~479 ms at nvars=16 is ~200 M
+  GF(2^128) muls (the degree-3 `eq·(U·V−W)` evals over 1536 slices). Next lever:
+  **SIMD-batch the GF128 arithmetic** (the codebase already has x4 `psi_α`
+  CLMUL batching) — process the 4 boundary points / multiple `(k,b)` per
+  instruction. Bigger, separate effort. Also: tune `FUSED_MIN_VARS` (measure the
+  12–15 crossover) and `CHUNK` (512).
+- **Original profiling + design (for context):**
 - **Profiling (2026-06, nvars=16, `parallel simd unchecked`, this box)**: the
   Hadamard discharge is **~92% of the whole prove** — `Prove-NoHadamard` ≈ 46
   ms vs `Prove-Hadamard` ≈ 600 ms (so the discharge alone is ~554 ms). The
