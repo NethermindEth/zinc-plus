@@ -334,7 +334,7 @@ fn cell_from_mask<const D: usize>(m: u64) -> BinaryPoly<D> {
 /// Build the three packed operand columns `[U, V, W]` of an adder relation
 /// (column-major over rows). See [`F2AdderSpec`] for the construction.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_adder_operand_columns<const D: usize>(
+pub(crate) fn build_adder_operand_columns<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     spec: &F2AdderSpec,
     num_vars: usize,

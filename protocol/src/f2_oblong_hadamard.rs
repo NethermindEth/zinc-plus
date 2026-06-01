@@ -48,8 +48,8 @@ use zinc_poly::univariate::oblong_and::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
 use crate::f2_hadamard::{
-    F2HadamardSpec, F2Operand, build_operand_column, cell_mask, derive_operand_parents,
-    distinct_pairs, pair_alpha_evals,
+    F2AdderSpec, F2HadamardSpec, F2Operand, adder_operand_alpha_evals, build_adder_operand_columns,
+    build_operand_column, cell_mask, derive_operand_parents, distinct_pairs, pair_alpha_evals,
 };
 
 type Gf = BinaryFieldGF128;
@@ -169,22 +169,37 @@ pub fn verify_oblong_and_relation<T: Transcript>(
 /// zero-operand relations (`0 ⊙ 0 = 0`, vacuously satisfied). One univariate-skip
 /// round + one Phase-2 sumcheck cover all relations (Binius's stacking — vs the
 /// current discharge's `γ`-batch).
+/// Convert a built `BinaryPoly<D>` operand column to `u32` words.
+fn words_of(col: &DenseMultilinearExtension<BinaryPoly<D>>) -> Vec<u32> {
+    col.evaluations.iter().map(|c| cell_mask::<D>(c) as u32).collect()
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prove_oblong_and_batch<T: Transcript>(
     transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    specs: &[F2HadamardSpec],
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
     num_vars: usize,
 ) -> OblongAndProof {
     let n = 1usize << num_vars;
-    let k_pad = specs.len().next_power_of_two().max(1);
+    let k = and_specs.len() + adder_specs.len();
+    let k_pad = k.next_power_of_two().max(1);
     let mut a = Vec::with_capacity(k_pad * n);
     let mut b = Vec::with_capacity(k_pad * n);
     let mut c = Vec::with_capacity(k_pad * n);
-    for spec in specs {
+    // AND relations first, then adders (Binius carry-AND form): the stack order
+    // is the relation index, and the ψ_z tie derives evals in the same order.
+    for spec in and_specs {
         a.extend(operand_words(columns, &spec.u, num_vars));
         b.extend(operand_words(columns, &spec.v, num_vars));
         c.extend(operand_words(columns, &spec.w, num_vars));
+    }
+    for adder in adder_specs {
+        let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
+        a.extend(words_of(&uvw[0]));
+        b.extend(words_of(&uvw[1]));
+        c.extend(words_of(&uvw[2]));
     }
     // Pad the stack to k_pad·n rows with zero-operand relations.
     a.resize(k_pad * n, 0);
@@ -206,10 +221,11 @@ pub fn verify_oblong_and_batch<T: Transcript>(
     transcript: &mut T,
     proof: &OblongAndProof,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    specs: &[F2HadamardSpec],
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
     num_vars: usize,
 ) -> Result<(), OblongVerifyError> {
-    let k = specs.len();
+    let k = and_specs.len() + adder_specs.len();
     let k_pad = k.next_power_of_two().max(1);
     let log_k = k_pad.trailing_zeros() as usize;
     let stacked_nvars = num_vars + log_k;
@@ -223,12 +239,20 @@ pub fn verify_oblong_and_batch<T: Transcript>(
     let z = out.eval_point[0];
     let gammas = &out.eval_point[1..];
     let (gamma_word, gamma_rel) = gammas.split_at(num_vars);
-
-    // ψ_z(col↓Δ)(γ_word) for the distinct pairs, then per-relation operand evals.
     let lagrange_z = base_lagrange_at(z).to_vec();
-    let pairs = distinct_pairs(specs);
+
+    // Per-relation operand ψ_z evals at γ_word, in stack order (ANDs, then
+    // adders). AND operands derive soundly from committed columns via the pair
+    // evals; adder operands carry the derived carry — their ψ_z evals are
+    // recomputed here from the columns (honest-prover; the sound binding of the
+    // carry is the row/bit-shift discharge, ledger Issue 1).
+    let pairs = distinct_pairs(and_specs);
     let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, gamma_word);
-    let parents = derive_operand_parents(specs, &pairs, &pair_evals, &lagrange_z);
+    let mut parents = derive_operand_parents(and_specs, &pairs, &pair_evals, &lagrange_z);
+    for adder in adder_specs {
+        let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
+        parents.extend(adder_operand_alpha_evals::<D>(&uvw, &lagrange_z, gamma_word));
+    }
 
     // a/b/c_eval = Σ_rel eq(rel; γ_rel)·ψ_z(operand_rel)(γ_word).
     let eq_rel = eq_indicator(gamma_rel); // length k_pad
@@ -387,13 +411,14 @@ mod tests {
 
     fn round_trip_batch(
         columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
-        specs: &[F2HadamardSpec],
+        and_specs: &[F2HadamardSpec],
+        adder_specs: &[F2AdderSpec],
         num_vars: usize,
     ) {
         let mut tp = Blake3Transcript::new();
-        let proof = prove_oblong_and_batch(&mut tp, columns, specs, num_vars);
+        let proof = prove_oblong_and_batch(&mut tp, columns, and_specs, adder_specs, num_vars);
         let mut tv = Blake3Transcript::new();
-        verify_oblong_and_batch(&mut tv, &proof, columns, specs, num_vars)
+        verify_oblong_and_batch(&mut tv, &proof, columns, and_specs, adder_specs, num_vars)
             .expect("batched oblong round-trip + ψ_z tie");
     }
 
@@ -425,7 +450,30 @@ mod tests {
                 w: F2Operand::col(7),
             },
         ];
-        round_trip_batch(&columns, &specs, 3);
+        round_trip_batch(&columns, &specs, &[], 3);
+    }
+
+    #[test]
+    fn batch_and_plus_adder_round_trips() {
+        // 1 AND (U⊙V=W0, cols 0,1,2) + 1 adder t=x+y (cols 3,4,5). K=2.
+        let u0 = U.to_vec();
+        let v0 = V.to_vec();
+        let w0: Vec<u32> = u0.iter().zip(&v0).map(|(x, y)| x & y).collect();
+        let xv: Vec<u32> = V.to_vec();
+        let yv: Vec<u32> = U.iter().map(|v| v.rotate_right(3)).collect();
+        let tv: Vec<u32> = xv.iter().zip(&yv).map(|(a, b)| a.wrapping_add(*b)).collect();
+        let columns = [
+            col_from_u32s(&u0),
+            col_from_u32s(&v0),
+            col_from_u32s(&w0),
+            col_from_u32s(&tv),
+            col_from_u32s(&xv),
+            col_from_u32s(&yv),
+        ];
+        let tm = |col, row_shift| crate::f2_hadamard::F2OperandTerm { col, row_shift };
+        let and_specs = [F2HadamardSpec::plain(0, 1, 2)];
+        let adder_specs = [F2AdderSpec::uniform(tm(3, 0), tm(4, 0), tm(5, 0))];
+        round_trip_batch(&columns, &and_specs, &adder_specs, 3);
     }
 
     #[test]
@@ -446,9 +494,9 @@ mod tests {
         ];
         let specs = [F2HadamardSpec::plain(0, 1, 2), F2HadamardSpec::plain(3, 4, 5)];
         let mut tp = Blake3Transcript::new();
-        let proof = prove_oblong_and_batch(&mut tp, &columns, &specs, 3);
+        let proof = prove_oblong_and_batch(&mut tp, &columns, &specs, &[], 3);
         let mut tv = Blake3Transcript::new();
-        let res = verify_oblong_and_batch(&mut tv, &proof, &columns, &specs, 3);
+        let res = verify_oblong_and_batch(&mut tv, &proof, &columns, &specs, &[], 3);
         assert!(
             matches!(res, Err(OblongVerifyError::Oblong(OblongError::RoundConsistency(_)))),
             "got {res:?}"
