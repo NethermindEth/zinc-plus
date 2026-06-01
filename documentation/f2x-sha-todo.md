@@ -1305,6 +1305,21 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   `fast_path_matches_generic` (proof stays byte-identical) — so correctness
   is mechanical to verify; the risk is purely in the multidim bind/sum
   bookkeeping. Effort ~150-200 lines.
+- **⚠ Perf caveat found while scoping the wiring**: a **naïve** `v`-dim grid
+  prefix is ~neutral-to-regression at sizes that fit RAM. Of the `4^v` grid
+  points only `2^v` are on the `{0,1}` hypercube (cheap packed-bit / select
+  arithmetic); the other `4^v − 2^v` (e.g. 12 of 16 at `v=2`) are
+  off-hypercube, where the operand slices interpolate to general
+  GF(2^128) values → full `bb` arithmetic. The naïve prefix totals ~1.33×
+  the arithmetic of generic rounds 1+2 (at `v=2`), so it only pays off where
+  the **memory** reduction dominates (nvars≥~19), and even there `v=2`
+  merely halves the materialised slices. **The shippable win needs the
+  efficient multiproduct (Dao Procedure 1, `O(d log d)` `bb` via
+  extrapolation, + the §6 eq-opt)** so the off-hypercube grid isn't
+  recomputed per point — that's the real next algorithmic increment, larger
+  than the bind/sum wiring. Recommendation: implement Procedure 1 first (or
+  alongside), not the naïve grid, else the wiring lands a correct-but-not-
+  faster path.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
