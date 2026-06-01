@@ -1438,9 +1438,21 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   volume.
 - **Implication for priority**: the `×32` GF(2¹²⁸) slice volume is THE bottleneck
   (memory-bound, poor scaling). Target reducing the materialised data — word-level
-  operands (Binius AND reduction) and/or a smaller field for the slices
-  (GF(2⁸)/tower) — over further sumcheck-arithmetic micro-opts. This subsumes the
-  univariate-skip entry below as the "sumcheck" half of the same rearchitecture.
+  operands (Binius AND reduction) — over further sumcheck-arithmetic micro-opts.
+- **▶ CONCRETE PORT PLAN: `documentation/f2-hadamard-oblong-port-plan.md`** (after
+  reading the real Binius64 source at `~/binius64`). Key corrections to the
+  univariate-skip entry below (which conflated *original* Binius with **Binius64**):
+  **(1) the field is SHARED** — Binius64 `B128` is the **GHASH GF(2¹²⁸)**
+  (`X¹²⁸+X⁷+X²+X+1`, `0x87`), *identical to our `BinaryFieldGF128`*; **no tower
+  rewrite** (the original Binius tower is a different system; Binius64 uses one
+  `GF(2⁸)` subfield only for ≤3 deterministic skip challenges). **(2) The target
+  is the `OblongZerocheckProver`** (`~/binius64/crates/prover/src/and_reduction/`,
+  verifier `crates/verifier/src/protocols/bitand.rs`): operands stay packed
+  (`Vec<Word>`), the bit dim is a univariate-skip round + additive NTT, the 1536
+  slices are never materialised. **(3) It's a port over our field**, not a
+  re-architecture; the real risk is the integration seam (tying operand evals to
+  our columns via ψ_α / a shift-reduction analogue) — plan §4. Benchmark target:
+  Binius's ~123 ns/AND (README: 2²⁰ ANDs in 128.58 ms) vs our ~398 ns/relation.
 
 ### ⭐ Univariate skip / small-characteristic packed sumcheck — the Binius scaling lever we're MISSING (IDENTIFIED; big, verifier-visible protocol change)
 - **Why this matters**: the whole discharge runs the sumcheck in **GF(2¹²⁸)**,

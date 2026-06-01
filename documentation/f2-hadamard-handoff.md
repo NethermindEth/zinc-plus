@@ -72,11 +72,28 @@ changing the *representation* (fewer/smaller slices) can.
 
 ## The next lever — WORD-LEVEL AND reduction (the real fix)
 
+**▶ See the concrete plan: [`f2-hadamard-oblong-port-plan.md`](f2-hadamard-oblong-port-plan.md).**
+After reading the actual Binius64 source (`~/binius64`), the target is its
+**oblong univariate zerocheck** AND reduction: keep operands as packed words
+(`Vec<Word>`), handle the bit dimension with a univariate-skip round + additive
+NTT, never materialise the 1536 GF(2¹²⁸) slices.
+
+Two corrections to earlier notes in this repo (which conflated the *original*
+Binius with **Binius64**):
+- **The field is SHARED, not a tower.** Binius64 `B128` is the **GHASH GF(2¹²⁸)**
+  (`X¹²⁸+X⁷+X²+X+1`, reduces with `0x87`) — *identical to our `BinaryFieldGF128`*.
+  No tower-field rewrite. (The original Binius's heavy GF(2)/GF(2⁸) tower packing
+  is a different system.) Binius64 uses a single `GF(2⁸)` subfield *only* for ≤3
+  deterministic small-field challenges in the skip round.
+- So adopting it is a **port over our existing field**, not a field
+  re-architecture. The real risk is the **integration seam** (tying the oblong
+  zerocheck's operand evals to our committed columns via ψ_α / a shift-reduction
+  analogue), not the field or the zerocheck. See the port plan §4.
+
 Represent the operands as **packed words** (≈48 word-columns) instead of **1536
 bit-slices**, so the discharge streams ~32× less data ⇒ no longer memory-bound,
-scales across cores, and the arithmetic shrinks too. This is Binius64's approach
-("constraint systems 64-fold smaller than bits"). It is **not** byte-identical —
-it changes how `W = U ⊙ V` is argued.
+scales across cores, and the arithmetic shrinks too. It is **not** byte-identical —
+it changes how `W = U ⊙ V` is argued (verifier-visible).
 
 **What to scope first (design pass, before any code):**
 - The mechanism to argue bitwise `W = U ⊙ V` over *packed* operands without the
