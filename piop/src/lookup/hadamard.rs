@@ -40,6 +40,7 @@ use crate::{
     CombFn,
     sumcheck::{
         multi_degree::{MultiDegreeSumcheckGroup, Round1FastPath, Round1Output},
+        multiproduct::{multi_extrapolate, multi_product_eval},
         prover::ProverState as SumcheckProverState,
     },
 };
@@ -537,12 +538,15 @@ where
     let zero = F::zero_with_cfg(config);
     let one = F::one_with_cfg(config);
     let half = 1usize << (num_vars - 2);
-    // T[i*4+j] = Σ_{x''} E_other(x'') · (comb sans the skipped-var eq factor).
-    let mut t = vec![zero.clone(); 16];
+    // T over U_2^2 (the comb sans its eq factor is degree 2; multiproduct
+    // grid index `i + 3·j`): Σ_{x''} E_other(x'') Σ_k γ'^k Σ_b σ^b
+    // (U_b·V_b − W_b). Each product is computed with Procedure 1
+    // (`multi_product_eval`) rather than re-evaluated per grid point, so the
+    // off-hypercube extrapolation isn't redone for every grid cell.
+    let mut t9 = vec![zero.clone(); 9];
     for xpp in 0..half {
         let eo = F::new_unchecked_with_cfg(eq_other_table[xpp].clone(), config);
         let base = 4 * xpp;
-        // Corner masks (rows base+{0,1,2,3}) for each operand column.
         let masks: Vec<[u64; 4]> = operand_cols
             .iter()
             .map(|col| {
@@ -554,46 +558,42 @@ where
                 ]
             })
             .collect();
-        for i in 0..4 {
-            let omsi = one.clone() - grid_pts[i].clone();
-            for j in 0..4 {
-                let omtj = one.clone() - grid_pts[j].clone();
-                // Bilinear weights for corners (X1,X2) ∈ {(0,0),(1,0),(0,1),(1,1)}.
-                let bw = [
-                    omsi.clone() * omtj.clone(),
-                    grid_pts[i].clone() * omtj.clone(),
-                    omsi.clone() * grid_pts[j].clone(),
-                    grid_pts[i].clone() * grid_pts[j].clone(),
-                ];
-                let bilin = |m: &[u64; 4], b: usize| -> F {
-                    let mut a = zero.clone();
-                    for (c, bwc) in bw.iter().enumerate() {
-                        if (m[c] >> b) & 1 == 1 {
-                            a = a + bwc.clone();
-                        }
+        // Corner evals over {0,1}^2 (index X1 + 2·X2) of operand `op` bit `b`.
+        let corner = |op: usize, b: usize| -> Vec<F> {
+            let m = &masks[op];
+            (0..4)
+                .map(|c| {
+                    if (m[c] >> b) & 1 == 1 {
+                        one.clone()
+                    } else {
+                        zero.clone()
                     }
-                    a
-                };
-                let mut g = zero.clone();
-                for (k, tri) in relations.iter().enumerate() {
-                    let (um, vm, wm) = (&masks[tri.u_col], &masks[tri.v_col], &masks[tri.w_col]);
-                    let mut bit_acc = zero.clone();
-                    for b in 0..D {
-                        let (ub, vb, wb) = (bilin(um, b), bilin(vm, b), bilin(wm, b));
-                        bit_acc = bit_acc + sigma_powers[b].clone() * (ub * vb - wb);
-                    }
-                    g = g + gamma_powers[k].clone() * bit_acc;
+                })
+                .collect()
+        };
+        for (k, tri) in relations.iter().enumerate() {
+            let gpow_eo = gamma_powers[k].clone() * eo.clone();
+            for b in 0..D {
+                let uv =
+                    multi_product_eval(&[corner(tri.u_col, b), corner(tri.v_col, b)], 2, config);
+                let w_ext = multi_extrapolate(corner(tri.w_col, b), 2, 1, 2, config);
+                let weight = gpow_eo.clone() * sigma_powers[b].clone();
+                for (tg, (uvg, wg)) in t9.iter_mut().zip(uv.iter().zip(w_ext.iter())) {
+                    *tg = tg.clone() + weight.clone() * (uvg.clone() - wg.clone());
                 }
-                t[i * 4 + j] = t[i * 4 + j].clone() + eo.clone() * g;
             }
         }
     }
-    // Fold in the skipped-var eq factor: q[i][j] = eq(grid_i,ic0)·eq(grid_j,ic1)·T.
+    // Lift T from U_2^2 → U_3^2 (degree 3 = eq·U·V), then fold in the
+    // skipped-var eq factor. Multiproduct index is `i + 4·j`; the prefix grid
+    // this returns is `i*4 + j` (var-0 row, var-1 col), so transpose here.
+    let t16 = multi_extrapolate(t9, 2, 2, 3, config);
     let mut q = vec![zero; 16];
     for i in 0..4 {
         for j in 0..4 {
-            q[i * 4 + j] =
-                eq1(&grid_pts[i], ic0, config) * eq1(&grid_pts[j], ic1, config) * t[i * 4 + j].clone();
+            q[i * 4 + j] = eq1(&grid_pts[i], ic0, config)
+                * eq1(&grid_pts[j], ic1, config)
+                * t16[i + 4 * j].clone();
         }
     }
     q
