@@ -1401,6 +1401,38 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 - **Optional (only if revived)**: generalise `num_skip` past 2 (`v`-dim grid +
   multidim bind/sum) — moot unless the bit-packed prefix above lands first.
 
+### ⭐⭐ ROOT CAUSE of the Binius gap: the discharge is MEMORY-BANDWIDTH-BOUND (1536 GF(2¹²⁸) slices) — the real lever is WORD-LEVEL, not the sumcheck
+- **The decisive measurement (2026-06, M4)**: Prove-Hadamard nvars=16 is **1085
+  ms single-thread → 464 ms on 10 cores = only 2.34× scaling**. A compute-bound
+  job on the M4's ~6 P-equivalents should scale ~6×; 2.34× means the discharge
+  is **memory-bandwidth-bound**, leaving most cores idle.
+- **Why**: the discharge materialises **1536 GF(2¹²⁸) slices ≈ 1.6 GB**
+  (`K·3·D = 16·3·32` bit-slices × 16 B) and streams them every round. Bandwidth,
+  not CLMUL, is the cap. This is the `×D=32` bit-split × the 16-byte field.
+- **Binius vs us, hardware-normalised**: Binius64 = **111.82 ms proof for 1365
+  keccak-f on a 64-core Graviton4** (irreducible.com/posts/announcing-binius64
+  benchmarks; their published numbers are caveated/"flawed, removed"). Ours =
+  464 ms / 963 SHA-256 on 10-core M4. The wall-clock gap is *partly* hardware
+  (64 vs 10 cores) + hash type (keccak≠SHA), but our **2.34× scaling** shows that
+  on equal HW we'd still be ~3–4× slower — because Binius's **word-level / GF(2)
+  representation is ~32× less data** ("64-fold smaller than bits"), so it is NOT
+  memory-bound (scales to 64 cores *and* cheaper per-core).
+- **Reconciles the whole investigation**: (a) the shipped fused evaluator
+  (−24.5%, `9505876`+`7a27606`) fixed the *access pattern* but NOT the root
+  cause — it still streams 1536 GF(2¹²⁸) slices; (b) the byte-identical
+  small-value prover (closed, ~624×/term) also wouldn't fix it — same slice
+  volume post-skip; (c) **only the WORD-LEVEL reformulation reduces the data
+  ~32×**, killing both the memory-bound scaling *and* the arithmetic cost. So the
+  real Binius-scale lever is the **word-level AND reduction** (drop the `×D=32`
+  bit-slice materialisation), more than the sumcheck small-field tricks below.
+  The byte-identical paths can't reach it because they don't change the data
+  volume.
+- **Implication for priority**: the `×32` GF(2¹²⁸) slice volume is THE bottleneck
+  (memory-bound, poor scaling). Target reducing the materialised data — word-level
+  operands (Binius AND reduction) and/or a smaller field for the slices
+  (GF(2⁸)/tower) — over further sumcheck-arithmetic micro-opts. This subsumes the
+  univariate-skip entry below as the "sumcheck" half of the same rearchitecture.
+
 ### ⭐ Univariate skip / small-characteristic packed sumcheck — the Binius scaling lever we're MISSING (IDENTIFIED; big, verifier-visible protocol change)
 - **Why this matters**: the whole discharge runs the sumcheck in **GF(2¹²⁸)**,
   but its bit-slices `U_b,V_b,W_b` are **GF(2)-valued** on the hypercube — i.e.
