@@ -287,6 +287,40 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         }
     }
 
+    // -- Hadamard discharge components (all empty unless hadamard_specs
+    // were registered). Before the Approach-B discharge these weren't in
+    // the breakdown, so a with- vs without-Hadamard size comparison came
+    // out byte-identical; count them so the delta is real. The zerocheck
+    // `sumcheck` is the bulk; `bit_slice_evals` + the `r*_H` `pair_evals`
+    // and trusted `adder_parents` are 16-byte GF(2^128) values each.
+    let (had_sumcheck, had_bit_slice_evals) = match &proof.uair.hadamard_proof {
+        Some(h) => {
+            let mut sc = vec![0u8; h.sumcheck_proof.get_num_bytes()];
+            h.sumcheck_proof.write_transcription_bytes_exact(&mut sc);
+            let mut bse = vec![0u8; h.bit_slice_evals.len() * ALPHA_BYTES];
+            for (chunk, v) in bse.chunks_mut(ALPHA_BYTES).zip(&h.bit_slice_evals) {
+                v.inner().write_transcription_bytes_exact(chunk);
+            }
+            (sc, bse)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let mut had_pair_evals = vec![0u8; proof.uair.hadamard_pair_evals.len() * ALPHA_BYTES];
+    for (chunk, v) in had_pair_evals
+        .chunks_mut(ALPHA_BYTES)
+        .zip(&proof.uair.hadamard_pair_evals)
+    {
+        v.inner().write_transcription_bytes_exact(chunk);
+    }
+    let mut had_adder_parents =
+        vec![0u8; proof.uair.hadamard_adder_parents.len() * ALPHA_BYTES];
+    for (chunk, v) in had_adder_parents
+        .chunks_mut(ALPHA_BYTES)
+        .zip(&proof.uair.hadamard_adder_parents)
+    {
+        v.inner().write_transcription_bytes_exact(chunk);
+    }
+
     vec![
         ("commitment.root", commitment),
         ("uair.alpha", alpha),
@@ -302,6 +336,10 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         ("open.opened/values", opened_values),
         ("open.opened/merkle", opened_merkle),
         ("open.opened/headers", opened_headers),
+        ("uair.hadamard/sumcheck", had_sumcheck),
+        ("uair.hadamard/bit_slice_evals", had_bit_slice_evals),
+        ("uair.hadamard/pair_evals", had_pair_evals),
+        ("uair.hadamard/adder_parents", had_adder_parents),
     ]
 }
 
@@ -2352,6 +2390,201 @@ fn micro_benches(c: &mut Criterion) {
     group.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Hadamard discharge A/B: cost of registering the 16 SHA-256 Hadamard
+// relations (the Approach-B discharge) vs the `&[]`-spec path the rest of
+// the bench measures.
+// ---------------------------------------------------------------------------
+
+/// Build the SHA-256 Hadamard relation layout for a `2^num_vars`-row
+/// trace. Mirror of the `sha256_f2_hadamard_layout` test helper in
+/// `f2_prove.rs` — just column-index plumbing from `sha256_f2::cols`
+/// (the relation topology lives in `Sha256F2HadamardLayout`). protocol
+/// can't read `cols` (test-uair is only a dev-dep), but the bench can.
+fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha256F2HadamardLayout {
+    use zinc_test_uair::sha256_f2::cols;
+    zinc_protocol::f2_hadamard::Sha256F2HadamardLayout {
+        num_vars,
+        rows_per_comp: cols::ROWS_PER_COMP,
+        rounds_per_comp: cols::ROUNDS_PER_COMP,
+        num_compressions: cols::num_compressions(num_vars),
+        pa_a: cols::PA_A,
+        pa_e: cols::PA_E,
+        pa_k: cols::PA_K,
+        w_a: cols::W_A,
+        w_e: cols::W_E,
+        w_w: cols::W_W,
+        w_sigma0: cols::W_SIGMA0,
+        w_sigma1: cols::W_SIGMA1,
+        w_sig0: cols::W_SIG0,
+        w_sig1: cols::W_SIG1,
+        w_uef: cols::W_UEF,
+        w_uneg_e_g: cols::W_UNEG_E_G,
+        w_maj: cols::W_MAJ,
+        w_t1: cols::W_T1,
+        w_t2: cols::W_T2,
+        w_w_s1: cols::W_W_S1,
+        w_w_s2: cols::W_W_S2,
+        w_t1_s1: cols::W_T1_S1,
+        w_t1_s2: cols::W_T1_S2,
+        w_t1_s3: cols::W_T1_S3,
+        w_t1_s4: cols::W_T1_S4,
+    }
+}
+
+/// A/B the Approach-B Hadamard discharge cost: the same `prove_f2_full*`
+/// / `verify_f2_full*` family run **with** the 16 SHA-256 Hadamard
+/// relations (3 ANDs + 13 adders, from `Sha256F2HadamardLayout`) vs
+/// **without** (the `&[]` specs the rest of the bench uses). The delta
+/// between the `*-Hadamard` and `*-NoHadamard` cases is the discharge
+/// overhead — on the prover: the per-relation Hadamard zerocheck plus the
+/// pointed-shift terms folded into the main multipoint-eval; on the
+/// verifier: the recombination + the pointed-shift subclaim check; in the
+/// proof: the Hadamard sumcheck messages + pair-evals.
+///
+/// Both sides use the NON-pre-paired entry (`prove_f2_full_with_*`, not
+/// the pre-paired e2e entry), so each includes the witness pairing and the
+/// A/B delta isolates the discharge. Absolute numbers therefore run a
+/// touch higher than the e2e `Prove` headline (which amortises pairing).
+fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &ProverFixture) {
+    let (and_specs, adder_specs) = sha256_f2_hadamard_layout(fx.num_vars).relations();
+    assert_eq!(and_specs.len(), 3, "expected 3 AND relations (C12–C14)");
+    assert_eq!(adder_specs.len(), 13, "expected 13 adder relations (C5–C11)");
+
+    let bit_ops = sha_f2_bit_op_virtuals();
+    let public_cols = &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB];
+
+    // -- Prove A/B --
+    group.bench_function(BenchmarkId::new("Prove-NoHadamard", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
+                &mut transcript,
+                &fx.pp,
+                &fx.trace,
+                &[],
+                &bit_ops,
+                fx.num_vars,
+                sha256_f2_project_scalar::<R>,
+                BENCH_NUM_OPENINGS,
+            )
+            .expect("prove (no hadamard) should succeed");
+            black_box(proof);
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("Prove-Hadamard", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_hadamard(
+                &mut transcript,
+                &fx.pp,
+                &fx.trace,
+                &[],
+                &bit_ops,
+                &and_specs,
+                &adder_specs,
+                fx.num_vars,
+                sha256_f2_project_scalar::<R>,
+                BENCH_NUM_OPENINGS,
+            )
+            .expect("prove (hadamard) should succeed");
+            black_box(proof);
+        });
+    });
+
+    // Build both proofs once for the verify benches + size report.
+    let proof_no_had = {
+        let mut t = Blake3Transcript::new();
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
+            &mut t,
+            &fx.pp,
+            &fx.trace,
+            &[],
+            &bit_ops,
+            fx.num_vars,
+            sha256_f2_project_scalar::<R>,
+            BENCH_NUM_OPENINGS,
+        )
+        .expect("prove (no hadamard) for verify bench")
+    };
+    let proof_had = {
+        let mut t = Blake3Transcript::new();
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut t,
+            &fx.pp,
+            &fx.trace,
+            &[],
+            &bit_ops,
+            &and_specs,
+            &adder_specs,
+            fx.num_vars,
+            sha256_f2_project_scalar::<R>,
+            BENCH_NUM_OPENINGS,
+        )
+        .expect("prove (hadamard) for verify bench")
+    };
+    // Proof-size impact of the discharge (raw + zstd-3), printed once.
+    eprint_f2_proof_size(&format!("{id} NoHadamard"), &proof_no_had);
+    eprint_f2_proof_size(&format!("{id} Hadamard"), &proof_had);
+
+    // -- Verify A/B --
+    group.bench_function(BenchmarkId::new("Verify-NoHadamard", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let subclaim = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full_with_bit_ops(
+                &mut transcript,
+                &fx.pp,
+                &proof_no_had,
+                &[],
+                &bit_ops,
+                public_cols,
+                fx.num_vars,
+                fx.num_primary,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+            .expect("verify (no hadamard) should succeed");
+            black_box(subclaim);
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("Verify-Hadamard", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let subclaim =
+                ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+                    &mut transcript,
+                    &fx.pp,
+                    &proof_had,
+                    &[],
+                    &bit_ops,
+                    &and_specs,
+                    &adder_specs,
+                    public_cols,
+                    fx.num_vars,
+                    fx.num_primary,
+                    |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+                )
+                .expect("verify (hadamard) should succeed");
+            black_box(subclaim);
+        });
+    });
+}
+
+fn hadamard_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Hadamard");
+    group.sample_size(10);
+    // Small sweep: nvars=9 matches the Steps baseline; 16/20 show how the
+    // per-relation zerocheck scales with 2^num_vars. Extend with the e2e
+    // NVARS_SWEEP if you want the full curve (slower).
+    for &num_vars in &[9usize, 16, 20] {
+        let fx = setup_prover(num_vars);
+        let id = format!("nvars={num_vars}");
+        bench_hadamard_compare(&mut group, &id, &fx);
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = e2e;
     config = Criterion::default().sample_size(10);
@@ -2367,4 +2600,9 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = micro_benches
 }
-criterion_main!(e2e, steps, micro);
+criterion_group! {
+    name = hadamard;
+    config = Criterion::default().sample_size(10);
+    targets = hadamard_benches
+}
+criterion_main!(e2e, steps, micro, hadamard);

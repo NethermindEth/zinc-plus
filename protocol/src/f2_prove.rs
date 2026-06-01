@@ -127,9 +127,11 @@ pub struct F2Proof {
     /// (sorted-pair order; see [`crate::f2_hadamard::distinct_pairs`]).
     /// `ψ_α(col ^↓Δ)(r*_H)`. Empty when `hadamard_proof` is `None`. The
     /// verifier derives each operand's parent eval from these (XOR-additive
-    /// in ψ_α) and recombines against the bit-slice evals. The `Δ = 0` pair
-    /// evals are bound to the commitment by the second-mp discharge; the
-    /// `Δ ≠ 0` pair evals are trusted until a row-shift discharge lands.
+    /// in ψ_α) and recombines against the bit-slice evals. Under Approach B
+    /// both the `Δ = 0` and `Δ ≠ 0` pair evals are bound to the commitment:
+    /// they fold into the main multipoint-eval as pointed shifts (Δ=0 as a
+    /// point claim, Δ≠0 via the shift predicate at `r*_H`), and the single
+    /// open at `r_0` binds them — closing the AND row-shift soundness.
     pub hadamard_pair_evals: Vec<BinaryFieldGF128>,
     /// Trusted parent evals `ψ_α(operand)(r*_H)` of the **adder** relations'
     /// operands (`U_0, V_0, W_0, U_1, …`, 3 per [`crate::f2_hadamard::F2AdderSpec`]).
@@ -2955,11 +2957,12 @@ where
     }
 
     /// Shared post-commit body for the `prove_f2_full*` entry points:
-    /// IC + α + (optional Hadamard zerocheck) + sumcheck, the main
-    /// multipoint-eval + open at `r*`/`r_0`, and — when
-    /// `hadamard_specs` is non-empty — the second multipoint-eval +
-    /// open at `r*_H`/`r_0^H` that makes the Hadamard discharge sound.
-    /// The caller supplies the already-absorbed `(hint, commitment)`.
+    /// IC + α + (optional Hadamard zerocheck) + sumcheck, then the single
+    /// multipoint-eval + open at `r*`/`r_0`. When `hadamard_specs` is
+    /// non-empty (Approach B), each AND pair's claim at `r*_H` is folded
+    /// into that *same* multipoint-eval as a pointed shift, so the one
+    /// open at `r_0` binds the discharge (no second mp/open). The caller
+    /// supplies the already-absorbed `(hint, commitment)`.
     #[allow(clippy::too_many_arguments)]
     fn prove_f2_full_impl(
         transcript: &mut impl Transcript,
@@ -3264,11 +3267,11 @@ where
     /// Shared verifier body for the `verify_f2_full*` entry points.
     /// Mirrors `prove_f2_full_impl`: absorb commitment + public cols,
     /// run the IC + (optional Hadamard zerocheck) + sumcheck verifier,
-    /// the public/virtual eval checks, the main multipoint-eval + open
-    /// at `r*`/`r_0`, and — when `hadamard_specs` is non-empty — the
-    /// second multipoint-eval + open at `r*_H`/`r_0^H` plus the
-    /// parent-eval binding check that upgrades the trusted recombination
-    /// to sound.
+    /// the public/virtual eval checks, then the single multipoint-eval +
+    /// open at `r*`/`r_0`. When `hadamard_specs` is non-empty (Approach
+    /// B), the AND pairs' `r*_H` claims are rebuilt as pointed shifts and
+    /// checked against the one open via `verify_subclaim_pointed`, so the
+    /// recombination is bound without a separate mp/open or binding check.
     #[allow(clippy::too_many_arguments)]
     fn verify_f2_full_impl<IdealOverF>(
         transcript: &mut impl Transcript,

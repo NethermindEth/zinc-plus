@@ -66,6 +66,88 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1; working tree)
+- **What**: `HadamardRound1FastPath` (`piop/src/lookup/hadamard.rs`) + a
+  `prepare_hadamard_group_with_fast` that takes **packed operand columns**
+  (`BinaryPoly<D>`, 3 per relation) and uses `with_round_1_fast` instead of
+  materialising the 1536 full-width `GF128::Inner` bit-slices.
+  `prove_f2_hadamard_phase` now builds packed columns (`build_operand_column`
+  + the existing `build_adder_operand_columns`) rather than calling the
+  (now-removed) `build_all_operand_slices`. Modelled on the booleanity
+  degree-3 fast path, but over `GF(2^128)`: boundary points are
+  `F::from_with_cfg(2/3)` (= `X`, `X+1`), **not** booleanity's `one+one`
+  (which collapses to `0,1` in char 2 — that shortcut is correct only in
+  booleanity's large-field integer pipeline).
+- **Correctness**: `round_1_message` does NOT assume `M(0)=M(1)=0` — unlike
+  booleanity's `v(v−1)` (structurally 0 for any bit), the Hadamard term
+  `U·V−W` is non-zero on a corrupt row, so it computes all four `M(0..3)`
+  to match the generic path (the negative tests `corrupt_w_is_rejected` /
+  `adder_rejects_wrong_sum` fail otherwise). Gated by a new piop test
+  `fast_path_matches_generic` asserting the fast- and generic-path
+  `MultiDegreeSumcheckProof`s are **byte-identical**; 58 piop + 50 protocol
+  lib tests green.
+- **Result (Prove-Hadamard, M-series, `parallel simd unchecked`)**:
+
+  | nvars | generic | fast path | Δ     |
+  |-------|---------|-----------|-------|
+  | 9     | 10.35 ms| 8.03 ms   | −22%  |
+  | 16    | 650.7 ms| 622.6 ms  | −4%   |
+  | 20    | 28.83 s | 18.83 s   | −35%  |
+
+  Verify unchanged. **Partial win**: round-1 compute is similar (4 boundary
+  points either way), so where the working set fits RAM (nvars≤16) the gain
+  is small; the nvars=20 −35% is the ~2× peak-memory reduction (round-1's
+  24 GB materialise removed, but `fold_with_r1` still emits ~12 GB of
+  half-size slices). nvars≥20 stays memory-bound until **Phase 2** (slice
+  dedup) lands — see "Identified but not implemented".
+
+### Hadamard discharge cost measured — new `f2_sha256` "Hadamard" A/B group (working tree)
+- **What**: added a `hadamard` criterion group to `protocol/benches/f2_sha256.rs`
+  that A/Bs the *same* `prove_f2_full_with_*` / `verify_f2_full_with_*`
+  family **with** the 16 SHA-256 Hadamard relations (3 ANDs + 13 adders,
+  from `Sha256F2HadamardLayout::relations()`) vs **without** (`&[]` specs,
+  what the rest of the bench measures). Both sides non-pre-paired so the
+  A/B delta is purely the discharge. Also extended `f2_full_proof_parts`
+  to count the previously-omitted Hadamard fields (`uair.hadamard_proof`'s
+  sumcheck + `bit_slice_evals`, `hadamard_pair_evals`,
+  `hadamard_adder_parents`) — before this the with/without proof sizes came
+  out byte-identical because those fields weren't in the breakdown.
+- **Result (M-series, `parallel simd unchecked`, no `metal_gpu`, sample_size 10)** —
+  the discharge is **cheap to verify, catastrophic to prove, and worsens
+  super-linearly**:
+
+  | nvars | Prove no-had | Prove +16had | ×    | Verify no-had | Verify +16had | × |
+  |-------|--------------|--------------|------|---------------|---------------|---|
+  | 9     | 2.33 ms      | 10.35 ms     | 4.4× | 1.06 ms       | 1.41 ms       | 1.33× |
+  | 16    | 47.0 ms      | 650.7 ms     | 13.8×| 4.67 ms       | 5.15 ms       | 1.10× |
+  | 20    | 739.9 ms     | **28.83 s**  | 39×  | 42.9 ms       | 44.2 ms       | 1.03× |
+
+  - **Verify**: negligible (+3% at nvars=20, shrinking with nvars). Not a concern.
+  - **Proof size**: ~**constant +26 KB raw / +25 KB zstd**, independent of
+    nvars (so 3.0% at nvars=9 → 0.4% at nvars=20). Dominated by
+    `bit_slice_evals` (24.6 KB); the zerocheck `sumcheck` is only ~1 KB,
+    `pair_evals` 144 B, `adder_parents` 624 B. Size is a non-issue.
+  - **Prove**: the headline problem. The no-had prove scales ~linearly
+    (47 → 740 ms = 15.7× for the 16× rows of nvars 16→20); the +had prove
+    scales **super-linearly** (651 ms → 28.8 s = **44×** for the same 16×
+    rows). At nvars=20, **28.1 s of the 28.8 s is discharge overhead.**
+- **Root-cause hypothesis (unconfirmed — needs profiling)**: the super-
+  linearity lives entirely in the discharge path, consistent with a
+  **memory-bandwidth bound**. The Hadamard zerocheck materialises bit-slice
+  MLEs for all 16 relations' operands (D=32 slices/column → 32× the per-
+  column data); at nvars=20 the working set (~hundreds of MB per operand
+  set) blows past cache, so wall-time grows faster than O(rows). The degree-3
+  zerocheck round-1 (which touches the full (μ+5)-var hypercube, ≈50% of the
+  sumcheck point-work) is the prime suspect for the constant factor.
+- **Optimisation opportunities this surfaced** (see "Identified but not
+  implemented"): (a) a `{0,1}`-slice round-1 fast path for the degree-3
+  zerocheck — round 1 is the biggest round and the bit-slices are still
+  0/1-valued there (AND/select instead of GF(2^128) mults); the main
+  γ-sumcheck already has `F2EqColRound1FastPath`, this ports it to the
+  Hadamard zerocheck. (b) batch the 16 per-relation zerochecks instead of
+  running them as separate groups. (c) avoid full bit-slice materialisation
+  / cache-block the expansion to fix the super-linear memory behaviour.
+
 ### `LEAF_GROUP_SIZE` 8 → 1 to shrink `open.opened/values` 8× (commit `<TBD>`, measurements pending)
 - **What**: `protocol/src/f2_prove.rs::LEAF_GROUP_SIZE` flipped from
   `8` to `1`. With group size 1 each Merkle leaf hashes exactly one
@@ -1127,6 +1209,58 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Identified but not implemented
+
+### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
+- **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
+  the group via `MultiDegreeSumcheckGroup::new(3, …)` — no fast path) and
+  `protocol/src/f2_hadamard.rs::prove_f2_hadamard_phase` (calls
+  `build_all_operand_slices`, which materialises every operand bit-slice).
+- **Root cause being fixed**: the discharge zerocheck materialises **1536
+  bit-slices** (16 relations × 3 operands × 32 bits) as full-width
+  `GF128::Inner` (= `Uint<2>`, 16 B) MLEs → 24 GB at nvars=20 (the
+  super-linear prove blowup; see the "Hadamard discharge cost" shipped
+  entry). Round 1 also touches the full (μ)-var hypercube.
+- **Fix (proposed approach)**: port the booleanity degree-3 round-1 fast
+  path (`piop/src/lookup/booleanity.rs::BooleanityRound1FastPath`) to the
+  Hadamard group. The fast path reads the **packed operand columns**
+  (`DenseMultilinearExtension<BinaryPoly<D>>`, 4 B/row — the `op_mask` that
+  `build_operand_slices` computes internally, and `build_adder_operand_columns`
+  already produces) instead of materialising 16-B F-slices; round 1 does
+  boolean arithmetic and `fold_with_r1` emits half-size folded F-slices for
+  rounds 2..n. The Hadamard round poly factors as
+  `M(t) = eq(t,r₀)·Σ_{b'} E_other(b')·G(t,b')` with
+  `G(t,b') = Σ_k γ'^k Σ_b σ^b (U_b(t)·V_b(t) + W_b(t))` (char-2), and
+  `G = 0` on the honest hypercube ⇒ `M(0)=M(1)=0`, so only `M(2),M(3)` need
+  computing (mirrors booleanity's `p1(1)=0`). Each operand bit folds by the
+  `{0,1}² → {0,t,1−t,1}` lookup.
+- **CRITICAL field subtlety**: the booleanity fast path computes its
+  boundary points as `one+one` / `one+one+one` — correct only for the
+  **large prime field** of the integer/Q[X] pipeline (where booleanity
+  lives). Over `GF(2^128)` (char 2) those collapse: `2 = 0`, `3 = 1`. The
+  multi-degree sumcheck instead uses `F::from_with_cfg(k)`, which under the
+  bit-pattern convention is the field element `X` for `k=2`, `X+1` for `k=3`
+  (distinct) — see `prover.rs:170-196` and `F2EqColRound1FastPath`
+  (`f2_prove.rs:639`, the degree-2 GF128 template). The Hadamard fast path
+  MUST use `F::from_with_cfg(2/3)` and `eq(t,r₀)=(1−t)(1−r₀)+t·r₀`, not the
+  booleanity integer shortcut.
+- **Correctness gate**: a test that runs the same zerocheck through the
+  generic `new(3,…)` group and the `with_round_1_fast` group and asserts an
+  **identical** `MultiDegreeSumcheckProof` (the `Round1FastPath` contract:
+  `round_1_message` must equal what a faithful generic round-1 would emit).
+- **Expected gain**: ~2× peak memory (round-1 24 GB materialise removed;
+  `fold_with_r1` still emits ~12 GB of half-size slices at nvars=20) + the
+  round-1 boolean-arithmetic win. Does NOT fully kill the nvars≥20 blowup —
+  that needs **Phase 2** below.
+
+### Phase 2 — cut the Hadamard slice count via `(col,Δ)` dedup
+- **Where**: same path. The 16 relations' operands reference a small set of
+  underlying columns with overlap (e.g. `W_E` feeds C12/C13/C14; the adder
+  chains reuse `W_W`, `W_T1`, …), but `build_all_operand_slices` materialises
+  slices **per operand occurrence**, not per distinct `(col,Δ)`.
+- **Fix**: restructure the comb to operate on per-`(col,Δ)` slices with the
+  XOR/complement structure encoded in the comb coefficients, so each distinct
+  pair's slices are built once. Reduces memory + compute proportionally to the
+  dedup factor; pairs with Phase 1 to make nvars≥20 viable.
 
 ### Fast u64 scatter in `scatter_matrix_into_gpu_slab` (rejected on second-pass measurement)
 - **Status**: implemented in a temporary branch state via a new

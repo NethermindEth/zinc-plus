@@ -30,10 +30,9 @@
 
 use crypto_primitives::Field;
 use crypto_primitives::boolean::Boolean;
-use zinc_piop::lookup::booleanity::compute_bit_slices_flat;
 use zinc_piop::lookup::hadamard::{
     HadamardError, HadamardTriple, finalize_hadamard_prover, finalize_hadamard_verifier,
-    prepare_hadamard_group, prepare_hadamard_verifier,
+    prepare_hadamard_group_with_fast, prepare_hadamard_verifier,
 };
 use zinc_piop::sumcheck::SumCheckError;
 use zinc_piop::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
@@ -472,18 +471,19 @@ fn all_ones_mask<const D: usize>() -> u64 {
     }
 }
 
-/// Build the `D` bit-slice MLEs of one operand (column-major, `D` slices),
-/// computing each bit as the bitwise XOR of the source bits at the right
-/// row-shift, plus the complement constant. The result is `{0,1}`-valued.
+/// Build the packed `BinaryPoly<D>` column of one operand: each row is the
+/// complement ⊕ XOR of the (row-shifted) source cells. The packed sibling
+/// of the per-bit slice expansion — fed to the Hadamard round-1 fast path
+/// ([`prepare_hadamard_group_with_fast`] /
+/// `HadamardRound1FastPath`) so round 1 reads 4-byte cells instead of `D`
+/// 16-byte F-valued slices.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_operand_slices<const D: usize>(
+fn build_operand_column<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     operand: &F2Operand,
     num_vars: usize,
-) -> Vec<DenseMultilinearExtension<Inner>> {
+) -> DenseMultilinearExtension<BinaryPoly<D>> {
     let n = 1usize << num_vars;
-    let one_inner = *Gf::one().inner();
-    let zero_inner = *Gf::zero().inner();
 
     // Per-row operand bitmask: complement ⊕ XOR of (shifted) source masks.
     let const_mask = if operand.complement {
@@ -502,56 +502,10 @@ fn build_operand_slices<const D: usize>(
         }
     }
 
-    (0..D)
-        .map(|b| {
-            let evals: Vec<Inner> = op_mask
-                .iter()
-                .map(|m| {
-                    if (m >> b) & 1 == 1 {
-                        one_inner.clone()
-                    } else {
-                        zero_inner.clone()
-                    }
-                })
-                .collect();
-            DenseMultilinearExtension {
-                evaluations: evals,
-                num_vars,
-            }
-        })
-        .collect()
-}
-
-/// Build the full operand-slice MLE set for the zerocheck: the AND specs'
-/// operand slices first (`U_k, V_k, W_k` per spec), then the adder specs'
-/// (`U_j, V_j, W_j` per adder, built via [`build_adder_operand_columns`] +
-/// [`compute_bit_slices_flat`]). Operand index `3k+i` owns slices
-/// `[(3k+i)·D, (3k+i+1)·D)`. Also returns the built adder operand packed
-/// columns (3 per adder, in order) — the caller projects them at α after
-/// it is sampled to get the trusted adder parents.
-fn build_all_operand_slices<const D: usize>(
-    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    specs: &[F2HadamardSpec],
-    adder_specs: &[F2AdderSpec],
-    num_vars: usize,
-) -> (
-    Vec<DenseMultilinearExtension<Inner>>,
-    Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
-) {
-    let cfg = ();
-    let mut out = Vec::new();
-    for spec in specs {
-        for operand in operands(spec) {
-            out.extend(build_operand_slices::<D>(columns, operand, num_vars));
-        }
+    DenseMultilinearExtension {
+        evaluations: op_mask.iter().map(|&m| cell_from_mask::<D>(m)).collect(),
+        num_vars,
     }
-    let mut adder_cols = Vec::with_capacity(adder_specs.len().saturating_mul(3));
-    for spec in adder_specs {
-        let uvw = build_adder_operand_columns::<D>(columns, spec, num_vars);
-        out.extend(compute_bit_slices_flat::<Gf, D>(&uvw, &cfg));
-        adder_cols.extend(uvw);
-    }
-    (out, adder_cols)
 }
 
 /// One `HadamardTriple` per relation, indexing the operand-slice groups
@@ -661,15 +615,37 @@ pub fn prove_f2_hadamard_phase<const D: usize>(
     }
     let cfg = ();
     let pairs = distinct_pairs(specs);
-    let (bit_slice_mles, adder_cols) =
-        build_all_operand_slices::<D>(columns, specs, adder_specs, num_vars);
     let num_relations = specs.len().saturating_add(adder_specs.len());
     let relations = relations_into_triples(num_relations);
 
-    let (group, ancillary) =
-        prepare_hadamard_group::<Gf, D>(transcript, bit_slice_mles, &relations, ic_evaluation_point, &cfg)
-            .expect("hadamard group preparation")
-            .expect("non-empty relations yield a group");
+    // Build packed operand columns (`U_k, V_k, W_k` per relation, operand
+    // order) for the round-1 fast path — instead of materialising the
+    // 16-byte-per-entry bit-slice MLEs (the 24 GB-at-nvars=20 blowup). AND
+    // specs first, then adders; the adder operand columns double as the
+    // trusted-parent source (`adder_operand_alpha_evals`).
+    let mut operand_cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+        Vec::with_capacity(num_relations.saturating_mul(3));
+    for spec in specs {
+        for operand in operands(spec) {
+            operand_cols.push(build_operand_column::<D>(columns, operand, num_vars));
+        }
+    }
+    let mut adder_cols = Vec::with_capacity(adder_specs.len().saturating_mul(3));
+    for spec in adder_specs {
+        let uvw = build_adder_operand_columns::<D>(columns, spec, num_vars);
+        operand_cols.extend(uvw.iter().cloned());
+        adder_cols.extend(uvw);
+    }
+
+    let (group, ancillary) = prepare_hadamard_group_with_fast::<Gf, D>(
+        transcript,
+        operand_cols,
+        &relations,
+        ic_evaluation_point,
+        &cfg,
+    )
+    .expect("hadamard group preparation")
+    .expect("non-empty relations yield a group");
 
     let (sumcheck_proof, mut states) =
         MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(transcript, vec![group], num_vars, &cfg);
