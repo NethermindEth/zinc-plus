@@ -325,11 +325,49 @@ impl OblongChannel for ReplayChannel {
     }
 }
 
+/// The subspace-dependent **prover** operations of the oblong zerocheck: the
+/// Phase-1 round message and the fold-at-`z` Lagrange weights. Swapping the
+/// scheme switches the additive-NTT basis — [`MonomialScheme`] (naive
+/// `GF(2^128)`, the `{X⁰…X⁵}` subspace) vs the `GF(2^8)` byte-lookup scheme over
+/// `embed(H₈)` ([`super::oblong_and_gf8::Gf8Scheme`]). The Phase-2 sumcheck and
+/// the verifier's round-consistency checks are subspace-independent; only the
+/// round message, the fold weights, and the verifier's `R₀` reconstruction
+/// subspace depend on the scheme (the verifier takes that subspace directly).
+pub trait OblongScheme {
+    /// The Phase-1 round message `R₀` on the extension domain (`WORD_BITS` evals).
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F]) -> [F; WORD_BITS];
+    /// The base-domain Lagrange weights `L_b(z)` for folding a word at `z`.
+    fn base_lagrange(&self, z: F) -> [F; WORD_BITS];
+}
+
+/// Naive `GF(2^128)` scheme over the monomial `{X⁰…X⁵}` subspace (borrows the
+/// additive NTT so the explicit-challenge wrappers keep their `&AdditiveNtt`
+/// signature). Its `R₀` reconstruction subspace is `BinarySubspace::with_dim(
+/// SKIPPED_VARS+1)`.
+pub struct MonomialScheme<'a> {
+    ntt: &'a AdditiveNtt,
+}
+
+impl<'a> MonomialScheme<'a> {
+    pub fn new(ntt: &'a AdditiveNtt) -> Self {
+        Self { ntt }
+    }
+}
+
+impl OblongScheme for MonomialScheme<'_> {
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F]) -> [F; WORD_BITS] {
+        univariate_round_message(a, b, c, eq, self.ntt)
+    }
+    fn base_lagrange(&self, z: F) -> [F; WORD_BITS] {
+        base_lagrange_at(z)
+    }
+}
+
 /// Prover for the oblong AND zerocheck `A ⊙ B = C` (one relation), driven by a
-/// Fiat–Shamir [`OblongChannel`]. The channel supplies the `n` zerocheck
-/// challenges `r` (first), then `z` (after the round message is absorbed), then
-/// each `γ` (after its round polynomial is absorbed) — so the challenges are not
-/// part of the returned proof.
+/// Fiat–Shamir [`OblongChannel`] and a [`OblongScheme`] (the additive-NTT basis).
+/// The channel supplies the `n` zerocheck challenges `r` (first), then `z` (after
+/// the round message is absorbed), then each `γ` (after its round polynomial is
+/// absorbed) — so the challenges are not part of the returned proof.
 ///
 /// `*_words` are the packed operand columns (`2ⁿ` rows, `n = log2(len)`).
 #[allow(clippy::arithmetic_side_effects)]
@@ -338,7 +376,7 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     a_words: &[u32],
     b_words: &[u32],
     c_words: &[u32],
-    ntt: &AdditiveNtt,
+    scheme: &impl OblongScheme,
 ) -> OblongAndProof {
     let len = a_words.len();
     let n = len.trailing_zeros() as usize;
@@ -351,12 +389,12 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     let eq = eq_indicator(&r);
 
     // Phase 1: round message, then the univariate-skip challenge z.
-    let round_message = univariate_round_message(a_words, b_words, c_words, &eq, ntt);
+    let round_message = scheme.round_message(a_words, b_words, c_words, &eq);
     ch.absorb(&round_message);
     let z = ch.sample();
 
     // Phase-1 → Phase-2 transition: fold each word at z into an MLE over rows.
-    let lag_z = base_lagrange_at(z);
+    let lag_z = scheme.base_lagrange(z);
     let mut a: Vec<F> = a_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
     let mut b: Vec<F> = b_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
     let mut c: Vec<F> = c_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
@@ -398,7 +436,8 @@ pub fn prove_oblong_and(
     ntt: &AdditiveNtt,
 ) -> OblongAndProof {
     let mut ch = ReplayChannel::from_challenges(r, z, gammas);
-    prove_oblong_and_channel(&mut ch, a_words, b_words, c_words, ntt)
+    let scheme = MonomialScheme::new(ntt);
+    prove_oblong_and_channel(&mut ch, a_words, b_words, c_words, &scheme)
 }
 
 /// Verifier for the oblong AND zerocheck, driven by a Fiat–Shamir
@@ -412,6 +451,7 @@ pub fn verify_oblong_and_channel<C: OblongChannel>(
     ch: &mut C,
     proof: &OblongAndProof,
     n: usize,
+    full_subspace: &BinarySubspace,
 ) -> Result<AndCheckOutput, OblongError> {
     if proof.round_polys.len() != n {
         return Err(OblongError::Shape(proof.round_polys.len(), n));
@@ -421,13 +461,14 @@ pub fn verify_oblong_and_channel<C: OblongChannel>(
 
     // Reconstruct R₀(z): the prover sends only the extension half; the base
     // half is zero iff the AND holds, so a corrupt C is caught right here at
-    // round 0 (the reconstructed claim won't match g(0)+g(1)).
+    // round 0 (the reconstructed claim won't match g(0)+g(1)). `full_subspace`
+    // is the dim-(SKIPPED_VARS+1) univariate domain — monomial or `embed(H₈)`,
+    // matching the prover's scheme.
     ch.absorb(&proof.round_message);
     let z = ch.sample();
-    let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
     let mut coeffs = vec![F::zero(); 2 * WORD_BITS];
     coeffs[WORD_BITS..].copy_from_slice(&proof.round_message);
-    let mut claim = super::binary_subspace::extrapolate_over_subspace(&full, &coeffs, z);
+    let mut claim = super::binary_subspace::extrapolate_over_subspace(full_subspace, &coeffs, z);
 
     let dim2 = BinarySubspace::with_dim(2);
     let mut gammas = Vec::with_capacity(n);
@@ -470,7 +511,8 @@ pub fn verify_oblong_and(
     gammas: &[F],
 ) -> Result<AndCheckOutput, OblongError> {
     let mut ch = ReplayChannel::from_challenges(r, z, gammas);
-    verify_oblong_and_channel(&mut ch, proof, r.len())
+    let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
+    verify_oblong_and_channel(&mut ch, proof, r.len(), &full)
 }
 
 #[cfg(test)]

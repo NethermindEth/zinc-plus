@@ -2549,6 +2549,19 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
                 black_box(proof);
             });
         });
+        group.bench_function(BenchmarkId::new("Discharge-Oblong-GF8", id), |bench| {
+            bench.iter(|| {
+                let mut t = Blake3Transcript::new();
+                let proof = zinc_protocol::f2_oblong_hadamard::prove_oblong_and_batch_gf8(
+                    &mut t,
+                    &fx.trace.binary_poly,
+                    &and_specs,
+                    &adder_specs,
+                    fx.num_vars,
+                );
+                black_box(proof);
+            });
+        });
     }
 
     // Build both proofs once for the verify benches + size report.

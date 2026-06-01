@@ -29,7 +29,8 @@
 
 use super::binary_gf128::BinaryFieldGF128;
 use super::binary_gf8::{Gf8, embed};
-use super::oblong_and::{SKIPPED_VARS, WORD_BITS};
+use super::binary_subspace::{BinarySubspace, lagrange_evals};
+use super::oblong_and::{OblongScheme, SKIPPED_VARS, WORD_BITS};
 
 type F128 = BinaryFieldGF128;
 
@@ -169,6 +170,55 @@ pub fn embed_subspaces() -> (super::binary_subspace::BinarySubspace, super::bina
     )
 }
 
+/// The `GF(2^8)` [`OblongScheme`]: the byte-lookup additive NTT over the
+/// `embed(H₈)` subspace. Drop-in for [`super::oblong_and::MonomialScheme`] in
+/// `prove_oblong_and_channel`; the verifier must pair it with
+/// [`Gf8Scheme::full_subspace`]. Holds the precomputed NTT table + the
+/// `embed(H₈)` base/full subspaces.
+pub struct Gf8Scheme {
+    ntt: Gf8Ntt,
+    base: BinarySubspace,
+    full: BinarySubspace,
+}
+
+impl Default for Gf8Scheme {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Gf8Scheme {
+    pub fn new() -> Self {
+        let (base, full) = embed_subspaces();
+        Self {
+            ntt: Gf8Ntt::new(),
+            base,
+            full,
+        }
+    }
+
+    /// The full univariate domain (`embed(H₈)`, dim `SKIPPED_VARS+1`) the
+    /// verifier extrapolates `R₀` over with this scheme.
+    pub fn full_subspace(&self) -> &BinarySubspace {
+        &self.full
+    }
+}
+
+impl OblongScheme for Gf8Scheme {
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F128]) -> [F128; WORD_BITS] {
+        gf8_round_message(a, b, c, eq, &self.ntt)
+    }
+
+    fn base_lagrange(&self, z: F128) -> [F128; WORD_BITS] {
+        // L_b(z) over the embed(H₈) base subspace — the fold weights matching
+        // the GF(2^8) round message's basis.
+        let lag = lagrange_evals(&self.base, z);
+        let mut out = [F128::zero(); WORD_BITS];
+        out.copy_from_slice(&lag);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::binary_subspace::{BinarySubspace, extrapolate_over_subspace};
@@ -238,6 +288,37 @@ mod tests {
                 }
             }
             assert_eq!(got, want, "gf8 round message mismatch at n={n}");
+        }
+    }
+
+    #[test]
+    fn gf8_scheme_full_protocol_round_trips() {
+        // Prove with the GF(2^8) scheme + verify over embed(H₈): the full
+        // Phase-1+2 protocol must round-trip (honest AND), validating that the
+        // GF(2^8) round message, the embed-base fold, and the embed-full R₀
+        // reconstruction are mutually consistent.
+        use super::super::oblong_and::{
+            ReplayChannel, prove_oblong_and_channel, verify_oblong_and_channel,
+        };
+        for n in [4usize, 6] {
+            let num = 1usize << n;
+            let a: Vec<u32> = (0..num).map(|i| sample32(i as u64 * 3 + 1)).collect();
+            let b: Vec<u32> = (0..num).map(|i| sample32(i as u64 * 5 + 2)).collect();
+            let c: Vec<u32> = a.iter().zip(&b).map(|(&x, &y)| x & y).collect();
+            let scheme = Gf8Scheme::new();
+
+            // Shared challenge sequence [r…, z, γ…] for prove + verify.
+            let mut seq: Vec<F128> = (0..n).map(|i| sample128(i as u64 + 1)).collect();
+            seq.push(sample128(0xBEEF));
+            seq.extend((0..n).map(|k| sample128(0xCAFE + k as u64)));
+
+            let mut pch = ReplayChannel::new(seq.clone());
+            let proof = prove_oblong_and_channel(&mut pch, &a, &b, &c, &scheme);
+
+            let mut vch = ReplayChannel::new(seq);
+            let out = verify_oblong_and_channel(&mut vch, &proof, n, scheme.full_subspace())
+                .expect("GF(2^8) scheme must verify honest AND");
+            assert_eq!(out.eval_point.len(), n + 1);
         }
     }
 
