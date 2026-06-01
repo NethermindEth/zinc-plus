@@ -18,6 +18,7 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod f2_hadamard;
+pub mod f2_oblong_hadamard;
 pub mod f2_native_ic;
 pub mod f2_prove;
 pub mod fixed_prime;

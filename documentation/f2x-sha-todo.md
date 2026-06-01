@@ -75,6 +75,40 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong AND zerocheck — Phase C: ψ_z integration tie, one AND relation round-trips (working tree)
+- **What**: the oblong AND zerocheck wired into the F_2 Hadamard discharge for a
+  single AND relation, with the **`ψ_z` recombination tie** that binds the
+  zerocheck's operand evals to the committed columns
+  (`protocol/src/f2_oblong_hadamard.rs`; plan §4). `prove_oblong_and_relation`
+  packs the built operand columns to `u32` words and runs the oblong zerocheck;
+  `verify_oblong_and_relation` checks the zerocheck then the tie.
+- **Why it's a near-mechanical seam (the key realisation, plan §4)**: the oblong
+  challenge `z` plays the same role as `α`. Both `F_2`-linearly collapse a word's
+  `D` bits into one scalar — `ψ_α(W)=Σ_b W_b·α^b` (monomial) vs
+  `ψ_z(W)=Σ_i W_i·L_i(z)` (additive-NTT Lagrange). The zerocheck outputs
+  `a_eval=ψ_z(U)(γ)` **by construction**, so the tie **reuses the existing,
+  tested `ψ_α` machinery** (`pair_alpha_evals` + `derive_operand_parents`) fed
+  `base_lagrange_at(z)` for the α-powers and the Phase-2 sumcheck point `γ` for
+  `r*`. `ψ_z` is `F_2`-linear ⇒ commutes with the XOR/shift/complement operand
+  structure exactly as `ψ_α` does; soundness is the same `(D−1)/|F|` bound.
+- **Result**: 6 new tests, the 9 existing `f2_hadamard` tests still green
+  (`build_operand_column`/`cell_mask` exposed `pub(crate)`, no behaviour change).
+  Gate (full prove→verify + tie round-trip, à la `plain_and_round_trips`): the
+  `ψ_z` tie derives the correct operand evals for **plain / row-shifted /
+  complemented / Maj-combo** operands; `corrupt_w_is_rejected` (zerocheck rejects
+  a bad W at round 0); and `tie_catches_wrong_operand_wiring` — the tie itself
+  rejects when the verifier binds to the wrong column, i.e. the tie has real
+  soundness teeth, not just a tautological pass. **The architectural risk
+  (does `ψ_z` compose with our operand/column structure?) is resolved.**
+- **Remaining for Phase C / D** (explicit challenges + in-memory tie today):
+  (a) **Fiat–Shamir** — sample `z`/`γ` from a `Blake3Transcript` (prover absorbs
+  the round message → `z`, each round poly → `γ`); (b) **PCS opening at `γ`** —
+  the tie checks the derived evals against the in-memory columns; the real
+  protocol opens the `ψ_z`-projected columns through the PCS at `(z, γ)` (vs
+  today's `r*`), the §4-(i)/(ii) projection-point choice; (c) **batch all 16
+  relations** (3 ANDs + 13 adders) into one oblong zerocheck (Phase D) + the
+  GF(2⁸)/eq-split prover swap, then A/B vs the current fused discharge.
+
 ### Oblong AND zerocheck — GF(2⁸) speed lever: subfield + embedding + byte-lookup NTT (working tree)
 - **What**: the prover-side speed prerequisite (plan P1 + P4) for the oblong AND
   zerocheck, so the additive-NTT and the per-extension-point products run in

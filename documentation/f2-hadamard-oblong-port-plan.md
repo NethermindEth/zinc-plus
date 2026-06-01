@@ -7,10 +7,10 @@ instead of 1536 slices and the bit dimension is handled by a univariate-skip
 round. Reference implementation: the local repo `~/binius64`,
 `crates/prover/src/and_reduction/` + `crates/verifier/src/protocols/bitand.rs`.*
 
-## Progress (2026-06-01) — Phases A + B DONE + GF(2⁸) speed lever (2.56× on the kernel)
+## Progress (2026-06-01) — Phases A + B + GF(2⁸) speed lever + Phase-C ψ_z tie DONE
 
-**Landed** (working tree, `poly` crate, 23 tests green, full lib suite 144 passed,
-clippy-clean, no prover path touched):
+**Landed** (working tree, 29 tests green — 23 `poly` + 6 `protocol`, no prover
+path touched):
 - `poly/src/univariate/binary_subspace.rs` — P2 (`BinarySubspace`) + P3
   (`lagrange_evals`, `extrapolate_over_subspace`, `evaluate_univariate`). Ports of
   binius64 `math/src/{binary_subspace,univariate}.rs` over `BinaryFieldGF128`.
@@ -25,6 +25,10 @@ clippy-clean, no prover path touched):
   65536 pairs. `poly/src/univariate/oblong_and_gf8.rs` (P4) — `Gf8Ntt` byte-lookup
   additive NTT + `gf8_round_message` + `embed_subspaces`; the NTT + products run in
   GF(2⁸), cross-checked against the GF(2¹²⁸) computation over `embed(H₈)`.
+- `protocol/src/f2_oblong_hadamard.rs` (Phase C) — `prove/verify_oblong_and_relation`
+  for one AND relation + the **`ψ_z` recombination tie** (reuses `pair_alpha_evals`
+  + `derive_operand_parents` with `base_lagrange_at(z)` weights and the row-point
+  `γ`). Explicit challenges; in-memory tie (no PCS open yet).
 
 **De-risked**:
 - The **field is directly compatible** (§0 empirically confirmed; Open-Q #1
@@ -41,23 +45,28 @@ clippy-clean, no prover path touched):
 - The **GF(2⁸) speed lever works**: single-relation Phase-1 round message at
   nvars=16 is **2.56× faster** in GF(2⁸) (99.6 vs 255 ns/word), *with the
   eq-weighting still per-word in GF(2¹²⁸)* — headroom remains (eq-split below).
+- The **Phase-C `ψ_z` tie composes** (the architectural risk): the recombination
+  derives the correct operand evals for plain / shifted / complemented / Maj-combo
+  operands, and `tie_catches_wrong_operand_wiring` shows it rejects a mis-bound
+  column — real soundness teeth, a drop-in reuse of the `ψ_α` machinery.
 
 **Remaining (next sessions), in order:**
-1. **eq-split (more speed)**: split the `n` row-vars into ≤3 **deterministic
+1. **Phase C finish** — (a) **Fiat-Shamir**: sample `z`/`γ` from a
+   `Blake3Transcript` in `protocol` (drop the explicit args); (b) **PCS opening at
+   `γ`**: the tie checks the derived evals against the *in-memory* columns; the
+   real protocol opens the `ψ_z`-projected columns through the PCS at `(z, γ)`
+   (the §4-(i)/(ii) projection-point choice — start with (i), `z` only on the
+   discharge columns) + the `↓Δ` shift opening.
+2. **eq-split (more speed)**: split the `n` row-vars into ≤3 **deterministic
    GF(2⁸)** skip challenges `{α,α²,α⁴}` (eq weighted in GF(2⁸), accumulated per
    `2^k`-word chunk) + the big-field remainder (embed + GF(2¹²⁸) eq once per
    chunk). Cuts the remaining per-word GF(2¹²⁸) mults by the chunk size — the part
    the 2.56× hasn't captured. Packing 16 `Gf8` lanes (binius `PackedAESBinaryField16x8b`)
-   is a further SIMD lever.
-2. **Phase C** integration seam (§4) — now also carries **Fiat-Shamir** (the
-   transcript belongs in the `protocol` crate, not `poly`, which has no transcript
-   dep). Tie the `a/b/c_eval` at `(z, γ)` to the committed columns via the **`ψ_z`
-   recombination** (`L_i(z)` in place of `α^b`; soundness verified in §4) + the
-   `↓Δ` shift opening. Wire `prove_oblong_and`/`verify_oblong_and` to a
-   `Blake3Transcript` there (drop the explicit `z`/`gammas` args), and parameterise
-   the subspace so the GF(2⁸) path (`embed(H₈)`) and the naive path share one
-   verifier. The GF(2⁸) prover is then a drop-in (same eval values).
-3. **Phase D**: all 16 relations (3 ANDs + 13 adders) + A/B at nvars=16/20.
+   is a further SIMD lever. Parameterise the subspace so the GF(2⁸) path
+   (`embed(H₈)`) and the naive path share one verifier; the prover is then a
+   drop-in (same eval values).
+3. **Phase D**: batch all 16 relations (3 ANDs + 13 adders) into one oblong
+   zerocheck + A/B vs the current fused discharge at nvars=16/20.
 
 ## 0. The big de-risking facts (why this is a port, not a research project)
 

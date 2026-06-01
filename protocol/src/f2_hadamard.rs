@@ -450,7 +450,7 @@ fn pair_index(pairs: &[(usize, usize)], col: usize, row_shift: usize) -> usize {
 /// Read a `BinaryPoly<D>` cell as a `u64` bitmask (low `D` bits).
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
-fn cell_mask<const D: usize>(bp: &BinaryPoly<D>) -> u64 {
+pub(crate) fn cell_mask<const D: usize>(bp: &BinaryPoly<D>) -> u64 {
     let mut out: u64 = 0;
     for (i, c) in bp.iter().enumerate() {
         if c.into_inner() {
@@ -478,7 +478,7 @@ fn all_ones_mask<const D: usize>() -> u64 {
 /// `HadamardRound1FastPath`) so round 1 reads 4-byte cells instead of `D`
 /// 16-byte F-valued slices.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_operand_column<const D: usize>(
+pub(crate) fn build_operand_column<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     operand: &F2Operand,
     num_vars: usize,

@@ -7,15 +7,17 @@ doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 > **▶ ACTIVE PLAN (2026-06-01): the "next lever" below is now being built as a
 > direct port of Binius64's oblong univariate zerocheck — see
 > `documentation/f2-hadamard-oblong-port-plan.md` (reference repo `~/binius64`).
-> Phases A+B + the GF(2⁸) speed lever are DONE (23 tests, `poly` crate):
-> a **standalone oblong AND zerocheck works end-to-end over `GF(2¹²⁸)`**
-> (`binary_subspace.rs` + `oblong_and.rs` — Phase-1 round message + Phase-2
-> eq-weighted sumcheck + closing check; accepts honest, rejects corrupted), and
-> the prover-side **GF(2⁸) byte-lookup NTT** (`binary_gf8.rs` + `oblong_and_gf8.rs`,
-> embedding verified over all 65536 pairs) makes the round message **2.56× faster**
-> (99.6 vs 255 ns/word, nvars=16). Continue from the port plan's "Progress" +
-> §5 (next: the eq-split for more speed, then Phase C — the ψ_z integration tie +
-> Fiat-Shamir in the `protocol` crate).**
+> Phases A+B + the GF(2⁸) speed lever + the Phase-C `ψ_z` tie are DONE (29 tests).
+> A **standalone oblong AND zerocheck works over `GF(2¹²⁸)`** (`poly`:
+> `binary_subspace.rs` + `oblong_and.rs`); the prover-side **GF(2⁸) byte-lookup
+> NTT** (`binary_gf8.rs` + `oblong_and_gf8.rs`, embedding verified over all 65536
+> pairs) makes the round message **2.56× faster** (99.6 vs 255 ns/word, nvars=16);
+> and **Phase C** (`protocol/src/f2_oblong_hadamard.rs`) wires one AND relation
+> into the discharge with the **`ψ_z` recombination tie** (reuses the `ψ_α`
+> machinery; round-trips for plain/shift/complement/Maj, rejects mis-wiring).
+> Continue from the port plan's "Progress" + §5 (next: finish Phase C — Fiat-Shamir
+> + the PCS open at `γ`; then the eq-split for more speed; then Phase D batching
+> + the A/B).**
 
 ## TL;DR (the one thing to know)
 
