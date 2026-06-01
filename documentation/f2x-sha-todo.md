@@ -1320,6 +1320,20 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   than the bind/sum wiring. Recommendation: implement Procedure 1 first (or
   alongside), not the naïve grid, else the wiring lands a correct-but-not-
   faster path.
+- **Procedure 1 — ✅ SHIPPED (commit `a388588`)**: `piop::sumcheck::multiproduct`
+  (`multi_product_eval` + `multi_extrapolate`) is the efficient evaluation-form
+  multiproduct (Dao §4 Procedures 1+2): `d` multilinears over `{0,1}^v` →
+  product over `U_d^v` in `O(d log d)` `bb` mults, reusing `NatEvaluatedPoly`
+  for the per-axis univariate extrapolation. Validated vs the naïve grid
+  product (`v=2 d=3`, `v=3 d=4`, `d=1` identity). This is the engine that
+  keeps the off-hypercube prefix grid from being recomputed per point.
+- **Last step — the prefix wiring**: a `num_skip=v` Hadamard fast path that,
+  in `prepare`, builds the prefix grid `q` over `U_d^v` by feeding the
+  operand columns' `{0,1}^v` corner evals (per `x''`) through
+  `multi_product_eval` for the `eq·U·V` (d=3) and `eq·W` (d=2) terms,
+  σ/γ'-weighted and summed over `x''`; then `round_message`/`fold` read `q`
+  (the validated v=2 math). Size-gate (`v=1` at nvars=9) + A/B at
+  nvars=16/20. Gated by `fast_path_matches_generic`.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
