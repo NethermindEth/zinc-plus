@@ -102,12 +102,18 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   (does `ψ_z` compose with our operand/column structure?) is resolved.**
 - **Remaining for Phase C / D** (explicit challenges + in-memory tie today):
   (a) **Fiat–Shamir** — sample `z`/`γ` from a `Blake3Transcript` (prover absorbs
-  the round message → `z`, each round poly → `γ`); (b) **PCS opening at `γ`** —
-  the tie checks the derived evals against the in-memory columns; the real
-  protocol opens the `ψ_z`-projected columns through the PCS at `(z, γ)` (vs
-  today's `r*`), the §4-(i)/(ii) projection-point choice; (c) **batch all 16
-  relations** (3 ANDs + 13 adders) into one oblong zerocheck (Phase D) + the
-  GF(2⁸)/eq-split prover swap, then A/B vs the current fused discharge.
+  the round message → `z`, each round poly → `γ`); (b) **fold the tie into the
+  multipoint-eval** — the binding is a **row-space opening at `γ`, not a joint
+  `(z, γ)` open**: `z` is the bit-recombination (it picks the `L_i(z)` weights
+  collapsing the `D` bit-slices, exactly as `α^b` does today), so the opened
+  object is the `ψ_z`-projected column opened at `γ`. The `ψ_z(col↓Δ)(γ)`
+  pair-evals fold into the **main multipoint-eval** (Δ=0 point claim, Δ≠0 shift
+  predicate, single open binds them) — the same "Approach B" the `ψ_α`
+  pair-evals already use in `f2_prove.rs`, with `L_i(z)`/`γ` for `α^b`/`r*`. The
+  §4-(i)/(ii) projection-point choice (z vs α for shared columns) is the cost
+  question. (c) **batch all 16 relations** (3 ANDs + 13 adders) into one oblong
+  zerocheck (Phase D) + the GF(2⁸)/eq-split prover swap, then A/B vs the current
+  fused discharge.
 
 ### Oblong AND zerocheck — GF(2⁸) speed lever: subfield + embedding + byte-lookup NTT (working tree)
 - **What**: the prover-side speed prerequisite (plan P1 + P4) for the oblong AND

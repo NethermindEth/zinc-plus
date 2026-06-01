@@ -52,11 +52,16 @@ path touched):
 
 **Remaining (next sessions), in order:**
 1. **Phase C finish** — (a) **Fiat-Shamir**: sample `z`/`γ` from a
-   `Blake3Transcript` in `protocol` (drop the explicit args); (b) **PCS opening at
-   `γ`**: the tie checks the derived evals against the *in-memory* columns; the
-   real protocol opens the `ψ_z`-projected columns through the PCS at `(z, γ)`
-   (the §4-(i)/(ii) projection-point choice — start with (i), `z` only on the
-   discharge columns) + the `↓Δ` shift opening.
+   `Blake3Transcript` in `protocol` (drop the explicit args); (b) **fold the tie
+   into the multipoint-eval** — the binding is a **row-space opening at `γ`, not a
+   joint `(z, γ)` open**. `z` is the bit-recombination (it picks the `L_i(z)`
+   weights that collapse the `D` bit-slices, exactly as `α^b` does today), so the
+   opened object is the `ψ_z`-projected column opened at the row point `γ`. The
+   `ψ_z(col↓Δ)(γ)` pair-evals fold into the **main multipoint-eval** (Δ=0 point
+   claim, Δ≠0 shift predicate, single open binds them) — the same "Approach B" the
+   `ψ_α` pair-evals already use in `f2_prove.rs`, with `L_i(z)`/`γ` for `α^b`/`r*`.
+   §4-(i)/(ii) (z vs α for shared columns) is the projection-point cost choice;
+   start with (i) (`z` only on the discharge columns) + the `↓Δ` shift opening.
 2. **eq-split (more speed)**: split the `n` row-vars into ≤3 **deterministic
    GF(2⁸)** skip challenges `{α,α²,α⁴}` (eq weighted in GF(2⁸), accumulated per
    `2^k`-word chunk) + the big-field remainder (embed + GF(2¹²⁸) eq once per

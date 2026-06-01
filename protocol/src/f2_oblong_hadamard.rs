@@ -23,10 +23,19 @@
 //!
 //! One AND relation, **explicit challenges** (`r`, `z`, `γ`) — the Fiat–Shamir
 //! transcript wiring and the multi-relation batching are the follow-ups (plan
-//! §5, Phase D). The tie does *not* yet open the projected columns through the
-//! PCS at `(z, γ)`; it checks the derived evals against the in-memory columns,
-//! which validates the recombination algebra (the architectural risk). The PCS
-//! opening at `γ` (vs today's `r*`) is the remaining Phase-C wiring.
+//! §5, Phase D). The tie does *not* yet bind the operand evals to the
+//! commitment; it checks the derived evals against the in-memory columns, which
+//! validates the recombination algebra (the architectural risk).
+//!
+//! **The binding is a row-space opening at `γ`, not a joint `(z, γ)` open.**
+//! `z` is the *bit-recombination*: it selects the weights `L_i(z)` that collapse
+//! the `D` bit-slices into one `GF(2^128)` scalar — exactly as `α` (via `α^b`)
+//! does in today's discharge — so the opened object is the `ψ_z`-projected
+//! column, a row-multilinear opened at the row point `γ`. The remaining wiring
+//! is therefore to **fold the `ψ_z(col↓Δ)(γ)` pair-evals into the main
+//! multipoint-eval** (Δ=0 as a point claim, Δ≠0 via the shift predicate, bound
+//! by the single PCS open) — the same "Approach B" the `ψ_α` pair-evals already
+//! use (`f2_prove.rs`), with `L_i(z)`/`γ` for `α^b`/`r*`.
 
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::binary::BinaryPoly;
