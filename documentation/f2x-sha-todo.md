@@ -1052,6 +1052,34 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Investigated, didn't help
 
+### Precompute the `γ'^k·σ^b` weight table in the Hadamard zerocheck comb (rejected)
+- **Hypothesis**: the degree-3 Hadamard comb does
+  `gpow * sigma_powers[b] * (u·v − w)` = 3 GF(2^128)-mults/term in rounds
+  2..n. Folding the two batch challenges into one precomputed
+  `weights[k·D + b] = γ'^k·σ^b` (constant across hypercube points) drops it
+  to 2 mults/term — expected ~10–17% on Prove-Hadamard.
+- **Implementation**: added a flat `weights` field to
+  `HadamardRound1FastPath` (replacing `gamma_powers`/`sigma_powers`) and
+  built it once in `prepare_hadamard_group_with_fast`, used in both
+  `round_1_message` and the `comb_fn`. Value-preserving (the
+  `fast_path_matches_generic` byte-identical-proof test still passed; all
+  59 piop + 50 protocol lib tests green).
+- **Measurement (rigorous Criterion A/B, nvars=16, same machine state via
+  `git stash` + `--save-baseline`/`--baseline`)**: change
+  **[+1.5% +6.9% +15.4%] (p=0.03) — regressed.** Reverted.
+- **Why it didn't help**: rounds 2..n are **memory-bandwidth bound**, not
+  arithmetic-bound. The generic multi-degree sumcheck rebuilds a
+  1537-element value array per hypercube point (the eq MLE + 1536 slices);
+  that traffic dominates. Trading a cheap CLMUL field-mult for a load from
+  a larger 512-entry `weights` table (vs the tiny, cache-resident 16-entry
+  `gamma_powers` + 32-entry `sigma_powers`) is net-neutral-to-negative.
+  **Lesson / culprit for the discharge cost**: the real bottleneck is the
+  generic per-point value-array machinery over 1536 polynomials — only a
+  *specialised* Hadamard sumcheck that folds slices in place (avoiding that
+  rebuild) or a smaller polynomial count would move Prove-Hadamard; comb
+  micro-opts won't. (Phase-1 round-1 fast path already bypasses the rebuild
+  for round 1, which is why it — not this — was the win.)
+
 ### Fast u64 scatter in `scatter_matrix_into_gpu_slab` for F2PackU64 cells (rejected)
 - **Hypothesis (from optimization survey)**: the per-cell write in
   `zip-plus/src/merkle.rs::scatter_matrix_into_gpu_slab` goes through
