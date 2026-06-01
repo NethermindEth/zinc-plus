@@ -1457,6 +1457,18 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   "Packed Sumcheck over Fields of Small Characteristic" eprint 2025/719;
   binius.xyz blueprint (Univariate Skip / Rijndael Zerocheck / ANDs);
   irreducible.com "Slicing Up Binary Towers"; LambdaClass "Binius Part 2".
+- **Phase 0 — ✅ DONE, gate CLEARED (~19× ceiling).** Probe
+  `poly/benches/binary_gf_compare.rs::bench_discharge_comb` measures the
+  discharge comb at one point (512 terms), bb vs sv: **`bb_GF128_products` 2594
+  ns** (512 post-fold GF128 products) vs **`sv_packed_psi_x4` 137 ns** (bit
+  operands: `(U&V)⊕W` packed + ψ_σ via the x4 NEON kernel + 17 bb) ⇒ **~19×** on
+  M-series. This is the realized √κ on the inner comb — the part the removed skip
+  prover ran in `bb` (2594 ns), explaining its 40–74× slowdown. It's the
+  *ceiling* (excludes off-hypercube grid + only `v≈5–7` rounds skipped); net
+  discharge speedup est. **~5–15×** (→ 418 ms → ~30–80 ms, byte-identical) —
+  **GO.** Phase 1: resurrect + bit-pack the full v-variate prefix (grid + delayed
+  reduction), gate `fast_path_skip2_matches_generic`-style, A/B the net. See
+  `documentation/f2-hadamard-univariate-skip-design.md` §10.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds

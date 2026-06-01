@@ -217,6 +217,41 @@ Drop the additive-NTT/univariate-skip prototype (wrong technique). Instead:
   reuses the existing discharge verifier + recombination — far less than the
   univariate-skip build in §6.)
 
+## 10. Phase 0 — ✅ DONE: the inner-comb ceiling is ~19× (clears the gate)
+
+Probe shipped as `poly/benches/binary_gf_compare.rs::bench_discharge_comb`
+(`binary_gf/discharge_comb_512term`), the discharge comb at one sumcheck point
+(K=16 relations × D=32 bits = 512 terms), two ways:
+
+| arm | what | time/comb |
+|-----|------|-----------|
+| `bb_GF128_products` | standard: post-fold slices are general GF(2¹²⁸) ⇒ 512 `U_b·V_b` are full CLMUL muls (~1041 bb) | **2594 ns** |
+| `sv_packed_psi_x4`  | small-value: operands are bits ⇒ `(U_k&V_k)⊕W_k` packed AND/XOR + `Σ_b σ^b(·)` = ψ_σ via the x4 NEON kernel + 17 bb | **137 ns** |
+
+**⇒ ~19× faster** (M-series, `target-cpu=native`, `--features simd`). Breakdown:
+bb ≈ 2.5 ns/GF128-mul (CLMUL-throughput-bound); sv's 137 ns ≈ 17 bb-muls (~42 ns)
++ 4 ψ-x4 calls (~95 ns ⇒ ψ_σ(32-bit) ≈ 6 ns ≈ 2.4 bb-equiv, vs the ~64 bb it
+replaces per relation). This is the realized `√κ` on the per-point inner comb,
+and it **clears the ≥4× gate with margin** — confirming the removed skip prover's
+failure was the `bb` execution, not the algorithm.
+
+**Caveat — this is the CEILING.** It measures only the inner comb (the part the
+small-value prover does cheaply). The full prover adds: (a) the off-hypercube
+grid `Θ((d+1)^v)` cells (sb/bb extrapolation via Procedure 1 — `O(d log d)` bb,
+small for d=3 but nonzero), (b) prefix construction + delayed-reduction
+bookkeeping, (c) only `v≈5–7` of the `n` rounds are skipped (the tail stays
+standard, but it's `2^v`-cheaper). So the **net** discharge speedup will be
+< 19× — plausibly **~5–15×** if the grid overhead stays sub-dominant (Procedure
+1), i.e. discharge 418 ms → ~30–80 ms, nvars=16 prove → ~75–125 ms (a ~4–6× total
+prove win), byte-identical. Phase 1 must measure the *full* prefix (grid
+included) to confirm the net.
+
+**Recommendation: GO.** The gate cleared decisively and the technique is
+byte-identical with the skeleton in git. Phase 1: resurrect + bit-pack the full
+v-variate prefix (grid + delayed reduction), gate it `fast_path_skip2_matches_
+generic`-style, A/B the net discharge speedup, then wire size-gated like the
+fused evaluator.
+
 --- (historical: original §8 blocked-state notes follow) ---
 
 ### Original §8 (now superseded by §8 RESOLUTION above)

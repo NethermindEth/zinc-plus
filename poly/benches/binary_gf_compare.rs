@@ -347,6 +347,87 @@ fn bench_project_trace(c: &mut Criterion) {
     group.finish();
 }
 
+/// Number of Hadamard relations in the SHA-256 F_2 discharge.
+const K: usize = 16;
+
+/// PHASE-0 PROBE for the small-value sum-check prover (see
+/// `documentation/f2-hadamard-univariate-skip-design.md`). The discharge comb
+/// at ONE sumcheck point is `eq · Σ_k γ^k Σ_b σ^b (U_{k,b}·V_{k,b} − W_{k,b})`
+/// over `K=16` relations × `D=32` bits = 512 terms.
+///
+/// - **`bb_GF128_products`**: the standard prover's representation — *after* a
+///   round-1 GF(2¹²⁸) fold the slices are general field elements, so each of the
+///   512 `U_b·V_b` terms is a full GF(2¹²⁸) multiply (`bb`). ~1041 GF128 muls.
+/// - **`sv_packed_psi_x4`**: the small-value prover keeps the operands as the
+///   *bits* they are on the hypercube. Then `U_b·V_b − W_b = ((U_k & V_k)⊕W_k)_b`
+///   (one packed `u64` AND+XOR per relation), and `Σ_b σ^b·(that)` is exactly a
+///   **ψ_σ projection** of the packed word — done 4 relations at a time by the
+///   existing `eval_f2_poly_d_at_with_powers_simd_x4` NEON kernel. ~16 packed
+///   ops + 4 ψ-x4 calls + 17 GF128 muls.
+///
+/// The ratio bounds the realized `√κ` on this aarch64 target: it's the ceiling
+/// of the small-value win on the per-point inner comb (the full prover adds
+/// off-hypercube-grid overhead on top, which only lowers it). Gate the full
+/// (byte-identical) build on this clearing ≳4×.
+fn bench_discharge_comb(c: &mut Criterion) {
+    let mut group = c.benchmark_group("binary_gf/discharge_comb_512term");
+    group.sample_size(50);
+    let mut rng = StdRng::seed_from_u64(0x5C5C_5C5C);
+
+    let sigma = rand_gf128(&mut rng);
+    let gamma = rand_gf128(&mut rng);
+    let sigma_pows = gf128::alpha_powers(&sigma, D); // [1, σ, …, σ^{D-1}]
+    let gamma_pows = gf128::alpha_powers(&gamma, K); // [1, γ, …, γ^{K-1}]
+    let eq = rand_gf128(&mut rng);
+
+    // bb: general (post-fold) GF128 slice values — 512 (U,V,W) triples.
+    let u: Vec<BinaryFieldGF128> = (0..K * D).map(|_| rand_gf128(&mut rng)).collect();
+    let v: Vec<BinaryFieldGF128> = (0..K * D).map(|_| rand_gf128(&mut rng)).collect();
+    let w: Vec<BinaryFieldGF128> = (0..K * D).map(|_| rand_gf128(&mut rng)).collect();
+    // sv: packed bit operands (pre-fold) — one D-bit word per relation.
+    let up: Vec<u64> = (0..K).map(|_| rng.random()).collect();
+    let vp: Vec<u64> = (0..K).map(|_| rng.random()).collect();
+    let wp: Vec<u64> = (0..K).map(|_| rng.random()).collect();
+
+    group.bench_function("bb_GF128_products", |bench| {
+        bench.iter(|| {
+            let mut acc = BinaryFieldGF128::zero();
+            for k in 0..K {
+                let mut s = BinaryFieldGF128::zero();
+                for b in 0..D {
+                    let idx = k * D + b;
+                    let prod = black_box(u[idx]) * black_box(v[idx]);
+                    s += &(sigma_pows[b] * (prod - black_box(w[idx])));
+                }
+                acc += &(gamma_pows[k] * s);
+            }
+            black_box(eq * acc)
+        });
+    });
+
+    group.bench_function("sv_packed_psi_x4", |bench| {
+        bench.iter(|| {
+            let mut acc = BinaryFieldGF128::zero();
+            for q in 0..(K / 4) {
+                // d_k = (U_k & V_k) ^ W_k, four relations packed for the x4 kernel.
+                let quad = [
+                    (black_box(up[4 * q]) & black_box(vp[4 * q])) ^ black_box(wp[4 * q]),
+                    (black_box(up[4 * q + 1]) & black_box(vp[4 * q + 1])) ^ black_box(wp[4 * q + 1]),
+                    (black_box(up[4 * q + 2]) & black_box(vp[4 * q + 2])) ^ black_box(wp[4 * q + 2]),
+                    (black_box(up[4 * q + 3]) & black_box(vp[4 * q + 3])) ^ black_box(wp[4 * q + 3]),
+                ];
+                let psi = gf128::eval_f2_poly_d_at_with_powers_simd_x4::<D>(quad, &sigma_pows);
+                acc += &(gamma_pows[4 * q] * psi[0]);
+                acc += &(gamma_pows[4 * q + 1] * psi[1]);
+                acc += &(gamma_pows[4 * q + 2] * psi[2]);
+                acc += &(gamma_pows[4 * q + 3] * psi[3]);
+            }
+            black_box(eq * acc)
+        });
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = compare;
     config = Criterion::default();
@@ -357,6 +438,7 @@ criterion_group! {
         bench_batch_mul,
         bench_alpha_precompute,
         bench_project_col,
-        bench_project_trace
+        bench_project_trace,
+        bench_discharge_comb
 }
 criterion_main!(compare);
