@@ -43,7 +43,7 @@ use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
 use zinc_poly::univariate::oblong_and::{
     AdditiveNtt, AndCheckOutput, OblongAndProof, OblongChannel, OblongError, WORD_BITS,
-    base_lagrange_at, prove_oblong_and_channel, verify_oblong_and_channel,
+    base_lagrange_at, eq_indicator, prove_oblong_and_channel, verify_oblong_and_channel,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
@@ -158,6 +158,87 @@ pub fn verify_oblong_and_relation<T: Transcript>(
         || parents[1] != out.b_eval
         || parents[2] != out.c_eval
     {
+        return Err(OblongVerifyError::TieMismatch);
+    }
+    Ok(())
+}
+
+/// Prover for a **batch** of `K` AND relations: stack their operand columns into
+/// one oblong zerocheck. The relation index forms the high row variables, the
+/// word index the low ones, padded to a power-of-two relation count with
+/// zero-operand relations (`0 ⊙ 0 = 0`, vacuously satisfied). One univariate-skip
+/// round + one Phase-2 sumcheck cover all relations (Binius's stacking — vs the
+/// current discharge's `γ`-batch).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn prove_oblong_and_batch<T: Transcript>(
+    transcript: &mut T,
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    specs: &[F2HadamardSpec],
+    num_vars: usize,
+) -> OblongAndProof {
+    let n = 1usize << num_vars;
+    let k_pad = specs.len().next_power_of_two().max(1);
+    let mut a = Vec::with_capacity(k_pad * n);
+    let mut b = Vec::with_capacity(k_pad * n);
+    let mut c = Vec::with_capacity(k_pad * n);
+    for spec in specs {
+        a.extend(operand_words(columns, &spec.u, num_vars));
+        b.extend(operand_words(columns, &spec.v, num_vars));
+        c.extend(operand_words(columns, &spec.w, num_vars));
+    }
+    // Pad the stack to k_pad·n rows with zero-operand relations.
+    a.resize(k_pad * n, 0);
+    b.resize(k_pad * n, 0);
+    c.resize(k_pad * n, 0);
+
+    let ntt = AdditiveNtt::new();
+    let mut ch = TranscriptChannel::new(transcript);
+    prove_oblong_and_channel(&mut ch, &a, &b, &c, &ntt)
+}
+
+/// Verify the batched oblong zerocheck and tie **every** relation's operand
+/// evals to the committed columns. The eval point is `[z, γ]` with `γ` splitting
+/// into `γ_word` (low `num_vars`) + `γ_rel` (high `log2 k_pad`); the batched tie
+/// checks `a_eval = Σ_rel eq(rel; γ_rel)·ψ_z(U_rel)(γ_word)` and likewise b/c.
+/// Padding relations have zero operands, so they contribute zero and are skipped.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn verify_oblong_and_batch<T: Transcript>(
+    transcript: &mut T,
+    proof: &OblongAndProof,
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    specs: &[F2HadamardSpec],
+    num_vars: usize,
+) -> Result<(), OblongVerifyError> {
+    let k = specs.len();
+    let k_pad = k.next_power_of_two().max(1);
+    let log_k = k_pad.trailing_zeros() as usize;
+    let stacked_nvars = num_vars + log_k;
+
+    let out: AndCheckOutput = {
+        let mut ch = TranscriptChannel::new(transcript);
+        verify_oblong_and_channel(&mut ch, proof, stacked_nvars)
+            .map_err(OblongVerifyError::Oblong)?
+    };
+
+    let z = out.eval_point[0];
+    let gammas = &out.eval_point[1..];
+    let (gamma_word, gamma_rel) = gammas.split_at(num_vars);
+
+    // ψ_z(col↓Δ)(γ_word) for the distinct pairs, then per-relation operand evals.
+    let lagrange_z = base_lagrange_at(z).to_vec();
+    let pairs = distinct_pairs(specs);
+    let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, gamma_word);
+    let parents = derive_operand_parents(specs, &pairs, &pair_evals, &lagrange_z);
+
+    // a/b/c_eval = Σ_rel eq(rel; γ_rel)·ψ_z(operand_rel)(γ_word).
+    let eq_rel = eq_indicator(gamma_rel); // length k_pad
+    let mut exp = [Gf::zero(); 3];
+    for (rel, &w) in eq_rel.iter().take(k).enumerate() {
+        for j in 0..3 {
+            exp[j] = exp[j] + w * parents[3 * rel + j];
+        }
+    }
+    if exp[0] != out.a_eval || exp[1] != out.b_eval || exp[2] != out.c_eval {
         return Err(OblongVerifyError::TieMismatch);
     }
     Ok(())
@@ -302,5 +383,75 @@ mod tests {
         let mut tv = Blake3Transcript::new();
         let res = verify_oblong_and_relation(&mut tv, &proof, &columns, &bad_spec, num_vars);
         assert!(matches!(res, Err(OblongVerifyError::TieMismatch)), "got {res:?}");
+    }
+
+    fn round_trip_batch(
+        columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        specs: &[F2HadamardSpec],
+        num_vars: usize,
+    ) {
+        let mut tp = Blake3Transcript::new();
+        let proof = prove_oblong_and_batch(&mut tp, columns, specs, num_vars);
+        let mut tv = Blake3Transcript::new();
+        verify_oblong_and_batch(&mut tv, &proof, columns, specs, num_vars)
+            .expect("batched oblong round-trip + ψ_z tie");
+    }
+
+    #[test]
+    fn batch_three_and_relations_round_trips() {
+        // rel0: U⊙V=W0 (cols 0,1,2); rel1: V⊙P=W1 (cols 3,4,5);
+        // rel2: U⊙U↓1=W2 (cols 6,7). K=3 ⇒ k_pad=4 (one zero-operand padding relation).
+        let n = 8usize;
+        let p: Vec<u32> = U.iter().map(|x| x.rotate_left(5) ^ 0x55).collect();
+        let w0: Vec<u32> = U.iter().zip(&V).map(|(x, y)| x & y).collect();
+        let w1: Vec<u32> = V.iter().zip(&p).map(|(x, y)| x & y).collect();
+        let w2: Vec<u32> = (0..n).map(|t| if t + 1 < n { U[t] & U[t + 1] } else { 0 }).collect();
+        let columns = [
+            col_from_u32s(&U),
+            col_from_u32s(&V),
+            col_from_u32s(&w0),
+            col_from_u32s(&V),
+            col_from_u32s(&p),
+            col_from_u32s(&w1),
+            col_from_u32s(&U),
+            col_from_u32s(&w2),
+        ];
+        let specs = [
+            F2HadamardSpec::plain(0, 1, 2),
+            F2HadamardSpec::plain(3, 4, 5),
+            F2HadamardSpec {
+                u: F2Operand::col(6),
+                v: F2Operand::shifted(6, 1),
+                w: F2Operand::col(7),
+            },
+        ];
+        round_trip_batch(&columns, &specs, 3);
+    }
+
+    #[test]
+    fn batch_corrupt_one_relation_is_rejected() {
+        // Corrupting relation 0's W breaks its AND on some stacked rows ⇒ R₀ no
+        // longer vanishes on the base domain ⇒ round-0 rejection.
+        let p: Vec<u32> = U.iter().map(|x| x.rotate_left(5) ^ 0x55).collect();
+        let mut w0: Vec<u32> = U.iter().zip(&V).map(|(x, y)| x & y).collect();
+        let w1: Vec<u32> = V.iter().zip(&p).map(|(x, y)| x & y).collect();
+        w0[1] ^= 1 << 9; // corrupt
+        let columns = [
+            col_from_u32s(&U),
+            col_from_u32s(&V),
+            col_from_u32s(&w0),
+            col_from_u32s(&V),
+            col_from_u32s(&p),
+            col_from_u32s(&w1),
+        ];
+        let specs = [F2HadamardSpec::plain(0, 1, 2), F2HadamardSpec::plain(3, 4, 5)];
+        let mut tp = Blake3Transcript::new();
+        let proof = prove_oblong_and_batch(&mut tp, &columns, &specs, 3);
+        let mut tv = Blake3Transcript::new();
+        let res = verify_oblong_and_batch(&mut tv, &proof, &columns, &specs, 3);
+        assert!(
+            matches!(res, Err(OblongVerifyError::Oblong(OblongError::RoundConsistency(_)))),
+            "got {res:?}"
+        );
     }
 }
