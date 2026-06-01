@@ -1330,9 +1330,9 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     protocol lib tests pass. The `f2_prove.rs` threading is still
     uncommitted (entangled with the GF128 WIP — option 1: lands after
     the WIP).
-  - **SOUND DISCHARGE SHIPPED (Approach A, working tree on `f2-clean`)**:
-    the trusted `parent_evals` are now PCS-bound. Full-pipeline change in
-    `protocol/src/f2_prove.rs`:
+  - **SOUND DISCHARGE SHIPPED (Approach A — SUPERSEDED by Approach B
+    below; kept for the soundness rationale)**: the trusted `parent_evals`
+    are now PCS-bound. Full-pipeline change in `protocol/src/f2_prove.rs`:
     - **`F2FullProof`** gains four fields (all `None`/empty without
       Hadamard): `hadamard_multipoint_eval: Option<MultipointEvalProof>`,
       `hadamard_evals_at_rstar_h: Vec<Gf>` (every projected column's eval
@@ -1389,12 +1389,57 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     - **Helper extracted**: `recompute_public_col_evals_at::<D>` — the
       public-col α-project + MLE-eval recompute, now shared by all three
       verifier points (`r*`, `r_0`, `r_0^H`).
+  - **SOUND DISCHARGE REWORKED → Approach B (two-point multipoint-eval;
+    working tree on `f2-clean`)**: Approach A was the user-identified
+    "wrong turn" — it opened the witness slice **twice** (a separate
+    `r*_H` mp+open) and leaned on a `parent_eval == evals_at_rstar_h`
+    binding check. Approach B folds the Hadamard claims into the **main**
+    mp instead, exactly as requested: each AND pair's claim
+    `MLE[v](r*_H)` enters the *single* multipoint-eval as a **pointed
+    shift** and comes out as a claim on `MLE[v]` at the shared `r_0`,
+    unifying every `MLE[v]` evaluation across points under **one** open.
+    - **New piop primitive** (`piop/src/multipoint_eval.rs`, additive —
+      the integer mp is untouched): `PointedShiftClaim { point, shift,
+      source_col }` + `prove/verify_as_subprotocol_with_pointed_shifts`
+      + `verify_subclaim_pointed`. A pointed shift carries its **own**
+      point (here `r*_H`) and a `shift` Δ; `shift = 0` ⇒ the shift
+      predicate is `eq` ⇒ a plain point-claim, so Δ=0 AND pairs fold as
+      point claims and Δ≠0 pairs (row-shifted operands) fold via the
+      shift predicate at `r*_H` — **closing the AND row-shift soundness**
+      (ledger Issue 1) for the AND relations in the same pass. Unit test
+      `two_point_pointed_shifts_roundtrip` passes (17 piop mp tests green).
+    - **`F2FullProof` slimmed**: the four `hadamard_*` fields
+      (`hadamard_multipoint_eval`, `hadamard_evals_at_rstar_h`,
+      `hadamard_open_evals_at_r0h`, `hadamard_open`) are **removed**. The
+      existing `multipoint_eval` + `open` + `open_evals_at_r_0` now carry
+      the folded `r*_H` claims; the prover feeds `uair.hadamard_pair_evals`
+      as the pointed shifts' `down_evals`, the verifier rebuilds the same
+      `PointedShiftClaim`s from `subclaim.hadamard_pairs`/`hadamard_rstar`
+      and checks them with `verify_subclaim_pointed(open_evals_at_r_0,
+      pointed_shift_sources)`. Seven now-dead `F2FullVerifyError` variants
+      removed (`MissingHadamardDischarge`, `Hadamard{EvalsAtRstarH,OpenEvals}
+      LengthMismatch`, `Hadamard{Public,Virtual}ColumnEvalMismatchAtR0H`,
+      `HadamardParentEval{CountMismatch,BindingMismatch}`).
+    - **Why sound without the binding check**: the AND pair-evals
+      (`hadamard_pair_evals`) are still the recombination's inputs (corrupt
+      → `HadamardRecombination`) AND now the mp's down-terms folded into the
+      single `r_0` open — SZ over the mp's γ pins them to the committed
+      columns directly, so the separate A-style binding equality is no
+      longer needed. Adders stay trusted (their computed-β operands are
+      virtual/non-column, so they can't fold as pointed shifts).
+    - **Tests**: `prove_then_verify_f2_full_with_hadamard_roundtrips`
+      rewritten for B (tampers: flipped `W` → zerocheck, swapped
+      parent-eval → recombination, tampered `open_evals_at_r_0` → the
+      two-point mp subclaim check); `_with_operand_hadamards_roundtrips`'s
+      honest path now exercises the Δ≠0 pointed shifts end-to-end. All 19
+      protocol `f2_prove` tests + the SHA-256 e2e tests pass
+      (`--features parallel`); `multipoint_eval.rs`/`f2_prove.rs`
+      clippy-clean (the only `arithmetic_side_effects` hits are pre-existing
+      in the `poly` GF128/GF192 code, out of scope).
   - **Identified, not done (optimisations on the sound discharge)**:
-    (a) the second mp+open opens the witness slice a **second** time (at
-    `r_0^H`) and clones the full projected trace — collapse only the
-    Hadamard-column subset + a subset-column open, or fold `r*` and `r*_H`
-    into a single two-point multipoint-eval (the "proper" mp the Issue-1
-    row-shift discharge also wants) → one open instead of two. (b) The
+    (a) ~~the second mp+open opens the witness slice a **second** time~~
+    **DONE via Approach B above** — folded into one two-point mp + one
+    open. (b) The
     `prove_f2_full_impl` / `verify_f2_full_impl` Hadamard blocks duplicate
     the main mp+open block (~60 lines each) — a `*_mp_and_open_at_point`
     helper would DRY it but threads ~13 params; left inline for review

@@ -44,7 +44,8 @@ use std::fmt::Debug;
 use zinc_piop::{
     ideal_check::{IdealCheckProtocol, Proof as IcProof, VerifierSubclaim as IcVerifierSubclaim},
     multipoint_eval::{
-        MultipointEval, MultipointEvalError, Proof as MultipointEvalProof,
+        MultipointEval, MultipointEvalError, PointedShiftClaim,
+        Proof as MultipointEvalProof,
     },
     projections::project_f2_trace_row_major,
     sumcheck::{
@@ -2989,42 +2990,38 @@ where
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
 
-        // When discharging Hadamard relations we need the α-projected
-        // trace again after the main open (for the second multipoint-
-        // eval at r*_H). Clone it now — the original is consumed by the
-        // main open_evals computation below. The clone is paid only on
-        // the Hadamard path; the no-Hadamard fast path is byte-for-byte
-        // the pre-Hadamard prover. (Optimisation — collapse only the
-        // Hadamard subset, fold both points into one multipoint-eval —
-        // is logged in documentation/f2x-sha-todo.md.)
-        let projected_trace_for_hadamard: Option<
-            Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>>,
-        > = if hadamard_specs.is_empty() {
-            None
-        } else {
-            Some(projected_trace_for_mp.clone())
-        };
+        // -- Step 4.5: two-point multipoint-eval (r*, r*_H -> r_0) ---
+        //
+        // Reduces the per-column MLE eval claims at r* (all cols, carried
+        // in `uair_proof.column_evals_at_rstar`) AND — via Approach B —
+        // the Hadamard AND relations' per-`(col, Δ)` claims at r*_H into a
+        // single open point r_0. Each distinct `(col, Δ)` pair folds as a
+        // pointed-shift claim at r*_H (Δ=0 = a plain point claim, Δ≠0 =
+        // the shift predicate at r*_H) with claimed value
+        // `uair.hadamard_pair_evals[i]`; the single `open` at r_0 then
+        // binds them, closing the AND-relation row-shift soundness. No
+        // pairs ⇒ empty list ⇒ the plain single-point reduction.
+        //
+        // `projected_trace_for_mp` is the α-projected extended trace from
+        // `prove_f2_uair_with_groups`, so no re-projection here.
+        let pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = subclaim
+            .hadamard_pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: subclaim.hadamard_rstar.clone(),
+                shift,
+                source_col: col,
+            })
+            .collect();
 
-        // -- Step 4.5: Multipoint-eval reduction (r* -> r_0) ---------
-        //
-        // Reduces the per-column MLE evaluation claims at the
-        // sumcheck point r* (carried in
-        // `uair_proof.column_evals_at_rstar`) to a single evaluation
-        // claim at a fresh random point r_0, batched across columns
-        // via gamma. Row-shifted column evals (when they land) flow
-        // through MultipointEval's `down_evals` + `shifts` params here.
-        //
-        // `projected_trace_for_mp` is the α-projected extended trace
-        // surfaced by `prove_f2_uair_with_groups`, so no re-projection
-        // is needed here.
         let (mp_proof, mp_prover_state) =
-            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol(
+            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol_with_pointed_shifts(
                 transcript,
                 &projected_trace_for_mp,
                 &subclaim.sumcheck_point,
                 &uair_proof.column_evals_at_rstar,
-                /* down_evals */ &[],
-                /* shifts     */ &[],
+                &pointed_shifts,
+                &uair_proof.hadamard_pair_evals,
                 &(),
             )
             .map_err(F2ProveError::MultipointEval)?;
@@ -3079,120 +3076,12 @@ where
             num_column_openings,
         );
 
-        // -- Step 4.5'/7': Hadamard sound discharge (second mp+open) -
-        //
-        // Bind the Hadamard parent-evals (the per-column α-evals at the
-        // Hadamard sumcheck point r*_H, shipped trusted in
-        // `uair.hadamard_pair_evals`) to the commitment by opening at
-        // r*_H. Collapse EVERY projected column's eval at r*_H to a
-        // fresh point r_0^H via a second multipoint-eval, then open the
-        // same contiguous witness slice at r_0^H. Collapsing all columns
-        // (not just the Hadamard subset) reuses the witness-slice open
-        // verbatim and dodges subset-column mapping; the parent-evals are
-        // then a subset of the bound `evals_at_rstar_h`.
-        let (
-            hadamard_multipoint_eval,
-            hadamard_evals_at_rstar_h,
-            hadamard_open_evals_at_r0h,
-            hadamard_open,
-        ) = match projected_trace_for_hadamard {
-            None => (None, Vec::new(), Vec::new(), None),
-            Some(ptrace) => {
-                let r_star_h = &subclaim.hadamard_rstar;
-
-                // up_evals: every projected column's MLE eval at r*_H.
-                // Clone per col (evaluate_with_config consumes) so
-                // `ptrace` survives for the second multipoint-eval below.
-                let evals_at_rstar_h: Vec<BinaryFieldGF128> = cfg_iter!(&ptrace)
-                    .map(|col| {
-                        <DenseMultilinearExtension<_>
-                            as zinc_poly::mle::MultilinearExtensionWithConfig<
-                                BinaryFieldGF128,
-                            >>::evaluate_with_config(col.clone(), r_star_h, &())
-                        .expect("MLE evaluation at r*_H should succeed")
-                    })
-                    .collect();
-
-                // Absorb the up_evals BEFORE the second multipoint-eval
-                // samples its γ challenges — exactly as
-                // `prove_f2_uair_with_groups` absorbs `column_evals_at_rstar`
-                // before the main mp. Soundness needs this: otherwise a
-                // prover seeing γ first could fit fake per-column evals at
-                // r*_H to the γ-batched sum while keeping the witness slice
-                // honest, defeating the parent-eval binding. With the
-                // absorb, Schwartz-Zippel over the now-fresh γ pins every
-                // up_eval to the true committed value.
-                let mut buf_rstar_h = vec![
-                    0u8;
-                    <<BinaryFieldGF128 as Field>::Inner
-                        as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-                ];
-                for v in &evals_at_rstar_h {
-                    transcript.absorb_random_field(v, &mut buf_rstar_h);
-                }
-
-                let (mp2_proof, mp2_state) =
-                    MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol(
-                        transcript,
-                        &ptrace,
-                        r_star_h,
-                        &evals_at_rstar_h,
-                        /* down_evals */ &[],
-                        /* shifts     */ &[],
-                        &(),
-                    )
-                    .map_err(F2ProveError::MultipointEval)?;
-                let r_0_h = mp2_state.eval_point;
-
-                let open_evals_at_r0h: Vec<BinaryFieldGF128> =
-                    zinc_utils::cfg_into_iter!(ptrace)
-                        .map(|col| {
-                            <DenseMultilinearExtension<_>
-                                as zinc_poly::mle::MultilinearExtensionWithConfig<
-                                    BinaryFieldGF128,
-                                >>::evaluate_with_config(col, &r_0_h, &())
-                            .expect("MLE evaluation at r_0^H should succeed")
-                        })
-                        .collect();
-
-                let mut buf_r0h = vec![
-                    0u8;
-                    <<BinaryFieldGF128 as Field>::Inner
-                        as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-                ];
-                for v in &open_evals_at_r0h {
-                    transcript.absorb_random_field(v, &mut buf_r0h);
-                }
-
-                let open2 = Self::prove_f2_open(
-                    transcript,
-                    pp,
-                    &hint,
-                    &trace.binary_poly[num_pub_bin..],
-                    &r_0_h,
-                    &subclaim.alpha,
-                    num_column_openings,
-                );
-
-                (
-                    Some(mp2_proof),
-                    evals_at_rstar_h,
-                    open_evals_at_r0h,
-                    Some(open2),
-                )
-            }
-        };
-
         Ok(F2FullProof {
             commitment,
             uair: uair_proof,
             multipoint_eval: mp_proof,
             open_evals_at_r_0,
             open: open_proof,
-            hadamard_multipoint_eval,
-            hadamard_evals_at_rstar_h,
-            hadamard_open_evals_at_r0h,
-            hadamard_open,
         })
     }
 
@@ -3457,26 +3346,37 @@ where
             }
         }
 
-        // -- Step 4.5 verify: multipoint-eval reduction (r* -> r_0) --
+        // -- Step 4.5 verify: two-point multipoint-eval (r*, r*_H -> r_0) --
         //
-        // Mirror of the prover's
-        // [`Self::prove_f2_full_with_bit_ops`] multipoint-eval phase.
-        // Reduces the per-col MLE eval claims at r* (carried in
-        // `proof.uair.column_evals_at_rstar`) to `r_0`, then checks
-        // the prover-supplied `proof.open_evals_at_r_0` against the
-        // reduction. The witness-primary slice of
-        // `open_evals_at_r_0` is what the F_2 PCS open at r_0 binds.
-        let mp_subclaim = MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol(
-            transcript,
-            proof.multipoint_eval.clone(),
-            &subclaim.sumcheck_point,
-            &proof.uair.column_evals_at_rstar,
-            /* down_evals */ &[],
-            /* shifts     */ &[],
-            num_vars,
-            &(),
-        )
-        .map_err(F2FullVerifyError::MultipointEval)?;
+        // Mirror of the prover (Approach B): reduce the per-col claims at r*
+        // AND the Hadamard AND relations' per-`(col, Δ)` claims at r*_H — the
+        // pointed shifts, with claimed values `proof.uair.hadamard_pair_evals`
+        // — into one r_0. The single open at r_0 then binds every folded
+        // claim (closing the AND row-shift soundness); `open_evals_at_r_0` is
+        // checked against the reduction by `verify_subclaim_pointed` below.
+        let pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = subclaim
+            .hadamard_pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: subclaim.hadamard_rstar.clone(),
+                shift,
+                source_col: col,
+            })
+            .collect();
+        let pointed_shift_sources: Vec<usize> =
+            pointed_shifts.iter().map(|p| p.source_col).collect();
+        let mp_subclaim =
+            MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol_with_pointed_shifts(
+                transcript,
+                proof.multipoint_eval.clone(),
+                &subclaim.sumcheck_point,
+                &proof.uair.column_evals_at_rstar,
+                &pointed_shifts,
+                &proof.uair.hadamard_pair_evals,
+                num_vars,
+                &(),
+            )
+            .map_err(F2FullVerifyError::MultipointEval)?;
         let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
 
         // Absorb open_evals_at_r_0 into transcript (mirror of the
@@ -3540,12 +3440,14 @@ where
             }
         }
 
-        // Finalise multipoint-eval check: verify the sumcheck-
-        // reduction is internally consistent with `open_evals_at_r_0`.
-        MultipointEval::<BinaryFieldGF128>::verify_subclaim(
+        // Finalise the two-point multipoint-eval check: verify the
+        // sumcheck reduction is consistent with `open_evals_at_r_0` for
+        // both the r* claims and the Hadamard r*_H pointed shifts (whose
+        // down terms index `open_evals_at_r_0` by the pairs' source col).
+        MultipointEval::<BinaryFieldGF128>::verify_subclaim_pointed(
             &mp_subclaim,
             &proof.open_evals_at_r_0,
-            /* shifts */ &[],
+            &pointed_shift_sources,
             &(),
         )
         .map_err(F2FullVerifyError::MultipointEval)?;
@@ -3575,178 +3477,6 @@ where
             bit_op_specs,
         )
         .map_err(F2FullVerifyError::Open)?;
-
-        // -- Hadamard sound discharge: second mp+open at r*_H ---------
-        //
-        // Mirror of the prover's second multipoint-eval + open in
-        // `prove_f2_full_impl`. It binds every column's α-eval at the
-        // Hadamard sumcheck point r*_H (`hadamard_evals_at_rstar_h`) to
-        // the commitment, then checks the trusted in-flow parent-evals
-        // (`uair.hadamard_pair_evals`, recombined inside
-        // `verify_f2_uair_with_groups`) equal the bound subset — upgrading
-        // the recombination from honest-prover-only to sound. Gated on
-        // `hadamard_specs` exactly like the prover.
-        if !hadamard_specs.is_empty() {
-            let num_total = proof.uair.column_evals_at_rstar.len();
-            let mp2_proof = proof
-                .hadamard_multipoint_eval
-                .as_ref()
-                .ok_or(F2FullVerifyError::MissingHadamardDischarge)?;
-            let open2 = proof
-                .hadamard_open
-                .as_ref()
-                .ok_or(F2FullVerifyError::MissingHadamardDischarge)?;
-
-            if proof.hadamard_evals_at_rstar_h.len() != num_total {
-                return Err(F2FullVerifyError::HadamardEvalsAtRstarHLengthMismatch {
-                    got: proof.hadamard_evals_at_rstar_h.len(),
-                    expected: num_total,
-                });
-            }
-            if proof.hadamard_open_evals_at_r0h.len() != num_total {
-                return Err(F2FullVerifyError::HadamardOpenEvalsLengthMismatch {
-                    got: proof.hadamard_open_evals_at_r0h.len(),
-                    expected: num_total,
-                });
-            }
-
-            // Absorb the up_evals at r*_H before the second mp samples
-            // its γ — mirror of the prover; pins each up_eval via SZ.
-            let mut buf_rstar_h = vec![
-                0u8;
-                <<BinaryFieldGF128 as Field>::Inner
-                    as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-            ];
-            for v in &proof.hadamard_evals_at_rstar_h {
-                transcript.absorb_random_field(v, &mut buf_rstar_h);
-            }
-
-            // Second multipoint-eval reduction (r*_H -> r_0^H), with the
-            // claimed per-column evals at r*_H as up_evals.
-            let mp2_subclaim = MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol(
-                transcript,
-                mp2_proof.clone(),
-                &subclaim.hadamard_rstar,
-                &proof.hadamard_evals_at_rstar_h,
-                /* down_evals */ &[],
-                /* shifts     */ &[],
-                num_vars,
-                &(),
-            )
-            .map_err(F2FullVerifyError::MultipointEval)?;
-            let r_0_h = mp2_subclaim.sumcheck_subclaim.point.clone();
-
-            // Absorb open_evals_at_r0h (mirror of the prover).
-            let mut buf_r0h = vec![
-                0u8;
-                <<BinaryFieldGF128 as Field>::Inner
-                    as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-            ];
-            for v in &proof.hadamard_open_evals_at_r0h {
-                transcript.absorb_random_field(v, &mut buf_r0h);
-            }
-
-            // Public col evals at r_0^H: validate by local recomputation.
-            if num_pub_bin > 0 {
-                let computed =
-                    recompute_public_col_evals_at::<D>(public_binary_trace, &subclaim.alpha, &r_0_h);
-                for (g, &c) in computed.iter().enumerate() {
-                    let claimed = proof.hadamard_open_evals_at_r0h[g];
-                    if c != claimed {
-                        return Err(
-                            F2FullVerifyError::HadamardPublicColumnEvalMismatchAtR0H {
-                                public_col_idx: g,
-                                computed: c,
-                                claimed,
-                            },
-                        );
-                    }
-                }
-            }
-
-            // XOR-virtual cols at r_0^H: derive from primary evals and
-            // check against the prover's claim.
-            let (primary_evals_at_r_0_h, virtual_evals_at_r_0_h_from_proof) =
-                proof.hadamard_open_evals_at_r0h.split_at(num_primary_columns);
-            let virtual_evals_at_r_0_h_derived =
-                derive_f2_virtual_evals_at(primary_evals_at_r_0_h, virtual_specs);
-            for (k, (claimed, derived)) in virtual_evals_at_r_0_h_from_proof
-                .iter()
-                .zip(virtual_evals_at_r_0_h_derived.iter())
-                .enumerate()
-            {
-                if claimed != derived {
-                    return Err(
-                        F2FullVerifyError::HadamardVirtualColumnEvalMismatchAtR0H {
-                            virtual_idx: k,
-                            derived: *derived,
-                            claimed: *claimed,
-                        },
-                    );
-                }
-            }
-
-            // Finalise the second multipoint-eval against open_evals_at_r0h.
-            MultipointEval::<BinaryFieldGF128>::verify_subclaim(
-                &mp2_subclaim,
-                &proof.hadamard_open_evals_at_r0h,
-                /* shifts */ &[],
-                &(),
-            )
-            .map_err(F2FullVerifyError::MultipointEval)?;
-
-            // Build a subclaim at r_0^H for the second open, then bind the
-            // witness slice to the same commitment as the main open.
-            let subclaim_at_r_0_h = F2VerifierSubclaim {
-                ic_evaluation_point: subclaim.ic_evaluation_point.clone(),
-                alpha: subclaim.alpha,
-                sumcheck_point: r_0_h,
-                primary_column_evals: primary_evals_at_r_0_h.to_vec(),
-                virtual_column_evals: virtual_evals_at_r_0_h_derived,
-                hadamard_rstar: Vec::new(),
-                hadamard_pairs: Vec::new(),
-            };
-            Self::verify_f2_open_with_virtuals(
-                transcript,
-                pp,
-                &proof.commitment,
-                open2,
-                &subclaim_at_r_0_h,
-                bit_op_specs,
-            )
-            .map_err(F2FullVerifyError::Open)?;
-
-            // -- Binding check (the soundness step) -------------------
-            // The per-column evals at r*_H are now bound to the
-            // commitment (witness via the open, public/virtual via the
-            // local checks, all pinned individually via the up-eval
-            // absorb + SZ). For each `Δ = 0` Hadamard pair, the trusted
-            // pair-eval the in-flow recombination used must equal the bound
-            // column eval at r*_H. `Δ ≠ 0` pairs are row-shifted and stay
-            // trusted (the row-shift discharge gap, plan §6).
-            // `subclaim.hadamard_pairs` is the sorted distinct `(col, Δ)`
-            // list, aligned 1:1 with `uair.hadamard_pair_evals`.
-            if proof.uair.hadamard_pair_evals.len() != subclaim.hadamard_pairs.len() {
-                return Err(F2FullVerifyError::HadamardParentEvalCountMismatch {
-                    got: proof.uair.hadamard_pair_evals.len(),
-                    expected: subclaim.hadamard_pairs.len(),
-                });
-            }
-            for (i, &(col, row_shift)) in subclaim.hadamard_pairs.iter().enumerate() {
-                if row_shift != 0 {
-                    continue; // row-shifted pair: trusted (row-shift gap).
-                }
-                let opened = proof.hadamard_evals_at_rstar_h[col];
-                let pair_eval = proof.uair.hadamard_pair_evals[i];
-                if opened != pair_eval {
-                    return Err(F2FullVerifyError::HadamardParentEvalBindingMismatch {
-                        distinct_col: col,
-                        opened,
-                        parent: pair_eval,
-                    });
-                }
-            }
-        }
 
         Ok(subclaim)
     }
@@ -3789,41 +3519,19 @@ pub struct F2FullProof<const D: usize> {
     /// — for the witness-primary slice — by [`Self::open`] below.
     pub open_evals_at_r_0: Vec<BinaryFieldGF128>,
     pub open: F2OpenProof<D>,
-
-    // -- Hadamard sound-discharge (second mp+open at `r*_H`) ----------
+    // -- Hadamard discharge (Approach B: two-point multipoint-eval) ----
     //
-    // When the UAIR carries coefficient-wise `W = U ⊙ V` operand
-    // relations, the Wiring-R Hadamard zerocheck (in `uair`) reduces them
-    // to per-slice evals at the Hadamard sumcheck point `r*_H`, recombined
-    // against operand parents derived from the **prover-supplied**
-    // `uair.hadamard_pair_evals` (one per distinct `(col, Δ)` pair). The
-    // `Δ = 0` pair evals are made *sound* by opening them at `r*_H` against
-    // the commitment: a SECOND multipoint-eval collapses every projected
-    // column's eval at `r*_H` to a fresh point `r_0^H`, then a second
-    // γ-batched open binds the witness slice — exactly mirroring the main
-    // `multipoint_eval` + `open` at `r*`/`r_0`. The verifier's binding
-    // check then ties each `Δ = 0` pair eval to the bound
-    // `hadamard_evals_at_rstar_h[col]`. (`Δ ≠ 0` pairs are row-shifted and
-    // stay trusted — the row-shift discharge gap.) All four fields are
-    // `None`/empty when the UAIR has no Hadamard relations.
-    /// Second multipoint-eval reducing the per-column evals at `r*_H`
-    /// to a single open point `r_0^H`. `None` when no Hadamard relations.
-    pub hadamard_multipoint_eval: Option<MultipointEvalProof<BinaryFieldGF128>>,
-    /// Every projected column's MLE eval at `r*_H` (primary cols first,
-    /// then virtual) — the `up_evals` the second multipoint-eval reduces.
-    /// Bound to the commitment via the second mp+open chain; the `Δ = 0`
-    /// Hadamard pairs' `[col]` entries are checked equal to the matching
-    /// `uair.hadamard_pair_evals`. Empty when no Hadamard relations.
-    pub hadamard_evals_at_rstar_h: Vec<BinaryFieldGF128>,
-    /// Every projected column's MLE eval at `r_0^H` (primary cols first,
-    /// then virtual), bound by the second multipoint-eval consistency
-    /// check and — for the witness-primary slice — by [`Self::hadamard_open`].
-    /// Empty when no Hadamard relations.
-    pub hadamard_open_evals_at_r0h: Vec<BinaryFieldGF128>,
-    /// Second γ-batched open over the witness slice at `r_0^H`, sharing
-    /// the same commitment / Merkle tree as [`Self::open`]. `None` when
-    /// no Hadamard relations.
-    pub hadamard_open: Option<F2OpenProof<D>>,
+    // When the UAIR carries coefficient-wise `W = U ⊙ V` AND relations, the
+    // Wiring-R zerocheck (in `uair`) reduces them to operand bit-slice evals
+    // at `r*_H`, recombined against operand parents derived from
+    // `uair.hadamard_pair_evals` (one per distinct `(col, Δ)` pair). Those
+    // pair evals are made *sound* by being folded into the **main**
+    // `multipoint_eval` above as pointed-shift claims at `r*_H` (Δ=0 as point
+    // claims, Δ≠0 via the shift predicate at `r*_H`) — so the single `open`
+    // at `r_0` binds them, closing the row-shift soundness for the AND
+    // relations. No separate second mp / open / binding check (that was the
+    // superseded Approach A). The adder relations keep trusted operand
+    // parents (`uair.hadamard_adder_parents`) — honest-prover.
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_full`].
@@ -3869,54 +3577,6 @@ where
         "open_evals_at_r_0 has length {got}, expected {expected} (= num_primary + num_virtual)"
     )]
     OpenEvalsLengthMismatch { got: usize, expected: usize },
-    #[error(
-        "Hadamard discharge: proof carries Hadamard specs but the second \
-         multipoint-eval / open is missing"
-    )]
-    MissingHadamardDischarge,
-    #[error(
-        "Hadamard discharge: hadamard_evals_at_rstar_h has length {got}, expected {expected} \
-         (= num_primary + num_virtual)"
-    )]
-    HadamardEvalsAtRstarHLengthMismatch { got: usize, expected: usize },
-    #[error(
-        "Hadamard discharge: hadamard_open_evals_at_r0h has length {got}, expected {expected} \
-         (= num_primary + num_virtual)"
-    )]
-    HadamardOpenEvalsLengthMismatch { got: usize, expected: usize },
-    #[error(
-        "Hadamard discharge: public column {public_col_idx}: claimed MLE eval at r_0^H \
-         ({claimed:?}) doesn't match verifier's local computation ({computed:?})"
-    )]
-    HadamardPublicColumnEvalMismatchAtR0H {
-        public_col_idx: usize,
-        computed: BinaryFieldGF128,
-        claimed: BinaryFieldGF128,
-    },
-    #[error(
-        "Hadamard discharge: virtual column {virtual_idx}: claimed MLE eval at r_0^H \
-         ({claimed:?}) doesn't match verifier's derivation from primary evals ({derived:?})"
-    )]
-    HadamardVirtualColumnEvalMismatchAtR0H {
-        virtual_idx: usize,
-        derived: BinaryFieldGF128,
-        claimed: BinaryFieldGF128,
-    },
-    #[error(
-        "Hadamard discharge: parent-eval count {got} doesn't match the distinct Hadamard \
-         column count {expected}"
-    )]
-    HadamardParentEvalCountMismatch { got: usize, expected: usize },
-    #[error(
-        "Hadamard discharge: distinct column {distinct_col}'s opened α-eval at r*_H ({opened:?}) \
-         doesn't match the trusted parent-eval ({parent:?}) — the parent-evals are not bound to \
-         the commitment"
-    )]
-    HadamardParentEvalBindingMismatch {
-        distinct_col: usize,
-        opened: BinaryFieldGF128,
-        parent: BinaryFieldGF128,
-    },
 }
 
 #[cfg(test)]
@@ -5322,22 +4982,17 @@ mod tests {
     /// `verify_f2_full_with_hadamard` pipeline on a 3-column
     /// `W = U ⊙ V` trace.
     ///
-    /// Asserts the honest proof round-trips — which exercises the second
-    /// multipoint-eval + open at `r*_H` and the parent-eval binding
-    /// check (`hadamard_evals_at_rstar_h[distinct] ==
-    /// uair.hadamard_pair_evals`, satisfied by construction on every
-    /// honest proof) — and that the soundness machinery rejects the
-    /// reachable tampers:
+    /// Asserts the honest proof round-trips — which exercises the
+    /// Approach-B two-point multipoint-eval that folds the per-col claims
+    /// at `r*` and the Hadamard AND `(col, Δ)` claims at `r*_H` (the
+    /// pointed shifts, valued by `uair.hadamard_pair_evals`) into a single
+    /// point `r_0`, bound by the one PCS open — and that the soundness
+    /// machinery rejects the reachable tampers:
     ///   - a flipped `W` bit            → the Hadamard zerocheck,
     ///   - a swapped parent-eval        → the in-flow recombination,
-    ///   - a dropped second open        → `MissingHadamardDischarge`,
-    ///   - a tampered per-col eval@r*_H → the second multipoint-eval.
-    ///
-    /// (The `HadamardParentEvalBindingMismatch` variant is defence in
-    /// depth: it fires only for a *malicious* prover that ships fake
-    /// bit-slice MLEs decoupled from the commitment — the recombination
-    /// + zerocheck over-determine the slices, so no single-field tamper
-    /// of an honest proof can reach it without tripping an earlier gate.)
+    ///   - a tampered open eval@`r_0`   → the two-point multipoint-eval
+    ///                                     subclaim check (the folded
+    ///                                     `r*_H` pointed-shift binding).
     #[test]
     fn prove_then_verify_f2_full_with_hadamard_roundtrips() {
         const D: usize = 32;
@@ -5428,20 +5083,10 @@ mod tests {
 
         // -- honest round-trip --
         let proof = prove(&trace);
-        assert!(proof.hadamard_multipoint_eval.is_some());
-        assert!(proof.hadamard_open.is_some());
-        assert_eq!(proof.hadamard_evals_at_rstar_h.len(), 3);
-        assert_eq!(proof.hadamard_open_evals_at_r0h.len(), 3);
+        // plain(0,1,2): the three per-column AND claims at r*_H fold as
+        // pointed shifts (col,0) into the single two-point mp; their
+        // claimed values are `uair.hadamard_pair_evals`.
         assert_eq!(proof.uair.hadamard_pair_evals.len(), 3);
-        // The binding equality holds by construction on an honest proof:
-        // the distinct cols are 0,1,2, so parent_evals[i] == the bound
-        // per-column eval at r*_H for column i.
-        for (i, &pe) in proof.uair.hadamard_pair_evals.iter().enumerate() {
-            assert_eq!(
-                pe, proof.hadamard_evals_at_rstar_h[i],
-                "honest parent-eval {i} must equal the bound r*_H eval",
-            );
-        }
         verify(&proof).expect("honest sound-discharge proof must verify");
 
         // -- corrupt W bit: the Hadamard zerocheck rejects --
@@ -5468,26 +5113,18 @@ mod tests {
             "a swapped parent-eval must be rejected by the recombination",
         );
 
-        // -- dropped second open: explicit MissingHadamardDischarge --
-        let mut proof_no_open = proof.clone();
-        proof_no_open.hadamard_open = None;
+        // -- tampered open eval at r_0: the two-point mp subclaim check
+        // rejects. Column 2 (= W) is both an r* claim and the (2,0)
+        // pointed shift folded from r*_H, so corrupting its opened value
+        // breaks the reduction the single open is checked against. --
+        let mut proof_bad_r0 = proof.clone();
+        proof_bad_r0.open_evals_at_r_0[2] += &one;
         assert!(
             matches!(
-                verify(&proof_no_open),
-                Err(F2FullVerifyError::MissingHadamardDischarge)
-            ),
-            "a missing second open must be rejected",
-        );
-
-        // -- tampered per-col eval at r*_H: the second mp rejects --
-        let mut proof_bad_up = proof.clone();
-        proof_bad_up.hadamard_evals_at_rstar_h[2] += &one;
-        assert!(
-            matches!(
-                verify(&proof_bad_up),
+                verify(&proof_bad_r0),
                 Err(F2FullVerifyError::MultipointEval(_))
             ),
-            "a tampered r*_H eval must be rejected by the second multipoint-eval",
+            "a tampered r_0 eval must be rejected by the two-point multipoint-eval",
         );
     }
 

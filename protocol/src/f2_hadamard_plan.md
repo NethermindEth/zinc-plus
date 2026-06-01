@@ -255,6 +255,18 @@ Hadamard path consumes bit-slices, not packed down-rows.)
 
 ## 5.7 Sound discharge of the Hadamard parent-evals (the soundness step)
 
+> **✅ SHIPPED — Approach B (two-point multipoint-eval).** The sound
+> discharge is done. We first shipped **Approach A** (a separate `r*_H` mp
+> + second open + binding check) and then reworked it to **Approach B**:
+> each AND pair's `MLE[v](r*_H)` claim folds into the **main** mp as a
+> *pointed shift* (`PointedShiftClaim`, `piop/src/multipoint_eval.rs`) and
+> is bound by the **one** PCS open at `r_0`. Δ=0 pairs fold as point
+> claims, Δ≠0 (row-shifted operands) fold via the shift predicate —
+> closing the AND part of **Issue 1** too. `F2FullProof` carries no
+> `hadamard_*` fields. Details: handoff §4 + ledger entry "SOUND DISCHARGE
+> REWORKED → Approach B". The A/B design notes below are retained for the
+> rationale; §5.7.1's concrete steps describe the now-removed A code.
+
 The in-flow discharge as wired today ships `F2Proof.hadamard_parent_evals`
 (the α-evals at `r*_H`) as **trusted** prover values: the verifier
 recombines `Σ_b α^b·v_b == parent_eval`, but `parent_eval` itself is not
@@ -291,7 +303,9 @@ their own discharge.
 folds claims at both `r*` and `r*_H` into a single `r_0`, then one open.
 This is exactly the "proper" multipoint-eval the ledger's **Issue 1**
 also needs (it's currently degenerate / single-point), so doing B serves
-both. Heavier to build than A.
+both. Heavier to build than A. **← This is what shipped** (via
+per-claim `PointedShiftClaim`s rather than a wholesale two-point fold, so
+each AND pair keeps its own `(point, Δ)` and the integer mp is untouched).
 
 **Cost**: A adds one μ-var degree-2 multipoint sumcheck + one open of the
 ~handful of Hadamard columns (Merkle shared). **Test**: extend the full
@@ -305,7 +319,12 @@ GF128 WIP lands. Line-level call sites (the `MultipointEval` + `open`
 invocations in `prove_f2_full_with_bit_ops`, and `prove_f2_open`'s point
 parameter) to confirm at implementation time.
 
-## 5.7.1 Concrete implementation of Approach A (derived from the pipeline)
+## 5.7.1 Concrete implementation of Approach A (HISTORICAL — superseded by B)
+
+> This section describes the **removed** Approach-A code (second `r*_H`
+> mp + open + binding check). It is kept only to document the soundness
+> reasoning that carried over to B. The live code is the Approach-B
+> pointed-shift fold — see handoff §4.
 
 Read of `prove_f2_full_with_bit_ops` (around `f2_prove.rs:2775-2873`) — the
 existing single discharge is:

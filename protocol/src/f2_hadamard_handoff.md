@@ -8,13 +8,15 @@ commit it). Your job: extend it to the **real SHA-256 relations**
 (shifts / virtual operands, the `W_β` carry column, then register the 16
 relations) — see **§5**, which is now the next task.
 
-> **STATUS UPDATE (sound discharge SHIPPED).** §4's "next task" is done.
-> `prove_f2_full_with_hadamard` / `verify_f2_full_with_hadamard` exist;
-> `F2FullProof` carries the four `hadamard_*` discharge fields; the
-> verifier's binding check + the up-eval-absorb make the in-flow
-> recombination sound. Full write-up in the ledger
-> (`documentation/f2x-sha-todo.md`, entry "SOUND DISCHARGE SHIPPED").
-> Read §4 for *what it does*; jump to §5 for *what's next*.
+> **STATUS UPDATE (sound discharge SHIPPED — now Approach B).** §4's
+> "next task" is done, and the discharge was reworked from the original
+> Approach A (a separate `r*_H` mp + second open + binding check) to
+> **Approach B**: a single two-point multipoint-eval that folds each AND
+> pair's `MLE[v](r*_H)` claim into the main mp as a *pointed shift*, bound
+> by the **one** PCS open at `r_0`. `F2FullProof` no longer carries any
+> `hadamard_*` fields. Full write-up in the ledger
+> (`documentation/f2x-sha-todo.md`, entry "SOUND DISCHARGE REWORKED →
+> Approach B"). Read §4 for *what it does*; jump to §5 for *what's next*.
 
 ---
 
@@ -100,42 +102,52 @@ ledger Issue 1 — not the AND discharge itself.)
 
 ---
 
-## 4. DONE — sound discharge (Approach A). Full detail in §5.7.1.
+## 4. DONE — sound discharge (Approach B: two-point multipoint-eval).
 
-`parent_evals` are now opened at `r*_H` against the commitment. What
-shipped (all in `protocol/src/f2_prove.rs`):
+> **Approach A (a separate `r*_H` mp + a second open + a `parent_eval ==
+> evals_at_rstar_h` binding check) was a wrong turn and has been removed.**
+> It opened the witness slice *twice*. Approach B folds the Hadamard
+> claims into the **main** multipoint-eval instead — each AND pair's claim
+> `MLE[v](r*_H)` enters the single mp as a *pointed shift* and exits as a
+> claim on `MLE[v]` at the shared `r_0`, so the **one** PCS open binds it.
+> (The A description below is preserved in §5.7.1 only for the soundness
+> rationale; the code no longer matches it.)
 
-1. **`F2FullProof`** gained FOUR fields (all `None`/empty without
-   Hadamard): `hadamard_multipoint_eval: Option<MultipointEvalProof>`,
-   **`hadamard_evals_at_rstar_h: Vec<Gf>`** (every projected column's eval
-   at `r*_H` — the second mp's `up_evals`; this one is *not* in the
-   original §5.7.1 list but is **required** — the verifier needs the
-   up-evals and they get bound transitively),
-   `hadamard_open_evals_at_r0h: Vec<Gf>`, `hadamard_open: Option<F2OpenProof>`.
-2. **`prove_f2_full_with_hadamard` / `verify_f2_full_with_hadamard`** added;
-   existing `*_with_bit_ops` (+ pre-paired) signatures **unchanged** (benches
-   untouched). Bodies factored into private `prove_f2_full_impl` /
-   `verify_f2_full_impl(.., hadamard_specs)` (old entries pass `&[]`).
-3. **Second mp+open** after the main one: evaluate all projected cols at
-   `r*_H`, **absorb those up-evals** (soundness-critical — see below), run a
-   second `MultipointEval` → `r_0^H`, then `prove_f2_open` on the same
-   witness slice at `r_0^H`.
-4. **Verify**: mirror, then binding check
-   `hadamard_evals_at_rstar_h[distinct] == proof.uair.hadamard_parent_evals`.
-   The in-flow recombination is kept as-is; the binding makes it sound.
-5. **e2e test** `prove_then_verify_f2_full_with_hadamard_roundtrips`
-   (HadF2Uair): honest round-trip + 4 tamper rejections.
+What shipped (piop primitive + `protocol/src/f2_prove.rs` rewire):
 
-⚠️ **Soundness detail you must preserve if you touch this**: the second
-mp's `up_evals` (`hadamard_evals_at_rstar_h`) are absorbed into the
-transcript **before** the second mp samples γ (both sides), mirroring how
-`prove_f2_uair_with_groups` absorbs `column_evals_at_rstar` before the main
-mp. Without that absorb the per-column up-evals aren't SZ-pinned and the
-binding is defeatable. Don't drop it.
+1. **piop** (`piop/src/multipoint_eval.rs`, additive — the integer mp is
+   untouched): `PointedShiftClaim { point, shift, source_col }` plus
+   `prove/verify_as_subprotocol_with_pointed_shifts` and
+   `verify_subclaim_pointed`. A pointed shift carries its **own** point
+   (here `r*_H`, distinct from the main eval point `r*`) and a `shift` Δ;
+   `shift = 0` makes the shift predicate `eq`, i.e. a plain point-claim.
+   So Δ=0 AND pairs fold as point claims and **Δ≠0 (row-shifted operands)
+   fold via the shift predicate at `r*_H`** — closing the AND row-shift
+   soundness (ledger **Issue 1**) for the AND relations in the same pass.
+2. **`F2FullProof` slimmed**: the four Approach-A `hadamard_*` fields are
+   **removed**. The existing `multipoint_eval` + `open` + `open_evals_at_r_0`
+   now carry the folded `r*_H` claims.
+3. **Prover** (`prove_f2_full_impl`): builds one `PointedShiftClaim` per
+   `subclaim.hadamard_pairs` entry `(col, Δ)` at `point = r*_H`, feeds
+   `uair.hadamard_pair_evals` as their `down_evals`, and runs the single
+   `prove_as_subprotocol_with_pointed_shifts` (no second mp, no second open).
+4. **Verify** (`verify_f2_full_impl`): rebuilds the same pointed shifts from
+   `subclaim.hadamard_pairs`/`hadamard_rstar`, runs
+   `verify_as_subprotocol_with_pointed_shifts`, then
+   `verify_subclaim_pointed(open_evals_at_r_0, pointed_shift_sources)`. The
+   single γ-batched open at `r_0` binds every folded claim. The seven dead
+   Approach-A `F2FullVerifyError` variants were removed.
+5. **e2e tests**: `prove_then_verify_f2_full_with_hadamard_roundtrips`
+   (rewritten — tampers: flipped `W` → zerocheck, swapped parent-eval →
+   recombination, tampered `open_evals_at_r_0` → the two-point mp subclaim
+   check) and `_with_operand_hadamards_roundtrips` (honest path now drives
+   the Δ≠0 pointed shifts). 19 protocol + 17 piop mp tests pass.
 
-Optimisation left open (ledger): collapse only the Hadamard subset, or
-fold `r*`+`r*_H` into one two-point multipoint-eval (the "proper" mp the
-ledger's **Issue 1** also needs) — one open instead of two.
+✅ **Why it's sound without the A binding check**: `hadamard_pair_evals`
+are still the recombination's inputs **and** now the mp's folded down-terms
+tied to the single `r_0` open — SZ over the mp's γ pins them to the
+committed columns directly. Adders stay trusted (their computed-β operands
+are virtual/non-column, so they can't fold as pointed shifts).
 
 ---
 

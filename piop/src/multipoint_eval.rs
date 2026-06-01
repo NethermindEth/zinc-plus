@@ -96,6 +96,19 @@ pub struct Subclaim<F: PrimeField> {
     pub shifts_at_r0: Vec<F>,
 }
 
+/// A single evaluation claim folded by the **two-point** multipoint-eval
+/// ([`MultipointEval::prove_as_subprotocol_with_pointed_shifts`]): the claim
+/// `MLE[trace[source_col]^↓shift](point) = down_eval`, discharged via the
+/// shift predicate `next_{shift}(point, ·)` at the claim's *own* `point`
+/// (which may differ from the up-columns' `eval_point`). `shift = 0` is a
+/// plain point claim `MLE[trace[source_col]](point)` (since `next_0 = eq`).
+#[derive(Clone, Debug)]
+pub struct PointedShiftClaim<F: PrimeField> {
+    pub point: Vec<F>,
+    pub shift: usize,
+    pub source_col: usize,
+}
+
 //
 // Protocol
 //
@@ -288,6 +301,200 @@ where
             eq_at_r0,
             shifts_at_r0,
         })
+    }
+
+    /// Two-point multipoint-eval prover. Like [`Self::prove_as_subprotocol`]
+    /// but each [`PointedShiftClaim`] folds a claim at its **own** point
+    /// (e.g. `r*_H`) rather than the shared `eval_point` (`r*`), and shifts
+    /// of `0` are allowed (plain point claims). The up columns are claimed at
+    /// `eval_point`; the pointed shifts at their own points; all reduce to a
+    /// single `r_0` so one opening discharges every claim. `down_evals[k]` is
+    /// the claimed value of pointed-shift `k`.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn prove_as_subprotocol_with_pointed_shifts(
+        transcript: &mut impl Transcript,
+        trace_mles: &[DenseMultilinearExtension<F::Inner>],
+        eval_point: &[F],
+        up_evals: &[F],
+        pointed_shifts: &[PointedShiftClaim<F>],
+        down_evals: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(Proof<F>, ProverState<F>), MultipointEvalError<F>> {
+        let num_cols = trace_mles.len();
+        let num_down_cols = pointed_shifts.len();
+        let num_vars = eval_point.len();
+        let zero = F::zero_with_cfg(field_cfg);
+        let zero_inner = zero.inner();
+
+        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+
+        // eq_r at the up point; each pointed shift's selector at its own point.
+        let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
+        let (next_mles, down_cols): (Vec<_>, Vec<_>) = pointed_shifts
+            .iter()
+            .map(|spec| {
+                let next = build_next_c_r_mle(&spec.point, spec.shift, field_cfg)?;
+                let col = trace_mles[spec.source_col].clone();
+                Ok((next, col))
+            })
+            .collect::<Result<Vec<_>, ArithErrors>>()?
+            .into_iter()
+            .unzip();
+
+        let precombined = {
+            let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
+                .map(|b| {
+                    gammas
+                        .iter()
+                        .enumerate()
+                        .fold(zero.clone(), |acc, (i, gamma)| {
+                            let eval_f = F::new_unchecked_with_cfg(
+                                trace_mles[i].evaluations[b].clone(),
+                                field_cfg,
+                            );
+                            acc + eval_f * gamma
+                        })
+                        .into_inner()
+                })
+                .collect();
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations, zero_inner.clone())
+        };
+
+        let mut mles = Vec::with_capacity(2 + 2 * num_down_cols);
+        mles.push(eq_r);
+        mles.extend(next_mles);
+        mles.push(precombined);
+        mles.extend(down_cols);
+
+        let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
+            transcript,
+            mles,
+            num_vars,
+            2,
+            |mle_values: &[F]| {
+                let eq_val = &mle_values[0];
+                let precombined = &mle_values[num_down_cols + 1];
+                alphas
+                    .iter()
+                    .enumerate()
+                    .fold(eq_val.clone() * precombined, |acc, (i, alpha)| {
+                        let next = &mle_values[1 + i];
+                        let down_col = &mle_values[num_down_cols + 2 + i];
+                        acc + alpha.clone() * next * down_col
+                    })
+            },
+            field_cfg,
+        );
+
+        debug_assert_eq!(
+            sumcheck_proof.claimed_sum,
+            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero)
+        );
+
+        Ok((
+            Proof { sumcheck_proof },
+            ProverState {
+                eval_point: sumcheck_prover_state.randomness,
+            },
+        ))
+    }
+
+    /// Two-point multipoint-eval verifier (sumcheck phase). Mirror of
+    /// [`Self::verify_as_subprotocol`] with each pointed shift's selector
+    /// recomputed at its **own** point. Finalize via
+    /// [`Self::verify_subclaim_pointed`] (which indexes the open-evals by the
+    /// pointed shifts' `source_col`).
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn verify_as_subprotocol_with_pointed_shifts(
+        transcript: &mut impl Transcript,
+        proof: Proof<F>,
+        eval_point: &[F],
+        up_evals: &[F],
+        pointed_shifts: &[PointedShiftClaim<F>],
+        down_evals: &[F],
+        num_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<Subclaim<F>, MultipointEvalError<F>> {
+        let num_cols = up_evals.len();
+        let num_down_cols = pointed_shifts.len();
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+
+        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+
+        let expected_sum: F =
+            compute_expected_sum(up_evals, down_evals, &gammas, &alphas, zero.clone());
+        if proof.sumcheck_proof.claimed_sum != expected_sum {
+            return Err(MultipointEvalError::WrongSumcheckSum {
+                got: proof.sumcheck_proof.claimed_sum.clone(),
+                expected: expected_sum,
+            });
+        }
+
+        let sumcheck_subclaim = MLSumcheck::verify_as_subprotocol(
+            transcript,
+            num_vars,
+            2,
+            &proof.sumcheck_proof,
+            field_cfg,
+        )?;
+        let r_0 = &sumcheck_subclaim.point;
+
+        let eq_at_r0 = zinc_poly::utils::eq_eval(r_0, eval_point, one)?;
+        let shifts_at_r0: Vec<F> = pointed_shifts
+            .iter()
+            .map(|spec| eval_shift_predicate(&spec.point, r_0, spec.shift, field_cfg))
+            .collect();
+
+        Ok(Subclaim {
+            sumcheck_subclaim,
+            gammas,
+            alphas,
+            eq_at_r0,
+            shifts_at_r0,
+        })
+    }
+
+    /// Finalize the two-point check: like [`Self::verify_subclaim`] but the
+    /// down terms index `open_evals` by the pointed shifts' `source_col`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn verify_subclaim_pointed(
+        subclaim: &Subclaim<F>,
+        open_evals: &[F],
+        source_cols: &[usize],
+        field_cfg: &F::Config,
+    ) -> Result<(), MultipointEvalError<F>> {
+        let num_cols = subclaim.gammas.len();
+        if open_evals.len() != num_cols {
+            return Err(MultipointEvalError::WrongOpenEvalsNumber {
+                got: open_evals.len(),
+                expected: num_cols,
+            });
+        }
+        let zero = F::zero_with_cfg(field_cfg);
+        let batched_up: F = subclaim
+            .gammas
+            .iter()
+            .zip(open_evals.iter())
+            .fold(zero.clone(), |acc, (gamma, eval)| acc + gamma.clone() * eval);
+        let batched_down: F = subclaim
+            .alphas
+            .iter()
+            .enumerate()
+            .zip(subclaim.shifts_at_r0.iter())
+            .fold(zero, |acc, ((k, alpha), shift_at_r0)| {
+                acc + alpha.clone() * shift_at_r0 * &open_evals[source_cols[k]]
+            });
+        let expected_evaluation = subclaim.eq_at_r0.clone() * &batched_up + batched_down;
+        if expected_evaluation != subclaim.sumcheck_subclaim.expected_evaluation {
+            return Err(MultipointEvalError::ClaimMismatch {
+                got: subclaim.sumcheck_subclaim.expected_evaluation.clone(),
+                expected: expected_evaluation,
+            });
+        }
+        Ok(())
     }
 
     /// Finalize the multi-point evaluation check given `open_evals`.
@@ -739,5 +946,79 @@ mod tests {
             ),
             "expected sumcheck or consistency error, got {err:?}",
         );
+    }
+
+    /// Two-point reduction: up claims at `r*`, plus pointed shifts at a
+    /// *different* point `r*_H` (one shift-0 = plain point claim, one
+    /// shift-2). All reduce to one `r_0`; one set of open-evals discharges
+    /// everything. A tampered down-eval is rejected.
+    #[test]
+    fn two_point_pointed_shifts_roundtrip() {
+        let num_vars = 4usize;
+        let n = 1usize << num_vars;
+        let zero_inner = F::ZERO.into_inner();
+        let num_cols = 3usize;
+        let trace: Vec<DenseMultilinearExtension<_>> = (0..num_cols)
+            .map(|col| {
+                let evals: Vec<_> = (0..n)
+                    .map(|i| F::from((col * n + i + 1) as u32).into_inner())
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(num_vars, evals, zero_inner)
+            })
+            .collect();
+        let r_star: Vec<F> = (0..num_vars).map(|i| F::from((i + 7) as u32)).collect();
+        let r_star_h: Vec<F> = (0..num_vars).map(|i| F::from((i + 13) as u32)).collect();
+
+        let up_evals: Vec<F> = trace
+            .iter()
+            .map(|m| m.clone().evaluate_with_config(&r_star, &()).unwrap())
+            .collect();
+        let pointed = vec![
+            PointedShiftClaim { point: r_star_h.clone(), shift: 0, source_col: 0 },
+            PointedShiftClaim { point: r_star_h.clone(), shift: 2, source_col: 1 },
+        ];
+        let shifted_eval = |col: usize, c: usize| -> F {
+            let mut s = trace[col].evaluations[c..].to_vec();
+            s.extend(std::iter::repeat_n(zero_inner, c));
+            DenseMultilinearExtension::from_evaluations_vec(num_vars, s, zero_inner)
+                .evaluate_with_config(&r_star_h, &())
+                .unwrap()
+        };
+        let down_evals = vec![shifted_eval(0, 0), shifted_eval(1, 2)];
+        let source_cols: Vec<usize> = pointed.iter().map(|p| p.source_col).collect();
+
+        let mut pt = make_transcript();
+        let (proof, state) =
+            MultipointEval::<F>::prove_as_subprotocol_with_pointed_shifts(
+                &mut pt, &trace, &r_star, &up_evals, &pointed, &down_evals, &(),
+            )
+            .unwrap();
+        let r_0 = &state.eval_point;
+        let open_evals: Vec<F> = trace
+            .iter()
+            .map(|m| m.clone().evaluate_with_config(r_0, &()).unwrap())
+            .collect();
+
+        let mut vt = make_transcript();
+        let sub = MultipointEval::<F>::verify_as_subprotocol_with_pointed_shifts(
+            &mut vt, proof, &r_star, &up_evals, &pointed, &down_evals, num_vars, &(),
+        )
+        .unwrap();
+        MultipointEval::<F>::verify_subclaim_pointed(&sub, &open_evals, &source_cols, &())
+            .expect("two-point subclaim must hold");
+
+        // Tampered down-eval (the r*_H claim) is rejected.
+        let mut bad = down_evals.clone();
+        bad[0] += F::ONE;
+        let mut pt2 = make_transcript();
+        let (proof2, _) = MultipointEval::<F>::prove_as_subprotocol_with_pointed_shifts(
+            &mut pt2, &trace, &r_star, &up_evals, &pointed, &down_evals, &(),
+        )
+        .unwrap();
+        let mut vt2 = make_transcript();
+        let res = MultipointEval::<F>::verify_as_subprotocol_with_pointed_shifts(
+            &mut vt2, proof2, &r_star, &up_evals, &pointed, &bad, num_vars, &(),
+        );
+        assert!(matches!(res, Err(MultipointEvalError::WrongSumcheckSum { .. })));
     }
 }
