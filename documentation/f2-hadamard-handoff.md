@@ -7,13 +7,15 @@ doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 > **▶ ACTIVE PLAN (2026-06-01): the "next lever" below is now being built as a
 > direct port of Binius64's oblong univariate zerocheck — see
 > `documentation/f2-hadamard-oblong-port-plan.md` (reference repo `~/binius64`).
-> Phases A+B are DONE: a **standalone oblong AND zerocheck works end-to-end over
-> our `GF(2¹²⁸)`** (`poly/src/univariate/{binary_subspace,oblong_and}.rs`,
-> 14 tests) — Phase-1 univariate-skip round message + Phase-2 eq-weighted
-> sumcheck + closing check; accepts honest, rejects corrupted; field confirmed
-> directly compatible. Naive GF(2¹²⁸) NTT (correctness, not speed yet).
-> Continue from the port plan's "Progress" + §5 (next: GF(2⁸) byte-lookup NTT
-> for prover speed, then Fiat-Shamir wiring, then the ψ_α integration seam).**
+> Phases A+B + the GF(2⁸) speed lever are DONE (23 tests, `poly` crate):
+> a **standalone oblong AND zerocheck works end-to-end over `GF(2¹²⁸)`**
+> (`binary_subspace.rs` + `oblong_and.rs` — Phase-1 round message + Phase-2
+> eq-weighted sumcheck + closing check; accepts honest, rejects corrupted), and
+> the prover-side **GF(2⁸) byte-lookup NTT** (`binary_gf8.rs` + `oblong_and_gf8.rs`,
+> embedding verified over all 65536 pairs) makes the round message **2.56× faster**
+> (99.6 vs 255 ns/word, nvars=16). Continue from the port plan's "Progress" +
+> §5 (next: the eq-split for more speed, then Phase C — the ψ_z integration tie +
+> Fiat-Shamir in the `protocol` crate).**
 
 ## TL;DR (the one thing to know)
 

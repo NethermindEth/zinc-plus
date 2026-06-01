@@ -75,6 +75,52 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong AND zerocheck — GF(2⁸) speed lever: subfield + embedding + byte-lookup NTT (working tree)
+- **What**: the prover-side speed prerequisite (plan P1 + P4) for the oblong AND
+  zerocheck, so the additive-NTT and the per-extension-point products run in
+  **GF(2⁸)** (log/antilog mult, 1-byte XOR) instead of GF(2¹²⁸) (CLMUL, 16-byte
+  XOR). Two new `poly` modules:
+  - `poly/src/univariate/binary_gf8.rs` — `Gf8` (`GF(2⁸)`, `u8`-backed) **derived
+    from within GHASH**: `θ = relative-norm N_{GF(2¹²⁸)/GF(2⁸)}(g)` lands in the
+    order-255 subfield, and `GF(2⁸)=F_2[X]/m(X)` with `m=minpoly(θ)` (found via an
+    XOR linear basis over `θ^0..θ^8`). Then `α↦θ` is **automatically a field
+    homomorphism** — no AES-isomorphism search. `θ`, `m`, log/antilog + `embed`
+    tables computed once from our GF(2¹²⁸) arithmetic and memoised.
+  - `poly/src/univariate/oblong_and_gf8.rs` — `Gf8Ntt` (the
+    `[[[Gf8;WORD_BITS];256];WORD_BYTES]` byte-lookup additive NTT, binius
+    `ntt_lookup.rs`) + `extend_word` + `gf8_round_message` + `embed_subspaces`
+    (the `embed(H₈)` base/full subspaces the verifier uses with this path).
+- **Why sound**: the NTT runs over the GF(2⁸) subspace `H₈={Gf8(0)…Gf8(63)}`;
+  its image `embed(H₈)` is the verifier's GF(2¹²⁸) subspace. Since `embed` is a
+  field hom, every GF(2⁸) NTT value/product equals (after `embed`) the GF(2¹²⁸)
+  computation over `embed(H₈)`. (Different subspace than the naive path's
+  monomial `{X⁰…X⁵}` — each internally consistent with its own verifier.)
+- **Result**: 9 new tests (6 field + 3 NTT), full `zinc-poly` suite 144 passed.
+  Gates: `embed_is_a_field_homomorphism` over **all 65536 pairs**; `mul` matches a
+  carryless reference; antilog covers all 255 nonzero bytes; the cross-field
+  `gf8_extend_embeds_to_gf128_extend` and `gf8_round_message_matches_gf128_over_
+  embed_subspace`. Resolves plan Open-Q #2 (subfield generator + the
+  `F_2`-independent skip challenges `{α,α²,α⁴}`).
+- **Measured** (Apple M4, `--release`, `target-cpu=native`), single-relation
+  Phase-1 round message at **nvars=16 (65536 words), best of 5**:
+
+  | path | time | ns/word |
+  |---|---|---|
+  | GF(2¹²⁸) naive | 16.71 ms | 255.0 |
+  | **GF(2⁸) lookup** | **6.53 ms** | **99.6** |
+  | — | — | **2.56× faster** |
+
+  And this is with the **eq-weighting still per-word in GF(2¹²⁸)** — binius's
+  small/big `eq` split (weight the ≤3 deterministic small-field vars in GF(2⁸),
+  embed + big-`eq`-weight once per `2^k` chunk) is the next lever and cuts the
+  remaining GF(2¹²⁸) mults by the chunk size. (Bench: `oblong_and_gf8::tests::
+  bench_gf8_vs_gf128_round_message`, `--ignored --nocapture`.)
+- **Remaining D-prereq**: the eq-split (above) for more speed; **Fiat-Shamir**
+  moves to Phase C (it belongs in the `protocol` crate with the integration —
+  `poly` has no transcript dep). The `verify_oblong_and` already accepts evals
+  from a faster NTT (same values), so swapping in the GF(2⁸) prover is a
+  drop-in once the subspace is parameterised.
+
 ### Oblong univariate AND zerocheck — Phase A primitives + standalone Phase-1+2 prove/verify (working tree)
 - **What**: first landed slice of the Binius64 **oblong univariate zerocheck**
   port (plan: `documentation/f2-hadamard-oblong-port-plan.md`), the verifier-

@@ -7,9 +7,9 @@ instead of 1536 slices and the bit dimension is handled by a univariate-skip
 round. Reference implementation: the local repo `~/binius64`,
 `crates/prover/src/and_reduction/` + `crates/verifier/src/protocols/bitand.rs`.*
 
-## Progress (2026-06-01) — Phases A + B DONE: standalone oblong AND zerocheck works end-to-end (naive GF128)
+## Progress (2026-06-01) — Phases A + B DONE + GF(2⁸) speed lever (2.56× on the kernel)
 
-**Landed** (working tree, `poly` crate, 14 tests green, full lib suite 135 passed,
+**Landed** (working tree, `poly` crate, 23 tests green, full lib suite 144 passed,
 clippy-clean, no prover path touched):
 - `poly/src/univariate/binary_subspace.rs` — P2 (`BinarySubspace`) + P3
   (`lagrange_evals`, `extrapolate_over_subspace`, `evaluate_univariate`). Ports of
@@ -19,8 +19,12 @@ clippy-clean, no prover path touched):
   `univariate_round_message`, **and the full standalone protocol**
   `prove_oblong_and` / `verify_oblong_and` (round message → fold at `z` → Phase-2
   eq-weighted degree-≤3 sumcheck → closing `a·b−c==eval`), `eq_indicator`,
-  `AndCheckOutput`, `OblongError`. **Naive GF(2¹²⁸)**, no GF(2⁸) lookup yet.
-  `SKIPPED_VARS=5`, `WORD_BITS=32`.
+  `AndCheckOutput`, `OblongError`. **Naive GF(2¹²⁸)**. `SKIPPED_VARS=5`, `WORD_BITS=32`.
+- `poly/src/univariate/binary_gf8.rs` (P1) — `Gf8` derived from GHASH (`θ`=relative
+  norm, `m=minpoly(θ)`, `α↦θ` ⇒ field hom), `embed: Gf8→GF128`, verified over all
+  65536 pairs. `poly/src/univariate/oblong_and_gf8.rs` (P4) — `Gf8Ntt` byte-lookup
+  additive NTT + `gf8_round_message` + `embed_subspaces`; the NTT + products run in
+  GF(2⁸), cross-checked against the GF(2¹²⁸) computation over `embed(H₈)`.
 
 **De-risked**:
 - The **field is directly compatible** (§0 empirically confirmed; Open-Q #1
@@ -34,22 +38,26 @@ clippy-clean, no prover path touched):
   `eq_indicator` was big-endian vs `fold_low`'s low-bit-first binding.)
 - The **memory win is structural/real already**: 48 packed word-columns (post-fold
   48 GF128 MLEs) vs 1536 GF128 bit-slices = the ×D=32 data-volume cut.
+- The **GF(2⁸) speed lever works**: single-relation Phase-1 round message at
+  nvars=16 is **2.56× faster** in GF(2⁸) (99.6 vs 255 ns/word), *with the
+  eq-weighting still per-word in GF(2¹²⁸)* — headroom remains (eq-split below).
 
 **Remaining (next sessions), in order:**
-1. **GF(2⁸) speed (P1 + P4)**: a `GF(2⁸)` (AES) subfield + `F₂`-embedding into our
-   GHASH `GF(2¹²⁸)`, and the `8×256×(WORD_BITS/16)` **byte-lookup NTT** so the NTT
-   + per-point products run in the 8-bit field (the naive path does them in
-   GF(2¹²⁸)). This is what makes the prover *fast*; needed for the Phase-D A/B.
-   Pick our own deterministic skip challenges (binius's `[0x2,0x4,0x10]` are
-   AES-basis). The standalone `verify_oblong_and` already accepts evals computed by
-   a faster NTT (same values), so this is a drop-in prover-side swap.
-2. **Fiat-Shamir**: replace the explicit `z`/`gammas` args with a `Blake3Transcript`
-   (prover absorbs the round message, samples `z`; absorbs each round poly, samples
-   `γ`). Mechanical; the math is settled.
-3. **Phase C** integration seam (§4, route B): tie the `a/b/c_eval` at `(z, γ)` to
-   the committed columns via the ψ_α recombination over the oblong point. The
-   architectural risk lives here.
-4. **Phase D**: all 16 relations (3 ANDs + 13 adders) + A/B at nvars=16/20.
+1. **eq-split (more speed)**: split the `n` row-vars into ≤3 **deterministic
+   GF(2⁸)** skip challenges `{α,α²,α⁴}` (eq weighted in GF(2⁸), accumulated per
+   `2^k`-word chunk) + the big-field remainder (embed + GF(2¹²⁸) eq once per
+   chunk). Cuts the remaining per-word GF(2¹²⁸) mults by the chunk size — the part
+   the 2.56× hasn't captured. Packing 16 `Gf8` lanes (binius `PackedAESBinaryField16x8b`)
+   is a further SIMD lever.
+2. **Phase C** integration seam (§4) — now also carries **Fiat-Shamir** (the
+   transcript belongs in the `protocol` crate, not `poly`, which has no transcript
+   dep). Tie the `a/b/c_eval` at `(z, γ)` to the committed columns via the **`ψ_z`
+   recombination** (`L_i(z)` in place of `α^b`; soundness verified in §4) + the
+   `↓Δ` shift opening. Wire `prove_oblong_and`/`verify_oblong_and` to a
+   `Blake3Transcript` there (drop the explicit `z`/`gammas` args), and parameterise
+   the subspace so the GF(2⁸) path (`embed(H₈)`) and the naive path share one
+   verifier. The GF(2⁸) prover is then a drop-in (same eval values).
+3. **Phase D**: all 16 relations (3 ANDs + 13 adders) + A/B at nvars=16/20.
 
 ## 0. The big de-risking facts (why this is a port, not a research project)
 
@@ -123,35 +131,68 @@ are the real new code, but all have a working template.
 - **Adapt the constants**: `SKIPPED_VARS = 5`, `|D| = ROWS_PER_HYPERCUBE_VERTEX =
   32`, univariate domain dim 6; NTT lookup over a 5-bit subspace, 4 bytes/word.
 
-## 4. Integration — the architectural seam (highest risk)
+## 4. Integration — the `ψ_z` recombination (the seam, now well-scoped)
 
 Our discharge runs **before ψ_α** (Wiring R): it currently produces
 `bit_slice_evals` at `r*_H`, which the **recombination at α** ties to the column
 openings (`derive_operand_parents` + `verify_bit_decomposition_consistency`).
 
-The oblong zerocheck instead produces `a_eval/b_eval/c_eval` at `(z, r)`. These
-must be tied to the committed columns. Two routes:
+**Key structural fact: the oblong challenge `z` plays the same role as `α`.** Both
+are a single random `GF(2¹²⁸)` point that **F₂-linearly collapses a word's `D`
+bits into one field scalar** — just in different bases:
 
-- **(A) Port the shift reduction too** (`prover/src/protocols/shift/`,
-  `verifier/.../shift`). It's the natural partner: it takes the operand evals +
-  the shifted-value-index structure and proves consistency with the committed
-  words (the "monster" multilinear). Cleanest, but more code.
-- **(B) Adapt our ψ_α recombination** to consume `(z, r)` evals: each operand
-  eval is an `F₂`-linear (XOR) combination of its `(col,Δ)` terms' evals at
-  `(z, r)`; reduce to per-`(col,Δ)` column evals at `(z, r)`, apply the `↓Δ`
-  shift, and open via the existing PCS. This reuses our machinery but must handle
-  the oblong `z`-coordinate in the opening (the column openings are over rows; the
-  `z` (bit) coordinate needs an extra MLE-eval over the 5 bit-vars). Smaller, but
-  the soundness of the adapted tie needs a proof.
+- `ψ_α(W) = Σ_b W_b·α^b` — bits as *monomial coefficients*, evaluated at `α`.
+- `ψ_z(W) = Σ_i W_i·L_i(z)` — bits as *values*, the oblong univariate (additive-NTT
+  Lagrange `L_i` over the subspace) evaluated at `z`.
 
-**Recommendation: prototype (B)** (less new infra, reuses ψ_α/PCS), fall back to
-(A) if the oblong-`z` opening doesn't compose. Either way this seam — not the
-zerocheck itself — is the design risk, because it's where our architecture and
-Binius's diverge.
+So the oblong zerocheck's output is exactly `a_eval = ψ_z(A)(r)` **by
+construction** (your `base_lagrange_at`·`fold_word_at`). The tie is therefore the
+**`ψ_z` recombination** — the direct analog of today's `ψ_α` recombination, with
+`L_i(z)` replacing `α^b`. This is the chosen route (was "route B"). Route (A)
+(porting Binius's shift reduction) remains the fallback if a column's `↓Δ`
+row-shift can't be expressed as a clean `(z, r)` opening.
 
-Soundness note: the oblong zerocheck's error is `deg(R₀)/|F| + (sumcheck) +
-(tie)`; with `|F|=2¹²⁸` and `deg(R₀) ≤ 2·31 = 62` the skip round is negligible;
-the tie (§4) carries the real soundness obligation.
+### Correctness
+`ψ_z` is **F₂-linear** (bits in `{0,1}⊂GF(2)`, char 2):
+`ψ_z(W⊕W') = Σ_i (W_i⊕W'_i)L_i(z) = ψ_z(W) + ψ_z(W')`. So it commutes with our
+XOR-operand structure:
+`ψ_z((col↓s ⊕ col_j ⊕ …) ⊕ cmpl) = Σ ψ_z(col↓s) ⊕ cmpl·Σ_i L_i(z)`.
+The tie reduces to: derive each operand eval as the F₂-sum of its `(col,Δ)` terms'
+`ψ_z`-projected column evals at `r` (+ the complement constant `Σ_i L_i(z)`), then
+check it equals the zerocheck's `a/b/c_eval`. Identical shape to
+`derive_operand_parents`, with `L_i(z)` for `α^b`. (`ψ_z` is not multiplicative —
+fine; the AND is enforced by the zerocheck, the projection only carries the XOR
+tie.)
+
+### Soundness — same `≤(D−1)/|F|` as `ψ_α`
+`ψ_z(W)` is the unique degree-`≤D−1` univariate interpolating the `D` bits over the
+subspace, evaluated at `z`. For `W≠W'` the difference is `Σ_{i∈T} L_i(z)` over the
+nonempty differing set — a **nonzero** poly in `z` (Lagrange basis is
+`GF(2¹²⁸)`-independent) of degree `≤D−1`, so `Pr_z[ψ_z(W)=ψ_z(W')] ≤ (D−1)/2¹²⁸`
+(= `31/2¹²⁸` for `D=32`) — **identical to the monomial `ψ_α`** (`Σ(W_b⊕W'_b)α^b`,
+same degree/bound). Conditions, all met: (1) `{L_i}` independent ✓ (Lagrange over
+`D` distinct subspace points); (2) `z` random and drawn **after** the column
+commitments ✓ (it's the univariate-skip Fiat–Shamir challenge); (3) subspace dim
+`≥ log₂ D = 5` ✓. The total discharge error is then
+`deg(R₀)/|F| + (degree-2 sumcheck) + (D−1)/|F|`, all negligible at `|F|=2¹²⁸`.
+
+### The one remaining decision (cost, not soundness): which projection point
+Today's Wiring-R *reuses* `α` for both the main column projection and the
+discharge tie. Since `z ≠ α` and the bases differ (subspace vs monomial), a column
+used in the discharge **and** elsewhere (e.g. `W_E`) would be projected at two
+points. The PCS opens whatever projected column it's handed, so this is purely an
+opening-count question:
+- **(i) Keep `α` (monomial) for the main open; project the discharge columns at
+  `z` (subspace) too.** Smaller change; costs extra openings for the discharge
+  columns (they already get a separate discharge opening today, so the delta is
+  the basis + point, not a new opening class).
+- **(ii) Re-base the whole projection to the subspace** so `z` is the single
+  point everywhere — fully unified with Binius, no double-opening, but it touches
+  the IC / multipoint-eval / open path beyond the discharge.
+
+Start with **(i)** (localised to the discharge); consider **(ii)** later if the
+double-open cost shows up in the A/B. Either is sound (the argument above is
+independent of how many points a column is opened at).
 
 ## 5. Phased roadmap
 
@@ -167,8 +208,9 @@ the tie (§4) carries the real soundness obligation.
   code, but `~/binius64` is a line-by-line template.*
 - **Phase C — the integration seam (§4).** Wire the oblong zerocheck into
   `prove_f2_hadamard_phase` for ONE simple AND relation (e.g. C12) and tie its
-  evals to the committed columns via route (B). **Gate**: full prove→verify
-  round-trip for that relation (à la the existing `plain_and_round_trips`). *The
+  evals to the committed columns via the **`ψ_z` recombination** (§4; `L_i(z)` for
+  `α^b`, soundness verified). **Gate**: full prove→verify round-trip for that
+  relation (à la the existing `plain_and_round_trips`). *The
   architectural risk lives here.*
 - **Phase D — all 16 relations + measure.** Wire the 3 ANDs + 13 adders (the
   shifted operands, complement, carry). **A/B** the new discharge vs the current
@@ -180,7 +222,9 @@ the tie (§4) carries the real soundness obligation.
 
 - **Phase A**: ~1 week (field embedding + 4 self-contained math ports).
 - **Phase B**: ~1–2 weeks (the oblong kernel + verifier; template available).
-- **Phase C**: ~1–2 weeks, **highest risk** (the ψ_α/shift tie + its soundness).
+- **Phase C**: ~1–2 weeks. Soundness of the `ψ_z` tie is now **resolved** (§4);
+  remaining risk is the `↓Δ` row-shift opening + the §4-(i)/(ii) projection-point
+  choice — fall back to porting Binius's shift reduction (route A) if needed.
 - **Phase D**: ~1 week (wiring + A/B).
 - Total ~4–6 weeks, gated so we learn early (Phase C is the go/no-go for the
   architecture). The verifier changes (it's a new sub-protocol) — so this is NOT
@@ -195,9 +239,16 @@ the tie (§4) carries the real soundness obligation.
 2. **The `GF(2⁸) ↪ GF(2¹²⁸)` embedding** — pick the subfield generator + the
    deterministic skip challenges so the tensor-product `F₂`-independence holds in
    *our* GHASH field (binius uses AES-basis `[0x2,0x4,0x10]`; ours will differ).
-3. **The integration tie (§4)** — does route (B) (ψ_α recombination over the
-   oblong `(z,r)` point) compose soundly, or do we need the shift reduction (A)?
-   This is the one to settle on paper before Phase C.
+3. **The integration tie (§4)** — ✅ **SOUNDNESS RESOLVED**: the `ψ_z`
+   recombination (`L_i(z)` for `α^b`) is correct (F₂-linear ⇒ commutes with the
+   XOR operands) and sound (`≤(D−1)/2¹²⁸`, identical to `ψ_α`); see §4. Remaining
+   sub-questions for Phase C: (a) the projection-point decision §4-(i) vs (ii)
+   (cost, not soundness) — start with (i); (b) the **`↓Δ` row-shift** in the
+   opening — confirm `ψ_z(col↓Δ)(r)` is a clean shift of `ψ_z(col)(r)` in our PCS
+   (it is for `Δ=0`; `Δ≠0` is the "trusted shifted-eval" gap shared with the
+   current discharge, `f2_hadamard_plan.md` §6 / ledger Issue 1) — else fall back
+   to route (A), Binius's shift reduction, which exists precisely to discharge
+   these shifts soundly.
 4. **Adders/carry** — confirm the carry operand `c` (derived, currently trusted
    per `f2_hadamard_plan.md` §6 Issue 1) ties down under the new reduction the
    same way (or better) than today.
