@@ -645,10 +645,8 @@ pub struct F2EqColRound1FastPath {
 
 impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
     #[allow(clippy::arithmetic_side_effects)]
-    fn round_message(
+    fn round_1_message(
         &self,
-        _round: usize,
-        _prior: &[BinaryFieldGF128],
         config: &<BinaryFieldGF128 as PrimeField>::Config,
     ) -> Round1Output<BinaryFieldGF128> {
         let half = 1usize << (self.num_vars - 1);
@@ -717,12 +715,11 @@ impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn fold(
+    fn fold_with_r1(
         self: Box<Self>,
-        challenges: &[BinaryFieldGF128],
+        r_1: &BinaryFieldGF128,
         config: &<BinaryFieldGF128 as PrimeField>::Config,
     ) -> Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> {
-        let r_1 = &challenges[0];
         let half = 1usize << (self.num_vars - 1);
         let zero_inner = *BinaryFieldGF128::zero().inner();
 

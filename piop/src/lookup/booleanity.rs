@@ -627,7 +627,7 @@ where
     F: InnerTransparentField + Send + Sync + 'static,
     F::Inner: Send + Sync + Zero + Default,
 {
-    fn round_message(&self, _round: usize, _prior: &[F], config: &F::Config) -> Round1Output<F> {
+    fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
         let extra_offset = self.binary_cols.len() * D;
         debug_assert_eq!(
             self.alpha_powers.len(),
@@ -698,12 +698,11 @@ where
         }
     }
 
-    fn fold(
+    fn fold_with_r1(
         self: Box<Self>,
-        challenges: &[F],
+        r_1: &F,
         config: &F::Config,
     ) -> Vec<DenseMultilinearExtension<F::Inner>> {
-        let r_1 = &challenges[0];
         let one = F::one_with_cfg(config);
         let one_minus_r1 = one.clone() - r_1.clone();
         let r1 = r_1.clone();
@@ -1334,7 +1333,7 @@ mod tests {
             ic_ep_0: ic_ep[0].clone(),
             num_vars,
         };
-        let fast_out = fast_path.round_message(1, &[], &cfg);
+        let fast_out = fast_path.round_1_message(&cfg);
 
         // ---- Standard path ----
         let bit_slices = compute_bit_slices_flat::<F, D>(&binary_cols, &cfg);
@@ -1419,7 +1418,7 @@ mod tests {
             num_vars,
         });
 
-        let fast_mles = fast_path.fold(core::slice::from_ref(&r_1), &cfg);
+        let fast_mles = fast_path.fold_with_r1(&r_1, &cfg);
         // [eq_r_folded, bit_0, bit_1, ..., bit_{D-1}].
         assert_eq!(fast_mles.len(), 1 + D);
 

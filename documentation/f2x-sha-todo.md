@@ -1238,7 +1238,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
-### Small-value / multi-round-skip prover for the Hadamard zerocheck (the real Binius64-style lever; scoped, NOT built)
+### Small-value / multi-round-skip prover for the Hadamard zerocheck (BUILT in full, A/B-DISCONFIRMED at 40–74× SLOWER, then REMOVED from the tree — record kept so the approach isn't re-attempted the same way; see the A/B RESULT + REMOVED bullet)
 - **Source**: Dao–DeStefano–Bagad–Domb–Thaler, "Speeding Up Sum-Check
   Proving" (cs.nyu.edu/~zd2131/papers/26-587.pdf, Mar 2026), §3 (tower-field
   small-value arithmetic), §5 (small-value prover + cost), §6 (eq-poly
@@ -1272,7 +1272,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   memory benefit dominates). The efficient multiproduct (Dao Procedure 1,
   `O(d log d)` vs `O(d²)` bb) is what keeps `v>1` from regressing; needed
   for a real win.
-- **Framework groundwork — ✅ SHIPPED**: the `Round1FastPath` hook
+- **Framework groundwork — BUILT then REMOVED (reverted to `af0cdf2`)**: the `Round1FastPath` hook
   (`piop/src/sumcheck/multi_degree.rs`) is generalised from one round to
   **`num_skip()` rounds**: `round_message(round, prior)` for rounds
   `1..=num_skip`, then a single `fold(challenges)`; the prover loop drives
@@ -1285,13 +1285,13 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   gate the optimised version. (NB this is the verifier-preserving
   small-value variant, NOT Binius64's univariate skip, which changes the
   proof/degree.)
-- **Math validated — ✅ (commit `eb3138a`)**: `prefix_v2_matches_generic`
+- **Math validated — ✅ (commit `eb3138a`, code since REMOVED)**: `prefix_v2_matches_generic`
   computes the `v=2` prefix `q(X_1,X_2) = Σ_{x''} comb` over the
   `{0,1,X,X+1}^2` grid, derives the round-1 message (`Σ_{X_2∈{0,1}} q`) and
   round-2 message (Lagrange-interp `q`'s X_1-column to `r_1`), and asserts
   both equal a generic 2-round run's `round_tails`. Passes — the small-value
   `v>1` math is correct for our `eq_r·Σσ^b(U·V−W)` comb.
-- **Remaining — the fast-path wiring (next focused pass)**: a `num_skip=v`
+- **(Historical plan — the wiring below WAS built per this, then REMOVED)**: a `num_skip=v`
   Hadamard fast path that (a) precomputes the `v`-dim prefix grid `q`
   (`4^v` field values) in `prepare_hadamard_group_with_fast` from the packed
   operand columns; (b) `round_message(round, prior)`: bind dims `1..round-1`
@@ -1320,38 +1320,70 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   than the bind/sum wiring. Recommendation: implement Procedure 1 first (or
   alongside), not the naïve grid, else the wiring lands a correct-but-not-
   faster path.
-- **Procedure 1 — ✅ SHIPPED (commit `a388588`)**: `piop::sumcheck::multiproduct`
+- **Procedure 1 — BUILT (commit `a388588`), then REMOVED**: `piop::sumcheck::multiproduct`
   (`multi_product_eval` + `multi_extrapolate`) is the efficient evaluation-form
   multiproduct (Dao §4 Procedures 1+2): `d` multilinears over `{0,1}^v` →
   product over `U_d^v` in `O(d log d)` `bb` mults, reusing `NatEvaluatedPoly`
   for the per-axis univariate extrapolation. Validated vs the naïve grid
   product (`v=2 d=3`, `v=3 d=4`, `d=1` identity). This is the engine that
   keeps the off-hypercube prefix grid from being recomputed per point.
-- **Prefix wiring — ✅ SHIPPED (commit `a4422fb`)**: `HadamardPrefixFastPath`
+- **Prefix wiring — BUILT (commit `a4422fb`), then REMOVED**: `HadamardPrefixFastPath`
   (`num_skip=2`) + `prepare_hadamard_group_with_skip` build the 2-variate
   prefix grid `q` over `U_3^2` and answer `round_message` (round 1 =
   `Σ_{X_2} q`, round 2 = `q(r_1,·)` via `NatEvaluatedPoly`) and `fold`
   (bilinear fold of operand corners + `eq_r` to the `2^(μ-2)`-size MLEs).
   Gated by `fast_path_skip2_matches_generic`: byte-identical proof vs the
   generic path. `prefix q` is built directly (bilinear) for now.
-- **Procedure-1 swap — ✅ SHIPPED (commit `f615f7f`)**: `build_prefix_q_v2`
+- **Procedure-1 swap — BUILT (commit `f615f7f`), then REMOVED**: `build_prefix_q_v2`
   now computes the per-`(relation,bit,x'')` `U·V−W` terms via
   `multi_product_eval`/`multi_extrapolate` (over `U_2^2`, lifted to `U_3^2`)
   instead of the by-hand 16-point bilinear. Same `q`
   (`fast_path_skip2_matches_generic` byte-identical), so the off-hypercube
   extrapolation isn't redone per grid cell.
-- **Remaining (perf only — correctness fully locked)**:
-  (a) **enable in `prove_f2_hadamard_phase` size-gated** (`v=1` at production
-  nvars=9; `v=2` only for nvars≥~16 where the memory win pays) — a small
-  routing change to call `prepare_hadamard_group_with_skip(skip, …)`;
-  (b) **A/B the f2_sha256 Hadamard group at nvars=16/20** (skip=1 vs skip=2)
-  to confirm the speedup empirically — this is the multi-minute bench, so
-  it's the *first* thing a fresh session should run (it both validates the
-  full prove+verify at large nvars under skip=2 and measures the win);
-  (c) optionally generalise `num_skip` past 2 (`v`-dim grid + multidim
-  bind/sum) if the A/B shows higher `v` is warranted. Production prover stays
-  `skip=1` until (b) confirms the win — do NOT enable on faith (cf. the
-  rejected weight-precompute/dedup).
+- **A/B RESULT — ❌ skip=2 DISCONFIRMED, then REMOVED**: wired a temporary
+  size-gate (`effective_hadamard_skip`, default skip=1) + a
+  `set_hadamard_skip_override` A/B knob + skip1/skip2 Prove arms in the
+  `f2_sha256` Hadamard group (`F2_HAD_ONLY=1 HAD_NVARS=…` to scope the run;
+  full-prover byte-identity asserted between skips). **Measured (M-series,
+  `parallel simd unchecked`):**
+
+  | nvars | Prove-Hadamard skip=1 | skip=2 | ratio |
+  |------:|----------------------:|-------:|------:|
+  |  9    | ~9.1 ms               | ~368 ms | **40× slower** |
+  | 16    | ~626 ms               | ~46.2 s | **74× slower** |
+
+  The gap *widens* with nvars (no crossover): skip=2's prefix build scales
+  **exactly** with `2^(n-2)` (125× from nvars 9→16 ≈ the 128× hypercube
+  growth), so it dominates the whole prove. **Root cause:**
+  `build_prefix_q_v2` calls `multi_product_eval`/`multi_extrapolate` per
+  `(x'', relation, bit)` = `2^(n-2)·16·32` calls/prove, and each call runs
+  `prepare_eval_aux` → `batch_invert` (GF128 inversions) + Vec allocations.
+  Procedure 1's `O(d log d)` *setup* cost dwarfs the actual `v=2,d≤3` work at
+  this per-scalar granularity — i.e. the Procedure-1 swap (`f615f7f`) made the
+  prefix build *worse*, not better, vs the by-hand bilinear it replaced. The
+  per-bit loop also forgoes the bit-packing skip=1's `HadamardRound1FastPath`
+  gets from reading packed `u64` cells. **Decision (user call): REMOVED, not
+  kept gated.** Reverted all five skip-2 commits' code to `af0cdf2` (the
+  pre-skip-2 state, which already carried the shipped skip=1 round-1 fast path)
+  and deleted `multiproduct.rs`; `multi_degree.rs`'s `Round1FastPath` is back to
+  its single-round form. Production is **skip=1 only**. Verified after removal:
+  59 piop + 9 f2_hadamard tests green, `fast_path_matches_generic` (skip=1)
+  still gates byte-identity.
+- **If ever revived — DON'T repeat the per-scalar multiproduct**: the only path to a win is
+  a **bit-packed, allocation-free, aux-hoisted prefix build** that processes
+  all `D` bits per `u64` op (like the skip=1 fast path) instead of looping
+  `for b in 0..D` with a Procedure-1 call each. Obstacle: the per-bit `σ^b`
+  GF(2^128) weight can't be folded bitwise, so the accumulation must stay
+  per-bit in GF128 even when the *operand reads* are bit-packed — exactly the
+  trick `HadamardRound1FastPath` already pulls off for round 1, so mirror its
+  structure into the 2-variate prefix. Expected ceiling: the prior
+  direct-bilinear prefix was only **~neutral** at nvars=9, and the theoretical
+  prize is just avoiding round-2 slice-MLE materialisation (`2^(n-2)·1536·16 B`
+  ≈ 6.4 GB at nvars=20) — so even a perfect rewrite is speculative. Do NOT
+  pursue without a cost model showing the bit-packed prefix beats skip=1's
+  already-fast-pathed round 1 + one materialised round 2.
+- **Optional (only if revived)**: generalise `num_skip` past 2 (`v`-dim grid +
+  multidim bind/sum) — moot unless the bit-packed prefix above lands first.
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
