@@ -30,7 +30,7 @@ use super::{
     SumCheckError,
     prover::{
         NatEvaluatedPolyWithoutConstant, ProverMsg as SumcheckProverMsg,
-        ProverState as SumcheckProverState,
+        ProverState as SumcheckProverState, RoundPolyEvaluator,
     },
     verifier::VerifierState,
 };
@@ -81,6 +81,7 @@ pub struct MultiDegreeSumcheckGroup<F: PrimeField> {
     poly: Vec<DenseMultilinearExtension<F::Inner>>,
     comb_fn: CombFn<F>,
     round_1_fast: Option<Box<dyn Round1FastPath<F>>>,
+    round_evaluator: Option<Box<dyn RoundPolyEvaluator<F>>>,
 }
 
 impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
@@ -94,6 +95,7 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
             poly,
             comb_fn,
             round_1_fast: None,
+            round_evaluator: None,
         }
     }
 
@@ -111,7 +113,16 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
             poly,
             comb_fn,
             round_1_fast: Some(round_1_fast),
+            round_evaluator: None,
         }
+    }
+
+    /// Attach a fused [`RoundPolyEvaluator`] used for rounds ≥ 2 in place of
+    /// the generic per-point gather. Byte-identical; see the trait. Builder
+    /// form so it composes with [`Self::with_round_1_fast`].
+    pub fn with_round_evaluator(mut self, evaluator: Box<dyn RoundPolyEvaluator<F>>) -> Self {
+        self.round_evaluator = Some(evaluator);
+        self
     }
 }
 
@@ -346,7 +357,9 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         for group in groups {
             let degree_field = F::from_with_cfg(group.degree as u64, config);
             transcript.absorb_random_field(&degree_field, &mut buf);
-            prover_states.push(SumcheckProverState::new(group.poly, num_vars, group.degree));
+            let mut state = SumcheckProverState::new(group.poly, num_vars, group.degree);
+            state.round_evaluator = group.round_evaluator;
+            prover_states.push(state);
             comb_fns.push(group.comb_fn);
             fast_paths.push(group.round_1_fast);
         }

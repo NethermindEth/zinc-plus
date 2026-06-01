@@ -47,6 +47,40 @@ pub struct ProverMsg<F>(pub NatEvaluatedPolyWithoutConstant<F>);
 delegate_transcribable!(ProverMsg<F>(NatEvaluatedPolyWithoutConstant<F>)
     where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
 
+/// Optional per-round polynomial evaluator that replaces the generic
+/// per-point value-array gather in [`ProverState::prove_round`]. When a
+/// state carries one, `prove_round` calls it to compute the round
+/// polynomial evaluations `[M(0), M(1), …, M(degree)]` directly from the
+/// (already-folded) `mles` — instead of rebuilding a `polys.len()`-element
+/// value array per hypercube point and invoking the generic `comb_fn`
+/// `degree + 1` times.
+///
+/// The fold (`fix_variables`) and message formation are unchanged, and
+/// because field arithmetic is exact the summation order is irrelevant — so
+/// the emitted proof is **byte-identical** to the generic path. This is a
+/// pure access-pattern / arithmetic-fusion win for combs whose structure
+/// lets the prover stream a few MLEs at a time (e.g. the Hadamard
+/// discharge's per-`(relation, bit)` triples) rather than scatter-gather all
+/// `polys.len()` of them per hypercube point. Round 1 is unaffected:
+/// fast-path groups emit it via [`super::multi_degree::Round1FastPath`], so
+/// this evaluator only runs for rounds ≥ 2 in such groups.
+pub trait RoundPolyEvaluator<F: PrimeField>: Send + Sync {
+    /// Return `[M(0), M(1), …, M(degree)]` (length `degree + 1`) for the
+    /// round-`round` polynomial over `mles` (each holding
+    /// `2^(num_vars − round + 1)` evaluations, folded for the prior rounds).
+    /// Same boundary convention as the generic path: each MLE is linear in
+    /// the round variable, so its value at boundary point `F::from(x)` is
+    /// `mle[2·pt] + F::from(x)·(mle[2·pt+1] − mle[2·pt])`.
+    fn round_evals(
+        &self,
+        mles: &[DenseMultilinearExtension<F::Inner>],
+        round: usize,
+        num_vars: usize,
+        degree: usize,
+        config: &F::Config,
+    ) -> Vec<F>;
+}
+
 /// Sumcheck Prover State.
 pub struct ProverState<F: PrimeField> {
     /// Sampled randomness given by the verifier.
@@ -68,6 +102,11 @@ pub struct ProverState<F: PrimeField> {
     /// of their setup, so the standard prover must not fold them a second
     /// time. The flag is reset to `false` after the skipped fold.
     pub skip_next_fold: bool,
+    /// Optional fused round-polynomial evaluator (see [`RoundPolyEvaluator`]).
+    /// When `Some`, `prove_round` uses it instead of the generic per-point
+    /// gather to compute the round message — byte-identical, faster access
+    /// pattern. `None` ⇒ the standard path.
+    pub round_evaluator: Option<Box<dyn RoundPolyEvaluator<F>>>,
 }
 
 impl<F: PrimeField> ProverState<F> {
@@ -86,6 +125,7 @@ impl<F: PrimeField> ProverState<F> {
             round: 0,
             asserted_sum: None,
             skip_next_fold: false,
+            round_evaluator: None,
         }
     }
 }
@@ -139,6 +179,14 @@ where
         let i = self.round;
         let nv = self.num_vars;
         let degree = self.max_degree;
+
+        // Fused fast path: a group may supply a `RoundPolyEvaluator` that
+        // computes the round polynomial evaluations directly, bypassing the
+        // generic per-point 1..=polys.len() value-array gather below.
+        // Byte-identical (exact-field, order-independent sum); see the trait.
+        let evaluations: Vec<F> = match self.round_evaluator.as_ref() {
+            Some(ev) => ev.round_evals(&self.mles, i, nv, degree, config),
+            None => {
 
         let polys = &self.mles;
 
@@ -264,6 +312,10 @@ where
 
         #[cfg(not(feature = "parallel"))]
         let evaluations = summer.evals;
+
+                evaluations
+            }
+        };
 
         // Record the claimed sum once during the first round.
         if self.round == 1 {

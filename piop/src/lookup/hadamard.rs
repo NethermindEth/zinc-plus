@@ -40,7 +40,7 @@ use crate::{
     CombFn,
     sumcheck::{
         multi_degree::{MultiDegreeSumcheckGroup, Round1FastPath, Round1Output},
-        prover::ProverState as SumcheckProverState,
+        prover::{ProverState as SumcheckProverState, RoundPolyEvaluator},
     },
 };
 
@@ -321,6 +321,134 @@ where
     }
 }
 
+/// Fused round-polynomial evaluator for the degree-3 Hadamard zerocheck,
+/// used for **rounds ≥ 2** in place of the generic per-point value-array
+/// gather (see [`RoundPolyEvaluator`]). The generic prover rebuilds a
+/// `1 + 1536`-element value array per hypercube point — a scatter across
+/// 1536 separate slice `Vec`s that is latency-bound and dominates
+/// Prove-Hadamard. This evaluator instead loops **`(relation, bit)`-outer,
+/// point-inner**, streaming each triple's 3 slices `U_{k,b}, V_{k,b},
+/// W_{k,b}` sequentially, so the access pattern is cache-friendly. The
+/// `eq_r` factor is common to all `(k,b)` so it is applied once in a second
+/// pass. Same arithmetic, exact-field order-independent sum ⇒ the emitted
+/// round message is **byte-identical** to the generic path.
+pub struct HadamardRoundEvaluator<F: PrimeField, const D: usize> {
+    relations: Vec<HadamardTriple>,
+    /// Flattened batch weights `weights[k·D + b] = γ'^k · σ^b`.
+    weights: Vec<F>,
+}
+
+impl<F, const D: usize> RoundPolyEvaluator<F> for HadamardRoundEvaluator<F, D>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: Send + Sync + Zero + Clone,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn round_evals(
+        &self,
+        mles: &[DenseMultilinearExtension<F::Inner>],
+        round: usize,
+        num_vars: usize,
+        degree: usize,
+        config: &F::Config,
+    ) -> Vec<F> {
+        debug_assert_eq!(degree, 3, "Hadamard zerocheck is degree 3");
+        debug_assert_eq!(mles.len(), 1 + self.relations.len() * 3 * D);
+        let zero = F::zero_with_cfg(config);
+        let half = 1usize << (num_vars - round); // number of point-pairs
+        // Degree-3 boundary points {0, 1, X, X+1}; x=0,1 read off directly,
+        // x=2,3 via `s0 + bp·(s1−s0)` (matches the generic Lagrange path).
+        let bp2 = F::from_with_cfg(2, config);
+        let bp3 = F::from_with_cfg(3, config);
+        let eq = &mles[0].evaluations;
+        let slices = &mles[1..];
+        let relations = &self.relations;
+        let weights = &self.weights;
+
+        // Chunk the hypercube points so each task streams a cache-resident
+        // sub-range of every slice (the local `g` stays in L1/L2) and the
+        // work parallelises — replacing the generic per-point scatter-gather
+        // across all 1536 slice `Vec`s.
+        const CHUNK: usize = 512;
+        let n_chunks = half.div_ceil(CHUNK).max(1);
+
+        let partials: Vec<[F; 4]> = cfg_into_iter!(0..n_chunks)
+            .map(|c| {
+                let lo = c * CHUNK;
+                let hi = ((c + 1) * CHUNK).min(half);
+                if lo >= hi {
+                    return [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+                }
+                let clen = hi - lo;
+                // Pass 1: g[x·clen + (pt−lo)] = Σ_{k,b} w_{k,b}·(Uₓ·Vₓ − Wₓ).
+                let mut g = vec![zero.clone(); 4 * clen];
+                for (k, tri) in relations.iter().enumerate() {
+                    for b in 0..D {
+                        let w = &weights[k * D + b];
+                        let u = &slices[tri.u_col * D + b].evaluations;
+                        let v = &slices[tri.v_col * D + b].evaluations;
+                        let ws = &slices[tri.w_col * D + b].evaluations;
+                        for pt in lo..hi {
+                            let li = pt - lo;
+                            let uu = lift4::<F>(u, pt, &bp2, &bp3, config);
+                            let vv = lift4::<F>(v, pt, &bp2, &bp3, config);
+                            let ww = lift4::<F>(ws, pt, &bp2, &bp3, config);
+                            for x in 0..4 {
+                                g[x * clen + li] +=
+                                    w.clone() * (uu[x].clone() * vv[x].clone() - ww[x].clone());
+                            }
+                        }
+                    }
+                }
+                // Pass 2: fold in the shared eq_r factor over this chunk.
+                let mut le = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+                for pt in lo..hi {
+                    let li = pt - lo;
+                    let ee = lift4::<F>(eq, pt, &bp2, &bp3, config);
+                    for x in 0..4 {
+                        le[x] += ee[x].clone() * g[x * clen + li].clone();
+                    }
+                }
+                le
+            })
+            .collect();
+
+        // Sum the per-chunk partials (n_chunks is small).
+        let mut evals = vec![zero; 4];
+        for p in &partials {
+            for (x, e) in evals.iter_mut().enumerate() {
+                *e += p[x].clone();
+            }
+        }
+        evals
+    }
+}
+
+/// Lift a bit-slice's two folded halves at point-pair `pt` to its four
+/// degree-3 boundary values `[s(0), s(1), s(X), s(X+1)]`. Each MLE is linear
+/// in the round variable: `s(0)=s0`, `s(1)=s1`, `s(b)=s0 + b·(s1−s0)` for the
+/// off-hypercube points — the same convention as the generic prover, so the
+/// result is bit-identical.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn lift4<F: InnerTransparentField>(
+    s: &[F::Inner],
+    pt: usize,
+    bp2: &F,
+    bp3: &F,
+    config: &F::Config,
+) -> [F; 4] {
+    let s0 = F::new_unchecked_with_cfg(s[2 * pt].clone(), config);
+    let s1 = F::new_unchecked_with_cfg(s[2 * pt + 1].clone(), config);
+    let ds = s1.clone() - s0.clone();
+    [
+        s0.clone(),
+        s1,
+        s0.clone() + bp2.clone() * ds.clone(),
+        s0 + bp3.clone() * ds,
+    ]
+}
+
 /// Like [`prepare_hadamard_group`], but supplies a round-1
 /// [`HadamardRound1FastPath`] instead of materialising the bit-slice MLEs:
 /// takes the **packed** operand columns (`U_k, V_k, W_k` as `BinaryPoly<D>`,
@@ -359,6 +487,20 @@ where
     let gamma_powers: Vec<F> = powers(gamma_prime, one.clone(), relations.len());
     let sigma_powers: Vec<F> = powers(sigma, one.clone(), D);
 
+    // Flattened batch weights for the fused rounds-≥2 evaluator:
+    // `weights[k·D + b] = γ'^k · σ^b` (built here, before `comb_fn` consumes
+    // `gamma_powers`/`sigma_powers`).
+    let mut weights: Vec<F> = Vec::with_capacity(gamma_powers.len().saturating_mul(D));
+    for g in &gamma_powers {
+        for s in &sigma_powers {
+            weights.push(g.clone() * s.clone());
+        }
+    }
+    let round_evaluator: Box<dyn RoundPolyEvaluator<F>> = Box::new(HadamardRoundEvaluator::<F, D> {
+        relations: relations.to_vec(),
+        weights,
+    });
+
     let eq_other_table: Vec<F::Inner> = if num_vars >= 2 {
         build_eq_x_r_inner(&ic_evaluation_point[1..], field_cfg)?.evaluations
     } else {
@@ -392,10 +534,21 @@ where
         acc * eq_r
     });
 
-    Ok(Some((
-        MultiDegreeSumcheckGroup::with_round_1_fast(3, Vec::new(), comb_fn, fast_path),
-        HadamardProverAncillary { num_bit_slices },
-    )))
+    // Size-gate the fused rounds-≥2 evaluator. It wins once the 1536 folded
+    // slices spill cache (≈200 MB at nvars=14, ≈800 MB at 16 → −13% there),
+    // but its per-chunk setup adds overhead that *regresses* tiny discharges
+    // (≈+25% at the nvars=9 production size, where the rounds barely fill one
+    // chunk). Below the threshold, fall back to the generic per-point path.
+    // Threshold is conservative (slices ≫ cache by nvars=14) and tunable.
+    const FUSED_MIN_VARS: usize = 14;
+    let group = MultiDegreeSumcheckGroup::with_round_1_fast(3, Vec::new(), comb_fn, fast_path);
+    let group = if num_vars >= FUSED_MIN_VARS {
+        group.with_round_evaluator(round_evaluator)
+    } else {
+        group
+    };
+
+    Ok(Some((group, HadamardProverAncillary { num_bit_slices })))
 }
 
 /// Extract the bit-slice evals at the shared sumcheck point from the
@@ -727,6 +880,65 @@ mod tests {
         assert_eq!(
             proof_g, proof_f,
             "fast-path proof must be identical to the generic-path proof"
+        );
+    }
+
+    /// Byte-identity gate for the **fused rounds-≥2 evaluator**: at
+    /// `num_vars >= FUSED_MIN_VARS` (14) `prepare_hadamard_group_with_fast`
+    /// attaches `HadamardRoundEvaluator`, so this exercises round 1 (fast
+    /// path) *and* rounds 2..n (fused) and must reproduce the generic proof
+    /// exactly. (`fast_path_matches_generic` at nvars=3 is below the gate, so
+    /// it covers only the round-1 fast path + generic rounds 2..n.)
+    #[test]
+    fn fused_matches_generic_large() {
+        let cfg = &();
+        const D: usize = 4;
+        let num_vars = 14; // ≥ FUSED_MIN_VARS ⇒ fused evaluator is active
+        let n = 1usize << num_vars;
+        let relations = [
+            HadamardTriple { u_col: 0, v_col: 1, w_col: 2 },
+            HadamardTriple { u_col: 3, v_col: 4, w_col: 5 },
+        ];
+        let ic: Vec<Gf> = (0..num_vars)
+            .map(|i| Gf::from_words([(i as u64).wrapping_mul(7).wrapping_add(3), (i as u64) + 1]))
+            .collect();
+        let mask = (1u32 << D) - 1;
+        let gen_col = |a: u32, b: u32| -> Vec<u32> {
+            (0..n)
+                .map(|i| (i as u32).wrapping_mul(a).wrapping_add(b) & mask)
+                .collect()
+        };
+        // Two relations, six operand columns; values are arbitrary (byte
+        // identity holds whether or not the AND relation is satisfied).
+        let cols: Vec<Vec<u32>> = vec![
+            gen_col(2654435761, 1),
+            gen_col(40503, 7),
+            gen_col(2246822519, 3),
+            gen_col(3266489917, 5),
+            gen_col(668265263, 11),
+            gen_col(374761393, 13),
+        ];
+
+        let slices = build_slices::<D>(&cols, num_vars);
+        let mut pt_g = Blake3Transcript::new();
+        let (group_g, _) = prepare_hadamard_group::<Gf, D>(&mut pt_g, slices, &relations, &ic, cfg)
+            .unwrap()
+            .unwrap();
+        let (proof_g, _) =
+            MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(&mut pt_g, vec![group_g], num_vars, cfg);
+
+        let packed = build_cols::<D>(&cols, num_vars);
+        let mut pt_f = Blake3Transcript::new();
+        let (group_f, _) =
+            prepare_hadamard_group_with_fast::<Gf, D>(&mut pt_f, packed, &relations, &ic, cfg)
+                .unwrap()
+                .unwrap();
+        let (proof_f, _) =
+            MultiDegreeSumcheck::<Gf>::prove_as_subprotocol(&mut pt_f, vec![group_f], num_vars, cfg);
+
+        assert_eq!(
+            proof_g, proof_f,
+            "fused rounds-≥2 proof must be identical to the generic-path proof"
         );
     }
 }
