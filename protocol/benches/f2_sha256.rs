@@ -2511,6 +2511,46 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
         });
     });
 
+    // -- Discharge-only A/B: the current fused bit-slice discharge
+    // (`prove_f2_hadamard_phase`, ψ_α over 1536 GF128 slices) vs the word-packed
+    // **oblong** zerocheck (`prove_oblong_and_batch`, ψ_z, ~48 packed columns)
+    // over the same 16 SHA relations + the same committed columns. Isolates the
+    // discharge prover cost (no commit/open). Oblong is still the naive GF128 NTT
+    // (no GF(2⁸)/eq-split yet) and does not yet bind via the multipoint-eval.
+    {
+        use zinc_poly::univariate::binary_gf128::BinaryFieldGF128 as DGf;
+        let ic_point: Vec<DGf> = (0..fx.num_vars)
+            .map(|i| DGf::from(0x9E37_79B9u64.wrapping_mul(i as u64 + 1)))
+            .collect();
+        group.bench_function(BenchmarkId::new("Discharge-Fused", id), |bench| {
+            bench.iter(|| {
+                let mut t = Blake3Transcript::new();
+                let phase = zinc_protocol::f2_hadamard::prove_f2_hadamard_phase::<D>(
+                    &mut t,
+                    &fx.trace.binary_poly,
+                    &and_specs,
+                    &adder_specs,
+                    &ic_point,
+                    fx.num_vars,
+                );
+                black_box(phase);
+            });
+        });
+        group.bench_function(BenchmarkId::new("Discharge-Oblong", id), |bench| {
+            bench.iter(|| {
+                let mut t = Blake3Transcript::new();
+                let proof = zinc_protocol::f2_oblong_hadamard::prove_oblong_and_batch(
+                    &mut t,
+                    &fx.trace.binary_poly,
+                    &and_specs,
+                    &adder_specs,
+                    fx.num_vars,
+                );
+                black_box(proof);
+            });
+        });
+    }
+
     // Build both proofs once for the verify benches + size report.
     let proof_no_had = {
         let mut t = Blake3Transcript::new();
