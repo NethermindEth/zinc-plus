@@ -16,6 +16,7 @@ pub mod dense;
 pub mod dynamic;
 pub mod nat_evaluation;
 pub mod oblong_and;
+pub mod oblong_and_gf8;
 
 /// In-place `F_2` addition for `F_2[X]`-typed values. Unlike `AddAssign`
 /// on the binary-poly types — which models the coefficients as the
