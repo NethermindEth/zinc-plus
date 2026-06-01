@@ -1327,13 +1327,20 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   for the per-axis univariate extrapolation. Validated vs the naïve grid
   product (`v=2 d=3`, `v=3 d=4`, `d=1` identity). This is the engine that
   keeps the off-hypercube prefix grid from being recomputed per point.
-- **Last step — the prefix wiring**: a `num_skip=v` Hadamard fast path that,
-  in `prepare`, builds the prefix grid `q` over `U_d^v` by feeding the
-  operand columns' `{0,1}^v` corner evals (per `x''`) through
-  `multi_product_eval` for the `eq·U·V` (d=3) and `eq·W` (d=2) terms,
-  σ/γ'-weighted and summed over `x''`; then `round_message`/`fold` read `q`
-  (the validated v=2 math). Size-gate (`v=1` at nvars=9) + A/B at
-  nvars=16/20. Gated by `fast_path_matches_generic`.
+- **Prefix wiring — ✅ SHIPPED (commit `a4422fb`)**: `HadamardPrefixFastPath`
+  (`num_skip=2`) + `prepare_hadamard_group_with_skip` build the 2-variate
+  prefix grid `q` over `U_3^2` and answer `round_message` (round 1 =
+  `Σ_{X_2} q`, round 2 = `q(r_1,·)` via `NatEvaluatedPoly`) and `fold`
+  (bilinear fold of operand corners + `eq_r` to the `2^(μ-2)`-size MLEs).
+  Gated by `fast_path_skip2_matches_generic`: byte-identical proof vs the
+  generic path. `prefix q` is built directly (bilinear) for now.
+- **Remaining (perf only — correctness done)**: (1) swap the direct prefix
+  build for `multi_product_eval` (Procedure 1) — drop-in, same `q`, the
+  efficiency the off-hypercube grid needs; (2) generalise `num_skip` past 2
+  (the `v`-dim grid + multidim bind/sum) if higher `v` is wanted; (3) enable
+  in `prove_f2_hadamard_phase` size-gated (`v=1` at production nvars=9) and
+  A/B at nvars=16/20 to confirm the win. Production prover is unchanged
+  (`skip=1`) until (3).
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
