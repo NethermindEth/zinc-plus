@@ -1334,13 +1334,24 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   (bilinear fold of operand corners + `eq_r` to the `2^(μ-2)`-size MLEs).
   Gated by `fast_path_skip2_matches_generic`: byte-identical proof vs the
   generic path. `prefix q` is built directly (bilinear) for now.
-- **Remaining (perf only — correctness done)**: (1) swap the direct prefix
-  build for `multi_product_eval` (Procedure 1) — drop-in, same `q`, the
-  efficiency the off-hypercube grid needs; (2) generalise `num_skip` past 2
-  (the `v`-dim grid + multidim bind/sum) if higher `v` is wanted; (3) enable
-  in `prove_f2_hadamard_phase` size-gated (`v=1` at production nvars=9) and
-  A/B at nvars=16/20 to confirm the win. Production prover is unchanged
-  (`skip=1`) until (3).
+- **Procedure-1 swap — ✅ SHIPPED (commit `f615f7f`)**: `build_prefix_q_v2`
+  now computes the per-`(relation,bit,x'')` `U·V−W` terms via
+  `multi_product_eval`/`multi_extrapolate` (over `U_2^2`, lifted to `U_3^2`)
+  instead of the by-hand 16-point bilinear. Same `q`
+  (`fast_path_skip2_matches_generic` byte-identical), so the off-hypercube
+  extrapolation isn't redone per grid cell.
+- **Remaining (perf only — correctness fully locked)**:
+  (a) **enable in `prove_f2_hadamard_phase` size-gated** (`v=1` at production
+  nvars=9; `v=2` only for nvars≥~16 where the memory win pays) — a small
+  routing change to call `prepare_hadamard_group_with_skip(skip, …)`;
+  (b) **A/B the f2_sha256 Hadamard group at nvars=16/20** (skip=1 vs skip=2)
+  to confirm the speedup empirically — this is the multi-minute bench, so
+  it's the *first* thing a fresh session should run (it both validates the
+  full prove+verify at large nvars under skip=2 and measures the win);
+  (c) optionally generalise `num_skip` past 2 (`v`-dim grid + multidim
+  bind/sum) if the A/B shows higher `v` is warranted. Production prover stays
+  `skip=1` until (b) confirms the win — do NOT enable on faith (cf. the
+  rejected weight-precompute/dedup).
 
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
