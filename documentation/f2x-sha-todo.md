@@ -1238,6 +1238,56 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
+### Small-value / multi-round-skip prover for the Hadamard zerocheck (the real Binius64-style lever; scoped, NOT built)
+- **Source**: Dao–DeStefano–Bagad–Domb–Thaler, "Speeding Up Sum-Check
+  Proving" (cs.nyu.edu/~zd2131/papers/26-587.pdf, Mar 2026), §3 (tower-field
+  small-value arithmetic), §5 (small-value prover + cost), §6 (eq-poly
+  optimisation). Same regime Binius64's AND reduction uses (univariate skip,
+  binius.xyz/blueprint/backend/ands). §2.1 explicitly names GF(2^128)/GF(2)
+  (Binius) as a target.
+- **Idea**: our Phase-1 round-1 fast path is the `v=1` case of the
+  small-value prover — round 1 runs on packed 0/1 bits, then `fold_with_r1`
+  materialises half-size F-slices and the generic sumcheck takes rounds
+  2..n. Extending to `v>1` keeps the first `v` rounds on packed bits and
+  defers materialisation, which (a) shrinks the peak F-slice memory
+  geometrically (`1536 · 2^(μ-v) · 16 B`: nvars=20 v=1→12 GB, v=2→6 GB,
+  v=5→0.75 GB — i.e. it's what actually clears the nvars≥20 swap), and
+  (b) moves `v` rounds off the memory-bound generic value-array rebuild.
+- **Mechanism (Dao §5.1)**: don't bind `X_1..X_v` one round at a time
+  (each binding makes the slices large via the random challenge). Instead
+  compute the `v`-variate **prefix polynomial**
+  `q(X_1..X_v) = Σ_{x'} comb(X_1..X_v, x')` over the grid `{0,1,X,X+1}^v`
+  (the GF(2^128) boundary points `F::from_with_cfg(0,1,2,3)`) from the 0/1
+  base evals, then read round `i`'s message off `q` and interpolate
+  `q(r_1..r_{i-1}, X_i, ·)` for the bound prefix. After `v` rounds, fold to
+  the `2^(μ-v)`-size F-slices.
+- **Cost / payoff**: speedup `Θ((d²κ)^{1/δ})`, `δ=log₂(d+1)=2` for our
+  `d=3`, so ≈ `3√κ` where `κ = cost(bb)/cost(ss)`. Their measured 10.9×
+  (Spartan) is over **256-bit prime fields** (`bb`≈40-100 cyc). We're over
+  **GF(2^128)** where `bb` (CLMUL) is ~5-15 cyc → `κ` is small → realistic
+  **~2-5×**, mostly a **memory** win at nvars≥19. The §6 eq-optimisation
+  (we have the `eq_r` factor) stacks on top. A *naïve* prefix does ~1.33×
+  the arithmetic of generic rounds 1+2, so it **regresses small nvars** —
+  must be **size-gated** (`v=1` for production nvars=9; `v>1` only when the
+  memory benefit dominates). The efficient multiproduct (Dao Procedure 1,
+  `O(d log d)` vs `O(d²)` bb) is what keeps `v>1` from regressing; needed
+  for a real win.
+- **Why it's a real build, not an increment**: the multi-degree sumcheck's
+  `Round1FastPath` hook (`piop/src/sumcheck/multi_degree.rs`) skips **one**
+  round only (`round_1_message` + `fold_with_r1`). Multi-round skip needs a
+  framework change (loop the fast path for `v` rounds, or a "prove from
+  round v+1" entry) **plus** the prefix-polynomial machinery (Procedures
+  1+2) **plus** the eq-opt — a multi-component effort touching shared piop
+  code. Verifier/proof are **unchanged** (same protocol), so the existing
+  `fast_path_matches_generic` byte-identity test extends to gate it — the
+  one big de-risk. (NB this is the verifier-preserving small-value variant,
+  NOT Binius64's univariate skip, which changes the proof/degree.)
+- **Recommended first increment**: a unit test that computes the `v=2`
+  prefix `q` and asserts its derived round-1+round-2 messages equal a
+  generic 2-round run's `group_messages` (validates the math before any
+  framework surgery), then the framework `v`-round-skip hook, then size-gate
+  + A/B at nvars=16/20.
+
 ### Round-1 fast path for the Hadamard degree-3 zerocheck (Phase 1 — ✅ SHIPPED; see Shipped-work entry for results)
 - **Where**: `piop/src/lookup/hadamard.rs` (`prepare_hadamard_group` builds
   the group via `MultiDegreeSumcheckGroup::new(3, …)` — no fast path) and
