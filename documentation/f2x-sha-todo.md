@@ -1581,6 +1581,18 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   output point `r_0`. Fixed both: added the `&[]` hadamard/adder args, and
   made `2-VerifyOpen` replicate the mp phase (mp `verify_as_subprotocol` →
   absorb `open_evals_at_r_0` → subclaim at `r_0`) before timing the open.
+- **Sibling benches `f2_sha256_rs.rs` + `f2_blake3.rs` had the *identical*
+  pair of drifts** (surfaced later, building with `--all-targets`): the same
+  5 stale `prove_f2_uair_with_groups` call sites (missing `&[]` hadamard +
+  `&[]` adder args since `13c169e`) **and** the same `2-VerifyOpen` panic
+  (opened at `r*`, proof opens at `r_0`). Fixed identically — the mp-phase
+  replication is generic (all three pass `&[]` XOR-virtual-bp specs, so
+  `open_evals_at_r_0` is exactly the primary col evals); added the two
+  imports (`F2VerifierSubclaim`, `multipoint_eval::MultipointEval`) the
+  siblings lacked. All three `2-VerifyOpen` micro-benches now run clean
+  (smoke-tested at nvars=9). These three benches aren't in the default build,
+  so any signature change to `prove_f2_uair_with_groups` / `F2FullProof`
+  must remember to touch all three.
 - **Baseline (nvars=9, 7-compression / 512-row fixture, M-series CPU,
   `parallel simd unchecked`, no `metal_gpu`)** — prove: 1-Commit ≈ 272 µs,
   2-UAIR ≈ 953 µs, 3-Open ≈ 660 µs (≈ 1.89 ms total); verify:
