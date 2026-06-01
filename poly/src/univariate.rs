@@ -8,6 +8,7 @@ pub mod binary_gf128;
             Switch new code to crate::univariate::binary_gf128."
 )]
 pub mod binary_gf192;
+pub mod binary_gf8;
 pub mod binary_ref;
 pub mod binary_subspace;
 pub mod binary_u64;
