@@ -75,7 +75,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
-### Oblong AND zerocheck — Phase D entry: batched all-16-relation discharge + A/B (oblong beats fused, naive)
+### Oblong AND zerocheck — Phase D entry: batched all-16 discharge + GF(2⁸) swap → ~2× vs fused (A/B)
 - **What**: the oblong discharge now covers **all 16 SHA relations in one
   zerocheck**, is **Fiat–Shamir**, and there's a **discharge A/B** vs the current
   fused bit-slice discharge.
@@ -95,23 +95,24 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   `prove_oblong_and_batch` (oblong, ψ_z, word-packed), same SHA columns + same 16
   relations (`f2_sha256` bench, `Discharge-Fused`/`Discharge-Oblong`):
 
-  | nvars | fused | oblong | speedup |
-  |---|---|---|---|
-  | 9 | 3.61 ms | 2.58 ms | **1.40×** |
-  | 16 | 385.7 ms | 339.7 ms | **1.14×** |
+  | nvars | fused (ψ_α) | oblong naive (GF128) | **oblong GF(2⁸)** | GF(2⁸) vs fused |
+  |---|---|---|---|---|
+  | 9 | 3.66 ms | 2.64 ms | **1.54 ms** | **2.37×** |
+  | 16 | 388 ms | 342 ms | **198 ms** | **1.96×** |
 
-  **The oblong word-packed discharge already wins — and this is the FLOOR**: it's
-  the naive GF(2¹²⁸) NTT (no GF(2⁸) byte-lookup, which alone is 2.56× on the round
-  message; no eq-split), and the oblong arm doesn't yet produce its ψ_z pair-evals
-  (small) or bind via the multipoint-eval (plumbing, doesn't change discharge
-  prove cost). The win is larger at nvars=9 (cache-resident) than nvars=16 — at
-  nvars=16 the naive Phase-2 still streams the stacked GF128 MLEs, which is exactly
-  what GF(2⁸) + eq-split remove. 30+ tests green across `poly` + `protocol`.
-- **Remaining for the full Phase D**: (a) the **multipoint-eval binding** (task #7
-  part 2 — fold the ψ_z pair-evals into `f2_prove`, the production integration);
-  (b) the **GF(2⁸) + eq-split prover swap** (tasks already filed) to convert the
-  naive floor into the real win; (c) a sound carry binding for the adders
-  (Issue 1). Then the e2e `Prove` A/B.
+  **The GF(2⁸)-accelerated oblong discharge is ~2× faster than the fused bit-slice
+  one** (`prove_oblong_and_batch_gf8`, the byte-lookup NTT over `embed(H₈)`). The
+  naive GF(2¹²⁸) oblong is already 1.1–1.4×; the **GF(2⁸) swap** (`OblongScheme` →
+  `Gf8Scheme`) turns that floor into ~2×. **Still untapped**: the eq-split (the
+  eq-weighting is still per-word GF(2¹²⁸)) + SIMD-packed `Gf8` lanes. The win is
+  larger at nvars=9 (cache-resident) than nvars=16; at nvars=16 the Phase-2 still
+  streams the stacked GF128 MLEs, exactly what the eq-split removes. 32 tests green
+  across `poly` + `protocol`.
+- **Remaining for the full Phase D**: (a) the **eq-split** (task #6) for the next
+  speed step; (b) the **multipoint-eval binding** (task #7 part 2 — fold the ψ_z
+  pair-evals into `f2_prove`, the production integration; doesn't change discharge
+  prove cost); (c) a sound carry binding for the adders (Issue 1). Then the e2e
+  `Prove` A/B.
 
 ### Oblong AND zerocheck — Phase C: ψ_z integration tie, one AND relation round-trips (working tree)
 - **What**: the oblong AND zerocheck wired into the F_2 Hadamard discharge for a

@@ -9,11 +9,13 @@ round. Reference implementation: the local repo `~/binius64`,
 
 ## Progress (2026-06-02) — A,B + GF(2⁸) + Phase-C ψ_z tie + Fiat-Shamir + batched all-16 discharge + A/B
 
-**Headline A/B** (`f2_sha256` bench `Discharge-Fused` vs `Discharge-Oblong`, same
-SHA columns + 16 relations): the **oblong word-packed discharge already beats the
-fused bit-slice one** — nvars=9 **1.40×** (3.61→2.58 ms), nvars=16 **1.14×**
-(385.7→339.7 ms) — and this is the **FLOOR** (naive GF(2¹²⁸), no GF(2⁸)/eq-split,
-no multipoint binding yet). See the ledger entry for the full table + caveats.
+**Headline A/B** (`f2_sha256` bench, same SHA columns + 16 relations): the
+**GF(2⁸)-accelerated oblong discharge is ~2× faster than the fused bit-slice one**
+— nvars=9 **2.37×** (3.66→1.54 ms), nvars=16 **1.96×** (388→198 ms). The naive
+GF(2¹²⁸) oblong is already 1.1–1.4×; the **GF(2⁸) swap** (`Gf8Scheme`, byte-lookup
+NTT over `embed(H₈)`) turns that into ~2×. Still untapped: the eq-split + SIMD
+`Gf8` lanes; the multipoint-eval binding (doesn't change discharge prove cost).
+See the ledger entry for the full table + caveats.
 
 **Landed** (working tree, 30+ tests green across `poly` + `protocol`, no prover
 path touched):
