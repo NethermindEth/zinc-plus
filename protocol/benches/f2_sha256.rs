@@ -2241,11 +2241,11 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
         });
     });
 
-    // Oblong discharge wired into the e2e prove path (measurement-first):
-    // the no-Hadamard pipeline + the GF(2⁸) oblong AND zerocheck on the same
-    // transcript. Delta to `Prove-NoHadamard` = the oblong discharge cost (the
-    // handoff Gate). The ψ_z→commitment binding is the follow-up, so this is a
-    // prove-cost measurement only (no matching verify arm yet).
+    // Oblong discharge wired into the e2e prove path, now **soundly bound**: the
+    // no-Hadamard pipeline + the GF(2⁸) oblong AND zerocheck on the same
+    // transcript, with the discharge's ψ_z AND-pair evals folded into the
+    // multipoint-eval and bound by the single open (adders keep trusted parents).
+    // Delta to `Prove-NoHadamard` = the oblong discharge + binding cost.
     group.bench_function(BenchmarkId::new("Prove-Hadamard-Oblong", id), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();

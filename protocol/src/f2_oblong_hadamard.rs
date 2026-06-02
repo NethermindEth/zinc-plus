@@ -259,6 +259,127 @@ fn batched_tie_check(
     Ok(())
 }
 
+/// Recombination data the **sound** discharge binding needs, derived from the
+/// oblong eval-point `[z, γ]` (GF(2^8) scheme). Both prover and verifier compute
+/// this identically from the discharge output + the committed columns (the AND
+/// `pair_evals` are recomputed from `columns` on the prover and **bound via the
+/// multipoint** on the verifier; the adder parents are trusted on both sides).
+pub struct OblongBindingData {
+    /// `L_b(z)` — the GF(2^8) base-Lagrange weights folding a word's `D` bits.
+    pub lagrange_z: Vec<Gf>,
+    /// The row point `γ_word` (the low `num_vars` of `γ`); `ψ_z` evals live here.
+    pub gamma_word: Vec<Gf>,
+    /// Distinct `(col, Δ)` pairs of the AND specs (the pointed-shift sources).
+    pub pairs: Vec<(usize, usize)>,
+    /// `ψ_z(col↓Δ)(γ_word)`, one per pair — the multipoint pointed-shift down-evals.
+    pub pair_evals: Vec<Gf>,
+    /// Trusted `ψ_z` operand parents of the adder relations at `γ_word` (3/adder).
+    pub adder_parents: Vec<Gf>,
+}
+
+/// Compute the [`OblongBindingData`] for the **GF(2^8)** batched discharge from
+/// its eval-point `[z, γ]`. `pair_evals` come from the committed columns (the
+/// prover's source of truth; the verifier instead takes the multipoint-bound
+/// values and only uses `pairs`/`lagrange_z`/`gamma_word` from here).
+pub fn oblong_binding_data_gf8(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
+    num_vars: usize,
+    eval_point: &[Gf],
+) -> OblongBindingData {
+    let (lagrange_z, gamma_word, pairs) =
+        oblong_verifier_binding_gf8(and_specs, num_vars, eval_point);
+    let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, &gamma_word);
+    let mut adder_parents = Vec::new();
+    for adder in adder_specs {
+        let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
+        adder_parents.extend(adder_operand_alpha_evals::<D>(&uvw, &lagrange_z, &gamma_word));
+    }
+    OblongBindingData {
+        lagrange_z,
+        gamma_word,
+        pairs,
+        pair_evals,
+        adder_parents,
+    }
+}
+
+/// The **columns-free** subset of the binding data the *verifier* needs: the GF(2^8)
+/// base-Lagrange weights `L_b(z)`, the row point `γ_word`, and the distinct AND
+/// `(col,Δ)` pairs — all derivable from the discharge eval-point `[z, γ]` alone
+/// (the `pair_evals`/`adder_parents` come from the proof, bound/trusted).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn oblong_verifier_binding_gf8(
+    and_specs: &[F2HadamardSpec],
+    num_vars: usize,
+    eval_point: &[Gf],
+) -> (Vec<Gf>, Vec<Gf>, Vec<(usize, usize)>) {
+    let z = eval_point[0];
+    let gamma_word = eval_point[1..1 + num_vars].to_vec();
+    let lagrange_z = Gf8Scheme::new().base_lagrange(z).to_vec();
+    let pairs = distinct_pairs(and_specs);
+    (lagrange_z, gamma_word, pairs)
+}
+
+/// Verifier-side `ψ_z` tie using the **multipoint-bound** AND `bound_pair_evals`
+/// and the **trusted** `adder_parents` (from the proof), instead of recomputing
+/// from in-memory columns (`batched_tie_check`). Checks
+/// `Σ_rel eq(rel; γ_rel)·ψ_z(operand_rel)(γ_word) == out.{a,b,c}_eval`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn oblong_tie_from_bound(
+    out: &AndCheckOutput,
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
+    num_vars: usize,
+    pairs: &[(usize, usize)],
+    lagrange_z: &[Gf],
+    bound_pair_evals: &[Gf],
+    adder_parents: &[Gf],
+) -> Result<(), OblongVerifyError> {
+    let k = and_specs.len() + adder_specs.len();
+    let gammas = &out.eval_point[1..];
+    let (_gamma_word, gamma_rel) = gammas.split_at(num_vars);
+
+    let mut parents = derive_operand_parents(and_specs, pairs, bound_pair_evals, lagrange_z);
+    parents.extend_from_slice(adder_parents);
+
+    let eq_rel = eq_indicator(gamma_rel);
+    let mut exp = [Gf::zero(); 3];
+    for (rel, &w) in eq_rel.iter().take(k).enumerate() {
+        for j in 0..3 {
+            exp[j] = exp[j] + w * parents[3 * rel + j];
+        }
+    }
+    if exp[0] != out.a_eval || exp[1] != out.b_eval || exp[2] != out.c_eval {
+        return Err(OblongVerifyError::TieMismatch);
+    }
+    Ok(())
+}
+
+/// Verify **only** the GF(2^8) batched oblong zerocheck (no `ψ_z` tie) and return
+/// the [`AndCheckOutput`] (operand evals + eval-point `[z, γ]`). The sound-binding
+/// verifier ([`ZincPlusPiopF2::verify_f2_full_with_oblong_hadamard`]) calls this,
+/// then ties via the multipoint-bound pair-evals ([`oblong_tie_from_bound`]) —
+/// unlike [`verify_oblong_and_batch_gf8`], which ties against in-memory columns.
+pub fn verify_oblong_zerocheck_gf8<T: Transcript>(
+    transcript: &mut T,
+    proof: &OblongAndProof,
+    k: usize,
+    num_vars: usize,
+) -> Result<AndCheckOutput, OblongVerifyError> {
+    let scheme = Gf8Scheme::new();
+    let mut ch = TranscriptChannel::new(transcript);
+    verify_oblong_and_channel(
+        &mut ch,
+        proof,
+        stacked_nvars(k, num_vars),
+        scheme.full_subspace(),
+        scheme.small_challenges(),
+    )
+    .map_err(OblongVerifyError::Oblong)
+}
+
 /// Batched oblong discharge prover, **naive `GF(2^128)`** (monomial scheme).
 pub fn prove_oblong_and_batch<T: Transcript>(
     transcript: &mut T,
