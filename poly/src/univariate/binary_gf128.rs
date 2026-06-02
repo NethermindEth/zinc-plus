@@ -1082,6 +1082,40 @@ pub fn project_column_with_powers<const D: usize>(
     out
 }
 
+/// The un-lifted open's per-column claim: a column's `F_2[X]<D>`-valued MLE at
+/// the row-point whose equality indicator is `eq`, returned as its `D`
+/// `GF(2^128)` coefficients
+/// ```text
+///   c_b = Σ_row eq[row] · bit_b(cell_row) = MLE[bit-slice b](ρ),   b ∈ 0..D.
+/// ```
+/// I.e. `MLE[col](ρ) = Σ_b c_b·X^b` (a degree-`<D` polynomial whose coefficients
+/// are the bit-slice evals). **Both** projections read off this one vector:
+/// `ψ_α(col)(ρ) = Σ_b c_b·α^b` (monomial — the main / IC / C16–C18 claim, where
+/// `ψ_α` stays a ring hom) and `ψ_z(col)(ρ) = Σ_b c_b·L_b(z)` (subspace-Lagrange
+/// — the oblong discharge). Unlike [`project_column_with_powers`], which collapses
+/// each cell to a single `ψ_α` scalar, this keeps all `D` bit-slice evals, so the
+/// discharge's `ψ_z` is a sound functional of the same bound object. Binding this
+/// degree-`<D` polynomial binds every `c_b` uniquely (the legacy `AlphaPolyBasis`
+/// lift compressed exactly this structure away). Requires `D ≤ 64`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn column_bitslice_evals<const D: usize>(
+    cells: &[BinaryPoly<D>],
+    eq: &[BinaryFieldGF128],
+) -> Vec<BinaryFieldGF128> {
+    assert!(D <= 64, "column_bitslice_evals: D ({D}) must be ≤ 64");
+    assert_eq!(cells.len(), eq.len(), "eq must cover every row");
+    let mut out = vec![BinaryFieldGF128::zero(); D];
+    for (cell, &e) in cells.iter().zip(eq) {
+        let mut bits = cell.pack_u64();
+        while bits != 0 {
+            let b = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            out[b] += e; // bit b set in this cell ⇒ coefficient c_b gets += eq[row]
+        }
+    }
+    out
+}
+
 /// IC-style accumulator: for each row `i` in `0..cells.len()` and each
 /// set bit `d` of `cells[i]`, XOR `eq_table[i]` into `coeffs[d]`.
 ///
@@ -1666,6 +1700,39 @@ mod tests {
 
     fn gf(lo: u64, hi: u64) -> BinaryFieldGF128 {
         BinaryFieldGF128::from_words([lo, hi])
+    }
+
+    #[test]
+    fn column_bitslice_evals_reproduce_psi_alpha() {
+        // c_b = MLE[bit-slice b](ρ) (per `column_bitslice_evals`); Σ_b c_b·α^b
+        // must equal ψ_α(col)(ρ) = Σ_row eq[row]·ψ_α(cell_row). The soundness-
+        // preserving identity for the un-lifted open: the D bit-slice evals
+        // collapse (at α) to the legacy ψ_α projection, while also exposing
+        // ψ_z = Σ_b c_b·L_b(z) as another functional of the same vector.
+        use crate::univariate::F2PackU64;
+        const D: usize = 32;
+        let mut rng = StdRng::seed_from_u64(0xB175_11CE);
+        let num_rows = 16usize;
+        let cells: Vec<BinaryPoly<D>> = (0..num_rows)
+            .map(|_| BinaryPoly::<D>::unpack_u64(rng.random::<u32>() as u64))
+            .collect();
+        // Any eq weights satisfy the linearity identity (no real eq-indicator needed).
+        let eq: Vec<BinaryFieldGF128> = (0..num_rows).map(|_| rand_elt(&mut rng)).collect();
+        let alpha = rand_elt(&mut rng);
+        let alpha_pows = alpha_powers(&alpha, D);
+
+        let c = column_bitslice_evals::<D>(&cells, &eq);
+        assert_eq!(c.len(), D);
+        let lhs = c
+            .iter()
+            .zip(&alpha_pows)
+            .fold(BinaryFieldGF128::zero(), |acc, (&cb, &ab)| acc + cb * ab);
+        let psi = project_column_with_powers::<D>(&cells, &alpha_pows);
+        let rhs = psi
+            .iter()
+            .zip(&eq)
+            .fold(BinaryFieldGF128::zero(), |acc, (&p, &e)| acc + p * e);
+        assert_eq!(lhs, rhs, "Σ_b c_b·α^b must equal ψ_α(col)(ρ)");
     }
 
     #[test]
