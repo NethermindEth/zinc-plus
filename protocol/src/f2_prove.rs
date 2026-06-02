@@ -824,7 +824,11 @@ where
         // commitment is the follow-up (see the doc); for now this measures the
         // discharge's prove cost as an extra phase on top of the no-Hadamard
         // pipeline below.
-        let oblong_proof = crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8(
+        // `_oblong_point = [z, γ…]` is now exposed by the prover; the sound binding
+        // (next increment) folds the `ψ_z(col↓Δ)(γ_word)` pair-evals into the main
+        // multipoint-eval using it. The measurement path still runs the discharge
+        // unbound, so drop the point for now.
+        let (oblong_proof, _oblong_point) = crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8(
             transcript,
             &trace.binary_poly,
             hadamard_specs,

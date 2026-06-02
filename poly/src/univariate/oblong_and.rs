@@ -490,6 +490,11 @@ impl OblongScheme for MonomialScheme<'_> {
 /// the round message is absorbed), then each `γ` (after its round polynomial is
 /// absorbed) — so the challenges are not part of the returned proof.
 ///
+/// Returns the proof **and** the evaluation point `[z, γ₀, …, γₙ₋₁]` (the same
+/// `AndCheckOutput.eval_point` the verifier re-derives). Callers that bind the
+/// operand evals to a commitment need `z`/`γ` to recombine the projected columns;
+/// callers that don't (the math tests, the standalone discharge) drop the point.
+///
 /// `*_words` are the packed operand columns (`2ⁿ` rows, `n = log2(len)`).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prove_oblong_and_channel<C: OblongChannel>(
@@ -498,7 +503,7 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     b_words: &[u32],
     c_words: &[u32],
     scheme: &impl OblongScheme,
-) -> OblongAndProof {
+) -> (OblongAndProof, Vec<F>) {
     let len = a_words.len();
     let n = len.trailing_zeros() as usize;
     assert_eq!(1usize << n, len, "columns must have a power-of-two row count");
@@ -537,12 +542,14 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     // prime polynomial `h` truncated to its monomial `[c₁, c₂]` (`c₀` recovered
     // by the verifier).
     let mut round_polys = Vec::with_capacity(n);
+    let mut gammas = Vec::with_capacity(n);
     for i in 0..n {
         let [h0, h1, hinf] = prime_poly(&a, &b, &c, &eq_rest);
         let trunc = [h1 - h0 - hinf, hinf]; // [c₁, c₂]; c₀ = h(0) recovered by verifier
         ch.absorb(&trunc);
         let gamma = ch.sample();
         round_polys.push(trunc);
+        gammas.push(gamma);
         a = fold_low(&a, gamma);
         b = fold_low(&b, gamma);
         c = fold_low(&c, gamma);
@@ -551,13 +558,24 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
         }
     }
 
-    OblongAndProof {
-        round_message,
-        round_polys,
-        a_eval: a[0],
-        b_eval: b[0],
-        c_eval: c[0],
-    }
+    // The evaluation point `[z, γ…]`, identical to what the verifier re-derives
+    // (`verify_oblong_and_channel`'s `AndCheckOutput.eval_point`). Exposed so the
+    // prover can recombine the projected operand columns at `γ` without re-running
+    // the transcript.
+    let mut eval_point = Vec::with_capacity(n + 1);
+    eval_point.push(z);
+    eval_point.extend_from_slice(&gammas);
+
+    (
+        OblongAndProof {
+            round_message,
+            round_polys,
+            a_eval: a[0],
+            b_eval: b[0],
+            c_eval: c[0],
+        },
+        eval_point,
+    )
 }
 
 /// Explicit-challenge prover: a thin wrapper over [`prove_oblong_and_channel`]
@@ -575,7 +593,9 @@ pub fn prove_oblong_and(
 ) -> OblongAndProof {
     let mut ch = ReplayChannel::from_challenges(r, z, gammas);
     let scheme = MonomialScheme::new(ntt);
-    prove_oblong_and_channel(&mut ch, a_words, b_words, c_words, &scheme)
+    // Explicit-challenge path (math tests): the caller already has `z`/`γ`, so the
+    // returned eval-point is redundant — drop it.
+    prove_oblong_and_channel(&mut ch, a_words, b_words, c_words, &scheme).0
 }
 
 /// Verifier for the oblong AND zerocheck, driven by a Fiat–Shamir

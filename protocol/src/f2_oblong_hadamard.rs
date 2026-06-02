@@ -127,7 +127,7 @@ pub fn prove_oblong_and_relation<T: Transcript>(
     let ntt = AdditiveNtt::new();
     let scheme = MonomialScheme::new(&ntt);
     let mut ch = TranscriptChannel::new(transcript);
-    prove_oblong_and_channel(&mut ch, &u, &v, &w, &scheme)
+    prove_oblong_and_channel(&mut ch, &u, &v, &w, &scheme).0
 }
 
 /// Verifier: re-derive the challenges from `transcript`, check the oblong
@@ -271,19 +271,25 @@ pub fn prove_oblong_and_batch<T: Transcript>(
     let ntt = AdditiveNtt::new();
     let scheme = MonomialScheme::new(&ntt);
     let mut ch = TranscriptChannel::new(transcript);
-    prove_oblong_and_channel(&mut ch, &a, &b, &c, &scheme)
+    prove_oblong_and_channel(&mut ch, &a, &b, &c, &scheme).0
 }
 
 /// **`GF(2^8)`-accelerated** batched oblong discharge prover: same stacked
 /// zerocheck, but the additive-NTT + per-extension-point products run in
 /// `GF(2^8)` over `embed(H₈)` (the byte-lookup scheme).
+///
+/// Returns the proof **and** the eval-point `[z, γ…]` (`γ` splits into `γ_word`
+/// over the low `num_vars` row variables + `γ_rel` over the high `log2 k_pad`
+/// relation variables). The sound binding folds the `ψ_z(col↓Δ)(γ_word)`
+/// pair-evals into the main multipoint-eval, so it needs `z`/`γ_word`; the
+/// standalone discharge bench drops the point.
 pub fn prove_oblong_and_batch_gf8<T: Transcript>(
     transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
-) -> OblongAndProof {
+) -> (OblongAndProof, Vec<Gf>) {
     let (a, b, c) = build_stacked_operands(columns, and_specs, adder_specs, num_vars);
     let scheme = Gf8Scheme::new();
     let mut ch = TranscriptChannel::new(transcript);
@@ -534,7 +540,7 @@ mod tests {
         // Same relations, but proven + verified with the GF(2^8) scheme (the
         // embed(H₈) subspace). Validates the GF(2^8)-accelerated batch end-to-end.
         let mut tp = Blake3Transcript::new();
-        let proof = prove_oblong_and_batch_gf8(&mut tp, &columns, &specs, &[], 3);
+        let (proof, _point) = prove_oblong_and_batch_gf8(&mut tp, &columns, &specs, &[], 3);
         let mut tv = Blake3Transcript::new();
         verify_oblong_and_batch_gf8(&mut tv, &proof, &columns, &specs, &[], 3)
             .expect("GF(2^8) batched oblong round-trip + ψ_z tie");

@@ -490,7 +490,7 @@ mod tests {
             seq.extend((0..n).map(|k| sample128(0xCAFE + k as u64)));
 
             let mut pch = ReplayChannel::new(seq.clone());
-            let proof = prove_oblong_and_channel(&mut pch, &a, &b, &c, &scheme);
+            let (proof, prover_point) = prove_oblong_and_channel(&mut pch, &a, &b, &c, &scheme);
 
             let mut vch = ReplayChannel::new(seq);
             let out = verify_oblong_and_channel(
@@ -502,6 +502,10 @@ mod tests {
             )
             .expect("GF(2^8) scheme must verify honest AND");
             assert_eq!(out.eval_point.len(), n + 1);
+            // The prover's exposed eval-point must equal the verifier's re-derived
+            // one (same `[z, γ…]` drawn in the same order) — the invariant the
+            // sound ψ_z binding relies on to recombine projected columns at γ.
+            assert_eq!(prover_point, out.eval_point);
         }
     }
 
