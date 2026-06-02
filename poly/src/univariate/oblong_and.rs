@@ -413,8 +413,19 @@ impl OblongChannel for ReplayChannel {
 /// round message, the fold weights, and the verifier's `R₀` reconstruction
 /// subspace depend on the scheme (the verifier takes that subspace directly).
 pub trait OblongScheme {
-    /// The Phase-1 round message `R₀` on the extension domain (`WORD_BITS` evals).
-    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F]) -> [F; WORD_BITS];
+    /// Deterministic small-field skip challenges (already embedded to
+    /// `GF(2^128)`); the first `len()` row-variables use these instead of
+    /// channel-sampled ones, enabling the **eq-split**. Empty ⇒ no eq-split
+    /// (the monomial scheme). For `Gf8Scheme` these are `{α, α², α⁴}` embedded,
+    /// whose tensor product is `F_2`-independent.
+    fn small_challenges(&self) -> &[F] {
+        &[]
+    }
+    /// The Phase-1 round message `R₀` on the extension domain (`WORD_BITS`
+    /// evals). `big_challenges` are the **big-field** row-variable challenges
+    /// (the channel-sampled ones); the scheme builds `eq` over them and, if it
+    /// has small challenges, combines with its cheap small-field `eq`.
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], big_challenges: &[F]) -> [F; WORD_BITS];
     /// The base-domain Lagrange weights `L_b(z)` for folding a word at `z`.
     fn base_lagrange(&self, z: F) -> [F; WORD_BITS];
 }
@@ -434,8 +445,10 @@ impl<'a> MonomialScheme<'a> {
 }
 
 impl OblongScheme for MonomialScheme<'_> {
-    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F]) -> [F; WORD_BITS] {
-        univariate_round_message(a, b, c, eq, self.ntt)
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], big_challenges: &[F]) -> [F; WORD_BITS] {
+        // No eq-split: big_challenges = all row challenges; eq is the full table.
+        let eq = eq_indicator(big_challenges);
+        univariate_round_message(a, b, c, &eq, self.ntt)
     }
     fn base_lagrange(&self, z: F) -> [F; WORD_BITS] {
         base_lagrange_at(z)
@@ -463,14 +476,22 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     assert_eq!(b_words.len(), len);
     assert_eq!(c_words.len(), len);
 
-    // Zerocheck eq-randomness, sampled first.
-    let r: Vec<F> = (0..n).map(|_| ch.sample()).collect();
-    let eq = eq_indicator(&r);
+    // The first `small.len()` row challenges are deterministic (the scheme's
+    // eq-split skip challenges); the rest are channel-sampled (big field).
+    let small = scheme.small_challenges();
+    assert!(small.len() <= n, "more small challenges than row variables");
+    let n_big = n - small.len();
+    let big: Vec<F> = (0..n_big).map(|_| ch.sample()).collect();
 
-    // Phase 1: round message, then the univariate-skip challenge z.
-    let round_message = scheme.round_message(a_words, b_words, c_words, &eq);
+    // Phase 1: round message over the big challenges (the scheme builds eq),
+    // then the univariate-skip challenge z.
+    let round_message = scheme.round_message(a_words, b_words, c_words, &big);
     ch.absorb(&round_message);
     let z = ch.sample();
+
+    // Phase-2 eq over the full row challenges [small ++ big].
+    let r: Vec<F> = small.iter().copied().chain(big.iter().copied()).collect();
+    let eq = eq_indicator(&r);
 
     // Phase-1 → Phase-2 transition: fold each word at z into an MLE over rows.
     let lag_z = scheme.base_lagrange(z);
@@ -531,12 +552,16 @@ pub fn verify_oblong_and_channel<C: OblongChannel>(
     proof: &OblongAndProof,
     n: usize,
     full_subspace: &BinarySubspace,
+    small_challenges: &[F],
 ) -> Result<AndCheckOutput, OblongError> {
     if proof.round_polys.len() != n {
         return Err(OblongError::Shape(proof.round_polys.len(), n));
     }
 
-    let r: Vec<F> = (0..n).map(|_| ch.sample()).collect();
+    // Mirror the prover: deterministic small-field prefix, then sampled big.
+    let n_big = n.saturating_sub(small_challenges.len());
+    let big: Vec<F> = (0..n_big).map(|_| ch.sample()).collect();
+    let r: Vec<F> = small_challenges.iter().copied().chain(big).collect();
 
     // Reconstruct R₀(z): the prover sends only the extension half; the base
     // half is zero iff the AND holds, so a corrupt C is caught right here at
@@ -591,7 +616,7 @@ pub fn verify_oblong_and(
 ) -> Result<AndCheckOutput, OblongError> {
     let mut ch = ReplayChannel::from_challenges(r, z, gammas);
     let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
-    verify_oblong_and_channel(&mut ch, proof, r.len(), &full)
+    verify_oblong_and_channel(&mut ch, proof, r.len(), &full, &[])
 }
 
 #[cfg(test)]

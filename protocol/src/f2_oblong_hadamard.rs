@@ -144,7 +144,7 @@ pub fn verify_oblong_and_relation<T: Transcript>(
     let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
     let out: AndCheckOutput = {
         let mut ch = TranscriptChannel::new(transcript);
-        verify_oblong_and_channel(&mut ch, proof, num_vars, &full)
+        verify_oblong_and_channel(&mut ch, proof, num_vars, &full, &[])
             .map_err(OblongVerifyError::Oblong)?
     };
 
@@ -310,7 +310,7 @@ pub fn verify_oblong_and_batch<T: Transcript>(
     let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
     let out = {
         let mut ch = TranscriptChannel::new(transcript);
-        verify_oblong_and_channel(&mut ch, proof, stacked_nvars(k, num_vars), &full)
+        verify_oblong_and_channel(&mut ch, proof, stacked_nvars(k, num_vars), &full, &[])
             .map_err(OblongVerifyError::Oblong)?
     };
     let lagrange_z = base_lagrange_at(out.eval_point[0]).to_vec();
@@ -337,6 +337,7 @@ pub fn verify_oblong_and_batch_gf8<T: Transcript>(
             proof,
             stacked_nvars(k, num_vars),
             scheme.full_subspace(),
+            scheme.small_challenges(),
         )
         .map_err(OblongVerifyError::Oblong)?
     };

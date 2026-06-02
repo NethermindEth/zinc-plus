@@ -154,12 +154,26 @@ struct Gf8Tables {
     log: [u8; 256],
     /// `embed[b]` = image in `GF(2^128)` of the byte `b`.
     embed: [F128; 256],
+    /// Full `256×256` product table: `mul_table[(a<<8)|b] = a·b` in `GF(2^8)`.
+    /// One L2 lookup per multiply — no log/antilog/modulo, and (when fetched
+    /// once per hot loop via [`gf8_mul_embed_tables`]) no per-op `OnceLock` load,
+    /// which matters on aarch64 where there is no GFNI native `GF(2^8)` mul.
+    mul_table: Box<[u8; 65536]>,
     theta: F128,
 }
 
 fn tables() -> &'static Gf8Tables {
     static T: OnceLock<Gf8Tables> = OnceLock::new();
     T.get_or_init(build_tables)
+}
+
+/// Borrow the `(mul_table, embed_table)` once for a hot loop, so the inner
+/// `GF(2^8)` multiplies and embeds are plain array lookups with no per-op
+/// `OnceLock` fetch. `Gf8(mul_table[(a.0<<8)|b.0]) = a·b`; `embed_table[x.0] =
+/// embed(Gf8(x))`.
+pub(crate) fn gf8_mul_embed_tables() -> (&'static [u8; 65536], &'static [F128; 256]) {
+    let t = tables();
+    (&t.mul_table, &t.embed)
 }
 
 #[inline]
@@ -294,11 +308,21 @@ fn build_tables() -> Gf8Tables {
         *slot = acc;
     }
 
+    // Full 256×256 product table from log/antilog (no modulo at lookup time).
+    let mut mul_table = Box::new([0u8; 65536]);
+    for a in 1..256usize {
+        for b in 1..256usize {
+            let l = log[a] as usize + log[b] as usize;
+            mul_table[(a << 8) | b] = antilog[if l >= 255 { l - 255 } else { l }];
+        }
+    }
+
     Gf8Tables {
         m_low,
         antilog,
         log,
         embed,
+        mul_table,
         theta,
     }
 }

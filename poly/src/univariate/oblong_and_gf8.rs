@@ -28,9 +28,9 @@
 //! is a follow-up that cuts the `GF(2^128)` mult count by the chunk size.
 
 use super::binary_gf128::BinaryFieldGF128;
-use super::binary_gf8::{Gf8, embed};
+use super::binary_gf8::{Gf8, embed, gf8_mul_embed_tables};
 use super::binary_subspace::{BinarySubspace, lagrange_evals};
-use super::oblong_and::{OblongScheme, PAR_MIN_LEN, SKIPPED_VARS, WORD_BITS};
+use super::oblong_and::{OblongScheme, PAR_MIN_LEN, SKIPPED_VARS, WORD_BITS, eq_indicator};
 
 type F128 = BinaryFieldGF128;
 
@@ -137,12 +137,16 @@ fn accumulate_gf8_word(
     b: u32,
     c: u32,
     w: F128,
+    mt: &[u8; 65536],
+    et: &[F128; 256],
 ) {
     let ae = ntt.extend_word(a);
     let be = ntt.extend_word(b);
     let ce = ntt.extend_word(c);
     for j in 0..WORD_BITS {
-        acc[j] += embed(ae[j].mul(be[j]) - ce[j]) * w;
+        // ae·be in GF(2^8) (table lookup), − ce (XOR), embed (table), · w (GF128).
+        let prod = mt[((ae[j].0 as usize) << 8) | be[j].0 as usize];
+        acc[j] += et[(prod ^ ce[j].0) as usize] * w;
     }
 }
 
@@ -159,6 +163,9 @@ pub fn gf8_round_message(
     assert_eq!(c_words.len(), n);
     assert_eq!(eq.len(), n);
 
+    // Fetch the GF(2^8) product + embed tables once (not per multiply).
+    let (mt, et) = gf8_mul_embed_tables();
+
     // Parallel map-reduce over the words (each contributes to the 32-element
     // accumulator). The fused discharge this replaces is parallel too.
     #[cfg(feature = "parallel")]
@@ -170,7 +177,7 @@ pub fn gf8_round_message(
             .fold(
                 || [F128::zero(); WORD_BITS],
                 |mut acc, x| {
-                    accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+                    accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x], mt, et);
                     acc
                 },
             )
@@ -188,7 +195,117 @@ pub fn gf8_round_message(
     {
         let mut acc = [F128::zero(); WORD_BITS];
         for x in 0..n {
-            accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+            accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x], mt, et);
+        }
+        acc
+    }
+}
+
+/// `GF(2^8)` equality indicator `eq[s] = ∏_i (bit_i(s)? r_i : 1−r_i)` over the
+/// small-field skip challenges (little-endian, matching [`eq_indicator`]).
+#[allow(clippy::arithmetic_side_effects)]
+fn eq_indicator_gf8(r: &[Gf8]) -> Vec<Gf8> {
+    let mut ev = vec![Gf8::ONE];
+    for &ri in r {
+        let half = ev.len();
+        let mut next = vec![Gf8::ZERO; half * 2];
+        for j in 0..half {
+            next[j] = ev[j].mul(Gf8::ONE - ri); // bit = 0 (low half)
+            next[j + half] = ev[j].mul(ri); // bit = 1 (high half)
+        }
+        ev = next;
+    }
+    ev
+}
+
+/// Accumulate one chunk of `eq_small.len()` words into the eq-split round
+/// message: weight each word's `GF(2^8)` product by the small-field eq in
+/// `GF(2^8)`, sum into `chunk_ntt`, then `embed` + weight by the big-field eq
+/// **once** for the whole chunk (the eq-split's GF(2^128)-mul saving).
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn process_gf8_chunk(
+    acc: &mut [F128; WORD_BITS],
+    chunk: usize,
+    a_words: &[u32],
+    b_words: &[u32],
+    c_words: &[u32],
+    eq_big: &[F128],
+    eq_small: &[u8],
+    ntt: &Gf8Ntt,
+    mt: &[u8; 65536],
+    et: &[F128; 256],
+) {
+    let chunk_size = eq_small.len();
+    let mut chunk_ntt = [0u8; WORD_BITS]; // GF(2^8) bytes, accumulated by XOR
+    for s in 0..chunk_size {
+        let x = chunk * chunk_size + s;
+        let ae = ntt.extend_word(a_words[x]);
+        let be = ntt.extend_word(b_words[x]);
+        let ce = ntt.extend_word(c_words[x]);
+        let ws = eq_small[s] as usize;
+        for j in 0..WORD_BITS {
+            let prod = mt[((ae[j].0 as usize) << 8) | be[j].0 as usize]; // ae·be
+            let pmc = (prod ^ ce[j].0) as usize; // − ce
+            chunk_ntt[j] ^= mt[(pmc << 8) | ws]; // ·eq_small, GF(2^8) add
+        }
+    }
+    // embed + big-field eq weight, once per chunk (the eq-split's GF128 saving).
+    let big = eq_big[chunk];
+    for j in 0..WORD_BITS {
+        acc[j] += et[chunk_ntt[j] as usize] * big;
+    }
+}
+
+/// The **eq-split** GF(2^8) round message: the row variables split into the
+/// small-field skip vars (`eq_small`, weighted in GF(2^8) per word) and the
+/// big-field vars (`eq_big`, weighted in GF(2^128) once per `eq_small.len()`-word
+/// chunk). Cuts the GF(2^128) eq-mults by the chunk size vs [`gf8_round_message`].
+#[allow(clippy::arithmetic_side_effects)]
+pub fn gf8_round_message_split(
+    a_words: &[u32],
+    b_words: &[u32],
+    c_words: &[u32],
+    eq_big: &[F128],
+    ntt: &Gf8Ntt,
+    eq_small: &[Gf8],
+) -> [F128; WORD_BITS] {
+    let chunk_size = eq_small.len();
+    let num_chunks = a_words.len() / chunk_size;
+    assert_eq!(eq_big.len(), num_chunks, "eq_big must cover every chunk");
+
+    let (mt, et) = gf8_mul_embed_tables();
+    let eq_small: Vec<u8> = eq_small.iter().map(|g| g.0).collect();
+    let eq_small = eq_small.as_slice();
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..num_chunks)
+            .into_par_iter()
+            .with_min_len(PAR_MIN_LEN / chunk_size + 1)
+            .fold(
+                || [F128::zero(); WORD_BITS],
+                |mut acc, chunk| {
+                    process_gf8_chunk(&mut acc, chunk, a_words, b_words, c_words, eq_big, eq_small, ntt, mt, et);
+                    acc
+                },
+            )
+            .reduce(
+                || [F128::zero(); WORD_BITS],
+                |mut a, b| {
+                    for j in 0..WORD_BITS {
+                        a[j] += b[j];
+                    }
+                    a
+                },
+            )
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc = [F128::zero(); WORD_BITS];
+        for chunk in 0..num_chunks {
+            process_gf8_chunk(&mut acc, chunk, a_words, b_words, c_words, eq_big, eq_small, ntt, mt, et);
         }
         acc
     }
@@ -220,6 +337,11 @@ pub struct Gf8Scheme {
     ntt: Gf8Ntt,
     base: BinarySubspace,
     full: BinarySubspace,
+    /// `{α, α², α⁴}` embedded to `GF(2^128)` — the deterministic skip challenges
+    /// for the first 3 row-variables (their tensor product is `F_2`-independent).
+    small_embedded: Vec<F128>,
+    /// `eq` over `{α, α², α⁴}` in `GF(2^8)` (8 weights) for the eq-split.
+    eq_small_gf8: Vec<Gf8>,
 }
 
 impl Default for Gf8Scheme {
@@ -231,10 +353,16 @@ impl Default for Gf8Scheme {
 impl Gf8Scheme {
     pub fn new() -> Self {
         let (base, full) = embed_subspaces();
+        let g = Gf8::generator();
+        let small_gf8 = [g, g.pow(2), g.pow(4)];
+        let small_embedded = small_gf8.iter().map(|&c| embed(c)).collect();
+        let eq_small_gf8 = eq_indicator_gf8(&small_gf8);
         Self {
             ntt: Gf8Ntt::new(),
             base,
             full,
+            small_embedded,
+            eq_small_gf8,
         }
     }
 
@@ -246,8 +374,14 @@ impl Gf8Scheme {
 }
 
 impl OblongScheme for Gf8Scheme {
-    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], eq: &[F128]) -> [F128; WORD_BITS] {
-        gf8_round_message(a, b, c, eq, &self.ntt)
+    fn small_challenges(&self) -> &[F128] {
+        &self.small_embedded
+    }
+
+    fn round_message(&self, a: &[u32], b: &[u32], c: &[u32], big_challenges: &[F128]) -> [F128; WORD_BITS] {
+        // eq-split: eq_big (GF128) over the big vars; eq_small (GF8) baked in.
+        let eq_big = eq_indicator(big_challenges);
+        gf8_round_message_split(a, b, c, &eq_big, &self.ntt, &self.eq_small_gf8)
     }
 
     fn base_lagrange(&self, z: F128) -> [F128; WORD_BITS] {
@@ -348,8 +482,10 @@ mod tests {
             let c: Vec<u32> = a.iter().zip(&b).map(|(&x, &y)| x & y).collect();
             let scheme = Gf8Scheme::new();
 
-            // Shared challenge sequence [r…, z, γ…] for prove + verify.
-            let mut seq: Vec<F128> = (0..n).map(|i| sample128(i as u64 + 1)).collect();
+            // Shared sampled-challenge sequence for prove + verify: only the
+            // BIG challenges (n−3, the 3 small ones are deterministic from the
+            // scheme), then z, then the n sumcheck γ.
+            let mut seq: Vec<F128> = (0..n - 3).map(|i| sample128(i as u64 + 1)).collect();
             seq.push(sample128(0xBEEF));
             seq.extend((0..n).map(|k| sample128(0xCAFE + k as u64)));
 
@@ -357,8 +493,14 @@ mod tests {
             let proof = prove_oblong_and_channel(&mut pch, &a, &b, &c, &scheme);
 
             let mut vch = ReplayChannel::new(seq);
-            let out = verify_oblong_and_channel(&mut vch, &proof, n, scheme.full_subspace())
-                .expect("GF(2^8) scheme must verify honest AND");
+            let out = verify_oblong_and_channel(
+                &mut vch,
+                &proof,
+                n,
+                scheme.full_subspace(),
+                scheme.small_challenges(),
+            )
+            .expect("GF(2^8) scheme must verify honest AND");
             assert_eq!(out.eval_point.len(), n + 1);
         }
     }
