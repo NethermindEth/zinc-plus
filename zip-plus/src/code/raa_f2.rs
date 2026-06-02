@@ -372,6 +372,17 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> F2LinearOpener
         // so the F_2-linear encoder kernel works directly.
         self.encode_f2_lin::<BinaryF2Poly<W>, BinaryF2Poly<W>>(row)
     }
+
+    fn encode_gf128_lin_open<const D: usize>(
+        &self,
+        row: &[zinc_poly::univariate::binary_gf128::GF128Poly<D>],
+    ) -> Vec<zinc_poly::univariate::binary_gf128::GF128Poly<D>> {
+        // GF128Poly<D> implements F2AddAssign (coefficient-wise GF(2^128) add) +
+        // FromRef<Self> + Clone, so the same generic F_2-linear kernel applies
+        // per coefficient — the un-lifted open's combined row in GF(2^128)[X]<D>.
+        use zinc_poly::univariate::binary_gf128::GF128Poly;
+        self.encode_f2_lin::<GF128Poly<D>, GF128Poly<D>>(row)
+    }
 }
 
 impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>

@@ -1116,6 +1116,86 @@ pub fn column_bitslice_evals<const D: usize>(
     out
 }
 
+// ----------------------------------------------------------------------------
+// `GF(2^128)[X]<D>` (= `GF128Poly<D>`) operations for the un-lifted open.
+//
+// With the eq-tensor kept in `GF(2^128)` (un-lifted), the open's per-column
+// claim is `a' = Σ_b c_b·X^b` (the bit-slice evals as coefficients), and every
+// operation is bit-scatter / `GF(2^128)`-scalar scale + coefficient-wise add —
+// NO polynomial multiplication, since the eq-tensor and γ/coeff challenges are
+// `GF(2^128)` *scalars* and the cells are `{0,1}`-coefficient bit-polys.
+// ----------------------------------------------------------------------------
+
+/// `F_2`-addition (= coefficient-wise field add) for `GF(2^128)[X]<D>`, so the
+/// generic RaaF2 encoder kernel `encode_f2_lin::<GF128Poly<D>,_>` (which needs
+/// `F2AddAssign + FromRef + Clone`) reuses unchanged for the un-lifted open's
+/// combined-row proximity encoding. `GF128Poly<D>` already has `Clone`/`FromRef`.
+impl<const D: usize> crate::univariate::F2AddAssign for GF128Poly<D> {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn f2_add_assign(&mut self, rhs: &Self) {
+        for (a, b) in self.coeffs.iter_mut().zip(rhs.coeffs.iter()) {
+            *a = *a + *b;
+        }
+    }
+}
+
+/// Identity lift `GF(2^128) → GF(2^128)`. Completes the `FromRef` chain the
+/// generic RaaF2 encoder kernel needs for `GF128Poly<D>` (via
+/// `FromRef<DensePolynomial<S,D>> for DensePolynomial<R,D>` with `R = S`), so
+/// `encode_f2_lin::<GF128Poly<D>, GF128Poly<D>>` typechecks for the un-lifted open.
+impl zinc_utils::from_ref::FromRef<BinaryFieldGF128> for BinaryFieldGF128 {
+    #[inline(always)]
+    fn from_ref(value: &BinaryFieldGF128) -> Self {
+        *value
+    }
+}
+
+/// `acc += s·cell` in `GF(2^128)[X]<D>`: scatter the `GF(2^128)` scalar `s` into
+/// the set-bit positions of `cell` (`s·X^b` for each set bit `b`). `s·cell` is
+/// the product of the scalar with the `{0,1}`-coefficient bit-poly. `D ≤ 64`.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn gf128poly_accumulate_cell<const D: usize>(
+    acc: &mut GF128Poly<D>,
+    cell: &BinaryPoly<D>,
+    s: BinaryFieldGF128,
+) {
+    let mut bits = cell.pack_u64();
+    while bits != 0 {
+        let b = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        acc.coeffs[b] += s;
+    }
+}
+
+/// `acc += s·p` in `GF(2^128)[X]<D>`: scale each coefficient of `p` by the
+/// `GF(2^128)` scalar `s` and add into `acc`.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn gf128poly_accumulate_scaled<const D: usize>(
+    acc: &mut GF128Poly<D>,
+    p: &GF128Poly<D>,
+    s: BinaryFieldGF128,
+) {
+    for (a, &c) in acc.coeffs.iter_mut().zip(p.coeffs.iter()) {
+        *a += c * s;
+    }
+}
+
+/// Read a projection off the bit-slice-coefficient poly: `Σ_b p_b·weights[b]`.
+/// `weights = [α^b]` gives `ψ_α(col)(ρ)` (the monomial main claim); `weights =
+/// base_lagrange_at(z)` gives `ψ_z(col)(ρ)` (the subspace-Lagrange discharge).
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn gf128poly_project<const D: usize>(p: &GF128Poly<D>, weights: &[BinaryFieldGF128]) -> BinaryFieldGF128 {
+    debug_assert!(weights.len() >= D);
+    let mut acc = BinaryFieldGF128::zero();
+    for (b, &c) in p.coeffs.iter().enumerate() {
+        acc += c * weights[b];
+    }
+    acc
+}
+
 /// IC-style accumulator: for each row `i` in `0..cells.len()` and each
 /// set bit `d` of `cells[i]`, XOR `eq_table[i]` into `coeffs[d]`.
 ///

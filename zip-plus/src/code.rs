@@ -10,6 +10,7 @@ use num_traits::Zero;
 use std::fmt::Debug;
 use std::mem::MaybeUninit;
 use zinc_poly::univariate::binary_f2_wide::BinaryF2Poly;
+use zinc_poly::univariate::binary_gf128::GF128Poly;
 use zinc_utils::{cfg_chunks, cfg_chunks_mut, from_ref::FromRef};
 
 #[cfg(feature = "parallel")]
@@ -32,6 +33,18 @@ pub trait F2LinearOpener {
         &self,
         row: &[BinaryF2Poly<W>],
     ) -> Vec<BinaryF2Poly<W>>;
+
+    /// `GF(2^128)`-coefficient variant for the **un-lifted** open: the same
+    /// `F_2`-linear Repeat/Permute/XOR-Accumulate map, applied per coefficient
+    /// of a `GF128Poly<D>` row (reusing the generic `encode_f2_lin` kernel — the
+    /// encoder is `F_2`-linear, hence `GF(2^128)`-linear per coefficient). Used
+    /// by the un-lifted open's combined-row proximity, where the eq-tensor stays
+    /// in `GF(2^128)` so the combined row carries `D` `GF(2^128)` coefficients
+    /// (the bit-slice evals) instead of a lifted wide `F_2[X]` poly.
+    fn encode_gf128_lin_open<const D: usize>(
+        &self,
+        row: &[GF128Poly<D>],
+    ) -> Vec<GF128Poly<D>>;
 }
 
 pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
