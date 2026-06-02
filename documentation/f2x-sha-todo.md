@@ -75,6 +75,58 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong AND zerocheck — e2e prove integration (measurement-first): ~5.6× faster Hadamard prove (working tree)
+- **What**: wired the GF(2⁸) oblong discharge into the **e2e F_2 prove path** —
+  `ZincPlusPiopF2::prove_f2_full_with_oblong_hadamard` (`protocol/src/f2_prove.rs`,
+  on a `D = 32`-specialised `impl` since the oblong is hardwired to 32-bit words)
+  runs the standard no-Hadamard pipeline (commit + IC + α + sumcheck +
+  multipoint-eval + single α-open) **and**, on the same transcript,
+  `prove_oblong_and_batch_gf8` over the 16 SHA relations. Added a
+  `Prove-Hadamard-Oblong` bench arm to `protocol/benches/f2_sha256.rs`.
+- **Why measurement-first**: the handoff's NEXT STEP #1 (the production
+  integration / Gate) is fundamentally an *e2e prove-time* question — does the
+  5–14× standalone discharge speedup translate to a measurable e2e win? This
+  increment answers that **before** the delicate sound-binding rework below, so
+  we see the number first and de-risk the core path.
+- **Measured e2e A/B** (Apple M4, `target-cpu=native`, `parallel simd unchecked`,
+  `f2_sha256` bench, hot machine):
+
+  | arm | nvars=16 median | discharge overhead vs NoHadamard |
+  |---|---|---|
+  | Prove-NoHadamard | 46.5 ms | — |
+  | Prove-Hadamard (fused, ψ_α bit-slice) | 567 ms (noisy: 483–717) | ~+520 ms |
+  | **Prove-Hadamard-Oblong (this)** | **101 ms** (97–104) | **~+54 ms** |
+
+  The oblong discharge cuts the e2e Hadamard prove overhead from ~390–520 ms
+  (fused) to **~54 ms**, making the full Hadamard prove **~5.6× faster**
+  (567→101 ms) at nvars=16 — better than the handoff's ~70 ms / ~3.7× projection.
+  (The fused arm is memory-bound and very noisy; the oblong arm is tight.)
+- **Architectural finding (why the sound binding is a separate, sizeable step)**:
+  the oblong discharge produces `ψ_z` operand evals — `ψ_z(col) = Σ_b col_b·L_b(z)`,
+  the *subspace-Lagrange* projection at the univariate-skip challenge `z`. The
+  existing single PCS open (`prove_f2_open`) is **monomial-α-specific**: its lifted
+  eq-tensor `(q0,q1)` and the per-cell lift (`Σ_b cell_b·X^b`, evaluated at α) both
+  bake in α, and the wide F_2[X] claim is only meaningful at α. So `ψ_z` (a
+  *different* linear functional of the same bits) **cannot ride the α-open** — it
+  needs its own z-projection multipoint-eval + open (handoff §4-(i) "extra
+  openings on the discharge columns"). The current fused "Approach B" works only
+  because its pair-evals are `ψ_α`, the same projection as the trace/open.
+- **NOT yet sound / scope of this increment**: the oblong discharge's `ψ_z` evals
+  are produced (and the discharge sumcheck runs on the real transcript), but they
+  are **not bound to the commitment** — hence `prove_f2_full_with_oblong_hadamard`
+  returns the main proof + a *standalone* `OblongAndProof` tuple, and there is no
+  matching verify arm yet. The measurement is also not perfectly apples-to-apples:
+  the oblong runs the discharge as an extra phase on top of the no-Hadamard main
+  pipeline, whereas the fused folds its pair-evals into the multipoint-eval; the
+  eventual sound binding will add a (small) z-multipoint + z-open cost on top of
+  the ~54 ms.
+- **Next (completes NEXT STEP #1)**: the **sound z-binding** — a second
+  multipoint-eval reducing the `ψ_z(col^↓Δ)(γ_word)` pointed-shift claims to a
+  point `r_0^z`, plus a second PCS open at `z` (z-Lagrange cell projection), with
+  the verifier path. Then a `Verify-Hadamard-Oblong` arm + an e2e round-trip test.
+  Adders keep the trusted carry (Issue 1) and Δ≠0 shifts trusted, same as the
+  fused discharge.
+
 ### Oblong AND zerocheck — Phase-2 Gruen eq-trick: degree-2 MLE-check, no eq-table fold (working tree)
 - **What**: replaced the Phase-2 sumcheck of the oblong discharge
   (`poly/src/univariate/oblong_and.rs`) with Binius64's eq-factored **MLE-check**

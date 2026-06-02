@@ -13,13 +13,16 @@ the local repo `~/binius64` (`crates/prover/src/and_reduction/`,
 
 We replaced the memory-bound **bit-slice AND discharge** (1536 GF(2¹²⁸) slices,
 ~92% of the nvars=16 prove) with Binius64's **word-packed oblong univariate
-zerocheck**. As a **standalone discharge prover** it is now **5–14× faster than
-the fused bit-slice discharge** and the win grows with size. It is **fully built,
-tested, and benchmarked in isolation — but NOT yet wired into the real prover**, so
-there is **no end-to-end prove measurement yet**. The single most valuable next
-step is the **production integration** (task #7 pt 2 below): fold the discharge's
-`ψ_z` evals into `f2_prove`'s multipoint-eval. That converts the standalone speedup
-into a measurable e2e prove speedup (projected ~3.7× at nvars=16, unverified).
+zerocheck**. As a **standalone discharge prover** it is **5–14× faster than the
+fused bit-slice discharge** (win grows with size). It is now also **wired into the
+e2e prove path (measurement-first)**: the `Prove-Hadamard-Oblong` bench arm measures
+a **~5.6× faster Hadamard prove at nvars=16** (101 ms vs the fused 567 ms; discharge
+overhead ~54 ms vs ~390–520 ms) — confirming the standalone win e2e and beating the
+~3.7× projection. The remaining work is the **sound `ψ_z`→commitment binding**: the
+oblong's `ψ_z` (subspace-Lagrange) evals **can't ride the existing monomial-`α`
+open**, so they need a **second multipoint-eval + open at `z`** (NEXT STEP #1 below).
+Until that lands the e2e oblong path is a prove-cost measurement, not a verified
+proof.
 
 ## Measured discharge A/B (standalone prover only)
 
@@ -116,21 +119,41 @@ Gruen eq-trick, working tree, pending commit) on branch `f2-clean`.
 
 ## NEXT STEPS, in priority order
 
-### 1. ★ Production integration — fold `ψ_z` evals into `f2_prove`'s multipoint-eval (task #7 pt 2)
-**This is the high-value next step** — it's what makes the 5–14× *real* (e2e
-measurable). The discharge currently produces `a/b/c_eval` at `(z, γ)`; the tie
-checks them against in-memory columns. The real protocol must instead:
-- project the discharge columns with `project_column_with_powers(col,
-  base_lagrange_at(z))` (= `ψ_z`, exactly what `pair_alpha_evals` already does),
-- fold the `ψ_z(col↓Δ)(γ)` pair-evals into `f2_prove`'s **main multipoint-eval**
-  (Δ=0 point claim, Δ≠0 shift predicate), bound by the single PCS open — mirroring
-  the `ψ_α` Approach-B path at `f2_prove.rs:120-135,949-1010`.
-- §4-(i) projection-point choice: keep `α` for the IC columns, project the
-  discharge columns at `z` too (extra openings on the discharge columns only).
-- Adders ship **trusted** ψ_z parents today (the carry isn't committed — ledger
-  Issue 1); a sound carry binding (the row/bit-shift discharge) is the follow-up.
-- **Gate**: `Prove-Hadamard` e2e bench with the oblong discharge ≈ `Prove-NoHadamard`
-  + ~70 ms instead of + ~390 ms. Add a `Prove-Hadamard-Oblong` bench arm.
+### 1. ★ Production integration — fold `ψ_z` evals into `f2_prove` (task #7 pt 2)
+**This is the high-value next step.** It splits into a *measurement* part (done)
+and the *sound binding* (the remaining work).
+
+**✅ Measurement-first increment — DONE (working tree).** Wired the GF(2⁸) oblong
+discharge into the e2e prove path: `prove_f2_full_with_oblong_hadamard`
+(`f2_prove.rs`, `D = 32`-specialised impl) runs the no-Hadamard pipeline + the
+oblong discharge on the same transcript; `Prove-Hadamard-Oblong` bench arm added.
+**Measured (Apple M4, nvars=16): Prove-NoHadamard 46.5 ms, Prove-Hadamard (fused)
+~567 ms, Prove-Hadamard-Oblong ~101 ms** — the oblong discharge adds **~54 ms**
+(vs the fused's ~390–520 ms), a **~5.6× faster** Hadamard prove, beating the ~70 ms
+/ ~3.7× projection. The 5–14× standalone win is now confirmed e2e. (See the ledger
+entry for caveats: the fused arm is noisy, and the comparison isn't perfectly
+apples-to-apples.)
+
+**⚠ The sound binding is the remaining work — and it's bigger than this doc
+originally implied.** The original plan ("fold the `ψ_z` pair-evals into the main
+multipoint-eval, mirroring the `ψ_α` Approach-B path") **does not work directly**:
+Approach B rides the *single α-open*, but the existing open is **monomial-α-specific**
+(its lifted eq-tensor + per-cell lift `Σ_b cell_b·X^b` evaluate at α; the wide
+F_2[X] claim is only meaningful at α). `ψ_z = Σ_b col_b·L_b(z)` is the
+*subspace-Lagrange* projection — a **different linear functional of the same bits**
+— so it **cannot ride the α-open**. The sound binding therefore needs (handoff
+§4-(i), "extra openings"):
+- a **second multipoint-eval** reducing the `ψ_z(col^↓Δ)(γ_word)` pointed-shift
+  claims (Δ=0 point claim, Δ≠0 shift predicate) to a point `r_0^z`, and
+- a **second PCS open at `z`** (a z-Lagrange cell projection in `prove_f2_open` —
+  the delicate part), binding those `ψ_z` evals to the commitment.
+- §4-(i) projection-point choice: keep `α` for the main open; this adds the z-open
+  for the discharge columns only. (§4-(ii) — re-base everything to `z` — is blocked
+  by the open's monomial-evaluation structure, so it's not a clean swap.)
+- Adders ship **trusted** ψ_z parents (carry not committed — ledger Issue 1); a
+  sound carry binding is a further follow-up.
+- **Gate (sound)**: a `Verify-Hadamard-Oblong` arm + an e2e round-trip test that
+  verifies the z-bound discharge.
 
 ### 2. ✅ DONE — Gruen's eq-trick on Phase-2 (degree-2 MLE-check, smaller proof)
 **Shipped** (working tree; the ledger has the full entry + A/B). Replaced the naive
