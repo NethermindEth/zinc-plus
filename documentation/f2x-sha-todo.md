@@ -126,6 +126,14 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   the verifier path. Then a `Verify-Hadamard-Oblong` arm + an e2e round-trip test.
   Adders keep the trusted carry (Issue 1) and Δ≠0 shifts trusted, same as the
   fused discharge.
+  - **Perf note for that binding (don't leave it on the table)**: the z-open
+    should **reuse the α-open's Merkle openings** — it's the same commitment, and
+    the sampled codeword positions are independent of the eval point, so the
+    verifier can run the z-lift-project on the **same opened cells** (only the
+    lifted eq-tensor + algebraic check differ, α vs z). That keeps the binding to
+    a cheap z-multipoint sumcheck + a small algebraic check (no second set of
+    Merkle paths — the expensive part), so the sound oblong path should stay near
+    the ~54 ms measured rather than ~doubling the open.
 
 ### Oblong AND zerocheck — Phase-2 Gruen eq-trick: degree-2 MLE-check, no eq-table fold (working tree)
 - **What**: replaced the Phase-2 sumcheck of the oblong discharge
@@ -1766,6 +1774,18 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   Binius's ~123 ns/AND (README: 2²⁰ ANDs in 128.58 ms) vs our ~398 ns/relation.
 
 ### ⭐ Univariate skip / small-characteristic packed sumcheck — the Binius scaling lever we're MISSING (IDENTIFIED; big, verifier-visible protocol change)
+- **⚠ STATUS UPDATE — the oblong discharge realizes this (for the bit dimension)**:
+  the word-packed **oblong AND zerocheck** (Shipped work, top of this doc) **is**
+  Binius64's univariate-skip AND reduction — its Phase-1 round fuses the 5
+  bit-index variables into one univariate `R₀(Z)` and runs the NTT + products in
+  **GF(2⁸)** (`Gf8Scheme`), exactly the "univariate skip + small-field arithmetic"
+  this entry says we're missing. The e2e measurement (~5.6× faster Hadamard prove
+  at nvars=16) confirms it. So once the oblong is the sound production discharge
+  (pending the `ψ_z`→commitment binding) this lever is **shipped, not missing**;
+  the "we do neither / never attempted" verdict below describes the **fused**
+  bit-slice discharge the oblong replaces. (Phase-2's row sumcheck stays GF(2¹²⁸) —
+  post-fold-at-`z` values are general — so the skip is on the bit dimension only,
+  which is where the win is.)
 - **Why this matters**: the whole discharge runs the sumcheck in **GF(2¹²⁸)**,
   but its bit-slices `U_b,V_b,W_b` are **GF(2)-valued** on the hypercube — i.e.
   base-field witness, extension-field sumcheck. That's precisely the regime the
