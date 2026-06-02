@@ -108,9 +108,15 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   the 1.1–1.4× naive floor into ~2×; (2) **parallelism** (commit `39ebc1d`) — the
   oblong prover was single-threaded while the fused baseline used all cores;
   parallelizing the round message + Phase-2 (rayon, `with_min_len(2^14)` so the
-  nvars=9 default stays serial) took GF(2⁸) from 198→74.7 ms at nvars=16. **Still
-  untapped**: the eq-split (eq-weighting is still per-word GF(2¹²⁸)) + SIMD-packed
-  `Gf8` lanes. 32 tests green across `poly` + `protocol`.
+  nvars=9 default stays serial) took GF(2⁸) from 198→74.7 ms at nvars=16; (3) the
+  **eq-split** (commit `9149b91`) — 3 deterministic GF(2⁸) skip challenges
+  `{α,α²,α⁴}` + the GF(2¹²⁸) eq-weight/embed once per 8-word chunk — to **70.7 ms**.
+  **Key aarch64 finding**: the eq-split alone does *not* pay because `Gf8::mul`
+  (log/antilog + `%255` + per-op `OnceLock`) ≈ GF128 CLMUL without GFNI; it needs
+  a **64KB direct mul-table fetched once per kernel** to win (then 92→70.7 ms =
+  1.30× same-mul; ~1.06× vs the prior log/antilog base). Modest on aarch64, larger
+  with GFNI. **Still untapped**: SIMD-packed `Gf8` lanes (16-wide); the Gruen
+  eq-trick in Phase-2 (degree-2 round polys, no eq-table fold). 35 tests green.
 - **Remaining for the full Phase D**: (a) the **eq-split** (task #6) for the next
   speed step; (b) the **multipoint-eval binding** (task #7 part 2 — fold the ψ_z
   pair-evals into `f2_prove`, the production integration; doesn't change discharge
