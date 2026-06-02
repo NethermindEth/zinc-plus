@@ -75,6 +75,40 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Un-lifted GF128[X]<D> open — bit-slice-preserving open binds *both* ψ_α and ψ_z (commits `7827683`, `192e173`, `b840839`)
+- **What**: rewrote the F_2 PCS open (`prove_f2_open` /
+  `verify_f2_open_with_virtuals` / `F2OpenProof`, `protocol/src/f2_prove.rs`)
+  to keep the eq-tensor in `GF(2^128)` instead of lifting it to `F_2[X]` via
+  `AlphaPolyBasis`. The per-column claim is now `a' = Σ_b c_b·X^b`, a clean
+  degree-`<D` `GF128Poly<D>` whose `D` `GF(2^128)` coefficients **are** the
+  bit-slice MLE evals `c_b = MLE[v_b](ρ)`. Staged: Stage 0 (`7827683`) the
+  `column_bitslice_evals` kernel + math test; Stage 1a (`192e173`) the
+  `GF128Poly<D>` primitives (`gf128poly_accumulate_cell/_bits/_scaled/_project`,
+  `F2AddAssign`/`FromRef` chain) + `encode_gf128_lin_open<D>` reusing the generic
+  `encode_f2_lin` kernel (the RaaF2 encoder is F_2-linear ⇒ GF128-linear per
+  coefficient — **no new encoder**); Stage 1b (`b840839`) the open rewrite itself.
+- **Why (the user's insight)**: the lifted open was *monomial-α-specific* — its
+  claim was only meaningful at α, so `ψ_z` (the discharge's subspace-Lagrange
+  projection) could not ride it. Keeping the eq-tensor un-lifted makes `a'` carry
+  the bit-slice evals as its coefficients, so **one bound object yields both
+  projections**: `ψ_α(v)(ρ) = Σ_b c_b·α^b` (`gf128poly_project` with α-powers — the
+  main / C16–C18 / IC claim, ψ_α stays the ring hom those degree-2 pins need) **and**
+  `ψ_z(v)(ρ) = Σ_b c_b·L_b(z)` (same project with `base_lagrange_at(z)` — the
+  discharge claim). No second z-open needed.
+- **Soundness**: binding is exact (a degree-`<D` poly is its `D` coefficients — no
+  underdetermination, unlike the wide-lift form where the `Σ X^i·c_i'` overlapped);
+  proximity stays sound because `RaaF2Code` is F_2-linear ⊆ GF128-linear, so a
+  GF128-combination of F_2-codewords is a GF128-codeword (same `(δ/2)^NUM_COLUMN_OPENINGS`).
+- **Result**: all **59 protocol + 35 poly tests green** — open round-trips, tamper
+  rejected, e2e SHA with/without Hadamard. Soundness-preserving for the main α-path
+  (byte-different proof, same accepted claims), and the open now **exposes ψ_z as a
+  free second functional** — the foundation the sound oblong binding is built on.
+- **Tradeoff (accepted, applied uniformly)**: the bit-slice claim carries `D` GF128
+  coeffs (~512 B/entry at D=32) vs the lift's compressed ~24–40 B — the lift was also
+  a proof-size compression. Per the approved direction the un-lifted form is applied
+  to **all** columns (no discharge-only mixed-flavor batching); proof size grows, the
+  M_α⁻¹ lift cost disappears.
+
 ### Oblong AND zerocheck — e2e prove integration (measurement-first): ~5.6× faster Hadamard prove (working tree)
 - **What**: wired the GF(2⁸) oblong discharge into the **e2e F_2 prove path** —
   `ZincPlusPiopF2::prove_f2_full_with_oblong_hadamard` (`protocol/src/f2_prove.rs`,
@@ -120,20 +154,51 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   pipeline, whereas the fused folds its pair-evals into the multipoint-eval; the
   eventual sound binding will add a (small) z-multipoint + z-open cost on top of
   the ~54 ms.
-- **Next (completes NEXT STEP #1)**: the **sound z-binding** — a second
-  multipoint-eval reducing the `ψ_z(col^↓Δ)(γ_word)` pointed-shift claims to a
-  point `r_0^z`, plus a second PCS open at `z` (z-Lagrange cell projection), with
-  the verifier path. Then a `Verify-Hadamard-Oblong` arm + an e2e round-trip test.
-  Adders keep the trusted carry (Issue 1) and Δ≠0 shifts trusted, same as the
-  fused discharge.
-  - **Perf note for that binding (don't leave it on the table)**: the z-open
-    should **reuse the α-open's Merkle openings** — it's the same commitment, and
-    the sampled codeword positions are independent of the eval point, so the
-    verifier can run the z-lift-project on the **same opened cells** (only the
-    lifted eq-tensor + algebraic check differ, α vs z). That keeps the binding to
-    a cheap z-multipoint sumcheck + a small algebraic check (no second set of
-    Merkle paths — the expensive part), so the sound oblong path should stay near
-    the ~54 ms measured rather than ~doubling the open.
+- **Next (completes NEXT STEP #1) — SUPERSEDED design, now that the un-lifted open
+  ships**: there is **no second open**. The un-lifted open's bound `a' = Σ_b c_b·X^b`
+  already yields `ψ_z(col)(r_0) = Σ_b c_b·L_b(z)` for free. So the sound binding is a
+  **dual-projection multipoint-eval** reducing both the main `ψ_α` claims at r* and
+  the oblong's `ψ_z(col^↓Δ)(γ_word)` pointed-shift claims to the **same** open point
+  r_0, where the *one* open binds them:
+  - `trace_mles = [α-projected trace] ++ [z-projected discharge cols]`
+    (`project_column_with_powers(col, base_lagrange_at(z))` — derived, not committed);
+    `up_evals = column_evals_at_rstar` (ψ_α, ref α-cols); `pointed_shifts =` the
+    `pair_alpha_evals(columns, distinct_pairs(specs), L_b(z), γ_word)` claims (ref the
+    z-cols, point γ_word, shift Δ); reduce to r_0.
+  - `open_evals_at_r_0 = [ψ_α(col)(r_0)] ++ [ψ_z(col)(r_0)]`. α-evals bound by the
+    open's Check 2; **z-evals bound by a new oblong-verifier check**
+    `gf128poly_project(open.a'_g, base_lagrange_at(z)) == z_evals[g]` (same `a'`, same
+    transcript-derived γ-batch ⇒ binds each z-eval). `verify_subclaim_pointed` then
+    checks the ψ_z pointed-shifts against the bound z-evals; the `batched_tie_check`
+    relation `a/b/c_eval = Σ_rel eq(rel;γ_rel)·ψ_z(operand)(γ_word)` closes from them.
+- **Concrete subtleties surfaced while scoping (read before starting — these set the
+  real size, ≈ Stage 1b or larger)**:
+  1. **Prover doesn't expose the oblong eval point.** `OblongAndProof` carries only
+     `a/b/c_eval` + round polys; `[z, γ]` is transcript-derived. To fold ψ_z
+     pair-evals the prover must capture/re-derive `z` + `γ_word` (mirror
+     `verify_oblong_and_channel`, or extend `prove_oblong_and_channel` to return the
+     `AndCheckOutput.eval_point`).
+  2. **Adders don't fold as (col,Δ) pairs.** `batched_tie_check` handles ANDs via
+     `distinct_pairs`/`pair_alpha_evals` over **trace columns** (foldable as
+     pointed-shifts ✓) but adders via `build_adder_operand_columns` +
+     `adder_operand_alpha_evals` over **derived carry-AND columns** (NOT simple shifts
+     of trace cols ✗). A first sound integration is therefore **AND-only**, or must
+     first establish that the carry columns are themselves committed (IC kappa cols)
+     so their operands decompose into trace pair-evals. SHA's discharge uses adders,
+     so AND-only is **not** a complete SHA binding — flag this, don't silently scope it out.
+  3. **`prove_f2_full_impl` is monolithic** (runs multipoint + open internally). The
+     oblong path calls it with empty fused specs, so its multipoint folds only the
+     column evals. Folding the oblong ψ_z pointed-shifts needs either generalizing it
+     (optional extra trace MLEs + pointed-shifts + down-evals, empty ⇒ byte-identical
+     for the main path) or duplicating ~120 lines into an oblong-specific impl.
+  4. **No verifier yet.** `verify_f2_full_with_oblong_hadamard` must be written from
+     scratch (mirror `verify_f2_full_impl` + the oblong channel verify + the
+     dual-projection multipoint verify + the new z-binding check).
+  5. **γ re-derivation.** The open's per-column γ-batch is derived inside
+     `verify_f2_open`; the oblong z-binding check must re-derive it identically.
+  - **Perf note (still applies)**: one open, one extra (z-)multipoint sumcheck, no
+    second Merkle path — the sound oblong path should stay near the ~54 ms measured
+    rather than ~doubling the open.
 
 ### Oblong AND zerocheck — Phase-2 Gruen eq-trick: degree-2 MLE-check, no eq-table fold (working tree)
 - **What**: replaced the Phase-2 sumcheck of the oblong discharge
