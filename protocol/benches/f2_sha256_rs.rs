@@ -255,26 +255,31 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         );
     }
 
-    // -- open.lifted_claim (BinaryF2Poly<7> = 80 bytes) --
-    let mut lifted_claim = Vec::with_capacity(80);
-    for w in proof.open.lifted_claim.words() {
-        lifted_claim.extend_from_slice(&w.to_le_bytes());
-    }
+    // The un-lifted open carries its claim / b-vector / combined-row as
+    // `GF128Poly<D>` (D = WORD_BITS GF(2^128) coefficients = the bit-slice evals)
+    // rather than a wide `BinaryF2Poly`. Each poly serialises as `D · ALPHA_BYTES`.
+    let mut coeff_buf = vec![0u8; ALPHA_BYTES];
+    let mut serialize_gf128poly = |out: &mut Vec<u8>, p: &zinc_poly::univariate::binary_gf128::GF128Poly<D>| {
+        for c in p.coeffs.iter() {
+            c.inner().write_transcription_bytes_exact(&mut coeff_buf);
+            out.extend_from_slice(&coeff_buf);
+        }
+    };
 
-    // -- open.b_vector (Vec<BinaryF2Poly<5>>, 7 × u64 = 56 bytes each) --
-    let mut b_vector = Vec::with_capacity(proof.open.b_vector.len() * 56);
+    // -- open.lifted_claim (GF128Poly<D>) --
+    let mut lifted_claim = Vec::with_capacity(D * ALPHA_BYTES);
+    serialize_gf128poly(&mut lifted_claim, &proof.open.lifted_claim);
+
+    // -- open.b_vector (Vec<GF128Poly<D>>) --
+    let mut b_vector = Vec::with_capacity(proof.open.b_vector.len() * D * ALPHA_BYTES);
     for v in &proof.open.b_vector {
-        for w in v.words() {
-            b_vector.extend_from_slice(&w.to_le_bytes());
-        }
+        serialize_gf128poly(&mut b_vector, v);
     }
 
-    // -- open.combined_row (Vec<BinaryF2Poly<5>>) --
-    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * 56);
+    // -- open.combined_row (Vec<GF128Poly<D>>) --
+    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * D * ALPHA_BYTES);
     for v in &proof.open.combined_row {
-        for w in v.words() {
-            combined_row.extend_from_slice(&w.to_le_bytes());
-        }
+        serialize_gf128poly(&mut combined_row, v);
     }
 
     // -- open.opened_columns, split into three sub-regions --
@@ -1958,280 +1963,6 @@ fn bench_micro_verifier_uair(
 }
 
 // ---------------------------------------------------------------------------
-// MICRO breakdown: timing each sub-step inside `verify_f2_open`.
-//
-// Body-order:
-//   a. LiftedEqTensor   — `AlphaPolyBasis::new(α)` + `build_lifted_eq_tensor`
-//                         (q0, q1) — the verifier rebuilds the same tensors
-//                         the prover used.
-//   b. EvalConsistency  — Check 1: `Σ_i q0[i] · b'[i] == a'`.
-//                         `num_rows × f2_poly_mul<3,7,10>` over the
-//                         prover-sent b' vector.
-//   c. LiftDischarge    — Check 2: `ψ_α(a') == Σ_g γ_g · col_g(r*)`.
-//                         γ-batched lift discharge in GF(2^128).
-//   d. Coherence        — Check 3: `<combined_row', q1> == <coeffs, b'>`.
-//                         `row_len + num_rows` `f2_poly_mul<3,7,10>`.
-//   e. PerOpening       — Check 4: per-opening Merkle verify + γ-weighted
-//                         column rebuild + encoding consistency, ×987
-//                         opened columns. Dominates `verify_f2_open` total.
-// ---------------------------------------------------------------------------
-
-fn bench_micro_verifier_open(
-    group: &mut BenchmarkGroup<WallTime>,
-    id: &str,
-    fx: &ProverFixture,
-) {
-    use zinc_poly::univariate::binary_f2_wide::{BinaryF2Poly, f2_inner_product, f2_poly_mul};
-    use zinc_poly::univariate::binary_gf128::{
-        AlphaPolyBasis, eval_f2_wide_poly_at, lift_bp_to_f2_poly_1,
-    };
-    use zinc_protocol::f2_prove::build_lifted_eq_tensor;
-
-    let proof = {
-        let mut transcript = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_bit_ops(
-            &mut transcript,
-            &fx.pp,
-            &fx.trace,
-            &[],
-            &sha_f2_bit_op_virtuals(),
-
-            fx.num_vars,
-            sha256_f2_project_scalar::<R>,
-            BENCH_NUM_OPENINGS,
-        )
-        .expect("prove")
-    };
-
-    let field_cfg = ();
-    let num_rows = fx.pp.num_rows;
-    let row_len = fx.pp.linear_code.row_len();
-    let codeword_len = fx.pp.linear_code.codeword_len();
-    let num_cols = fx.num_primary;
-
-    // The verifier's open path starts with the verifier-side transcript
-    // state immediately after the `verify_f2_uair` consumes the IC +
-    // sumcheck. We rebuild the same primary_column_evals + sumcheck_point
-    // + alpha that downstream checks consume.
-    let subclaim = {
-        let mut t = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
-            &mut t,
-            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
-        );
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_uair(
-            &mut t,
-            &proof.uair,
-            &[],
-            fx.num_vars,
-            fx.num_primary,
-            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
-        )
-        .expect("UAIR verify for open-micro setup")
-    };
-
-    // Helper: rebuild the transcript up to the start of `verify_f2_open`
-    // (immediately after `verify_f2_uair` returned). Used as the
-    // setup for benches that consume the post-UAIR transcript.
-    let post_uair_transcript = || {
-        let mut t = Blake3Transcript::new();
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_commitment(&mut t, &proof.commitment);
-        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::absorb_public_binary_cols(
-            &mut t,
-            &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB],
-        );
-        let _ = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_uair(
-            &mut t,
-            &proof.uair,
-            &[],
-            fx.num_vars,
-            fx.num_primary,
-            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
-        )
-        .expect("UAIR verify");
-        t
-    };
-
-    // ---- a) LiftedEqTensor (basis + q0/q1) ----
-    group.bench_function(BenchmarkId::new("VerifyOpen-a-LiftedEqTensor", id), |bench| {
-        bench.iter(|| {
-            let basis = AlphaPolyBasis::new(&subclaim.alpha);
-            let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
-            black_box((basis, q0, q1));
-        });
-    });
-
-    // Precompute basis + (q0, q1) + γ + coeffs once for the remaining benches.
-    let basis = AlphaPolyBasis::new(&subclaim.alpha);
-    let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
-    let (gamma_gf, gamma_lifted, coeffs_lifted): (
-        Vec<BinaryFieldGF128>,
-        Vec<BinaryF2Poly<2>>,
-        Vec<BinaryF2Poly<2>>,
-    ) = {
-        let mut t = post_uair_transcript();
-        let gamma_gf: Vec<BinaryFieldGF128> =
-            t.get_field_challenges(num_cols, &field_cfg);
-        let gamma_lifted: Vec<BinaryF2Poly<2>> =
-            gamma_gf.iter().map(|g| basis.lift(g)).collect();
-        zinc_protocol::f2_prove::absorb_f2_poly_slice::<5, _>(&mut t, proof.open.b_vector.iter());
-        zinc_protocol::f2_prove::absorb_f2_poly_slice::<7, _>(
-            &mut t,
-            core::iter::once(&proof.open.lifted_claim),
-        );
-        let coeffs_gf: Vec<BinaryFieldGF128> =
-            t.get_field_challenges(num_rows, &field_cfg);
-        let coeffs_lifted: Vec<BinaryF2Poly<2>> =
-            coeffs_gf.iter().map(|g| basis.lift(g)).collect();
-        (gamma_gf, gamma_lifted, coeffs_lifted)
-    };
-
-    // ---- b) EvalConsistency — Σ_i q0[i] · b'[i] == a' ----
-    group.bench_function(BenchmarkId::new("VerifyOpen-b-EvalConsistency", id), |bench| {
-        bench.iter(|| {
-            let mut acc = BinaryF2Poly::<7>::zero();
-            for i in 0..num_rows {
-                let prod: BinaryF2Poly<7> =
-                    f2_poly_mul::<2, 5, 7>(&q0[i], &proof.open.b_vector[i]);
-                acc += prod;
-            }
-            let ok = acc == proof.open.lifted_claim;
-            black_box(ok);
-        });
-    });
-
-    // ---- c) LiftDischarge — ψ_α(a') == Σ_g γ_g · primary_col_evals[g] ----
-    group.bench_function(BenchmarkId::new("VerifyOpen-c-LiftDischarge", id), |bench| {
-        bench.iter(|| {
-            let psi = eval_f2_wide_poly_at::<7>(&proof.open.lifted_claim, &subclaim.alpha);
-            let mut expected = BinaryFieldGF128::zero();
-            for g in 0..num_cols {
-                let mut term = gamma_gf[g];
-                term *= &subclaim.primary_column_evals[g];
-                expected += &term;
-            }
-            black_box((psi, expected));
-        });
-    });
-
-    // ---- d) Coherence — <combined_row, q1> == <coeffs, b'> ----
-    group.bench_function(BenchmarkId::new("VerifyOpen-d-Coherence", id), |bench| {
-        bench.iter(|| {
-            let lhs: BinaryF2Poly<7> = {
-                let mut acc = BinaryF2Poly::<7>::zero();
-                for j in 0..row_len {
-                    let prod: BinaryF2Poly<7> =
-                        f2_poly_mul::<2, 5, 7>(&q1[j], &proof.open.combined_row[j]);
-                    acc += prod;
-                }
-                acc
-            };
-            let rhs: BinaryF2Poly<7> = {
-                let mut acc = BinaryF2Poly::<7>::zero();
-                for i in 0..num_rows {
-                    let prod: BinaryF2Poly<7> =
-                        f2_poly_mul::<2, 5, 7>(&coeffs_lifted[i], &proof.open.b_vector[i]);
-                    acc += prod;
-                }
-                acc
-            };
-            let ok = lhs == rhs;
-            black_box(ok);
-        });
-    });
-
-    // ---- e) PerOpening — Check 4: per-opening Merkle + γ-weighted col + encoding ----
-    //
-    // Dominant cost of `verify_f2_open` — runs `num_column_openings`
-    // (987 for the deployed REP=4 RAA F_2) iterations, each doing:
-    //   - Merkle path verify against root
-    //   - per-column F_2 cell lift to `BinaryF2Poly<1>` + γ-weighted
-    //     accumulate into `BinaryF2Poly<3>` (num_cols × num_rows mults)
-    //   - row-major inner product with `coeffs` (num_rows mults)
-    //   - one encoded[column_idx] equality check
-    //
-    // Parallelised across openings via `rayon` to mirror the real
-    // `verify_f2_open` (`cfg_iter!` over `opened_columns`). The
-    // sequential version was ~8× slower at nvars=16 and didn't
-    // reconcile with the e2e Verify total — using the same parallel
-    // shape closes that gap.
-    group.bench_function(BenchmarkId::new("VerifyOpen-e-PerOpening", id), |bench| {
-        // Pre-compute encoded combined_row once (the protocol caches
-        // this across openings).
-        use zinc_protocol::f2_prove::LEAF_GROUP_SIZE;
-        let encoded: Vec<BinaryF2Poly<5>> = fx
-            .pp
-            .linear_code
-            .encode_f2_lin_open::<5>(&proof.open.combined_row);
-        let paired_batch = num_cols.div_ceil(2);
-        let single_col_len = paired_batch * num_rows;
-        bench.iter(|| {
-            #[cfg(feature = "parallel")]
-            use rayon::prelude::*;
-            #[cfg(feature = "parallel")]
-            let it = proof.open.opened_columns.par_iter();
-            #[cfg(not(feature = "parallel"))]
-            let it = proof.open.opened_columns.iter();
-            it.for_each(|opened| {
-                // (a) Merkle path — recompute leaf hash from the
-                //     `LEAF_GROUP_SIZE` columns of the group.
-                let group_idx = opened.column_idx / LEAF_GROUP_SIZE;
-                let group_slices: Vec<&[BinaryPoly<64>]> = (0..LEAF_GROUP_SIZE)
-                    .map(|l| {
-                        &opened.column_values[l * single_col_len..(l + 1) * single_col_len]
-                    })
-                    .collect();
-                opened
-                    .merkle_proof
-                    .verify_grouped(&proof.commitment.root, &group_slices, group_idx)
-                    .expect("Merkle verify");
-
-                // (b) γ-weighted encoding consistency on the queried
-                //     column within the group. Lift each packed cell
-                //     straight from its raw u64 into two
-                //     `BinaryF2Poly<1>` halves without an intermediate
-                //     `BinaryPoly<D>` allocation. Mirrors the fast
-                //     path in `verify_f2_open`.
-                use zinc_poly::univariate::F2PackU64;
-                let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
-                let local_col = &opened.column_values
-                    [local_idx * single_col_len..(local_idx + 1) * single_col_len];
-                let lo_mask: u64 = 0xFFFF_FFFFu64;
-                let mut weighted_col: Vec<BinaryF2Poly<3>> =
-                    vec![BinaryF2Poly::<3>::zero(); num_rows];
-                for p in 0..paired_batch {
-                    let g_lo = 2 * p;
-                    let g_hi = 2 * p + 1;
-                    let has_hi = g_hi < num_cols;
-                    for i in 0..num_rows {
-                        let packed_bits = local_col[p * num_rows + i].pack_u64();
-                        let lo_lifted = BinaryF2Poly::<1>::from_words([packed_bits & lo_mask]);
-                        let prod_lo: BinaryF2Poly<3> =
-                            f2_poly_mul::<1, 2, 3>(&lo_lifted, &gamma_lifted[g_lo]);
-                        weighted_col[i] += prod_lo;
-                        if has_hi {
-                            let hi_lifted = BinaryF2Poly::<1>::from_words([packed_bits >> 32]);
-                            let prod_hi: BinaryF2Poly<3> =
-                                f2_poly_mul::<1, 2, 3>(&hi_lifted, &gamma_lifted[g_hi]);
-                            weighted_col[i] += prod_hi;
-                        }
-                    }
-                }
-                let actual_at_j: BinaryF2Poly<5> =
-                    f2_inner_product::<2, 3, 5>(&coeffs_lifted, &weighted_col);
-                let ok = actual_at_j == encoded[opened.column_idx];
-                black_box(ok);
-            });
-        });
-    });
-
-    // Silence "unused" warnings if the per-bench iter doesn't pull
-    // these names — they exist to mirror the protocol's variables.
-    let _ = codeword_len;
-}
-
-// ---------------------------------------------------------------------------
 // Criterion entry points.
 // ---------------------------------------------------------------------------
 
@@ -2345,7 +2076,6 @@ fn micro_benches(c: &mut Criterion) {
     bench_micro_prover_uair(&mut group, &id, &fx);
     bench_micro_prover_open(&mut group, &id, &fx);
     bench_micro_verifier_uair(&mut group, &id, &fx);
-    bench_micro_verifier_open(&mut group, &id, &fx);
     group.finish();
 }
 

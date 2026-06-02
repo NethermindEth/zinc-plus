@@ -108,6 +108,20 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   a proof-size compression. Per the approved direction the un-lifted form is applied
   to **all** columns (no discharge-only mixed-flavor batching); proof size grows, the
   M_α⁻¹ lift cost disappears.
+- **Bench migration (follow-up, done)**: Stage 1b changed `F2OpenProof`'s claim /
+  b-vector / combined-row from wide `BinaryF2Poly` to `GF128Poly<D>` but only ran
+  `--lib` tests, so the three F_2 benches (`f2_sha256`, `f2_sha256_rs`, `f2_blake3`)
+  didn't compile under `--benches`. Fixed: (1) the **proof-size measurement** now
+  serialises each poly as `D · ALPHA_BYTES` (its D GF(2^128) coefficients) instead of
+  `.words()`; (2) the **`bench_micro_verifier_open` suite was removed** (arms
+  a–e: LiftedEqTensor / EvalConsistency / LiftDischarge / Coherence / PerOpening) — it
+  micro-timed the *defunct* lifted-open verify steps (`AlphaPolyBasis`,
+  `f2_poly_mul::<2,5,7>`, `build_lifted_eq_tensor`), which no longer exist on the open
+  path. The un-lifted open's verify steps are structurally different (no lift;
+  `gf128poly_project`/`_accumulate_scaled`/`encode_gf128_lin_open`), so this is
+  re-authoring, not migration; the e2e + step benches still measure real open cost.
+  **Re-author per-step verify micro-benches against the un-lifted open if that
+  breakdown is wanted again.**
 
 ### Oblong AND zerocheck — e2e prove integration (measurement-first): ~5.6× faster Hadamard prove (working tree)
 - **What**: wired the GF(2⁸) oblong discharge into the **e2e F_2 prove path** —
