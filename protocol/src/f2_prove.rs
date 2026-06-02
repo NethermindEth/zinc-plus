@@ -764,6 +764,94 @@ impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
     }
 }
 
+/// Oblong-discharge prove entry point, specialised to the SHA-256 word width
+/// `D = 32` (`WORD_BITS`). The oblong AND zerocheck
+/// ([`crate::f2_oblong_hadamard`]) is hardwired to 32-bit words, so this lives on
+/// the `D = 32` instantiation rather than the generic `impl<.., const D>` below.
+impl<Zt, U> ZincPlusPiopF2<Zt, U, 32>
+where
+    Zt: F2ZincTypes<32>,
+    U: Uair + 'static,
+{
+    /// **Measurement-first** oblong-discharge variant of
+    /// [`Self::prove_f2_full_with_hadamard`]: runs the standard *no-Hadamard*
+    /// pipeline (commit + IC + α + sumcheck + multipoint-eval + the single
+    /// α-open) AND, on the same transcript, the word-packed **oblong AND
+    /// zerocheck** discharge ([`crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8`],
+    /// the GF(2⁸) byte-lookup NTT over `ψ_z`) for the 16 SHA relations.
+    ///
+    /// Purpose: measure the **e2e prove cost** of the oblong discharge — the
+    /// handoff Gate, `Prove-NoHadamard + ~oblong-cost` vs the fused
+    /// `Prove-Hadamard`'s `+ ~390 ms`. Because the main pipeline here is the
+    /// no-Hadamard one (identical to [`Self::prove_f2_full_with_bit_ops`]), the
+    /// delta to `Prove-NoHadamard` is exactly the oblong discharge.
+    ///
+    /// **NOT yet sound.** The oblong discharge's `ψ_z` operand evals are produced
+    /// but **not bound to the commitment**: `ψ_z` is the subspace-Lagrange
+    /// projection at the univariate-skip challenge `z`, a *different* projection
+    /// than the monomial-`α` open, so it cannot ride the existing α-open and
+    /// needs its own z-projection multipoint-eval + open. That sound binding is
+    /// the immediate follow-up (handoff §4-(i) / NEXT STEP #1). Until it lands
+    /// the returned [`zinc_poly::univariate::oblong_and::OblongAndProof`] is a
+    /// standalone proof, not tied into [`F2FullProof`]'s verified path — hence
+    /// the tuple return rather than a new `F2FullProof` field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full_with_oblong_hadamard(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<32>, BinaryPoly<32>, 32>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+    ) -> Result<
+        (F2FullProof<32>, zinc_poly::univariate::oblong_and::OblongAndProof),
+        F2ProveError<U>,
+    > {
+        let (hint, commitment) = Self::commit_and_absorb_f2_trace_with_virtuals(
+            transcript,
+            pp,
+            &trace.binary_poly,
+            bit_op_specs,
+        )
+        .expect("F_2 commit should succeed for a well-shaped trace");
+
+        // Oblong AND-zerocheck discharge over the committed trace columns,
+        // woven into the same transcript. Binding its ψ_z evals to the
+        // commitment is the follow-up (see the doc); for now this measures the
+        // discharge's prove cost as an extra phase on top of the no-Hadamard
+        // pipeline below.
+        let oblong_proof = crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8(
+            transcript,
+            &trace.binary_poly,
+            hadamard_specs,
+            adder_specs,
+            num_vars,
+        );
+
+        // The standard no-Hadamard main pipeline (α-only; no fused discharge,
+        // no ψ_z folded into the multipoint-eval yet).
+        let main = Self::prove_f2_full_impl(
+            transcript,
+            pp,
+            trace,
+            hint,
+            commitment,
+            virtual_specs,
+            &[],
+            &[],
+            num_vars,
+            project_scalar,
+            num_column_openings,
+        )?;
+
+        Ok((main, oblong_proof))
+    }
+}
+
 impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
 where
     Zt: F2ZincTypes<D>,

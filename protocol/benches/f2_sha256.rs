@@ -2511,6 +2511,31 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
         });
     });
 
+    // Oblong discharge wired into the e2e prove path (measurement-first):
+    // the no-Hadamard pipeline + the GF(2⁸) oblong AND zerocheck on the same
+    // transcript. Delta to `Prove-NoHadamard` = the oblong discharge cost (the
+    // handoff Gate). The ψ_z→commitment binding is the follow-up, so this is a
+    // prove-cost measurement only (no matching verify arm yet).
+    group.bench_function(BenchmarkId::new("Prove-Hadamard-Oblong", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_oblong_hadamard(
+                &mut transcript,
+                &fx.pp,
+                &fx.trace,
+                &[],
+                &bit_ops,
+                &and_specs,
+                &adder_specs,
+                fx.num_vars,
+                sha256_f2_project_scalar::<R>,
+                BENCH_NUM_OPENINGS,
+            )
+            .expect("prove (oblong hadamard) should succeed");
+            black_box(proof);
+        });
+    });
+
     // -- Discharge-only A/B: the current fused bit-slice discharge
     // (`prove_f2_hadamard_phase`, ψ_α over 1536 GF128 slices) vs the word-packed
     // **oblong** zerocheck (`prove_oblong_and_batch`, ψ_z, ~48 packed columns)
