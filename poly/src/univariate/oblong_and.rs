@@ -53,6 +53,12 @@ pub const SKIPPED_VARS: usize = 5;
 /// Binius calls this `ROWS_PER_HYPERCUBE_VERTEX`. `32` for SHA-256.
 pub const WORD_BITS: usize = 1 << SKIPPED_VARS;
 
+/// Minimum items per rayon job for the parallel hot loops (`with_min_len`), so
+/// small workloads (e.g. the nvars=9 production default, ~8K stacked words) stay
+/// effectively serial and don't pay task-spawn overhead, while large ones (nvars
+/// ≥ 16, ~1M words) split across cores.
+pub(crate) const PAR_MIN_LEN: usize = 1 << 14;
+
 /// Precomputed additive-NTT that extends a packed word (its `WORD_BITS`
 /// bits = base-domain evaluations) to its `WORD_BITS` extension-domain
 /// evaluations.
@@ -161,17 +167,50 @@ pub fn univariate_round_message(
     assert_eq!(c_words.len(), n, "operand columns must have equal length");
     assert_eq!(eq.len(), n, "eq indicator must cover every row");
 
-    let mut acc = [F::zero(); WORD_BITS];
-    for x in 0..n {
-        let ae = ntt.extend_word(a_words[x]);
-        let be = ntt.extend_word(b_words[x]);
-        let ce = ntt.extend_word(c_words[x]);
-        let w = eq[x];
-        for j in 0..WORD_BITS {
-            acc[j] += (ae[j] * be[j] - ce[j]) * w;
-        }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .with_min_len(PAR_MIN_LEN)
+            .fold(
+                || [F::zero(); WORD_BITS],
+                |mut acc, x| {
+                    accumulate_naive_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+                    acc
+                },
+            )
+            .reduce(
+                || [F::zero(); WORD_BITS],
+                |mut a, b| {
+                    for j in 0..WORD_BITS {
+                        a[j] += b[j];
+                    }
+                    a
+                },
+            )
     }
-    acc
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc = [F::zero(); WORD_BITS];
+        for x in 0..n {
+            accumulate_naive_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+        }
+        acc
+    }
+}
+
+/// Accumulate one word-triple's contribution to the naive `GF(2^128)` round
+/// message: NTT-extend, `(A·B − C)` per extension point, weight by `eq`.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_naive_word(acc: &mut [F; WORD_BITS], ntt: &AdditiveNtt, a: u32, b: u32, c: u32, w: F) {
+    let ae = ntt.extend_word(a);
+    let be = ntt.extend_word(b);
+    let ce = ntt.extend_word(c);
+    for j in 0..WORD_BITS {
+        acc[j] += (ae[j] * be[j] - ce[j]) * w;
+    }
 }
 
 /// Tensor-product equality indicator `eq[X] = ∏_i (bit_i(X)? r_i : 1−r_i)`,
@@ -247,26 +286,59 @@ fn round_poly_points() -> [F; 4] {
 /// Phase-2 round polynomial `g(t) = Σ_rest (a_t·b_t − c_t)·eq_t`, where the
 /// **low** bound variable's pair `(2i, 2i+1)` is linearly extrapolated to each
 /// of the four points. Degree ≤ 3 (a·b degree 2 times eq degree 1).
+/// Pair `(2i, 2i+1)`'s contribution to the round polynomial (4 points).
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn round_poly_pair(g: &mut [F; 4], a: &[F], b: &[F], c: &[F], eq: &[F], pts: &[F; 4], i: usize) {
+    let (alo, ahi) = (a[2 * i], a[2 * i + 1]);
+    let (blo, bhi) = (b[2 * i], b[2 * i + 1]);
+    let (clo, chi) = (c[2 * i], c[2 * i + 1]);
+    let (elo, ehi) = (eq[2 * i], eq[2 * i + 1]);
+    let (ad, bd, cd, ed) = (ahi - alo, bhi - blo, chi - clo, ehi - elo);
+    for (k, &t) in pts.iter().enumerate() {
+        let at = alo + t * ad;
+        let bt = blo + t * bd;
+        let ct = clo + t * cd;
+        let et = elo + t * ed;
+        g[k] += (at * bt - ct) * et;
+    }
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 fn round_poly(a: &[F], b: &[F], c: &[F], eq: &[F]) -> [F; 4] {
     let half = a.len() / 2;
     let pts = round_poly_points();
-    let mut g = [F::zero(); 4];
-    for i in 0..half {
-        let (alo, ahi) = (a[2 * i], a[2 * i + 1]);
-        let (blo, bhi) = (b[2 * i], b[2 * i + 1]);
-        let (clo, chi) = (c[2 * i], c[2 * i + 1]);
-        let (elo, ehi) = (eq[2 * i], eq[2 * i + 1]);
-        let (ad, bd, cd, ed) = (ahi - alo, bhi - blo, chi - clo, ehi - elo);
-        for (k, &t) in pts.iter().enumerate() {
-            let at = alo + t * ad;
-            let bt = blo + t * bd;
-            let ct = clo + t * cd;
-            let et = elo + t * ed;
-            g[k] += (at * bt - ct) * et;
-        }
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..half)
+            .into_par_iter()
+            .with_min_len(PAR_MIN_LEN)
+            .fold(
+                || [F::zero(); 4],
+                |mut g, i| {
+                    round_poly_pair(&mut g, a, b, c, eq, &pts, i);
+                    g
+                },
+            )
+            .reduce(
+                || [F::zero(); 4],
+                |mut x, y| {
+                    for k in 0..4 {
+                        x[k] += y[k];
+                    }
+                    x
+                },
+            )
     }
-    g
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut g = [F::zero(); 4];
+        for i in 0..half {
+            round_poly_pair(&mut g, a, b, c, eq, &pts, i);
+        }
+        g
+    }
 }
 
 /// Fold a multilinear table at a challenge by binding its low variable:
@@ -274,9 +346,16 @@ fn round_poly(a: &[F], b: &[F], c: &[F], eq: &[F]) -> [F; 4] {
 #[allow(clippy::arithmetic_side_effects)]
 fn fold_low(tbl: &[F], gamma: F) -> Vec<F> {
     let half = tbl.len() / 2;
-    (0..half)
-        .map(|i| tbl[2 * i] + gamma * (tbl[2 * i + 1] - tbl[2 * i]))
-        .collect()
+    let f = |i: usize| tbl[2 * i] + gamma * (tbl[2 * i + 1] - tbl[2 * i]);
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..half).into_par_iter().with_min_len(PAR_MIN_LEN).map(f).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..half).map(f).collect()
+    }
 }
 
 /// A Fiat–Shamir channel for the oblong AND zerocheck: absorb prover messages

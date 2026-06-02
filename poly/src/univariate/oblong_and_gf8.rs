@@ -30,7 +30,7 @@
 use super::binary_gf128::BinaryFieldGF128;
 use super::binary_gf8::{Gf8, embed};
 use super::binary_subspace::{BinarySubspace, lagrange_evals};
-use super::oblong_and::{OblongScheme, SKIPPED_VARS, WORD_BITS};
+use super::oblong_and::{OblongScheme, PAR_MIN_LEN, SKIPPED_VARS, WORD_BITS};
 
 type F128 = BinaryFieldGF128;
 
@@ -125,6 +125,27 @@ impl Gf8Ntt {
 /// Output matches [`super::oblong_and::univariate_round_message`] run over the
 /// `embed(H₈)` subspace (not the monomial one). `eq` is the `GF(2^128)` row-var
 /// equality indicator (length `2ⁿ`).
+/// Accumulate one word-triple's contribution into the round-message
+/// accumulator: NTT-extend in `GF(2^8)`, `(A·B − C)` per extension point in
+/// `GF(2^8)`, then `embed` + weight by the `GF(2^128)` eq value.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_gf8_word(
+    acc: &mut [F128; WORD_BITS],
+    ntt: &Gf8Ntt,
+    a: u32,
+    b: u32,
+    c: u32,
+    w: F128,
+) {
+    let ae = ntt.extend_word(a);
+    let be = ntt.extend_word(b);
+    let ce = ntt.extend_word(c);
+    for j in 0..WORD_BITS {
+        acc[j] += embed(ae[j].mul(be[j]) - ce[j]) * w;
+    }
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 pub fn gf8_round_message(
     a_words: &[u32],
@@ -138,19 +159,39 @@ pub fn gf8_round_message(
     assert_eq!(c_words.len(), n);
     assert_eq!(eq.len(), n);
 
-    let mut acc = [F128::zero(); WORD_BITS];
-    for x in 0..n {
-        let ae = ntt.extend_word(a_words[x]);
-        let be = ntt.extend_word(b_words[x]);
-        let ce = ntt.extend_word(c_words[x]);
-        let w = eq[x];
-        for j in 0..WORD_BITS {
-            // (A·B − C) in GF(2^8), then lift and weight by eq in GF(2^128).
-            let prod = ae[j].mul(be[j]) - ce[j];
-            acc[j] += embed(prod) * w;
-        }
+    // Parallel map-reduce over the words (each contributes to the 32-element
+    // accumulator). The fused discharge this replaces is parallel too.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..n)
+            .into_par_iter()
+            .with_min_len(PAR_MIN_LEN)
+            .fold(
+                || [F128::zero(); WORD_BITS],
+                |mut acc, x| {
+                    accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+                    acc
+                },
+            )
+            .reduce(
+                || [F128::zero(); WORD_BITS],
+                |mut a, b| {
+                    for j in 0..WORD_BITS {
+                        a[j] += b[j];
+                    }
+                    a
+                },
+            )
     }
-    acc
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut acc = [F128::zero(); WORD_BITS];
+        for x in 0..n {
+            accumulate_gf8_word(&mut acc, ntt, a_words[x], b_words[x], c_words[x], eq[x]);
+        }
+        acc
+    }
 }
 
 /// The `embed(H₈)` subspaces the verifier must use with the `GF(2^8)` path:
