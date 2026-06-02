@@ -75,7 +75,7 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
-### Oblong AND zerocheck — Phase D entry: batched all-16 discharge + GF(2⁸) swap → ~2× vs fused (A/B)
+### Oblong AND zerocheck — Phase D: batched all-16 discharge + GF(2⁸) + parallel → 5–11× vs fused (A/B)
 - **What**: the oblong discharge now covers **all 16 SHA relations in one
   zerocheck**, is **Fiat–Shamir**, and there's a **discharge A/B** vs the current
   fused bit-slice discharge.
@@ -97,17 +97,20 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
   | nvars | fused (ψ_α) | oblong naive (GF128) | **oblong GF(2⁸)** | GF(2⁸) vs fused |
   |---|---|---|---|---|
-  | 9 | 3.66 ms | 2.64 ms | **1.54 ms** | **2.37×** |
-  | 16 | 388 ms | 342 ms | **198 ms** | **1.96×** |
+  | 9 | 3.72 ms | 2.84 ms | **1.70 ms** | **2.2×** |
+  | 16 | 395 ms | 102 ms | **74.7 ms** | **5.3×** |
+  | 20 | 13.2 s | 1.63 s | **1.17 s** | **11.2×** |
 
-  **The GF(2⁸)-accelerated oblong discharge is ~2× faster than the fused bit-slice
-  one** (`prove_oblong_and_batch_gf8`, the byte-lookup NTT over `embed(H₈)`). The
-  naive GF(2¹²⁸) oblong is already 1.1–1.4×; the **GF(2⁸) swap** (`OblongScheme` →
-  `Gf8Scheme`) turns that floor into ~2×. **Still untapped**: the eq-split (the
-  eq-weighting is still per-word GF(2¹²⁸)) + SIMD-packed `Gf8` lanes. The win is
-  larger at nvars=9 (cache-resident) than nvars=16; at nvars=16 the Phase-2 still
-  streams the stacked GF128 MLEs, exactly what the eq-split removes. 32 tests green
-  across `poly` + `protocol`.
+  **The GF(2⁸)-accelerated oblong discharge is 5–11× faster than the fused
+  bit-slice one** — and the **win grows with size** (the fused discharge is
+  memory-bound / super-linear; the oblong scales well). Two compounding levers:
+  (1) the **GF(2⁸) swap** (`Gf8Scheme`, byte-lookup NTT over `embed(H₈)`) — turned
+  the 1.1–1.4× naive floor into ~2×; (2) **parallelism** (commit `39ebc1d`) — the
+  oblong prover was single-threaded while the fused baseline used all cores;
+  parallelizing the round message + Phase-2 (rayon, `with_min_len(2^14)` so the
+  nvars=9 default stays serial) took GF(2⁸) from 198→74.7 ms at nvars=16. **Still
+  untapped**: the eq-split (eq-weighting is still per-word GF(2¹²⁸)) + SIMD-packed
+  `Gf8` lanes. 32 tests green across `poly` + `protocol`.
 - **Remaining for the full Phase D**: (a) the **eq-split** (task #6) for the next
   speed step; (b) the **multipoint-eval binding** (task #7 part 2 — fold the ψ_z
   pair-evals into `f2_prove`, the production integration; doesn't change discharge

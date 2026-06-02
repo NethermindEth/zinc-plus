@@ -10,12 +10,15 @@ round. Reference implementation: the local repo `~/binius64`,
 ## Progress (2026-06-02) — A,B + GF(2⁸) + Phase-C ψ_z tie + Fiat-Shamir + batched all-16 discharge + A/B
 
 **Headline A/B** (`f2_sha256` bench, same SHA columns + 16 relations): the
-**GF(2⁸)-accelerated oblong discharge is ~2× faster than the fused bit-slice one**
-— nvars=9 **2.37×** (3.66→1.54 ms), nvars=16 **1.96×** (388→198 ms). The naive
-GF(2¹²⁸) oblong is already 1.1–1.4×; the **GF(2⁸) swap** (`Gf8Scheme`, byte-lookup
-NTT over `embed(H₈)`) turns that into ~2×. Still untapped: the eq-split + SIMD
-`Gf8` lanes; the multipoint-eval binding (doesn't change discharge prove cost).
-See the ledger entry for the full table + caveats.
+**GF(2⁸)-accelerated oblong discharge is 5–11× faster than the fused bit-slice
+one**, and the **win grows with size** — nvars=16 **5.3×** (395→74.7 ms),
+nvars=20 **11.2×** (13.2 s→1.17 s). Two compounding levers: the **GF(2⁸) swap**
+(`Gf8Scheme`, byte-lookup NTT over `embed(H₈)`; the naive GF128 oblong is 1.1–1.4×,
+GF(2⁸) ~2×) and **parallelism** (the oblong prover was single-threaded vs the
+parallel fused baseline; rayon-parallelizing the round message + Phase-2 took
+GF(2⁸) 198→74.7 ms at nvars=16). Still untapped: the eq-split + SIMD `Gf8` lanes;
+the multipoint-eval binding (doesn't change discharge prove cost). See the ledger
+entry for the full table + caveats.
 
 **Landed** (working tree, 30+ tests green across `poly` + `protocol`, no prover
 path touched):

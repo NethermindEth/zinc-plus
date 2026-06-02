@@ -16,14 +16,15 @@ doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 > **`ψ_z` recombination tie** (reuses the `ψ_α` machinery), is **Fiat-Shamir**, and
 > now **batches all 16 SHA relations** (3 ANDs + 13 adders) into one zerocheck.
 > **Headline A/B** (`f2_sha256` bench): the **GF(2⁸)-accelerated oblong discharge
-> is ~2× faster than the fused bit-slice one** — nvars=9 **2.37×** (3.66→1.54 ms),
-> nvars=16 **1.96×** (388→198 ms). The naive GF(2¹²⁸) oblong is 1.1–1.4×; the
-> `Gf8Scheme` (byte-lookup NTT over `embed(H₈)`) turns that into ~2×. Continue from
-> the port plan's "Progress" + §5. **Remaining**: (1) the **eq-split** (task #6,
-> next speed step — eq-weighting is still per-word GF128); (2) the **multipoint-eval
-> binding** in `f2_prove` (task #7 pt 2, production integration, open at `γ`/Approach
-> B; doesn't change discharge prove cost); (3) sound adder carry binding (Issue 1);
-> then the **e2e `Prove` A/B**.**
+> is 5–11× faster than the fused bit-slice one** and the **win grows with size** —
+> nvars=16 **5.3×** (395→74.7 ms), nvars=20 **11.2×** (13.2 s→1.17 s). Two
+> compounding levers: the `Gf8Scheme` (byte-lookup NTT, naive→~2×) and
+> **parallelism** (the oblong prover was single-threaded vs the parallel fused
+> baseline). Continue from the port plan's "Progress" + §5. **Remaining**: (1) the
+> **eq-split** (task #6, next speed step — eq-weighting is still per-word GF128);
+> (2) the **multipoint-eval binding** in `f2_prove` (task #7 pt 2, production
+> integration, open at `γ`/Approach B; doesn't change discharge prove cost);
+> (3) sound adder carry binding (Issue 1); then the **e2e `Prove` A/B**.**
 
 ## TL;DR (the one thing to know)
 
