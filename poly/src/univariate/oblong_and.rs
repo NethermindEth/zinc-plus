@@ -35,10 +35,11 @@
 //!
 //! The verifier prepends `WORD_BITS` zeros, samples `z`, extrapolates `R₀(z)`
 //! (via [`super::binary_subspace::extrapolate_over_subspace`]), and proceeds
-//! to a standard degree-2 sumcheck over the `n` row variables (Phase 2, not
-//! in this module). The cross-check test below is exactly binius64's
-//! `test_first_round_message_matches_next_round_sum_claim`: `R₀(z)` recovered
-//! from the round message must equal the brute-force folded sum claim.
+//! to a degree-2 **MLE-check** over the `n` row variables (Phase 2, below in
+//! this module — Gruen's eq-factored sumcheck). The cross-check test below is
+//! exactly binius64's `test_first_round_message_matches_next_round_sum_claim`:
+//! `R₀(z)` recovered from the round message must equal the brute-force folded
+//! sum claim.
 
 use super::binary_gf128::BinaryFieldGF128;
 use super::binary_subspace::{BinarySubspace, lagrange_evals};
@@ -249,65 +250,72 @@ pub struct AndCheckOutput {
 }
 
 /// Proof produced by [`prove_oblong_and`]: the Phase-1 extension-domain round
-/// message, the Phase-2 degree-≤3 round polynomials (4 evals each, over the
-/// dim-2 subspace `{0,1,2,3}`), and the closing operand evals.
+/// message, the Phase-2 MLE-check round polynomials, and the closing operand
+/// evals.
+///
+/// Each Phase-2 round poly is the **degree-2 prime polynomial** `h` of Gruen's
+/// eq-factored sumcheck ([Gruen24] §3; binius64 `quadratic_mle.rs`), stored in
+/// **truncated monomial form** `[c₁, c₂]`. With the equality indicator factored
+/// out of the round message the round poly drops from degree 3 to degree 2, and
+/// the constant `c₀` is recovered by the verifier from the MLE-check eq-relation
+/// `(1−r_i)·h(0) + r_i·h(1) = claim` — so only two coefficients ship per round
+/// (vs the four evals of the naive eq-folded form).
+///
+/// [Gruen24]: <https://eprint.iacr.org/2024/108>
 #[derive(Clone, Debug)]
 pub struct OblongAndProof {
     pub round_message: [F; WORD_BITS],
-    pub round_polys: Vec<[F; 4]>,
+    pub round_polys: Vec<[F; 2]>,
     pub a_eval: F,
     pub b_eval: F,
     pub c_eval: F,
 }
 
-/// Why an oblong AND proof was rejected.
+/// Why an oblong AND proof was rejected. The eq-factored MLE-check has **no
+/// per-round consistency rejection** (the verifier's recovered constant always
+/// satisfies the round relation), so a corrupt witness — a non-vanishing `R₀`,
+/// or tampered closing evals — is caught at the closing [`FinalCheck`].
+///
+/// [`FinalCheck`]: OblongError::FinalCheck
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OblongError {
-    #[error("round {0}: g(0)+g(1) ≠ claim")]
-    RoundConsistency(usize),
-    #[error("closing check (a·b−c)·eq ≠ final claim")]
+    #[error("closing check a·b−c ≠ final claim")]
     FinalCheck,
     #[error("malformed proof: {0} round polynomials, expected {1}")]
     Shape(usize, usize),
 }
 
-/// The four base points `{0, 1, X, X+1}` of the dim-2 subspace, on which each
-/// Phase-2 round polynomial (degree ≤ 3) is reported.
-#[inline]
-fn round_poly_points() -> [F; 4] {
-    [
-        F::from_words([0, 0]),
-        F::from_words([1, 0]),
-        F::from_words([2, 0]),
-        F::from_words([3, 0]),
-    ]
-}
-
-/// Phase-2 round polynomial `g(t) = Σ_rest (a_t·b_t − c_t)·eq_t`, where the
-/// **low** bound variable's pair `(2i, 2i+1)` is linearly extrapolated to each
-/// of the four points. Degree ≤ 3 (a·b degree 2 times eq degree 1).
-/// Pair `(2i, 2i+1)`'s contribution to the round polynomial (4 points).
+/// Pair `(2i, 2i+1)`'s contribution to the **prime polynomial** `h` of the
+/// eq-factored Phase-2 round (Gruen's trick), accumulated as the three evals
+/// `(h(0), h(1), h(∞))`.
+///
+/// With `eq` factored out of the round message, the round poly is the degree-2
+/// `h(t) = Σ_rest (a(t)·b(t) − c(t)) · eq_rest[rest]`, where `a(t)` linearly
+/// interpolates the low-variable pair `(a[2i], a[2i+1])` and `eq_rest` weights
+/// the *remaining* row variables. `h(∞)` is the leading (t²) coefficient — the
+/// Karatsuba "infinity" eval — which for `a·b − c` is `a_d·b_d` with
+/// `a_d = a[2i+1] − a[2i]` (the linear-difference of `a`, etc.).
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
-fn round_poly_pair(g: &mut [F; 4], a: &[F], b: &[F], c: &[F], eq: &[F], pts: &[F; 4], i: usize) {
+fn prime_poly_pair(acc: &mut [F; 3], a: &[F], b: &[F], c: &[F], eq_rest: &[F], i: usize) {
     let (alo, ahi) = (a[2 * i], a[2 * i + 1]);
     let (blo, bhi) = (b[2 * i], b[2 * i + 1]);
     let (clo, chi) = (c[2 * i], c[2 * i + 1]);
-    let (elo, ehi) = (eq[2 * i], eq[2 * i + 1]);
-    let (ad, bd, cd, ed) = (ahi - alo, bhi - blo, chi - clo, ehi - elo);
-    for (k, &t) in pts.iter().enumerate() {
-        let at = alo + t * ad;
-        let bt = blo + t * bd;
-        let ct = clo + t * cd;
-        let et = elo + t * ed;
-        g[k] += (at * bt - ct) * et;
-    }
+    let w = eq_rest[i];
+    let (ad, bd) = (ahi - alo, bhi - blo);
+    acc[0] += (alo * blo - clo) * w; // h(0)
+    acc[1] += (ahi * bhi - chi) * w; // h(1)
+    acc[2] += (ad * bd) * w; // h(∞): leading coeff of (a·b − c)
 }
 
+/// The Phase-2 prime polynomial `h` as its three evals `(h(0), h(1), h(∞))`.
+/// `eq_rest` (length `a.len()/2`) is the equality indicator over the row
+/// variables *not yet* bound and *not* the current one. Degree 2 in the bound
+/// variable; ports binius64 `QuadraticMleCheckProver::execute`.
 #[allow(clippy::arithmetic_side_effects)]
-fn round_poly(a: &[F], b: &[F], c: &[F], eq: &[F]) -> [F; 4] {
+fn prime_poly(a: &[F], b: &[F], c: &[F], eq_rest: &[F]) -> [F; 3] {
     let half = a.len() / 2;
-    let pts = round_poly_points();
+    debug_assert_eq!(eq_rest.len(), half, "eq_rest must cover every remaining-variable cube point");
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
@@ -315,16 +323,16 @@ fn round_poly(a: &[F], b: &[F], c: &[F], eq: &[F]) -> [F; 4] {
             .into_par_iter()
             .with_min_len(PAR_MIN_LEN)
             .fold(
-                || [F::zero(); 4],
-                |mut g, i| {
-                    round_poly_pair(&mut g, a, b, c, eq, &pts, i);
-                    g
+                || [F::zero(); 3],
+                |mut acc, i| {
+                    prime_poly_pair(&mut acc, a, b, c, eq_rest, i);
+                    acc
                 },
             )
             .reduce(
-                || [F::zero(); 4],
+                || [F::zero(); 3],
                 |mut x, y| {
-                    for k in 0..4 {
+                    for k in 0..3 {
                         x[k] += y[k];
                     }
                     x
@@ -333,11 +341,32 @@ fn round_poly(a: &[F], b: &[F], c: &[F], eq: &[F]) -> [F; 4] {
     }
     #[cfg(not(feature = "parallel"))]
     {
-        let mut g = [F::zero(); 4];
+        let mut acc = [F::zero(); 3];
         for i in 0..half {
-            round_poly_pair(&mut g, a, b, c, eq, &pts, i);
+            prime_poly_pair(&mut acc, a, b, c, eq_rest, i);
         }
-        g
+        acc
+    }
+}
+
+/// Shrink the `eq_rest` indicator one variable by collapsing its low variable:
+/// `out[i] = tbl[2i] + tbl[2i+1]`. This is the eq-factored sumcheck's cheap
+/// **XOR-only** eq update (binius `eq_ind_truncate_low_inplace`): summing the
+/// pair drops the lowest-variable `eq` factor, leaving `eq` over one fewer
+/// variable — no challenge multiply, unlike [`fold_low`], because that factor is
+/// reintroduced by the verifier rather than folded into the table.
+#[allow(clippy::arithmetic_side_effects)]
+fn sum_fold_low(tbl: &[F]) -> Vec<F> {
+    let half = tbl.len() / 2;
+    let f = |i: usize| tbl[2 * i] + tbl[2 * i + 1];
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..half).into_par_iter().with_min_len(PAR_MIN_LEN).map(f).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..half).map(f).collect()
     }
 }
 
@@ -489,28 +518,37 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
     ch.absorb(&round_message);
     let z = ch.sample();
 
-    // Phase-2 eq over the full row challenges [small ++ big].
+    // Gruen eq-factoring (binius `QuadraticMleCheckProver`): maintain only the
+    // equality indicator over the *remaining* row variables `r[1..]`, never the
+    // full `eq(·; r)` table. Each Phase-2 round the current variable's `eq`
+    // factor is reintroduced by the verifier and the prefix product of bound
+    // variables threads out of the claim, so the prover never folds `eq` as a
+    // fourth (challenge-fold) table — it sum-folds this half-size table instead.
     let r: Vec<F> = small.iter().copied().chain(big.iter().copied()).collect();
-    let eq = eq_indicator(&r);
+    let mut eq_rest = eq_indicator(r.get(1..).unwrap_or(&[]));
 
     // Phase-1 → Phase-2 transition: fold each word at z into an MLE over rows.
     let lag_z = scheme.base_lagrange(z);
     let mut a: Vec<F> = a_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
     let mut b: Vec<F> = b_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
     let mut c: Vec<F> = c_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
-    let mut eqt = eq;
 
-    // Phase 2: degree-≤3 sumcheck over the n row variables.
+    // Phase 2: degree-2 MLE-check over the n row variables. Each round ships the
+    // prime polynomial `h` truncated to its monomial `[c₁, c₂]` (`c₀` recovered
+    // by the verifier).
     let mut round_polys = Vec::with_capacity(n);
-    for _ in 0..n {
-        let g = round_poly(&a, &b, &c, &eqt);
-        ch.absorb(&g);
+    for i in 0..n {
+        let [h0, h1, hinf] = prime_poly(&a, &b, &c, &eq_rest);
+        let trunc = [h1 - h0 - hinf, hinf]; // [c₁, c₂]; c₀ = h(0) recovered by verifier
+        ch.absorb(&trunc);
         let gamma = ch.sample();
-        round_polys.push(g);
+        round_polys.push(trunc);
         a = fold_low(&a, gamma);
         b = fold_low(&b, gamma);
         c = fold_low(&c, gamma);
-        eqt = fold_low(&eqt, gamma);
+        if i + 1 < n {
+            eq_rest = sum_fold_low(&eq_rest);
+        }
     }
 
     OblongAndProof {
@@ -542,10 +580,11 @@ pub fn prove_oblong_and(
 
 /// Verifier for the oblong AND zerocheck, driven by a Fiat–Shamir
 /// [`OblongChannel`]. Samples `r`, reconstructs `R₀(z)` from the round message
-/// (base zeros ++ extension evals), runs the Phase-2 sumcheck-consistency checks
-/// (absorbing each round polynomial before sampling its `γ`, mirroring the
-/// prover), and verifies the closing `(a·b − c)·eq(γ; r) = claim`. `n` is the
-/// number of row variables.
+/// (base zeros ++ extension evals) as the initial MLE-check claim, runs the
+/// eq-factored Phase-2 MLE-check (absorbing each truncated round polynomial
+/// before sampling its `γ`, mirroring the prover; recovering each `c₀` from the
+/// eq-relation and threading the claim by `h(γ)`), and verifies the closing
+/// `a·b − c = claim`. `n` is the number of row variables.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn verify_oblong_and_channel<C: OblongChannel>(
     ch: &mut C,
@@ -563,10 +602,11 @@ pub fn verify_oblong_and_channel<C: OblongChannel>(
     let big: Vec<F> = (0..n_big).map(|_| ch.sample()).collect();
     let r: Vec<F> = small_challenges.iter().copied().chain(big).collect();
 
-    // Reconstruct R₀(z): the prover sends only the extension half; the base
-    // half is zero iff the AND holds, so a corrupt C is caught right here at
-    // round 0 (the reconstructed claim won't match g(0)+g(1)). `full_subspace`
-    // is the dim-(SKIPPED_VARS+1) univariate domain — monomial or `embed(H₈)`,
+    // Reconstruct R₀(z) → the initial MLE-check claim: the prover sends only the
+    // extension half; the base half is zero iff the AND holds, so a corrupt C
+    // makes this claim disagree with the folded tables — which surfaces at the
+    // closing check once the rounds have threaded it through. `full_subspace` is
+    // the dim-(SKIPPED_VARS+1) univariate domain — monomial or `embed(H₈)`,
     // matching the prover's scheme.
     ch.absorb(&proof.round_message);
     let z = ch.sample();
@@ -574,24 +614,27 @@ pub fn verify_oblong_and_channel<C: OblongChannel>(
     coeffs[WORD_BITS..].copy_from_slice(&proof.round_message);
     let mut claim = super::binary_subspace::extrapolate_over_subspace(full_subspace, &coeffs, z);
 
-    let dim2 = BinarySubspace::with_dim(2);
+    // Phase-2 MLE-check (Gruen). Each round the prover sent the degree-2 prime
+    // polynomial `h` as a truncated monomial `[c₁, c₂]`. Recover the dropped
+    // constant from the eq-relation `claim = (1−α)·h(0) + α·h(1)` (α = r_i, so
+    // `c₀ = claim − α·(c₁ + c₂)`), then thread the claim by `h(γ_i)`. There is no
+    // per-round consistency rejection — the recovered `c₀` always satisfies the
+    // relation — so a corrupt witness surfaces only at the closing check below
+    // (mirrors binius64 `mlecheck::verify`).
     let mut gammas = Vec::with_capacity(n);
-    for (k, g) in proof.round_polys.iter().enumerate() {
-        if g[0] + g[1] != claim {
-            return Err(OblongError::RoundConsistency(k));
-        }
-        ch.absorb(g);
+    for (i, trunc) in proof.round_polys.iter().enumerate() {
+        let [c1, c2] = *trunc;
+        ch.absorb(trunc);
         let gamma = ch.sample();
-        claim = super::binary_subspace::extrapolate_over_subspace(&dim2, g, gamma);
+        let c0 = claim - r[i] * (c1 + c2);
+        claim = c0 + (c1 + c2 * gamma) * gamma; // h(γ_i), Horner
         gammas.push(gamma);
     }
 
-    // Closing check: eq(γ; r) recomputed independently.
-    let mut eq_star = F::one();
-    for (&g, &ri) in gammas.iter().zip(&r) {
-        eq_star *= g * ri + (F::one() - g) * (F::one() - ri);
-    }
-    if (proof.a_eval * proof.b_eval - proof.c_eval) * eq_star != claim {
+    // Closing check: the per-variable `eq` factors have been threaded out of the
+    // claim round by round, so the final claim is exactly the composition
+    // `a·b − c` at the challenge point (no separate `eq(γ; r)` factor).
+    if proof.a_eval * proof.b_eval - proof.c_eval != claim {
         return Err(OblongError::FinalCheck);
     }
 
@@ -782,7 +825,10 @@ mod tests {
     #[test]
     fn corrupted_c_is_rejected() {
         // Flipping a bit of C breaks base-domain vanishing, so the verifier's
-        // reconstructed R₀(z) ≠ the prover's true sum ⇒ round-0 rejection.
+        // reconstructed R₀(z) ≠ the true folded sum. The eq-factored MLE-check
+        // has no per-round rejection (the recovered constant always satisfies
+        // the round relation), so the bad claim threads through every round and
+        // is caught at the closing check.
         let n = 6usize;
         let num = 1usize << n;
         let a: Vec<u32> = (0..num).map(|i| sample32(i as u64 * 3 + 2)).collect();
@@ -798,7 +844,7 @@ mod tests {
         let proof = prove_oblong_and(&a, &b, &c, &r, z, &gammas, &ntt);
         let res = verify_oblong_and(&proof, &r, z, &gammas);
         assert!(
-            matches!(res, Err(OblongError::RoundConsistency(_))),
+            matches!(res, Err(OblongError::FinalCheck)),
             "corrupted C must be rejected, got {res:?}"
         );
     }

@@ -451,7 +451,9 @@ mod tests {
 
     #[test]
     fn corrupt_w_is_rejected() {
-        // Corrupt one W word ⇒ the AND fails ⇒ oblong zerocheck rejects.
+        // Corrupt one W word ⇒ the AND fails ⇒ R₀ no longer vanishes on the base
+        // domain ⇒ the reconstructed claim is wrong. The eq-factored MLE-check
+        // threads that bad claim to the closing check, which rejects.
         let mut w: Vec<u32> = U.iter().zip(&V).map(|(a, b)| a & b).collect();
         w[2] ^= 1 << 7;
         let columns = [col_from_u32s(&U), col_from_u32s(&V), col_from_u32s(&w)];
@@ -462,7 +464,7 @@ mod tests {
         let mut tv = Blake3Transcript::new();
         let res = verify_oblong_and_relation(&mut tv, &proof, &columns, &spec, num_vars);
         assert!(
-            matches!(res, Err(OblongVerifyError::Oblong(OblongError::RoundConsistency(_)))),
+            matches!(res, Err(OblongVerifyError::Oblong(OblongError::FinalCheck))),
             "corrupt W must be rejected by the zerocheck, got {res:?}"
         );
     }
@@ -564,7 +566,8 @@ mod tests {
     #[test]
     fn batch_corrupt_one_relation_is_rejected() {
         // Corrupting relation 0's W breaks its AND on some stacked rows ⇒ R₀ no
-        // longer vanishes on the base domain ⇒ round-0 rejection.
+        // longer vanishes on the base domain ⇒ the eq-factored MLE-check threads
+        // the wrong claim to the closing check, which rejects.
         let p: Vec<u32> = U.iter().map(|x| x.rotate_left(5) ^ 0x55).collect();
         let mut w0: Vec<u32> = U.iter().zip(&V).map(|(x, y)| x & y).collect();
         let w1: Vec<u32> = V.iter().zip(&p).map(|(x, y)| x & y).collect();
@@ -583,7 +586,7 @@ mod tests {
         let mut tv = Blake3Transcript::new();
         let res = verify_oblong_and_batch(&mut tv, &proof, &columns, &specs, &[], 3);
         assert!(
-            matches!(res, Err(OblongVerifyError::Oblong(OblongError::RoundConsistency(_)))),
+            matches!(res, Err(OblongVerifyError::Oblong(OblongError::FinalCheck))),
             "got {res:?}"
         );
     }
