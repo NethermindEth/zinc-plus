@@ -2673,17 +2673,18 @@ fn hadamard_benches(c: &mut Criterion) {
     }
     let mut group = c.benchmark_group("Zinc+ F_2 SHA-256 Hadamard");
     group.sample_size(10);
-    // Small sweep: nvars=9 matches the Steps baseline; 16/20 show how the
+    // Small sweep: nvars=9 matches the Steps baseline; 16/20/21 show how the
     // per-relation zerocheck scales with 2^num_vars. Extend with the e2e
     // NVARS_SWEEP if you want the full curve (slower). `HAD_NVARS=16` (comma-
     // separated) restricts the sweep — each point pays a full `setup_prover`,
-    // and nvars=20 needs ~13 GB (swaps on a 16 GB box), so scope it.
+    // and the footprint roughly doubles per step: nvars=20 needs ~13 GB and
+    // nvars=21 ~26 GB (both swap on a 16 GB box), so scope it with HAD_NVARS.
     let only: Option<Vec<usize>> = std::env::var("HAD_NVARS").ok().map(|s| {
         s.split(',')
             .filter_map(|x| x.trim().parse::<usize>().ok())
             .collect()
     });
-    for &num_vars in &[9usize, 16, 20] {
+    for &num_vars in &[9usize, 16, 20, 21] {
         if let Some(only) = &only {
             if !only.contains(&num_vars) {
                 continue;
