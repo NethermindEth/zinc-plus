@@ -4,6 +4,10 @@
 then go to the canonical ledger `documentation/f2x-sha-todo.md` and the design
 doc `documentation/f2-hadamard-univariate-skip-design.md` for detail.*
 
+> **▶ START HERE for the oblong work: `documentation/f2-hadamard-oblong-handoff.md`**
+> (current state, A/B numbers, code map, next steps). The summary below is kept
+> for context.
+>
 > **▶ ACTIVE PLAN (2026-06-01): the "next lever" below is now being built as a
 > direct port of Binius64's oblong univariate zerocheck — see
 > `documentation/f2-hadamard-oblong-port-plan.md` (reference repo `~/binius64`).
