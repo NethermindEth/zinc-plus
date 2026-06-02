@@ -219,8 +219,25 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   1. **Multipoint `up_evals` is strictly 1:1 with `trace_mles`** (the `precombined`
      MLE γ-combines every col; no "down-only" columns). So the z-projected discharge
      cols must be **appended to `trace_mles` with `ψ_z(col)(r*)` up-evals**, reduced to
-     r_0 with everything and bound there. Append only the **distinct cols referenced by
-     `and_specs`** (~5 for SHA), not all ~41 — small extra cost.
+     r_0 with everything and bound there.
+     - **CORRECTION (critical, from reading the open's Check 2 at `f2_prove.rs:2675`)**:
+       append **ALL witness primary cols** (`trace.binary_poly[num_pub_bin..]`),
+       *not* just the ~5 AND-referenced ones. The open's Check 2 binds
+       `ψ_α(a') = Σ_g γ_g·witness_primary_evals[g]` over the **whole** witness γ-batch;
+       the `ψ_z` binding rides the SAME `a'`, so `ψ_z(a') = Σ_g γ_g·ψ_z(col_g)(r_0)`
+       also sums over **every** witness col — the batch γ-mixes them, so the full
+       `z_r0_evals` vector must be known to verify it. Binding just the AND subset is
+       impossible (can't extract per-col `a'_g` from the batched `a'`). So the
+       multipoint ~doubles (α-cols + all-witness z-cols); `z_up_evals`/`z_r0_evals` are
+       ~num-witness-cols each (not ~5). This is the subtlety that, rushed, yields an
+       open that passes the honest round-trip but binds nothing on the z-side.
+     - **Indexing**: z-cols are appended after the C α-cols (= `projected_trace_for_mp.len()`,
+       which is indexed by the spec col indices). The z-col for trace col `col`
+       (a witness primary col, `col >= num_pub_bin`) sits at `C + (col - num_pub_bin)`;
+       pointed-shift `source_col` = that. Off-by-one here = unsound/broken.
+     - **γ-threading**: the `ψ_z` check needs the open's per-col γ (drawn inside
+       `verify_f2_open_with_virtuals` at `:2656`). Thread it out — return γ from the
+       open verify, or do the `ψ_z` check inside a variant — don't re-derive (fragile).
   2. **New shipped proof fields** (beyond today's `F2FullProof`): the **z up-evals**
      `ψ_z(col)(r*)` (verifier can't recompute them without the trace — same reason
      `column_evals_at_rstar` is shipped), the **z r_0-evals** (extend

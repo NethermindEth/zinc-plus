@@ -3608,6 +3608,58 @@ pub struct F2FullProof<const D: usize> {
     // parents (`uair.hadamard_adder_parents`) — honest-prover.
 }
 
+/// Proof of an F_2 statement with a **sound oblong-Hadamard discharge**: the
+/// standard F_2 pipeline plus the Binius64 oblong AND-zerocheck, with its `ψ_z`
+/// operand evals **bound to the commitment** (not trusted against in-memory cols).
+///
+/// The binding rides the un-lifted open: its bit-slice claim `a' = Σ_b c_b·X^b`
+/// yields `ψ_z(col)(r_0) = Σ_b c_b·L_b(z)` as a second functional (alongside the
+/// main `ψ_α`). The oblong's `ψ_z(col↓Δ)(γ_word)` AND-pair claims fold into the
+/// **same** multipoint-eval as the `ψ_α` claims (z-projected discharge cols
+/// appended to its trace, claimed at `r*` and reduced to `r_0`); the single open
+/// then binds them. Adder relations keep **trusted** operand parents
+/// (`adder_parents`) — exact soundness parity with the fused discharge (Issue 1).
+///
+/// See `documentation/f2x-sha-todo.md` (un-lifted open + oblong-binding entries).
+#[derive(Clone, Debug)]
+pub struct F2OblongHadamardProof<const D: usize> {
+    pub commitment: ZipPlusCommitment,
+    pub uair: F2Proof,
+    /// Multipoint-eval folding BOTH the `ψ_α` column claims at `r*` (the α-cols)
+    /// AND the oblong `ψ_z(col↓Δ)(γ_word)` AND-pair claims (the appended z-cols,
+    /// as pointed-shifts) into a single open point `r_0`.
+    pub multipoint_eval: MultipointEvalProof<BinaryFieldGF128>,
+    /// `ψ_α(col)(r_0)` for every column (primary then virtual) — the standard
+    /// open evals, bound by the open's `ψ_α` check + the multipoint reduction.
+    pub alpha_r0_evals: Vec<BinaryFieldGF128>,
+    /// `ψ_z(col)(r*)` for **all witness primary cols** (the same set + order the
+    /// open's γ-batch covers, `trace.binary_poly[num_pub_bin..]`). Shipped: the
+    /// verifier has no trace to recompute them, and they are the multipoint
+    /// up-claims for the appended z-cols. Spans all witness cols — not just the
+    /// AND-referenced ones — because the `ψ_z` binding rides the full-batch `a'`
+    /// (which γ-mixes every witness col, so the whole vector must be known).
+    pub z_up_evals: Vec<BinaryFieldGF128>,
+    /// `ψ_z(col)(r_0)` for all witness primary cols — the multipoint output for
+    /// the z-cols, bound by the `ψ_z` check
+    /// `gf128poly_project(a', L_b(z)) == Σ_g γ_g·z_r0_evals[g]` (same γ as the
+    /// open's Check 2, same witness-col batch).
+    pub z_r0_evals: Vec<BinaryFieldGF128>,
+    /// The oblong AND-pair `ψ_z(col↓Δ)(γ_word)` evals (one per
+    /// `distinct_pairs(and_specs)`), in pair order. Shipped: the multipoint
+    /// pointed-shift down-evals + the `batched_tie_check` AND inputs. Bound by
+    /// `verify_subclaim_pointed` against the (bound) `z_r0_evals` at `r_0`.
+    pub pair_evals: Vec<BinaryFieldGF128>,
+    pub open: F2OpenProof<D>,
+    /// The oblong AND-zerocheck proof (round message + Gruen round polys + the
+    /// closing `a/b/c_eval`). Its eval-point `[z, γ]` is transcript-re-derived.
+    pub oblong: zinc_poly::univariate::oblong_and::OblongAndProof,
+    /// Trusted `ψ_z` operand parents of the **adder** relations at `γ_word`
+    /// (3 per adder: U,V,W), in adder order. Honest-prover (Issue 1), same as the
+    /// fused discharge — the bit-level carry recurrence (`SHR¹`, `β=Maj`, `X·c`)
+    /// doesn't decompose into row-shift pair-evals, so it isn't folded/bound here.
+    pub adder_parents: Vec<BinaryFieldGF128>,
+}
+
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_full`].
 #[derive(Debug, thiserror::Error)]
 pub enum F2FullVerifyError<U: Uair, IdealOverF>
