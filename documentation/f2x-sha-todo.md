@@ -75,6 +75,40 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Sound oblong-Hadamard ψ_z binding — NEXT STEP #1 DONE (commits `91eebec`, `4b5aca8`, `317a83a`, `aa05f21`)
+- **What**: the Binius64 oblong AND-zerocheck's `ψ_z` operand evals are now **bound
+  to the PCS commitment** end-to-end, not trusted against in-memory columns.
+  `prove_f2_full_with_oblong_hadamard` / `verify_f2_full_with_oblong_hadamard`
+  (`f2_prove.rs`, D=32 impl) + the `F2OblongHadamardProof` wire type + the
+  `f2_oblong_hadamard` helpers (`oblong_binding_data_gf8`,
+  `oblong_verifier_binding_gf8`, `oblong_tie_from_bound`, `verify_oblong_zerocheck_gf8`).
+- **Mechanism (dual-projection multipoint, riding the un-lifted open)**: the prover
+  runs the discharge (capturing `[z,γ]`), appends z-projections of **all witness
+  primary cols** to the multipoint trace with `ψ_z(col)(r*)` up-evals, folds the
+  `ψ_z(col↓Δ)(γ_word)` AND-pair claims as **pointed-shifts**, and reduces everything
+  to the single open point `r_0`. The verifier mirrors it, then: (a) the open exposes
+  its batch `γ`; (b) the **ψ_z binding check** `ψ_z(a') == Σ_g γ_g·z_r0_evals[g]`
+  ties the z-evals to the committed bit-slice claim `a'` (the same `a'` that yields
+  `ψ_α` via the open's Check 2 — this is why the un-lifted open was the prerequisite);
+  (c) `oblong_tie_from_bound` recombines the now-bound AND pair-evals + the trusted
+  adder parents to the zerocheck operand evals.
+- **Scope: AND relations bound, adders trusted (= fused-discharge soundness parity,
+  Issue 1)**. Adder operands use bit-level `SHR¹`/`β=Maj`/`X·c` (the D-dimension ψ_z
+  projects away), so they don't decompose into row-shift `(col,Δ)` pair-evals; their
+  parents ship trusted, exactly as the fused path does.
+- **Prerequisites shipped**: `91eebec` exposed the prover eval-point `[z,γ]`;
+  `4b5aca8` cleared the Stage-1b bench debt (proof-size migration + removed the stale
+  `bench_micro_verifier_open` suite); `317a83a` defined the proof type + finalized the
+  design (the critical *all-witness-cols* binding correction).
+- **Result**: round-trip test (`prove_then_verify_f2_full_with_oblong_hadamard_roundtrips`)
+  green — honest accept, flipped-`W` → oblong-zerocheck reject, tampered-`z_r0` →
+  ψ_z-binding/multipoint reject, tampered AND pair-eval → multipoint/tie reject. **All
+  60 protocol + 35 poly tests green; benches compile.**
+- **Still open (follow-ups, not blockers)**: a `Verify-Hadamard-Oblong` bench arm +
+  an e2e prove/verify A/B vs the fused discharge (perf numbers for the bound path);
+  re-authoring the per-step verify micro-benches against the un-lifted open if that
+  breakdown is wanted again.
+
 ### Un-lifted GF128[X]<D> open — bit-slice-preserving open binds *both* ψ_α and ψ_z (commits `7827683`, `192e173`, `b840839`)
 - **What**: rewrote the F_2 PCS open (`prove_f2_open` /
   `verify_f2_open_with_virtuals` / `F2OpenProof`, `protocol/src/f2_prove.rs`)

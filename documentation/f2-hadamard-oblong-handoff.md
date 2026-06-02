@@ -18,11 +18,12 @@ fused bit-slice discharge** (win grows with size). It is now also **wired into t
 e2e prove path (measurement-first)**: the `Prove-Hadamard-Oblong` bench arm measures
 a **~5.6× faster Hadamard prove at nvars=16** (101 ms vs the fused 567 ms; discharge
 overhead ~54 ms vs ~390–520 ms) — confirming the standalone win e2e and beating the
-~3.7× projection. The remaining work is the **sound `ψ_z`→commitment binding**: the
-oblong's `ψ_z` (subspace-Lagrange) evals **can't ride the existing monomial-`α`
-open**, so they need a **second multipoint-eval + open at `z`** (NEXT STEP #1 below).
-Until that lands the e2e oblong path is a prove-cost measurement, not a verified
-proof.
+~3.7× projection. **The sound `ψ_z`→commitment binding is now DONE (NEXT STEP #1
+below)**: rather than a second z-open, the **open was rewritten un-lifted** so its
+bound bit-slice claim `a' = Σ_b c_b·X^b` yields *both* `ψ_α` (main) and `ψ_z`
+(discharge) — the discharge folds into the **same** multipoint + open.
+`prove/verify_f2_full_with_oblong_hadamard` round-trips (honest accept + tamper
+rejects); the e2e oblong path is now a **verified** proof, not just a measurement.
 
 ## Measured discharge A/B (standalone prover only)
 
@@ -119,41 +120,39 @@ Gruen eq-trick, working tree, pending commit) on branch `f2-clean`.
 
 ## NEXT STEPS, in priority order
 
-### 1. ★ Production integration — fold `ψ_z` evals into `f2_prove` (task #7 pt 2)
-**This is the high-value next step.** It splits into a *measurement* part (done)
-and the *sound binding* (the remaining work).
+### 1. ✅ DONE — Production integration: sound `ψ_z` binding in `f2_prove` (task #7 pt 2)
+**Shipped** (ledger has the full entry; commits `91eebec` `4b5aca8` `317a83a` `aa05f21`).
+The oblong discharge's `ψ_z` operand evals are now **bound to the commitment**.
 
-**✅ Measurement-first increment — DONE (working tree).** Wired the GF(2⁸) oblong
-discharge into the e2e prove path: `prove_f2_full_with_oblong_hadamard`
-(`f2_prove.rs`, `D = 32`-specialised impl) runs the no-Hadamard pipeline + the
-oblong discharge on the same transcript; `Prove-Hadamard-Oblong` bench arm added.
-**Measured (Apple M4, nvars=16): Prove-NoHadamard 46.5 ms, Prove-Hadamard (fused)
-~567 ms, Prove-Hadamard-Oblong ~101 ms** — the oblong discharge adds **~54 ms**
-(vs the fused's ~390–520 ms), a **~5.6× faster** Hadamard prove, beating the ~70 ms
-/ ~3.7× projection. The 5–14× standalone win is now confirmed e2e. (See the ledger
-entry for caveats: the fused arm is noisy, and the comparison isn't perfectly
-apples-to-apples.)
+**✅ Measurement-first increment (earlier).** Measured (Apple M4, nvars=16):
+Prove-NoHadamard 46.5 ms, Prove-Hadamard (fused) ~567 ms, Prove-Hadamard-Oblong
+~101 ms — the oblong discharge adds **~54 ms** (vs the fused's ~390–520 ms), **~5.6×
+faster** Hadamard prove.
 
-**⚠ The sound binding is the remaining work — and it's bigger than this doc
-originally implied.** The original plan ("fold the `ψ_z` pair-evals into the main
-multipoint-eval, mirroring the `ψ_α` Approach-B path") **does not work directly**:
-Approach B rides the *single α-open*, but the existing open is **monomial-α-specific**
-(its lifted eq-tensor + per-cell lift `Σ_b cell_b·X^b` evaluate at α; the wide
-F_2[X] claim is only meaningful at α). `ψ_z = Σ_b col_b·L_b(z)` is the
-*subspace-Lagrange* projection — a **different linear functional of the same bits**
-— so it **cannot ride the α-open**. The sound binding therefore needs (handoff
-§4-(i), "extra openings"):
-- a **second multipoint-eval** reducing the `ψ_z(col^↓Δ)(γ_word)` pointed-shift
-  claims (Δ=0 point claim, Δ≠0 shift predicate) to a point `r_0^z`, and
-- a **second PCS open at `z`** (a z-Lagrange cell projection in `prove_f2_open` —
-  the delicate part), binding those `ψ_z` evals to the commitment.
-- §4-(i) projection-point choice: keep `α` for the main open; this adds the z-open
-  for the discharge columns only. (§4-(ii) — re-base everything to `z` — is blocked
-  by the open's monomial-evaluation structure, so it's not a clean swap.)
-- Adders ship **trusted** ψ_z parents (carry not committed — ledger Issue 1); a
-  sound carry binding is a further follow-up.
-- **Gate (sound)**: a `Verify-Hadamard-Oblong` arm + an e2e round-trip test that
-  verifies the z-bound discharge.
+**✅ Sound binding — the mechanism that actually worked (un-lifted open, NOT a
+second z-open).** The original "second multipoint + second z-open" plan was
+**superseded**: instead of opening twice, the **open was rewritten to be un-lifted**
+(`b840839`) so its bound per-column claim is the bit-slice poly `a' = Σ_b c_b·X^b`
+(coefficients = the bit-slice MLE evals). That **one** bound object yields *both*
+projections — `ψ_α(col)(r_0) = Σ_b c_b·α^b` (main, via the open's Check 2) **and**
+`ψ_z(col)(r_0) = Σ_b c_b·L_b(z)` (discharge). So the discharge rides the **same**
+open. Concretely (`prove/verify_f2_full_with_oblong_hadamard`):
+- The discharge's `ψ_z(col↓Δ)(γ_word)` AND-pair claims fold into the **same** main
+  multipoint-eval as pointed-shifts, over z-projections of **all witness primary
+  cols** appended to the trace (claimed at `r*`), reduced to the single `r_0`.
+- The open exposes its batch `γ`; the **ψ_z binding check**
+  `ψ_z(a') == Σ_g γ_g·z_r0_evals[g]` ties the z-evals to `a'`; `oblong_tie_from_bound`
+  recombines the now-bound AND pair-evals + trusted adder parents to the operand evals.
+- *Why "all witness cols", not just the AND-referenced ones*: the open's γ-batch
+  mixes every witness col, so binding `ψ_z` via `a'` needs the whole `z_r0_evals`
+  vector (can't extract per-col `a'_g` from the batched `a'`).
+- Adders ship **trusted** `ψ_z` parents (bit-level carry recurrence doesn't decompose
+  into row-shift pair-evals — ledger Issue 1; = fused-discharge soundness parity).
+- **Gate met**: `prove_then_verify_f2_full_with_oblong_hadamard_roundtrips` — honest
+  accept + corrupt-W / tampered-ψ_z / tampered-pair-eval rejection; 60 protocol tests green.
+
+**Follow-ups (not blockers)**: a `Verify-Hadamard-Oblong` bench arm + e2e prove/verify
+A/B vs the fused discharge; a sound adder-carry binding (Issue 1).
 
 ### 2. ✅ DONE — Gruen's eq-trick on Phase-2 (degree-2 MLE-check, smaller proof)
 **Shipped** (working tree; the ledger has the full entry + A/B). Replaced the naive
