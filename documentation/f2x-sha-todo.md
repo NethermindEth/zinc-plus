@@ -75,6 +75,58 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Oblong AND zerocheck — Phase-2 Gruen eq-trick: degree-2 MLE-check, no eq-table fold (working tree)
+- **What**: replaced the Phase-2 sumcheck of the oblong discharge
+  (`poly/src/univariate/oblong_and.rs`) with Binius64's eq-factored **MLE-check**
+  (Gruen, <https://eprint.iacr.org/2024/108> §3; reference
+  `crates/ip-prover/src/sumcheck/quadratic_mle.rs` + `crates/ip/src/mlecheck.rs`).
+  The naive form folded `eq(·; r)` as a fourth table and sent the degree-3 round
+  poly on the 4-point subspace `{0,1,2,3}`. Gruen factors the per-round `eq` out:
+  - the prover ships the **degree-2 prime polynomial** `h(t) = Σ_rest
+    (a·b−c)(t,rest)·eq_rest[rest]` truncated to its monomial `[c₁, c₂]` — the
+    constant `c₀` is recovered by the verifier from the eq-relation
+    `c₀ = claim − r_i·(c₁+c₂)` — so **2 field elements/round, not 4**;
+  - only `eq_rest` (eq over the **remaining** row vars `r[1..]`, half the size) is
+    maintained, **sum-folded** (XOR-only `out[i]=t[2i]+t[2i+1]`, no challenge
+    multiply, via `sum_fold_low`) — so Phase-2 folds **3 tables (a,b,c), not 4**,
+    and the full `eq_indicator(r)` (2ⁿ GF128 ≈ 16 MB at nvars=16) is never built;
+  - the verifier threads the claim by `h(γ_i)` (Horner); the closing check is just
+    `a·b−c == claim` — the per-variable `eq` factors thread out, so the old
+    `eq_star = ∏ eq1(γ_j;r_j)` closing factor is gone.
+  Per-pair Phase-2 mults drop **24 → 6** (4 points × 6 muls → 3 evals × 2 muls),
+  plus one fewer table-fold and a half-size, mul-free eq update. Scheme-
+  independent: `MonomialScheme` (GF128) and `Gf8Scheme` share this Phase 2, so
+  both `Discharge-Oblong` arms benefit.
+- **Soundness / detection note**: the MLE-check has **no per-round consistency
+  rejection** (the recovered `c₀` always satisfies the round relation), so a
+  corrupt witness — a non-vanishing `R₀`, or tampered closing evals — now surfaces
+  at the closing `FinalCheck` rather than at round 0. `OblongError::RoundConsistency`
+  is removed; the corrupt-witness tests now assert `FinalCheck`. Same Gruen24
+  soundness as binius's production MLE-check (Schwartz–Zippel over the random γ).
+- **Measured discharge A/B** (Apple M4, `target-cpu=native`, `parallel simd
+  unchecked`, `f2_sha256` bench; back-to-back `git stash` A/B on one hot machine,
+  so the unchanged `Discharge-Fused` arm is the thermal-drift anchor):
+
+  | arm | nvars=16 before → after | nvars=20 before → after |
+  |---|---|---|
+  | Fused (unchanged anchor) | 491.9 → 441.7 ms (−10%, pure drift) | — (≈13 s; skipped) |
+  | **Oblong GF(2⁸)** | **74.7 → 57.9 ms** | **1.315 → 1.068 s** |
+  | Oblong GF128 | 145.7 → 121.4 ms | 2.65 → 2.68 s (noise) |
+
+  The **GF(2⁸) arm (the production candidate) is ~19–22% faster raw** — ~14% after
+  subtracting the −10% Fused-anchor drift at nvars=16, and a clean −19% at
+  nvars=20 (no usable Fused anchor there — it's ~13 s/iter). The **GF128 arm's win
+  is real but Phase-1-dominated**: its full-field NTT dwarfs Phase 2, so the
+  (scheme-independent) ~50% Phase-2 cut is only ~7% of total and sits inside the
+  ±8% CI at nvars=20 — visible at nvars=16 (−17% raw) but partly drift. Matches the
+  handoff's ~11% estimate; the proof also shrinks (2 vs 4 coeffs/round). All 11
+  poly + 9 protocol oblong tests green.
+- **Still untapped (the 2-eval prover)**: binius computes only `h(1), h(∞)` and
+  recovers `h(0)` from the threaded claim (2 evals not 3 → ~6→4 muls/pair), at the
+  cost of a per-round field inverse + prover-side claim tracking. Deferred for
+  prover simplicity (no inverse, no claim thread); a small further Phase-2 win.
+  SIMD-packed `Gf8` lanes remain the bigger (x86/GFNI-only) lever — see below.
+
 ### Oblong AND zerocheck — Phase D: batched all-16 discharge + GF(2⁸) + parallel → 5–11× vs fused (A/B)
 - **What**: the oblong discharge now covers **all 16 SHA relations in one
   zerocheck**, is **Fiat–Shamir**, and there's a **discharge A/B** vs the current
@@ -116,7 +168,8 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   a **64KB direct mul-table fetched once per kernel** to win (then 92→70.7 ms =
   1.30× same-mul; ~1.06× vs the prior log/antilog base). Modest on aarch64, larger
   with GFNI. **Still untapped**: SIMD-packed `Gf8` lanes (16-wide); the Gruen
-  eq-trick in Phase-2 (degree-2 round polys, no eq-table fold). 35 tests green.
+  eq-trick in Phase-2 (degree-2 round polys, no eq-table fold) — *the Gruen
+  eq-trick has since shipped; see the most-recent entry above*. 35 tests green.
 - **Remaining for the full Phase D**: (a) the **eq-split** (task #6) for the next
   speed step; (b) the **multipoint-eval binding** (task #7 part 2 — fold the ψ_z
   pair-evals into `f2_prove`, the production integration; doesn't change discharge

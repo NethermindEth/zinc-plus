@@ -35,10 +35,16 @@ sample_size 10. **Numbers drift with thermal state — these are a clean, cool r
 | 16 | ~395 ms | ~102 ms | **~70 ms** | **~5.6×** |
 | 20 | ~13 s   | ~1.6 s  | **~1.2 s** | **~11×** |
 
+**Post-Gruen** (Phase-2 eq-trick, task #2, now shipped — see below): a back-to-back
+hot-machine A/B drops the GF8 arm further to **~58 ms** (nvars=16) / **~1.07 s**
+(nvars=20), ~14–19% on top of the table above (the table is a separate cool run, so
+don't subtract the cells directly). Full A/B + drift caveats in the ledger.
+
 How we got there, compounding (newest last): word-packed representation (1.1–1.4×)
 → **GF(2⁸) swap** (`Gf8Scheme`, ~2×) → **parallelism** (the biggest single lever —
 the prover was single-threaded vs the parallel fused baseline) → **eq-split**
-(modest on aarch64; see the finding below).
+(modest on aarch64; see the finding below) → **Phase-2 Gruen eq-trick** (degree-2
+MLE-check, no eq-table fold; ~14–19% on the GF8 arm + smaller proof).
 
 **What the bench does NOT include**: the ψ_z tie, the PCS commit/open, the
 multipoint-eval — it is purely `prove_oblong_and_batch_gf8` on the trace columns.
@@ -104,7 +110,9 @@ nvars=9 workload single-threaded). Trust nvars=16/20.
 Phase A primitives · Phase B standalone prove/verify (accepts honest, rejects
 corrupt) · Phase C `ψ_z` tie (plain/shift/complement/Maj round-trips + mis-wiring
 rejected) · Fiat–Shamir · batched all-16 (ANDs + adders) · GF(2⁸) swap ·
-**parallelization** · eq-split. Commits `6660bff` → `3057190` on branch `f2-clean`.
+**parallelization** · eq-split · **Phase-2 Gruen eq-trick** (degree-2 MLE-check,
+no eq-table fold; proof 2 vs 4 coeffs/round). Commits `6660bff` → `3057190` (+ the
+Gruen eq-trick, working tree, pending commit) on branch `f2-clean`.
 
 ## NEXT STEPS, in priority order
 
@@ -124,17 +132,22 @@ checks them against in-memory columns. The real protocol must instead:
 - **Gate**: `Prove-Hadamard` e2e bench with the oblong discharge ≈ `Prove-NoHadamard`
   + ~70 ms instead of + ~390 ms. Add a `Prove-Hadamard-Oblong` bench arm.
 
-### 2. Gruen's eq-trick on Phase-2 (clean, portable speed + smaller proof)
-My Phase-2 is the naive form: degree-3 round polys (folds `eq` as a 4th table) +
-the full `eq_indicator(r)` materialised (2²⁰ GF128 ≈ 16 MB at nvars=16). Gruen
-factors `eq` out: send the degree-2 `h_i(t)=Σ_rest (a·b−c)(t,rest)` (3 evals),
-reconstruct `g_i = eq(t;r_i)·h_i` with a running `∏ eq(γ_j;r_j)` scalar. Drops the
-`eq` table (fold 3 not 4, no `eq_indicator` build), 3 evals/round not 4, **smaller
-proof**. Composes with the eq-split (the scalar just includes the deterministic
-small `r_i`). The fused discharge already does this (`piop` `MultiDegreeSumcheck`)
-— mirror it. Estimate ~70.7→~63 ms at nvars=16, grows at nvars=20. **Touch**: the
-Phase-2 in `oblong_and.rs` (`round_poly`, the fold loop, `verify_oblong_and_channel`
-round-consistency + closing) + the round-trip tests (proof shape changes).
+### 2. ✅ DONE — Gruen's eq-trick on Phase-2 (degree-2 MLE-check, smaller proof)
+**Shipped** (working tree; the ledger has the full entry + A/B). Replaced the naive
+degree-3 Phase-2 (folded `eq` as a 4th table + the full 2ⁿ `eq_indicator(r)`, ≈16 MB
+at nvars=16) with binius's eq-factored **MLE-check** (`quadratic_mle.rs` +
+`mlecheck.rs`): the prover ships the degree-2 prime poly
+`h(t)=Σ_rest (a·b−c)(t,rest)·eq_rest[rest]` truncated to `[c₁,c₂]` (the verifier
+recovers `c₀ = claim − r_i·(c₁+c₂)`), maintains only the half-size `eq_rest`
+(`sum_fold_low`, mul-free), folds **3 tables not 4**, and closes on `a·b−c == claim`
+(the `eq_star` factor threads out round by round). Result: **~14–19% on the GF8 arm**
+(the GF128 win is Phase-1-dominated, so smaller) + the **proof shrinks 4→2
+coeffs/round**. One behavioural change: there's no per-round consistency rejection
+anymore — a corrupt witness surfaces at `FinalCheck` (`OblongError::RoundConsistency`
+removed; the corrupt-witness tests now assert `FinalCheck`). **Deferred micro-opt**:
+binius's 2-eval prover (compute `h(1),h(∞)`, recover `h(0)` from the claim;
+~6→4 muls/pair) needs a per-round field inverse + prover claim-tracking — skipped
+for prover simplicity (no inverse, no claim thread).
 
 ### 3. Lower-value / hardware-specific
 - **SIMD packing** (`Gf8` 16-lane) — **blocked on aarch64** (no GFNI ⇒ no native
@@ -170,4 +183,6 @@ cargo test -p zinc-protocol --features "parallel simd unchecked" --lib f2_oblong
 `8677fae` Phase-C ψ_z tie · `7ed6318` Fiat–Shamir · `a50638a` batched ANDs ·
 `06077b3` +adders (all 16) · `1a0b09f` discharge bench · `a6e4780` GF(2⁸) swap ·
 `39ebc1d` **parallelize** · `9149b91` eq-split + 64KB mul-table (+ interleaved
-`docs(...)` commits). All work is in the 7 files listed under "Code map".
+`docs(...)` commits) · **Phase-2 Gruen eq-trick** (working tree, pending commit —
+Phase-2 rewrite in `oblong_and.rs` + corrupt-witness test updates there and in
+`f2_oblong_hadamard.rs`). All work is in the 7 files listed under "Code map".
