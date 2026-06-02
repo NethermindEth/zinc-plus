@@ -213,6 +213,35 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   - **Perf note (still applies)**: one open, one extra (z-)multipoint sumcheck, no
     second Merkle path — the sound oblong path should stay near the ~54 ms measured
     rather than ~doubling the open.
+- **Implementation findings for the prover/verifier wiring (c)/(d), from tracing
+  `prove_as_subprotocol_with_pointed_shifts` + `prove_f2_full_impl`** — these set the
+  real shape; record so the next push doesn't rediscover them:
+  1. **Multipoint `up_evals` is strictly 1:1 with `trace_mles`** (the `precombined`
+     MLE γ-combines every col; no "down-only" columns). So the z-projected discharge
+     cols must be **appended to `trace_mles` with `ψ_z(col)(r*)` up-evals**, reduced to
+     r_0 with everything and bound there. Append only the **distinct cols referenced by
+     `and_specs`** (~5 for SHA), not all ~41 — small extra cost.
+  2. **New shipped proof fields** (beyond today's `F2FullProof`): the **z up-evals**
+     `ψ_z(col)(r*)` (verifier can't recompute them without the trace — same reason
+     `column_evals_at_rstar` is shipped), the **z r_0-evals** (extend
+     `open_evals_at_r_0`), the **trusted adder parents**, and the `OblongAndProof`. So
+     the e2e oblong path returns a **wrapper proof**, not a bare `F2FullProof`.
+  3. **Transcript order**: discharge (draws z,γ) runs *before* uair (current code);
+     but the **z up-evals need both z and r***, so they're computed **after uair, before
+     the multipoint challenges**, and absorbed there (mirrors the `column_evals_at_rstar`
+     absorb). The z r_0-evals ride the existing `open_evals_at_r_0` absorb.
+  4. **Architecture decision: a self-contained `prove_f2_full_oblong_impl`, NOT a
+     generalized `prove_f2_full_impl`.** Threading the z up-evals (needs r*, only
+     available *inside* the impl) + the extra return data across a generalization
+     boundary is awkward and touches all 4 main callers' return handling; duplicating
+     the ~120-line multipoint+open section into an isolated oblong impl is safer (zero
+     risk to the main path) and keeps the oblong-specific transcript ordering local.
+  5. **Scheme**: z-weights are `Gf8Scheme::new().base_lagrange(z)` (embed(H₈)), not
+     `base_lagrange_at(z)` (monomial) — match `verify_oblong_and_batch_gf8`.
+  - **Status**: (a) shipped (`91eebec`); (b) resolved (AND-only, adders trusted); the
+    remaining (c)+(d) is **one indivisible ~250-300-line soundness-critical push**
+    (prover impl + wrapper proof struct + verifier + round-trip test) — it only becomes
+    meaningfully green once the round-trip validates, so it lands as a unit.
 
 ### Oblong AND zerocheck — Phase-2 Gruen eq-trick: degree-2 MLE-check, no eq-table fold (working tree)
 - **What**: replaced the Phase-2 sumcheck of the oblong discharge
