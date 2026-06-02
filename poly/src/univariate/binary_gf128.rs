@@ -1160,10 +1160,20 @@ pub fn gf128poly_accumulate_cell<const D: usize>(
     cell: &BinaryPoly<D>,
     s: BinaryFieldGF128,
 ) {
-    let mut bits = cell.pack_u64();
+    gf128poly_accumulate_bits::<D>(acc, cell.pack_u64(), s);
+}
+
+/// `acc += s·(bits viewed as a degree-`<D` bit-poly)`: scatter the `GF(2^128)`
+/// scalar `s` into the set-bit positions of the raw `u64` `bits` (bits `≥ D`
+/// must be clear). Same as [`gf128poly_accumulate_cell`] but for callers (the
+/// verifier's per-column proximity) holding the cells as raw `u64` halves.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn gf128poly_accumulate_bits<const D: usize>(acc: &mut GF128Poly<D>, mut bits: u64, s: BinaryFieldGF128) {
     while bits != 0 {
         let b = bits.trailing_zeros() as usize;
         bits &= bits - 1;
+        debug_assert!(b < D);
         acc.coeffs[b] += s;
     }
 }

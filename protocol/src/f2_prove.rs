@@ -1926,12 +1926,16 @@ where
 // not on a hot path for any current workload.
 #[derive(Clone, Debug)]
 pub struct F2OpenProof<const D: usize> {
-    /// `a' = Σ_g γ_g · a_g' ∈ F_2[X]`.
-    pub lifted_claim: BinaryF2Poly<7>,
-    /// `b'[i] = Σ_g γ_g · b_g[i]`. `num_rows` entries.
-    pub b_vector: Vec<BinaryF2Poly<5>>,
-    /// `combined_row'[j] = Σ_g γ_g · combined_row_g[j]`. `row_len` entries.
-    pub combined_row: Vec<BinaryF2Poly<5>>,
+    /// `a' = Σ_g γ_g · a_g' ∈ GF(2^128)[X]<D>`, the γ-batched bit-slice
+    /// coefficient claim (`a_g' = Σ_b MLE[col_g bit-slice b](r_0)·X^b`). The
+    /// un-lifted open keeps the eq-tensor in `GF(2^128)`, so the claim is this
+    /// clean degree-`<D` polynomial — `ψ_α(a') = Σ_b a'_b·α^b` (the main column
+    /// evals) and `ψ_z` (the discharge) are both read off its coefficients.
+    pub lifted_claim: zinc_poly::univariate::binary_gf128::GF128Poly<D>,
+    /// `b'[i] = Σ_g γ_g · b_g[i] ∈ GF(2^128)[X]<D>`. `num_rows` entries.
+    pub b_vector: Vec<zinc_poly::univariate::binary_gf128::GF128Poly<D>>,
+    /// `combined_row'[j] = Σ_g γ_g · combined_row_g[j] ∈ GF(2^128)[X]<D>`. `row_len` entries.
+    pub combined_row: Vec<zinc_poly::univariate::binary_gf128::GF128Poly<D>>,
     /// One entry per opened codeword column. Each entry holds the
     /// column's `batch_size · num_rows` codeword cells (concatenated
     /// per-poly in commit order) plus a Merkle proof.
@@ -2260,6 +2264,57 @@ pub fn build_lifted_eq_tensor(
     (q0, q1)
 }
 
+/// **Un-lifted** eq-tensor for the GF(2^128)[X]<D> open: the two halves
+/// `(q0, q1)` of `eq(·; point)` kept in `GF(2^128)` (NOT lifted to F_2[X] via
+/// `AlphaPolyBasis`). The un-lifted open multiplies these `GF(2^128)` scalars
+/// into the `{0,1}` cell bits, so the per-column claim is the bit-slice
+/// coefficient vector `Σ_b c_b·X^b` directly — from which both `ψ_α` and `ψ_z`
+/// are read. No `M_α⁻¹` lift.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_eq_tensor_gf128(
+    num_rows: usize,
+    point: &[BinaryFieldGF128],
+) -> (Vec<BinaryFieldGF128>, Vec<BinaryFieldGF128>) {
+    assert!(num_rows.is_power_of_two());
+    let split = point.len() - (num_rows.ilog2() as usize);
+    let (hi, lo) = point.split_at(split);
+    let field_cfg = ();
+    let q0 = if !lo.is_empty() {
+        zinc_poly::utils::build_eq_x_r_vec(lo, &field_cfg).expect("build_eq_x_r_vec on lo")
+    } else {
+        vec![BinaryFieldGF128::one()]
+    };
+    let q1 = if !hi.is_empty() {
+        zinc_poly::utils::build_eq_x_r_vec(hi, &field_cfg).expect("build_eq_x_r_vec on hi")
+    } else {
+        vec![BinaryFieldGF128::one()]
+    };
+    (q0, q1)
+}
+
+/// Absorb a slice of `GF128Poly<D>` (the un-lifted open's `b`-vector /
+/// combined-row / `a'`) into the transcript: flatten each poly's `D`
+/// `GF(2^128)` coefficients to little-endian bytes, then one `absorb_slice`.
+/// Mirrors [`absorb_f2_poly_slice`] for the `GF(2^128)`-coefficient type.
+pub fn absorb_gf128_poly_slice<'a, const D: usize, I>(transcript: &mut impl Transcript, iter: I)
+where
+    I: IntoIterator<Item = &'a zinc_poly::univariate::binary_gf128::GF128Poly<D>>,
+{
+    let polys: Vec<_> = iter.into_iter().collect();
+    if polys.is_empty() {
+        return;
+    }
+    let mut buf = Vec::with_capacity(polys.len() * D * 16);
+    for p in &polys {
+        for c in p.coeffs.iter() {
+            for w in c.words() {
+                buf.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+    }
+    transcript.absorb_slice(&buf);
+}
+
 impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
 where
     Zt: F2ZincTypes<D>,
@@ -2297,19 +2352,25 @@ where
         let num_cols = trace_binary_cols.len();
         assert!(num_rows.is_power_of_two());
 
-        let basis = zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(alpha);
-        let (q0, q1) = build_lifted_eq_tensor(num_rows, sumcheck_point, &basis);
+        // Un-lifted open: eq-tensor stays in GF(2^128) (no AlphaPolyBasis M_α⁻¹
+        // lift), so the per-column claim is the clean bit-slice coefficient
+        // vector `a_g' = Σ_b c_b·X^b`. `alpha` is the verifier's projection
+        // challenge (ψ_α = Σ_b c_b·α^b, read off `a'`); the prover doesn't use it.
+        use num_traits::Zero;
+        use zinc_poly::univariate::F2AddAssign;
+        use zinc_poly::univariate::binary_gf128::{
+            GF128Poly, gf128poly_accumulate_cell, gf128poly_accumulate_scaled,
+        };
+        let _ = alpha;
+        let (q0, q1) = build_eq_tensor_gf128(num_rows, sumcheck_point);
         debug_assert_eq!(q1.len(), row_len);
         debug_assert_eq!(q0.len(), num_rows);
 
         // -- Step 7.1: γ_g challenges (one per committed column) ---
-        // Drawn early so a', b', combined_row' depend on γ. (γ is
-        // the only cross-column entropy in the open; coeffs comes
-        // later for proximity.)
-        let gamma_gf: Vec<BinaryFieldGF128> =
+        // Drawn early so a', b', combined_row' depend on γ. γ stays in GF(2^128)
+        // (no lift) — it scales the bit-slice coefficient claims.
+        let gamma: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_cols, &());
-        let gamma: Vec<BinaryF2Poly<2>> =
-            gamma_gf.iter().map(|g| basis.lift(g)).collect();
 
         // -- Step 7.2: per-column intermediates, folded into b'/a'.
         //
@@ -2325,7 +2386,7 @@ where
         // partial `(b_g, a_g_scaled)` results, then merge serially.
         // The per-row work within a column stays sequential (row_len
         // is small in the deployed shape).
-        let per_col_results: Vec<(Vec<BinaryF2Poly<5>>, BinaryF2Poly<7>)> =
+        let per_col_results: Vec<(Vec<GF128Poly<D>>, GF128Poly<D>)> =
             cfg_iter!(trace_binary_cols)
                 .enumerate()
                 .map(|(g, col)| {
@@ -2335,131 +2396,96 @@ where
                         "trace column evaluation count must equal num_rows × row_len"
                     );
 
-                    let mut b_g_scaled: Vec<BinaryF2Poly<5>> =
-                        Vec::with_capacity(num_rows);
-                    let mut b_g: Vec<BinaryF2Poly<3>> = Vec::with_capacity(num_rows);
+                    let mut b_g_scaled: Vec<GF128Poly<D>> = Vec::with_capacity(num_rows);
+                    let mut b_g: Vec<GF128Poly<D>> = Vec::with_capacity(num_rows);
                     for i in 0..num_rows {
-                        let row_slice =
-                            &col.evaluations[i * row_len..(i + 1) * row_len];
-                        let row_lifted: Vec<BinaryF2Poly<1>> = row_slice
-                            .iter()
-                            .map(
-                                zinc_poly::univariate::binary_gf128::lift_bp_to_f2_poly_1::<D>,
-                            )
-                            .collect();
-                        let entry: BinaryF2Poly<3> =
-                            zinc_poly::univariate::binary_f2_wide::f2_inner_product::<1, 2, 3>(
-                                &row_lifted, &q1,
-                            );
+                        let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
+                        // b_g[i] = Σ_j q1[j]·cell[i,j]: scatter each GF(2^128)
+                        // eq-weight into the cell's set-bit coefficient slots.
+                        let mut entry = GF128Poly::<D>::zero();
+                        for (cell, &qj) in row_slice.iter().zip(q1.iter()) {
+                            gf128poly_accumulate_cell::<D>(&mut entry, cell, qj);
+                        }
                         // γ_g · b_g[i], to be merged into b'[i].
-                        let scaled: BinaryF2Poly<5> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 3, 5>(
-                                &gamma[g], &entry,
-                            );
+                        let mut scaled = GF128Poly::<D>::zero();
+                        gf128poly_accumulate_scaled::<D>(&mut scaled, &entry, gamma[g]);
                         b_g_scaled.push(scaled);
                         b_g.push(entry);
                     }
 
-                    let a_g_prime: BinaryF2Poly<5> =
-                        zinc_poly::univariate::binary_f2_wide::f2_inner_product::<2, 3, 5>(
-                            &q0, &b_g,
-                        );
+                    // a_g' = Σ_i q0[i]·b_g[i] = Σ_b MLE[col bit-slice b](r_0)·X^b.
+                    let mut a_g_prime = GF128Poly::<D>::zero();
+                    for (bg, &qi) in b_g.iter().zip(q0.iter()) {
+                        gf128poly_accumulate_scaled::<D>(&mut a_g_prime, bg, qi);
+                    }
                     // γ_g · a_g', to be merged into a'.
-                    let a_scaled: BinaryF2Poly<7> =
-                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
-                            &gamma[g], &a_g_prime,
-                        );
+                    let mut a_scaled = GF128Poly::<D>::zero();
+                    gf128poly_accumulate_scaled::<D>(&mut a_scaled, &a_g_prime, gamma[g]);
                     (b_g_scaled, a_scaled)
                 })
                 .collect();
 
-        // Serial merge: ~`num_cols` u64 XORs per row. Cheap.
-        let mut b_prime: Vec<BinaryF2Poly<5>> =
-            vec![BinaryF2Poly::<5>::zero(); num_rows];
-        let mut a_prime: BinaryF2Poly<7> = BinaryF2Poly::<7>::zero();
+        // Serial merge into the γ-batched b'/a' (coefficient-wise GF(2^128) add).
+        let mut b_prime: Vec<GF128Poly<D>> = vec![GF128Poly::<D>::zero(); num_rows];
+        let mut a_prime = GF128Poly::<D>::zero();
         for (b_g_scaled, a_scaled) in per_col_results {
             for i in 0..num_rows {
-                b_prime[i] += b_g_scaled[i].clone();
+                b_prime[i].f2_add_assign(&b_g_scaled[i]);
             }
-            a_prime += a_scaled;
+            a_prime.f2_add_assign(&a_scaled);
         }
 
         // Absorb (b', a') into the transcript so subsequent challenges
         // depend on them.
-        absorb_f2_poly_slice::<5, _>(transcript, b_prime.iter());
-        absorb_f2_poly_slice::<7, _>(transcript, core::iter::once(&a_prime));
+        absorb_gf128_poly_slice::<D, _>(transcript, b_prime.iter());
+        absorb_gf128_poly_slice::<D, _>(transcript, core::iter::once(&a_prime));
 
         // -- Step 7.3: proximity coefficients ----------------------
-        let coeffs_gf: Vec<BinaryFieldGF128> =
+        // GF(2^128) (no lift) — they weight the per-row bit-slice contributions.
+        let coeffs: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_rows, &());
-        let coeffs: Vec<BinaryF2Poly<2>> =
-            coeffs_gf.iter().map(|g| basis.lift(g)).collect();
 
         // -- Step 7.4: combined_row' = Σ_g γ_g · (Σ_i coeffs[i] · M_w_g[i, *])
         //
         // Parallelise across the outer (g) loop: each column produces
         // an independent length-`row_len` contribution to
         // `combined_row`. Merge serially.
-        let per_col_combined: Vec<Vec<BinaryF2Poly<5>>> = cfg_iter!(trace_binary_cols)
+        let per_col_combined: Vec<Vec<GF128Poly<D>>> = cfg_iter!(trace_binary_cols)
             .enumerate()
             .map(|(g, col)| {
-                // Loop-reorder: outer over `i` (rows), inner over `j`
-                // (codeword positions). The original (j outer, i inner)
-                // order read `col.evaluations[i * row_len + j]` with a
-                // `row_len`-stride between successive `i` values. At
-                // nvars=20 `row_len = 131072` and `BinaryPoly<32>` is
-                // 4 bytes, so the stride is 512 KB — well past what the
-                // hardware prefetcher tracks and well past the per-row
-                // working set the L1 can hold. Flipping the loops makes
-                // the read pattern sequential within each row pass and
-                // also keeps `coeffs[i]` in registers across the inner
-                // `j` loop instead of reloading it every (i, j) pair.
-                //
-                // Accumulate per-`j` partials in `col_partial` (W=4),
-                // then a final pass multiplies each by `γ_g` (W=7).
-                // Same total work, dramatically better cache + register
-                // behaviour at large `nvars`.
-                let mut col_partial: Vec<BinaryF2Poly<3>> =
-                    vec![BinaryF2Poly::<3>::zero(); row_len];
+                // Loop-reorder (outer `i` rows, inner `j` codeword positions) for
+                // sequential reads + `coeffs[i]` in registers — as in the lifted
+                // path, but accumulating GF(2^128)[X]<D> bit-slice partials.
+                let mut col_partial: Vec<GF128Poly<D>> =
+                    vec![GF128Poly::<D>::zero(); row_len];
                 for i in 0..num_rows {
-                    let row_slice =
-                        &col.evaluations[i * row_len..(i + 1) * row_len];
-                    let coeff_i = &coeffs[i];
+                    let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
+                    let coeff_i = coeffs[i];
                     for j in 0..row_len {
-                        let cell =
-                            zinc_poly::univariate::binary_gf128::lift_bp_to_f2_poly_1::<D>(
-                                &row_slice[j],
-                            );
-                        let prod: BinaryF2Poly<3> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
-                                &cell, coeff_i,
-                            );
-                        col_partial[j] += prod;
+                        // col_partial[j] += coeffs[i]·cell[i,j]  (scatter the bits)
+                        gf128poly_accumulate_cell::<D>(&mut col_partial[j], &row_slice[j], coeff_i);
                     }
                 }
-                // Apply `γ_g` in a separate pass over `col_partial`.
-                // Reads stride 1, writes stride 1, kernel is identical
-                // per `j` — easy to keep `gamma[g]` in registers.
+                // Apply γ_g in a separate pass.
                 col_partial
                     .into_iter()
                     .map(|entry| {
-                        zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 3, 5>(
-                            &gamma[g], &entry,
-                        )
+                        let mut scaled = GF128Poly::<D>::zero();
+                        gf128poly_accumulate_scaled::<D>(&mut scaled, &entry, gamma[g]);
+                        scaled
                     })
-                    .collect::<Vec<BinaryF2Poly<5>>>()
+                    .collect::<Vec<GF128Poly<D>>>()
             })
             .collect();
 
-        let mut combined_row: Vec<BinaryF2Poly<5>> =
-            vec![BinaryF2Poly::<5>::zero(); row_len];
+        let mut combined_row: Vec<GF128Poly<D>> = vec![GF128Poly::<D>::zero(); row_len];
         for col_contrib in per_col_combined {
             for j in 0..row_len {
-                combined_row[j] += col_contrib[j].clone();
+                combined_row[j].f2_add_assign(&col_contrib[j]);
             }
         }
 
-        absorb_f2_poly_slice::<5, _>(transcript, combined_row.iter());
+        absorb_gf128_poly_slice::<D, _>(transcript, combined_row.iter());
 
         // -- Step 7.5: sample column indices + Merkle opens --------
         //
@@ -2615,32 +2641,26 @@ where
         }
 
         // -- Re-derive γ_g ----------------------------------------
-        let basis =
-            zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(&subclaim.alpha);
-        let (q0, q1) = build_lifted_eq_tensor(num_rows, &subclaim.sumcheck_point, &basis);
-        let gamma_gf: Vec<BinaryFieldGF128> =
-            transcript.get_field_challenges(num_cols, &());
-        let gamma: Vec<BinaryF2Poly<2>> =
-            gamma_gf.iter().map(|g| basis.lift(g)).collect();
+        // Un-lifted open: eq-tensor stays in GF(2^128); the per-column claim a'
+        // is the bit-slice coefficient vector, ψ_α read off it (Check 2 below).
+        use num_traits::Zero;
+        use zinc_poly::univariate::binary_gf128::{
+            GF128Poly, gf128poly_accumulate_bits, gf128poly_accumulate_scaled, gf128poly_project,
+        };
+        let alpha_pows = zinc_poly::univariate::binary_gf128::alpha_powers(&subclaim.alpha, D);
+        let (q0, q1) = build_eq_tensor_gf128(num_rows, &subclaim.sumcheck_point);
+        let gamma: Vec<BinaryFieldGF128> = transcript.get_field_challenges(num_cols, &());
 
         // Absorb (b', a') as the prover did.
-        absorb_f2_poly_slice::<5, _>(transcript, proof.b_vector.iter());
-        absorb_f2_poly_slice::<7, _>(
-            transcript,
-            core::iter::once(&proof.lifted_claim),
-        );
+        absorb_gf128_poly_slice::<D, _>(transcript, proof.b_vector.iter());
+        absorb_gf128_poly_slice::<D, _>(transcript, core::iter::once(&proof.lifted_claim));
 
-        // -- Check 1: evaluation consistency in F_2[X] -------------
-        //    Σ_i q_0[i] · b'[i]  =  a'.
-        let recomputed_a_prime: BinaryF2Poly<7> = {
-            let mut acc = BinaryF2Poly::<7>::zero();
+        // -- Check 1: evaluation consistency ----------------------
+        //    Σ_i q_0[i] · b'[i]  =  a'   (in GF(2^128)[X]<D>).
+        let recomputed_a_prime: GF128Poly<D> = {
+            let mut acc = GF128Poly::<D>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<7> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
-                        &q0[i],
-                        &proof.b_vector[i],
-                    );
-                acc += prod;
+                gf128poly_accumulate_scaled::<D>(&mut acc, &proof.b_vector[i], q0[i]);
             }
             acc
         };
@@ -2648,16 +2668,12 @@ where
             return Err(F2OpenError::EvalConsistency);
         }
 
-        // -- Check 2: lift discharge in GF(2^128) ------------------
-        //    ψ_α(a')  =  Σ_g γ_g_gf · a_g  (g ranges over WITNESS
-        // primary cols only — public cols aren't in this batch).
-        let psi = zinc_poly::univariate::binary_gf128::eval_f2_wide_poly_at::<7>(
-            &proof.lifted_claim,
-            &subclaim.alpha,
-        );
+        // -- Check 2: ψ_α projection discharge in GF(2^128) --------
+        //    ψ_α(a') = Σ_b a'_b·α^b  =  Σ_g γ_g · a_g   (witness cols only).
+        let psi = gf128poly_project::<D>(&proof.lifted_claim, &alpha_pows);
         let mut expected = BinaryFieldGF128::zero();
         for g in 0..num_cols {
-            let mut term = gamma_gf[g];
+            let mut term = gamma[g];
             term *= &witness_primary_evals[g];
             expected += &term;
         }
@@ -2669,37 +2685,22 @@ where
         }
 
         // -- Re-derive coeffs + absorb combined_row ---------------
-        let coeffs_gf: Vec<BinaryFieldGF128> =
-            transcript.get_field_challenges(num_rows, &());
-        let coeffs: Vec<BinaryF2Poly<2>> =
-            coeffs_gf.iter().map(|g| basis.lift(g)).collect();
-        absorb_f2_poly_slice::<5, _>(transcript, proof.combined_row.iter());
+        let coeffs: Vec<BinaryFieldGF128> = transcript.get_field_challenges(num_rows, &());
+        absorb_gf128_poly_slice::<D, _>(transcript, proof.combined_row.iter());
 
         // -- Check 3: coherence ------------------------------------
-        //    <combined_row', q_1>  =  <coeffs, b'>  in F_2[X]<10>.
-        // `q1` (W=3) is ~96 set bits vs `combined_row` (W=7) at ~224
-        // — pass the smaller as `a` to minimise schoolbook iterations.
-        let lhs: BinaryF2Poly<7> = {
-            let mut acc = BinaryF2Poly::<7>::zero();
+        //    <combined_row', q_1>  =  <coeffs, b'>   (in GF(2^128)[X]<D>).
+        let lhs: GF128Poly<D> = {
+            let mut acc = GF128Poly::<D>::zero();
             for j in 0..row_len {
-                let prod: BinaryF2Poly<7> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
-                        &q1[j],
-                        &proof.combined_row[j],
-                    );
-                acc += prod;
+                gf128poly_accumulate_scaled::<D>(&mut acc, &proof.combined_row[j], q1[j]);
             }
             acc
         };
-        let rhs: BinaryF2Poly<7> = {
-            let mut acc = BinaryF2Poly::<7>::zero();
+        let rhs: GF128Poly<D> = {
+            let mut acc = GF128Poly::<D>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<7> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
-                        &coeffs[i],
-                        &proof.b_vector[i],
-                    );
-                acc += prod;
+                gf128poly_accumulate_scaled::<D>(&mut acc, &proof.b_vector[i], coeffs[i]);
             }
             acc
         };
@@ -2715,9 +2716,9 @@ where
         // Public columns are not part of this equation — the verifier
         // validates their MLE evals at r* upstream from `public_trace`
         // (in `verify_f2_full_with_bit_ops`), not via this open.
-        let encoded: Vec<BinaryF2Poly<5>> = pp
+        let encoded: Vec<GF128Poly<D>> = pp
             .linear_code
-            .encode_f2_lin_open::<5>(&proof.combined_row);
+            .encode_gf128_lin_open::<D>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
         // γ is witness-local: gamma[g] corresponds to the g-th
@@ -2826,15 +2827,13 @@ where
                 let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
                 let local_col = &opened.column_values
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
-                let mut weighted_col: Vec<BinaryF2Poly<3>> =
-                    vec![BinaryF2Poly::<3>::zero(); num_rows];
+                let mut weighted_col: Vec<GF128Poly<D>> =
+                    vec![GF128Poly::<D>::zero(); num_rows];
 
-                // Witness primary + bit-op virtual contributions:
-                // cells from the opened paired storage matrices.
-                // γ is witness-local: gamma[wit_local_*] / gamma[spec.col_idx]
-                // index witness cols directly (no public offset).
-                // Public columns aren't in this batch; their MLE evals
-                // at r* are validated upstream from `public_trace`.
+                // Witness primary + bit-op virtual contributions: cells from the
+                // opened paired storage. γ is witness-local (gamma[wit_local_*] /
+                // gamma[spec.col_idx]). Public columns aren't in this batch. The
+                // un-lifted form scatters each GF(2^128) γ into the cell's set bits.
                 for p in 0..paired_primary_count {
                     let wit_local_lo = primary_witness_indices[2 * p];
                     let wit_local_hi_opt: Option<usize> =
@@ -2843,55 +2842,35 @@ where
                         let packed_bits = local_col[p * num_rows + i].pack_u64();
                         let lo_cell = packed_bits & lo_mask;
 
-                        // Primary lo contribution.
-                        let lo_lifted = BinaryF2Poly::<1>::from_words([lo_cell]);
-                        let prod_lo: BinaryF2Poly<3> =
-                            zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
-                                &lo_lifted, &gamma[wit_local_lo],
-                            );
-                        weighted_col[i] += prod_lo;
+                        // Primary lo contribution: weighted_col[i] += γ·lo_cell.
+                        gf128poly_accumulate_bits::<D>(&mut weighted_col[i], lo_cell, gamma[wit_local_lo]);
 
-                        // Virtual contributions sourced from this lo
-                        // primary cell (witness-local source idx).
+                        // Virtual contributions sourced from this lo primary cell.
                         for spec in &virtuals_by_source[wit_local_lo] {
                             let v_cell = apply_bit_op_u32(lo_cell, spec.op);
-                            let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
-                            let prod_v: BinaryF2Poly<3> =
-                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
-                                    &v_lifted, &gamma[spec.col_idx],
-                                );
-                            weighted_col[i] += prod_v;
+                            gf128poly_accumulate_bits::<D>(&mut weighted_col[i], v_cell, gamma[spec.col_idx]);
                         }
 
                         if let Some(wit_local_hi) = wit_local_hi_opt {
                             let hi_cell = packed_bits >> 32;
                             // Primary hi contribution.
-                            let hi_lifted = BinaryF2Poly::<1>::from_words([hi_cell]);
-                            let prod_hi: BinaryF2Poly<3> =
-                                zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
-                                    &hi_lifted, &gamma[wit_local_hi],
-                                );
-                            weighted_col[i] += prod_hi;
+                            gf128poly_accumulate_bits::<D>(&mut weighted_col[i], hi_cell, gamma[wit_local_hi]);
 
-                            // Virtual contributions sourced from this hi
-                            // primary cell.
+                            // Virtual contributions sourced from this hi primary cell.
                             for spec in &virtuals_by_source[wit_local_hi] {
                                 let v_cell = apply_bit_op_u32(hi_cell, spec.op);
-                                let v_lifted = BinaryF2Poly::<1>::from_words([v_cell]);
-                                let prod_v: BinaryF2Poly<3> =
-                                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<1, 2, 3>(
-                                        &v_lifted, &gamma[spec.col_idx],
-                                    );
-                                weighted_col[i] += prod_v;
+                                gf128poly_accumulate_bits::<D>(&mut weighted_col[i], v_cell, gamma[spec.col_idx]);
                             }
                         }
                     }
                 }
-                let actual_at_j: BinaryF2Poly<5> =
-                    zinc_poly::univariate::binary_f2_wide::f2_inner_product::<2, 3, 5>(
-                        &coeffs,
-                        &weighted_col,
-                    );
+                let actual_at_j: GF128Poly<D> = {
+                    let mut acc = GF128Poly::<D>::zero();
+                    for i in 0..num_rows {
+                        gf128poly_accumulate_scaled::<D>(&mut acc, &weighted_col[i], coeffs[i]);
+                    }
+                    acc
+                };
                 if actual_at_j != encoded[opened.column_idx] {
                     return Err(F2OpenError::EncodingConsistency {
                         column_idx: opened.column_idx,
@@ -4761,9 +4740,8 @@ mod tests {
         );
 
         // Flip the lowest bit of the (γ-batched) lifted claim a'.
-        let mut tampered_words = *open_proof.lifted_claim.words();
-        tampered_words[0] ^= 1;
-        open_proof.lifted_claim = BinaryF2Poly::<7>::from_words(tampered_words);
+        open_proof.lifted_claim.coeffs[0] =
+            open_proof.lifted_claim.coeffs[0] + BinaryFieldGF128::one();
 
         let mut open_vt = Blake3Transcript::new();
         ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::absorb_commitment(&mut open_vt, &comm);
@@ -4864,29 +4842,16 @@ mod tests {
         //     the genuine M_w while b' now isn't; or
         //   - the lift discharge ψ_α(a') = Σ_g γ_g · a_g fails, because
         //     the rebased a' projects to a different GF(2^128) value.
-        let mut tampered_b = *open_proof.b_vector[0].words();
-        tampered_b[0] ^= 1;
-        open_proof.b_vector[0] = BinaryF2Poly::<5>::from_words(tampered_b);
-        // Re-derive a' = Σ_i q_0[i] · b'[i] over F_2[X]<10>.
-        let basis = zinc_poly::univariate::binary_gf128::AlphaPolyBasis::new(&subclaim.alpha);
-        let (q0, _q1) = {
-            let split = subclaim.sumcheck_point.len() - (num_rows.ilog2() as usize);
-            let (hi, lo) = subclaim.sumcheck_point.split_at(split);
-            let q0_gf = zinc_poly::utils::build_eq_x_r_vec(lo, &()).unwrap();
-            let q1_gf = zinc_poly::utils::build_eq_x_r_vec(hi, &()).unwrap();
-            let q0: Vec<BinaryF2Poly<2>> = q0_gf.iter().map(|g| basis.lift(g)).collect();
-            let q1: Vec<BinaryF2Poly<2>> = q1_gf.iter().map(|g| basis.lift(g)).collect();
-            (q0, q1)
-        };
+        open_proof.b_vector[0].coeffs[0] =
+            open_proof.b_vector[0].coeffs[0] + BinaryFieldGF128::one();
+        // Re-derive a' = Σ_i q_0[i] · b'[i] in GF(2^128)[X]<D> (un-lifted open).
+        use num_traits::Zero;
+        use zinc_poly::univariate::binary_gf128::{GF128Poly, gf128poly_accumulate_scaled};
+        let (q0, _q1) = build_eq_tensor_gf128(num_rows, &subclaim.sumcheck_point);
         open_proof.lifted_claim = {
-            let mut acc = BinaryF2Poly::<7>::zero();
+            let mut acc = GF128Poly::<D>::zero();
             for i in 0..num_rows {
-                let prod: BinaryF2Poly<7> =
-                    zinc_poly::univariate::binary_f2_wide::f2_poly_mul::<2, 5, 7>(
-                        &q0[i],
-                        &open_proof.b_vector[i],
-                    );
-                acc += prod;
+                gf128poly_accumulate_scaled::<D>(&mut acc, &open_proof.b_vector[i], q0[i]);
             }
             acc
         };
@@ -5040,9 +5005,8 @@ mod tests {
         .expect("prove should succeed");
 
         // Flip a bit in a'.
-        let mut tampered = *proof.open.lifted_claim.words();
-        tampered[0] ^= 1;
-        proof.open.lifted_claim = BinaryF2Poly::<7>::from_words(tampered);
+        proof.open.lifted_claim.coeffs[0] =
+            proof.open.lifted_claim.coeffs[0] + BinaryFieldGF128::one();
 
         let mut vt = Blake3Transcript::new();
         let err = ZincPlusPiopF2::<F2Types<D>, TinyF2Uair, D>::verify_f2_full(
