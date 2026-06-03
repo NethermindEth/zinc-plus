@@ -515,8 +515,6 @@ where
     clippy::cast_sign_loss
 )]
 mod tests {
-    use crate::utils::{build_eq_x_r, build_eq_x_r_vec};
-
     use super::*;
 
     use crypto_primitives::{
@@ -551,53 +549,6 @@ mod tests {
                 DenseMultilinearExtension::from_evaluations_vec(n, evals, F::zero_with_cfg(&cfg))
             })
         })
-    }
-
-    #[test]
-    fn test_build_eq_x_r_vec_basic() {
-        let cfg = get_dyn_config(MODULUS);
-        let r: [F; _] = [3_u64.into_with_cfg(&cfg)];
-        let evals = build_eq_x_r_vec(&r, &cfg).unwrap();
-        assert_eq!(
-            evals,
-            vec![F::one_with_cfg(&cfg) - r[0].clone(), r[0].clone()]
-        );
-    }
-
-    #[test]
-    fn test_build_eq_x_r_vec_two_vars() {
-        let cfg = get_dyn_config(MODULUS);
-        let r: [F; _] = [2u64.into_with_cfg(&cfg), 5u64.into_with_cfg(&cfg)];
-        let evals = build_eq_x_r_vec(&r, &cfg).unwrap();
-        let e00 = (F::one_with_cfg(&cfg) - r[0].clone()) * (F::one_with_cfg(&cfg) - r[1].clone());
-        let e01 = r[0].clone() * (F::one_with_cfg(&cfg) - r[1].clone());
-        let e10 = (F::one_with_cfg(&cfg) - r[0].clone()) * r[1].clone();
-        let e11 = r[0].clone() * r[1].clone();
-        assert_eq!(evals, vec![e00, e01, e10, e11]);
-    }
-
-    #[test]
-    fn test_build_eq_x_r_error_on_empty() {
-        let cfg = get_dyn_config(MODULUS);
-        let r: [F; 0] = [];
-        let err = build_eq_x_r_vec(&r, &cfg).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("Invalid parameters"));
-    }
-
-    #[test]
-    fn test_build_eq_x_r_mle_properties() {
-        let cfg = get_dyn_config(MODULUS);
-        let r: [F; _] = [
-            7u64.into_with_cfg(&cfg),
-            11u64.into_with_cfg(&cfg),
-            13u64.into_with_cfg(&cfg),
-        ];
-        let mle = build_eq_x_r(&r, &cfg).unwrap();
-        assert_eq!(mle.num_vars, r.len());
-        let evals = mle.evaluations;
-        let direct = build_eq_x_r_vec(&r, &cfg).unwrap();
-        assert_eq!(evals, direct);
     }
 
     #[test]

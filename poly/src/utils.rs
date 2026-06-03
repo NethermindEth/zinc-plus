@@ -1,10 +1,6 @@
 use crypto_primitives::{Field, PrimeField, Semiring};
-use num_traits::Zero;
 use thiserror::Error;
-use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField, sub};
-
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, sub};
 
 use crate::mle::{DenseMultilinearExtension, dense::CollectDenseMleWithZero};
 
@@ -35,13 +31,13 @@ where
     Ok(mle)
 }
 
-/// This function build the eq(x, r) polynomial for any given r, and output the
-/// evaluation of eq(x, r) in its vector form.
+/// This function builds the eq(x, r) polynomial for any given r, and outputs
+/// the evaluation of eq(x, r) in its vector form.
 ///
 /// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
+///      $eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))$
 /// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
+///      $eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))$
 pub fn build_eq_x_r_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F>, ArithErrors>
 where
     F: PrimeField,
@@ -57,47 +53,25 @@ where
     //  1 1 1 1 -> r0       * r1        * r2        * r3
     // we will need 2^num_var evaluations
 
-    let mut eval = Vec::new();
-    build_eq_x_r_helper(r, &mut eval, cfg)?;
-
-    Ok(eval)
-}
-
-/// A helper function to build eq(x, r) recursively.
-/// This function takes `r.len()` steps, and for each step it requires a maximum
-/// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<F>(r: &[F], buf: &mut Vec<F>, cfg: &F::Config) -> Result<(), ArithErrors>
-where
-    F: PrimeField,
-{
     if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".into()));
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push(F::one_with_cfg(cfg) - &r[0]);
-        buf.push(r[0].clone());
-    } else {
-        build_eq_x_r_helper(&r[1..], buf, cfg)?;
-
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
-
-        let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = buf[i >> 1].clone();
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = bi - tmp;
-            } else {
-                *val = tmp;
-            }
-        });
-        *buf = res;
+        return Err(ArithErrors::InvalidParameters("r length is 0".to_owned()));
     }
 
-    Ok(())
+    let one = F::one_with_cfg(cfg);
+    let l = r.len();
+    let mut eval = vec![one.clone(); 1 << l];
+    let mut s = 1;
+    for ri in r {
+        for j in (0..s).rev() {
+            let prev = eval[j].clone();
+            let hi = prev.clone() * ri;
+            eval[j] = prev - &hi;
+            eval[add!(j, s)] = hi;
+        }
+        s = mul!(s, 2);
+    }
+
+    Ok(eval)
 }
 
 /// This function build the eq(x, r) polynomial for any given r.
@@ -111,8 +85,7 @@ pub fn build_eq_x_r_inner<F>(
     cfg: &F::Config,
 ) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
 where
-    F: PrimeField,
-    F::Inner: Zero,
+    F: InnerTransparentField,
 {
     let evals = build_eq_x_r_inner_vec(r, cfg)?;
     let mle = DenseMultilinearExtension {
@@ -123,76 +96,30 @@ where
     Ok(mle)
 }
 
-/// This function build the eq(x, r) polynomial for any given r, and output the
-/// evaluation of eq(x, r) in its vector form.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
+/// See [`build_eq_x_r_vec`]
 fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
 where
-    F: PrimeField,
-    F::Inner: Zero,
+    F: InnerTransparentField,
 {
-    // we build eq(x,r) from its evaluations
-    // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
-    // for example, with num_vars = 4, x is a binary vector of 4, then
-    //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
-    //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
-    //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
-    //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
-    //  ....
-    //  1 1 1 1 -> r0       * r1        * r2        * r3
-    // we will need 2^num_var evaluations
-
-    let mut eval = Vec::new();
-    build_eq_x_r_inner_helper(r, &mut eval, cfg)?;
-
-    Ok(eval)
-}
-
-/// A helper function to build eq(x, r) recursively.
-/// This function takes `r.len()` steps, and for each step it requires a maximum
-/// `r.len()-1` multiplications.
-fn build_eq_x_r_inner_helper<F>(
-    r: &[F],
-    buf: &mut Vec<F::Inner>,
-    cfg: &F::Config,
-) -> Result<(), ArithErrors>
-where
-    F: PrimeField,
-    F::Inner: Zero,
-{
-    let one = F::one_with_cfg(cfg);
     if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".into()));
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push((one - &r[0]).into_inner());
-        buf.push(r[0].inner().clone());
-    } else {
-        build_eq_x_r_inner_helper(&r[1..], buf, cfg)?;
-
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
-
-        let mut res = vec![F::Inner::zero(); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = F::new_unchecked_with_cfg(buf[i >> 1].clone(), cfg);
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = (bi - tmp).into_inner();
-            } else {
-                *val = tmp.into_inner();
-            }
-        });
-        *buf = res;
+        return Err(ArithErrors::InvalidParameters("r length is 0".to_owned()));
     }
 
-    Ok(())
+    let one = F::one_with_cfg(cfg).into_inner();
+    let l = r.len();
+    let mut eval = vec![one.clone(); 1 << l];
+    let mut s = 1;
+    for ri in r {
+        for j in (0..s).rev() {
+            let prev = eval[j].clone();
+            let hi = (F::new_unchecked_with_cfg(prev.clone(), cfg) * ri).into_inner();
+            eval[j] = F::sub_inner(&prev, &hi, cfg);
+            eval[add!(j, s)] = hi;
+        }
+        s = mul!(s, 2);
+    }
+
+    Ok(eval)
 }
 
 /// Build the shift selector MLE `next_c_mle(r, *)` with the first `num_vars`
@@ -210,8 +137,7 @@ pub fn build_next_c_r_mle<F>(
     field_cfg: &F::Config,
 ) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
 where
-    F: PrimeField,
-    F::Inner: Zero,
+    F: InnerTransparentField,
 {
     let num_vars = r.len();
     let n = 1 << num_vars;
@@ -360,11 +286,15 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::needless_range_loop
+)]
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
-    use num_traits::One;
+    use num_traits::{One, Zero};
     use proptest::{prelude::*, proptest};
 
     use crate::mle::MultilinearExtensionWithConfig;
@@ -376,6 +306,63 @@ mod tests {
     type F = ConstMontyField<Params, { U128::LIMBS }>;
 
     const NUM_VARS: u32 = 8;
+
+    #[test]
+    fn build_eq_x_r_vec_matches_product_formula() {
+        // For each b in {0,1}^n, eq(b, r) = prod_i (b_i * r_i + (1-b_i) * (1-r_i)).
+        // The helper uses little-endian indexing: bit i of the index is x_i.
+        let r: Vec<F> = (0..NUM_VARS).map(|i| F::from(i + 11)).collect();
+        let eq_vec = build_eq_x_r_vec(&r, &()).unwrap();
+
+        let n = 1usize << NUM_VARS;
+        assert_eq!(eq_vec.len(), n);
+
+        let one = F::one();
+        for b in 0..n {
+            let mut expected = one;
+            for (i, ri) in r.iter().enumerate() {
+                let bit = (b >> i) & 1;
+                expected *= if bit == 1 { *ri } else { one - ri };
+            }
+            assert_eq!(eq_vec[b], expected, "mismatch at b={b}");
+        }
+    }
+
+    #[test]
+    fn build_eq_x_r_vec_basic() {
+        let r: [F; _] = [F::from(3_u64)];
+        let evals = build_eq_x_r_vec(&r, &()).unwrap();
+        assert_eq!(evals, vec![F::one() - r[0], r[0]]);
+    }
+
+    #[test]
+    fn build_eq_x_r_vec_two_vars() {
+        let r: [F; _] = [F::from(2_u64), F::from(5_u64)];
+        let evals = build_eq_x_r_vec(&r, &()).unwrap();
+        let e00 = (F::one() - r[0]) * (F::one() - r[1]);
+        let e01 = r[0] * (F::one() - r[1]);
+        let e10 = (F::one() - r[0]) * r[1];
+        let e11 = r[0] * r[1];
+        assert_eq!(evals, vec![e00, e01, e10, e11]);
+    }
+
+    #[test]
+    fn build_eq_x_r_error_on_empty() {
+        let r: [F; 0] = [];
+        let err = build_eq_x_r_vec(&r, &()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Invalid parameters"));
+    }
+
+    #[test]
+    fn build_eq_x_r_mle_properties() {
+        let r: [F; _] = [F::from(7_u64), F::from(11_u64), F::from(13_u64)];
+        let mle = build_eq_x_r(&r, &()).unwrap();
+        assert_eq!(mle.num_vars, r.len());
+        let evals = mle.evaluations;
+        let direct = build_eq_x_r_vec(&r, &()).unwrap();
+        assert_eq!(evals, direct);
+    }
 
     #[test]
     fn next_mle_is_one_on_successors() {
