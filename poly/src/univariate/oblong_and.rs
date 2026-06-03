@@ -534,9 +534,27 @@ pub fn prove_oblong_and_channel<C: OblongChannel>(
 
     // Phase-1 → Phase-2 transition: fold each word at z into an MLE over rows.
     let lag_z = scheme.base_lagrange(z);
-    let mut a: Vec<F> = a_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
-    let mut b: Vec<F> = b_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
-    let mut c: Vec<F> = c_words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect();
+    // Fold every stacked word at `z` — embarrassingly parallel (each word folds
+    // independently). This dominates the discharge (~62% at nvars=16: ~1M words
+    // ×3), so run it across cores like the round-message / Phase-2 loops.
+    let fold_at = |words: &[u32]| -> Vec<F> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            words
+                .par_iter()
+                .with_min_len(PAR_MIN_LEN)
+                .map(|&w| AdditiveNtt::fold_word_at(&lag_z, w))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            words.iter().map(|&w| AdditiveNtt::fold_word_at(&lag_z, w)).collect()
+        }
+    };
+    let mut a = fold_at(a_words);
+    let mut b = fold_at(b_words);
+    let mut c = fold_at(c_words);
 
     // Phase 2: degree-2 MLE-check over the n row variables. Each round ships the
     // prime polynomial `h` truncated to its monomial `[c₁, c₂]` (`c₀` recovered
