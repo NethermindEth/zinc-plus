@@ -1,3 +1,6 @@
+cargo bench -p zinc-protocol --bench f2_sha256 \
+      --features parallel,simd,unchecked,metal_gpu -- "Zinc\+ F_2 SHA-256 Hadamard"
+
 # Zinc+
 
 WIP implementation of:
