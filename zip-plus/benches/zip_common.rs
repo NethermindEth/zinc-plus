@@ -20,8 +20,8 @@ use std::{
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionRand};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_utils::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, named::Named,
-    projectable_to_field::ProjectableToField,
+    from_ref::FromRef, montgomery_inner_product::MontgomeryIntegerInnerProduct,
+    mul_by_scalar::MulByScalar, named::Named, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     code::LinearCode,
@@ -44,7 +44,8 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
@@ -240,10 +241,10 @@ pub fn prove<
     make_linear_code: impl Fn(usize) -> Option<Lc>,
 ) where
     StandardUniform: Distribution<Zt::Eval>,
-    F: for<'a> FromWithConfig<&'a Zt::CombR>
-        + for<'a> FromWithConfig<&'a Zt::Chal>
+    F: for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
@@ -331,7 +332,8 @@ pub fn verify<
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
-        + for<'a> MulByScalar<&'a F>,
+        + for<'a> MulByScalar<&'a F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>,
     <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {

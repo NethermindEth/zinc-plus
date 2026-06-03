@@ -18,6 +18,7 @@ use zinc_utils::{
     UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct},
+    montgomery_inner_product::MontgomeryIntegerInnerProduct,
     mul_by_scalar::MulByScalar,
 };
 
@@ -92,10 +93,10 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
+            + FromRef<F>
+            + MontgomeryIntegerInnerProduct<Zt::CombR>,
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
@@ -126,9 +127,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
+            + FromRef<F>
+            + MontgomeryIntegerInnerProduct<Zt::CombR>,
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
@@ -145,9 +146,6 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        // TODO Lift q0, q1 back to int and take following dot products on ints instead
-        // of MBSInnerProduct in field (see comboned row) We prove evaluations
-        // over the field, so integers need to be mapped to field elements first
         let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
@@ -174,13 +172,33 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             .try_collect()?;
 
         let zero_f = F::zero_with_cfg(field_cfg);
+        let q_1_montgomery =
+            <F as MontgomeryIntegerInnerProduct<Zt::CombR>>::prepare_montgomery_rhs(&q_1, &zero_f);
 
         // Compute per-polynomial row dot products, then sum across polynomials.
-        let b = {
+        let b = if batch_size == 1 {
+            cfg_chunks!(&polys_as_comb_r[0], row_len)
+                .map(|row| {
+                    <F as MontgomeryIntegerInnerProduct<
+                        Zt::CombR,
+                    >>::inner_product_prepared_montgomery(
+                        row,
+                        &q_1_montgomery,
+                    )
+                })
+                .collect::<Result<Vec<F>, _>>()?
+        } else {
             let per_poly_b: Vec<Vec<F>> = cfg_iter!(polys_as_comb_r)
                 .map(|poly_comb_r| {
                     cfg_chunks!(poly_comb_r, row_len)
-                        .map(|row| MBSInnerProduct::inner_product_field(row, &q_1, zero_f.clone()))
+                        .map(|row| {
+                            <F as MontgomeryIntegerInnerProduct<
+                                Zt::CombR,
+                            >>::inner_product_prepared_montgomery(
+                                row,
+                                &q_1_montgomery,
+                            )
+                        })
                         .collect::<Result<Vec<F>, _>>()
                 })
                 .collect::<Result<_, _>>()?;
@@ -264,11 +282,11 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
-            + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
-            + FromRef<F>,
+            + FromRef<F>
+            + MontgomeryIntegerInnerProduct<Zt::CombR>,
         F::Inner: Transcribable,
         F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     {

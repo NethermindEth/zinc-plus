@@ -33,6 +33,7 @@ use zinc_utils::{
     CHECKED,
     from_ref::FromRef,
     inner_product::{MBSInnerProduct, ScalarProduct},
+    montgomery_inner_product::MontgomeryIntegerInnerProduct,
     mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -168,7 +169,8 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
-        + FromRef<F>,
+        + FromRef<F>
+        + MontgomeryIntegerInnerProduct<<TestZipTypes<N, K, M> as ZipTypes>::CombR>,
     F::Inner: Transcribable,
     F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
@@ -202,7 +204,9 @@ where
         + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
-        + 'static,
+        + MontgomeryIntegerInnerProduct<
+            <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR,
+        > + 'static,
     F::Inner: Transcribable,
     F::Modulus:
         FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
@@ -231,7 +235,8 @@ where
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
-        + FromRef<F>,
+        + FromRef<F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>,
     F::Inner: Transcribable,
     F::Modulus: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,

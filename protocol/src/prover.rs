@@ -24,7 +24,8 @@ use zinc_uair::{
 };
 use zinc_utils::{
     add, cfg_iter, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, powers, projectable_to_field::ProjectableToField,
+    montgomery_inner_product::MontgomeryIntegerInnerProduct, mul_by_scalar::MulByScalar, powers,
+    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
@@ -289,10 +290,10 @@ macro_rules! impl_with_type_bounds {
             F: InnerTransparentField
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
-                + for<'b> FromWithConfig<&'b Zt::CombR>
                 + for<'b> FromWithConfig<&'b Zt::Chal>
                 + for<'b> MulByScalar<&'b F>
                 + FromRef<F>
+                + MontgomeryIntegerInnerProduct<Zt::CombR>
                 + Send
                 + Sync
                 + 'static,
@@ -922,11 +923,11 @@ where
     F: InnerTransparentField
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
-        + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>
         + Send
         + Sync
         + 'static,

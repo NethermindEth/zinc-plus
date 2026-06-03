@@ -539,6 +539,7 @@ mod tests {
         CHECKED,
         from_ref::FromRef,
         inner_product::{MBSInnerProduct, ScalarProduct},
+        montgomery_inner_product::MontgomeryIntegerInnerProduct,
         projectable_to_field::ProjectableToField,
     };
     use zip_plus::{
@@ -751,7 +752,8 @@ mod tests {
         F: for<'a> FromWithConfig<&'a Zt::Int>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
-            + for<'a> FromWithConfig<&'a Zt::Pt>,
+            + for<'a> FromWithConfig<&'a Zt::Pt>
+            + MontgomeryIntegerInnerProduct<Zt::CombR>,
         <F as Field>::Inner: FromRef<Zt::Fmod>,
         <F as Field>::Modulus: FromRef<Zt::Fmod>,
     {

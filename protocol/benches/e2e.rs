@@ -37,6 +37,7 @@ use zinc_uair::{
 use zinc_utils::{
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
+    montgomery_inner_product::MontgomeryIntegerInnerProduct,
     mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -342,6 +343,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>
         + Send
         + Sync
         + 'static,
@@ -432,6 +434,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
+        + MontgomeryIntegerInnerProduct<Zt::CombR>
         + Send
         + Sync
         + 'static,
