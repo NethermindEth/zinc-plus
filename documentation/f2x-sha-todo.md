@@ -75,6 +75,44 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Prover-path parallelization sweep — Prove-Hadamard-Oblong 154 → ~100 ms (commits `d8cfe4b`, `1a69adc`, `7ea7dff`)
+- **What**: a sweep for *serial code on a parallel machine* across the sound-oblong
+  prove path. The discharge/open/uair/commit are all rayon-parallel, but several
+  hot loops added by the binding/open/discharge were plain `.iter()`/`for` — on a
+  10-core M4 that cost ~10× what it should. Profiled each phase, parallelized the
+  serial ones (all bit-identical → no proof/soundness change), and re-measured.
+  - **`7ea7dff` — the big one: the oblong discharge's Phase-1→Phase-2 word-fold**
+    (`oblong_and.rs`, folding every stacked operand word at `z`) was a sequential
+    `.iter().map()` — profiled at **~31 ms / 62% of the discharge** at nvars=16
+    (~1M stacked words ×3), while round-message + Phase-2 were already parallel.
+    `par_iter` → ~8 ms. **Discharge ~50 → ~28 ms; Prove-Hadamard-Oblong 128 → ~100 ms.**
+  - **`d8cfe4b` — binding loops**: `oblong_binding_data`'s 13-adder build+project
+    loop + `pair_alpha_evals` (shared with fused) + the prover's `z_block`/`z_up`.
+    Binding overhead ~48 → ~18 ms.
+  - **`1a69adc` — open `combined_row`** (γ-fusion + cache-blocking — see the
+    un-lifted-open regression entry): 13.5 → ~7 ms.
+- **Result**: **Prove-Hadamard-Oblong 154 → ~100 ms (nvars=16), ~4.9× faster than
+  the fused discharge (487 ms)**; verify unchanged (~11 ms). All 60 protocol + 146
+  poly tests green.
+- **Component breakdown after the sweep (nvars=16, Apple M4, ~100 ms)**: commit ~25 ms,
+  discharge ~28 ms (round_message ~9 + word-fold ~8 + phase2 ~9), rest ~27 ms
+  (binding ~17 + open ~9 + mp), uair ~13 ms. **Every major component is now
+  rayon-parallel** — the easy "serialcode" wins are exhausted.
+- **Lesson (for the next agent)**: any new prover hot loop on this path MUST use
+  `cfg_iter!`/rayon; serial code stands out sharply (~5–10×) against the otherwise
+  fully-parallel pipeline. Profile with per-phase `Instant`/eprintln (criterion's
+  ±5 ms median noise hides changes < ~8 ms).
+- **Remaining opportunities (harder / smaller, NOT pursued)**:
+  - **Commit (~25 ms)** is parallel + CPU-near-optimal; the real lever is the
+    **Metal GPU** commit path (`metal_gpu` feature), not a CPU code change.
+  - **Binding multipoint** still folds **all** witness z-cols; folding only the
+    ~5 AND-referenced ones (the rest are bound by the ψ_z check alone) saves ~5 ms
+    but is a **soundness-sensitive** z-block-indexing restructure.
+  - **Discharge round_message/phase2 (~9 ms each)** are parallel + algorithmically
+    tuned (GF(2⁸) NTT, Gruen MLE-check) — limited headroom.
+  - **Open per-col over 20 cols not 8** (the bit-op-virtual-derivation idea, see
+    its own entry) — but the per-col cost is now small post-`combined_row` fix.
+
 ### Sound oblong-Hadamard ψ_z binding — NEXT STEP #1 DONE (commits `91eebec`, `4b5aca8`, `317a83a`, `aa05f21`)
 - **What**: the Binius64 oblong AND-zerocheck's `ψ_z` operand evals are now **bound
   to the PCS commitment** end-to-end, not trusted against in-memory columns.
