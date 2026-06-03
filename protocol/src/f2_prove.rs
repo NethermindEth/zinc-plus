@@ -858,8 +858,7 @@ where
         //    are needed — not just the AND-referenced ones. --
         let witness_cols = &trace.binary_poly[num_pub_bin..];
         let z_block: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
-            witness_cols
-                .iter()
+            cfg_iter!(witness_cols)
                 .map(|col| {
                     let proj = project_column_with_powers::<32>(&col.evaluations, &binding.lagrange_z);
                     DenseMultilinearExtension::from_evaluations_vec(
@@ -872,8 +871,7 @@ where
 
         // z up-evals: ψ_z(col)(r*) — the multipoint up-claims for the z-block
         // (verifier can't recompute without the trace, so they are shipped).
-        let z_up_evals: Vec<BinaryFieldGF128> = z_block
-            .iter()
+        let z_up_evals: Vec<BinaryFieldGF128> = cfg_iter!(z_block)
             .map(|col| {
                 <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
                     BinaryFieldGF128,

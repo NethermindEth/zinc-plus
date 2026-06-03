@@ -40,6 +40,10 @@ use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::{BinaryFieldGF128, project_column_with_powers};
 use zinc_transcript::traits::Transcript;
+use zinc_utils::cfg_iter;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 type Gf = BinaryFieldGF128;
 type Inner = <BinaryFieldGF128 as Field>::Inner;
@@ -569,8 +573,7 @@ pub fn pair_alpha_evals<const D: usize>(
     r_star: &[Gf],
 ) -> Vec<Gf> {
     let zero_inner = Gf::zero().into_inner();
-    pairs
-        .iter()
+    cfg_iter!(pairs)
         .map(|&(col, shift)| {
             let column = &columns[col];
             let n = column.evaluations.len();

@@ -49,6 +49,10 @@ use zinc_poly::univariate::oblong_and::{
 };
 use zinc_poly::univariate::oblong_and_gf8::Gf8Scheme;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_utils::cfg_iter;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::f2_hadamard::{
     F2AdderSpec, F2HadamardSpec, F2Operand, adder_operand_alpha_evals, build_adder_operand_columns,
@@ -291,11 +295,17 @@ pub fn oblong_binding_data_gf8(
     let (lagrange_z, gamma_word, pairs) =
         oblong_verifier_binding_gf8(and_specs, num_vars, eval_point);
     let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, &gamma_word);
-    let mut adder_parents = Vec::new();
-    for adder in adder_specs {
-        let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
-        adder_parents.extend(adder_operand_alpha_evals::<D>(&uvw, &lagrange_z, &gamma_word));
-    }
+    // Per-adder parents are independent — build + project each adder's operand
+    // columns in parallel (the loop was the dominant binding cost; like the
+    // discharge / open / uair, it should use every core). Order is preserved
+    // (the tie indexes `parents[3·rel + j]`), so collect per-adder then flatten.
+    let adder_parents: Vec<Gf> = cfg_iter!(adder_specs)
+        .map(|adder| {
+            let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
+            adder_operand_alpha_evals::<D>(&uvw, &lagrange_z, &gamma_word)
+        })
+        .collect::<Vec<Vec<Gf>>>()
+        .concat();
     OblongBindingData {
         lagrange_z,
         gamma_word,
