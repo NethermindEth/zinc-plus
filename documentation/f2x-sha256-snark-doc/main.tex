@@ -1,0 +1,65 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{An All-$\Ftwo[X]$ SNARK for SHA-256:\\
+       Arithmetization, Binary-Field PIOP, and Bit-Sliced Commitment\\[4pt]
+       \large As realised in the Zinc\texorpdfstring{$+$}{+} reference
+       codebase (\texttt{f2-clean})}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Companion note to the Zinc\texttt{+} paper. It
+describes the end-to-end all-$\Ftwo[X]$ proof system for SHA-256: the
+arithmetization, the binary-field polynomial interactive oracle
+reduction, and the bit-sliced polynomial commitment. Machine-assisted
+draft, under author revision.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We give a self-contained account of a succinct argument for SHA-256 that
+operates \emph{natively} over the polynomial ring $\Ftwo[X]$, never
+lifting the computation to the integers or to a large prime field. Each
+$32$-bit machine word is a bit-polynomial in the cell ring
+$\cellring = \Ftwo[X]/(X^{\wbit})$, and the three bitwise primitives of
+SHA-256 become ring operations: $\XOR$ is polynomial addition (free at
+the commitment layer); bit shifts and rotations are monomial
+multiplications, realised as linear ``virtual'' columns; and modular
+addition $\bmod\,2^{\wbit}$ is the Binius per-step full-adder identity in
+the quotient $\Fshift$. The single nonlinear primitive, $\AND$ (hence
+$\Ch$ and $\Maj$), is a coefficient-wise Hadamard product, which we
+discharge by an oblong zerocheck whose output is tied back to the
+commitment through a subspace-Lagrange projection. We then describe the
+binary-field polynomial interactive oracle reduction that proves the
+resulting constraint system --- ideal check, the evaluation projection
+$\psia$, and sumcheck over $\K = \mathrm{GF}(2^{128})$ --- and show how
+every constraint and every Hadamard discharge reduces to multilinear
+evaluation claims at a common point. These claims are settled by a
+hash-based polynomial commitment whose opening is \emph{bit-sliced}:
+the eq-folded $\{0,1\}$ bit slices of the committed cells form a single
+degree-$<\wbit$ polynomial over $\K$, from which the verifier reads off
+both the evaluation claim (via $\psia$) and the Hadamard discharge
+operands (via $\psiz$) at no extra commitment cost. The construction is
+presented as an idealized design, with the deployed instantiation
+($\wbit = 32$, $\K=\mathrm{GF}(2^{128})$, seven chained compressions)
+and its engineering choices given as remarks.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/introduction}
+\input{sections/preliminaries}
+\input{sections/arithmetization}   % Stage 2
+\input{sections/piop}              % Stage 3
+\input{sections/hadamard}          % Stage 3
+\input{sections/commitment}        % Stage 4
+\input{sections/soundness}         % Stage 4
+\input{sections/implementation}    % Stage 5
+
+\end{document}

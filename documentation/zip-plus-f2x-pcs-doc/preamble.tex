@@ -1,0 +1,107 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper and the sister F_2 companion documents
+% (sha-f2x-doc, f2-mle-opening-doc).
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{thmtools}
+\usepackage{cleveref}
+
+% --- Theorem environments --------------------------------------------------
+% Every environment shares the `theorem` numbering sequence (one sees
+% Definition 5.1, Lemma 5.2, ...) via thmtools' `sibling=theorem`, while
+% cleveref still names each reference by its true kind ("Lemma 3.3",
+% "Definition 5.1") rather than collapsing them all to "Theorem".
+\theoremstyle{plain}
+\declaretheorem[name=Theorem, numberwithin=section]{theorem}
+\declaretheorem[name=Lemma, sibling=theorem]{lemma}
+\declaretheorem[name=Proposition, sibling=theorem]{proposition}
+\declaretheorem[name=Corollary, sibling=theorem]{corollary}
+\declaretheorem[name=Claim, sibling=theorem]{claim}
+
+\theoremstyle{definition}
+\declaretheorem[name=Definition, sibling=theorem]{definition}
+\declaretheorem[name=Construction, sibling=theorem]{construction}
+\declaretheorem[name=Protocol, sibling=theorem]{protocol}
+\declaretheorem[name=Example, sibling=theorem]{example}
+
+\theoremstyle{remark}
+\declaretheorem[name=Remark, sibling=theorem]{remark}
+
+% --- Operators -------------------------------------------------------------
+\DeclareMathOperator{\MLE}{MLE}
+\DeclareMathOperator{\negl}{negl}
+\DeclareMathOperator{\eq}{eq}
+\DeclareMathOperator{\enc}{Enc}
+\DeclareMathOperator{\Merk}{Merkle}
+\DeclareMathOperator{\Commit}{Commit}
+\DeclareMathOperator{\Open}{Open}
+\DeclareMathOperator{\Verify}{Verify}
+\DeclareMathOperator{\rate}{rate}
+\DeclareMathOperator{\dist}{\Delta}
+\DeclareMathOperator{\rep}{Rep}
+\DeclareMathOperator{\acc}{Acc}
+\DeclareMathOperator{\img}{img}
+\DeclareMathOperator{\Hom}{Hom}
+\DeclareMathOperator{\spanop}{span}
+
+% --- Number systems --------------------------------------------------------
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Ftwo}{\F_2}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\bP}{\mathbb{P}}
+
+% Binary extension field K = GF(2^128).
+\newcommand{\K}{\mathbb{K}}
+\newcommand{\Kbits}{128}
+
+% Cell ring R = F_2[X]/(X^D); deployed at D = 32.
+\newcommand{\cellring}{R}
+\newcommand{\Dval}{D}
+
+% Degree-<D univariate over a coefficient ring S in the cell variable X.
+\newcommand{\polyat}[2]{#1[X]_{<#2}}
+\newcommand{\Kpoly}{\polyat{\K}{\Dval}}      % K[X]_{<D}
+\newcommand{\Ftwopoly}{\polyat{\Ftwo}{\Dval}}% F_2[X]_{<D} = R (as F_2-module)
+
+% Projection psi_alpha : evaluation of the cell variable at alpha in K.
+\newcommand{\psia}{\psi_{\alpha}}
+\newcommand{\psiz}{\psi_{z}}
+
+% MLE tilde
+\newcommand{\mle}[1]{\widetilde{#1}}
+
+% Hadamard product
+\newcommand{\had}{\odot}
+
+% Vectors / matrices
+\newcommand{\vv}[1]{\mathbf{#1}}
+\newcommand{\mat}[1]{\mathsf{#1}}
+
+% Branding for code symbols, usable in text and math mode.
+\newcommand{\code}[1]{\ensuremath{\mathsf{#1}}}
+
+\newcommand{\negligible}{\negl}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}

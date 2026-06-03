@@ -1,0 +1,188 @@
+\section{Completeness and Soundness}
+\label{sec:soundness}
+
+We first verify completeness, then analyse knowledge soundness by
+walking the four checks backward from the commitment to the claim. The
+analysis isolates the opening; we treat the upstream reduction's
+knowledge-soundness error as a black box $\epsilon_{\mathrm{pre}}$ and
+add only the opening's error.
+
+\subsection{Completeness}
+
+\begin{theorem}[Completeness]
+\label{thm:completeness}
+For an honest prover holding a witness whose commitment was produced by
+\Cref{cons:commit} and whose claims satisfy
+$a_g = \mle{\psia(w_g)}(r^*)$, the verifier of \Cref{prot:open} accepts
+with probability $1$.
+\end{theorem}
+
+\begin{proof}
+We verify each check on honest data, using $\K$-linearity of the maps
+involved.
+
+\emph{\ref{chk:eval}.} By \eqref{eq:b-batch} and \eqref{eq:a-batch},
+\[
+  \sum_i q_0[i]\,b'[i]
+  = \sum_i q_0[i]\sum_g \gamma_g\,b_g[i]
+  = \sum_g \gamma_g \sum_i q_0[i]\,b_g[i]
+  = \sum_g \gamma_g\,a_g' = a'.
+\]
+
+\emph{\ref{chk:discharge}.} Since $\psia$ is $\K$-linear on $\Kpoly$
+(\Cref{rem:psi-extends}) and $a' = \sum_g \gamma_g a_g'$,
+\[
+  \psia(a') = \sum_g \gamma_g\,\psia(a_g') = \sum_g \gamma_g\,a_g,
+\]
+where the last step is \Cref{lem:bitslice}.
+
+\emph{\ref{chk:coherence}.} Substituting \eqref{eq:combined-row} and reordering,
+\[
+\begin{aligned}
+  \sum_j q_1[j]\,\mathrm{cr}'[j]
+  &= \sum_j q_1[j]\sum_g \gamma_g \sum_i c_i\,M_{w_g}[i,j] \\
+  &= \sum_i c_i \sum_g \gamma_g \sum_j q_1[j]\,M_{w_g}[i,j]
+   = \sum_i c_i \sum_g \gamma_g\,b_g[i]
+   = \sum_i c_i\,b'[i].
+\end{aligned}
+\]
+
+\emph{\ref{chk:encoding}.} For honest data $\mat{C}_g[i,\cdot] = \enc(M_{w_g}[i,\cdot])$.
+By the scalar-extension property (\Cref{lem:linearity}),
+\[
+\begin{aligned}
+  \enc(\mathrm{cr}')[j]
+  &= \enc\!\Big(\sum_g \gamma_g \sum_i c_i\,M_{w_g}[i,\cdot]\Big)[j] \\
+  &= \sum_g \gamma_g \sum_i c_i\,\enc(M_{w_g}[i,\cdot])[j] \\
+  &= \sum_i c_i \sum_g \gamma_g\,\mat{C}_g[i,j],
+\end{aligned}
+\]
+for every $j$, in particular at the opened $j_k$; and the honest Merkle
+paths verify. All four checks pass.
+\end{proof}
+
+\begin{remark}[No abort event]
+Unlike the $\alpha$-lift predecessor --- whose lift table fails to exist
+when $\alpha$ falls in a proper subfield of $\K$, forcing a resample with
+probability $\le 2^{-95}$ --- the bit-sliced open has \emph{no} such
+event: it never inverts a matrix and never requires $\{1,\alpha,\dots\}$
+to be a basis. Completeness is unconditional in $\alpha$.
+\end{remark}
+
+\subsection{Knowledge soundness}
+
+We argue that an accepting transcript forces the claims to equal the true
+evaluations of an extractable committed witness, up to a small additive
+error. The argument is the standard Brakedown/Ligero backbone --- a
+proximity test plus a consistency test --- specialised to the
+$\gamma$-batched, bit-sliced setting.
+
+\paragraph{Setup.} Fix a (possibly malicious) prover that produces an
+accepting transcript with commitment $\mathrm{root}$ and proof
+$(a', b', \mathrm{cr}', \{(j_k,\text{cells}_k,\pi_k)\})$. Let $\delta$ be
+the relative minimum distance of the code and write
+$\epsilon_{\mathrm{prox}}(t,\delta)$ for the proximity error of the
+$t$-query column test --- $\bigl((1+\delta)/2\bigr)^t$ in the
+unique-decoding regime, or the correlated-agreement (MCA) bound in the
+list-decoding regime that the codebase targets. The deployed
+$t = 987$ at rate $1/4$ places this term below $2^{-100}$
+(\Cref{rem:distance}).
+
+\begin{theorem}[Knowledge soundness of the opening]
+\label{thm:soundness}
+There is an extractor that, given an accepting transcript, outputs
+committed messages $\widehat w_1,\dots,\widehat w_K \in \cellring^{\,n}$
+consistent with $\mathrm{root}$ such that, except with probability at most
+\[
+  \epsilon_{\mathrm{open}}
+  \;\le\;
+  \epsilon_{\mathrm{prox}}(t,\delta)
+  \;+\;
+  \frac{1}{2^{\Kbits}}
+  \;+\;
+  \frac{1}{2^{\Kbits}},
+\]
+each accepted claim equals the true evaluation of the committed witness,
+$a_g = \mle{\psia(\widehat w_g)}(r^*)$ for all $g$. The two
+$2^{-\Kbits}$ terms come from \ref{chk:coherence} and \ref{chk:discharge}
+respectively.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+We chain the four checks from the commitment inward. Throughout,
+``honest value of $Z$'' means the value $Z$ would take for the committed
+messages $\widehat w_g$ obtained by decoding.
+
+\emph{(i) Proximity pins $\mathrm{cr}'$ (\ref{chk:encoding}).} The column-opening
+test is the Brakedown proximity check on the $\gamma$- and $c$-folded
+codeword. By the proximity lemma for the code, except with probability
+$\epsilon_{\mathrm{prox}}(t,\delta)$ the committed columns
+$\mat{C}_g[i,\cdot]$ are (correlated-)close to codewords; the extractor
+decodes them to messages $\widehat w_g$, and the encoding identity at the
+$t$ random positions forces
+\[
+  \mathrm{cr}' \;=\; \sum_g \gamma_g \sum_i c_i\,\widehat M_{w_g}[i,\cdot]
+  \qquad\text{(the honest fold of the committed messages)},
+\]
+since two distinct messages whose encodings agree at $t$ random positions
+violate the distance bound. Thus $\mathrm{cr}'$ is determined by
+$(\widehat w_g, \gamma, c)$.
+
+\emph{(ii) Coherence pins $b'$ (\ref{chk:coherence}).} Let
+$\widehat b'[i] = \sum_g \gamma_g \sum_j q_1[j]\,\widehat M_{w_g}[i,j]$ be
+the honest row-fold. By the completeness computation,
+$\sum_j q_1[j]\,\mathrm{cr}'[j] = \sum_i c_i\,\widehat b'[i]$ with the
+$\mathrm{cr}'$ pinned in (i). \ref{chk:coherence} therefore requires
+$\sum_i c_i\,(b'[i]-\widehat b'[i]) = 0$ in $\Kpoly$. If
+$b' \ne \widehat b'$, some coefficient slot $b$ has
+$\bigl(b'[i]-\widehat b'[i]\bigr)_b$ nonzero for some $i$; as $c$ is drawn
+\emph{after} $b'$ is absorbed, that slot's equation
+$\sum_i c_i\,(b'[i]-\widehat b'[i])_b = 0$ is a nontrivial $\K$-linear
+form in the uniform $c$, satisfied with probability $2^{-\Kbits}$. Hence
+$b' = \widehat b'$ except with probability $2^{-\Kbits}$.
+
+\emph{(iii) Evaluation consistency pins $a'$ (\ref{chk:eval}).} \ref{chk:eval} is
+deterministic: $a' = \sum_i q_0[i]\,b'[i]$. With $b'=\widehat b'$ from
+(ii), this forces $a' = \sum_i q_0[i]\,\widehat b'[i] = \sum_g \gamma_g\,
+\widehat a_g'$, the $\gamma$-batch of the committed messages' bit-slice
+folds.
+
+\emph{(iv) Discharge pins the claims (\ref{chk:discharge}).} Let
+$\widehat a_g = \mle{\psia(\widehat w_g)}(r^*)$ be the true evaluations of
+the committed witness. By \Cref{lem:bitslice} applied to
+$\widehat w_g$, $\psia(\widehat a_g') = \widehat a_g$, so with $a'$ from
+(iii), $\psia(a') = \sum_g \gamma_g\,\widehat a_g$. \ref{chk:discharge} requires
+$\psia(a') = \sum_g \gamma_g\,a_g$, hence
+$\sum_g \gamma_g\,(a_g - \widehat a_g) = 0$ in $\K$. The claims $a_g$ are
+fixed by the upstream transcript before $\gamma$ is drawn; if any
+$a_g \ne \widehat a_g$ the difference vector is nonzero and the equation
+is a nontrivial $\K$-linear form in the uniform $\gamma$, satisfied with
+probability $2^{-\Kbits}$. Hence $a_g = \widehat a_g$ for all $g$ except
+with probability $2^{-\Kbits}$.
+
+A union bound over (i), (ii), (iv) gives the stated
+$\epsilon_{\mathrm{open}}$. The extractor of (i) outputs the witness; (ii)--(iv)
+certify the claims are its true evaluations.
+\end{proof}
+
+\begin{remark}[Where the batching gain lives]
+The single equation $\sum_g \gamma_g\,(a_g-\widehat a_g)=0$ in step (iv)
+pins \emph{all} $K$ per-column claims at once, at the cost of one
+$\K$-element of soundness ($2^{-\Kbits}$), independent of $K$. This is the
+$\gamma$-batch: the algebraic proof carries one triple $(a',b',\mathrm{cr}')$
+rather than $K$, and the soundness pays a single Schwartz--Zippel term.
+\end{remark}
+
+\begin{remark}[Composition with the host PIOP]
+Composed with the upstream reduction (error $\epsilon_{\mathrm{pre}}$),
+the augmented argument has knowledge-soundness error
+$\epsilon_{\mathrm{pre}} + \epsilon_{\mathrm{open}}$. With
+$\Kbits = 128$, $\Dval = 32$, and $t = 987$ at rate $1/4$, the two
+algebraic terms are $2\cdot 2^{-128}$, far below the proximity term; the
+column-opening parameter $t$ dominates the opening's soundness budget, as
+in the integer pipeline. Under the Fiat--Shamir/BCS transform in the
+random-oracle model, the round-by-round structure of the four checks
+(each challenge drawn after the data it tests is absorbed) yields a
+non-interactive argument with the same error up to the standard ROM
+losses.
+\end{remark}

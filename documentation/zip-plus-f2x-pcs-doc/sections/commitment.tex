@@ -1,0 +1,99 @@
+\section{The Commitment}
+\label{sec:commitment}
+
+The commitment is a single Merkle root over the column-wise encoded
+trace. We give the abstract construction first, then the storage layout
+the codebase uses.
+
+\subsection{Construction}
+
+\begin{construction}[Commit]
+\label{cons:commit}
+On input the trace columns $w_1,\dots,w_K \in \cellring^{\,n}$ and the
+code parameters $(\ell, \mathrm{REP})$ with $\ell = n_{\mathrm{cols}}$,
+$N = \mathrm{REP}\cdot\ell$, $n_{\mathrm{rows}} = n/\ell$:
+\begin{enumerate}[leftmargin=2em]
+  \item \emph{Encode each row of each column.} View $w_g$ as the matrix
+    $M_{w_g} \in \cellring^{\,n_{\mathrm{rows}}\times\ell}$ and encode each
+    of its $n_{\mathrm{rows}}$ rows with $\enc$, giving the codeword matrix
+    \[
+      \mat{C}_g \;\in\; \cellring^{\,n_{\mathrm{rows}}\times N},
+      \qquad
+      \mat{C}_g[i,\cdot] \;=\; \enc\bigl(M_{w_g}[i,\cdot]\bigr).
+    \]
+  \item \emph{Define columns of the commitment.} For each codeword
+    position $j \in \{0,\dots,N-1\}$, the $j$-th \emph{leaf payload} is
+    the concatenation across all columns and all rows,
+    \[
+      \mathrm{leaf}_j \;=\; \bigl(\,\mat{C}_g[i,j]\,\bigr)_{g \in [K],\, i \in [n_{\mathrm{rows}}]},
+    \]
+    i.e. the entire $j$-th column of all $K$ codeword matrices, a vector of
+    $K\cdot n_{\mathrm{rows}}$ cells.
+  \item \emph{Merkle-commit.} Hash each $\mathrm{leaf}_j$ with a
+    collision-resistant hash (Blake3, $32$-byte output) into a leaf, build
+    a binary Merkle tree over the $N$ leaves, and output the root.
+\end{enumerate}
+The commitment is the pair $(\mathrm{root}, K)$; the prover retains the
+codeword matrices $\{\mat{C}_g\}$ and the Merkle tree as opening hint.
+\end{construction}
+
+The single batched tree --- one leaf per codeword position, carrying all
+columns at that position --- is what makes a column opening reveal every
+committed column's value at the queried position with one authentication
+path, and is what lets the $\gamma$-batched opening of \Cref{sec:eval}
+verify all columns from the same $t$ paths.
+
+\begin{remark}[Storage layout in the codebase]
+\label{rem:storage}
+The deployed commitment applies two storage optimisations that do not
+change the abstract object of \Cref{cons:commit}.
+
+\emph{Cell pairing.} Since $\Dval = 32 \le 32$, two trace cells pack into
+one $64$-bit storage word: column $2k$ in the low half, column $2k+1$ in
+the high half (\code{pair\_cells}). Because the RAA encoder is
+bit-parallel and $\Ftwo$-linear, encoding the packed word produces exactly
+the packed pair of the two columns' codewords, so the prover encodes
+$\lceil K/2\rceil$ paired matrices instead of $K$. The leaf payload is
+correspondingly $\lceil K/2 \rceil \cdot n_{\mathrm{rows}}$ packed cells;
+the commitment's $\code{batch\_size}$ field records this paired count. The
+verifier unpacks the two halves when it needs per-column cells.
+
+\emph{Leaf grouping.} A leaf may bundle a small group of
+$\code{LEAF\_GROUP\_SIZE}$ consecutive codeword positions, trading a
+shorter tree for wider leaves; the default group size is $1$. The
+leaf-payload byte order is fixed (\code{hash\_grouped\_leaf\_from\_row\_major}):
+for each grouped position, for each paired column, for each row.
+
+\emph{Witness-only commitment.} Public columns are \emph{not} committed
+--- the verifier evaluates their MLEs locally --- and bit-operation
+``virtual'' columns (e.g. a shift/rotate of another column) are not
+committed either: they are reconstructed verifier-side from the opened
+cells of their source column by applying the declared bitwise operation.
+Only the \emph{primary witness} columns enter the tree, which is the $K$
+of \Cref{cons:commit}.
+\end{remark}
+
+\subsection{Commitment properties}
+
+\begin{proposition}[Binding]
+\label{prop:binding}
+Under collision resistance of the hash, the commitment
+$(\mathrm{root}, K)$ binds the codeword matrices $\{\mat{C}_g\}$: no
+efficient prover can produce two distinct codeword-column values for the
+same position $j$ that both verify against $\mathrm{root}$ with valid
+authentication paths, except with negligible probability.
+\end{proposition}
+
+\begin{proof}
+A column opening at position $j$ reveals $\mathrm{leaf}_j$ and an
+authentication path; \code{verify\_grouped} recomputes the leaf hash and
+the path to the root. Two accepting openings with different payloads at
+the same leaf index yield a hash collision somewhere along the shared
+path, contradicting collision resistance.
+\end{proof}
+
+We stress that binding is to the \emph{codewords}, not yet to valid
+\emph{messages}: a malicious prover may commit to a matrix whose rows are
+not codewords. Tying the committed rows to genuine codewords --- and to
+the claimed evaluations --- is the job of the proximity test and the
+algebraic checks in the opening, analysed in \Cref{sec:soundness}.

@@ -1,0 +1,142 @@
+\section{Preliminaries and Setting}
+\label{sec:prelim}
+
+\subsection{Fields and the cell ring}
+
+Fix the binary extension field
+\[
+  \K \;:=\; \Ftwo[X]\big/\bigl(P(X)\bigr),
+  \qquad
+  P(X) \;=\; X^{128} + X^7 + X^2 + X + 1,
+\]
+the field of order $2^{\Kbits}$ defined by the GHASH/AES-GCM reduction
+pentanomial. Elements of $\K$ are stored as $128$-bit vectors;
+multiplication is a carryless product followed by reduction modulo $P$,
+and addition is bitwise XOR. We write $\K$ abstractly as the protocol's
+\emph{challenge and evaluation field}; the choice of $\Kbits = 128$ over
+a wider field is a performance trade-off (it halves the carryless
+multiplication count relative to a $192$-bit field) and enters the
+analysis only through the soundness denominator $2^{\Kbits}$.
+
+Fix a cell-width parameter $\Dval = 32$ and define the \emph{cell ring}
+\[
+  \cellring \;:=\; \Ftwo[X]\big/(X^{\Dval}),
+\]
+a free $\Ftwo$-module of rank $\Dval$. A cell $w \in \cellring$ is a
+\emph{bit-polynomial} $w = \sum_{b=0}^{\Dval-1} w_b X^b$ with
+$w_b \in \{0,1\}$; we identify $\cellring$ with $\polyat{\Ftwo}{\Dval}$
+throughout. The quotient by $(X^{\Dval})$ is structural --- it bounds
+the cell width --- and is not the source of any reduction in this note.
+
+\begin{remark}[The two roles of the variable $X$]
+\label{rem:two-X}
+The symbol $X$ plays two roles, distinguished by the surrounding ring.
+As the \emph{cell variable} it indexes the $\Dval$ bit positions of a
+cell and, after the construction lifts coefficients into $\K$, the
+$\Dval$ coordinates of a polynomial in $\Kpoly$. As the
+\emph{defining variable} of $\K = \Ftwo[X]/(P)$ it is the formal symbol
+in which field elements are represented. The construction only ever
+substitutes the cell variable by a field element $\alpha \in \K$; it
+never substitutes the defining variable. We keep the single letter $X$
+to match the codebase and rely on the ring context to disambiguate;
+where a polynomial has $\K$-valued coefficients we write it explicitly
+as an element of $\Kpoly$.
+\end{remark}
+
+\subsection{Trace, columns, and the matrix view}
+
+Fix the number of variables $\nu$ and set $n = 2^{\nu}$. The committed
+witness is a tuple of $K$ trace columns
+$w_1, \dots, w_K \in \cellring^{\,n}$, each a length-$n$ vector of cells
+indexed by the boolean hypercube $\{0,1\}^{\nu}$.
+
+For the opening we arrange each column $w_g$ as a matrix
+\[
+  M_{w_g} \;\in\; \cellring^{\,n_{\mathrm{rows}} \times n_{\mathrm{cols}}},
+  \qquad
+  n = n_{\mathrm{rows}} \cdot n_{\mathrm{cols}},
+\]
+both factors powers of two. Correspondingly the variable index splits as
+$\{0,1\}^{\nu} = \{0,1\}^{\nu_0} \times \{0,1\}^{\nu_1}$ with
+$\nu = \nu_0 + \nu_1$; we write a hypercube point as $(i,j)$ with
+$i \in \{0,1\}^{\nu_0}$ (the row index) and $j \in \{0,1\}^{\nu_1}$ (the
+column index). In the codebase $n_{\mathrm{cols}}$ is the code's row
+length $\code{row\_len}$ and $n_{\mathrm{rows}} = n / \code{row\_len}$;
+the deployed binary trace uses a small fixed $n_{\mathrm{rows}}$ (e.g.
+$8$).
+
+\subsection{The evaluation projection $\psia$}
+
+The Zinc\texttt{+} PIOP reduces ring-typed constraints to the binary
+field by a transcript-fresh \emph{evaluation projection}. Fix
+$\alpha \in \K$ sampled after the witness is committed, and define the
+$\Ftwo$-algebra homomorphism
+\[
+  \psia : \cellring \longrightarrow \K,
+  \qquad
+  \psia\Big(\textstyle\sum_b w_b X^b\Big) \;=\; \sum_b w_b\,\alpha^b
+  \;=\; w(\alpha).
+\]
+That is, $\psia$ evaluates the cell's bit-polynomial at the field point
+$\alpha$. We use the same symbol for its coordinatewise action
+$\psia : \cellring^{\,n} \to \K^{\,n}$. The map is $\Ftwo$-linear,
+indeed an $\Ftwo$-algebra map; this is the only property of $\psia$ the
+opening uses.
+
+\begin{remark}[$\psia$ extends to $\Kpoly$]
+\label{rem:psi-extends}
+Extend $\psia$ to $\Ftwo$-linear maps with $\K$-coefficients by
+declaring $\psia(X^b) = \alpha^b$ and extending $\K$-linearly: for
+$p = \sum_b p_b X^b \in \Kpoly$, set $\psia(p) := \sum_b p_b\,\alpha^b$.
+This is evaluation of the cell variable at $\alpha$, now applied to a
+$\K$-coefficient polynomial; it agrees with the cell-level $\psia$ on
+$\cellring \subset \Kpoly$. We write $\alpha$-projection for this map
+and note it is the inner product of the coefficient vector of $p$ with
+$(\alpha^0, \dots, \alpha^{\Dval-1})$.
+\end{remark}
+
+\subsection{Multilinear extensions and the input claim}
+
+For a vector $v \in \K^{\,n}$, its \emph{multilinear extension} over
+$\K$ is the unique multilinear $\mle{v} \in \K[Y_1,\dots,Y_\nu]$ with
+$\mle{v}(c) = v_c$ for all $c \in \{0,1\}^{\nu}$; explicitly
+\[
+  \mle{v}(r) \;=\; \sum_{c \in \{0,1\}^{\nu}} \eq_c(r)\,v_c,
+  \qquad
+  \eq_c(r) \;=\; \prod_{k=1}^{\nu}\bigl(c_k r_k + (1-c_k)(1-r_k)\bigr).
+\]
+The upstream sumcheck delivers to the opening, for each committed column
+$w_g$, an \emph{MLE evaluation claim}
+\[
+  a_g \;=\; \mle{\psia(w_g)}(r^*) \;\in\; \K,
+  \qquad g = 1, \dots, K,
+\]
+at a common point $r^* \in \K^{\,\nu}$. The verifier holds
+$(r^*, \alpha, a_1, \dots, a_K)$ and the commitment; the prover holds the
+full witness and the commit-time codeword data. \emph{The task of the
+evaluation argument is to certify each $a_g$ against the commitment.}
+
+\subsection{The eq-tensor}
+\label{sec:eqtensor}
+
+Under the matrix view the $\eq$-MLE factorises as a tensor product over
+the row/column split:
+\[
+  \eq_{(i,j)}(r^*) \;=\; q_0[i]\cdot q_1[j],
+  \qquad
+  q_0 \in \K^{\,n_{\mathrm{rows}}},\;\; q_1 \in \K^{\,n_{\mathrm{cols}}},
+\]
+where $q_0, q_1$ are the boolean-hypercube $\eq$-vectors of the two
+halves of $r^*$ (computed by the codebase routine
+\code{build\_eq\_x\_r\_vec}, split as in \code{build\_eq\_tensor\_gf128}).
+The matrix form of the claim is the bilinear form
+\begin{equation}
+  \label{eq:claim-bilinear}
+  a_g \;=\; q_0^{\top}\,\psia(M_{w_g})\,q_1
+  \;=\; \sum_{i}\sum_{j} q_0[i]\,q_1[j]\,\psia\!\bigl(M_{w_g}[i,j]\bigr)
+  \;\in\;\K,
+\end{equation}
+where $\psia(M_{w_g})$ is the entrywise $\alpha$-evaluation of the cell
+matrix. Both parties compute $(q_0, q_1)$ identically from $r^*$; the
+eq-tensor is kept in $\K$ (no lift), which is exactly what makes the
+bit-sliced opening possible.

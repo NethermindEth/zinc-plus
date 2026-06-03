@@ -1,0 +1,275 @@
+\section{The Bit-Sliced Evaluation Argument}
+\label{sec:eval}
+
+This section presents the opening: an interactive (Fiat--Shamir
+compiled) argument that certifies the batch of MLE evaluation claims
+$a_1,\dots,a_K$ of \Cref{sec:prelim} against the commitment of
+\Cref{sec:commitment}. It is a Brakedown/Ligero-style protocol with an
+$\Ftwo[X]$-native twist: the evaluation phase produces, per column, a
+single degree-$<\Dval$ polynomial over $\K$ whose $\alpha$-projection is
+the claim, so the entire argument runs in $\Kpoly$-arithmetic and never
+forms an inverse lift.
+
+\subsection{The bit-slice fold}
+
+The technical core is the following observation. The bilinear form
+\eqref{eq:claim-bilinear} that defines $a_g$ commutes the eq-tensor
+through $\psia$, and $\psia$ is $\Ftwo$-linear; so we may compute the
+fold of the \emph{cell bits} first and project last.
+
+\begin{definition}[Bit-slice fold]
+\label{def:bitslice}
+For a column $w_g$ with cell matrix $M_{w_g}$ and the eq-tensor
+$(q_0, q_1)$ of \Cref{sec:eqtensor}, the \emph{bit-slice fold} is the
+degree-$<\Dval$ polynomial
+\[
+  a_g' \;=\; \sum_{b=0}^{\Dval-1} a_g'[b]\,X^b \;\in\; \Kpoly,
+  \qquad
+  a_g'[b] \;=\; \sum_{i}\sum_{j} q_0[i]\,q_1[j]\,\bigl(M_{w_g}[i,j]\bigr)_b \;\in\; \K,
+\]
+where $(M_{w_g}[i,j])_b \in \{0,1\}$ is the $b$-th bit of the cell. Its
+$b$-th coefficient is the boolean-hypercube fold of the column's $b$-th
+bit slice.
+\end{definition}
+
+In the codebase $a_g'$ is computed in two passes:
+$b_g[i] = \sum_j q_1[j]\cdot M_{w_g}[i,j]$ (a $\K$-scalar times a
+$\{0,1\}$-cell, accumulated into $\Kpoly$ by
+\code{gf128poly\_accumulate\_cell}, which scatters the scalar $q_1[j]$
+into the cell's set-bit coefficient slots), followed by
+$a_g' = \sum_i q_0[i]\cdot b_g[i]$ (a $\K$-scalar times a $\Kpoly$,
+accumulated by \code{gf128poly\_accumulate\_scaled}).
+
+\begin{lemma}[Bit-slice discharge]
+\label{lem:bitslice}
+For every column $g$, $\;\psia(a_g') = a_g$.
+\end{lemma}
+
+\begin{proof}
+By \Cref{rem:psi-extends}, $\psia(a_g') = \sum_b a_g'[b]\,\alpha^b$.
+Substituting \Cref{def:bitslice} and exchanging the order of summation,
+\[
+\begin{aligned}
+  \psia(a_g')
+  &= \sum_b \Big(\sum_{i,j} q_0[i]q_1[j]\,(M_{w_g}[i,j])_b\Big)\alpha^b
+   = \sum_{i,j} q_0[i]q_1[j]\sum_b (M_{w_g}[i,j])_b\,\alpha^b \\
+  &= \sum_{i,j} q_0[i]q_1[j]\,\psia(M_{w_g}[i,j]),
+\end{aligned}
+\]
+which is exactly $q_0^\top\,\psia(M_{w_g})\,q_1 = a_g$ by
+\eqref{eq:claim-bilinear}.
+\end{proof}
+
+\Cref{lem:bitslice} replaces the $\alpha$-lift's central machinery (the
+$\Kbits\times\Kbits$ inverse-lift table) with a single inner product:
+the claim $a_g$ is read off $a_g'$ as
+$a_g = \sum_b a_g'[b]\,\alpha^b$. Crucially, $a_g'$ has $\Dval = 32$
+coefficients regardless of the extension degree $\Kbits$, so the
+committed claim object is small and independent of the field width.
+
+\subsection{$\gamma$-batching and the proximity fold}
+
+To make the proof constant in the number of columns, the prover draws a
+transcript-fresh challenge $\gamma = (\gamma_1,\dots,\gamma_K) \in \K^K$
+(one per committed column) and folds all per-column data by it. Define
+\begin{align}
+  a' &\;:=\; \sum_{g=1}^{K} \gamma_g\,a_g' \;\in\; \Kpoly,
+  \label{eq:a-batch}\\
+  b'[i] &\;:=\; \sum_{g=1}^{K} \gamma_g\,b_g[i] \;\in\; \Kpoly,
+    \qquad i \in [n_{\mathrm{rows}}],
+  \label{eq:b-batch}
+\end{align}
+where $b_g[i] = \sum_j q_1[j]\,M_{w_g}[i,j]$ as above. Separately, after
+$\alpha$- and $\gamma$-dependent data is fixed, the prover draws
+\emph{proximity coefficients} $c = (c_1,\dots,c_{n_{\mathrm{rows}}}) \in
+\K^{n_{\mathrm{rows}}}$ and forms the $\gamma$-batched, $c$-folded
+\emph{combined row}
+\begin{equation}
+  \label{eq:combined-row}
+  \mathrm{cr}'[j] \;:=\; \sum_{g=1}^{K} \gamma_g \sum_{i} c_i\,M_{w_g}[i,j]
+  \;\in\; \Kpoly,
+  \qquad j \in [n_{\mathrm{cols}}].
+\end{equation}
+The combined row is a random linear combination of the message rows (in
+the message space, length $n_{\mathrm{cols}}$); it is the object the
+proximity test will encode and check against the committed codewords.
+
+\subsection{The protocol}
+
+\begin{protocol}[Bit-sliced $\gamma$-batched open]
+\label{prot:open}
+Run on the shared Fiat--Shamir transcript $\mathcal{T}$ that already
+carries the commitment and the upstream challenges $(\alpha, r^*)$ and
+claims $(a_g)$. Let $t = \code{num\_column\_openings}$ and
+$N = n_{\mathrm{cols}}\cdot\mathrm{REP}$.
+
+\smallskip
+\noindent\textbf{Prover.}
+\begin{enumerate}[leftmargin=2em]
+  \item Compute the eq-tensor $(q_0, q_1)$ from $r^*$ (kept in $\K$).
+  \item Draw $\gamma \leftarrow \mathcal{T}$ ($K$ challenges).
+  \item For each column $g$: compute $b_g$ and $a_g'$
+    (\Cref{def:bitslice}); accumulate $a' \mathrel{+}= \gamma_g a_g'$ and
+    $b'[i]\mathrel{+}= \gamma_g b_g[i]$.
+  \item Absorb $b'$ then $a'$ into $\mathcal{T}$.
+  \item Draw the proximity coefficients $c \leftarrow \mathcal{T}$
+    ($n_{\mathrm{rows}}$ challenges).
+  \item Compute the combined row $\mathrm{cr}'$ \eqref{eq:combined-row};
+    absorb it into $\mathcal{T}$.
+  \item For $k = 1,\dots,t$: draw a column index $j_k \leftarrow
+    \mathcal{T}$ (uniform in $\{0,\dots,N-1\}$ by masking a squeezed
+    word); emit the opened codeword column $\bigl(\mat{C}_g[i,j_k]\bigr)_{g,i}$
+    and its Merkle authentication path $\pi_k$.
+  \end{enumerate}
+The proof is $(a',\, b',\, \mathrm{cr}',\, \{(j_k,\,\text{cells}_k,\,\pi_k)\}_{k=1}^t)$.
+
+\smallskip
+\noindent\textbf{Verifier.}
+Re-derive $(q_0,q_1)$, $\gamma$, $c$, and the indices $j_k$ from
+$\mathcal{T}$ in the prover's order (absorbing $b',a'$ before $c$, and
+$\mathrm{cr}'$ before the $j_k$), then run \Cref{cons:checks}.
+\end{protocol}
+
+\begin{construction}[The four checks]
+\label{cons:checks}
+The verifier accepts iff all four hold; the first failure rejects.
+\begin{enumerate}[leftmargin=3.4em, label=\emph{Check \arabic*.}, ref=Check~\arabic*]
+  \item\label{chk:eval} \emph{(Evaluation consistency.)}
+    \[
+      \sum_{i} q_0[i]\cdot b'[i] \;\stackrel{?}{=}\; a'
+      \qquad\text{in } \Kpoly.
+    \]
+  \item\label{chk:discharge} \emph{($\alpha$-projection discharge.)}
+    \[
+      \psia(a') \;=\; \sum_{b} a'_b\,\alpha^b
+      \;\stackrel{?}{=}\; \sum_{g=1}^{K} \gamma_g\,a_g
+      \qquad\text{in } \K.
+    \]
+  \item\label{chk:coherence} \emph{(Coherence.)}
+    \[
+      \sum_{j} q_1[j]\cdot \mathrm{cr}'[j]
+      \;\stackrel{?}{=}\;
+      \sum_{i} c_i\cdot b'[i]
+      \qquad\text{in } \Kpoly.
+    \]
+  \item\label{chk:encoding} \emph{(Encoding consistency at each opened
+    column.)} For every opened index $j_k$:
+    \begin{itemize}[leftmargin=2em, label=---]
+      \item \emph{Merkle:} $\pi_k$ verifies the cells
+        $\bigl(\mat{C}_g[i,j_k]\bigr)_{g,i}$ against $\mathrm{root}$ at leaf
+        $j_k$.
+      \item \emph{Encoding identity:}
+        \[
+          \enc(\mathrm{cr}')[j_k]
+          \;\stackrel{?}{=}\;
+          \sum_{i} c_i \sum_{g=1}^{K} \gamma_g\,\mat{C}_g[i,j_k]
+          \qquad\text{in } \Kpoly,
+        \]
+        where $\enc$ is the $\Kpoly$-extended RAA encoder of
+        \Cref{lem:linearity} and each $\mat{C}_g[i,j_k]\in\cellring$ is
+        read as a $\{0,1\}$-cell scattered by the $\K$-scalar $\gamma_g$.
+    \end{itemize}
+\end{enumerate}
+\end{construction}
+
+\begin{remark}[Reading the checks]
+\ref{chk:eval} ties $a'$ to the row-folds $b'$; \ref{chk:discharge} ties
+$a'$ to the sumcheck claims; \ref{chk:coherence} ties the proximity fold
+$\mathrm{cr}'$ to the same $b'$; \ref{chk:encoding} ties $\mathrm{cr}'$ to
+the committed codewords. The chain
+$a_g \leftrightarrow a' \leftrightarrow b' \leftrightarrow
+\mathrm{cr}' \leftrightarrow \{\mat{C}_g\}$ closes the loop from the
+claim to the commitment. Only \ref{chk:discharge} leaves $\Kpoly$: it is
+the single $\K$-valued projection of the whole argument, and the one
+place the field structure of $\K$ (not just its $\Ftwo$-vector-space
+structure) is used.
+\end{remark}
+
+\begin{remark}[Well-typedness]
+Every quantity in \ref{chk:eval}, \ref{chk:coherence}, and
+\ref{chk:encoding} is an element of $\Kpoly$: products of a
+$\K$-scalar with a $\Kpoly$ stay degree-$<\Dval$, and sums are
+coefficientwise; equality is exact, with no reduction.
+\ref{chk:discharge} is an equality in $\K$. This is in deliberate contrast to the $\alpha$-lift
+predecessor, where the analogous quantities were unreduced $\Ftwo[X]$
+polynomials of growing degree ($\approx \Dval + 3\Kbits$ bits for the
+batched $a'$); the bit-sliced form keeps a fixed degree bound $\Dval$
+because the coefficients absorb the field arithmetic.
+\end{remark}
+
+\subsection{Virtual and public columns}
+\label{sec:virtuals}
+
+The commitment of \Cref{sec:commitment} stores only the \emph{primary
+witness} columns. The full trace, however, contains two further kinds of
+column that the argument must still account for without enlarging the
+Merkle tree. Both are handled by the verifier folding their contributions
+into the existing checks (\code{verify\_f2\_open\_with\_virtuals}); the
+batching vector $\gamma$ and the per-column claims $(a_g)$ range over the
+\emph{whole} witness trace, so $K$ below counts primary and virtual
+columns alike, while the committed codewords $\{\mat{C}_g\}$ exist only
+for the primary ones.
+
+\paragraph{Bit-operation virtuals.}
+A trace column $w_h$ may be declared as a fixed bitwise map of a committed
+\emph{source} column $w_s$, applied cell by cell:
+$w_h[\cdot] = T\!\bigl(w_s[\cdot]\bigr)$, where $T$ is a cyclic rotation
+$\mathrm{ROTL}_c$ or a logical right shift $\mathrm{SHR}_c$ of the
+$\Dval$-bit cell (codebase \code{BitOp::Rot}\,/\,\code{BitOp::ShiftR},
+realised by \code{apply\_bit\_op\_u32}). Such a column is not committed.
+This is sound because every such $T$ is an $\Ftwo$-linear map on the
+cell's bit-vector --- a rotation is a coordinate permutation, a shift is a
+coordinate truncation, both $0/1$ matrices on $\Ftwo^{\Dval}$ --- and
+therefore, by exactly the argument of \Cref{lem:linearity}, commutes with
+the RAA encoder applied cell-wise:
+\begin{equation}
+  \label{eq:virtual-commute}
+  \enc\!\bigl(T(w_s[i,\cdot])\bigr)
+  \;=\; T\!\bigl(\enc(w_s[i,\cdot])\bigr)
+  \;=\; T\!\bigl(\mat{C}_s[i,\cdot]\bigr).
+\end{equation}
+(Repetition and the permutations are cell-positional and trivially
+commute with the per-cell $T$; the prefix-XOR accumulator commutes because
+$T(a)+T(b)=T(a+b)$ in $\Ftwo$.) Thus the virtual column's codeword is
+\emph{determined} by --- and recomputable from --- the source's committed
+codeword: it needs no commitment of its own.
+
+The virtual column nonetheless participates in the argument like any
+other, carrying its own batching scalar $\gamma_h$ and its own MLE claim
+$a_h$ (delivered by the sumcheck for $w_h$ as a genuine trace column):
+\begin{itemize}[leftmargin=2em]
+  \item In \ref{chk:discharge} it contributes the term $\gamma_h\,a_h$ to
+    the right-hand side, indistinguishably from a committed column.
+  \item In the prover's folds $a'$, $b'$, and $\mathrm{cr}'$ the column is
+    materialised, so its contribution is genuinely present in the
+    transmitted $\mathrm{cr}'$.
+  \item In \ref{chk:encoding} the verifier, assembling the per-opened-column
+    fold $\sum_i c_i\sum_g \gamma_g\,\mat{C}_g[i,j_k]$, has \emph{no}
+    committed cell $\mat{C}_h[i,j_k]$ to read. It instead reconstructs that
+    cell as $T\!\bigl(\mat{C}_s[i,j_k]\bigr)$ from the \emph{source's}
+    opened cell --- which the Merkle path \emph{does} certify --- and
+    scatters it by $\gamma_h$. Identity \eqref{eq:virtual-commute} is
+    precisely what makes this reconstruction equal the prover's
+    materialised contribution to $\enc(\mathrm{cr}')[j_k]$, so the encoding
+    identity still closes.
+\end{itemize}
+Two restrictions keep this self-consistent and sound. The derivation is
+\emph{depth one}: a source column must itself be primary, never another
+virtual (enforced by \code{primary\_col\_indices\_from\_virtuals}), so a
+single opened source cell suffices and no chain of reconstructions arises.
+And $T$ must be $\Ftwo$-linear: nonlinear maps such as $\mathrm{AND}$ or
+$\mathrm{Maj}$ do \emph{not} commute with the encoder and cannot be
+virtualised this way; the host protocol discharges those instead through
+the second functional read-off $\psiz$ developed in
+\Cref{sec:multifunctional}.
+
+\paragraph{Public columns.}
+Public inputs are not committed at all. The verifier evaluates their MLEs
+at $r^*$ directly from the public data and omits them from the opened
+batch; they enter neither $\gamma$ nor the codeword fold. This mirrors the
+witness-only commitment of \Cref{rem:storage}.
+
+\medskip
+Neither refinement alters the algebra of \Cref{cons:checks}: they only
+redefine which terms enter the sums --- a virtual column substitutes
+$T(\mat{C}_s)$ for a committed $\mat{C}_h$, and a public column drops out.

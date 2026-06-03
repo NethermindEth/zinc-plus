@@ -1,0 +1,187 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Relation to the integer pipeline}
+
+The integer Zip\texttt{+} opening certifies $\Z[X]$-typed witnesses by
+lifting MLE claims through $\Z \to \F_q$ and running the proximity test
+modulo $q$, exploiting that the encoder commutes with the reduction. The
+bit-sliced opening is the structural analogue with three substitutions:
+the reduction $n \mapsto n\bmod q$ becomes the evaluation
+$w \mapsto w(\alpha)$; the prime field $\F_q$ becomes the binary
+extension $\K$; and ``commutes with reduction'' becomes ``commutes with
+the $\Ftwo$-linear, scalar-extendable encoder'' (\Cref{lem:linearity}).
+The decisive difference is that $w \mapsto w(\alpha)$ is not a ring
+homomorphism that fixes the canonical representative --- it is merely
+$\Ftwo$-linear --- so the claim cannot be discharged by re-reducing a
+single committed scalar. The bit-sliced fold restores a clean discharge
+by carrying \emph{all} $\Dval$ bit-slice folds as the $\Dval$
+coefficients of $a' \in \Kpoly$ and projecting once at the end.
+
+The practical payoff over the integer pipeline is that the all-$\Ftwo$
+trace pays no $\F_q[X]\to\F_q$ projection per row at commit time, and the
+codewords never widen the cell ring (\Cref{lem:no-widen}); the price is
+paid once, in the opening, by the $\Dval$-fold inflation of the algebraic
+vectors $b'$ and $\mathrm{cr}'$ (each entry is $\Dval$ field elements
+rather than one).
+
+\subsection{Relation to the $\alpha$-lift predecessor}
+
+The scheme's earlier opening (the ``$\alpha$-lift'', described in the
+companion note on discharging GF-MLE claims) lifted the $\K$-valued
+evaluation weights into $\Ftwo[X]$ through the unique inverse of $\psia$,
+computed by a $\Kbits\times\Kbits$ Gauss--Jordan inversion over $\Ftwo$,
+and ran the whole proximity test in unreduced $\Ftwo[X]$-arithmetic. Its
+$a',b',\mathrm{cr}'$ were single $\Ftwo[X]$ polynomials of degree
+$\approx \Dval + 2\Kbits$, and discharge was one evaluation at $\alpha$.
+The bit-sliced opening of this note supersedes it (codebase commit
+\code{b840839}). Three differences:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \emph{No matrix inversion, no abort.} The $\alpha$-lift built a
+    per-$\alpha$ inverse-lift table and aborted-and-resampled on the
+    $2^{-95}$ event that $\{1,\alpha,\dots,\alpha^{\Kbits-1}\}$ failed to
+    span $\K$. The bit-sliced open does neither: it keeps the weights in
+    $\K$ and folds the cell bits, so the lift table disappears and
+    completeness is unconditional in $\alpha$ (\Cref{thm:completeness}).
+  \item \emph{A field-independent claim object.} The committed claim $a'$
+    has exactly $\Dval = 32$ coefficients, independent of $\Kbits$,
+    whereas the $\alpha$-lift's $a'$ grew with the field extension degree.
+  \item \emph{Multi-functional binding} (next subsection) --- the
+    property that actually motivated the rewrite.
+\end{enumerate}
+
+The trade-off runs the other way on proof size: the $\alpha$-lift's
+$b',\mathrm{cr}'$ entries were single $\Ftwo[X]$ polynomials
+($\approx \Dval+2\Kbits$ bits, tens of bytes), while the bit-sliced
+entries are full $\Kpoly$ elements ($\Dval$ field coefficients, hundreds
+of bytes). The rewrite accepts the larger algebraic vectors in exchange
+for eliminating a second, separate opening for the Hadamard discharge ---
+a net win whenever that discharge is needed, which in the host protocol
+it always is.
+
+\subsection{Multi-functional openings}
+\label{sec:multifunctional}
+
+The bit-sliced opening's distinctive feature is that the single bound
+object $a'$ determines not one but \emph{every} $\Ftwo$-linear functional
+of the committed cells, folded along the eq-tensor.
+
+\begin{proposition}[Functional read-off]
+\label{prop:readoff}
+Let $\varphi : \cellring \to \K$ be any $\Ftwo$-linear functional, with
+weights $(\varphi_b)_b$ in $\K$ so that $\varphi(w) = \sum_b w_b\,\varphi_b$.
+Extend it to columns by
+$\Phi_g := \sum_{(i,j)} q_0[i]q_1[j]\,\varphi(\widehat M_{w_g}[i,j])$.
+Then for the bound, $\gamma$-batched claim $a'$ of an accepting
+transcript,
+\[
+  \sum_{b} a'_b\,\varphi_b \;=\; \sum_{g} \gamma_g\,\Phi_g.
+\]
+In particular a verifier holding $a'$ can certify the batched value of
+$\varphi$ on the committed witness with \emph{no} additional commitment,
+opening, or column query --- only a length-$\Dval$ inner product against
+the weight vector $(\varphi_0,\dots,\varphi_{\Dval-1})$.
+\end{proposition}
+
+\begin{proof}
+By \Cref{thm:soundness}, $a' = \sum_g \gamma_g\,\widehat a_g'$ with
+$\widehat a_g'[b] = \sum_{(i,j)} q_0[i]q_1[j]\,(\widehat M_{w_g}[i,j])_b$.
+Then $\sum_b a'_b\varphi_b = \sum_g \gamma_g \sum_b
+\widehat a_g'[b]\varphi_b = \sum_g \gamma_g \sum_{(i,j)} q_0[i]q_1[j]
+\sum_b (\widehat M_{w_g}[i,j])_b\varphi_b = \sum_g \gamma_g\,\Phi_g$,
+using $\sum_b (\cdot)_b\varphi_b = \varphi(\cdot)$.
+\end{proof}
+
+The construction's \ref{chk:discharge} is the instance $\varphi = \psia$,
+$\varphi_b = \alpha^b$: the monomial-power weights, giving the main MLE
+evaluation claims. The host protocol uses a second instance,
+$\varphi = \psiz$, whose weights $\varphi_b = L_b(z)$ are a
+subspace-Lagrange basis evaluated at a challenge $z$. This $\psiz$
+read-off discharges a column-level \emph{Hadamard-product} relation --- the
+binary $\mathrm{AND}$ of two trace columns, which the
+$\Ftwo[X]$ arithmetization cannot express linearly --- by binding the
+product's operand evaluations to the same $a'$ via the check
+$\psiz(a') = \sum_g \gamma_g\,(\text{$z$-evals})_g$. Because both
+functionals ride the single bound $a'$, the AND discharge costs no extra
+opening: it is a second length-$\Dval$ inner product against a different
+weight vector. This is exactly the saving (one open instead of two) that
+prompted the un-lifted rewrite; the codebase exposes it by returning the
+batch challenges $\gamma$ from the verifier so a caller can run the
+$\psiz$ tie on the already-bound $a'$.
+
+\begin{remark}
+\Cref{prop:readoff} is sound only for functionals whose weight vector is
+fixed \emph{before} the prover commits $a'$, or drawn fresh from the
+transcript afterwards; reusing $a'$ for an adaptively chosen $\varphi$
+requires the corresponding $\sum_g\gamma_g\Phi_g$ to be independently
+certified (as $\psiz$'s right-hand side is, by the zerocheck that
+produces it).
+\end{remark}
+
+\subsection{Deployed parameters and costs}
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l l}
+\toprule
+Parameter & Deployed value \\
+\midrule
+Cell ring $\cellring = \Ftwo[X]/(X^{\Dval})$ & $\Dval = 32$ \\
+Challenge / evaluation field $\K$ & $\mathrm{GF}(2^{128})$, $P=X^{128}+X^7+X^2+X+1$ \\
+Code & \code{RaaF2Code}, rate $1/\mathrm{REP} = 1/4$ \\
+Column openings $t$ & $987$ (\code{recommended\_num\_column\_openings}$(4)$) \\
+Row factor $n_{\mathrm{rows}}$ & small fixed (e.g. $8$) \\
+Column factor $n_{\mathrm{cols}}$ & $n/n_{\mathrm{rows}} = \code{row\_len}$ \\
+Committed columns $K$ & primary witness columns (e.g. $\sim 41$ for SHA-256) \\
+Claim object $a'$ & one $\Kpoly$, $\Dval$ field coeffs ($\Dval\cdot 16$ bytes) \\
+\bottomrule
+\end{tabular}
+\caption{Deployed parameters of the bit-sliced $\Ftwo[X]$ opening.}
+\end{table}
+
+\paragraph{Communication.} The proof carries: the claim $a'$ (one
+$\Kpoly$); the row-fold vector $b'$ ($n_{\mathrm{rows}}$ entries in
+$\Kpoly$); the combined row $\mathrm{cr}'$ ($n_{\mathrm{cols}}$ entries in
+$\Kpoly$); and $t$ column openings, each carrying
+$\lceil K/2\rceil\cdot n_{\mathrm{rows}}$ packed cells (the paired
+codeword column) plus a Merkle path of $\log_2 N$ hashes. As in all
+Brakedown/Ligero-style schemes the $t$ column openings dominate, and the
+proof is large (multiple megabytes at the larger trace sizes); the
+$\Kpoly$ vectors $b'$ and $\mathrm{cr}'$ add the bit-sliced overhead
+discussed above. Reducing this proof size --- e.g. via a WHIR-style
+recursive IOPP in place of the flat proximity test --- is orthogonal,
+ongoing work; the construction here optimises prover time and
+binding flexibility rather than proof length.
+
+\paragraph{Prover computation.} The dominant terms are: the per-column
+bit-slice folds $b_g, a_g'$ ($O(K\cdot n)$ scatter-accumulations into
+$\Kpoly$), the combined-row fold ($O(K\cdot n)$ likewise), and the $t$
+Merkle column extractions. The column-major commit hint and packed
+storage (\Cref{rem:storage}) keep the opening's memory access
+sequential. There is no matrix inversion and no eq-tensor lift; the eq
+factors stay in $\K$.
+
+\paragraph{Verifier computation.} The verifier recomputes the eq-tensor,
+re-derives $\gamma$ and $c$, runs Checks~1 and~3 (each an
+$O(n_{\mathrm{rows}}+n_{\mathrm{cols}})$ inner product over $\Kpoly$),
+runs \ref{chk:discharge} (one length-$\Dval$ projection in $\K$), and for each of the
+$t$ opened columns verifies one Merkle path and one $\gamma$/$c$-weighted
+encoding identity. Encoding $\mathrm{cr}'$ through the $\Kpoly$-extended
+RAA encoder is an $O(N)$ pass of $\Ftwo$-XORs per field coefficient.
+
+\subsection{Summary}
+
+The bit-sliced $\Ftwo[X]$ opening is a Brakedown/Ligero IOPP made native
+to binary-field witnesses by two design choices: an $\Ftwo$-linear code
+that does not widen the cell ring and extends scalar-wise to $\K$, and an
+evaluation argument that folds cell \emph{bits} against $\K$-valued
+eq-weights to produce a fixed-degree claim $a' \in \Kpoly$ discharged by
+a single $\alpha$-projection. The construction sidesteps the
+ring-homomorphism shortcut of the integer pipeline and the matrix-inverse
+lift of its own predecessor, keeps the committed claim small and
+field-independent, and --- because it binds the full bit-slice fold ---
+supports several distinct linear-functional read-offs from one opening,
+which the host protocol exploits to discharge column Hadamard products at
+no extra cost.

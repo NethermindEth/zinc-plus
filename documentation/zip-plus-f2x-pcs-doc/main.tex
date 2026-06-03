@@ -1,0 +1,69 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{A Hash-Based Polynomial Commitment Scheme over $\Ftwo[X]$:\\
+       The Zip\texorpdfstring{$+$}{+} Construction with Bit-Sliced
+       Evaluation Openings\\[4pt]
+       \large As deployed in the Zinc\texorpdfstring{$+$}{+} reference codebase
+       (\texttt{f2-clean})}
+\author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Companion note to the Zinc\texttt{+} paper. This
+document describes the binary-field instantiation of the Zip\texttt{+}
+polynomial commitment scheme as implemented on the \texttt{f2-clean}
+branch. Machine-assisted draft, under author revision.}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe a hash-based polynomial commitment scheme (PCS) for
+multilinear polynomials whose coefficients are bit-polynomials in the
+ring $\cellring = \Ftwo[X]/(X^{\Dval})$, together with an evaluation
+argument that discharges the multilinear-extension evaluation claims
+produced by a binary-field sumcheck. The scheme is the
+$\Ftwo[X]$-native instantiation of Zip\texttt{+}, the Brakedown/Ligero-style
+interactive oracle proof of proximity (IOPP) underlying Zinc\texttt{+}. Its
+two pillars are an $\Ftwo$-linear Repeat--Accumulate--Accumulate code,
+whose codewords never widen the cell ring, and a \emph{bit-sliced}
+evaluation opening that runs the proximity test entirely inside
+$\Ftwo[X]$-arithmetic while binding claims stated over the binary
+extension field $\K = \mathrm{GF}(2^{\Kbits})$. The opening's central
+object is, for each committed column, the degree-$<\Dval$ univariate
+$a' \in \Kpoly$ whose $b$-th coefficient is the boolean-hypercube fold
+of the column's $b$-th bit slice. Because the evaluation projection
+$\psia : \cellring \to \K$, $w \mapsto w(\alpha)$ is $\Ftwo$-linear, the
+original claim is recovered by a single coefficient projection
+$a'(\alpha)$; this avoids the per-row $\K$-projection paid by the
+integer pipeline and avoids the $\K$-to-$\Ftwo[X]$ basis inversion of
+the scheme's earlier ``$\alpha$-lift'' variant. A transcript-fresh
+batching challenge $\gamma$ folds all per-column claims into one opening
+triple, making the algebraic part of the proof constant in the number
+of committed columns. We give the construction in full --- commitment,
+opening, and four verifier checks --- prove completeness, analyse
+knowledge soundness by enumerating the prover's deviation modes, and
+report the deployed parameters. A short final section observes that the
+bit-sliced opening binds the entire bit-slice fold rather than a single
+field projection, so a single opening can simultaneously discharge
+several distinct $\Ftwo$-linear functionals of the committed cells ---
+a property the host protocol uses to verify column-level Hadamard
+products at no extra opening cost.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/introduction}
+\input{sections/preliminaries}
+\input{sections/code}
+\input{sections/commitment}
+\input{sections/evaluation}
+\input{sections/soundness}
+\input{sections/discussion}
+
+\end{document}

@@ -1,0 +1,142 @@
+\section{Introduction}
+\label{sec:intro}
+
+A polynomial commitment scheme (PCS) lets a prover commit to a
+multilinear polynomial $\mle{w}$ and later prove, succinctly, that
+$\mle{w}(r) = a$ at a verifier-chosen point $r$. Hash-based PCSs in the
+Brakedown/Ligero family obtain transparent setup and plausibly
+post-quantum security by encoding the witness through a linear code,
+committing to the codeword via a Merkle tree, and answering evaluation
+queries through a combination of a random-linear-combination
+\emph{proximity test} and a small number of column openings. They are
+the commitment backbone of Zinc\texttt{+}, the SNARK for polynomial
+rings to which this note is a companion.
+
+This document concerns the instantiation of that backbone for witnesses
+that are natively \emph{binary}: every committed cell is a
+bit-polynomial in the ring
+\[
+  \cellring \;=\; \Ftwo[X]/(X^{\Dval}),
+  \qquad \Dval = 32,
+\]
+a free $\Ftwo$-module of rank $\Dval$ whose elements one should think of
+as $\Dval$-bit words carrying a polynomial structure. This is the
+representation produced by the all-$\Ftwo$ arithmetization of
+bit-oriented computations --- hash functions, bitwise circuits, the
+multi-scalar-multiplication core of ECDSA --- where $\mathrm{XOR}$ is
+polynomial addition, bit shifts and rotations are monomial
+multiplications, and modular addition is a Binius-style carry identity.
+Committing to such witnesses directly over $\Ftwo[X]$, rather than
+lifting them to $\Z[X]$ or to a large prime field, removes a
+constant-factor overhead that the integer pipeline pays at every row of
+the trace.
+
+\paragraph{The obstruction.} The integer Zip\texttt{+} opening lifts
+each multilinear-extension (MLE) evaluation claim through the ring
+homomorphism $\Z \to \F_q$, $n \mapsto n \bmod q$, and exploits that the
+encoder commutes with this reduction:
+\[
+  \enc\!\Big(\textstyle\sum_i c_i \cdot \mathrm{row}_i \bmod q\Big)
+  \;=\;
+  \Big(\textstyle\sum_i c_i \cdot \enc(\mathrm{row}_i)\Big) \bmod q .
+\]
+The analogue one would hope for in the binary world is the evaluation
+map $\psia : \Ftwo[X] \to \K$, $p \mapsto p(\alpha)$, at a
+transcript-fresh point $\alpha$ in the binary extension field
+$\K = \mathrm{GF}(2^{\Kbits})$. But $\psia$ does not behave like the
+integer reduction: the canonical degree-$<\Kbits$ bit-pattern
+representative of a field element $g \in \K$ evaluates at $\alpha$ back
+to $g$ only when $\alpha$ is the field's quotient generator, an event of
+probability $2^{-\Kbits}$ for a sampled $\alpha$. The naive bit-pattern
+lift of the random evaluation point is therefore \emph{unsound}, and the
+integer recipe does not transfer.
+
+\paragraph{Two ways around it.} The reference codebase has carried two
+constructions that resolve this obstruction, and we describe both
+because the second is best understood as a simplification of the first.
+
+\begin{itemize}[leftmargin=2em]
+  \item The \emph{$\alpha$-lift} opening (the scheme's earlier form)
+    replaces the bit-pattern lift with the unique $\Ftwo$-linear inverse
+    of $\psia$ on $\polyat{\Ftwo}{\Kbits}$, computed once per $\alpha$
+    by a $\Kbits \times \Kbits$ matrix inversion over $\Ftwo$. The
+    random evaluation weights are lifted into $\Ftwo[X]$ through this
+    inverse, the whole proximity test runs in $\Ftwo[X]$, and each claim
+    is discharged by one evaluation at $\alpha$.
+
+  \item The \emph{bit-sliced} opening (the current form, and the subject
+    of this note) observes that the lift is unnecessary. Keep the random
+    evaluation weights in $\K$, and fold the $\{0,1\}$-valued
+    \emph{bit slices} of the committed cells against them. For each
+    committed column this produces a single degree-$<\Dval$ univariate
+    \[
+      a' \;=\; \sum_{b=0}^{\Dval-1} a'_b \, X^b \;\in\; \Kpoly,
+      \qquad
+      a'_b \;=\; \sum_{(i,j)} q_0[i]\,q_1[j]\,\bigl(M_w[i,j]\bigr)_b \;\in\; \K,
+    \]
+    whose $b$-th coefficient is the boolean-hypercube fold of the
+    column's $b$-th bit slice. Since $\psia$ is $\Ftwo$-linear, the
+    original claim is exactly the coefficient projection
+    $a'(\alpha) = \sum_b a'_b\,\alpha^b$, read off $a'$ by a single
+    inner product with the power vector $(\alpha^0, \dots,
+    \alpha^{\Dval-1})$.
+\end{itemize}
+
+\paragraph{Contribution and why bit-slicing wins.} We present the
+bit-sliced $\Ftwo[X]$ PCS as deployed, with the following features.
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{No lift, no matrix inversion.} The opening never
+    constructs the $\Kbits \times \Kbits$ inverse-lift table of the
+    $\alpha$-lift variant, and never leaves $\K$-coefficient arithmetic.
+    The committed claim is a clean object: a degree-$<\Dval$ polynomial
+    over $\K$ with $\Dval = 32$ coefficients, independent of the field
+    extension degree.
+  \item \textbf{One reused codeword matrix.} The $\Ftwo$-linear
+    Repeat--Accumulate--Accumulate encoder does not widen the cell ring,
+    so codewords live in $\cellring$ exactly like the committed cells.
+    Its $\Ftwo$-linearity extends scalar-wise to $\Kpoly$, so the
+    commit-time codeword matrix is reused verbatim by the opening's
+    proximity check --- no re-encoding, no second commitment.
+  \item \textbf{Constant column overhead.} A transcript-fresh batching
+    challenge $\gamma \in \K$ folds all $K$ per-column claims into a
+    single opening triple $(a', b', \text{combined row})$. The algebraic
+    part of the proof is then $O(1)$ in $K$; only the Merkle column
+    openings scale with the trace.
+  \item \textbf{Multi-functional openings.} Because $a'$ binds the
+    \emph{entire} bit-slice fold and not merely its value at $\alpha$,
+    the verifier may read off any $\Ftwo$-linear functional of the
+    committed cells from the same $a'$. The host protocol uses this to
+    discharge a second, structurally different claim --- a column-level
+    Hadamard product --- from a single opening, at no additional
+    commitment or column-opening cost.
+\end{enumerate}
+
+\paragraph{Scope.} We treat the commitment and the evaluation argument
+as a stand-alone primitive: its interface is ``commit to binary trace
+columns; later certify a batch of MLE evaluation claims over $\K$
+against the commitment.'' We take as given the upstream reduction that
+produces those claims (the ring/evaluation projections and the
+binary-field sumcheck of the Zinc\texttt{+} PIOP) and treat its
+soundness error as a black box $\epsilon_{\mathrm{pre}}$; we analyse only
+the opening. Throughout, ``the codebase'' refers to the \texttt{f2-clean}
+branch, and we point to the governing types and routines by name where
+helpful.
+
+\paragraph{Organisation.}
+\Cref{sec:prelim} fixes the field, the cell ring, the multilinear
+encoding, and the evaluation projection, and isolates the linearity
+properties the construction rests on.
+\Cref{sec:code} describes the $\Ftwo$-linear RAA code and proves the two
+facts the opening needs from it: no width inflation, and scalar
+extension to $\Kpoly$.
+\Cref{sec:commitment} gives the commitment: matrix layout, encoding, and
+the batched Merkle tree.
+\Cref{sec:eval} is the heart of the note --- the bit-sliced
+$\gamma$-batched evaluation argument and its four verifier checks.
+\Cref{sec:soundness} proves completeness and analyses knowledge
+soundness deviation mode by deviation mode.
+\Cref{sec:discussion} compares the construction with the integer
+pipeline and the $\alpha$-lift predecessor, develops the
+multi-functional-opening property, and lists deployed parameters and
+costs.

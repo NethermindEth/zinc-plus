@@ -1,0 +1,115 @@
+\section{The $\Ftwo$-Linear Code}
+\label{sec:code}
+
+The commitment encodes each matrix row through a linear code. Two
+properties of the code are load-bearing for the bit-sliced opening: it
+must not widen the cell ring (so codewords are again $\cellring$-valued
+and committable without growth), and its $\Ftwo$-linearity must extend
+to $\K$-coefficient rows (so the same codeword matrix serves the
+proximity test in $\Kpoly$-arithmetic). We use the
+Repeat--Accumulate--Accumulate (RAA) code over $\Ftwo$, which has both.
+
+\subsection{Definition}
+
+\begin{definition}[$\Ftwo$-RAA code, \code{RaaF2Code}]
+\label{def:raa}
+Fix a repetition factor $\mathrm{REP} = 4$ (a power of two) and a power-of-two
+message length $\ell = n_{\mathrm{cols}}$. The codeword length is
+$N = \mathrm{REP}\cdot\ell$, so the rate is $1/\mathrm{REP} = 1/4$. Let
+$\pi_1, \pi_2$ be two fixed pseudorandom permutations of $\{0,\dots,N-1\}$
+(seeded deterministically; \code{perm\_1\_seed}, \code{perm\_2\_seed}),
+let $\rep : \cellring^{\ell} \to \cellring^{N}$ be the $\mathrm{REP}$-fold
+repetition $u \mapsto (u, u, \dots, u)$, and let
+$\acc : \cellring^{N} \to \cellring^{N}$ be the prefix-XOR accumulator
+$\acc(y)_k = \sum_{m \le k} y_m$ (running sum in $\Ftwo$, so
+$1 + 1 = 0$). The encoder is the composition
+\[
+  \enc \;=\; \acc \,\circ\, \pi_2 \,\circ\, \acc \,\circ\, \pi_1 \,\circ\, \rep
+  \;:\; \cellring^{\ell} \longrightarrow \cellring^{N}.
+\]
+\end{definition}
+
+The accumulator runs under the $\Ftwo$ addition of $\cellring$, i.e.
+coordinatewise XOR of the $\Dval$-bit cells; in the codebase this is
+\code{f2\_add\_assign}, so $1 + 1 = 0$ and there is no overflow to track.
+This is the only structural difference from the integer RAA code of the
+$\Z[X]$ pipeline, where the accumulator is an integer cumulative sum that
+widens the coefficient ring. Over $\Ftwo$ the addition is closed, hence:
+
+\begin{lemma}[No width inflation]
+\label{lem:no-widen}
+$\enc$ maps $\cellring^{\ell}$ into $\cellring^{N}$: every codeword cell
+lies in the same ring $\cellring$ as the message cells. In particular the
+codeword type equals the evaluation type ($\code{Cw} = \code{Eval} =
+\code{BinaryPoly}\langle \Dval\rangle$), and the encoded matrix occupies
+$\mathrm{REP}\times$ the message storage with no per-cell growth.
+\end{lemma}
+
+\begin{proof}
+$\rep$ and the permutations $\pi_1,\pi_2$ are coordinate moves and keep
+cells in $\cellring$; $\acc$ takes $\Ftwo$-sums of $\cellring$-cells,
+which lie in $\cellring$ because $\cellring$ is an $\Ftwo$-vector space
+closed under addition. The composition therefore lands in
+$\cellring^{N}$.
+\end{proof}
+
+\subsection{$\Ftwo$-linearity and scalar extension to $\Kpoly$}
+
+\begin{lemma}[$\Ftwo$-linearity and scalar extension]
+\label{lem:linearity}
+$\enc$ is $\Ftwo$-linear in the cell coordinate. Consequently it extends,
+\emph{coefficient by coefficient}, to an $\K$-linear map on rows valued
+in any $\Ftwo$-algebra $S \supseteq \cellring$ --- in particular on
+$\Kpoly$ --- and for every scalar $s$ in that algebra the diagram
+\[
+  \begin{array}{ccc}
+    S^{\ell} & \xrightarrow{\;\enc\;} & S^{N} \\[2pt]
+    \big\downarrow{\scriptstyle\, s\cdot} & & \big\downarrow{\scriptstyle\, s\cdot} \\[2pt]
+    S^{\ell} & \xrightarrow{\;\enc\;} & S^{N}
+  \end{array}
+\]
+commutes. We write $\enc$ also for these extensions; the codebase exposes
+the $\Kpoly$ extension as \code{encode\_gf128\_lin\_open}.
+\end{lemma}
+
+\begin{proof}
+Repetition and permutation are coordinate-positional and trivially
+$\Ftwo$-linear. The prefix-XOR accumulator is the matrix $\acc = L$ where
+$L$ is the $0/1$ lower-triangular all-ones matrix acting by $\Ftwo$-sums,
+again $\Ftwo$-linear. A composition of $\Ftwo$-linear maps is
+$\Ftwo$-linear. For the extension: $S$ is a flat $\Ftwo$-module, so
+applying $\enc$ coordinate-of-the-cell-wise (it is built only from
+positional moves and $\Ftwo$-additions) commutes with $S$-scalar
+multiplication, which acts within each cell. Hence $\enc(s\cdot u) =
+s\cdot\enc(u)$ for $s \in S$ and the diagram commutes.
+\end{proof}
+
+\Cref{lem:linearity} is what lets the opening reuse the commit-time
+codeword matrix. The matrix was produced by $\enc$ over $\cellring$; the
+same array \emph{is} the image under the $\Kpoly$-extended $\enc$ of the
+same message, because the extended encoder agrees with the $\cellring$
+encoder on $\cellring$-valued inputs and is $\K$-scalar-linear on top.
+The commitment is never re-issued for the opening.
+
+\begin{remark}[Distance and the column-opening parameter]
+\label{rem:distance}
+Write $\delta$ for the relative minimum distance of \code{RaaF2Code}. The
+proximity soundness of a Brakedown-style opening with $t$ independent
+column queries is governed by a term of the form
+$\bigl((1+\delta)/2\bigr)^{t}$ (in the unique-decoding regime; the
+list-decoding refinement uses the code's correlated-agreement bound). The
+codebase fixes $t$ through
+$\code{recommended\_num\_column\_openings}(\mathrm{REP})$, which for the
+deployed rate $1/4$ returns $t = 987$ --- calibrated to push the
+column-opening term below the $2^{-100}$ class for the code's distance.
+We treat $\delta$ and $t$ as code parameters and carry the proximity term
+abstractly in \Cref{sec:soundness}.
+\end{remark}
+
+\begin{remark}[Encoding cost is off the critical path of soundness]
+The encoder is implemented in several equivalent forms --- a generic
+per-cell path, a packed $u64$ fast path for $\Dval \le 64$, a fused
+zero-allocation matrix path, and a Metal GPU kernel --- all producing
+bit-identical codewords. These are performance variants of the single
+linear map of \Cref{def:raa} and do not affect the protocol's algebra.
+\end{remark}

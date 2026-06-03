@@ -1,0 +1,108 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper and the F_2 companion notes
+% (sha-f2x-doc, zip-plus-f2x-pcs-doc).
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{thmtools}
+\usepackage{cleveref}
+
+% --- Theorem environments --------------------------------------------------
+% Shared `theorem` numbering via thmtools' `sibling=theorem`, with cleveref
+% still naming each reference by its true kind ("Lemma 3.3", "Definition 5.1").
+\theoremstyle{plain}
+\declaretheorem[name=Theorem, numberwithin=section]{theorem}
+\declaretheorem[name=Lemma, sibling=theorem]{lemma}
+\declaretheorem[name=Proposition, sibling=theorem]{proposition}
+\declaretheorem[name=Corollary, sibling=theorem]{corollary}
+\declaretheorem[name=Claim, sibling=theorem]{claim}
+
+\theoremstyle{definition}
+\declaretheorem[name=Definition, sibling=theorem]{definition}
+\declaretheorem[name=Construction, sibling=theorem]{construction}
+\declaretheorem[name=Protocol, sibling=theorem]{protocol}
+\declaretheorem[name=Example, sibling=theorem]{example}
+
+\theoremstyle{remark}
+\declaretheorem[name=Remark, sibling=theorem]{remark}
+
+% --- Operators -------------------------------------------------------------
+\DeclareMathOperator{\ROTR}{ROTR}
+\DeclareMathOperator{\ROTL}{ROTL}
+\DeclareMathOperator{\SHR}{SHR}
+\DeclareMathOperator{\SHL}{SHL}
+\DeclareMathOperator{\XOR}{XOR}
+\DeclareMathOperator{\AND}{AND}
+\DeclareMathOperator{\OR}{OR}
+\DeclareMathOperator{\NOT}{NOT}
+\DeclareMathOperator{\Maj}{Maj}
+\DeclareMathOperator{\Ch}{Ch}
+\DeclareMathOperator{\MLE}{MLE}
+\DeclareMathOperator{\eq}{eq}
+\DeclareMathOperator{\enc}{Enc}
+\DeclareMathOperator{\wt}{wt}
+\DeclareMathOperator{\negl}{negl}
+\DeclareMathOperator{\img}{img}
+\DeclareMathOperator{\spanop}{span}
+\DeclareMathOperator{\Merk}{Merkle}
+
+% --- Number systems --------------------------------------------------------
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Ftwo}{\F_2}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\bP}{\mathbb{P}}
+
+% Binary extension field K = GF(2^kappa); deployed at kappa = 128.
+\newcommand{\K}{\mathbb{K}}
+
+% Cell ring R = F_2[X]/(X^w); deployed at word width w = 32.
+\newcommand{\cellring}{R}
+\newcommand{\wbit}{w}
+
+% Bit-polynomial set: degree-<n with {0,1} coefficients.
+\newcommand{\bitpoly}[1]{\{0,1\}^{<#1}[X]}
+
+% Quotient rings used in the modular-addition arithmetisation.
+\newcommand{\Fshift}{\Ftwo[X]/(X^{\wbit})}
+\newcommand{\Frot}{\Ftwo[X]/(X^{\wbit}-1)}
+
+% Degree-<d univariate over a coefficient ring S, in the cell variable X.
+\newcommand{\polyat}[2]{#1[X]_{<#2}}
+\newcommand{\Kpoly}{\polyat{\K}{\wbit}}        % K[X]_{<w}
+
+% Projections (evaluation of the cell variable through an F_2-linear map).
+\newcommand{\psia}{\psi_{\alpha}}
+\newcommand{\psiz}{\psi_{z}}
+
+% MLE tilde, Hadamard, bit-poly hat, ideal, column branding.
+\newcommand{\mle}[1]{\widetilde{#1}}
+\newcommand{\had}{\odot}
+\newcommand{\bp}[1]{\widehat{#1}}
+\newcommand{\ideal}[1]{\langle #1 \rangle}
+\newcommand{\col}[1]{\ensuremath{\mathsf{#1}}}
+\newcommand{\code}[1]{\ensuremath{\mathsf{#1}}}
+\newcommand{\vv}[1]{\mathbf{#1}}
+\newcommand{\mat}[1]{\mathsf{#1}}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}
