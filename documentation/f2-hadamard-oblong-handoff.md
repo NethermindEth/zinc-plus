@@ -151,8 +151,14 @@ open. Concretely (`prove/verify_f2_full_with_oblong_hadamard`):
 - **Gate met**: `prove_then_verify_f2_full_with_oblong_hadamard_roundtrips` — honest
   accept + corrupt-W / tampered-ψ_z / tampered-pair-eval rejection; 60 protocol tests green.
 
-**Follow-ups (not blockers)**: a `Verify-Hadamard-Oblong` bench arm + e2e prove/verify
-A/B vs the fused discharge; a sound adder-carry binding (Issue 1).
+**✅ e2e A/B (Apple M4, nvars=16)**: the bound discharge proves in **154 ms vs the
+fused 482 ms (~3.1× faster**; ~4.5× cheaper discharge overhead), **verify essentially
+unchanged** (10.95 vs 10.83 ms, +1%). `Verify-Hadamard-Oblong` bench arm added; the
+run also validates the sound path on the full SHA arithmetization (adders, public
+cols, bit-op virtuals). See the ledger for the full table.
+
+**Follow-ups (not blockers)**: a sound adder-carry binding (Issue 1); re-author the
+per-step verify micro-benches against the un-lifted open if that breakdown is wanted.
 
 ### 2. ✅ DONE — Gruen's eq-trick on Phase-2 (degree-2 MLE-check, smaller proof)
 **Shipped** (working tree; the ledger has the full entry + A/B). Replaced the naive

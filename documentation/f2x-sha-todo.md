@@ -104,8 +104,27 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   green — honest accept, flipped-`W` → oblong-zerocheck reject, tampered-`z_r0` →
   ψ_z-binding/multipoint reject, tampered AND pair-eval → multipoint/tie reject. **All
   60 protocol + 35 poly tests green; benches compile.**
-- **Still open (follow-ups, not blockers)**: a `Verify-Hadamard-Oblong` bench arm +
-  an e2e prove/verify A/B vs the fused discharge (perf numbers for the bound path);
+- **e2e prove/verify A/B vs the fused discharge — DONE** (`Verify-Hadamard-Oblong`
+  bench arm added; Apple M4, `target-cpu=native`, `parallel simd unchecked`):
+
+  | arm | nvars=9 | nvars=16 | discharge overhead @16 |
+  | --- | --- | --- | --- |
+  | Prove-NoHadamard | 2.28 ms | 59.9 ms | — |
+  | Prove-Hadamard (fused, ψ_α) | 7.72 ms | 482.5 ms | +422.6 ms |
+  | **Prove-Hadamard-Oblong (sound)** | **5.05 ms** | **154.0 ms** | **+94.2 ms** |
+  | Verify-NoHadamard | 1.24 ms | 10.52 ms | — |
+  | Verify-Hadamard (fused) | 1.44 ms | 10.83 ms | +0.31 ms |
+  | **Verify-Hadamard-Oblong (sound)** | **1.57 ms** | **10.95 ms** | **+0.43 ms** |
+
+  **The bound discharge is ~3.1× faster to prove than fused at nvars=16** (154 vs
+  482 ms; ~4.5× cheaper discharge overhead, 94 vs 423 ms), **with verify essentially
+  unchanged** (+0.12 ms vs fused, ~1% — both ~10.9 ms, dominated by the shared
+  open/Merkle verify). The binding added ~53 ms over the *unbound* measurement
+  (~101 ms): the z-block (z-projections of all witness cols) + the folded multipoint.
+  The run also **validates the sound path on the real SHA arithmetization** (adders,
+  public cols, bit-op virtuals) beyond the toy round-trip test — both `proof_oblong`
+  and `Verify-Hadamard-Oblong` are `.expect()`-guarded and succeeded.
+- **Still open (follow-ups, not blockers)**: a sound adder-carry binding (Issue 1);
   re-authoring the per-step verify micro-benches against the un-lifted open if that
   breakdown is wanted again.
 

@@ -2350,6 +2350,22 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
         )
         .expect("prove (hadamard) for verify bench")
     };
+    let proof_oblong = {
+        let mut t = Blake3Transcript::new();
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_oblong_hadamard(
+            &mut t,
+            &fx.pp,
+            &fx.trace,
+            &[],
+            &bit_ops,
+            &and_specs,
+            &adder_specs,
+            fx.num_vars,
+            sha256_f2_project_scalar::<R>,
+            BENCH_NUM_OPENINGS,
+        )
+        .expect("prove (oblong hadamard) for verify bench")
+    };
     // Proof-size impact of the discharge (raw + zstd-3), printed once.
     eprint_f2_proof_size(&format!("{id} NoHadamard"), &proof_no_had);
     eprint_f2_proof_size(&format!("{id} Hadamard"), &proof_had);
@@ -2393,6 +2409,31 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
                 )
                 .expect("verify (hadamard) should succeed");
             black_box(subclaim);
+        });
+    });
+
+    // The **sound** oblong verify: oblong zerocheck + the dual-projection
+    // multipoint (α-cols + z-cols) + the open + the ψ_z binding/tie. A/B vs
+    // `Verify-Hadamard` (fused) at the same nvars on the same SHA fixture.
+    group.bench_function(BenchmarkId::new("Verify-Hadamard-Oblong", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full_with_oblong_hadamard::<
+                Sha256F2Ideal,
+            >(
+                &mut transcript,
+                &fx.pp,
+                &proof_oblong,
+                &[],
+                &bit_ops,
+                &and_specs,
+                &adder_specs,
+                public_cols,
+                fx.num_vars,
+                fx.num_primary,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+            .expect("verify (oblong hadamard) should succeed");
         });
     });
 }
