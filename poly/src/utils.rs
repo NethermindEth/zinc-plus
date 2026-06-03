@@ -58,8 +58,7 @@ where
     }
 
     let one = F::one_with_cfg(cfg);
-    let l = r.len();
-    let mut eval = vec![one.clone(); 1 << l];
+    let mut eval = vec![one; 1 << r.len()];
     let mut s = 1;
     for ri in r {
         for j in (0..s).rev() {
@@ -106,8 +105,7 @@ where
     }
 
     let one = F::one_with_cfg(cfg).into_inner();
-    let l = r.len();
-    let mut eval = vec![one.clone(); 1 << l];
+    let mut eval = vec![one; 1 << r.len()];
     let mut s = 1;
     for ri in r {
         for j in (0..s).rev() {
