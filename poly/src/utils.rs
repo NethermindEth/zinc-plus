@@ -63,38 +63,51 @@ where
     Ok(eval)
 }
 
-/// A helper function to build eq(x, r) recursively.
-/// This function takes `r.len()` steps, and for each step it requires a maximum
-/// `r.len()-1` multiplications.
+/// A helper function to build the `eq(x, r)` evaluation table in place.
+///
+/// This is Procedure 2 of "A Time-Space Tradeoff for the Sumcheck Prover"
+/// (Bagad, Dao, Domb, Thaler): a single buffer of `2^{r.len()}` field
+/// elements is allocated once, and the valid prefix is doubled one variable
+/// at a time. Each parent value `p` expands into its two children with a
+/// *single* multiplication:
+///
+///   child(x_i = 1) = p * r_i
+///   child(x_i = 0) = p - child(x_i = 1)   (= p * (1 - r_i))
+///
+/// The previous version was recursive: it allocated a fresh vector at every
+/// one of the `r.len()` levels and performed two multiplications per parent
+/// (one for each child). This version does one allocation and one
+/// multiplication per parent, while producing the identical output.
 fn build_eq_x_r_helper<F>(r: &[F], buf: &mut Vec<F>, cfg: &F::Config) -> Result<(), ArithErrors>
 where
     F: PrimeField,
 {
     if r.is_empty() {
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push(F::one_with_cfg(cfg) - &r[0]);
-        buf.push(r[0].clone());
-    } else {
-        build_eq_x_r_helper(&r[1..], buf, cfg)?;
+    }
 
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
+    // Single allocation for the whole `2^{r.len()}` evaluation table.
+    buf.clear();
+    buf.resize(1usize << r.len(), F::zero_with_cfg(cfg));
+    buf[0] = F::one_with_cfg(cfg);
 
-        let mut res = vec![F::zero_with_cfg(cfg); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = buf[i >> 1].clone();
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = bi - tmp;
-            } else {
-                *val = tmp;
-            }
-        });
-        *buf = res;
+    // Fold in one variable `r_i` per round, doubling the valid prefix
+    // `[0, 1 << i)`. `r_i` becomes bit `i` of the output index: the lower
+    // half keeps `x_i = 0` and the upper half (offset `half`) gets
+    // `x_i = 1`. This matches the convention
+    // `eval[\sum_i x_i 2^i] = \prod_i eq(x_i, r_i)`.
+    for (i, ri) in r.iter().enumerate() {
+        let half = 1usize << i;
+        let (lo, hi) = buf.split_at_mut(half);
+        cfg_iter_mut!(lo)
+            .zip(cfg_iter_mut!(hi))
+            .for_each(|(lo_j, hi_j)| {
+                // child for `x_i = 1`
+                let one_child = lo_j.clone() * ri;
+                // child for `x_i = 0`: parent - one_child = parent * (1 - r_i)
+                *lo_j -= &one_child;
+                *hi_j = one_child;
+            });
     }
 
     Ok(())
@@ -164,32 +177,32 @@ where
     F: PrimeField,
     F::Inner: Zero,
 {
-    let one = F::one_with_cfg(cfg);
     if r.is_empty() {
         return Err(ArithErrors::InvalidParameters("r length is 0".into()));
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push((one - &r[0]).into_inner());
-        buf.push(r[0].inner().clone());
-    } else {
-        build_eq_x_r_inner_helper(&r[1..], buf, cfg)?;
+    }
 
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
+    // Single allocation for the whole `2^{r.len()}` evaluation table; see
+    // `build_eq_x_r_helper` for the in-place doubling scheme (Procedure 2 of
+    // the "Speedup Sumcheck" paper). Values are stored in `F::Inner` form;
+    // each is wrapped back into `F` only to perform the one multiplication
+    // and subtraction per parent.
+    buf.clear();
+    buf.resize(1usize << r.len(), F::Inner::zero());
+    buf[0] = F::one_with_cfg(cfg).into_inner();
 
-        let mut res = vec![F::Inner::zero(); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = F::new_unchecked_with_cfg(buf[i >> 1].clone(), cfg);
-            let tmp = r[0].clone() * &bi;
-            if (i & 1) == 0 {
-                *val = (bi - tmp).into_inner();
-            } else {
-                *val = tmp.into_inner();
-            }
-        });
-        *buf = res;
+    for (i, ri) in r.iter().enumerate() {
+        let half = 1usize << i;
+        let (lo, hi) = buf.split_at_mut(half);
+        cfg_iter_mut!(lo)
+            .zip(cfg_iter_mut!(hi))
+            .for_each(|(lo_j, hi_j)| {
+                let parent = F::new_unchecked_with_cfg(lo_j.clone(), cfg);
+                // child for `x_i = 1`
+                let one_child = ri.clone() * &parent;
+                // child for `x_i = 0`: parent - one_child = parent * (1 - r_i)
+                *lo_j = (parent - &one_child).into_inner();
+                *hi_j = one_child.into_inner();
+            });
     }
 
     Ok(())
