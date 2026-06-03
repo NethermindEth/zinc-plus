@@ -172,6 +172,22 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   a proof-size compression. Per the approved direction the un-lifted form is applied
   to **all** columns (no discharge-only mixed-flavor batching); proof size grows, the
   M_α⁻¹ lift cost disappears.
+- **MEASURED prove-time cost of the un-lifted open (A/B at `7d2c468` lifted vs
+  current, Apple M4, nvars=16): `Prove-NoHadamard` 47.8 → 63.2 ms (+15.4 ms, +32%)**.
+  The open is on **every** F_2 proof's critical path, so this ~15 ms hits all proofs.
+  Counter-intuitively, dropping the lift made the open *slower*: the `M_α⁻¹` lift was
+  `O(num_rows + row_len)` (small), but the un-lifted per-cell ops + the `combined_row`
+  proximity encode are now `GF128Poly<D>` (D=32 GF128 ≈ 512 B, ~13× wider than the old
+  narrow `BinaryF2Poly`) across `O(num_cols·2^num_vars)` cells — the width dominates.
+  **Net is still hugely positive for the SHA Hadamard prove** (the un-lifted open is a
+  ~15 ms *enabling* cost; the oblong discharge it unlocks saves ~350 ms → 482→136 ms,
+  3.6×). **Claw-back options if the ~15 ms matters** (open hot loop is the wide per-cell
+  `gf128poly_accumulate_cell` scatter + the D-wide `encode_gf128_lin_open` proximity):
+  (a) collapse the proximity's `combined_row` to one GF128 via a random bit-slice
+  challenge τ (keep `a'`/`b'` wide for the ψ_α/ψ_z *evals*, narrow only the *encode* —
+  sound since an F_2-codeword stays one under any GF128 combo); (b) discharge-cols-only
+  un-lifted (mixed-flavor batching — rejected earlier for simplicity); (c) SIMD/constant-
+  factor work on the wide scatter. Not yet attempted.
 - **Bench migration (follow-up, done)**: Stage 1b changed `F2OpenProof`'s claim /
   b-vector / combined-row from wide `BinaryF2Poly` to `GF128Poly<D>` but only ran
   `--lib` tests, so the three F_2 benches (`f2_sha256`, `f2_sha256_rs`, `f2_blake3`)
