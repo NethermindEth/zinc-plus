@@ -111,22 +111,33 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   | --- | --- | --- | --- |
   | Prove-NoHadamard | 2.28 ms | 59.9 ms | — |
   | Prove-Hadamard (fused, ψ_α) | 7.72 ms | 482.5 ms | +422.6 ms |
-  | **Prove-Hadamard-Oblong (sound)** | **5.05 ms** | **154.0 ms** | **+94.2 ms** |
+  | **Prove-Hadamard-Oblong (sound)** | **5.05 ms** | **136.2 ms** | **+73.0 ms** |
   | Verify-NoHadamard | 1.24 ms | 10.52 ms | — |
   | Verify-Hadamard (fused) | 1.44 ms | 10.83 ms | +0.31 ms |
-  | **Verify-Hadamard-Oblong (sound)** | **1.57 ms** | **10.95 ms** | **+0.43 ms** |
+  | **Verify-Hadamard-Oblong (sound)** | **1.57 ms** | **11.0 ms** | **+0.5 ms** |
 
-  **The bound discharge is ~3.1× faster to prove than fused at nvars=16** (154 vs
-  482 ms; ~4.5× cheaper discharge overhead, 94 vs 423 ms), **with verify essentially
-  unchanged** (+0.12 ms vs fused, ~1% — both ~10.9 ms, dominated by the shared
-  open/Merkle verify). The binding added ~53 ms over the *unbound* measurement
-  (~101 ms): the z-block (z-projections of all witness cols) + the folded multipoint.
-  The run also **validates the sound path on the real SHA arithmetization** (adders,
-  public cols, bit-op virtuals) beyond the toy round-trip test — both `proof_oblong`
-  and `Verify-Hadamard-Oblong` are `.expect()`-guarded and succeeded.
-- **Still open (follow-ups, not blockers)**: a sound adder-carry binding (Issue 1);
-  re-authoring the per-step verify micro-benches against the un-lifted open if that
-  breakdown is wanted again.
+  **The bound discharge is ~3.6× faster to prove than fused at nvars=16** (136 vs
+  487 ms), **with verify essentially unchanged** (+0.1 ms vs fused, ~1% — both
+  ~11 ms, dominated by the shared open/Merkle verify). The run also **validates the
+  sound path on the real SHA arithmetization** (adders, public cols, bit-op virtuals)
+  beyond the toy round-trip test — both `proof_oblong` and `Verify-Hadamard-Oblong`
+  are `.expect()`-guarded and succeeded.
+- **Binding overhead optimized (commit `d8cfe4b`): ~48 → ~18 ms (parallelized the
+  serial loops)**. The first sound impl added ~53 ms of binding on top of the unbound
+  discharge — but most was *serial code on a parallel machine* (the discharge/open/uair
+  already use every core). Parallelizing the three sequential loops (pure rayon, no
+  soundness change) recovered the bulk (phase timings, Apple M4 nvars=16):
+  `oblong_binding_data` (the 13-adder build+project loop + `pair_alpha_evals`)
+  **28.5 → 7.0 ms**; the prover's `z_block` projection **8.9 → 2.3 ms**; `z_up_evals`
+  **3.1 → 0.9 ms**. Prove-Hadamard-Oblong **154 → 136 ms**. Lesson: any new prover hot
+  loop on the F_2 path must use `cfg_iter!`/rayon — serial code stands out sharply
+  against the otherwise fully-parallel pipeline.
+- **Still open (follow-ups, not blockers)**: the multipoint now folds **all** witness
+  z-cols (~+7 ms of the remaining binding); folding only the AND-referenced ~5 cols
+  (the others are bound by the `ψ_z` check alone, no multipoint needed) would shave
+  most of that — but it's a soundness-sensitive restructure (z-block indexing), so
+  deferred. Also: a sound adder-carry binding (Issue 1); re-authoring the per-step
+  verify micro-benches against the un-lifted open if that breakdown is wanted.
 
 ### Un-lifted GF128[X]<D> open — bit-slice-preserving open binds *both* ψ_α and ψ_z (commits `7827683`, `192e173`, `b840839`)
 - **What**: rewrote the F_2 PCS open (`prove_f2_open` /
@@ -1557,6 +1568,84 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Investigated, didn't help
+
+### Depth-0 IPRS (Vandermonde column-sum) encode for `{0,1}` inputs vs depth-`d` radix-8 FFT (investigated — wins only for small `row_len`; NOT a general win)
+- **Scope note**: this is the **integer IPRS** code
+  (`zip-plus/src/code/iprs.rs`), the encoder used on the `Z[X]`/`e2e`
+  path — *not* the F_2 SHA fast path, which encodes with `RaaF2Code`
+  (XOR, no widening). Logged here anyway because it touches `iprs.rs`
+  and `merkle.rs` and the entry-size finding generalises.
+- **Hypothesis**: a depth-0 IPRS code *is* the full
+  `codeword_len × row_len` Vandermonde matvec (at `depth==0`
+  `combine_stages` is a no-op; `base_multiply_into_output` does the whole
+  product against the materialised `base_matrix`). For a binary message
+  `v ∈ {0,1}^k` the matvec degenerates to **summing the generator columns
+  at the set positions** — `output[i] = Σ_{c: v[c]=1} base_matrix[i][c]` —
+  i.e. *zero multiplications*, just `weight(v)` column-adds per output
+  cell. Because `|base_matrix[i][c]| ≤ (p−1)/2 = 2^15` (centered mod
+  `p=65537`), the entries also stay small (`≤ row_len·2^15`), so the
+  "naive RS over integers blows up" problem does **not** apply to binary
+  inputs. Question: does this beat the FFT, and do the smaller entries
+  cut the Merkle commit?
+- **Setup**: added `IprsCode::encode_binary_columnsum` (depth-0-only,
+  multiplication-free) and an ignored harness
+  `code::iprs::columnsum_experiment::experiment_depth0_columnsum_vs_fft`
+  (run: `cargo test -p zip-plus --release --features parallel
+  experiment_depth0_columnsum_vs_fft -- --ignored --nocapture`). The
+  harness asserts column-sum is **bit-identical** to the depth-0
+  `LinearCode::encode` output, times encode of a 64-row binary matrix
+  (min over 12 reps), and times the grouped Merkle commit
+  (`new_from_row_major_grouped`, `group_size=1`) at each codeword's
+  minimal cell width and at a shared `i128` baseline. `Eval=i32`,
+  `Cw=i128`, `CHECK=false`, Apple M-series.
+- **Measurement** (encode = ms/matrix of 64 rows; commit@min = grouped
+  Merkle at the smallest int cell that fits):
+
+  | row_len | rate | FFT enc | d0-colsum enc | colsum vs FFT | FFT max-bits (cell) | d0 max-bits (cell) | commit FFT@min | commit d0@min |
+  |---------|------|---------|---------------|---------------|---------------------|--------------------|----------------|---------------|
+  | 64      | 1/4  | 2.01 ms | 1.53 ms       | **1.32× faster** | 33 (8B) | 19 (4B) | 0.160 ms | 0.177 ms |
+  | 64      | 1/8  | 2.95 ms | 1.72 ms       | **1.72× faster** | 33 (8B) | 19 (4B) | 0.214 ms | 0.195 ms |
+  | 256     | 1/4  | 2.08 ms | 2.07 ms       | 1.01× (tie)      | 35 (8B) | 21 (4B) | 0.269 ms | 0.209 ms |
+  | 256     | 1/8  | 4.21 ms | 2.84 ms       | **1.48× faster** | 49 (8B) | 20 (4B) | 0.423 ms | 0.314 ms |
+  | 1024    | 1/4  | 6.24 ms | 17.31 ms      | 0.36× (FFT 2.8× faster) | 36 (8B) | 22 (4B) | 0.586 ms | 0.422 ms |
+  | 1024    | 1/8  | 8.51 ms | 40.14 ms      | 0.21× (FFT 4.7× faster) | 50 (8B) | 22 (4B) | 1.044 ms | 0.689 ms |
+
+- **Why / crossover**: column-sum is `O(REP·k²)` adds; the optimal-depth
+  FFT is `~O(REP·k·base_len)` with `base_len ≤ 256`
+  (`MAX_BASE_COLS_LOG2=8`). The ratio `≈ (k/2)/base_len`, so the
+  crossover sits at `row_len ≈ 2·base_len ≈ 256–512` — confirmed: a tie
+  at 256, FFT decisively ahead by 1024. Below the crossover, column-sum's
+  *no multiplies + no recursion + no twiddle loads* wins; above it the
+  quadratic dominates. (Skipping just the 0/1 multiply within depth-0 —
+  `d0-mul` vs `d0-colsum` — buys ~25% at row_len=1024 but can't rescue
+  the quadratic.)
+- **Bonus finding (entry size)**: for binary input the **FFT produces
+  LARGER integers than depth-0**, not smaller — its intermediate twiddle
+  products inflate (33–50 bits, needing an 8-byte cell; 49–50 bits at
+  rate 1/8 with depth 2) while the direct column-sum stays at 19–22 bits
+  (a 4-byte cell, rate-independent). That narrower cell makes the depth-0
+  Merkle commit ~1.3–1.5× cheaper at the minimal width (e.g. 1024@1/8:
+  0.69 ms vs 1.04 ms) and would also shrink column-opening bytes in the
+  proof. At a shared `i128` cell the two commits are equal (commit is
+  dimension-bound), so the saving is entirely from being able to size the
+  cell to depth-0's smaller entries.
+- **Verdict / residual opportunity**: NOT a drop-in win — at the row
+  lengths Zip+ normally runs the FFT (large `row_len`, few rows) it's
+  multiple-× slower to encode, and depth-0 also materialises the full
+  `codeword_len × row_len` matrix (only feasible for `codeword_len ≤ 2^16`
+  and memory-heavy near that bound). The real, unpursued opportunity is a
+  **many-short-rows Zip+ layout** (`row_len ≤ 256`, large `num_rows`)
+  feeding binary witness columns: there column-sum wins on encode *and*
+  the smaller entries cut commit + proof size. Whether that layout's
+  larger row count (more column openings) pays for itself end-to-end is
+  the open question — would need a full-prover A/B, not just the encode +
+  commit micro measured here. The `encode_binary_columnsum` method +
+  harness are left in the tree (ignored) for that follow-up.
+- **Lesson**: "lift the algorithm, not the code" is the right call for
+  *general* integer messages, but for genuinely binary messages the naive
+  Vandermonde is both bounded-growth AND multiplication-free — its only
+  problem is the `O(k²)` cost, so it's a small-`k` technique, and it
+  happens to yield *smaller* codeword entries than the FFT.
 
 ### Precompute the `γ'^k·σ^b` weight table in the Hadamard zerocheck comb (rejected)
 - **Hypothesis**: the degree-3 Hadamard comb does

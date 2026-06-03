@@ -151,11 +151,13 @@ open. Concretely (`prove/verify_f2_full_with_oblong_hadamard`):
 - **Gate met**: `prove_then_verify_f2_full_with_oblong_hadamard_roundtrips` — honest
   accept + corrupt-W / tampered-ψ_z / tampered-pair-eval rejection; 60 protocol tests green.
 
-**✅ e2e A/B (Apple M4, nvars=16)**: the bound discharge proves in **154 ms vs the
-fused 482 ms (~3.1× faster**; ~4.5× cheaper discharge overhead), **verify essentially
-unchanged** (10.95 vs 10.83 ms, +1%). `Verify-Hadamard-Oblong` bench arm added; the
-run also validates the sound path on the full SHA arithmetization (adders, public
-cols, bit-op virtuals). See the ledger for the full table.
+**✅ e2e A/B (Apple M4, nvars=16)**: the bound discharge proves in **136 ms vs the
+fused 487 ms (~3.6× faster**), **verify essentially unchanged** (11.0 vs 10.9 ms,
++1%). `Verify-Hadamard-Oblong` bench arm added; the run also validates the sound path
+on the full SHA arithmetization (adders, public cols, bit-op virtuals). The first
+sound impl was ~154 ms; **parallelizing the serial binding loops (`d8cfe4b`) cut the
+binding overhead ~48 → ~18 ms** (it was serial code on a parallel machine). See the
+ledger for the table + the remaining (soundness-sensitive) multipoint-trim follow-up.
 
 **Follow-ups (not blockers)**: a sound adder-carry binding (Issue 1); re-author the
 per-step verify micro-benches against the un-lifted open if that breakdown is wanted.
