@@ -2828,27 +2828,51 @@ where
             .enumerate()
             .map(|(g, col)| {
                 // Loop-reorder (outer `i` rows, inner `j` codeword positions) for
-                // sequential reads + `coeffs[i]` in registers — as in the lifted
-                // path, but accumulating GF(2^128)[X]<D> bit-slice partials.
+                // sequential reads + the per-row weight in registers — as in the
+                // lifted path, but accumulating GF(2^128)[X]<D> bit-slice partials.
+                //
+                // **γ folded into the scatter weight.** Since
+                //   combined_row[j] = Σ_g γ_g·Σ_i coeffs[i]·cell[i,j]
+                //                   = Σ_{g,i} (γ_g·coeffs[i])·cell[i,j],
+                // scatter `w_gi = γ_g·coeffs[i]` directly instead of scattering
+                // `coeffs[i]` and then applying γ_g in a separate `row_len`-long
+                // `gf128poly_accumulate_scaled` pass (D=32 GF128 muls per entry —
+                // the open's dominant cost; profiled at ~13.5 ms / 77% of the open
+                // at nvars=16). The fused form costs one GF128 mul per (col, row)
+                // and is **bit-identical**, so the proof + every verifier check are
+                // unchanged.
                 let mut col_partial: Vec<GF128Poly<D>> =
                     vec![GF128Poly::<D>::zero(); row_len];
-                for i in 0..num_rows {
-                    let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
-                    let coeff_i = coeffs[i];
-                    for j in 0..row_len {
-                        // col_partial[j] += coeffs[i]·cell[i,j]  (scatter the bits)
-                        gf128poly_accumulate_cell::<D>(&mut col_partial[j], &row_slice[j], coeff_i);
-                    }
-                }
-                // Apply γ_g in a separate pass.
-                col_partial
-                    .into_iter()
-                    .map(|entry| {
-                        let mut scaled = GF128Poly::<D>::zero();
-                        gf128poly_accumulate_scaled::<D>(&mut scaled, &entry, gamma[g]);
-                        scaled
+                // Per-row scatter weights `w[i] = γ_g·coeffs[i]` (one GF128 mul/row).
+                let w: Vec<BinaryFieldGF128> = (0..num_rows)
+                    .map(|i| {
+                        let mut x = gamma[g];
+                        x *= &coeffs[i];
+                        x
                     })
-                    .collect::<Vec<GF128Poly<D>>>()
+                    .collect();
+                // **Cache-blocked over `j`.** The scatter target is the whole
+                // `row_len × 512 B` `col_partial`; writing across all of it per row
+                // thrashes cache (profiled: this loop is ~12 ms / the open's bottleneck,
+                // vs 2.5 ms for `b_vector`'s same-count scatter into one hot
+                // accumulator). Tiling `j` so `col_partial[j0..j1]` (J_BLOCK·512 B ≈
+                // L1) stays hot across the `i` sweep keeps the heavy GF128Poly<D>
+                // writes resident; reads window each row's `[j0..j1]` slice. Pure
+                // reorder of associative adds ⇒ bit-identical `combined_row`.
+                const J_BLOCK: usize = 64;
+                let mut j0 = 0;
+                while j0 < row_len {
+                    let j1 = (j0 + J_BLOCK).min(row_len);
+                    for i in 0..num_rows {
+                        let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
+                        let w_i = w[i];
+                        for j in j0..j1 {
+                            gf128poly_accumulate_cell::<D>(&mut col_partial[j], &row_slice[j], w_i);
+                        }
+                    }
+                    j0 = j1;
+                }
+                col_partial
             })
             .collect();
 
