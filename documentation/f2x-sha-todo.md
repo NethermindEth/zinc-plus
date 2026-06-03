@@ -180,14 +180,30 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   proximity encode are now `GF128Poly<D>` (D=32 GF128 ≈ 512 B, ~13× wider than the old
   narrow `BinaryF2Poly`) across `O(num_cols·2^num_vars)` cells — the width dominates.
   **Net is still hugely positive for the SHA Hadamard prove** (the un-lifted open is a
-  ~15 ms *enabling* cost; the oblong discharge it unlocks saves ~350 ms → 482→136 ms,
-  3.6×). **Claw-back options if the ~15 ms matters** (open hot loop is the wide per-cell
-  `gf128poly_accumulate_cell` scatter + the D-wide `encode_gf128_lin_open` proximity):
-  (a) collapse the proximity's `combined_row` to one GF128 via a random bit-slice
-  challenge τ (keep `a'`/`b'` wide for the ψ_α/ψ_z *evals*, narrow only the *encode* —
-  sound since an F_2-codeword stays one under any GF128 combo); (b) discharge-cols-only
-  un-lifted (mixed-flavor batching — rejected earlier for simplicity); (c) SIMD/constant-
-  factor work on the wide scatter. Not yet attempted.
+  ~15 ms *enabling* cost; the oblong discharge it unlocks saves ~350 ms → 482→136 ms).
+- **Claw-back DONE — ~8 ms recovered (commit `1a69adc`)**. Profiled the open
+  sub-steps (nvars=16): the regression is **100% the `combined_row`** (proximity row)
+  build — **13.5 ms / 77% of the open** — while `b_vector` (same scatter count, into
+  one hot accumulator) is only 2.5 ms. So the cost is *cache*, not width per se.
+  - **The τ-collapse idea (a) is UNSOUND**: `combined_row` is used by **Check 3
+    (coherence)** `<combined_row, q1> == <coeffs, b'>` over the full `GF128Poly<D>`,
+    which binds the **wide** `b'` to the committed cells. Collapsing it to one GF128
+    would weaken that to a single random combination → a wrong `b'` (hence wrong
+    ψ_α/ψ_z) could pass. So `combined_row` must stay D-wide.
+  - **What actually worked (both bit-identical → no proof/verifier change)**:
+    (i) **γ-fusion** — `combined_row[j] = Σ_{g,i}(γ_g·coeffs[i])·cell`, so scatter the
+    fused weight and drop the separate `row_len`-long `gf128poly_accumulate_scaled`
+    γ-pass (~1.6 ms); (ii) **cache-blocking** — the scatter wrote across the whole
+    `row_len×512 B` `col_partial` per row (thrash); tile `j` into 64-wide blocks so
+    `col_partial[j0..j1]` stays L1-hot across the `i` sweep (~5 ms; mirrors why
+    `b_vector`'s hot-accumulator scatter was fast). `combined_row` 13.5 → ~7 ms;
+    `Prove-NoHadamard` 63.2 → 55.1 ms, `Prove-Hadamard-Oblong` 136.8 → 128.3 ms
+    (~3.8× vs fused).
+  - **Residual ~7 ms is fundamental**: `b_vector`/`a'` + `combined_row` must stay
+    `GF128Poly<D>` (D=32) to expose ψ_z; the un-lifted open is inherently ~D× wider
+    per cell than the old narrow `BinaryF2Poly`. Remaining (not pursued): (b)
+    discharge-cols-only un-lifted (mixed-flavor batching, rejected for simplicity);
+    (c) SIMD the per-cell bit scatter.
 - **Bench migration (follow-up, done)**: Stage 1b changed `F2OpenProof`'s claim /
   b-vector / combined-row from wide `BinaryF2Poly` to `GF128Poly<D>` but only ran
   `--lib` tests, so the three F_2 benches (`f2_sha256`, `f2_sha256_rs`, `f2_blake3`)
