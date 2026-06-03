@@ -103,13 +103,27 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   fully-parallel pipeline. Profile with per-phase `Instant`/eprintln (criterion's
   ±5 ms median noise hides changes < ~8 ms).
 - **Remaining opportunities (harder / smaller, NOT pursued)**:
-  - **Commit (~25 ms)** is parallel + CPU-near-optimal; the real lever is the
-    **Metal GPU** commit path (`metal_gpu` feature), not a CPU code change.
+  - **Commit (~25 ms) — Metal GPU INVESTIGATED (re-measured on the current oblong
+    path)**: the `metal_gpu` commit + α-projection offload is **already implemented,
+    wired, and functional** (`phase_commit.rs:176` leaf-hash when `num_leaves ≥ 256`;
+    `f2_prove.rs:1519` `project_columns_with_powers_gpu_batched`). Fresh A/B
+    (Apple M4, `--features parallel,simd,unchecked,metal_gpu`, nvars=16, **unsandboxed
+    — the sandbox blocks Metal: "No Metal device found"**): Prove-NoHadamard **55 →
+    ~47 ms** (−8 ms), Prove-Hadamard-Oblong **~100 → ~96 ms** (−~8 ms, partly within
+    noise). **Modest at nvars=16** because the CPU commit (~25 ms) is already
+    rayon-parallel and GPU dispatch has fixed overhead; the win **grows with nvars**
+    (more leaves → more GPU parallelism — the ledger's `9b8f178` entry showed
+    nvars=22 e2e −19%). So there is **no CPU code change to make** — it's a
+    deployment/feature choice (needs a GPU + unsandboxed). **The real un-GPU'd gap is
+    the discharge (~28 ms, the single biggest component): the GF(2⁸) NTT round-message
+    + the word-fold are not offloaded.** A GPU discharge is the largest remaining GPU
+    lever but a big new piece (Metal shaders for the byte-lookup NTT / fold; uncertain
+    vs the already-parallel CPU discharge) — not attempted.
   - **Binding multipoint** still folds **all** witness z-cols; folding only the
     ~5 AND-referenced ones (the rest are bound by the ψ_z check alone) saves ~5 ms
     but is a **soundness-sensitive** z-block-indexing restructure.
   - **Discharge round_message/phase2 (~9 ms each)** are parallel + algorithmically
-    tuned (GF(2⁸) NTT, Gruen MLE-check) — limited headroom.
+    tuned (GF(2⁸) NTT, Gruen MLE-check) — limited CPU headroom (see GPU note above).
   - **Open per-col over 20 cols not 8** (the bit-op-virtual-derivation idea, see
     its own entry) — but the per-col cost is now small post-`combined_row` fix.
 
