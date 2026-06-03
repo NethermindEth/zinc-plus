@@ -116,9 +116,11 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     nvars=22 e2e −19%). So there is **no CPU code change to make** — it's a
     deployment/feature choice (needs a GPU + unsandboxed). **The real un-GPU'd gap is
     the discharge (~28 ms, the single biggest component): the GF(2⁸) NTT round-message
-    + the word-fold are not offloaded.** A GPU discharge is the largest remaining GPU
-    lever but a big new piece (Metal shaders for the byte-lookup NTT / fold; uncertain
-    vs the already-parallel CPU discharge) — not attempted.
+    + the word-fold are not offloaded.** **GPU discharge INVESTIGATED + rejected** —
+    the word-fold offload (reusing the α-projection kernel) measured **~50% SLOWER**
+    than the parallel CPU fold at nvars=16 (GPU dispatch overhead > the ~3M-cell work;
+    CPU-wins regime). See the "GPU discharge … SLOWER than parallel CPU" entry under
+    *Investigated, didn't help*.
   - **Binding multipoint** still folds **all** witness z-cols; folding only the
     ~5 AND-referenced ones (the rest are bound by the ψ_z check alone) saves ~5 ms
     but is a **soundness-sensitive** z-block-indexing restructure.
@@ -1652,6 +1654,34 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Investigated, didn't help
+
+### GPU discharge (offload the oblong word-fold to Metal) — measured SLOWER than parallel CPU at nvars=16 (NOT worth it)
+- **Hypothesis**: the discharge's Phase-1→Phase-2 word-fold (`fold_word_at`: project a
+  bit-word at GF(2^128) weights → one GF128) is the *same op* as the α-projection that
+  already has a Metal kernel (`project_columns_with_powers_gpu_batched`). So offload the
+  fold to GPU by reusing that kernel — the largest remaining GPU lever (the discharge is
+  the biggest CPU component, ~28 ms; the commit + α-projection are already GPU'd).
+- **Spike** (temporary, in `prove_oblong_and_batch_gf8`; the operand words + GPU access
+  are both there): time the CPU par-fold vs (u32→`BinaryPoly<32>` convert + the GPU
+  projection kernel, batched over a/b/c) on the real stacked operands, nvars=16
+  (~1M words ×3 = 3M cells), `--features …,metal_gpu`, **unsandboxed** (sandbox blocks
+  Metal). Data-independent timing.
+- **RESULT (Apple M4, warm)**: **CPU par-fold ~4.3 ms vs GPU ~6 ms + convert ~0.46 ms =
+  ~6.5 ms — the GPU is ~50% SLOWER.** (First GPU call 42 ms cold; warm steady ~6 ms.)
+  The discharge fold (~3M cells) is in the **CPU-wins** regime: Metal dispatch +
+  unified-memory buffer + launch overhead (~fixed few-ms) exceeds the actual fold work,
+  which 10 rayon cores + SIMD already do in ~4 ms. This is *unlike* the commit's Merkle
+  leaf-hash (hundreds of thousands of leaves at nvars=22) where the GPU wins.
+- **Conclusion**: a GPU discharge fold would **regress** the prove at the bench/typical
+  scale (nvars=16). It could only win at very large nvars (overhead amortizes) and would
+  then need a `GPU_MIN`-style word-count threshold to avoid regressing small cases — plus
+  cross-crate callback plumbing (the discharge is in the `poly` crate, no `zip-plus` GPU
+  access) and a u32→u64 conversion (the kernel is `BinaryPoly`/u64-typed). The bigger
+  discharge phases (the GF(2⁸) NTT round-message, the Gruen Phase-2 loop) have **no
+  existing GPU kernel** and would face the same small-scale dispatch-overhead problem.
+  **Not implemented.** (Couldn't measure the large-nvars crossover: the nvars=19 spike
+  OOM'd on the 16 GB box.) The CPU word-fold parallelization (`7ea7dff`) already captured
+  the realistic win here.
 
 ### Depth-0 IPRS (Vandermonde column-sum) encode for `{0,1}` inputs vs depth-`d` radix-8 FFT (investigated — wins only for small `row_len`; NOT a general win)
 - **Scope note**: this is the **integer IPRS** code
