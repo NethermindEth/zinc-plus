@@ -17,11 +17,14 @@ zinc-transcript = { workspace = true }
 zinc-utils = { workspace = true }
 
 ark-ff = { version = "0.5.0", default-features = false }
+ark-ec = { version = "0.5.0", default-features = false }
 ark-poly = { version = "0.5.0", default-features = false }
+ark-std = { version = "0.5.0", default-features = false, features = ["std", "getrandom"] }
 
 itertools = { workspace = true }
 thiserror = { workspace = true }
 crypto-bigint = { workspace = true }
+num-integer = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
@@ -33,6 +36,7 @@ uninit = "0.6.2"
 zstd = "0.13"
 
 [dev-dependencies]
+ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
 criterion = { workspace = true }
 proptest = { workspace = true }
 
@@ -40,7 +44,7 @@ proptest = { workspace = true }
 workspace = true
 
 [features]
-parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
+parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-ec/parallel", "ark-poly/parallel"]
 simd = ["zinc-poly/simd"]
 unchecked = []
 
@@ -50,4 +54,8 @@ harness = false
 
 [[bench]]
 name = "zip_plus_benches"
+harness = false
+
+[[bench]]
+name = "msm_commitment_benches"
 harness = false
