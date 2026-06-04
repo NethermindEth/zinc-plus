@@ -132,7 +132,7 @@ where
                     // visits each coefficient once in O(D).
                     for (bit_idx, coeff) in bp.iter().enumerate() {
                         if coeff.into_inner() {
-                            accs[bit_idx] = accs[bit_idx].clone() + eq_t.clone();
+                            accs[bit_idx] += eq_t;
                         }
                     }
                 }

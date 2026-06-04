@@ -125,7 +125,7 @@ where
                             continue;
                         }
                         if let Some(w) = &weights[i] {
-                            acc += w.clone();
+                            acc += w;
                         }
                     }
                     acc.into_inner()
