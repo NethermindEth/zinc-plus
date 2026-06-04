@@ -255,6 +255,7 @@ macro_rules! impl_with_type_bounds {
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
             U: Uair + 'static,
             F: InnerTransparentField
+                + MontgomeryLimbs
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
                 + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
@@ -975,6 +976,7 @@ where
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
@@ -1127,6 +1129,7 @@ where
     BinaryPoly<HALF_D>: ProjectableToField<F>,
     U: Uair + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a ZtF::Int>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
@@ -1643,6 +1646,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1708,6 +1712,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1779,6 +1784,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1846,6 +1852,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -2065,12 +2072,16 @@ where
         .iter()
         .map(|&idx| projected_trace_f[int_offset + idx].clone())
         .collect();
-    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.shifted_bit_slice_specs(),
-        &field_cfg,
-    );
     let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
@@ -2141,11 +2152,21 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
-        .into_iter()
-        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
     cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);

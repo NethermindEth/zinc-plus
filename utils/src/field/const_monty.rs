@@ -31,7 +31,7 @@ macro_rules! impl_from_primitive_ref {
         )*
     };
 }
-impl_from_primitive_ref!(u8, u16, u32, u64, u128);
+impl_from_primitive_ref!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
 
 impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Uint<LIMBS>>
     for ConstMontyForm<Mod, LIMBS>
@@ -49,14 +49,23 @@ impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize> FromRef<Self>
     }
 }
 
-impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize>
-    ProjectableToField<ConstMontyField<Mod, LIMBS>> for Int<LIMBS2>
+impl<Mod: ConstMontyParams<LIMBS>, const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>>
+    for ConstMontyField<Mod, LIMBS>
+{
+    fn from_ref(value: &Int<LIMBS2>) -> Self {
+        value.into()
+    }
+}
+
+impl<T, Mod: ConstMontyParams<LIMBS>, const LIMBS: usize>
+    ProjectableToField<ConstMontyField<Mod, LIMBS>> for T
+where
+    ConstMontyField<Mod, LIMBS>: FromRef<T>,
 {
     fn prepare_projection(
         _sampled_value: &ConstMontyField<Mod, LIMBS>,
     ) -> impl Fn(&Self) -> ConstMontyField<Mod, LIMBS> + Send + Sync + 'static {
-        // No need to read anything
-        |value: &Int<LIMBS2>| value.into()
+        |value: &T| ConstMontyField::<Mod, LIMBS>::from_ref(value)
     }
 }
 

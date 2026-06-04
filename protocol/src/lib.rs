@@ -24,7 +24,10 @@ pub mod verifier;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{
+    ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring,
+    crypto_bigint_uint::Uint,
+};
 use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
@@ -47,7 +50,11 @@ use zinc_poly::{
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{Uair, ideal::Ideal};
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named};
+use zinc_utils::{
+    cfg_extend, cfg_into_iter, cfg_iter,
+    delayed_reduction::{DelayedModularReduction, MontgomeryLimbs},
+    named::Named,
+};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -505,12 +512,16 @@ fn absorb_public_columns<T: ConstTranscribable>(
 /// Binary columns exploit the 0/1 structure for conditional additions only.
 /// The `eq(point, *)` table is built once and reused across all columns.
 #[allow(clippy::arithmetic_side_effects)]
-fn compute_lifted_evals<F: PrimeField, const D: usize>(
+fn compute_lifted_evals<F, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     projected_trace: &ProjectedTrace<F>,
     field_cfg: &F::Config,
-) -> Vec<DynamicPolynomialF<F>> {
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
+    F::Config: Sync,
+{
     compute_lifted_evals_capped::<F, D>(point, trace_bin_poly, projected_trace, field_cfg, None)
 }
 
@@ -524,46 +535,48 @@ fn compute_lifted_evals<F: PrimeField, const D: usize>(
 /// section here is wasted work. Pass `Some(num_total_arb_cols)` to stop
 /// the non-binary iter right after arbitrary cols.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn compute_lifted_evals_capped<F: PrimeField, const D: usize>(
+pub fn compute_lifted_evals_capped<F, const D: usize>(
     point: &[F],
     trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
     projected_trace: &ProjectedTrace<F>,
     field_cfg: &F::Config,
     non_binary_cap: Option<usize>,
-) -> Vec<DynamicPolynomialF<F>> {
+) -> Vec<DynamicPolynomialF<F>>
+where
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
+    F::Config: Sync,
+{
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_lifted_evals: eq table build failed");
+    let reduction_params = F::barrett_reduction_params(field_cfg);
 
     let n_bin = trace_bin_poly.len();
     let zero = F::zero_with_cfg(field_cfg);
 
-    // Binary columns: exploit 0/1 structure for conditional additions.
-    // Pack each entry's up-to-64 boolean coefficients into a u64 so we
-    // can (a) skip entries that are identically zero, and (b) walk only
-    // the SET bits via `trailing_zeros` + Brian Kernighan's clear-lowest
-    // instead of branching on every slot.
-    debug_assert!(D <= 64, "compute_lifted_evals: bitmask packing assumes D <= 64");
+    // Binary columns: exploit 0/1 structure for conditional additions,
+    // accumulating with delayed modular reduction and reducing once per
+    // coefficient.
     let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
-            let mut coeffs = vec![zero.clone(); D];
+            let mut coeffs = vec![Uint::<5>::default(); D];
             for (b, entry) in col.iter().enumerate() {
-                let mut bits: u64 = 0;
+                let eq_b = &eq_table[b];
                 for (l, coeff) in entry.iter().enumerate().take(D) {
                     if coeff.into_inner() {
-                        bits |= 1u64 << l;
+                        <Uint<5> as DelayedModularReduction<F>>::add(&mut coeffs[l], eq_b);
                     }
                 }
-                if bits == 0 {
-                    continue;
-                }
-                let eq_b = &eq_table[b];
-                let mut remaining = bits;
-                while remaining != 0 {
-                    let l = remaining.trailing_zeros() as usize;
-                    coeffs[l] += eq_b;
-                    remaining &= remaining - 1;
-                }
             }
+            let coeffs: Vec<F> = coeffs
+                .into_iter()
+                .map(|acc| {
+                    <Uint<5> as DelayedModularReduction<F>>::reduce(
+                        acc,
+                        field_cfg,
+                        &reduction_params,
+                    )
+                })
+                .collect();
             DynamicPolynomialF::new_trimmed(coeffs)
         })
         .collect();
@@ -779,7 +792,8 @@ mod tests {
     use super::*;
     use crypto_bigint::U64;
     use crypto_primitives::{
-        Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        Field, FromWithConfig, boolean::Boolean, crypto_bigint_int::Int,
+        crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_piop::{
@@ -813,8 +827,7 @@ mod tests {
     };
 
     const INT_LIMBS: usize = U64::LIMBS;
-    // `fixed-prime` branch: 256-bit field modulus (4 × u64 limbs) so the
-    // hardcoded secp256k1 base prime fits in `Fmod = Uint<FIELD_LIMBS>`.
+    // 256-bit field modulus (4 × u64 limbs).
     const FIELD_LIMBS: usize = U64::LIMBS * 4;
     const DEGREE_PLUS_ONE: usize = 32;
 
@@ -850,6 +863,67 @@ mod tests {
     };
 
     type F = MontyField<FIELD_LIMBS>;
+
+    #[test]
+    fn lifted_binary_eval_matches_definition() {
+        let field_cfg = fixed_prime::secp256k1_field_cfg::<F, Uint<FIELD_LIMBS>>();
+        let point = vec![
+            F::from_with_cfg(7u64, &field_cfg),
+            F::from_with_cfg(11u64, &field_cfg),
+        ];
+        let trace_bin_poly: Vec<DenseMultilinearExtension<BinaryPoly<8>>> = [
+            [0b0000_0001, 0b0000_1010, 0b1010_0000, 0b1111_0000],
+            [0b1111_1111, 0b0101_0101, 0b0011_0011, 0b0000_0000],
+        ]
+        .into_iter()
+        .map(|patterns| {
+            let evaluations: Vec<BinaryPoly<8>> = patterns
+                .into_iter()
+                .map(|p| {
+                    let coeffs: [Boolean; 8] =
+                        std::array::from_fn(|i| Boolean::new((p >> i) & 1 != 0));
+                    BinaryPoly::<8>::new(coeffs)
+                })
+                .collect();
+            DenseMultilinearExtension {
+                num_vars: evaluations.len().next_power_of_two().trailing_zeros() as usize,
+                evaluations,
+            }
+        })
+        .collect();
+        let projected_trace = ProjectedTrace::RowMajor(vec![
+            vec![
+                DynamicPolynomialF::new_trimmed(vec![F::zero_with_cfg(&field_cfg)]),
+                DynamicPolynomialF::new_trimmed(vec![F::zero_with_cfg(&field_cfg)]),
+            ];
+            4
+        ]);
+
+        let eq_table = zinc_poly::utils::build_eq_x_r_vec(&point, &field_cfg).unwrap();
+        let expected: Vec<_> = trace_bin_poly
+            .iter()
+            .map(|col| {
+                let mut coeffs = vec![F::zero_with_cfg(&field_cfg); 8];
+                for (row_idx, entry) in col.iter().enumerate() {
+                    for (bit_idx, coeff) in entry.iter().enumerate() {
+                        if coeff.into_inner() {
+                            coeffs[bit_idx] += &eq_table[row_idx];
+                        }
+                    }
+                }
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect();
+        let lifted = compute_lifted_evals_capped::<F, 8>(
+            &point,
+            &trace_bin_poly,
+            &projected_trace,
+            &field_cfg,
+            None,
+        );
+
+        assert_eq!(lifted, expected);
+    }
 
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
@@ -1034,7 +1108,7 @@ mod tests {
         check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
     ) where
         Zt: ZincTypes<DEGREE_PLUS_ONE>,
-        Zt::Int: num_traits::Zero,
+        Zt::Int: ProjectableToField<F> + num_traits::Zero,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,

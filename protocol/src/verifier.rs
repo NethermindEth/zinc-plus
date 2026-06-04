@@ -34,8 +34,9 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    add, cfg_join, delayed_reduction::MontgomeryLimbs, from_ref::FromRef,
+    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
@@ -756,6 +757,7 @@ where
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::Chal>
@@ -992,6 +994,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
@@ -1098,6 +1101,7 @@ where
     <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     U: Uair + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b ZtF::Int>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
@@ -1672,6 +1676,7 @@ where
     <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
@@ -1746,6 +1751,7 @@ where
     <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
@@ -1821,6 +1827,7 @@ where
     <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
