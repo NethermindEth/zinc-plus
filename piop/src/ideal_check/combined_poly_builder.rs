@@ -6,7 +6,7 @@ use crate::{
     scalar_proj_cache::ScalarProjCache,
 };
 use crypto_primitives::PrimeField;
-use num_traits::{ConstZero, Zero};
+use num_traits::Zero;
 use std::cell::RefCell;
 use zinc_poly::{
     EvaluationError,
