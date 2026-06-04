@@ -80,17 +80,15 @@ use zinc_uair::{
 
 use crate::{
     GenerateRandomTrace,
-    ecdsa,
+    ecdsa::{self, FINAL_ROW as ECDSA_FINAL_ROW, NUM_SHAMIR_ROUNDS},
     ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing},
     sha256::{self, Sha256CompressionSliceUair, Sha256Ideal},
 };
-#[cfg(test)]
-use crate::ecdsa::FINAL_ROW as ECDSA_FINAL_ROW;
 
 use crypto_primitives::crypto_bigint_int::Int;
 
 // Re-export for convenience.
-pub use crate::ecdsa::{FINAL_ROW, NUM_SHAMIR_ROUNDS};
+pub use crate::ecdsa::FINAL_ROW;
 
 // ---------------------------------------------------------------------------
 // Column layout for the merged trace.
