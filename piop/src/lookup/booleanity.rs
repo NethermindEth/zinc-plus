@@ -13,7 +13,9 @@
 //! `max_degree + 3`. For SHA-style UAIRs (max_degree ≥ 6) with hundreds
 //! of bit-slice MLEs, this is a 2–2.5× saving on step 4 alone.
 
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, semiring::boolean::Boolean};
+use crypto_primitives::{
+    FromPrimitiveWithConfig, PrimeField, crypto_bigint_uint::Uint, semiring::boolean::Boolean,
+};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -31,7 +33,10 @@ use zinc_uair::{
     VirtualBoolSpec,
 };
 use zinc_utils::{
-    cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField, powers,
+    cfg_into_iter, cfg_iter,
+    delayed_reduction::{DelayedModularReduction, MontgomeryLimbs},
+    inner_transparent_field::InnerTransparentField,
+    powers,
 };
 
 /// Build the F::Inner-valued shifted bit-slice MLEs for each
@@ -88,15 +93,11 @@ where
 /// sumcheck point `r*`. Equivalent to
 /// `build_shifted_bit_slice_mles(...).iter().map(evaluate_at(r*))`,
 /// but skips materializing the `num_shifted_specs · D` F::Inner-valued
-/// MLE buffers (~`num_shifted · D · n` F::Inner allocations). Builds
-/// the size-`n` `eq(r*, ·)` table once and accumulates per-bit sums
-/// directly from the `BinaryPoly<D>` trace columns in a single pass
-/// per spec (t outer, bits inner — avoids `iter().nth(bit_idx)`'s
-/// linear cost on custom binary-poly iterators).
+/// MLE buffers (~`num_shifted · D · n` F::Inner allocations).
 ///
-/// Used when the prover doesn't otherwise need the materialized bit-
-/// slice MLEs (i.e. when no `VirtualBoolSpec` is registered — the
-/// `VirtualBinaryPolySpec` path reads source binary_polys directly).
+/// The hot per-bit sums are accumulated with delayed modular reduction:
+/// each bit accumulator is a small `Uint<5>` integer and is reduced
+/// once at the end of the spec scan.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn compute_shifted_bit_slice_evals_streaming<F, const D: usize>(
     trace_witness_binary_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
@@ -105,39 +106,42 @@ pub fn compute_shifted_bit_slice_evals_streaming<F, const D: usize>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ArithErrors>
 where
-    F: PrimeField + Send + Sync,
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
     F::Config: Sync,
 {
     if shifted_specs.is_empty() {
         return Ok(Vec::new());
     }
-    // Single shared eq table — one O(n) pass + O(n) memory across all
-    // (spec, bit) sums.
     let eq_table = build_eq_x_r_vec(point, field_cfg)?;
+    let reduction_params = F::barrett_reduction_params(field_cfg);
 
-    let zero = F::zero_with_cfg(field_cfg);
     let out: Vec<F> = cfg_iter!(shifted_specs)
         .flat_map(|spec| {
             let col = &trace_witness_binary_poly[spec.witness_col_idx];
             let shift = spec.shift_amount;
             let n = col.evaluations.len();
-            // Per-bit accumulators, one F-element each.
-            let mut accs: Vec<F> = vec![zero.clone(); D];
+            let mut accs: Vec<Uint<5>> = vec![Uint::zero(); D];
             for t in 0..n {
                 let src_t = t.checked_add(shift).filter(|&v| v < n);
                 if let Some(s) = src_t {
                     let bp = &col.evaluations[s];
                     let eq_t = &eq_table[t];
-                    // Walk bits in their stored order; the iterator
-                    // visits each coefficient once in O(D).
                     for (bit_idx, coeff) in bp.iter().enumerate() {
                         if coeff.into_inner() {
-                            accs[bit_idx] += eq_t;
+                            <Uint<5> as DelayedModularReduction<F>>::add(&mut accs[bit_idx], eq_t);
                         }
                     }
                 }
             }
-            accs
+            accs.into_iter()
+                .map(|acc| {
+                    <Uint<5> as DelayedModularReduction<F>>::reduce(
+                        acc,
+                        field_cfg,
+                        &reduction_params,
+                    )
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     Ok(out)
@@ -1193,6 +1197,39 @@ mod tests {
             num_vars,
             evaluations,
         }
+    }
+
+    #[test]
+    fn shifted_bit_slice_streaming_matches_materialized_mles() {
+        let cfg = test_cfg();
+        let col = col_from_u8s(&[0b0000_0001, 0b0000_1010, 0b1010_0000, 0b1111_0000]);
+        let specs = [
+            ShiftedBitSliceSpec::new(0, 1),
+            ShiftedBitSliceSpec::new(0, 2),
+        ];
+        let point = vec![
+            F::from_with_cfg(3u64, &cfg),
+            F::from_with_cfg(5u64, &cfg),
+        ];
+
+        let materialized = build_shifted_bit_slice_mles::<F, 8>(
+            std::slice::from_ref(&col),
+            &specs,
+            &cfg,
+        )
+        .into_iter()
+        .map(|mle| mle.evaluate_with_config(&point, &cfg))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let streaming = compute_shifted_bit_slice_evals_streaming::<F, 8>(
+            std::slice::from_ref(&col),
+            &specs,
+            &point,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(streaming, materialized);
     }
 
     #[test]

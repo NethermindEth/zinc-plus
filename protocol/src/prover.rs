@@ -255,6 +255,7 @@ macro_rules! impl_with_type_bounds {
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
             U: Uair + 'static,
             F: InnerTransparentField
+                + MontgomeryLimbs
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
                 + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
@@ -975,6 +976,7 @@ where
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
@@ -1127,6 +1129,7 @@ where
     BinaryPoly<HALF_D>: ProjectableToField<F>,
     U: Uair + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a ZtF::Int>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
@@ -1643,6 +1646,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1708,6 +1712,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1779,6 +1784,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1846,6 +1852,7 @@ where
     BinaryPoly<QUARTER_D>: ProjectableToField<F>,
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
+        + MontgomeryLimbs
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
