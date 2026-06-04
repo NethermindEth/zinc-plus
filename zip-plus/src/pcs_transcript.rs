@@ -99,17 +99,14 @@ impl PcsProverTranscript {
     pub fn write_field_elements<F>(&mut self, elems: &[F]) -> Result<(), ZipError>
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         if !elems.is_empty() {
-            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
-            let num_bytes = F::Inner::get_num_bytes(elems[0].inner());
-            debug_assert_eq!(num_bytes, F::Modulus::get_num_bytes(&elems[0].modulus()));
+            let num_bytes = F::Integer::get_num_bytes(&elems[0].modulus());
             let num_bytes_arr = num_bytes
                 .to_le_bytes()
                 .into_iter()
-                .take(F::Inner::LENGTH_NUM_BYTES)
+                .take(F::Integer::LENGTH_NUM_BYTES)
                 .collect_vec();
             self.stream.write_all(&num_bytes_arr)?;
 
@@ -130,13 +127,12 @@ impl PcsProverTranscript {
     fn write_field_element_no_length<F>(&mut self, fe: &F, buf: &mut [u8]) -> Result<(), ZipError>
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
         fe.modulus().write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;
-        fe.inner().write_transcription_bytes_exact(buf);
+        fe.lift_to_integer().write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;
         Ok(())
     }
@@ -242,15 +238,12 @@ impl PcsVerifierTranscript {
     pub fn read_field_elements<F>(&mut self, n: usize) -> Result<Vec<F>, ZipError>
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         if n > 0 {
-            debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
-            let mut buf = vec![0; F::Inner::LENGTH_NUM_BYTES];
+            let mut buf = vec![0; F::Integer::LENGTH_NUM_BYTES];
             self.stream.read_exact(&mut buf)?;
-            let num_bytes = F::Inner::read_num_bytes(&buf);
-            debug_assert_eq!(num_bytes, F::Modulus::read_num_bytes(&buf));
+            let num_bytes = F::Integer::read_num_bytes(&buf);
 
             let mut buf = vec![0; num_bytes];
             (0..n)
@@ -269,15 +262,14 @@ impl PcsVerifierTranscript {
     fn read_field_element_no_length<F>(&mut self, buf: &mut [u8]) -> Result<F, ZipError>
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         self.stream.read_exact(buf)?;
-        let modulus = F::Modulus::read_transcription_bytes_exact(buf);
+        let modulus = F::Integer::read_transcription_bytes_exact(buf);
         self.stream.read_exact(buf)?;
-        let inner = F::Inner::read_transcription_bytes_exact(buf);
+        let int = F::Integer::read_transcription_bytes_exact(buf);
         let field_cfg = F::make_cfg(&modulus)?;
-        let fe = F::new_unchecked_with_cfg(inner, &field_cfg);
+        let fe = F::from_with_cfg(int, &field_cfg);
         self.fs_transcript.absorb_random_field(&fe, buf);
         Ok(fe)
     }

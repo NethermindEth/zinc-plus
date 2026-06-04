@@ -7,7 +7,7 @@ use crate::{
     },
     pcs_transcript::PcsVerifierTranscript,
 };
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use itertools::Itertools;
 use num_traits::{ConstOne, ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -106,13 +106,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         eval_f: &F,
     ) -> Result<(), ZipError>
     where
-        F: FromPrimitiveWithConfig
+        F: PrimeField
+            + FromPrimitiveWithConfig
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
-        F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+        F::Integer: FromRef<Zt::Fmod> + Transcribable,
     {
         let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, comm.batch_size);
         Self::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
@@ -144,13 +144,13 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         per_poly_alphas: &[Vec<Zt::Chal>],
     ) -> Result<(), ZipError>
     where
-        F: FromPrimitiveWithConfig
+        F: PrimeField
+            + FromPrimitiveWithConfig
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> MulByScalar<&'a F>,
-        F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+        F::Integer: FromRef<Zt::Fmod> + Transcribable,
     {
         let batch_size = comm.batch_size;
         validate_input::<Zt, Lc, _>(
@@ -323,8 +323,8 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        Field, FromWithConfig, IntSemiring, IntoWithConfig, PrimeField, crypto_bigint_int::Int,
-        crypto_bigint_monty::MontyField,
+        Field, FromWithConfig, HasPrimeFieldConfig, IntSemiring, IntoWithConfig, PrimeField,
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
     use num_traits::{ConstOne, ConstZero, Zero};
@@ -443,7 +443,7 @@ mod tests {
             let original_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
             // Skipping over LENGTH_NUM_BYTES prefix for b field elements, and the modulus
             // bytes, to flip a byte in the VALUE part of the first b element.
-            type Mod = <F as Field>::Modulus;
+            type Mod = <F as Field>::Integer;
             let offset = Mod::LENGTH_NUM_BYTES + Mod::NUM_BYTES;
             proof.stream.get_mut()[offset] ^= 0x01;
 
@@ -554,7 +554,7 @@ mod tests {
     fn verification_fails_with_invalid_point_size() {
         let num_vars = 10;
 
-        let make_invalid_point = |cfg: &<F as PrimeField>::Config| {
+        let make_invalid_point = |cfg: &<F as HasPrimeFieldConfig>::Config| {
             let mut invalid_point = vec![];
             for i in 0..=num_vars {
                 invalid_point.push(F::from_with_cfg(100 + i as i32, cfg));

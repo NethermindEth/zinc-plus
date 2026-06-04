@@ -3,7 +3,7 @@ pub mod raa;
 pub mod raa_sign_flip;
 
 use crate::pcs::structs::ZipTypes;
-use crypto_primitives::FromPrimitiveWithConfig;
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use std::fmt::Debug;
 use zinc_utils::from_ref::FromRef;
 
@@ -68,5 +68,5 @@ pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     /// A vector of field elements representing the encoded row
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: FromPrimitiveWithConfig + FromRef<F>;
+        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>;
 }

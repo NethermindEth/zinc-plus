@@ -79,47 +79,47 @@ impl Transcript for Blake3Transcript {
 pub fn read_field_cfg<F>(bytes: &[u8]) -> F::Config
 where
     F: PrimeField,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
-    let mod_size = F::Modulus::NUM_BYTES;
-    let modulus = F::Modulus::read_transcription_bytes_exact(&bytes[..mod_size]);
+    let mod_size = F::Integer::NUM_BYTES;
+    let modulus = F::Integer::read_transcription_bytes_exact(&bytes[..mod_size]);
     F::make_cfg(&modulus).expect("valid field modulus in proof transcription")
 }
 
 pub fn read_field_vec_with_cfg<F>(bytes: &[u8], field_cfg: &F::Config) -> Vec<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
-    let inner_size = F::Inner::NUM_BYTES;
+    let int_size = F::Integer::NUM_BYTES;
     bytes
-        .chunks_exact(inner_size)
-        .map(F::Inner::read_transcription_bytes_exact)
-        .map(|inner| F::new_unchecked_with_cfg(inner, field_cfg))
+        .chunks_exact(int_size)
+        .map(F::Integer::read_transcription_bytes_exact)
+        .map(|int| F::from_with_cfg(int, field_cfg))
         .collect()
 }
 
-pub fn append_field_cfg<'a, F>(buf: &'a mut [u8], modulus: &F::Modulus) -> &'a mut [u8]
+pub fn append_field_cfg<'a, F>(buf: &'a mut [u8], modulus: &F::Integer) -> &'a mut [u8]
 where
     F: PrimeField,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
-    let mod_size = F::Modulus::NUM_BYTES;
+    let mod_size = F::Integer::NUM_BYTES;
     let (buf, rest) = buf.split_at_mut(mod_size);
     modulus.write_transcription_bytes_exact(buf);
     rest
 }
 
-pub fn append_field_vec_inner<'a, F>(buf: &'a mut [u8], slice: &[F]) -> &'a mut [u8]
+pub fn append_field_vec_lifted<'a, F>(buf: &'a mut [u8], slice: &[F]) -> &'a mut [u8]
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
-    let inner_size = F::Inner::NUM_BYTES;
+    let int_size = F::Integer::NUM_BYTES;
     let mut offset = 0;
     for elem in slice {
-        let offset_end = add!(offset, inner_size);
-        elem.inner()
+        let offset_end = add!(offset, int_size);
+        elem.lift_to_integer()
             .write_transcription_bytes_exact(&mut buf[offset..offset_end]);
         offset = offset_end;
     }

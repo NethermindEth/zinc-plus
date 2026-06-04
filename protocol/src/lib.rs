@@ -102,8 +102,7 @@ pub struct Proof<F: PrimeField> {
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
@@ -204,8 +203,7 @@ where
 impl<F> Transcribable for Proof<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
@@ -522,7 +520,8 @@ mod tests {
     use crate::fold::FoldBinaryTrace4x;
     use crypto_bigint::U64;
     use crypto_primitives::{
-        Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+        Field, HasPrimeFieldConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+        crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_piop::{
@@ -734,7 +733,7 @@ mod tests {
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
         project_ideal: impl Fn(
             &IdealOrZero<U::Ideal>,
-            &<F as PrimeField>::Config,
+            &<F as HasPrimeFieldConfig>::Config,
         ) -> IdealOrZero<DegreeOneIdeal<F>>
         + Copy,
         tamper: impl Fn(&mut Proof<F>),
@@ -752,8 +751,7 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>,
-        <F as Field>::Inner: FromRef<Zt::Fmod>,
-        <F as Field>::Modulus: FromRef<Zt::Fmod>,
+        <F as Field>::Integer: FromRef<Zt::Fmod>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);

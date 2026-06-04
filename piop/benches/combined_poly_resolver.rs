@@ -5,7 +5,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    ConstIntSemiring, Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
 };
 use rand::rng;
@@ -55,7 +55,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
     let max_degree = count_max_degree::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
-    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                      trace: &UairTrace<_, _, _, _>,
                      transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
@@ -239,7 +239,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
     let max_degree = count_max_degree::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
 
-    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                      trace: &UairTrace<_, _, _, _>,
                      transcript: &mut Blake3Transcript| {
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);

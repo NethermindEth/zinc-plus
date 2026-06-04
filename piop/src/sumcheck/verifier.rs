@@ -58,14 +58,14 @@ pub struct Subclaim<F> {
     pub expected_evaluation: F,
 }
 
-impl<F: FromPrimitiveWithConfig> VerifierState<F> {
+impl<F: PrimeField + FromPrimitiveWithConfig> VerifierState<F> {
     /// Run verifier at current round, given prover message.
     ///
     /// Samples a Fiat-Shamir challenge from the transcript and delegates to
     /// [`Self::verify_round_with_challenge`]. Returns the sampled challenge.
     pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
-        F::Inner: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         let challenge: F = transcript.get_field_challenge(&self.config);
         self.verify_round_with_challenge(prover_msg, challenge.clone());

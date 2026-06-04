@@ -29,8 +29,7 @@ pub struct Proof<F: PrimeField> {
 
 impl<F: PrimeField> GenTranscribable for Proof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (up_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
@@ -54,8 +53,7 @@ where
 
 impl<F: PrimeField> Transcribable for Proof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
         add!(

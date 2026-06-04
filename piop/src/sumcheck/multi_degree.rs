@@ -135,11 +135,10 @@ impl<F> MultiDegreeSumcheckProof<F> {
 
 impl<F: PrimeField> GenTranscribable for MultiDegreeSumcheckProof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
-        let mod_size = F::Modulus::NUM_BYTES;
+        let mod_size = F::Integer::NUM_BYTES;
         let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[..mod_size]);
         let bytes = &bytes[mod_size..];
 
@@ -158,7 +157,7 @@ where
 
         let mut group_messages = Vec::with_capacity(num_groups);
         for &deg in &degrees {
-            let msg_bytes = mul!(deg, F::Inner::NUM_BYTES);
+            let msg_bytes = mul!(deg, F::Integer::NUM_BYTES);
             let mut msgs = Vec::with_capacity(num_vars);
             for _ in 0..num_vars {
                 let tail_evaluations =
@@ -173,10 +172,10 @@ where
 
         let mut claimed_sums = Vec::with_capacity(num_groups);
         for _ in 0..num_groups {
-            let cs = F::Inner::read_transcription_bytes_exact(&bytes[..F::Inner::NUM_BYTES]);
-            let cs = F::new_unchecked_with_cfg(cs, &cfg);
+            let cs = F::Integer::read_transcription_bytes_exact(&bytes[..F::Integer::NUM_BYTES]);
+            let cs = F::from_with_cfg(cs, &cfg);
             claimed_sums.push(cs);
-            bytes = &bytes[F::Inner::NUM_BYTES..];
+            bytes = &bytes[F::Integer::NUM_BYTES..];
         }
 
         Self {
@@ -208,22 +207,21 @@ where
 
         for group in &self.group_messages {
             for msg in group {
-                buf = zinc_transcript::append_field_vec_inner(buf, &msg.0.tail_evaluations);
+                buf = zinc_transcript::append_field_vec_lifted(buf, &msg.0.tail_evaluations);
             }
         }
 
         for cs in &self.claimed_sums {
-            cs.inner()
-                .write_transcription_bytes_exact(&mut buf[..F::Inner::NUM_BYTES]);
-            buf = &mut buf[F::Inner::NUM_BYTES..];
+            cs.lift_to_integer()
+                .write_transcription_bytes_exact(&mut buf[..F::Integer::NUM_BYTES]);
+            buf = &mut buf[F::Integer::NUM_BYTES..];
         }
     }
 }
 
 impl<F: PrimeField> Transcribable for MultiDegreeSumcheckProof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
         let num_groups = self.group_messages.len();
@@ -232,10 +230,10 @@ where
         let total_evals: usize = self.degrees.iter().map(|&d| mul!(d, num_vars)).sum();
 
         // [field_cfg][num_groups][num_vars][deg₀..degₙ][evals...][claimed_sums]
-        let header = add!(F::Modulus::NUM_BYTES, add!(u32::NUM_BYTES, u32::NUM_BYTES));
+        let header = add!(F::Integer::NUM_BYTES, add!(u32::NUM_BYTES, u32::NUM_BYTES));
         let degrees = mul!(num_groups, u32::NUM_BYTES);
-        let eval_data = mul!(total_evals, F::Inner::NUM_BYTES);
-        let claimed = mul!(num_groups, F::Inner::NUM_BYTES);
+        let eval_data = mul!(total_evals, F::Integer::NUM_BYTES);
+        let claimed = mul!(num_groups, F::Integer::NUM_BYTES);
 
         add!(header, add!(degrees, add!(eval_data, claimed)))
     }
@@ -313,8 +311,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ) -> (MultiDegreeSumcheckProof<F>, Vec<SumcheckProverState<F>>)
     where
         F: InnerTransparentField + Send + Sync,
-        F::Inner: ConstTranscribable + Zero,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable + Zero,
     {
         assert!(
             num_vars > 0,
@@ -323,7 +320,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         assert!(!groups.is_empty(), "need at least one degree group");
 
         let num_groups = groups.len();
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::Integer::NUM_BYTES];
         let nvars_field = F::from_with_cfg(num_vars as u64, config);
         let ngroups_field = F::from_with_cfg(num_groups as u64, config);
         transcript.absorb_random_field(&nvars_field, &mut buf);
@@ -471,8 +468,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ) -> Result<MultiDegreeSubClaims<F>, SumCheckError<F>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         assert!(
             num_vars > 0,
@@ -481,7 +477,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         let num_groups = proof.degrees.len();
         assert!(num_groups != 0, "need at least one degree group");
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::Integer::NUM_BYTES];
         let nvars_field = F::from_with_cfg(num_vars as u64, config);
         let ngroups_field = F::from_with_cfg(num_groups as u64, config);
         transcript.absorb_random_field(&nvars_field, &mut buf);

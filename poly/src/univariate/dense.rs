@@ -188,7 +188,9 @@ impl<R: Semiring + Zero + One, const DEGREE_PLUS_ONE: usize> One
     for DensePolynomial<R, DEGREE_PLUS_ONE>
 {
     fn one() -> Self {
-        Self::from(R::one())
+        let mut coeffs = array::from_fn(|_| R::zero());
+        coeffs[0] = R::one();
+        Self { coeffs }
     }
 }
 
@@ -573,17 +575,29 @@ where
     }
 }
 
-impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R, DEGREE_PLUS_ONE> {
-    fn from(value: R) -> Self {
+impl<R: Zero + One, const DEGREE_PLUS_ONE: usize> From<bool>
+    for DensePolynomial<R, DEGREE_PLUS_ONE>
+{
+    fn from(value: bool) -> Self {
         let mut coeffs = array::from_fn(|_| R::zero());
-        coeffs[0] = value;
+        coeffs[0] = if value { R::one() } else { R::zero() };
         Self { coeffs }
     }
 }
 
+// impl<R: Zero, const DEGREE_PLUS_ONE: usize> From<R> for DensePolynomial<R,
+// DEGREE_PLUS_ONE> {     fn from(value: R) -> Self {
+//         let mut coeffs = array::from_fn(|_| R::zero());
+//         coeffs[0] = value;
+//         Self { coeffs }
+//     }
+// }
+
 impl<const DEGREE_PLUS_ONE: usize> FromRef<i64> for DensePolynomial<i128, DEGREE_PLUS_ONE> {
     fn from_ref(value: &i64) -> Self {
-        Self::from(i128::from(*value))
+        let mut coeffs = array::from_fn(|_| 0_i128);
+        coeffs[0] = i128::from(*value);
+        Self { coeffs }
     }
 }
 

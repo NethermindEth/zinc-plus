@@ -34,11 +34,10 @@ pub struct SumcheckProof<F> {
 
 impl<F: PrimeField> GenTranscribable for SumcheckProof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
-        let mod_size = F::Modulus::NUM_BYTES;
+        let mod_size = F::Integer::NUM_BYTES;
         let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[..mod_size]);
         let bytes = &bytes[mod_size..];
 
@@ -50,7 +49,7 @@ where
             let (len, rest) = u32::read_transcription_bytes_subset(bytes);
             let len = usize::try_from(len).expect("polynomial length must fit into usize");
             bytes = rest;
-            let end = mul!(len, F::Inner::NUM_BYTES);
+            let end = mul!(len, F::Integer::NUM_BYTES);
             let tail_evaluations = zinc_transcript::read_field_vec_with_cfg(&bytes[..end], &cfg);
             messages.push(ProverMsg(NatEvaluatedPolyWithoutConstant {
                 tail_evaluations,
@@ -58,8 +57,8 @@ where
             bytes = &bytes[end..];
         }
 
-        let claimed_sum = F::Inner::read_transcription_bytes_exact(bytes);
-        let claimed_sum = F::new_unchecked_with_cfg(claimed_sum, &cfg);
+        let claimed_sum = F::Integer::read_transcription_bytes_exact(bytes);
+        let claimed_sum = F::from_with_cfg(claimed_sum, &cfg);
         Self {
             messages,
             claimed_sum,
@@ -81,18 +80,17 @@ where
                 len.write_transcription_bytes_exact(&mut buf[0..u32::NUM_BYTES]);
                 &mut buf[u32::NUM_BYTES..]
             };
-            buf = zinc_transcript::append_field_vec_inner(buf, evals);
+            buf = zinc_transcript::append_field_vec_lifted(buf, evals);
         }
         self.claimed_sum
-            .inner()
+            .lift_to_integer()
             .write_transcription_bytes_exact(buf);
     }
 }
 
 impl<F: PrimeField> Transcribable for SumcheckProof<F>
 where
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
@@ -102,15 +100,15 @@ where
             .iter()
             .map(|m| m.0.tail_evaluations.len())
             .sum();
-        F::Modulus::NUM_BYTES
+        F::Integer::NUM_BYTES
             + u32::NUM_BYTES // n_msgs
             + n_msgs * u32::NUM_BYTES // n_evals for each message
-            + total_evals * F::Inner::NUM_BYTES // evals
-            + F::Inner::NUM_BYTES // claimed_sum
+            + total_evals * F::Integer::NUM_BYTES // evals
+            + F::Integer::NUM_BYTES // claimed_sum
     }
 }
 
-impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
+impl<F: PrimeField + FromPrimitiveWithConfig> MLSumcheck<F> {
     /// Sumcheck prover main entry point.
     ///
     /// This function executes the Prover side of the Sumcheck protocol.
@@ -170,14 +168,13 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable + Zero,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable + Zero,
     {
         if nvars == 0 {
             panic!("Attempt to prove a constant")
         }
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::Integer::NUM_BYTES];
         let nvars_field = F::from_with_cfg(nvars as u64, config);
         let degree_field = F::from_with_cfg(degree as u64, config);
 
@@ -273,14 +270,13 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         config: &F::Config,
     ) -> Result<Subclaim<F>, SumCheckError<F>>
     where
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         if num_vars == 0 {
             panic!("Attempt to verify a sumcheck claim for 0 variables")
         }
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::Integer::NUM_BYTES];
 
         let (nvars_field, degree_field): (F, F) = {
             (

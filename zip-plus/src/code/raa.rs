@@ -1,5 +1,5 @@
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
-use crypto_primitives::PrimeField;
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::CheckedAdd;
 use std::{fmt::Debug, marker::PhantomData, ops::AddAssign};
 use zinc_poly::ConstCoeffBitWidth;
@@ -154,7 +154,7 @@ impl<Zt: ZipTypes, Config: RaaConfig, const REP: usize> LinearCode<Zt>
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F>,
+        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
     {
         self.encode_inner(row)
     }

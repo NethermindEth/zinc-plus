@@ -467,8 +467,7 @@ impl<F: PrimeField> DynamicPolyVecF<F> {
 impl<F> GenTranscribable for DynamicPolyVecF<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         if bytes.is_empty() {
@@ -482,7 +481,7 @@ where
         };
         let mut bytes = &bytes[1..];
         let cfg_option = if modulus_present {
-            let mod_size = F::Modulus::NUM_BYTES;
+            let mod_size = F::Integer::NUM_BYTES;
             let cfg = zinc_transcript::read_field_cfg::<F>(&bytes[0..mod_size]);
             bytes = &bytes[mod_size..];
             Some(cfg)
@@ -494,7 +493,7 @@ where
             let (len, rest) = u32::read_transcription_bytes_subset(bytes);
             let len = usize::try_from(len).expect("polynomial length must fit into usize");
             bytes = rest;
-            let end = mul!(len, F::Inner::NUM_BYTES);
+            let end = mul!(len, F::Integer::NUM_BYTES);
             let coeffs = if let Some(ref cfg) = cfg_option {
                 zinc_transcript::read_field_vec_with_cfg(&bytes[..end], cfg)
             } else {
@@ -527,7 +526,7 @@ where
                 len.write_transcription_bytes_exact(&mut buf[0..u32::NUM_BYTES]);
                 &mut buf[u32::NUM_BYTES..]
             };
-            buf = zinc_transcript::append_field_vec_inner(buf, &poly.coeffs[0..len]);
+            buf = zinc_transcript::append_field_vec_lifted(buf, &poly.coeffs[0..len]);
         }
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
@@ -536,8 +535,7 @@ where
 impl<F> Transcribable for DynamicPolyVecF<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
         if self.0.is_empty() {
@@ -546,7 +544,7 @@ where
         // 1 byte for the modulus presence flag
         let has_modulus = self.0.iter().any(|p| !p.coeffs.is_empty());
         let modulus_bytes = if has_modulus {
-            F::Modulus::NUM_BYTES
+            F::Integer::NUM_BYTES
         } else {
             0
         };
@@ -555,7 +553,7 @@ where
             .iter()
             .map(|poly| {
                 let len = poly.degree().map(|d| add!(d, 1)).unwrap_or(0);
-                add!(u32::NUM_BYTES, mul!(len, F::Inner::NUM_BYTES))
+                add!(u32::NUM_BYTES, mul!(len, F::Integer::NUM_BYTES))
             })
             .sum();
         add!(add!(1, modulus_bytes), poly_bytes)

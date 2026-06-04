@@ -13,7 +13,7 @@ use crate::{
     EvaluationError,
     mle::{MultilinearExtension, MultilinearExtensionRand},
 };
-use crypto_primitives::{Matrix, PrimeField, Ring, Semiring};
+use crypto_primitives::{HasPrimeFieldConfig, Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
 use rand_core::RngCore;
 use zinc_utils::{
@@ -243,7 +243,7 @@ where
     fn fix_variables_with_config(
         &mut self,
         partial_point: &[F],
-        config: &<F as PrimeField>::Config,
+        config: &<F as HasPrimeFieldConfig>::Config,
     ) {
         assert!(
             partial_point.len() <= self.num_vars,
@@ -281,7 +281,7 @@ where
     fn fixed_variables_with_config(
         &self,
         partial_point: &[F],
-        config: &<F as PrimeField>::Config,
+        config: &<F as HasPrimeFieldConfig>::Config,
     ) -> Self {
         let mut res = self.clone();
         res.fix_variables_with_config(partial_point, config);
@@ -291,7 +291,7 @@ where
     fn evaluate_with_config(
         mut self,
         point: &[F],
-        config: &<F as PrimeField>::Config,
+        config: &<F as HasPrimeFieldConfig>::Config,
     ) -> Result<F, EvaluationError> {
         if point.len() == self.num_vars {
             self.fix_variables_with_config(point, config);
@@ -525,7 +525,7 @@ mod tests {
 
     const LIMBS: usize = 4;
 
-    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as PrimeField>::Config {
+    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as HasPrimeFieldConfig>::Config {
         let modulus = Uint::new(
             crypto_bigint::Uint::from_str_radix_vartime(hex_modulus, 16)
                 .expect("Invalid modulus hex string"),
@@ -536,7 +536,7 @@ mod tests {
     const MODULUS: &str = "0076F668F4274572E39A3EA8285319B5";
     type F = MontyField<LIMBS>;
 
-    fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
+    fn any_f(cfg: <F as HasPrimeFieldConfig>::Config) -> impl Strategy<Value = F> + 'static {
         any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
     }
 

@@ -62,8 +62,7 @@ pub trait IdealCheckProtocol: Uair {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable;
+        F::Integer: ConstTranscribable;
 
     /// Prover for any UAIR using combined polynomial construction.
     ///
@@ -91,8 +90,7 @@ pub trait IdealCheckProtocol: Uair {
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable;
+        F::Integer: ConstTranscribable;
 
     /// The verifier part of the ideal-check subprotocol.
     ///
@@ -129,8 +127,7 @@ pub trait IdealCheckProtocol: Uair {
     ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
 }
@@ -150,8 +147,7 @@ where
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -220,7 +216,7 @@ where
             }
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
@@ -246,8 +242,7 @@ where
     ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
@@ -278,7 +273,7 @@ where
             }
         };
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 
         combined_mle_values.iter().for_each(|combined_mle_value| {
             transcript
@@ -303,12 +298,11 @@ where
     ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
 

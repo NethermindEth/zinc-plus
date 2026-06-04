@@ -87,8 +87,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         field_cfg: &F::Config,
     ) -> Result<(MultiDegreeSumcheckGroup<F>, CprProverAncillary), CombinedPolyResolverError<F>>
     where
-        F::Inner: ConstTranscribable + Send + Sync + Zero + Default,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable + Send + Sync + Zero + Default,
         F: 'static,
         U::Scalar: 'static,
         U: Uair,
@@ -238,9 +237,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         field_cfg: &F::Config,
     ) -> Result<(CprProof<F>, CprProverState<F>), CombinedPolyResolverError<F>>
     where
-        F::Inner: ConstTranscribable + Zero,
-        F::Modulus: ConstTranscribable,
         U: Uair,
+        F::Integer: ConstTranscribable + Zero,
     {
         // Sumcheck prover stops evaluating MLEs
         // at the second to last challenge
@@ -292,7 +290,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         down_evals.extend_from_slice(&evals[up_end..bit_op_start]);
         down_evals.extend_from_slice(&evals[bit_op_end..]);
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         transcript.absorb_random_field_slice(&up_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&down_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&bit_op_evals, &mut transcription_buf);
@@ -336,8 +334,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         field_cfg: &F::Config,
     ) -> Result<CprVerifierAncillary<F>, CombinedPolyResolverError<F>>
     where
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
         U: Uair,
     {
         let uair_sig = U::signature();
@@ -426,8 +423,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Integer: ConstTranscribable,
         U: Uair,
     {
         let uair_sig = U::signature();
@@ -482,7 +478,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             });
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         transcript.absorb_random_field_slice(&proof.up_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&proof.down_evals, &mut transcription_buf);
         transcript.absorb_random_field_slice(&proof.bit_op_evals, &mut transcription_buf);

@@ -113,7 +113,7 @@ pub struct BooleanityProof<F: PrimeField> {
 }
 
 delegate_transcribable!(BooleanityProof<F> { bit_slice_evals: Vec<F> }
-    where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
+    where F: PrimeField, F::Integer: ConstTranscribable);
 
 /// Ancillary data produced by [`BooleanityChecker::prepare_sumcheck_group`]
 /// and consumed by [`BooleanityChecker::finalize_prover`].
@@ -163,8 +163,7 @@ pub struct BoolVerifierSubclaim<F: PrimeField> {
 impl<F> BooleanityChecker<F>
 where
     F: InnerTransparentField + Send + Sync + 'static,
-    F::Inner: ConstTranscribable + Clone + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable + Clone + Send + Sync + Zero + Default,
 {
     /// Build the booleanity sumcheck group, to be appended to the
     /// multi-degree sumcheck.
@@ -293,7 +292,7 @@ where
 
         debug_assert_eq!(bit_slice_evals.len(), active_len);
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         transcript.absorb_random_field_slice(&bit_slice_evals, &mut transcription_buf);
 
         Ok(BooleanityProof { bit_slice_evals })
@@ -385,7 +384,7 @@ where
             });
         }
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         transcript.absorb_random_field_slice(&proof.bit_slice_evals, &mut transcription_buf);
 
         Ok(BoolVerifierSubclaim {
@@ -439,7 +438,7 @@ struct BooleanityRound1FastPath<F: PrimeField, const D: usize> {
 impl<F, const D: usize> Round1FastPath<F> for BooleanityRound1FastPath<F, D>
 where
     F: InnerTransparentField + Send + Sync + 'static,
-    F::Inner: Zero + Clone + Send + Sync,
+    F::Integer: Zero + Clone + Send + Sync,
 {
     fn round_1_message(&self, config: &F::Config) -> Round1Output<F> {
         let zero = F::zero_with_cfg(config);
@@ -648,7 +647,7 @@ fn build_witness_bit_slice_mles<F, const D: usize>(
 ) -> Vec<DenseMultilinearExtension<F::Inner>>
 where
     F: PrimeField,
-    F::Inner: Clone + Send + Sync,
+    F::Integer: Clone + Send + Sync,
 {
     let zero_inner = F::zero_with_cfg(field_cfg).into_inner();
     let one_inner = F::one_with_cfg(field_cfg).into_inner();

@@ -10,8 +10,7 @@ pub struct Proof<F: PrimeField> {
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let combined_mle_values = DynamicPolyVecF::read_transcription_bytes_exact(bytes).0;
@@ -29,8 +28,7 @@ where
 impl<F> Transcribable for Proof<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
         DynamicPolyVecF::reinterpret(&self.combined_mle_values).get_num_bytes()

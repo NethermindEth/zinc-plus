@@ -1,7 +1,7 @@
 mod pntt;
 
 use crate::{ZipError, code::LinearCode, pcs::structs::ZipTypes};
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use num_traits::{CheckedAdd, CheckedMul};
 use pntt::radix8::params::Config as PnttConfig;
 pub use pntt::radix8::params::{PnttConfigF65537, PnttInt, Radix8PnttParams};
@@ -90,7 +90,7 @@ where
     // that we are dealing with a field.
     fn encode_inner_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: FromWithConfig<PnttInt> + FromRef<F>,
+        F: PrimeField + FromWithConfig<PnttInt> + FromRef<F>,
     {
         assert_eq!(
             row.len(),
@@ -151,7 +151,7 @@ where
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: FromPrimitiveWithConfig + FromRef<F>,
+        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
     {
         self.encode_inner_f(row)
     }

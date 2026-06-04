@@ -1,6 +1,5 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
-use num_traits::Zero;
 use std::{borrow::Cow, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -296,9 +295,8 @@ macro_rules! impl_with_type_bounds {
                 + Send
                 + Sync
                 + 'static,
-            F::Inner:
-                ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
-            F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+            F::Integer:
+                ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync,
         {
             $($code)*
         }
@@ -310,7 +308,7 @@ where
     Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
-    F::Inner: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     /// Step 0: Folding the trace.
     #[allow(clippy::type_complexity)]
@@ -783,7 +781,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             &self.field_cfg,
         );
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for bar_u in &lifted_evals {
             self.base
                 .pcs_transcript
@@ -935,9 +933,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner:
-        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync,
     U: Uair + 'static,
 {
     /// Zinc+ full PIOP prover.
@@ -1012,7 +1008,7 @@ fn project_binary_col_at_field<F, const D: usize>(
 ) -> DenseMultilinearExtension<F::Inner>
 where
     F: PrimeField,
-    F::Inner: Clone + Send + Sync,
+    F::Integer: Clone + Send + Sync,
 {
     debug_assert_eq!(alpha_powers.len(), D);
     let zero = F::zero_with_cfg(field_cfg);

@@ -59,7 +59,11 @@ pub fn project_trace_coeffs_row_major<F, PolyCoeff, Int, const DB: usize, const 
     field_cfg: &F::Config,
 ) -> RowMajorTrace<F>
 where
-    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a PolyCoeff>
+        + for<'a> FromWithConfig<&'a Int>
+        + Send
+        + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
@@ -150,7 +154,11 @@ pub fn project_trace_coeffs_column_major<F, PolyCoeff, Int, const DB: usize, con
     field_cfg: &F::Config,
 ) -> ColumnMajorTrace<F>
 where
-    F: for<'a> FromWithConfig<&'a PolyCoeff> + for<'a> FromWithConfig<&'a Int> + Send + Sync,
+    F: PrimeField
+        + for<'a> FromWithConfig<&'a PolyCoeff>
+        + for<'a> FromWithConfig<&'a Int>
+        + Send
+        + Sync,
     PolyCoeff: Clone + Send + Sync,
     Int: Clone + Send + Sync,
 {
@@ -453,11 +461,13 @@ pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
 mod tests {
     use super::*;
     use crate::test_utils::{LIMBS, test_config};
-    use crypto_primitives::{Field, FromWithConfig, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_monty::MontyField,
+    };
 
     type F = MontyField<LIMBS>;
 
-    fn f(value: u32, cfg: &<F as PrimeField>::Config) -> F {
+    fn f(value: u32, cfg: &<F as HasPrimeFieldConfig>::Config) -> F {
         F::from_with_cfg(value, cfg)
     }
 
@@ -468,7 +478,7 @@ mod tests {
     fn expected_inner(
         coeffs: &[F],
         projecting_element: &F,
-        cfg: &<F as PrimeField>::Config,
+        cfg: &<F as HasPrimeFieldConfig>::Config,
     ) -> <F as Field>::Inner {
         let zero = F::zero_with_cfg(cfg);
         let one = F::one_with_cfg(cfg);

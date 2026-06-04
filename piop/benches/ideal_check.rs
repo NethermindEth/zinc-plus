@@ -5,7 +5,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, FromWithConfig, PrimeField, crypto_bigint_int::Int,
+    ConstIntSemiring, Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
 };
 use rand::rng;
@@ -54,7 +54,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
 
-    let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+    let prove = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                  trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
@@ -146,7 +146,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
 
-    let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+    let prove = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                  trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {
@@ -240,7 +240,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
 
     let num_constraints = count_constraints::<BinaryDecompositionUair<u32>>();
 
-    let prove = |field_cfg: &<F<FIELD_LIMBS> as PrimeField>::Config,
+    let prove = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                  trace: &UairTrace<_, _, _, _>,
                  transcript: &mut Blake3Transcript|
      -> Proof<F<FIELD_LIMBS>> {

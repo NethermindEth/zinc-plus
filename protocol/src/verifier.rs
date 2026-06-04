@@ -1,7 +1,6 @@
 use super::*;
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
-use num_traits::Zero;
 use std::io::Cursor;
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -261,7 +260,7 @@ where
     Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
-    F::Inner: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     /// Step 0: Verifier entry point.
     /// Reconstruct Fiat-Shamir transcript from commitments and public data.
@@ -337,8 +336,7 @@ impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
 where
     Zt: ZincTypes<D, FD>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     U: Uair,
     IdealOverF: Ideal,
 {
@@ -386,8 +384,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -435,8 +432,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
@@ -488,8 +484,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     U: Uair + 'static,
     IdealOverF: Ideal,
 {
@@ -630,8 +625,7 @@ impl<'a, Zt, F, IdealOverF, const D: usize, const FD: usize>
 where
     Zt: ZincTypes<D, FD>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
     /// Step 5: Multi-point evaluation sumcheck.
@@ -706,8 +700,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
     /// Step 6: Recompute public lifted_evals, assemble full set, verify
@@ -793,7 +786,7 @@ where
             &self.field_cfg,
         )?;
 
-        let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
+        let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for bar_u in &all_lifted_evals {
             self.base
                 .pcs_transcript
@@ -832,8 +825,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
     /// Step 7: PCS verification at `r_0` (witness columns only).
@@ -990,8 +982,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
-    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     U: Uair + 'static,
 {
     /// Zinc+ full PIOP verifier.

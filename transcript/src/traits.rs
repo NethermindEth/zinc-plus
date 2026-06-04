@@ -2,10 +2,10 @@
 // Transcribable and Transcript
 //
 
-use crypto_bigint::{BitOps, BoxedUint, Word};
+use crypto_bigint::Word;
 use crypto_primitives::{
-    ConstIntSemiring, PrimeField, WORD_FACTOR, boolean::Boolean, crypto_bigint_int::Int,
-    crypto_bigint_uint::Uint,
+    ConstIntSemiring, PrimeField, WORD_FACTOR, boolean::Boolean,
+    crypto_bigint_boxed_uint::BoxedUint, crypto_bigint_int::Int, crypto_bigint_uint::Uint,
 };
 use itertools::Itertools;
 use zinc_primality::PrimalityTest;
@@ -333,11 +333,10 @@ pub trait Transcript {
 
     fn get_field_challenge<F: PrimeField>(&mut self, cfg: &F::Config) -> F
     where
-        F::Inner: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         let random_inner = self.get_challenge();
-
-        F::new_with_cfg(random_inner, cfg)
+        F::from_with_cfg(random_inner, cfg)
     }
 
     /// Generates a pseudorandom transcribable values as challenges based on the
@@ -348,7 +347,7 @@ pub trait Transcript {
     //             alternative to `get_challenge`.
     fn get_field_challenges<F: PrimeField>(&mut self, n: usize, cfg: &F::Config) -> Vec<F>
     where
-        F::Inner: ConstTranscribable,
+        F::Integer: ConstTranscribable,
     {
         (0..n).map(|_| self.get_field_challenge(cfg)).collect()
     }
@@ -365,12 +364,12 @@ pub trait Transcript {
     where
         F: PrimeField,
         FMod: ConstTranscribable + ConstIntSemiring,
-        F::Modulus: FromRef<FMod>,
+        F::Integer: FromRef<FMod>,
         T: PrimalityTest<FMod>,
     {
         let prime = self.get_prime::<FMod, T>();
 
-        F::make_cfg(&F::Modulus::from_ref(&prime)).expect("prime is guaranteed to be prime")
+        F::make_cfg(&F::Integer::from_ref(&prime)).expect("prime is guaranteed to be prime")
     }
 
     /// Absorbs a byte slice into the hash sponge.
@@ -388,26 +387,18 @@ pub trait Transcript {
     /// Absorbs a field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
-    // Note: Currently this only works for fields whose modulus and inner element
-    // have the same byte length
     fn absorb_random_field<F>(&mut self, v: &F, buf: &mut [u8])
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
-        debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
-        debug_assert_eq!(
-            F::Inner::get_num_bytes(v.inner()),
-            F::Modulus::get_num_bytes(&v.modulus())
-        );
         self.absorb_inner(&[0x3]);
         v.modulus().write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x5]);
 
         self.absorb_inner(&[0x1]);
-        v.inner().write_transcription_bytes_exact(buf);
+        v.lift_to_integer().write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x3])
     }
@@ -418,8 +409,7 @@ pub trait Transcript {
     fn absorb_random_field_slice<F>(&mut self, v: &[F], buf: &mut [u8])
     where
         F: PrimeField,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         v.iter().for_each(|x| self.absorb_random_field(x, buf));
     }
@@ -566,14 +556,13 @@ impl Transcribable for BoxedUint {
 impl<F> GenTranscribable for Vec<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         if bytes.is_empty() {
             return Vec::new();
         }
-        let mod_size = F::Modulus::NUM_BYTES;
+        let mod_size = F::Integer::NUM_BYTES;
         let cfg = super::read_field_cfg::<F>(&bytes[..mod_size]);
         super::read_field_vec_with_cfg(&bytes[mod_size..], &cfg)
     }
@@ -583,7 +572,7 @@ where
             return;
         }
         let buf = super::append_field_cfg::<F>(buf, &self[0].modulus());
-        let buf = super::append_field_vec_inner(buf, self);
+        let buf = super::append_field_vec_lifted(buf, self);
         assert!(
             buf.is_empty(),
             "Buffer size mismatch for Vec<F> transcription"
@@ -594,14 +583,16 @@ where
 impl<F> Transcribable for Vec<F>
 where
     F: PrimeField,
-    F::Inner: ConstTranscribable,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn get_num_bytes(&self) -> usize {
         if self.is_empty() {
             0
         } else {
-            add!(F::Modulus::NUM_BYTES, mul!(self.len(), F::Inner::NUM_BYTES))
+            add!(
+                F::Integer::NUM_BYTES,
+                mul!(self.len(), F::Integer::NUM_BYTES)
+            )
         }
     }
 }

@@ -96,8 +96,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         let point = point
             .iter()
@@ -129,8 +128,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: Transcribable,
-        F::Modulus: Transcribable,
+        F::Integer: Transcribable,
     {
         let batch_size = polys.len();
         validate_input::<Zt, Lc, _>(
@@ -269,8 +267,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
-        F::Inner: Transcribable,
-        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+        F::Integer: FromRef<Zt::Fmod> + Transcribable,
     {
         Self::prove::<F, CHECK_FOR_OVERFLOW>(
             transcript,

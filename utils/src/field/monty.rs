@@ -1,5 +1,5 @@
 use crypto_primitives::{
-    FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_monty::MontyField,
+    FromWithConfig, HasPrimeFieldConfig, IntoWithConfig, crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
 };
 use std::ops::MulAssign;
@@ -66,7 +66,7 @@ impl<const LIMBS: usize> InnerTransparentField for MontyField<LIMBS> {
 mod prop_tests {
     use crypto_bigint::U256;
     use crypto_primitives::{
-        FromWithConfig, IntoWithConfig, PrimeField,
+        FromWithConfig, HasPrimeFieldConfig, IntoWithConfig, PrimeField,
         crypto_bigint_monty::{F256, MontyField},
         crypto_bigint_uint::Uint,
     };
@@ -78,7 +78,7 @@ mod prop_tests {
     const MODULUS: &str = "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27";
     type F = F256;
 
-    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as PrimeField>::Config {
+    fn get_dyn_config(hex_modulus: &str) -> <MontyField<LIMBS> as HasPrimeFieldConfig>::Config {
         let modulus = Uint::new(
             crypto_bigint::Uint::<LIMBS>::from_str_radix_vartime(hex_modulus, 16).unwrap(),
         );

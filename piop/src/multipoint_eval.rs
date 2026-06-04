@@ -65,7 +65,7 @@ pub struct Proof<F: PrimeField> {
 }
 
 delegate_transcribable!(Proof<F> { sumcheck_proof: SumcheckProof<F> }
-    where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
+    where F: PrimeField, F::Integer: ConstTranscribable);
 
 /// Prover state after the multi-point evaluation protocol.
 pub struct ProverState<F: PrimeField> {
@@ -105,8 +105,7 @@ pub struct MultipointEval<F>(PhantomData<F>);
 impl<F> MultipointEval<F>
 where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
-    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
-    F::Modulus: ConstTranscribable,
+    F::Integer: ConstTranscribable + Zero + Default + Send + Sync,
 {
     /// Multi-point evaluation protocol prover.
     ///

@@ -135,14 +135,16 @@ fn eval_shift_small<F: PrimeField>(x: &[F], y: &[F], c: usize, m: usize, zero: &
 mod tests {
     use super::*;
     use crate::test_utils::test_config;
-    use crypto_primitives::{Field, FromWithConfig, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_monty::MontyField,
+    };
     use rand::Rng;
     use zinc_poly::utils::{build_eq_x_r_inner, build_next_c_r_mle};
 
     type F = MontyField<4>;
 
     /// LE convention: to_bin(val, i) = bit i of val (LSB = index 0).
-    fn to_bin(val: usize, bit: usize, cfg: &<F as PrimeField>::Config) -> F {
+    fn to_bin(val: usize, bit: usize, cfg: &<F as HasPrimeFieldConfig>::Config) -> F {
         if (val >> bit) & 1 == 1 {
             F::one_with_cfg(cfg)
         } else {
@@ -151,13 +153,13 @@ mod tests {
     }
 
     /// Convert F::Inner back to F.
-    fn from_inner(inner: <F as Field>::Inner, cfg: &<F as PrimeField>::Config) -> F {
+    fn from_inner(inner: <F as Field>::Inner, cfg: &<F as HasPrimeFieldConfig>::Config) -> F {
         let mut f = F::zero_with_cfg(cfg);
         *f.inner_mut() = inner;
         f
     }
 
-    fn rand_field(rng: &mut impl Rng, cfg: &<F as PrimeField>::Config) -> F {
+    fn rand_field(rng: &mut impl Rng, cfg: &<F as HasPrimeFieldConfig>::Config) -> F {
         F::from_with_cfg(rng.random::<u32>(), cfg)
     }
 

@@ -1,6 +1,6 @@
 use super::raa::*;
 use crate::{code::LinearCode, pcs::structs::ZipTypes, utils::shuffle_seeded};
-use crypto_primitives::{PrimeField, Ring};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, Ring};
 use num_traits::{CheckedAdd, CheckedNeg};
 use std::{
     fmt::Debug,
@@ -100,7 +100,7 @@ where
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
-        F: PrimeField + FromRef<F>,
+        F: PrimeField + FromPrimitiveWithConfig + FromRef<F>,
     {
         self.encode_inner(row)
     }

@@ -38,14 +38,14 @@ impl<F> std::ops::DerefMut for NatEvaluatedPolyWithoutConstant<F> {
 }
 
 delegate_transcribable!(NatEvaluatedPolyWithoutConstant<F> { tail_evaluations: Vec<F> }
-    where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
+    where F: PrimeField, F::Integer: ConstTranscribable);
 
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProverMsg<F>(pub NatEvaluatedPolyWithoutConstant<F>);
 
 delegate_transcribable!(ProverMsg<F>(NatEvaluatedPolyWithoutConstant<F>)
-    where F: PrimeField, F::Inner: ConstTranscribable, F::Modulus: ConstTranscribable);
+    where F: PrimeField, F::Integer: ConstTranscribable);
 
 /// Sumcheck Prover State.
 pub struct ProverState<F: PrimeField> {

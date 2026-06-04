@@ -169,8 +169,7 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: Transcribable,
-    F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
+    F::Integer: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
@@ -203,8 +202,7 @@ where
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Inner: Transcribable,
-    F::Modulus:
+    F::Integer:
         FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
@@ -232,8 +230,7 @@ where
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Inner: Transcribable,
-    F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    F::Integer: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
     let (pp, poly) = setup(num_vars);
@@ -263,7 +260,7 @@ pub fn get_field_cfg<Zt, F>(transcript: &mut impl Transcript) -> F::Config
 where
     Zt: ZipTypes,
     F: PrimeField,
-    F::Modulus: FromRef<Zt::Fmod>,
+    F::Integer: FromRef<Zt::Fmod>,
 {
     transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
 }

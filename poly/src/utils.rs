@@ -291,7 +291,9 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
 )]
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
+    use crypto_primitives::{
+        HasPrimeFieldConfig, IntoWithConfig, crypto_bigint_const_monty::ConstMontyField,
+    };
     use num_traits::{One, Zero};
     use proptest::{prelude::*, proptest};
 
@@ -405,7 +407,7 @@ mod tests {
         );
     }
 
-    fn any_f(cfg: <F as PrimeField>::Config) -> impl Strategy<Value = F> + 'static {
+    fn any_f(cfg: <F as HasPrimeFieldConfig>::Config) -> impl Strategy<Value = F> + 'static {
         any::<u128>().prop_map(move |v| v.into_with_cfg(&cfg))
     }
 
