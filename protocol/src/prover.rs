@@ -2072,12 +2072,16 @@ where
         .iter()
         .map(|&idx| projected_trace_f[int_offset + idx].clone())
         .collect();
-    let shifted_bit_slice_mles = build_shifted_bit_slice_mles::<F, D>(
-        &trace.binary_poly[num_pub_bin..],
-        uair_signature.shifted_bit_slice_specs(),
-        &field_cfg,
-    );
     let virtual_specs = uair_signature.virtual_booleanity_cols();
+    let shifted_bit_slice_mles = if virtual_specs.is_empty() {
+        Vec::new()
+    } else {
+        build_shifted_bit_slice_mles::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &field_cfg,
+        )
+    };
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
@@ -2148,11 +2152,21 @@ where
         cpr_ancillary,
         &field_cfg,
     )?;
-    let shifted_bit_slice_evals: Vec<F> = shifted_bit_slice_mles
-        .into_iter()
-        .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProtocolError::ShiftedBitSliceEval)?;
+    let shifted_bit_slice_evals: Vec<F> = if shifted_bit_slice_mles.is_empty() {
+        compute_shifted_bit_slice_evals_streaming::<F, D>(
+            &trace.binary_poly[num_pub_bin..],
+            uair_signature.shifted_bit_slice_specs(),
+            &cpr_prover_state.evaluation_point,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::Booleanity(e.into()))?
+    } else {
+        shifted_bit_slice_mles
+            .into_iter()
+            .map(|mle| mle.evaluate_with_config(&cpr_prover_state.evaluation_point, &field_cfg))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProtocolError::ShiftedBitSliceEval)?
+    };
     cpr_proof.shifted_bit_slice_evals = shifted_bit_slice_evals;
     if let Some(ba) = bool_ancillary_opt {
         let bool_state = md_states.remove(0);
