@@ -6,7 +6,7 @@ use std::{
     marker::PhantomData,
 };
 
-use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInteger, PrimeField as ArkPrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use crypto_primitives::{
@@ -90,30 +90,30 @@ pub struct HyraxProverData<C: AffineRepr> {
 }
 
 pub trait HyraxFieldBridge<C: AffineRepr>: PrimeField {
-    fn field_to_scalar(value: &Self) -> C::ScalarField;
-    fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Self;
+    fn field_to_scalar(value: &Self) -> Result<C::ScalarField, ZipError>;
+    fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Result<Self, ZipError>;
 }
 
 impl<C, const LIMBS: usize> HyraxFieldBridge<C> for MontyField<LIMBS>
 where
     C: AffineRepr,
 {
-    fn field_to_scalar(value: &Self) -> C::ScalarField {
-        assert_curve_scalar_modulus::<C, LIMBS>(&value.modulus());
+    fn field_to_scalar(value: &Self) -> Result<C::ScalarField, ZipError> {
+        validate_curve_scalar_modulus::<C, LIMBS>(&value.modulus())?;
 
         let canonical = value.retrieve();
         let mut bytes = vec![0u8; <Uint<LIMBS> as ConstTranscribable>::NUM_BYTES];
         canonical.write_transcription_bytes_exact(&mut bytes);
-        C::ScalarField::from_le_bytes_mod_order(&bytes)
+        Ok(C::ScalarField::from_le_bytes_mod_order(&bytes))
     }
 
-    fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Self {
+    fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Result<Self, ZipError> {
         let actual_modulus = Uint::<LIMBS>::new(cfg.modulus().get());
-        assert_curve_scalar_modulus::<C, LIMBS>(&actual_modulus);
+        validate_curve_scalar_modulus::<C, LIMBS>(&actual_modulus)?;
 
         let scalar_bigint: <C::ScalarField as ArkPrimeField>::BigInt = value.clone().into();
         let scalar_uint = uint_from_le_bytes::<LIMBS>(&scalar_bigint.to_bytes_le());
-        MontyField::<LIMBS>::from_with_cfg(&scalar_uint, cfg)
+        Ok(MontyField::<LIMBS>::from_with_cfg(&scalar_uint, cfg))
     }
 }
 
@@ -130,6 +130,53 @@ where
     fn lane_value(eval: &Eval, lane: usize) -> Result<Self::LaneValue, ZipError>;
 
     fn lane_to_scalar(value: Self::LaneValue) -> C::ScalarField;
+
+    fn accumulate_b(
+        row: &[Eval],
+        lane: usize,
+        q1_scalar: &[C::ScalarField],
+    ) -> Result<C::ScalarField, ZipError> {
+        let mut row_eval = C::ScalarField::zero();
+        for (col_idx, eval) in row.iter().enumerate() {
+            let value = Self::lane_to_scalar(Self::lane_value(eval, lane)?);
+            if let Some(weight) = q1_scalar.get(col_idx) {
+                row_eval += value * weight;
+            }
+        }
+        Ok(row_eval)
+    }
+
+    fn accumulate_combined_row(
+        row: &[Eval],
+        lane: usize,
+        coeff: C::ScalarField,
+        combined_row: &mut [C::ScalarField],
+    ) -> Result<(), ZipError> {
+        for (col_idx, eval) in row.iter().enumerate() {
+            let value = Self::lane_to_scalar(Self::lane_value(eval, lane)?);
+            combined_row[col_idx] += coeff * value;
+        }
+        Ok(())
+    }
+
+    fn accumulate_single_row_opening(
+        row: &[Eval],
+        lane: usize,
+        alpha: C::ScalarField,
+        q1_scalar: &[C::ScalarField],
+        b_scalar: &mut C::ScalarField,
+        combined_row: &mut [C::ScalarField],
+    ) -> Result<(), ZipError> {
+        for (col_idx, eval) in row.iter().enumerate() {
+            let value = Self::lane_to_scalar(Self::lane_value(eval, lane)?);
+            let scaled = alpha * value;
+            if let Some(weight) = q1_scalar.get(col_idx) {
+                *b_scalar += scaled * weight;
+            }
+            combined_row[col_idx] += scaled;
+        }
+        Ok(())
+    }
 
     fn lifted_eval<F>(
         lifted_eval: &DynamicPolynomialF<F>,
@@ -168,6 +215,57 @@ impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLa
         } else {
             C::ScalarField::zero()
         }
+    }
+
+    fn accumulate_b(
+        row: &[BinaryPoly<D>],
+        lane: usize,
+        q1_scalar: &[C::ScalarField],
+    ) -> Result<C::ScalarField, ZipError> {
+        let mut row_eval = C::ScalarField::zero();
+        for (col_idx, eval) in row.iter().enumerate() {
+            if <Self as HyraxLanes<C, BinaryPoly<D>, D>>::lane_value(eval, lane)? {
+                if let Some(weight) = q1_scalar.get(col_idx) {
+                    row_eval += weight;
+                }
+            }
+        }
+        Ok(row_eval)
+    }
+
+    fn accumulate_combined_row(
+        row: &[BinaryPoly<D>],
+        lane: usize,
+        coeff: C::ScalarField,
+        combined_row: &mut [C::ScalarField],
+    ) -> Result<(), ZipError> {
+        for (col_idx, eval) in row.iter().enumerate() {
+            if <Self as HyraxLanes<C, BinaryPoly<D>, D>>::lane_value(eval, lane)? {
+                combined_row[col_idx] += coeff;
+            }
+        }
+        Ok(())
+    }
+
+    fn accumulate_single_row_opening(
+        row: &[BinaryPoly<D>],
+        lane: usize,
+        alpha: C::ScalarField,
+        q1_scalar: &[C::ScalarField],
+        b_scalar: &mut C::ScalarField,
+        combined_row: &mut [C::ScalarField],
+    ) -> Result<(), ZipError> {
+        let mut row_eval = C::ScalarField::zero();
+        for (col_idx, eval) in row.iter().enumerate() {
+            if <Self as HyraxLanes<C, BinaryPoly<D>, D>>::lane_value(eval, lane)? {
+                if let Some(weight) = q1_scalar.get(col_idx) {
+                    row_eval += weight;
+                }
+                combined_row[col_idx] += alpha;
+            }
+        }
+        *b_scalar += alpha * row_eval;
+        Ok(())
     }
 
     fn lifted_eval<F>(
@@ -438,6 +536,16 @@ where
     {
         let _ = CHECK_FOR_OVERFLOW;
         if polys.is_empty() {
+            if prover_data.batch_size != 0
+                || prover_data.num_lanes != Lanes::NUM_LANES
+                || prover_data.num_rows != 0
+                || prover_data.blinding_mode != ck.blinding_mode
+                || !prover_data.blinds.is_empty()
+            {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax prover data must be canonical for an empty batch".to_string(),
+                ));
+            }
             return Ok(());
         }
         validate_polys(polys)?;
@@ -456,7 +564,10 @@ where
             )));
         }
 
-        let point_scalar = point.iter().map(F::field_to_scalar).collect::<Vec<_>>();
+        let point_scalar = point
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
         let row_vars = prover_data.num_rows.ilog2() as usize;
         let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
         let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
@@ -465,58 +576,81 @@ where
             polys.len() * Lanes::NUM_LANES,
         );
 
-        let mut b_scalar = vec![C::ScalarField::zero(); prover_data.num_rows];
-        for (poly_idx, poly) in polys.iter().enumerate() {
-            for lane in 0..Lanes::NUM_LANES {
-                let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
-                for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
-                    let mut row_eval = C::ScalarField::zero();
-                    for (col_idx, eval) in row.iter().enumerate() {
-                        let value = Lanes::lane_to_scalar(Lanes::lane_value(eval, lane)?);
-                        if let Some(weight) = q1_scalar.get(col_idx) {
-                            row_eval += value * weight;
-                        }
-                    }
-                    b_scalar[row_idx] += alpha * row_eval;
-                }
-            }
-        }
-
-        let b_f = b_scalar
-            .iter()
-            .map(|value| F::scalar_to_field(value, field_cfg))
-            .collect::<Vec<_>>();
-        transcript.write_field_elements(&b_f)?;
-
-        let row_coeffs = if prover_data.num_rows == 1 {
-            vec![C::ScalarField::from(1u64)]
-        } else {
-            sample_scalars::<C>(&mut transcript.fs_transcript, prover_data.num_rows)
-        };
-
         let mut combined_row = vec![C::ScalarField::zero(); ck.num_cols];
         let mut rho_star = C::ScalarField::zero();
-        for (poly_idx, poly) in polys.iter().enumerate() {
-            for lane in 0..Lanes::NUM_LANES {
-                let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
-                for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
-                    let coeff = alpha * row_coeffs[row_idx];
+
+        let mut b_scalar = vec![C::ScalarField::zero(); prover_data.num_rows];
+        if prover_data.num_rows == 1 {
+            for (poly_idx, poly) in polys.iter().enumerate() {
+                for lane in 0..Lanes::NUM_LANES {
+                    let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
                     if ck.blinding_mode.is_blinded() {
                         let blind_idx = commitment_index_dynamic(
                             Lanes::NUM_LANES,
                             poly_idx,
                             lane,
-                            row_idx,
+                            0,
                             prover_data.num_rows,
                         );
-                        rho_star += coeff * prover_data.blinds[blind_idx];
+                        rho_star += alpha * prover_data.blinds[blind_idx];
                     }
-                    for (col_idx, eval) in row.iter().enumerate() {
-                        let value = Lanes::lane_to_scalar(Lanes::lane_value(eval, lane)?);
-                        combined_row[col_idx] += coeff * value;
+                    Lanes::accumulate_single_row_opening(
+                        &poly.evaluations,
+                        lane,
+                        alpha,
+                        &q1_scalar,
+                        &mut b_scalar[0],
+                        &mut combined_row,
+                    )?;
+                }
+            }
+        } else {
+            for (poly_idx, poly) in polys.iter().enumerate() {
+                for lane in 0..Lanes::NUM_LANES {
+                    let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
+                    for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
+                        let row_eval = Lanes::accumulate_b(row, lane, &q1_scalar)?;
+                        b_scalar[row_idx] += alpha * row_eval;
                     }
                 }
             }
+
+            let b_f = b_scalar
+                .iter()
+                .map(|value| F::scalar_to_field(value, field_cfg))
+                .collect::<Result<Vec<_>, _>>()?;
+            transcript.write_field_elements(&b_f)?;
+
+            let row_coeffs =
+                sample_scalars::<C>(&mut transcript.fs_transcript, prover_data.num_rows);
+
+            for (poly_idx, poly) in polys.iter().enumerate() {
+                for lane in 0..Lanes::NUM_LANES {
+                    let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
+                    for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
+                        let coeff = alpha * row_coeffs[row_idx];
+                        if ck.blinding_mode.is_blinded() {
+                            let blind_idx = commitment_index_dynamic(
+                                Lanes::NUM_LANES,
+                                poly_idx,
+                                lane,
+                                row_idx,
+                                prover_data.num_rows,
+                            );
+                            rho_star += coeff * prover_data.blinds[blind_idx];
+                        }
+                        Lanes::accumulate_combined_row(row, lane, coeff, &mut combined_row)?;
+                    }
+                }
+            }
+        }
+
+        if prover_data.num_rows == 1 {
+            let b_f = b_scalar
+                .iter()
+                .map(|value| F::scalar_to_field(value, field_cfg))
+                .collect::<Result<Vec<_>, _>>()?;
+            transcript.write_field_elements(&b_f)?;
         }
 
         write_scalars::<C>(transcript, &combined_row)?;
@@ -524,7 +658,7 @@ where
             write_scalar::<C>(transcript, &rho_star)?;
         }
 
-        if q0_f.len() != b_f.len() {
+        if q0_f.len() != b_scalar.len() {
             return Err(ZipError::InvalidPcsOpen(
                 "Hyrax b vector shape mismatch".to_string(),
             ));
@@ -546,9 +680,6 @@ where
         F::Modulus: Transcribable,
     {
         let _ = CHECK_FOR_OVERFLOW;
-        if commitment.batch_size == 0 {
-            return Ok(());
-        }
         if commitment.blinding_mode != vk.blinding_mode {
             return Err(ZipError::InvalidPcsParam(
                 "Hyrax commitment blinding mode mismatch".to_string(),
@@ -562,6 +693,14 @@ where
                 lifted_evals.len()
             )));
         }
+        if commitment.batch_size == 0 {
+            if commitment.num_rows != 0 {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax empty batch must use the canonical empty commitment".to_string(),
+                ));
+            }
+            return Ok(());
+        }
 
         let n = 1usize << point.len();
         let expected_rows = num_rows(n, vk.num_cols)?;
@@ -574,7 +713,10 @@ where
 
         let row_vars = commitment.num_rows.ilog2() as usize;
         let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
-        let point_scalar = point.iter().map(F::field_to_scalar).collect::<Vec<_>>();
+        let point_scalar = point
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
         let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
         let alphas = sample_scalars::<C>(
             &mut transcript.fs_transcript,
@@ -594,7 +736,7 @@ where
                 let alpha = F::scalar_to_field(
                     &alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)],
                     field_cfg,
-                );
+                )?;
                 let mut term = Lanes::lifted_eval::<F>(lifted_eval, lane, field_cfg)?;
                 term *= &alpha;
                 expected_eval += &term;
@@ -613,7 +755,10 @@ where
             ));
         }
 
-        let b_scalar = b_f.iter().map(F::field_to_scalar).collect::<Vec<_>>();
+        let b_scalar = b_f
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
         let row_coeffs = if commitment.num_rows == 1 {
             vec![C::ScalarField::from(1u64)]
         } else {
@@ -641,29 +786,18 @@ where
             ));
         }
 
-        let mut comm_lc = C::Group::zero();
+        let mut comm_lc_scalars = Vec::with_capacity(commitment.comm.len());
         for poly_idx in 0..commitment.batch_size {
             for lane in 0..commitment.num_lanes {
                 let alpha = alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)];
-                for (row_idx, row_coeff) in row_coeffs.iter().enumerate() {
-                    let idx = commitment_index_dynamic(
-                        commitment.num_lanes,
-                        poly_idx,
-                        lane,
-                        row_idx,
-                        commitment.num_rows,
-                    );
-                    comm_lc += commitment.comm[idx] * (alpha * row_coeff);
-                }
+                comm_lc_scalars.extend(row_coeffs.iter().map(|row_coeff| alpha * row_coeff));
             }
         }
 
-        let msm_ck = msm_key(vk.num_cols, vk.bases.clone(), vk.h)?;
-        let mut expected = <ScalarPippengerMsm as RowMsmStrategy<C, C::ScalarField>>::msm_row(
-            &msm_ck,
-            &combined_row,
-        )
-        .map_err(msm_err)?;
+        let comm_bases = C::Group::normalize_batch(&commitment.comm);
+        let comm_lc = msm_unchecked::<C>(&comm_bases, &comm_lc_scalars)?;
+
+        let mut expected = msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
         if let Some(rho_star) = rho_star {
             expected += vk.h * rho_star;
         }
@@ -791,16 +925,21 @@ fn unsigned_int_to_scalar<C: AffineRepr, const LIMBS: usize>(value: &Int<LIMBS>)
     C::ScalarField::from_le_bytes_mod_order(&bytes)
 }
 
-fn assert_curve_scalar_modulus<C, const LIMBS: usize>(actual: &Uint<LIMBS>)
+fn validate_curve_scalar_modulus<C, const LIMBS: usize>(
+    actual: &Uint<LIMBS>,
+) -> Result<(), ZipError>
 where
     C: AffineRepr,
 {
     let expected =
         uint_from_le_bytes::<LIMBS>(&<C::ScalarField as ArkPrimeField>::MODULUS.to_bytes_le());
-    assert_eq!(
-        actual, &expected,
-        "Hyrax field mismatch: protocol field modulus must equal curve scalar modulus",
-    );
+    if actual != &expected {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax field mismatch: protocol field modulus must equal curve scalar modulus"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn uint_from_le_bytes<const LIMBS: usize>(bytes: &[u8]) -> Uint<LIMBS> {
@@ -822,6 +961,20 @@ fn msm_key<C: AffineRepr>(
     MsmCommitmentEngine::<C>::setup_from_bases(width, bases, h)
         .map(|(ck, _)| ck)
         .map_err(msm_err)
+}
+
+fn msm_unchecked<C: AffineRepr>(
+    bases: &[C],
+    scalars: &[C::ScalarField],
+) -> Result<C::Group, ZipError> {
+    if bases.len() != scalars.len() {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax MSM expected {} bases, got {}",
+            scalars.len(),
+            bases.len()
+        )));
+    }
+    Ok(<C::Group as VariableBaseMSM>::msm_unchecked(bases, scalars))
 }
 
 fn num_rows(n: usize, width: usize) -> Result<usize, ZipError> {
@@ -976,15 +1129,15 @@ mod tests {
             .expect("curve scalar modulus must be prime")
     }
 
-    fn assert_bridge_round_trip<C: AffineRepr>() {
+    fn assert_bridge_round_trip<C: AffineRepr>() -> Result<(), ZipError> {
         let cfg = cfg_from_curve::<C>();
         for value in [0u64, 1, 2, 17, 123, 1 << 20] {
             let field = MontyField::<4>::from_with_cfg(value, &cfg);
-            let scalar = <MontyField<4> as HyraxFieldBridge<C>>::field_to_scalar(&field);
+            let scalar = <MontyField<4> as HyraxFieldBridge<C>>::field_to_scalar(&field)?;
             assert_eq!(scalar, C::ScalarField::from(value));
 
             let field_again =
-                <MontyField<4> as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg);
+                <MontyField<4> as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)?;
             assert_eq!(field_again, field);
         }
 
@@ -994,29 +1147,30 @@ mod tests {
             C::ScalarField::from_le_bytes_mod_order(&[0xA5; 64]),
         ];
         for scalar in large_values {
-            let field = <MontyField<4> as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg);
-            let scalar_again = <MontyField<4> as HyraxFieldBridge<C>>::field_to_scalar(&field);
+            let field = <MontyField<4> as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)?;
+            let scalar_again = <MontyField<4> as HyraxFieldBridge<C>>::field_to_scalar(&field)?;
             assert_eq!(scalar_again, scalar);
         }
+        Ok(())
     }
 
     #[test]
     fn bridge_round_trips_bn254_scalar_field() {
-        assert_bridge_round_trip::<ark_bn254::G1Affine>();
+        assert_bridge_round_trip::<ark_bn254::G1Affine>().unwrap();
     }
 
     #[test]
     fn bridge_round_trips_secp256k1_scalar_field() {
-        assert_bridge_round_trip::<ark_secp256k1::Affine>();
+        assert_bridge_round_trip::<ark_secp256k1::Affine>().unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "Hyrax field mismatch")]
     fn bridge_rejects_mismatched_field_config() {
         let bn_cfg = cfg_from_curve::<ark_bn254::G1Affine>();
         let bn_field = MontyField::<4>::from_with_cfg(1u64, &bn_cfg);
-        let _ =
+        let result =
             <MontyField<4> as HyraxFieldBridge<ark_secp256k1::Affine>>::field_to_scalar(&bn_field);
+        assert!(matches!(result, Err(ZipError::InvalidPcsParam(_))));
     }
 
     fn binary_hyrax_open_verify_round_trip_with_modes(
@@ -1080,7 +1234,7 @@ mod tests {
             let scalar = <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(bytes);
             <F as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
         let eq = eq_tensor_f::<F>(&point, &cfg);
         let lifted_evals = polys
             .iter()
@@ -1166,5 +1320,84 @@ mod tests {
             HyraxBlindingMode::Blinded,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn hyrax_rejects_empty_commitment_with_nonempty_lifted_evals() {
+        type C = ark_bn254::G1Affine;
+        type F = MontyField<4>;
+        const D: usize = 32;
+
+        let width = 8;
+        let generator = <C as AffineRepr>::Group::generator();
+        let bases = (1..=width)
+            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
+            .collect::<Vec<_>>();
+        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h).unwrap();
+
+        let commitment = HyraxCommitment::<C> {
+            batch_size: 0,
+            num_lanes: D,
+            num_rows: 0,
+            blinding_mode: HyraxBlindingMode::Blinded,
+            comm: Vec::new(),
+        };
+        let cfg = cfg_from_curve::<C>();
+        let lifted_evals = vec![DynamicPolynomialF::new_trimmed(vec![F::zero_with_cfg(
+            &cfg,
+        )])];
+        let mut verifier_transcript = PcsVerifierTranscript {
+            fs_transcript: Default::default(),
+            stream: Default::default(),
+        };
+
+        let result = <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::verify_open::<true>(
+            &mut verifier_transcript,
+            &vk,
+            &commitment,
+            &[],
+            &lifted_evals,
+            &cfg,
+        );
+        assert!(matches!(result, Err(ZipError::InvalidPcsParam(_))));
+    }
+
+    #[test]
+    fn hyrax_rejects_noncanonical_empty_commitment() {
+        type C = ark_bn254::G1Affine;
+        type F = MontyField<4>;
+        const D: usize = 32;
+
+        let width = 8;
+        let generator = <C as AffineRepr>::Group::generator();
+        let bases = (1..=width)
+            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
+            .collect::<Vec<_>>();
+        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h).unwrap();
+
+        let commitment = HyraxCommitment::<C> {
+            batch_size: 0,
+            num_lanes: D,
+            num_rows: 1,
+            blinding_mode: HyraxBlindingMode::Blinded,
+            comm: Vec::new(),
+        };
+        let cfg = cfg_from_curve::<C>();
+        let mut verifier_transcript = PcsVerifierTranscript {
+            fs_transcript: Default::default(),
+            stream: Default::default(),
+        };
+
+        let result = <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::verify_open::<true>(
+            &mut verifier_transcript,
+            &vk,
+            &commitment,
+            &[],
+            &[],
+            &cfg,
+        );
+        assert!(matches!(result, Err(ZipError::InvalidPcsParam(_))));
     }
 }

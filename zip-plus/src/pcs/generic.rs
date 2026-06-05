@@ -101,6 +101,7 @@ where
 
     fn absorb_commitment<T: Transcript>(transcript: &mut T, commitment: &Self::Commitment) {
         transcript.absorb_slice(&commitment.root);
+        transcript.absorb_slice(&(commitment.batch_size as u64).to_le_bytes());
     }
 
     fn commitment_num_bytes(commitment: &Self::Commitment) -> usize {
@@ -129,10 +130,23 @@ where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
-        if let Some(hint) = prover_data {
-            let _ = ZipPlus::<Zt, Lc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                transcript, ck, polys, point, hint, field_cfg,
-            )?;
+        match (polys.is_empty(), prover_data) {
+            (true, None) => {}
+            (true, Some(_)) => {
+                return Err(ZipError::InvalidPcsParam(
+                    "Zip+ prover data must be empty for an empty batch".to_string(),
+                ));
+            }
+            (false, None) => {
+                return Err(ZipError::InvalidPcsParam(
+                    "Zip+ prover data missing for non-empty batch".to_string(),
+                ));
+            }
+            (false, Some(hint)) => {
+                let _ = ZipPlus::<Zt, Lc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+                    transcript, ck, polys, point, hint, field_cfg,
+                )?;
+            }
         }
         Ok(())
     }
@@ -149,7 +163,19 @@ where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
+        if lifted_evals.len() != commitment.batch_size {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Zip+ verifier expected {} lifted evals, got {}",
+                commitment.batch_size,
+                lifted_evals.len()
+            )));
+        }
         if commitment.batch_size == 0 {
+            if commitment.root != Default::default() {
+                return Err(ZipError::InvalidPcsParam(
+                    "Zip+ empty batch must use the canonical empty commitment".to_string(),
+                ));
+            }
             return Ok(());
         }
 
