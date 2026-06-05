@@ -170,8 +170,7 @@ use rand::RngCore;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial,
-        dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
     },
 };
 use zinc_uair::{
@@ -367,7 +366,7 @@ pub mod cols {
     // witness and the verifier no longer needs an out-of-band
     // public-structure check on them.
     pub const S_ACTIVE_SCHED: usize = 4; // public: 1 on C7's active range [start, start+48) per compression
-    pub const S_ACTIVE_UPD: usize = 5;   // public: 1 on C8/C9's active range [start, start+64) per compression
+    pub const S_ACTIVE_UPD: usize = 5; // public: 1 on C8/C9's active range [start, start+64) per compression
     // (For C12/C13 the active range is the junction window
     // [start+64, start+68), which is exactly where `S_FEEDFORWARD` is
     // 1 — no separate selector needed.)
@@ -387,11 +386,11 @@ pub mod cols {
     //   - SCHED (C7):         k ∈ [start, start + 48)
     //   - UPD (C8/C9):        k ∈ [start, start + 64)
     //   - JUNCTION (C12/C13): k ∈ [start + 64, start + 68)
-    pub const PA_C_C7: usize = 6;     // witness: compensator for C7 (sched_anch)
-    pub const PA_C_C8: usize = 7;     // witness: compensator for C8 (upd_anch a)
-    pub const PA_C_C9: usize = 8;     // witness: compensator for C9 (upd_anch e)
-    pub const PA_C_FF_A: usize = 9;   // witness: compensator for C12 (feed-forward a-half)
-    pub const PA_C_FF_E: usize = 10;  // witness: compensator for C13 (feed-forward e-half)
+    pub const PA_C_C7: usize = 6; // witness: compensator for C7 (sched_anch)
+    pub const PA_C_C8: usize = 7; // witness: compensator for C8 (upd_anch a)
+    pub const PA_C_C9: usize = 8; // witness: compensator for C9 (upd_anch e)
+    pub const PA_C_FF_A: usize = 9; // witness: compensator for C12 (feed-forward a-half)
+    pub const PA_C_FF_E: usize = 10; // witness: compensator for C13 (feed-forward e-half)
 
     /// Total number of int columns.
     ///
@@ -509,11 +508,11 @@ where
         // `down.bit_op` and the (X^32 − 1) modular lift goes away:
         // ROT/SHIFTR virtual columns are mod X^32 by construction.
         let bit_op_specs: Vec<BitOpSpec> = vec![
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)),    // σ_0: ROTR^7
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)),    // σ_0: ROTR^18
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)),  // σ_0: SHR^3
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)), // σ_0: ROTR^7
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)), // σ_0: ROTR^18
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)), // σ_0: SHR^3
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)), // σ_1: ROTR^17
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)), // σ_1: ROTR^19
             BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
             // Bit-op virtuals over W_MU_PACKED for extracting each
             // carry from its bit slice. The C7/C8/C9/C12/C13
@@ -521,10 +520,10 @@ where
             // `2^32 · ShiftR(k_low) − 2^{32+w} · ShiftR(k_low+w)`.
             // ShiftR(10) is also assert_zero'd by C22 to pin
             // positions 10..31 to 0.
-            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(2)),  // skips mu_W
-            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(5)),  // skips mu_W + mu_a
-            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(8)),  // skips through mu_e
-            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(9)),  // keeps mu_ff_e + (high)
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(2)), // skips mu_W
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(5)), // skips mu_W + mu_a
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(8)), // skips through mu_e
+            BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(9)), // keeps mu_ff_e + (high)
             BitOpSpec::new(cols::FLAT_W_MU_PACKED, BitOp::ShiftR(10)), // (high) — must be 0
         ];
         // Witness-relative col indices (post-public) for virtual specs.
@@ -748,10 +747,10 @@ where
         let down_w_shr3 = &down.bit_op[4]; //  σ_0: SHR^3
         let down_w_shr10 = &down.bit_op[5]; // σ_1: SHR^10
         // Bit-extraction shifts on W_MU_PACKED.
-        let down_w_mu_packed_shr2 = &down.bit_op[6];   // skips mu_W
-        let down_w_mu_packed_shr5 = &down.bit_op[7];   // skips mu_W + mu_a
-        let down_w_mu_packed_shr8 = &down.bit_op[8];   // skips through mu_e
-        let down_w_mu_packed_shr9 = &down.bit_op[9];   // keeps only mu_ff_e + (high)
+        let down_w_mu_packed_shr2 = &down.bit_op[6]; // skips mu_W
+        let down_w_mu_packed_shr5 = &down.bit_op[7]; // skips mu_W + mu_a
+        let down_w_mu_packed_shr8 = &down.bit_op[8]; // skips through mu_e
+        let down_w_mu_packed_shr9 = &down.bit_op[9]; // keeps only mu_ff_e + (high)
         let down_w_mu_packed_shr10 = &down.bit_op[10]; // (high) — must be 0
 
         // Ideals.
@@ -777,8 +776,7 @@ where
         let const_2_to_35 = const_scalar::<R>(pow_two::<R>(35));
 
         // mu_X contributions (each evaluates to `2^32 · mu_X` at X=2).
-        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32)
-            .expect("2^32 · w_mu_packed overflow")
+        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32).expect("2^32 · w_mu_packed overflow")
             - &mbs(down_w_mu_packed_shr2, &const_2_to_34)
                 .expect("2^34 · ShiftR(2)(w_mu_packed) overflow");
         let mu_a_contrib = mbs(down_w_mu_packed_shr2, &const_2_to_32)
@@ -807,7 +805,8 @@ where
         // Constraint 1: Sigma_0 rotation, Q[X]-lifted.
         //   (a_hat · rho_sig0 − sig0_hat − 2 · ov_sig0) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
+            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow")
+                - w_sig0
                 - &mbs(pa_ov_sig0, &two_scalar).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
@@ -815,7 +814,8 @@ where
         // Constraint 2: Sigma_1 rotation, Q[X]-lifted.
         //   (e_hat · rho_sig1 − sig1_hat − 2 · ov_sig1) ∈ (X^32 − 1)
         b.assert_in_ideal(
-            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
+            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow")
+                - w_sig1
                 - &mbs(pa_ov_sig1, &two_scalar).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
@@ -828,14 +828,16 @@ where
         // coefficient sum {0..3} → bit XOR.
         //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · pa_ov_lsig0 == 0
         b.assert_zero(
-            down_w_rot25.clone() + down_w_rot14 + down_w_shr3 - w_lsig0
+            down_w_rot25.clone() + down_w_rot14 + down_w_shr3
+                - w_lsig0
                 - &mbs(pa_ov_lsig0, &two_scalar).expect("2 · ov_lsig0 overflow"),
         );
 
         // Constraint 6 (was σ_1 (X^32 − 1) ideal-lift): σ_1 analogue of C4.
         //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · pa_ov_lsig1 == 0
         b.assert_zero(
-            down_w_rot15.clone() + down_w_rot13 + down_w_shr10 - w_lsig1
+            down_w_rot15.clone() + down_w_rot13 + down_w_shr10
+                - w_lsig1
                 - &mbs(pa_ov_lsig1, &two_scalar).expect("2 · ov_lsig1 overflow"),
         );
 
@@ -857,12 +859,9 @@ where
         // mu_W is now read from the up row (chained-comp re-anchoring
         // stores each carry at its constraint's anchor row, not at
         // spec-row t). `mu_w_contrib` evaluates to `2^32 · mu_W` at X=2.
-        let sched_inner = down_w_w_sh16.clone()
-            - w_big_w
-            - down_w_lsig0_sh1
-            - down_w_w_sh9
-            - down_w_lsig1_sh14
-            + &mu_w_contrib;
+        let sched_inner =
+            down_w_w_sh16.clone() - w_big_w - down_w_lsig0_sh1 - down_w_w_sh9 - down_w_lsig1_sh14
+                + &mu_w_contrib;
         b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
 
         // Constraint 8: Register-update for `a`, anchored at k = t − 3.
@@ -891,7 +890,7 @@ where
             - down_w_w_sh3                // W[t]
             - down_w_sig0_sh3             // Sigma_0(a[t])
             - down_w_maj_sh3              // Maj[t]
-            + &mu_a_contrib;              // = 2^32 · mu_a (bits 2-4 of W_MU_PACKED)
+            + &mu_a_contrib; // = 2^32 · mu_a (bits 2-4 of W_MU_PACKED)
         b.assert_in_ideal(a_update_inner + pa_c_c8, &ideal_rot_x2);
 
         // Constraint 9: Register-update for `e`, anchored at k = t − 3.
@@ -908,7 +907,7 @@ where
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
             - down_w_w_sh3
-            + &mu_e_contrib;              // = 2^32 · mu_e (bits 5-7 of W_MU_PACKED)
+            + &mu_e_contrib; // = 2^32 · mu_e (bits 5-7 of W_MU_PACKED)
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
         // C13–C15 (B_1/B_2/B_3 materialization identities) are gone:
@@ -958,18 +957,12 @@ where
         // Keeps C12 at degree 1 in the trace MLEs (preserving MLE-first
         // eligibility) and avoids a multiplicative selector that would
         // push the effective max degree to 2.
-        let ff_a_inner = down_w_a_sh4.clone()
-            - w_a
-            - pa_a
-            + &mu_ff_a_contrib;           // = 2^32 · mu_ff_a (bit 8 of W_MU_PACKED)
+        let ff_a_inner = down_w_a_sh4.clone() - w_a - pa_a + &mu_ff_a_contrib; // = 2^32 · mu_ff_a (bit 8 of W_MU_PACKED)
         b.assert_in_ideal(ff_a_inner + pa_c_ff_a, &ideal_rot_x2);
 
         // Constraint 13 (feed-forward, e-family). Mirrors C12 on the
         // e-half via `pa_c_ff_e`. mu_ff_e from bit 9 of W_MU_PACKED.
-        let ff_e_inner = down_w_e_sh4.clone()
-            - w_e
-            - pa_e
-            + &mu_ff_e_contrib;
+        let ff_e_inner = down_w_e_sh4.clone() - w_e - pa_e + &mu_ff_e_contrib;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
 
         // Constraint 16: message init (Table 9 row 77). For each
@@ -1104,17 +1097,14 @@ fn pow_two<R: ConstSemiring>(k: u32) -> R {
 /// so the C8/C9 read at anchor `k = start + j` (which references
 /// `down.pa_K^↓3 = pa_K[k+3]`) lands on the right round constant.
 pub const K_CANONICAL: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 #[inline]
@@ -1168,12 +1158,7 @@ fn maj(x: u32, y: u32, z: u32) -> u32 {
 /// Per the module doc, for the rho patterns we use (3 or 2 nonzero terms)
 /// each per-position quotient fits in `{0, 1}`; the returned word is
 /// therefore a valid 32-bit bit-polynomial.
-fn rotation_overflow(
-    input_bits: u32,
-    rho_positions: &[usize],
-    s0_bits: u32,
-    out_bits: u32,
-) -> u32 {
+fn rotation_overflow(input_bits: u32, rho_positions: &[usize], s0_bits: u32, out_bits: u32) -> u32 {
     // Compute the Z[X] product coefficients of `input · rho`.
     let mut prod = [0u32; 64];
     for i in 0..32 {
@@ -1452,8 +1437,14 @@ where
                 h_e_next[j] = sum_e as u32;
                 let carry_a = (sum_a >> 32) as u32;
                 let carry_e = (sum_e >> 32) as u32;
-                debug_assert!(carry_a <= 1, "feed-forward a-carry out of {{0,1}}: {carry_a}");
-                debug_assert!(carry_e <= 1, "feed-forward e-carry out of {{0,1}}: {carry_e}");
+                debug_assert!(
+                    carry_a <= 1,
+                    "feed-forward a-carry out of {{0,1}}: {carry_a}"
+                );
+                debug_assert!(
+                    carry_e <= 1,
+                    "feed-forward e-carry out of {{0,1}}: {carry_e}"
+                );
 
                 pa_a_vals[start + 64 + j] = prior_a;
                 pa_e_vals[start + 64 + j] = prior_e;
@@ -1489,10 +1480,22 @@ where
             .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
             .collect();
         let u_neg_e_g_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 2 { (!e_vals[t]) & e_vals[t - 2] } else { 0 })
+            .map(|t| {
+                if t >= 2 {
+                    (!e_vals[t]) & e_vals[t - 2]
+                } else {
+                    0
+                }
+            })
             .collect();
         let maj_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 2 { maj(a_vals[t], a_vals[t - 1], a_vals[t - 2]) } else { 0 })
+            .map(|t| {
+                if t >= 2 {
+                    maj(a_vals[t], a_vals[t - 1], a_vals[t - 2])
+                } else {
+                    0
+                }
+            })
             .collect();
 
         // ===== Tail compensators for the Ch (63) / Maj (64) virtual residuals =====
@@ -1579,9 +1582,9 @@ where
             v.iter().copied().map(BinaryPoly::<32>::from).collect()
         };
 
-        let to_bin_mle = |col: Vec<BinaryPoly<32>>| -> DenseMultilinearExtension<
-            BinaryPoly<32>,
-        > { col.into_iter().collect() };
+        let to_bin_mle = |col: Vec<BinaryPoly<32>>| -> DenseMultilinearExtension<BinaryPoly<32>> {
+            col.into_iter().collect()
+        };
 
         // Layout: 8 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
         // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_COMP,
@@ -1686,9 +1689,8 @@ where
         // prover, so `pa_c_cᵢ[k] = 0` automatically. On inactive rows the
         // compensator absorbs whatever `innerᵢ(2)` happens to be.
         let two_to_32: R = R::from(0x10000u32) * &R::from(0x10000u32);
-        let load = |arr: &[u32], idx: usize| -> R {
-            if idx < n { R::from(arr[idx]) } else { R::ZERO }
-        };
+        let load =
+            |arr: &[u32], idx: usize| -> R { if idx < n { R::from(arr[idx]) } else { R::ZERO } };
 
         // C7: inner(2) = w_W[k+16] − w_W[k] − lsig0[k+1] − w_W[k+9]
         //               − lsig1[k+14] + 2^32 · mu_W[k+16]
@@ -1728,14 +1730,7 @@ where
                 // formerly stored at k+3; now at row k).
                 let mu_a_k = load(&mu_a_vals, k);
                 let two32_mu = two_to_32.clone() * &mu_a_k;
-                w_e_k
-                    + &sig1_k3
-                    + &u_ef_k3
-                    + &u_neg_e_g_k3
-                    + &k_k3
-                    + &w_k3
-                    + &sig0_k3
-                    + &maj_k3
+                w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k3 + &sig0_k3 + &maj_k3
                     - &two32_mu
                     - &w_a_k4
             })
@@ -1757,13 +1752,7 @@ where
                 // mu_e stored at C9-anchor row k (analogous to mu_a).
                 let mu_e_k = load(&mu_e_vals, k);
                 let two32_mu = two_to_32.clone() * &mu_e_k;
-                w_a_k
-                    + &w_e_k
-                    + &sig1_k3
-                    + &u_ef_k3
-                    + &u_neg_e_g_k3
-                    + &k_k3
-                    + &w_k3
+                w_a_k + &w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k3
                     - &two32_mu
                     - &w_e_k4
             })
@@ -1798,9 +1787,8 @@ where
             })
             .collect();
 
-        let to_int_mle = |col: Vec<R>| -> DenseMultilinearExtension<R> {
-            col.into_iter().collect()
-        };
+        let to_int_mle =
+            |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
         // Layout: public int prefix (selectors + K + active-range
         // selectors) followed by witness int suffix (the five linear-
         // constraint compensators). Order matches cols::S_INIT_PREFIX..
@@ -1863,8 +1851,8 @@ mod tests {
     fn k_canonical_matches_sha256_empty_string_digest() {
         // SHA-256 H_0 (FIPS 180-4 §5.3.3).
         let h_in: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
         ];
         // Empty-string padded block: single 0x80 byte then 63 zero bytes.
         let mut m = [0u32; 16];
@@ -1890,9 +1878,13 @@ mod tests {
                 .wrapping_add(K_CANONICAL[t])
                 .wrapping_add(w[t]);
             let t2 = big_sigma0(a).wrapping_add(maj(a, b, c));
-            h = g; g = f; f = e;
+            h = g;
+            g = f;
+            f = e;
             e = d.wrapping_add(t1);
-            d = c; c = b; b = a;
+            d = c;
+            c = b;
+            b = a;
             a = t1.wrapping_add(t2);
         }
 
@@ -1909,9 +1901,12 @@ mod tests {
         ];
 
         let expected: [u32; 8] = [
-            0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924,
-            0x27ae41e4, 0x649b934c, 0xa495991b, 0x7852b855,
+            0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924, 0x27ae41e4, 0x649b934c, 0xa495991b,
+            0x7852b855,
         ];
-        assert_eq!(h_out, expected, "SHA-256(\"\") digest mismatch — K table or round logic drift");
+        assert_eq!(
+            h_out, expected,
+            "SHA-256(\"\") digest mismatch — K table or round logic drift"
+        );
     }
 }

@@ -12,8 +12,8 @@ pub use ecdsa_addition::JacobianAdditionUair;
 pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
-pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 pub use sha_ecdsa::ShaEcdsaUair;
+pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;
@@ -1008,10 +1008,7 @@ where
     {
         let two_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::from(2)));
         // V[i] − Rot(7)(W[i]) ≡ 0  mod (X − 2)
-        b.assert_in_ideal(
-            up.binary_poly[1].clone() - &down.bit_op[0],
-            &two_ideal,
-        );
+        b.assert_in_ideal(up.binary_poly[1].clone() - &down.bit_op[0], &two_ideal);
     }
 }
 

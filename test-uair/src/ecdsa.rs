@@ -64,8 +64,7 @@ use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
     ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
-    ideal::ImpossibleIdeal,
+    UairSignature, UairTrace, ideal::ImpossibleIdeal,
 };
 
 use crate::GenerateRandomTrace;
@@ -315,15 +314,12 @@ where
 
         // C-D4: Y_pa − 12·X³·Y² + 3·X²·X_pa + 8·Y⁴ = 0
         let x3_y_sq = x_sq.clone() * &x_y_sq;
-        let twelve_x3_y_sq =
-            mbs(&x3_y_sq, &twelve_scalar).expect("12·X³·Y² overflow");
+        let twelve_x3_y_sq = mbs(&x3_y_sq, &twelve_scalar).expect("12·X³·Y² overflow");
         let x_sq_x_pa = x_sq.clone() * x_pa;
-        let three_x2_xpa =
-            mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
+        let three_x2_xpa = mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
         let y_pow4 = y_sq.clone() * &y_sq;
         let eight_y_pow4 = mbs(&y_pow4, &eight_scalar).expect("8·Y⁴ overflow");
-        let d4_inner =
-            y_pa.clone() - &twelve_x3_y_sq + &three_x2_xpa + &eight_y_pow4;
+        let d4_inner = y_pa.clone() - &twelve_x3_y_sq + &three_x2_xpa + &eight_y_pow4;
         b.assert_zero(s_active.clone() * &d4_inner);
 
         // ===================================================================
@@ -376,12 +372,10 @@ where
         // C-O2 (Y): down.Y − Y_pa − S_ADD·(3·D·X_pa·C² + D·C³ − D³ − Y_pa·C³ − Y_pa) = 0
         let d_cube = d.clone() * &d_sq;
         let d_x_pa_c_sq = d.clone() * &x_pa_c_sq;
-        let three_d_x_pa_c_sq =
-            mbs(&d_x_pa_c_sq, &three_scalar).expect("3·D·X_pa·C² overflow");
+        let three_d_x_pa_c_sq = mbs(&d_x_pa_c_sq, &three_scalar).expect("3·D·X_pa·C² overflow");
         let d_c_cube = d.clone() * &c_cube;
         let y_pa_c_cube = y_pa.clone() * &c_cube;
-        let y_add_minus_y_pa =
-            three_d_x_pa_c_sq + &d_c_cube - &d_cube - &y_pa_c_cube - y_pa;
+        let y_add_minus_y_pa = three_d_x_pa_c_sq + &d_c_cube - &d_cube - &y_pa_c_cube - y_pa;
         let s_add_y = s_add.clone() * &y_add_minus_y_pa;
         let o2_inner = down_y.clone() - y_pa - &s_add_y;
         b.assert_zero(s_active.clone() * &o2_inner);
@@ -494,13 +488,11 @@ fn rand_nonzero_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIM
 
 fn inv_mod_p(a: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let p_odd = Odd::new(SECP256K1_P_UINT).expect("p is odd");
-    a.invert_odd_mod(&p_odd).expect("a has no inverse mod p (a == 0?)")
+    a.invert_odd_mod(&p_odd)
+        .expect("a has no inverse mod p (a == 0?)")
 }
 
-fn mul_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
     let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
     let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
@@ -526,10 +518,7 @@ fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
     a.checked_sub(&SECP256K1_P_UINT).is_some().into()
 }
 
-fn sub_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn sub_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     use crypto_bigint::CheckedSub;
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     if a.checked_sub(b).is_some().into() {
@@ -848,8 +837,15 @@ mod tests {
         assert_eq!(count_max_degree::<U>(), 7);
         let degrees = count_constraint_degrees::<U>();
         // Spot-checks: at least one deg-7 (Y addend constraint); 3 init deg-2.
-        assert!(degrees.iter().any(|&d| d == 7), "expected at least one deg-7");
-        assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 3, "init = 3 deg-2");
+        assert!(
+            degrees.iter().any(|&d| d == 7),
+            "expected at least one deg-7"
+        );
+        assert_eq!(
+            degrees.iter().filter(|&&d| d == 2).count(),
+            3,
+            "init = 3 deg-2"
+        );
     }
 
     /// Witness gen produces a trace where every constraint vanishes
@@ -858,8 +854,10 @@ mod tests {
     fn witness_satisfies_constraints_mod_p() {
         let num_vars = 9;
         let mut r = rng();
-        let trace = <EcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
-            generate_random_trace(num_vars, &mut r);
+        let trace =
+            <EcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::generate_random_trace(
+                num_vars, &mut r,
+            );
         let n_rows = 1 << num_vars;
         assert_eq!(trace.int.len(), cols::NUM_INT);
 
@@ -909,17 +907,41 @@ mod tests {
 
                 // Output: down.X = next R = expected.next_x.
                 if t + 1 < n_rows {
-                    assert_eq!(read_uint(cols::W_X, t + 1), expected.next_x, "next X at {t}");
-                    assert_eq!(read_uint(cols::W_Y, t + 1), expected.next_y, "next Y at {t}");
-                    assert_eq!(read_uint(cols::W_Z, t + 1), expected.next_z, "next Z at {t}");
+                    assert_eq!(
+                        read_uint(cols::W_X, t + 1),
+                        expected.next_x,
+                        "next X at {t}"
+                    );
+                    assert_eq!(
+                        read_uint(cols::W_Y, t + 1),
+                        expected.next_y,
+                        "next Y at {t}"
+                    );
+                    assert_eq!(
+                        read_uint(cols::W_Z, t + 1),
+                        expected.next_z,
+                        "next Z at {t}"
+                    );
                 }
             }
 
             // Init boundary: row 0's R = PA_R_INIT.
             if init {
-                assert_eq!(read_uint(cols::W_X, t), read_uint(cols::PA_R_INIT_X, t), "init X at {t}");
-                assert_eq!(read_uint(cols::W_Y, t), read_uint(cols::PA_R_INIT_Y, t), "init Y at {t}");
-                assert_eq!(read_uint(cols::W_Z, t), read_uint(cols::PA_R_INIT_Z, t), "init Z at {t}");
+                assert_eq!(
+                    read_uint(cols::W_X, t),
+                    read_uint(cols::PA_R_INIT_X, t),
+                    "init X at {t}"
+                );
+                assert_eq!(
+                    read_uint(cols::W_Y, t),
+                    read_uint(cols::PA_R_INIT_Y, t),
+                    "init Y at {t}"
+                );
+                assert_eq!(
+                    read_uint(cols::W_Z, t),
+                    read_uint(cols::PA_R_INIT_Z, t),
+                    "init Z at {t}"
+                );
             }
 
             // Final-row check: no in-circuit constraint after dropping

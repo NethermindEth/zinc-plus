@@ -35,9 +35,7 @@ pub const ZSTD_LEVEL: i32 = 3;
 /// compression step (excluding serialization). Useful for callers
 /// that want to attribute the compression cost to a step in a
 /// timings breakdown.
-pub fn serialize_and_compress<T: Transcribable>(
-    value: &T,
-) -> (Vec<u8>, std::time::Duration) {
+pub fn serialize_and_compress<T: Transcribable>(value: &T) -> (Vec<u8>, std::time::Duration) {
     let mut buf = vec![0_u8; value.get_num_bytes()];
     value.write_transcription_bytes_exact(&mut buf);
     let t0 = std::time::Instant::now();
@@ -75,7 +73,11 @@ pub fn eprint_bytes_size(label: impl std::fmt::Display, raw: &[u8]) {
     print_size!(format_args!("zstd-{ZSTD_LEVEL}"), compressed.len());
 
     let decompressed = zstd::decode_all(&compressed[..]).expect("zstd decompression failed");
-    assert_eq!(decompressed.len(), raw.len(), "zstd round-trip size mismatch");
+    assert_eq!(
+        decompressed.len(),
+        raw.len(),
+        "zstd round-trip size mismatch"
+    );
 }
 
 /// Prints a per-part proof size breakdown (raw + zstd-compressed) to stderr.

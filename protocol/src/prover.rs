@@ -3,7 +3,7 @@ use crypto_primitives::{
     ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig, crypto_bigint_int::Int,
 };
 use num_traits::Zero;
-use std::fmt::Debug;
+use std::{fmt::Debug, io::Cursor};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
@@ -21,11 +21,14 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 use zinc_poly::{
-    mle::MultilinearExtensionWithConfig,
-    univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::MultilinearExtensionWithConfig, univariate::dynamic::over_field::DynamicPolynomialF,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::{
+    Blake3Transcript,
+    traits::{ConstTranscribable, Transcript},
+};
 use zinc_uair::{
     Uair, UairSignature, UairTrace, constraint_counter::count_constraints,
     degree_counter::count_max_degree,
@@ -37,12 +40,14 @@ use zinc_utils::{
 use zip_plus::{
     pcs::{
         ZipPlusProveByteBreakdown,
+        generic::PCS,
         multi_zip::MultiZip3,
         structs::{ZipPlus, ZipPlusHint, ZipPlusParams, ZipTypes},
     },
     pcs_transcript::PcsProverTranscript,
 };
-use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+
+use crate::pcs::{AllZipPCSTypes, PCSCommitments, PCSParams, PCSProverData, ZincPCSTypes};
 
 /// Drop the witness binary_poly columns the UAIR opted out of (sorted,
 /// dedup'd `skip_indices` relative to `witness_cols`) and return the
@@ -73,24 +78,25 @@ fn filter_booleanity_witness<const D: usize>(
 /// Fiat-Shamir transcript, PCS parameters/hints/commitments, and trace
 /// reference.
 #[derive(Clone, Debug)]
-pub struct ProverBase<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
+pub struct ProverBase<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
     num_vars: usize,
     uair_signature: UairSignature,
     pcs_transcript: PcsProverTranscript,
     trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D>,
 
     // Commitment info
-    pp_bin: &'a ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-    pp_arb: &'a ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
-    pp_int: &'a ZipPlusParams<Zt::IntZt, Zt::IntLc>,
-    hint_bin: Option<ZipPlusHint<<Zt::BinaryZt as ZipTypes>::Cw>>,
-    hint_arb: Option<ZipPlusHint<<Zt::ArbitraryZt as ZipTypes>::Cw>>,
-    hint_int: Option<ZipPlusHint<<Zt::IntZt as ZipTypes>::Cw>>,
-    commitment_bin: ZipPlusCommitment,
-    commitment_arb: ZipPlusCommitment,
-    commitment_int: ZipPlusCommitment,
+    pcs_params: PCSParams<P, Zt, F, D>,
+    pcs_data: PCSProverData<P, Zt, F, D>,
+    pcs_commitments: PCSCommitments<P, Zt, F, D>,
 
-    _phantom: PhantomData<(U, F)>,
+    _phantom: PhantomData<(U, F, P)>,
 }
 
 //
@@ -100,8 +106,15 @@ pub struct ProverBase<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usi
 /// After step 1 via [`step1_combined`](ProverCommitted::step1_combined)
 /// (row-major / "combined" projection). `project_scalar` has been consumed.
 #[derive(Clone, Debug)]
-pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverProjectedCombined<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
     projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -110,8 +123,15 @@ pub struct ProverProjectedCombined<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
 /// After step 1 via [`step1_mle_first`](ProverCommitted::step1_mle_first)
 /// (column-major / MLE-first projection). `project_scalar` has been consumed.
 #[derive(Clone, Debug)]
-pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverProjectedMleFirst<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
     projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -123,8 +143,15 @@ pub struct ProverProjectedMleFirst<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField,
 /// through the combined-poly lane (row-major). `project_scalar` has been
 /// consumed.
 #[derive(Clone, Debug)]
-pub struct ProverProjectedHybrid<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverProjectedHybrid<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     row_major_trace: RowMajorTrace<F>,
     column_major_trace: ColumnMajorTrace<F>,
@@ -133,8 +160,15 @@ pub struct ProverProjectedHybrid<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, c
 
 /// After step 2 (ideal check).
 #[derive(Clone, Debug)]
-pub struct ProverIdealChecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverIdealChecked<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: ScalarMap<U::Scalar, DynamicPolynomialF<F>>,
@@ -146,8 +180,15 @@ pub struct ProverIdealChecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, cons
 
 /// After step 3 (eval projection). `projected_scalars_fx` has been consumed.
 #[derive(Clone, Debug)]
-pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverEvalProjected<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -164,8 +205,15 @@ pub struct ProverEvalProjected<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, con
 /// After step 4 (sumcheck).
 #[allow(clippy::type_complexity)]
 #[derive(Clone, Debug)]
-pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverSumchecked<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -185,8 +233,15 @@ pub struct ProverSumchecked<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const 
 
 /// After step 5 (multipoint eval).
 #[derive(Clone, Debug)]
-pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverMultipointEvaled<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
@@ -201,8 +256,15 @@ pub struct ProverMultipointEvaled<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, 
 
 /// After step 6 (lift-and-project).
 #[derive(Clone, Debug)]
-pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverLifted<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     field_cfg: F::Config,
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -215,8 +277,8 @@ pub struct ProverLifted<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: u
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
-impl<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize>
-    ProverLifted<'a, Zt, U, F, D>
+impl<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize, P: ZincPCSTypes<Zt, F, D>>
+    ProverLifted<'a, Zt, U, F, D, P>
 {
     /// PIOP evaluation point `r_0` produced by step 5. Used by external
     /// per-step bench harnesses (folded paths) to seed step 7 setups.
@@ -230,8 +292,15 @@ impl<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize>
 /// Ready for generating the final proof object in
 /// [`finish`](ProverPcsOpened::finish).
 #[derive(Clone, Debug)]
-pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D: usize> {
-    base: ProverBase<'a, Zt, U, F, D>,
+pub struct ProverPcsOpened<
+    'a,
+    Zt: ZincTypes<D>,
+    U: Uair,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: ProverBase<'a, Zt, U, F, D, P>,
     ic_proof: IdealCheckProof<F>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -248,9 +317,10 @@ pub struct ProverPcsOpened<'a, Zt: ZincTypes<D>, U: Uair, F: PrimeField, const D
 /// define them
 macro_rules! impl_with_type_bounds {
     ($type_name:ident { $($code:tt)* }) => {
-        impl<'a, Zt, U, F, const D: usize> $type_name<'a, Zt, U, F, D>
+        impl<'a, Zt, U, F, const D: usize, P> $type_name<'a, Zt, U, F, D, P>
         where
             Zt: ZincTypes<D>,
+            P: ZincPCSTypes<Zt, F, D>,
             Zt::Int: ProjectableToField<F>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
             U: Uair + 'static,
@@ -278,39 +348,83 @@ macro_rules! impl_with_type_bounds {
 impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
     Zt: ZincTypes<D>,
-    U: Uair,
-    F: PrimeField,
-    F::Inner: ConstTranscribable,
+    Zt::Int: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b Zt::Int>
+        + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b Zt::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner:
+        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync + Zero + Default,
+    F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
 {
-    /// Step 0: Prover entry point.
-    /// Commit *witness* columns via Zip+ PCS, absorb roots and public
-    /// data into the Fiat-Shamir transcript.
+    /// Step 0: Prover entry point using the default all-Zip PCS bundle.
     #[allow(clippy::type_complexity)]
     pub fn step0_commit<'a>(
-        (pp_bin, pp_arb, pp_int): &'a (
+        pp: &'a (
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D>,
         num_vars: usize,
-    ) -> Result<ProverBase<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverBase<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>>
+    where
+        AllZipPCSTypes: ZincPCSTypes<
+                Zt,
+                F,
+                D,
+                BinaryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::BinaryZt, Zt::BinaryLc>,
+                ArbitraryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+                IntPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::IntZt, Zt::IntLc>,
+            >,
+    {
+        let pcs_params = PCSParams::<AllZipPCSTypes, Zt, F, D> {
+            binary: pp.0.clone(),
+            arbitrary: pp.1.clone(),
+            int: pp.2.clone(),
+        };
+        Self::step0_commit_with_pcs::<AllZipPCSTypes>(&pcs_params, trace, num_vars)
+    }
+
+    /// Step 0 with an explicit PCS bundle.
+    pub fn step0_commit_with_pcs<'a, P>(
+        pcs_params: &PCSParams<P, Zt, F, D>,
+        trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+    ) -> Result<ProverBase<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>>
+    where
+        P: ZincPCSTypes<Zt, F, D>,
+    {
         let uair_signature = U::signature();
         let public_trace = trace.public(&uair_signature);
         let witness_trace = trace.witness(&uair_signature);
 
         let (res_bin, (res_arb, res_int)) = cfg_join!(
-            commit_optionally(pp_bin, &witness_trace.binary_poly),
-            commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
-            commit_optionally(pp_int, &witness_trace.int),
+            P::BinaryPCS::commit(&pcs_params.binary, &witness_trace.binary_poly),
+            P::ArbitraryPCS::commit(&pcs_params.arbitrary, &witness_trace.arbitrary_poly),
+            P::IntPCS::commit(&pcs_params.int, &witness_trace.int),
         );
-        let (hint_bin, commitment_bin) = res_bin?;
-        let (hint_arb, commitment_arb) = res_arb?;
-        let (hint_int, commitment_int) = res_int?;
+        let (data_bin, commitment_bin) = res_bin?;
+        let (data_arb, commitment_arb) = res_arb?;
+        let (data_int, commitment_int) = res_int?;
 
-        let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
-            [&commitment_bin, &commitment_arb, &commitment_int].into_iter(),
-        );
+        let mut pcs_transcript = PcsProverTranscript {
+            fs_transcript: Blake3Transcript::default(),
+            stream: Cursor::default(),
+        };
+        P::BinaryPCS::absorb_commitment(&mut pcs_transcript.fs_transcript, &commitment_bin);
+        P::ArbitraryPCS::absorb_commitment(&mut pcs_transcript.fs_transcript, &commitment_arb);
+        P::IntPCS::absorb_commitment(&mut pcs_transcript.fs_transcript, &commitment_int);
 
         absorb_public_columns(&mut pcs_transcript.fs_transcript, &public_trace.binary_poly);
         absorb_public_columns(
@@ -324,15 +438,17 @@ where
             uair_signature,
             pcs_transcript,
             trace,
-            pp_bin,
-            pp_arb,
-            pp_int,
-            hint_bin,
-            hint_arb,
-            hint_int,
-            commitment_bin,
-            commitment_arb,
-            commitment_int,
+            pcs_params: pcs_params.clone(),
+            pcs_data: PCSProverData {
+                binary: data_bin,
+                arbitrary: data_arb,
+                int: data_int,
+            },
+            pcs_commitments: PCSCommitments {
+                binary: commitment_bin,
+                arbitrary: commitment_arb,
+                int: commitment_int,
+            },
             _phantom: PhantomData,
         })
     }
@@ -351,6 +467,17 @@ impl_with_type_bounds!(ProverBase
         // See `crate::fixed_prime` for the soundness caveat.
         let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
+        self.project_common_with_field_cfg(project_scalar, field_cfg)
+    }
+
+    fn project_common_with_field_cfg<
+        S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    >(
+        &mut self,
+        project_scalar: S,
+        field_cfg: F::Config,
+    ) -> Result<(F::Config, ScalarMap<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
+    {
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         Ok((field_cfg, projected_scalars_fx))
     }
@@ -362,8 +489,27 @@ impl_with_type_bounds!(ProverBase
     pub fn step1_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+
+        let projected_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
+        Ok(ProverProjectedCombined {
+            base: self,
+            field_cfg,
+            projected_trace,
+            projected_scalars_fx,
+        })
+    }
+
+    pub fn step1_combined_with_field_cfg<
+        S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    >(
+        mut self,
+        project_scalar: S,
+        field_cfg: F::Config,
+    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
+        let (field_cfg, projected_scalars_fx) =
+            self.project_common_with_field_cfg(project_scalar, field_cfg)?;
 
         let projected_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
         Ok(ProverProjectedCombined {
@@ -381,8 +527,27 @@ impl_with_type_bounds!(ProverBase
     pub fn step1_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+
+        let projected_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
+        Ok(ProverProjectedMleFirst {
+            base: self,
+            field_cfg,
+            projected_trace,
+            projected_scalars_fx,
+        })
+    }
+
+    pub fn step1_mle_first_with_field_cfg<
+        S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    >(
+        mut self,
+        project_scalar: S,
+        field_cfg: F::Config,
+    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
+        let (field_cfg, projected_scalars_fx) =
+            self.project_common_with_field_cfg(project_scalar, field_cfg)?;
 
         let projected_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
         Ok(ProverProjectedMleFirst {
@@ -401,8 +566,29 @@ impl_with_type_bounds!(ProverBase
     pub fn step1_hybrid<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
+
+        let row_major_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
+        let column_major_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
+        Ok(ProverProjectedHybrid {
+            base: self,
+            field_cfg,
+            row_major_trace,
+            column_major_trace,
+            projected_scalars_fx,
+        })
+    }
+
+    pub fn step1_hybrid_with_field_cfg<
+        S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    >(
+        mut self,
+        project_scalar: S,
+        field_cfg: F::Config,
+    ) -> Result<ProverProjectedHybrid<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
+        let (field_cfg, projected_scalars_fx) =
+            self.project_common_with_field_cfg(project_scalar, field_cfg)?;
 
         let row_major_trace = project_trace_coeffs_row_major(self.trace, &field_cfg);
         let column_major_trace = project_trace_coeffs_column_major(self.trace, &field_cfg);
@@ -422,7 +608,7 @@ impl_with_type_bounds!(ProverProjectedCombined
     /// trace. Works for both linear and non-linear constraints.
     pub fn step2_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
         let (ic_proof, ic_prover_state) = U::prove_combined(
@@ -451,7 +637,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     /// trace. Only suitable for linear constraints.
     pub fn step2_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
         let (ic_proof, ic_prover_state) = U::prove_linear(
@@ -483,7 +669,7 @@ impl_with_type_bounds!(ProverProjectedHybrid
     /// linear and non-linear constraints.
     pub fn step2_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
 
         let (ic_proof, ic_prover_state) = U::prove_hybrid(
@@ -516,7 +702,7 @@ impl_with_type_bounds!(ProverIdealChecked
     /// `a in F_q`, evaluates polynomials at `X = a`.
     pub fn step3_eval_projection(
         mut self,
-    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
@@ -551,7 +737,7 @@ impl_with_type_bounds!(ProverEvalProjected
     /// Produces `up_evals` and `down_evals` (CPR) and lookup auxiliary witnesses at `r*`.
     pub fn step4_sumcheck(
         mut self,
-    ) -> Result<ProverSumchecked<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverSumchecked<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let num_constraints = count_constraints::<U>();
         // Sumcheck protocol degree must accommodate the actual fold
         // polynomial's per-variable degree, including `assert_zero`
@@ -778,7 +964,7 @@ impl_with_type_bounds!(ProverSumchecked
     /// to the source's `lifted_eval` (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval(
         mut self,
-    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let sig = &self.base.uair_signature;
 
         // Materialize the bit-op virtual MLEs (under ψ_α) — same shape
@@ -834,7 +1020,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
     /// evaluations at `r_0` in `F_q[X]` and absorbs them into the transcript.
     pub fn step6_lift_and_project(
         mut self,
-    ) -> Result<ProverLifted<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverLifted<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
         // (after \phi_q but before \psi_a). The verifier derives the scalar
         // open_evals via \psi_a for the sumcheck consistency check, and
@@ -873,39 +1059,33 @@ impl_with_type_bounds!(ProverLifted
     /// Step 7: PCS open at `r_0` (witness columns only).
     pub fn step7_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, P>, ProtocolError<F, U::Ideal>> {
         let witness_trace = self.base.trace.witness(&self.base.uair_signature);
 
-        if let Some(hint_bin) = &self.base.hint_bin {
-            let _ = ZipPlus::<Zt::BinaryZt, Zt::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_bin,
-                &witness_trace.binary_poly,
-                &self.r_0,
-                hint_bin,
-                &self.field_cfg,
-            )?;
-        }
-        if let Some(hint_arb) = &self.base.hint_arb {
-            let _ = ZipPlus::<Zt::ArbitraryZt, Zt::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_arb,
-                &witness_trace.arbitrary_poly,
-                &self.r_0,
-                hint_arb,
-                &self.field_cfg,
-            )?;
-        }
-        if let Some(hint_int) = &self.base.hint_int {
-            let _ = ZipPlus::<Zt::IntZt, Zt::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut self.base.pcs_transcript,
-                self.base.pp_int,
-                &witness_trace.int,
-                &self.r_0,
-                hint_int,
-                &self.field_cfg,
-            )?;
-        }
+        P::BinaryPCS::prove_open::<CHECK_FOR_OVERFLOW>(
+            &mut self.base.pcs_transcript,
+            &self.base.pcs_params.binary,
+            &witness_trace.binary_poly,
+            &self.r_0,
+            &self.base.pcs_data.binary,
+            &self.field_cfg,
+        )?;
+        P::ArbitraryPCS::prove_open::<CHECK_FOR_OVERFLOW>(
+            &mut self.base.pcs_transcript,
+            &self.base.pcs_params.arbitrary,
+            &witness_trace.arbitrary_poly,
+            &self.r_0,
+            &self.base.pcs_data.arbitrary,
+            &self.field_cfg,
+        )?;
+        P::IntPCS::prove_open::<CHECK_FOR_OVERFLOW>(
+            &mut self.base.pcs_transcript,
+            &self.base.pcs_params.int,
+            &witness_trace.int,
+            &self.r_0,
+            &self.base.pcs_data.int,
+            &self.field_cfg,
+        )?;
 
         Ok(ProverPcsOpened {
             base: self.base,
@@ -922,14 +1102,10 @@ impl_with_type_bounds!(ProverLifted
 impl_with_type_bounds!(ProverPcsOpened
 {
     /// Assemble the final proof from accumulated state.
-    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+    pub fn finish(self) -> Result<Proof<F, PCSCommitments<P, Zt, F, D>>, ProtocolError<F, U::Ideal>> {
         let sig = self.base.uair_signature;
         let zip_proof = self.base.pcs_transcript.stream.into_inner();
-        let commitments = (
-            self.base.commitment_bin,
-            self.base.commitment_arb,
-            self.base.commitment_int,
-        );
+        let commitments = self.base.pcs_commitments;
 
         let lifted_evals = self.lifted_evals;
 
@@ -1024,7 +1200,60 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
-        let committed = Self::step0_commit(pp, trace, num_vars)?;
+        let pcs_params = PCSParams::<AllZipPCSTypes, Zt, F, D> {
+            binary: pp.0.clone(),
+            arbitrary: pp.1.clone(),
+            int: pp.2.clone(),
+        };
+        let proof = Self::prove_with_pcs::<AllZipPCSTypes, MLE_FIRST, CHECK_FOR_OVERFLOW>(
+            &pcs_params,
+            trace,
+            num_vars,
+            project_scalar,
+        )?;
+        let commitments = proof.commitments;
+        Ok(Proof {
+            commitments: (commitments.binary, commitments.arbitrary, commitments.int),
+            zip: proof.zip,
+            ideal_check: proof.ideal_check,
+            resolver: proof.resolver,
+            combined_sumcheck: proof.combined_sumcheck,
+            multipoint_eval: proof.multipoint_eval,
+            witness_lifted_evals: proof.witness_lifted_evals,
+            lookup_proof: proof.lookup_proof,
+        })
+    }
+
+    pub fn prove_with_pcs<P, const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
+        pp: &PCSParams<P, Zt, F, D>,
+        trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+    ) -> Result<Proof<F, PCSCommitments<P, Zt, F, D>>, ProtocolError<F, U::Ideal>>
+    where
+        P: ZincPCSTypes<Zt, F, D>,
+    {
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
+        Self::prove_with_pcs_and_field_cfg::<P, MLE_FIRST, CHECK_FOR_OVERFLOW>(
+            pp,
+            trace,
+            num_vars,
+            project_scalar,
+            field_cfg,
+        )
+    }
+
+    pub fn prove_with_pcs_and_field_cfg<P, const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
+        pp: &PCSParams<P, Zt, F, D>,
+        trace: &UairTrace<'static, Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+        field_cfg: F::Config,
+    ) -> Result<Proof<F, PCSCommitments<P, Zt, F, D>>, ProtocolError<F, U::Ideal>>
+    where
+        P: ZincPCSTypes<Zt, F, D>,
+    {
+        let committed = Self::step0_commit_with_pcs::<P>(pp, trace, num_vars)?;
 
         let ideal_checked = if MLE_FIRST {
             // Classify constraints by degree, ignoring zero-ideal (their
@@ -1039,22 +1268,26 @@ where
                 if i.is_zero_ideal() {
                     continue;
                 }
-                if *m { any_linear = true } else { any_nonlinear = true }
+                if *m {
+                    any_linear = true
+                } else {
+                    any_nonlinear = true
+                }
             }
             match (any_linear, any_nonlinear) {
                 (true, false) => committed
-                    .step1_mle_first(project_scalar)?
+                    .step1_mle_first_with_field_cfg(project_scalar, field_cfg)?
                     .step2_ideal_check()?,
                 (false, _) => committed
-                    .step1_combined(project_scalar)?
+                    .step1_combined_with_field_cfg(project_scalar, field_cfg)?
                     .step2_ideal_check()?,
                 (true, true) => committed
-                    .step1_hybrid(project_scalar)?
+                    .step1_hybrid_with_field_cfg(project_scalar, field_cfg)?
                     .step2_ideal_check()?,
             }
         } else {
             committed
-                .step1_combined(project_scalar)?
+                .step1_combined_with_field_cfg(project_scalar, field_cfg)?
                 .step2_ideal_check()?
         };
 
@@ -1266,9 +1499,8 @@ where
 
     let projected_trace_f =
         evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
-    let projected_scalars_f =
-        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: CPR + booleanity multi-degree sumcheck ──────────────────
     let max_degree = count_max_degree::<U>();
@@ -1312,14 +1544,10 @@ where
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
-        let self_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            &field_cfg,
-        );
-        let public_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[..num_pub_bin],
-            &field_cfg,
-        );
+        let self_bit_slices =
+            compute_bit_slices_flat::<F, D>(&trace.binary_poly[num_pub_bin..], &field_cfg);
+        let public_bit_slices =
+            compute_bit_slices_flat::<F, D>(&trace.binary_poly[..num_pub_bin], &field_cfg);
         let int_witness_cols: Vec<_> = (0..num_wit_int)
             .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
             .collect();
@@ -1464,15 +1692,14 @@ where
         )?;
     }
     if let Some(hint_arb) = &hint_arb {
-        let _ =
-            ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
-                &mut pcs_transcript,
-                pp_arb,
-                &witness_trace.arbitrary_poly,
-                &r_0,
-                hint_arb,
-                &field_cfg,
-            )?;
+        let _ = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
+            &mut pcs_transcript,
+            pp_arb,
+            &witness_trace.arbitrary_poly,
+            &r_0,
+            hint_arb,
+            &field_cfg,
+        )?;
     }
     if let Some(hint_int) = &hint_int {
         let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
@@ -1533,8 +1760,6 @@ where
 // from `witness_lifted_evals` coefficient eighths (see `verify_folded_4x`).
 //
 
-
-
 /// Per-domain (binary / arbitrary / integer) byte breakdown of the
 /// PCS bytes written during step 7 of [`prove_folded_4x`]. Each domain
 /// holds its own [`ZipPlusProveByteBreakdown`] (sums of the four
@@ -1547,7 +1772,6 @@ pub struct FoldedProveZipBreakdown {
     pub arb: ZipPlusProveByteBreakdown,
     pub int: ZipPlusProveByteBreakdown,
 }
-
 
 /// Per-region wall-time breakdown of a single [`prove_folded_4x`] run,
 /// populated by [`prove_folded_4x_with_timings`]. Useful as a
@@ -1737,7 +1961,14 @@ where
         INT_QUARTER_LIMBS,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, Some(&mut timings), None)?;
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        Some(&mut timings),
+        None,
+    )?;
 
     let (_compressed, dt) = zip_plus::utils::serialize_and_compress(&proof);
     timings.step8_compress = dt;
@@ -1808,7 +2039,14 @@ where
         INT_QUARTER_LIMBS,
         MLE_FIRST,
         CHECK_FOR_OVERFLOW,
-    >(pp, trace, num_vars, project_scalar, None, Some(&mut breakdown))?;
+    >(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        None,
+        Some(&mut breakdown),
+    )?;
 
     Ok((proof, breakdown))
 }
@@ -2033,9 +2271,8 @@ where
 
     let projected_trace_f =
         evaluate_trace_to_column_mles_fast(trace, &projecting_element_f, &field_cfg);
-    let projected_scalars_f =
-        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
     if let Some(t) = timings.as_mut() {
         t.step3_eval_projection = _t_step3.elapsed();
     }
@@ -2074,14 +2311,10 @@ where
     let virtual_mles = if virtual_specs.is_empty() {
         Vec::new()
     } else {
-        let self_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[num_pub_bin..],
-            &field_cfg,
-        );
-        let public_bit_slices = compute_bit_slices_flat::<F, D>(
-            &trace.binary_poly[..num_pub_bin],
-            &field_cfg,
-        );
+        let self_bit_slices =
+            compute_bit_slices_flat::<F, D>(&trace.binary_poly[num_pub_bin..], &field_cfg);
+        let public_bit_slices =
+            compute_bit_slices_flat::<F, D>(&trace.binary_poly[..num_pub_bin], &field_cfg);
         let int_witness_cols: Vec<_> = (0..num_wit_int)
             .map(|i| projected_trace_f[int_offset + num_pub_int + i].clone())
             .collect();
@@ -2209,9 +2442,7 @@ where
     );
     let int_lifted_evals_4coeff: Vec<DynamicPolynomialF<F>> =
         crate::compute_int_fold_4x_lifted_evals::<F, INT_LIMBS, INT_QUARTER_LIMBS>(
-            &r_0,
-            &trace.int,
-            &field_cfg,
+            &r_0, &trace.int, &field_cfg,
         );
     // Append the 4-coeff int section.
     lifted_evals.extend(int_lifted_evals_4coeff);

@@ -19,11 +19,15 @@ zinc-primality = { workspace = true }
 zinc-transcript = { workspace = true }
 zinc-uair = { workspace = true }
 zinc-utils = { workspace = true }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
 
 [lib]
 bench = false
 
 [dev-dependencies]
+ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-secp256k1 = { version = "0.5.0", default-features = false }
 criterion = { workspace = true }
 crypto-bigint = { workspace = true }
 rand = { workspace = true }

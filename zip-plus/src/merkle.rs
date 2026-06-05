@@ -98,11 +98,7 @@ impl MerkleTree {
     /// from all three groups in fixed order (0, 1, 2). Used by
     /// [`crate::pcs::multi_zip::MultiZip3`] to commit two or three
     /// heterogeneous Zip+ instances under a single tree.
-    pub fn new_combined_3<S0, S1, S2>(
-        rows0: &[&[S0]],
-        rows1: &[&[S1]],
-        rows2: &[&[S2]],
-    ) -> Self
+    pub fn new_combined_3<S0, S1, S2>(rows0: &[&[S0]], rows1: &[&[S1]], rows2: &[&[S2]]) -> Self
     where
         S0: ConstTranscribable + Send + Sync,
         S1: ConstTranscribable + Send + Sync,

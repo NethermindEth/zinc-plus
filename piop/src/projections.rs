@@ -337,9 +337,8 @@ where
 {
     let zero_inner = F::Inner::default();
 
-    let mut result = Vec::with_capacity(
-        trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len(),
-    );
+    let mut result =
+        Vec::with_capacity(trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len());
 
     let bin_proj = BinaryPoly::<D>::prepare_projection(projecting_element);
     cfg_extend!(

@@ -14,6 +14,8 @@
 //! are honest mod `p`). Do not reuse this branch for other applications
 //! without re-doing the soundness analysis.
 
+use ark_ec::AffineRepr;
+use ark_ff::{BigInteger, PrimeField as ArkPrimeField};
 use crypto_primitives::PrimeField;
 use zinc_transcript::traits::ConstTranscribable;
 use zinc_utils::from_ref::FromRef;
@@ -24,10 +26,8 @@ use zinc_utils::from_ref::FromRef;
 /// as little-endian limb chunks (see `transcript::traits` impl), so we
 /// store the prime in that same order.
 pub const SECP256K1_P_LE_BYTES: [u8; 32] = [
-    0x2F, 0xFC, 0xFF, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x2F, 0xFC, 0xFF, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 ];
 
 /// Build `F::Config` from the secp256k1 base prime, replacing the
@@ -50,8 +50,39 @@ where
         "Fmod must be exactly 256 bits to hold the secp256k1 base prime",
     );
     let prime = FMod::read_transcription_bytes_exact(&SECP256K1_P_LE_BYTES);
+    F::make_cfg(&F::Modulus::from_ref(&prime)).expect("secp256k1 base field prime is prime")
+}
+
+/// Build `F::Config` from the scalar field of an arkworks curve.
+///
+/// This is the field configuration Hyrax must use: PCS scalar operations
+/// happen in `C::ScalarField`, so the PIOP field modulus must match it.
+pub fn field_cfg_from_curve_scalar<F, FMod, C>() -> F::Config
+where
+    F: PrimeField,
+    FMod: ConstTranscribable,
+    F::Modulus: FromRef<FMod>,
+    C: AffineRepr,
+{
+    let prime = fmod_from_curve_scalar::<FMod, C>();
     F::make_cfg(&F::Modulus::from_ref(&prime))
-        .expect("secp256k1 base field prime is prime")
+        .expect("curve scalar modulus must define a valid prime field")
+}
+
+fn fmod_from_curve_scalar<FMod, C>() -> FMod
+where
+    FMod: ConstTranscribable,
+    C: AffineRepr,
+{
+    let modulus_bytes = <C::ScalarField as ArkPrimeField>::MODULUS.to_bytes_le();
+    assert!(
+        modulus_bytes.len() <= FMod::NUM_BYTES,
+        "curve scalar modulus does not fit in the protocol modulus type",
+    );
+
+    let mut bytes = vec![0u8; FMod::NUM_BYTES];
+    bytes[..modulus_bytes.len()].copy_from_slice(&modulus_bytes);
+    FMod::read_transcription_bytes_exact(&bytes)
 }
 
 #[cfg(test)]
@@ -82,5 +113,24 @@ mod tests {
     #[test]
     fn secp256k1_field_cfg_constructs() {
         let _cfg = secp256k1_field_cfg::<MontyField<4>, Uint<4>>();
+    }
+
+    #[test]
+    fn curve_scalar_field_cfg_constructs() {
+        let bn_cfg = field_cfg_from_curve_scalar::<MontyField<4>, Uint<4>, ark_bn254::G1Affine>();
+        let secp_cfg =
+            field_cfg_from_curve_scalar::<MontyField<4>, Uint<4>, ark_secp256k1::Affine>();
+
+        let bn_modulus = MontyField::<4>::one_with_cfg(&bn_cfg).modulus();
+        let secp_modulus = MontyField::<4>::one_with_cfg(&secp_cfg).modulus();
+
+        assert_eq!(
+            bn_modulus,
+            fmod_from_curve_scalar::<Uint<4>, ark_bn254::G1Affine>(),
+        );
+        assert_eq!(
+            secp_modulus,
+            fmod_from_curve_scalar::<Uint<4>, ark_secp256k1::Affine>(),
+        );
     }
 }

@@ -19,6 +19,7 @@ zinc-utils = { workspace = true }
 ark-ff = { version = "0.5.0", default-features = false }
 ark-ec = { version = "0.5.0", default-features = false }
 ark-poly = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
 ark-std = { version = "0.5.0", default-features = false, features = ["std", "getrandom"] }
 
 itertools = { workspace = true }
@@ -37,6 +38,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-secp256k1 = { version = "0.5.0", default-features = false }
 criterion = { workspace = true }
 proptest = { workspace = true }
 
@@ -58,4 +60,8 @@ harness = false
 
 [[bench]]
 name = "msm_commitment_benches"
+harness = false
+
+[[bench]]
+name = "hyrax_commit_breakdown"
 harness = false

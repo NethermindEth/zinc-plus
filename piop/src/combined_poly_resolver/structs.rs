@@ -58,7 +58,9 @@ where
         let buf = self.down_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_slice_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_op_down_evals.write_transcription_bytes_subset(buf);
-        let buf = self.shifted_bit_slice_evals.write_transcription_bytes_subset(buf);
+        let buf = self
+            .shifted_bit_slice_evals
+            .write_transcription_bytes_subset(buf);
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
