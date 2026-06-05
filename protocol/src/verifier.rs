@@ -34,7 +34,9 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    add, cfg_join, delayed_reduction::MontgomeryLimbs, from_ref::FromRef,
+    add, cfg_join,
+    delayed_reduction::{DelayedFieldProductSum, MontgomeryLimbs},
+    from_ref::FromRef,
     inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
@@ -417,6 +419,7 @@ impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierIdealChecked<'a, Zt, U, F
 where
     Zt: ZincTypes<D>,
     F: InnerTransparentField
+        + DelayedFieldProductSum
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + FromRef<F>
         + Send
@@ -464,6 +467,7 @@ where
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
@@ -704,7 +708,13 @@ where
 impl<'a, Zt, F, IdealOverF, const D: usize> VerifierSumchecked<'a, Zt, F, IdealOverF, D>
 where
     Zt: ZincTypes<D>,
-    F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
@@ -758,6 +768,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::Chal>
@@ -880,6 +891,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
@@ -995,6 +1007,7 @@ where
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
@@ -1102,6 +1115,7 @@ where
     U: Uair + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b ZtF::Int>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
@@ -1677,6 +1691,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
@@ -1752,6 +1767,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
@@ -1828,6 +1844,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>

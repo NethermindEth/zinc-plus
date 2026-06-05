@@ -5,7 +5,7 @@
 //! reduction. The limb routines are adapted from Spartan2's MIT-licensed
 //! `big_num` helpers.
 
-use crypto_bigint::modular::ConstMontyParams;
+use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams, MontyForm};
 use crypto_primitives::{
     PrimeField, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_monty::MontyField,
     crypto_bigint_uint::Uint,
@@ -53,6 +53,14 @@ where
     fn reduce(self, cfg: &F::Config, params: &BarrettReductionParams) -> F;
 }
 
+/// Field product-sum backend for delayed modular reduction-aware dot products.
+pub trait DelayedFieldProductSum: PrimeField + Sized {
+    /// Compute `zero + sum_i lhs[i] * rhs[i]`.
+    ///
+    /// The caller is responsible for enforcing equal slice lengths.
+    fn delayed_sum_of_products(lhs: &[Self], rhs: &[Self], zero: Self) -> Self;
+}
+
 impl<F> DelayedModularReduction<F> for Uint<5>
 where
     F: MontgomeryLimbs + Send + Sync,
@@ -84,6 +92,65 @@ where
         let acc = self.as_words();
         F::from_montgomery_limbs(barrett_reduce_5(acc, params), cfg)
     }
+}
+
+impl<const LIMBS: usize> DelayedFieldProductSum for MontyField<LIMBS> {
+    fn delayed_sum_of_products(lhs: &[Self], rhs: &[Self], zero: Self) -> Self {
+        if lhs.is_empty() {
+            return zero;
+        }
+
+        let leading_zeros = zero.cfg().modulus().as_ref().leading_zeros();
+        if !lincomb_has_product_sum_headroom(leading_zeros, lhs.len()) {
+            return naive_sum_of_products(lhs, rhs, zero);
+        }
+
+        let lhs_forms: Vec<MontyForm<LIMBS>> =
+            lhs.iter().cloned().map(|value| value.into()).collect();
+        let rhs_forms: Vec<MontyForm<LIMBS>> =
+            rhs.iter().cloned().map(|value| value.into()).collect();
+        let products: Vec<(&MontyForm<LIMBS>, &MontyForm<LIMBS>)> =
+            lhs_forms.iter().zip(&rhs_forms).collect();
+
+        MontyField::new(MontyForm::lincomb_vartime(&products)) + zero
+    }
+}
+
+impl<Mod, const LIMBS: usize> DelayedFieldProductSum for ConstMontyField<Mod, LIMBS>
+where
+    Mod: ConstMontyParams<LIMBS>,
+{
+    fn delayed_sum_of_products(lhs: &[Self], rhs: &[Self], zero: Self) -> Self {
+        if lhs.is_empty() {
+            return zero;
+        }
+
+        let leading_zeros = Mod::PARAMS.modulus().as_ref().leading_zeros();
+        if !lincomb_has_product_sum_headroom(leading_zeros, lhs.len()) {
+            return naive_sum_of_products(lhs, rhs, zero);
+        }
+
+        let products: Vec<(ConstMontyForm<Mod, LIMBS>, ConstMontyForm<Mod, LIMBS>)> = lhs
+            .iter()
+            .cloned()
+            .zip(rhs.iter().cloned())
+            .map(|(left, right)| (left.into(), right.into()))
+            .collect();
+
+        ConstMontyField::from(ConstMontyForm::lincomb(&products)) + zero
+    }
+}
+
+#[inline(always)]
+fn lincomb_has_product_sum_headroom(leading_zeros: u32, len: usize) -> bool {
+    len > 1 && leading_zeros > 0
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn naive_sum_of_products<F: PrimeField>(lhs: &[F], rhs: &[F], zero: F) -> F {
+    lhs.iter()
+        .zip(rhs)
+        .fold(zero, |acc, (left, right)| acc + left.clone() * right)
 }
 
 impl<Mod> MontgomeryLimbs for ConstMontyField<Mod, 4>

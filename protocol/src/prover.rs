@@ -31,8 +31,9 @@ use zinc_uair::{
     degree_counter::count_max_degree,
 };
 use zinc_utils::{
-    add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
-    mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    add, cfg_join, delayed_reduction::DelayedFieldProductSum, from_ref::FromRef,
+    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
     pcs::{
@@ -256,6 +257,7 @@ macro_rules! impl_with_type_bounds {
             U: Uair + 'static,
             F: InnerTransparentField
                 + MontgomeryLimbs
+                + DelayedFieldProductSum
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
                 + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
@@ -977,6 +979,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
@@ -1130,6 +1133,7 @@ where
     U: Uair + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a ZtF::Int>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
@@ -1647,6 +1651,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1713,6 +1718,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1785,6 +1791,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
@@ -1853,6 +1860,7 @@ where
     U: Uair<Scalar = zinc_poly::univariate::dense::DensePolynomial<Int<INT_LIMBS>, D>> + 'static,
     F: InnerTransparentField
         + MontgomeryLimbs
+        + DelayedFieldProductSum
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>

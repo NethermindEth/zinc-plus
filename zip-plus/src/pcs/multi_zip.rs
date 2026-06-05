@@ -35,7 +35,8 @@ use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::Transcribable;
 use zinc_utils::{
-    cfg_into_iter, cfg_iter, cfg_join, from_ref::FromRef, mul_by_scalar::MulByScalar,
+    cfg_into_iter, cfg_iter, cfg_join, delayed_reduction::DelayedFieldProductSum,
+    from_ref::FromRef, mul_by_scalar::MulByScalar,
 };
 
 /// Full prover-side data for a [`MultiZip3`] commitment: per-instance
@@ -208,6 +209,7 @@ where
     ) -> Result<(Option<F>, Option<F>, Option<F>), ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt0::CombR>
             + for<'a> FromWithConfig<&'a Zt1::CombR>
             + for<'a> FromWithConfig<&'a Zt2::CombR>
@@ -310,6 +312,7 @@ where
     ) -> Result<(Option<F>, Option<F>, Option<F>), ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt0::CombR>
             + for<'a> FromWithConfig<&'a Zt1::CombR>
             + for<'a> FromWithConfig<&'a Zt2::CombR>

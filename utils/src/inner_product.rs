@@ -1,4 +1,6 @@
-use crate::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use crate::{
+    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef, mul_by_scalar::MulByScalar,
+};
 use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
 use num_traits::CheckedAdd;
 use thiserror::Error;
@@ -86,6 +88,30 @@ impl MBSInnerProduct {
     }
 }
 
+/// Field-field inner product backed by a delayed product-sum implementation.
+#[derive(Clone, Debug)]
+pub struct FieldFieldInnerProduct;
+
+impl<F> InnerProduct<[F], F, F> for FieldFieldInnerProduct
+where
+    F: DelayedFieldProductSum,
+{
+    fn inner_product<const CHECK: bool>(
+        lhs: &[F],
+        rhs: &[F],
+        zero: F,
+    ) -> Result<F, InnerProductError> {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        Ok(F::delayed_sum_of_products(lhs, rhs, zero))
+    }
+}
+
 /// The inner product for vectors of length 1 (a.k.a. scalars).
 /// Uses `mul_by_scalar` to multiply the only components of vectors
 /// to get the result.
@@ -154,8 +180,11 @@ impl<Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Ou
 #[cfg(test)]
 mod test {
     use crate::{CHECKED, UNCHECKED};
-    use crypto_bigint::{U64, const_monty_params};
-    use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
+    use crypto_bigint::{U64, U256, const_monty_params};
+    use crypto_primitives::{
+        FromWithConfig, PrimeField, crypto_bigint_const_monty::ConstMontyField,
+        crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    };
     use num_traits::ConstZero;
 
     use super::*;
@@ -198,6 +227,29 @@ mod test {
     }
 
     const_monty_params!(Params, U64, "0000000000000007");
+    const_monty_params!(
+        Params256,
+        U256,
+        "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27"
+    );
+
+    fn dyn_field_cfg() -> <MontyField<4> as PrimeField>::Config {
+        let modulus = Uint::new(
+            crypto_bigint::Uint::<4>::from_str_radix_vartime(
+                "00dca94d8a1ecce3b6e8755d8999787d0524d8ca1ea755e7af84fb646fa31f27",
+                16,
+            )
+            .expect("valid modulus"),
+        );
+        MontyField::make_cfg(&modulus).expect("valid field config")
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn naive_field_inner_product<F: PrimeField>(lhs: &[F], rhs: &[F], zero: F) -> F {
+        lhs.iter()
+            .zip(rhs)
+            .fold(zero, |acc, (left, right)| acc + left.clone() * right)
+    }
 
     #[test]
     fn boolean_unchecked_eq_boolean_checked() {
@@ -217,6 +269,94 @@ mod test {
         assert_eq!(
             BooleanInnerProductAdd::inner_product::<CHECKED>(&lhs, &rhs, ConstMontyField::ZERO),
             BooleanInnerProductAdd::inner_product::<UNCHECKED>(&lhs, &rhs, ConstMontyField::ZERO)
+        );
+    }
+
+    #[test]
+    fn field_field_inner_product_monty_matches_naive() {
+        type F = MontyField<4>;
+        let cfg = dyn_field_cfg();
+        let lhs = [
+            F::from_with_cfg(3u64, &cfg),
+            F::from_with_cfg(5u64, &cfg),
+            F::from_with_cfg(8u64, &cfg),
+            F::from_with_cfg(13u64, &cfg),
+        ];
+        let rhs = [
+            F::from_with_cfg(21u64, &cfg),
+            F::from_with_cfg(34u64, &cfg),
+            F::from_with_cfg(55u64, &cfg),
+            F::from_with_cfg(89u64, &cfg),
+        ];
+        let zero = F::zero_with_cfg(&cfg);
+
+        let got =
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &rhs, zero.clone()).unwrap();
+        let expected = naive_field_inner_product(&lhs, &rhs, zero);
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn field_field_inner_product_const_monty_matches_naive() {
+        type F = ConstMontyField<Params256, { U256::LIMBS }>;
+        let lhs = [F::from(2u64), F::from(7u64), F::from(19u64), F::from(31u64)];
+        let rhs = [
+            F::from(43u64),
+            F::from(59u64),
+            F::from(61u64),
+            F::from(71u64),
+        ];
+
+        let got = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &rhs, F::ZERO).unwrap();
+        let expected = naive_field_inner_product(&lhs, &rhs, F::ZERO);
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn field_field_inner_product_empty_returns_zero() {
+        type F = ConstMontyField<Params256, { U256::LIMBS }>;
+        let zero = F::from(99u64);
+
+        let got = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&[], &[], zero).unwrap();
+
+        assert_eq!(got, zero);
+    }
+
+    #[test]
+    fn field_field_inner_product_single_term_matches_naive() {
+        type F = ConstMontyField<Params256, { U256::LIMBS }>;
+        let lhs = [F::from(144u64)];
+        let rhs = [F::from(233u64)];
+
+        let got = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &rhs, F::ZERO).unwrap();
+        let expected = naive_field_inner_product(&lhs, &rhs, F::ZERO);
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn field_field_inner_product_nonzero_seed_matches_naive() {
+        type F = ConstMontyField<Params256, { U256::LIMBS }>;
+        let lhs = [F::from(5u64), F::from(8u64), F::from(13u64)];
+        let rhs = [F::from(21u64), F::from(34u64), F::from(55u64)];
+        let seed = F::from(99u64);
+
+        let got = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &rhs, seed).unwrap();
+        let expected = naive_field_inner_product(&lhs, &rhs, seed);
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn field_field_inner_product_length_mismatch() {
+        type F = ConstMontyField<Params256, { U256::LIMBS }>;
+        let lhs = [F::from(1u64)];
+
+        assert_eq!(
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &[], F::ZERO),
+            Err(InnerProductError::LengthMismatch { lhs: 1, rhs: 0 })
         );
     }
 }

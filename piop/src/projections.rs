@@ -15,8 +15,9 @@ use zinc_poly::{
 };
 use zinc_uair::{Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
-    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, from_ref::FromRef,
-    inner_product::InnerProduct, powers, projectable_to_field::ProjectableToField,
+    UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut,
+    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef, inner_product::InnerProduct,
+    powers, projectable_to_field::ProjectableToField,
 };
 
 /// HashMap specialization used for every `projected_scalars` lookup in the
@@ -240,7 +241,7 @@ where
 /// MLEs (`Vec<DenseMultilinearExtension<F::Inner>>`) for sumcheck
 /// compatibility. Dispatches on the trace layout internally.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn evaluate_trace_to_column_mles<F: PrimeField + 'static>(
+pub fn evaluate_trace_to_column_mles<F: DelayedFieldProductSum + 'static>(
     trace: &ProjectedTrace<F>,
     projecting_element: &F,
 ) -> Vec<DenseMultilinearExtension<F::Inner>> {
@@ -337,9 +338,8 @@ where
 {
     let zero_inner = F::Inner::default();
 
-    let mut result = Vec::with_capacity(
-        trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len(),
-    );
+    let mut result =
+        Vec::with_capacity(trace.binary_poly.len() + trace.arbitrary_poly.len() + trace.int.len());
 
     let bin_proj = BinaryPoly::<D>::prepare_projection(projecting_element);
     cfg_extend!(
@@ -408,7 +408,7 @@ pub fn project_scalars<F: PrimeField, U: Uair>(
 
 /// Project scalars of a UAIR along F[X] -> F.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn project_scalars_to_field<R: Semiring + 'static, F: PrimeField>(
+pub fn project_scalars_to_field<R: Semiring + 'static, F: DelayedFieldProductSum>(
     scalars: ScalarMap<R, DynamicPolynomialF<F>>,
     projecting_element: &F,
 ) -> Result<ScalarMap<R, F>, (R, F, EvaluationError)> {

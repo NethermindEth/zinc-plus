@@ -8,7 +8,8 @@ use std::{
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{
     UNCHECKED, add,
-    inner_product::{InnerProduct, InnerProductError},
+    delayed_reduction::DelayedFieldProductSum,
+    inner_product::{FieldFieldInnerProduct, InnerProduct, InnerProductError},
     mul,
 };
 
@@ -128,17 +129,13 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
 /// Inner product for dynamic polynomials over a prime field.
 pub struct DynamicPolyFInnerProduct;
 
-impl<F: PrimeField> InnerProduct<[F], F, F> for DynamicPolyFInnerProduct {
-    #[allow(clippy::arithmetic_side_effects)]
+impl<F: DelayedFieldProductSum> InnerProduct<[F], F, F> for DynamicPolyFInnerProduct {
     fn inner_product<const CHECK: bool>(
         lhs: &[F],
         rhs: &[F],
         zero: F,
     ) -> Result<F, InnerProductError> {
-        Ok(lhs
-            .iter()
-            .zip(rhs)
-            .fold(zero, |acc, (coeff, power)| acc + coeff.clone() * power))
+        FieldFieldInnerProduct::inner_product::<CHECK>(lhs, rhs, zero)
     }
 }
 

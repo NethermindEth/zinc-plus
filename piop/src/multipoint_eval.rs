@@ -47,7 +47,12 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::ShiftSpec;
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{
+    UNCHECKED, cfg_into_iter,
+    delayed_reduction::DelayedFieldProductSum,
+    inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_transparent_field::InnerTransparentField,
+};
 
 //
 // Data structures
@@ -104,7 +109,12 @@ pub struct MultipointEval<F>(PhantomData<F>);
 
 impl<F> MultipointEval<F>
 where
-    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
     F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable,
 {
@@ -315,13 +325,12 @@ where
 
         let zero = F::zero_with_cfg(field_cfg);
 
-        let batched_up: F = subclaim
-            .gammas
-            .iter()
-            .zip(open_evals.iter())
-            .fold(zero.clone(), |acc, (gamma, eval)| {
-                acc + gamma.clone() * eval
-            });
+        let batched_up: F = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            &subclaim.gammas,
+            open_evals,
+            zero.clone(),
+        )
+        .expect("inner product cannot fail here");
 
         // open_evals[j] = trace_col_j(r_0) for all committed (up) columns.
         // Shifted columns reuse the same opening: the shift is captured by
@@ -351,22 +360,20 @@ where
 
 /// `expected_sum = \sum_j \gamma_j * up_eval_j + \sum_k \alpha_k *
 /// down_eval_k`
-fn compute_expected_sum<F: PrimeField>(
+fn compute_expected_sum<F: DelayedFieldProductSum>(
     up_evals: &[F],
     down_evals: &[F],
     gammas: &[F],
     alphas: &[F],
     zero: F,
 ) -> F {
-    let up_sum = gammas
-        .iter()
-        .zip(up_evals.iter())
-        .fold(zero, |acc, (gamma, up)| acc + gamma.clone() * up);
+    let up_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(gammas, up_evals, zero.clone())
+        .expect("inner product cannot fail here");
 
-    alphas
-        .iter()
-        .zip(down_evals.iter())
-        .fold(up_sum, |acc, (alpha, down)| acc + alpha.clone() * down)
+    let down_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(alphas, down_evals, zero)
+        .expect("inner product cannot fail here");
+
+    up_sum + down_sum
 }
 
 //

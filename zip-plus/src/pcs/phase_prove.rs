@@ -51,8 +51,9 @@ use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     UNCHECKED, cfg_chunks, cfg_iter, cfg_iter_mut,
+    delayed_reduction::DelayedFieldProductSum,
     from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProduct},
+    inner_product::{FieldFieldInnerProduct, InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
 };
 
@@ -127,6 +128,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Pt>
             + for<'a> MulByScalar<&'a F>
@@ -161,6 +163,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
@@ -194,6 +197,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
@@ -223,6 +227,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
@@ -297,7 +302,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         }
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
-        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
+        let eval = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
         // Matrix-vector product over the flat poly_comb_r layout:
         // Each poly is a row-major (num_rows x row_len) matrix, and coeffs is the
@@ -377,6 +382,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>
@@ -413,6 +419,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<F, ZipError>
     where
         F: PrimeField
+            + DelayedFieldProductSum
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> MulByScalar<&'a F>
             + FromRef<F>,
@@ -473,12 +480,14 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         };
 
         transcript.write_field_elements(&b)?;
-        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
+        let eval = FieldFieldInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
 
         let coeffs = if pp.num_rows == 1 {
             vec![Zt::Chal::ONE]
         } else {
-            transcript.fs_transcript.get_challenges::<Zt::Chal>(num_rows)
+            transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(num_rows)
         };
 
         let combined_row: Vec<Zt::CombR> = {

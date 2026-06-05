@@ -38,8 +38,8 @@ use zinc_poly::{
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{BitOp, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
-    UNCHECKED, add, cfg_iter, from_ref::FromRef, inner_product::InnerProduct,
-    inner_transparent_field::InnerTransparentField, powers,
+    UNCHECKED, add, cfg_iter, delayed_reduction::DelayedFieldProductSum, from_ref::FromRef,
+    inner_product::InnerProduct, inner_transparent_field::InnerTransparentField, powers,
 };
 
 /// Materialize the bit-op virtual MLEs given by `bit_op_specs`.
@@ -143,7 +143,9 @@ where
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
-impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
+impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig + Send + Sync>
+    CombinedPolyResolver<F>
+{
     /// Build the CPR sumcheck group for use in the multi-degree sumcheck.
     ///
     /// Pre-sumcheck half of the CPR prover. Samples the folding challenge `α`,

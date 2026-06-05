@@ -19,8 +19,9 @@ use zinc_transcript::{
 };
 use zinc_utils::{
     UNCHECKED, add, cfg_into_iter,
+    delayed_reduction::DelayedFieldProductSum,
     from_ref::FromRef,
-    inner_product::{InnerProduct, MBSInnerProduct},
+    inner_product::{FieldFieldInnerProduct, InnerProduct, MBSInnerProduct},
     mul_by_scalar::MulByScalar,
 };
 
@@ -126,6 +127,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<(), ZipError>
     where
         F: FromPrimitiveWithConfig
+            + DelayedFieldProductSum
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -164,6 +166,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<(), ZipError>
     where
         F: FromPrimitiveWithConfig
+            + DelayedFieldProductSum
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -192,7 +195,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let b: Vec<F> = transcript.read_field_elements(num_rows)?;
 
         // Check 1: <q_0, b> == eval_f
-        if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
+        if FieldFieldInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f
+        {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
@@ -273,6 +277,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<VerifyPreOpen<Zt>, ZipError>
     where
         F: FromPrimitiveWithConfig
+            + DelayedFieldProductSum
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -348,6 +353,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
     ) -> Result<VerifyPreOpen<Zt>, ZipError>
     where
         F: FromPrimitiveWithConfig
+            + DelayedFieldProductSum
             + FromRef<F>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
@@ -374,7 +380,8 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let (q_0, q_1) = point_to_tensor(vp.num_rows, point_f, field_cfg)?;
         let zero_f = F::zero_with_cfg(field_cfg);
 
-        if MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f {
+        if FieldFieldInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())? != *eval_f
+        {
             return Err(ZipError::InvalidPcsOpen(
                 "Evaluation consistency failure".into(),
             ));
