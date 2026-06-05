@@ -1,11 +1,12 @@
-use crypto_bigint::BoxedUint;
+use crypto_bigint::{BoxedUint, modular::BoxedMontyForm};
 use crypto_primitives::{
     FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
     crypto_bigint_uint::Uint,
 };
 
 use crate::{
-    from_ref::FromRef, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 impl MulByScalar<&Self> for BoxedMontyField {
@@ -19,6 +20,33 @@ impl MulByScalar<&Self> for BoxedMontyField {
 impl FromRef<Self> for BoxedMontyField {
     fn from_ref(value: &Self) -> Self {
         value.clone()
+    }
+}
+
+impl DelayedFieldProductSum for BoxedMontyField {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn delayed_sum_of_products(lhs: &[Self], rhs: &[Self], zero: Self) -> Self {
+        if lhs.is_empty() {
+            return zero;
+        }
+
+        let leading_zeros = zero.cfg().modulus().as_ref().leading_zeros();
+        if lhs.len() == 1 || leading_zeros == 0 {
+            return lhs
+                .iter()
+                .zip(rhs)
+                .fold(zero, |acc, (left, right)| acc + left.clone() * right);
+        }
+
+        let forms: Vec<(BoxedMontyForm, BoxedMontyForm)> = lhs
+            .iter()
+            .zip(rhs)
+            .map(|(left, right)| (left.clone().into(), right.clone().into()))
+            .collect();
+        let products: Vec<(&BoxedMontyForm, &BoxedMontyForm)> =
+            forms.iter().map(|(left, right)| (left, right)).collect();
+
+        Self::from(BoxedMontyForm::lincomb_vartime(&products)) + zero
     }
 }
 
@@ -48,6 +76,7 @@ where
     clippy::cast_possible_wrap
 )]
 mod prop_tests {
+    use crate::delayed_reduction::DelayedFieldProductSum;
     use crypto_bigint::{BoxedUint, U256};
     use crypto_primitives::{
         FromWithConfig, IntoWithConfig, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
@@ -71,6 +100,39 @@ mod prop_tests {
     }
     fn any_bool() -> impl Strategy<Value = bool> {
         any::<bool>()
+    }
+
+    #[test]
+    fn delayed_sum_of_products_matches_naive() {
+        let cfg = get_dyn_config(MODULUS);
+        let seed = F::from_with_cfg(99u64, &cfg);
+        let empty = <F as DelayedFieldProductSum>::delayed_sum_of_products(&[], &[], seed.clone());
+        assert_eq!(empty, seed);
+
+        let single_lhs = [F::from_with_cfg(17u64, &cfg)];
+        let single_rhs = [F::from_with_cfg(23u64, &cfg)];
+        let got = <F as DelayedFieldProductSum>::delayed_sum_of_products(
+            &single_lhs,
+            &single_rhs,
+            seed.clone(),
+        );
+        assert_eq!(got, seed.clone() + single_lhs[0].clone() * &single_rhs[0]);
+
+        let lhs: Vec<F> = (0..128)
+            .map(|idx| F::from_with_cfg(idx + 3, &cfg))
+            .collect();
+        let rhs: Vec<F> = (0..128)
+            .map(|idx| F::from_with_cfg(257 - idx, &cfg))
+            .collect();
+        let expected = lhs
+            .iter()
+            .zip(&rhs)
+            .fold(seed.clone(), |acc, (left, right)| {
+                acc + left.clone() * right
+            });
+        let got = <F as DelayedFieldProductSum>::delayed_sum_of_products(&lhs, &rhs, seed);
+
+        assert_eq!(got, expected);
     }
 
     proptest! {

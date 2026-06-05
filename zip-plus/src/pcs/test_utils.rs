@@ -31,6 +31,7 @@ use zinc_primality::MillerRabin;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::{
     CHECKED,
+    delayed_reduction::DelayedFieldProductSum,
     from_ref::FromRef,
     inner_product::{MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -168,6 +169,7 @@ where
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
+        + DelayedFieldProductSum
         + FromRef<F>,
     F::Inner: Transcribable,
     F::Modulus: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
@@ -201,6 +203,7 @@ where
         + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
+        + DelayedFieldProductSum
         + FromRef<F>
         + 'static,
     F::Inner: Transcribable,
@@ -231,6 +234,7 @@ where
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>
+        + DelayedFieldProductSum
         + FromRef<F>,
     F::Inner: Transcribable,
     F::Modulus: FromRef<Zt::Fmod> + Transcribable,
