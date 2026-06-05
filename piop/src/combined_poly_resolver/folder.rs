@@ -1,5 +1,10 @@
 use crypto_primitives::PrimeField;
 use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
+use zinc_utils::{
+    UNCHECKED,
+    delayed_reduction::DelayedFieldProductSum,
+    inner_product::{FieldFieldInnerProduct, InnerProduct},
+};
 
 /// There are several situations where we need to
 /// compute an RLC `u_0 + \alpha * u_1 + ... + \alpha ^ k * u_k`,
@@ -18,31 +23,46 @@ use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
 ///
 /// This constraint builder handles those situations.
 /// It's `Expr` associated type is the field `F`, so once
-/// an `assert_*` method is called it adds it to the RLC
-/// with the next power of the challenge `\alpha`.
+/// an `assert_*` method is called it records the residual in order.
+/// Call [`ConstraintFolder::finish_folded`] to compute the RLC with the
+/// DMR-aware field-field product-sum backend.
 pub struct ConstraintFolder<'a, F: PrimeField> {
     /// A reference to precomputed powers of the challenge.
     challenge_powers: &'a [F],
-    /// Index of the current constraint,
-    /// and therefore the current power of the challenge.
-    current_constraint: usize,
-    /// The RLC computed so far.
-    pub folded_constraints: F,
+    /// Residuals in the exact order constraints were visited.
+    residuals: Vec<F>,
+    /// Additive identity used as the product-sum seed.
+    zero: F,
 }
 
 impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
     pub fn new(challenge_powers: &'a [F], zero: &F) -> Self {
         Self {
             challenge_powers,
-            current_constraint: 0,
-            folded_constraints: zero.clone(),
+            residuals: Vec::with_capacity(challenge_powers.len()),
+            zero: zero.clone(),
         }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn fold_constraint(&mut self, expr: F) {
-        self.folded_constraints += expr * &self.challenge_powers[self.current_constraint];
-        self.current_constraint += 1;
+        debug_assert!(
+            self.residuals.len() < self.challenge_powers.len(),
+            "more constraint residuals than challenge powers"
+        );
+        self.residuals.push(expr);
+    }
+
+    pub fn finish_folded(self) -> F
+    where
+        F: DelayedFieldProductSum,
+    {
+        FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            &self.residuals,
+            &self.challenge_powers[..self.residuals.len()],
+            self.zero,
+        )
+        .expect("constraint residuals and challenge powers have matching lengths")
     }
 }
 
@@ -70,5 +90,73 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
         self.fold_constraint(expr);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crypto_primitives::{FromWithConfig, crypto_bigint_monty::MontyField};
+    use zinc_uair::ConstraintBuilder;
+
+    type F = MontyField<4>;
+
+    fn cfg() -> <F as crypto_primitives::PrimeField>::Config {
+        crate::test_utils::test_config()
+    }
+
+    fn f(value: u64) -> F {
+        F::from_with_cfg(value, &cfg())
+    }
+
+    fn naive_fold(residuals: &[F], powers: &[F], zero: F) -> F {
+        residuals
+            .iter()
+            .zip(powers)
+            .fold(zero, |acc, (residual, power)| {
+                acc + residual.clone() * power
+            })
+    }
+
+    #[test]
+    fn finish_folded_matches_naive_empty() {
+        let cfg = cfg();
+        let zero = F::zero_with_cfg(&cfg);
+        let powers = vec![f(1), f(7), f(49)];
+        let folder = ConstraintFolder::new(&powers, &zero);
+
+        assert_eq!(folder.finish_folded(), zero);
+    }
+
+    #[test]
+    fn finish_folded_matches_naive_single_constraint() {
+        let cfg = cfg();
+        let zero = F::zero_with_cfg(&cfg);
+        let powers = vec![f(1), f(7), f(49)];
+        let residuals = vec![f(11)];
+        let mut folder = ConstraintFolder::new(&powers, &zero);
+        folder.assert_zero(residuals[0].clone());
+
+        assert_eq!(
+            folder.finish_folded(),
+            naive_fold(&residuals, &powers, zero)
+        );
+    }
+
+    #[test]
+    fn finish_folded_matches_naive_multiple_constraints() {
+        let cfg = cfg();
+        let zero = F::zero_with_cfg(&cfg);
+        let powers = vec![f(1), f(7), f(49), f(343)];
+        let residuals = vec![f(3), f(5), f(8), f(13)];
+        let mut folder = ConstraintFolder::new(&powers, &zero);
+        for residual in &residuals {
+            folder.assert_zero(residual.clone());
+        }
+
+        assert_eq!(
+            folder.finish_folded(),
+            naive_fold(&residuals, &powers, zero)
+        );
     }
 }

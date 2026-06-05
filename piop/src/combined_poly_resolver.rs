@@ -5,6 +5,7 @@ mod structs;
 
 pub use structs::*;
 
+use crate::projections::ScalarMap;
 use crate::{
     CombFn,
     combined_poly_resolver::{
@@ -18,12 +19,11 @@ use crate::{
         prover::ProverState as SumcheckProverState,
     },
 };
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, crypto_bigint_uint::Uint};
 use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::projections::ScalarMap;
 use std::{cell::RefCell, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
@@ -33,13 +33,17 @@ use zinc_poly::{
         binary::BinaryPoly,
         dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     },
-    utils::{ArithErrors, build_eq_x_r_inner, eq_eval},
+    utils::{ArithErrors, build_eq_x_r_inner, build_eq_x_r_vec, eq_eval},
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{BitOp, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
-    UNCHECKED, add, cfg_iter, delayed_reduction::DelayedFieldProductSum, from_ref::FromRef,
-    inner_product::InnerProduct, inner_transparent_field::InnerTransparentField, powers,
+    UNCHECKED, add, cfg_iter,
+    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    from_ref::FromRef,
+    inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_transparent_field::InnerTransparentField,
+    powers,
 };
 
 /// Materialize the bit-op virtual MLEs given by `bit_op_specs`.
@@ -139,6 +143,99 @@ where
             }
         })
         .collect()
+}
+
+/// Evaluate bit-op virtual columns directly at `point`, without materializing
+/// the full virtual MLEs.
+///
+/// This is the point-only counterpart of [`build_bit_op_mles`]. It keeps the
+/// hot scan addition-oriented: each set input bit adds the cached `eq_r(b)`
+/// into one destination bucket with sum-only DMR, then the 32 buckets are
+/// projected by `alpha` with the field product-sum backend.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_bit_op_evals_streaming<F, const D: usize>(
+    trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    bit_op_specs: &[zinc_uair::BitOpSpec],
+    num_total_bin: usize,
+    projecting_element_f: &F,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ArithErrors>
+where
+    F: InnerTransparentField + MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
+    F::Config: Sync,
+{
+    if bit_op_specs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    assert!(
+        D == 32,
+        "BitOpSpec virtual columns require D == 32, got D = {D}",
+    );
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let alpha_powers: Vec<F> = powers(projecting_element_f.clone(), one, 32);
+    let eq_table = build_eq_x_r_vec(point, field_cfg)?;
+    let reduction_params = F::barrett_reduction_params(field_cfg);
+
+    let evals = cfg_iter!(bit_op_specs)
+        .map(|spec| {
+            assert!(
+                spec.source_col() < num_total_bin,
+                "BitOpSpec source_col {} must reference a binary_poly column \
+                 (num binary cols = {num_total_bin})",
+                spec.source_col(),
+            );
+
+            let col = &trace_bin_poly[spec.source_col()];
+            let mut buckets: Vec<Uint<5>> = vec![Uint::zero(); 32];
+            for (b, cell) in col.iter().enumerate() {
+                let Some(eq_b) = eq_table.get(b) else {
+                    break;
+                };
+                for (src_bit, coeff) in cell.iter().enumerate().take(32) {
+                    if !coeff.into_inner() {
+                        continue;
+                    }
+                    if let Some(dst_bit) = bit_op_destination(spec.op(), src_bit) {
+                        <Uint<5> as DelayedModularReduction<F>>::add(&mut buckets[dst_bit], eq_b);
+                    }
+                }
+            }
+
+            let bucket_evals: Vec<F> = buckets
+                .into_iter()
+                .map(|acc| {
+                    <Uint<5> as DelayedModularReduction<F>>::reduce(
+                        acc,
+                        field_cfg,
+                        &reduction_params,
+                    )
+                })
+                .collect();
+
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &bucket_evals,
+                &alpha_powers,
+                zero.clone(),
+            )
+            .expect("bit-op bucket and alpha-power lengths match")
+        })
+        .collect();
+
+    Ok(evals)
+}
+
+fn bit_op_destination(op: BitOp, src_bit: usize) -> Option<usize> {
+    match op {
+        BitOp::Rot(c) => Some((src_bit + c as usize) % 32),
+        BitOp::ShiftR(c) => {
+            let c = c as usize;
+            src_bit.checked_sub(c)
+        }
+    }
 }
 
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
@@ -285,8 +382,7 @@ impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig
             // `scalar_proj_cache` for details. Lazily initialized — UAIRs
             // that never invoke `from_ref`/`mbs` pay only the Option's
             // discriminant write per call.
-            let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> =
-                RefCell::new(None);
+            let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> = RefCell::new(None);
             let project = |scalar: &U::Scalar| -> F {
                 if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(scalar)) {
                     return v;
@@ -315,7 +411,7 @@ impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig
                 ImpossibleIdeal::from_ref,
             );
 
-            folder.folded_constraints * (one.clone() - selector) * eq_r
+            folder.finish_folded() * (one.clone() - selector) * eq_r
         });
 
         Ok((
@@ -465,13 +561,11 @@ impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge, one.clone(), num_constraints);
 
-        // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
-        let expected_sum = ic_check_subclaim
+        let expected_values: Vec<F> = ic_check_subclaim
             .values
             .iter()
-            .zip(&folding_challenge_powers)
-            .map(|(claimed_value, random_coeff)| {
+            .map(|claimed_value| {
                 let deg = claimed_value.degree().map_or(0, |d| add!(d, 1));
                 DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
                     &claimed_value.coeffs[..deg],
@@ -479,9 +573,14 @@ impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig
                     zero.clone(),
                 )
                 .expect("inner product cannot fail here")
-                    * random_coeff
             })
-            .fold(zero.clone(), |acc, term| acc + term);
+            .collect();
+        let expected_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            &expected_values,
+            &folding_challenge_powers[..expected_values.len()],
+            zero.clone(),
+        )
+        .expect("claimed values and folding powers have matching lengths");
 
         if claimed_sum != expected_sum {
             return Err(CombinedPolyResolverError::WrongSumcheckSum {
@@ -575,17 +674,13 @@ impl<F: InnerTransparentField + DelayedFieldProductSum + FromPrimitiveWithConfig
                 &proof.up_evals,
                 uair_sig.total_cols().as_column_layout(),
             ),
-            TraceRow::from_slice_with_layout_and_bit_op(
-                &down_combined,
-                down_layout,
-                bit_op_count,
-            ),
+            TraceRow::from_slice_with_layout_and_bit_op(&down_combined, down_layout, bit_op_count),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
         );
 
-        let expected_claim_value = eq_r_value * (one - selector_value) * folder.folded_constraints;
+        let expected_claim_value = eq_r_value * (one - selector_value) * folder.finish_folded();
 
         if expected_claim_value != expected_evaluation {
             return Err(CombinedPolyResolverError::ClaimValueDoesNotMatch {
@@ -669,7 +764,9 @@ mod tests {
         sumcheck::multi_degree::MultiDegreeSumcheck,
         test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
+    };
     use rand::rng;
     use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
@@ -677,6 +774,7 @@ mod tests {
     };
     use zinc_transcript::Blake3Transcript;
     use zinc_uair::{
+        BitOpSpec,
         constraint_counter::count_constraints,
         degree_counter::count_max_degree,
         ideal::{DegreeOneIdeal, Ideal, IdealCheck},
@@ -686,6 +784,69 @@ mod tests {
     // TODO(Ilia): These tests are absolute joke.
     //             Once we have time we need to create a comprehensive test suite
     //             akin to the one we have for the PCS or the sumcheck.
+
+    fn binary_col_from_u32s(patterns: &[u32]) -> DenseMultilinearExtension<BinaryPoly<32>> {
+        DenseMultilinearExtension::from_evaluations_vec(
+            patterns.len().next_power_of_two().trailing_zeros() as usize,
+            patterns
+                .iter()
+                .copied()
+                .map(BinaryPoly::<32>::from)
+                .collect(),
+            BinaryPoly::<32>::zero(),
+        )
+    }
+
+    fn assert_bit_op_streaming_matches_materialized(spec: BitOpSpec) {
+        let cfg = test_config();
+        let trace_bin_poly = vec![binary_col_from_u32s(&[
+            0x0000_0001,
+            0x8000_0001,
+            0x0f0f_00f0,
+            0xf000_00ff,
+        ])];
+        let specs = vec![spec];
+        let projecting_element = MontyField::<4>::from_with_cfg(7u64, &cfg);
+        let point = vec![
+            MontyField::<4>::from_with_cfg(3u64, &cfg),
+            MontyField::<4>::from_with_cfg(5u64, &cfg),
+        ];
+
+        let materialized = build_bit_op_mles::<MontyField<4>, 32>(
+            &trace_bin_poly,
+            &specs,
+            1,
+            &projecting_element,
+            point.len(),
+            &cfg,
+        )
+        .into_iter()
+        .map(|mle| mle.evaluate_with_config(&point, &cfg))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+        let streaming = compute_bit_op_evals_streaming::<MontyField<4>, 32>(
+            &trace_bin_poly,
+            &specs,
+            1,
+            &projecting_element,
+            &point,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(streaming, materialized);
+    }
+
+    #[test]
+    fn bit_op_streaming_rot_matches_materialized_mle() {
+        assert_bit_op_streaming_matches_materialized(BitOpSpec::new(0, BitOp::Rot(7)));
+    }
+
+    #[test]
+    fn bit_op_streaming_shift_r_matches_materialized_mle() {
+        assert_bit_op_streaming_matches_materialized(BitOpSpec::new(0, BitOp::ShiftR(5)));
+    }
 
     fn test_successful_verification_generic<
         U,
@@ -737,22 +898,23 @@ mod tests {
             project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare → MultiDegreeSumcheck → finalize
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, DEGREE_PLUS_ONE>(
-            &mut prover_transcript,
-            evaluate_trace_to_column_mles(
-                &ProjectedTrace::RowMajor(projected_trace),
+        let (cpr_group, cpr_ancillary) =
+            CombinedPolyResolver::prepare_sumcheck_group::<U, DEGREE_PLUS_ONE>(
+                &mut prover_transcript,
+                evaluate_trace_to_column_mles(
+                    &ProjectedTrace::RowMajor(projected_trace),
+                    &projecting_element,
+                ),
+                &ic_prover_state.evaluation_point,
+                &projected_scalars,
+                num_constraints,
+                num_vars,
+                max_degree,
+                &test_config(),
+                &trace.binary_poly,
                 &projecting_element,
-            ),
-            &ic_prover_state.evaluation_point,
-            &projected_scalars,
-            num_constraints,
-            num_vars,
-            max_degree,
-            &test_config(),
-            &trace.binary_poly,
-            &projecting_element,
-        )
-        .expect("CPR prepare failed");
+            )
+            .expect("CPR prepare failed");
 
         let (md_proof, states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut prover_transcript,

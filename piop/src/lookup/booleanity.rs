@@ -33,8 +33,9 @@ use zinc_uair::{
     VirtualBoolSpec,
 };
 use zinc_utils::{
-    cfg_into_iter, cfg_iter,
-    delayed_reduction::{DelayedModularReduction, MontgomeryLimbs},
+    UNCHECKED, cfg_into_iter, cfg_iter,
+    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    inner_product::{FieldFieldInnerProduct, InnerProduct},
     inner_transparent_field::InnerTransparentField,
     powers,
 };
@@ -222,19 +223,15 @@ where
                     VirtualBoolSource::SelfBitSlice {
                         witness_col_idx,
                         bit_idx,
-                    } => &self_bit_slices[*witness_col_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &self_bit_slices[*witness_col_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::ShiftedBitSlice {
                         shifted_spec_idx,
                         bit_idx,
-                    } => &shifted_bit_slice_mles
-                        [*shifted_spec_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &shifted_bit_slice_mles[*shifted_spec_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::PublicBitSlice {
                         public_col_idx,
                         bit_idx,
-                    } => &public_bit_slices[*public_col_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &public_bit_slices[*public_col_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::IntCol { witness_col_idx } => {
                         &int_witness_cols[*witness_col_idx].evaluations
                     }
@@ -246,43 +243,38 @@ where
                 match *coeff {
                     1 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     -1 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     2 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     -2 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     c => {
                         for t in 0..n {
-                            let term =
-                                apply_coeff_inner::<F>(c, &src[t], field_cfg);
-                            evals[t] =
-                                F::add_inner(&evals[t], &term, field_cfg);
+                            let term = apply_coeff_inner::<F>(c, &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &term, field_cfg);
                         }
                     }
                 }
             }
-            DenseMultilinearExtension { evaluations: evals, num_vars }
+            DenseMultilinearExtension {
+                evaluations: evals,
+                num_vars,
+            }
         })
         .collect()
 }
@@ -318,13 +310,11 @@ where
                     VirtualBoolSource::ShiftedBitSlice {
                         shifted_spec_idx,
                         bit_idx,
-                    } => &shifted_bit_slice_evals
-                        [*shifted_spec_idx * D + *bit_idx],
+                    } => &shifted_bit_slice_evals[*shifted_spec_idx * D + *bit_idx],
                     VirtualBoolSource::PublicBitSlice {
                         public_col_idx,
                         bit_idx,
-                    } => &public_bit_slice_evals
-                        [*public_col_idx * D + *bit_idx],
+                    } => &public_bit_slice_evals[*public_col_idx * D + *bit_idx],
                     VirtualBoolSource::IntCol { witness_col_idx } => {
                         &int_witness_up_evals[*witness_col_idx]
                     }
@@ -460,7 +450,10 @@ where
                 }
                 evaluations.push(BinaryPoly::<D>::new(coeffs.as_slice()));
             }
-            DenseMultilinearExtension { evaluations, num_vars }
+            DenseMultilinearExtension {
+                evaluations,
+                num_vars,
+            }
         })
         .collect()
 }
@@ -733,9 +726,8 @@ where
         let r1_inner = r1.inner().clone();
         let one_minus_r1_inner = one_minus_r1.inner().clone();
 
-        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> = Vec::with_capacity(
-            1 + self.binary_cols.len() * D + self.extra_bit_cols.len(),
-        );
+        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(1 + self.binary_cols.len() * D + self.extra_bit_cols.len());
         mles.push(eq_folded);
 
         // BinaryPoly<D> does not impl Index<usize> on every backend
@@ -871,7 +863,12 @@ pub fn prepare_booleanity_group<F, const D: usize>(
     field_cfg: &F::Config,
 ) -> Result<Option<(MultiDegreeSumcheckGroup<F>, BooleanityProverAncillary)>, BooleanityError<F>>
 where
-    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
     F::Inner: ConstTranscribable + Send + Sync + Zero + Default + Clone,
     F::Modulus: ConstTranscribable,
 {
@@ -884,8 +881,7 @@ where
     let one = F::one_with_cfg(field_cfg);
 
     let folding_challenge: F = transcript.get_field_challenge(field_cfg);
-    let folding_challenge_powers: Vec<F> =
-        powers(folding_challenge, one.clone(), num_bit_slices);
+    let folding_challenge_powers: Vec<F> = powers(folding_challenge, one.clone(), num_bit_slices);
 
     // Pre-build E_other = eq(b', ic_evaluation_point[1..]) for the
     // round-1 fast path. The full-size eq_r is only needed for rounds
@@ -918,11 +914,13 @@ where
 
         // Σ_k α^k · v_k · (v_k - 1) computed as Σ_k α^k · (v_k² - v_k) to
         // avoid a per-iteration `(v - one)` clone.
-        let mut acc = zero.clone();
-        for (v, coeff) in bits.iter().zip(folding_challenge_powers.iter()) {
-            let v_sq = v.clone() * v.clone();
-            acc = acc + coeff.clone() * (v_sq - v.clone());
-        }
+        let residuals = booleanity_residuals(bits);
+        let acc = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            &folding_challenge_powers,
+            &residuals,
+            zero.clone(),
+        )
+        .expect("booleanity residuals and powers have matching lengths");
         acc * eq_r.clone()
     });
 
@@ -1039,7 +1037,7 @@ pub fn finalize_booleanity_verifier<F>(
     field_cfg: &F::Config,
 ) -> Result<(), BooleanityError<F>>
 where
-    F: InnerTransparentField,
+    F: InnerTransparentField + DelayedFieldProductSum,
     F::Inner: ConstTranscribable,
     F::Modulus: ConstTranscribable,
 {
@@ -1062,14 +1060,18 @@ where
     let eq_r_value = eq_eval(shared_point, &ancillary.ic_evaluation_point, one.clone())?;
 
     let n_proof = bit_slice_evals.len() - closing_overrides_tail.len();
-    let bool_folded = bit_slice_evals[..n_proof]
+    let values: Vec<F> = bit_slice_evals[..n_proof]
         .iter()
         .chain(closing_overrides_tail.iter())
-        .zip(ancillary.folding_challenge_powers.iter())
-        .fold(zero, |acc, (v, coeff)| {
-            let v_sq = v.clone() * v.clone();
-            acc + coeff.clone() * (v_sq - v.clone())
-        });
+        .cloned()
+        .collect();
+    let residuals = booleanity_residuals(&values);
+    let bool_folded = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        &ancillary.folding_challenge_powers,
+        &residuals,
+        zero,
+    )
+    .expect("booleanity residuals and powers have matching lengths");
 
     let recomputed = bool_folded * eq_r_value;
 
@@ -1099,7 +1101,7 @@ where
 /// each bit-slice eval against the true bit-decomposition of the
 /// committed parent column.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn verify_bit_decomposition_consistency<F: PrimeField>(
+pub fn verify_bit_decomposition_consistency<F: DelayedFieldProductSum>(
     parent_evals_per_col: &[F],
     bit_slice_evals: &[F],
     projecting_element: &F,
@@ -1118,24 +1120,15 @@ pub fn verify_bit_decomposition_consistency<F: PrimeField>(
 
     let zero = F::zero_with_cfg(projecting_element.cfg());
     let one = F::one_with_cfg(projecting_element.cfg());
-
-    // Powers [1, a, a^2, ..., a^{bits_per_col - 1}].
-    let mut a_powers: Vec<F> = Vec::with_capacity(bits_per_col);
-    let mut acc = one;
-    for _ in 0..bits_per_col {
-        a_powers.push(acc.clone());
-        acc *= projecting_element;
-    }
+    let a_powers: Vec<F> = powers(projecting_element.clone(), one, bits_per_col);
 
     for (col_idx, parent_eval) in parent_evals_per_col.iter().enumerate() {
         let base = col_idx * bits_per_col;
-        let recombined =
-            bit_slice_evals[base..base + bits_per_col]
-                .iter()
-                .zip(&a_powers)
-                .fold(zero.clone(), |acc, (bit_eval, a_pow)| {
-                    acc + bit_eval.clone() * a_pow
-                });
+        let recombined = project_bit_slice_chunk(
+            &bit_slice_evals[base..base + bits_per_col],
+            &a_powers,
+            zero.clone(),
+        );
 
         if &recombined != parent_eval {
             return Err(BooleanityError::ConsistencyMismatch {
@@ -1149,11 +1142,28 @@ pub fn verify_bit_decomposition_consistency<F: PrimeField>(
     Ok(())
 }
 
+fn booleanity_residuals<F: PrimeField>(values: &[F]) -> Vec<F> {
+    values
+        .iter()
+        .map(|v| {
+            let v_sq = v.clone() * v.clone();
+            v_sq - v.clone()
+        })
+        .collect()
+}
+
+fn project_bit_slice_chunk<F: DelayedFieldProductSum>(
+    bit_slice_evals: &[F],
+    powers: &[F],
+    zero: F,
+) -> F {
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(bit_slice_evals, powers, zero)
+        .expect("bit-slice chunk and projection powers have matching lengths")
+}
+
 #[derive(Debug, Error)]
 pub enum BooleanityError<F: PrimeField> {
-    #[error(
-        "wrong bit-slice evaluation count: got {got}, expected {expected}"
-    )]
+    #[error("wrong bit-slice evaluation count: got {got}, expected {expected}")]
     WrongBitSliceEvalCount { got: usize, expected: usize },
     #[error(
         "bit-decomposition consistency mismatch on binary_poly column {col_idx}: got Σ a^i·bᵢ = {got:?}, expected parent eval {expected:?}"
@@ -1172,9 +1182,7 @@ pub enum BooleanityError<F: PrimeField> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::{
-        FromWithConfig, boolean::Boolean, crypto_bigint_monty::MontyField,
-    };
+    use crypto_primitives::{FromWithConfig, boolean::Boolean, crypto_bigint_monty::MontyField};
 
     type F = MontyField<4>;
 
@@ -1187,8 +1195,7 @@ mod tests {
         let evaluations: Vec<BinaryPoly<8>> = patterns
             .iter()
             .map(|&p| {
-                let coeffs: [Boolean; 8] =
-                    array::from_fn(|i| Boolean::new((p >> i) & 1 != 0));
+                let coeffs: [Boolean; 8] = array::from_fn(|i| Boolean::new((p >> i) & 1 != 0));
                 BinaryPoly::<8>::new(coeffs)
             })
             .collect();
@@ -1207,20 +1214,14 @@ mod tests {
             ShiftedBitSliceSpec::new(0, 1),
             ShiftedBitSliceSpec::new(0, 2),
         ];
-        let point = vec![
-            F::from_with_cfg(3u64, &cfg),
-            F::from_with_cfg(5u64, &cfg),
-        ];
+        let point = vec![F::from_with_cfg(3u64, &cfg), F::from_with_cfg(5u64, &cfg)];
 
-        let materialized = build_shifted_bit_slice_mles::<F, 8>(
-            std::slice::from_ref(&col),
-            &specs,
-            &cfg,
-        )
-        .into_iter()
-        .map(|mle| mle.evaluate_with_config(&point, &cfg))
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        let materialized =
+            build_shifted_bit_slice_mles::<F, 8>(std::slice::from_ref(&col), &specs, &cfg)
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(&point, &cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
         let streaming = compute_shifted_bit_slice_evals_streaming::<F, 8>(
             std::slice::from_ref(&col),
             &specs,
@@ -1251,7 +1252,10 @@ mod tests {
                 } else {
                     zero.clone()
                 };
-                assert_eq!(bit_slices[bit].evaluations[row], want, "row {row} bit {bit}");
+                assert_eq!(
+                    bit_slices[bit].evaluations[row], want,
+                    "row {row} bit {bit}"
+                );
             }
         }
     }
@@ -1276,13 +1280,8 @@ mod tests {
             a_pow = a_pow * a.clone();
         }
 
-        verify_bit_decomposition_consistency(
-            std::slice::from_ref(&parent_eval),
-            &bit_evals,
-            &a,
-            8,
-        )
-        .expect("honest decomposition should satisfy consistency check");
+        verify_bit_decomposition_consistency(std::slice::from_ref(&parent_eval), &bit_evals, &a, 8)
+            .expect("honest decomposition should satisfy consistency check");
     }
 
     #[test]
@@ -1314,7 +1313,10 @@ mod tests {
             &a,
             4,
         );
-        assert!(matches!(res, Err(BooleanityError::ConsistencyMismatch { .. })));
+        assert!(matches!(
+            res,
+            Err(BooleanityError::ConsistencyMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1324,6 +1326,32 @@ mod tests {
         let parent_evals: Vec<F> = vec![];
         let bit_evals: Vec<F> = vec![];
         verify_bit_decomposition_consistency(&parent_evals, &bit_evals, &one, 8).unwrap();
+    }
+
+    #[test]
+    fn bit_slice_projection_helper_matches_naive_fold() {
+        let cfg = test_cfg();
+        let zero = F::zero_with_cfg(&cfg);
+        let one = F::one_with_cfg(&cfg);
+        let a = F::from_with_cfg(9u64, &cfg);
+        let bit_evals = vec![
+            F::from_with_cfg(1u64, &cfg),
+            F::from_with_cfg(0u64, &cfg),
+            F::from_with_cfg(1u64, &cfg),
+            F::from_with_cfg(1u64, &cfg),
+            F::from_with_cfg(0u64, &cfg),
+        ];
+        let powers = powers(a, one, bit_evals.len());
+
+        let got = project_bit_slice_chunk(&bit_evals, &powers, zero.clone());
+        let want = bit_evals
+            .iter()
+            .zip(&powers)
+            .fold(zero, |acc, (bit_eval, power)| {
+                acc + bit_eval.clone() * power
+            });
+
+        assert_eq!(got, want);
     }
 
     /// Cross-validate the round-1 fast path against a faithful standard
@@ -1343,8 +1371,14 @@ mod tests {
         // Mix of fully-zero, fully-one, and varying patterns to exercise all
         // four (A, B) cases for the XOR fold structure.
         let binary_cols = vec![
-            col_from_u8s(&[0b00000000, 0b00010001, 0b00100010, 0b00110011, 0b01000100, 0b01010101, 0b01100110, 0b01110111]),
-            col_from_u8s(&[0b11110000, 0b11100001, 0b11010010, 0b11000011, 0b10110100, 0b10100101, 0b10010110, 0b10000111]),
+            col_from_u8s(&[
+                0b00000000, 0b00010001, 0b00100010, 0b00110011, 0b01000100, 0b01010101, 0b01100110,
+                0b01110111,
+            ]),
+            col_from_u8s(&[
+                0b11110000, 0b11100001, 0b11010010, 0b11000011, 0b10110100, 0b10100101, 0b10010110,
+                0b10000111,
+            ]),
         ];
         let num_vars = 3;
         const D: usize = 8;
@@ -1467,7 +1501,8 @@ mod tests {
         let mut std_eq_r = eq_r_full;
         std_eq_r.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
         assert_eq!(
-            fast_mles[0].num_vars, num_vars - 1,
+            fast_mles[0].num_vars,
+            num_vars - 1,
             "fast-path eq_r_folded must have num_vars - 1 variables"
         );
         assert_eq!(
@@ -1478,7 +1513,8 @@ mod tests {
         for (idx, mut bit_mle) in bit_slices_full.into_iter().enumerate() {
             bit_mle.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
             assert_eq!(
-                fast_mles[1 + idx].evaluations, bit_mle.evaluations,
+                fast_mles[1 + idx].evaluations,
+                bit_mle.evaluations,
                 "fast-path bit-slice {idx} folded value must match standard fix_variables"
             );
         }
@@ -1491,6 +1527,9 @@ mod tests {
         let parent_evals = vec![one.clone()];
         let bit_evals: Vec<F> = vec![one.clone(), one.clone()];
         let res = verify_bit_decomposition_consistency(&parent_evals, &bit_evals, &one, 8);
-        assert!(matches!(res, Err(BooleanityError::WrongBitSliceEvalCount { .. })));
+        assert!(matches!(
+            res,
+            Err(BooleanityError::WrongBitSliceEvalCount { .. })
+        ));
     }
 }
