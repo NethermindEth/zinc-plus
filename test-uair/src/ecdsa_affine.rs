@@ -46,8 +46,7 @@ use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
     ConstraintBuilder, PublicColumnLayout, TotalColumnLayout, TraceRow, Uair, UairSignature,
-    UairTrace,
-    ideal::ImpossibleIdeal,
+    UairTrace, ideal::ImpossibleIdeal,
 };
 
 use crate::GenerateRandomTrace;
@@ -247,10 +246,7 @@ fn rand_nonzero_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIM
     }
 }
 
-fn mul_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
     let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
     let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
@@ -368,10 +364,18 @@ mod tests {
 
             // C1: Z · Z_inv = 1
             let one_uint: CbUint<EC_FP_INT_LIMBS> = CbUint::ONE;
-            assert_eq!(mul_mod_p(&z, &z_inv), one_uint, "C1 (Z·Z_inv=1) at row {row}");
+            assert_eq!(
+                mul_mod_p(&z, &z_inv),
+                one_uint,
+                "C1 (Z·Z_inv=1) at row {row}"
+            );
 
             // C2: Z_inv_sq = Z_inv²
-            assert_eq!(z_inv_sq, mul_mod_p(&z_inv, &z_inv), "C2 (Z_inv²) at row {row}");
+            assert_eq!(
+                z_inv_sq,
+                mul_mod_p(&z_inv, &z_inv),
+                "C2 (Z_inv²) at row {row}"
+            );
 
             // C3: Z_inv_cube = Z_inv · Z_inv_sq
             assert_eq!(

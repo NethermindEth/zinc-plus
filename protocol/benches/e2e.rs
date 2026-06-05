@@ -1,5 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
     measurement::WallTime,
@@ -11,6 +12,7 @@ use crypto_primitives::{
 };
 use rand::rng;
 use std::{fmt::Debug, hint::black_box, marker::PhantomData, ops::Neg};
+use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial,
     univariate::{
@@ -22,13 +24,17 @@ use zinc_poly::{
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{
     FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
+    fixed_prime::field_cfg_from_curve_scalar,
+    pcs::{
+        AllZipPCSTypes, BinaryHyraxZipRest, PCSCommitments, PCSParams, PCSVerifierParams,
+        ZincPCSTypes,
+    },
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
     EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
     ShaProxy, TestUairNoMultiplication,
 };
-use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable};
 use zinc_uair::{
     Uair, UairTrace,
@@ -44,9 +50,14 @@ use zinc_utils::{
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    code::iprs::{IprsCode, PnttConfigF65537},
+    code::{
+        LinearCode,
+        iprs::{IprsCode, PnttConfigF65537},
+    },
+    pcs::generic::{PCS, ZipPlusPCS},
+    pcs::hyrax::{BinaryLanes, HyraxPCS},
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
-    utils::{eprint_bytes_size_breakdown, eprint_proof_size},
+    utils::{eprint_bytes_size, eprint_bytes_size_breakdown, eprint_proof_size},
 };
 
 //
@@ -186,20 +197,8 @@ struct GenericBenchZincTypes<
     )>,
 );
 
-impl<Int, CwR, Chal, Pt, BinaryCombR, CombR, IntCombR, Fmod, PrimeTest, const D: usize>
-    ZincTypes<D>
-    for GenericBenchZincTypes<
-        Int,
-        CwR,
-        Chal,
-        Pt,
-        BinaryCombR,
-        CombR,
-        IntCombR,
-        Fmod,
-        PrimeTest,
-        D,
-    >
+impl<Int, CwR, Chal, Pt, BinaryCombR, CombR, IntCombR, Fmod, PrimeTest, const D: usize> ZincTypes<D>
+    for GenericBenchZincTypes<Int, CwR, Chal, Pt, BinaryCombR, CombR, IntCombR, Fmod, PrimeTest, D>
 where
     Int: ConstIntSemiring
         + for<'a> MulByScalar<&'a i64, CwR>
@@ -755,6 +754,290 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     );
 }
 
+fn append_transcribable_bytes<T: Transcribable>(out: &mut Vec<u8>, value: &T) {
+    let offset = out.len();
+    out.resize(offset + T::LENGTH_NUM_BYTES + value.get_num_bytes(), 0);
+    let rest = value.write_transcription_bytes_subset(&mut out[offset..]);
+    assert!(rest.is_empty(), "transcription buffer should be exact");
+}
+
+fn generic_pcs_proof_raw_bytes<P, Zt>(
+    proof: &Proof<F, PCSCommitments<P, Zt, F, DEGREE_PLUS_ONE>>,
+) -> Vec<u8>
+where
+    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    P: ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>,
+{
+    let mut out = Vec::new();
+    <<P as ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>>::BinaryPCS as PCS<
+        F,
+        BinaryPoly<DEGREE_PLUS_ONE>,
+        DEGREE_PLUS_ONE,
+    >>::write_commitment_bytes(&proof.commitments.binary, &mut out);
+    <<P as ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>>::ArbitraryPCS as PCS<
+        F,
+        DensePolynomial<Zt::Int, DEGREE_PLUS_ONE>,
+        DEGREE_PLUS_ONE,
+    >>::write_commitment_bytes(&proof.commitments.arbitrary, &mut out);
+    <<P as ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>>::IntPCS as PCS<
+        F,
+        Zt::Int,
+        DEGREE_PLUS_ONE,
+    >>::write_commitment_bytes(&proof.commitments.int, &mut out);
+
+    let zip_len = u32::try_from(proof.zip.len()).expect("zip length must fit into u32");
+    out.extend_from_slice(&zip_len.to_le_bytes());
+    out.extend_from_slice(&proof.zip);
+    append_transcribable_bytes(&mut out, &proof.ideal_check);
+    append_transcribable_bytes(&mut out, &proof.resolver);
+    append_transcribable_bytes(&mut out, &proof.combined_sumcheck);
+    append_transcribable_bytes(&mut out, &proof.multipoint_eval);
+    append_transcribable_bytes(
+        &mut out,
+        DynamicPolyVecF::reinterpret(&proof.witness_lifted_evals),
+    );
+    out
+}
+
+fn eprint_generic_pcs_proof_size<P, Zt>(
+    label: &str,
+    proof: &Proof<F, PCSCommitments<P, Zt, F, DEGREE_PLUS_ONE>>,
+) where
+    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    P: ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>,
+{
+    let raw = generic_pcs_proof_raw_bytes::<P, Zt>(proof);
+    eprint_bytes_size(label, &raw);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_bench_pcs_e2e<Zt, U, IdealOverF, P>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &PCSParams<P, Zt, F, DEGREE_PLUS_ONE>,
+    vp: &PCSVerifierParams<P, Zt, F, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
+    field_cfg: <F as PrimeField>::Config,
+    project_scalar: impl Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>
+    + Copy
+    + Sync,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    Zt::Int: ProjectableToField<F> + num_traits::Zero,
+    <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F: for<'a> FromWithConfig<&'a Zt::Int>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    U: Uair + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    P: ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    macro_rules! zinc_plus {
+        () => {
+            ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>
+        };
+    }
+
+    macro_rules! bench_prove {
+        ($label:literal, $mle_first:expr) => {
+            group.bench_function(BenchmarkId::new($label, &params), |bench| {
+                bench.iter(|| {
+                    black_box(<zinc_plus!()>::prove_with_pcs_and_field_cfg::<
+                        P,
+                        { $mle_first },
+                        PERFORM_CHECKS,
+                    >(
+                        pp, trace, num_vars, project_scalar, field_cfg.clone()
+                    ))
+                    .expect("Prover failed");
+                });
+            });
+        };
+    }
+
+    bench_prove!("Prove (Combined)", false);
+    if count_effective_max_degree::<U>() <= 1 {
+        bench_prove!("Prove (MLE-first)", true);
+    }
+
+    let proof = <zinc_plus!()>::prove_with_pcs_and_field_cfg::<P, false, PERFORM_CHECKS>(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        field_cfg.clone(),
+    )
+    .expect("proof generation for verifier bench");
+
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(<zinc_plus!()>::verify_with_pcs_and_field_cfg::<
+                    P,
+                    IdealOverF,
+                    PERFORM_CHECKS,
+                >(
+                    vp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    project_scalar,
+                    project_ideal,
+                    field_cfg.clone(),
+                ))
+                .expect("Verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    eprint_generic_pcs_proof_size::<P, Zt>(&params, &proof);
+}
+
+#[allow(clippy::too_many_arguments, clippy::unwrap_used)]
+fn do_bench_pcs_steps<Zt, U, IdealOverF, P>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    num_vars: usize,
+    pp: &PCSParams<P, Zt, F, DEGREE_PLUS_ONE>,
+    vp: &PCSVerifierParams<P, Zt, F, DEGREE_PLUS_ONE>,
+    trace: &UairTrace<'static, Zt::Int, Zt::Int, DEGREE_PLUS_ONE>,
+    field_cfg: <F as PrimeField>::Config,
+    project_scalar: fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F>,
+    project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
+) where
+    Zt: ZincTypes<DEGREE_PLUS_ONE>,
+    Zt::Int: ProjectableToField<F> + num_traits::Zero,
+    <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
+    <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
+    <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
+    F: FromWithConfig<Zt::Int>
+        + for<'a> FromWithConfig<&'a <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a <Zt::IntZt as ZipTypes>::CombR>
+        + for<'a> FromWithConfig<&'a Zt::Chal>
+        + for<'a> FromWithConfig<&'a Zt::Pt>
+        + for<'a> MulByScalar<&'a F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F: for<'a> FromWithConfig<&'a Zt::Int>,
+    <F as Field>::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
+    U: Uair + 'static,
+    IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    P: ZincPCSTypes<Zt, F, DEGREE_PLUS_ONE>,
+{
+    let params = format!("{label}/nvars={num_vars}");
+
+    macro_rules! step_bench {
+        ($side:literal / $step_name:literal, setup = || $setup:expr, run = |$s:ident| $run:expr $(,)?) => {
+            group.bench_function(
+                BenchmarkId::new(format!("{}/{}", $side, $step_name), &params),
+                |b| {
+                    b.iter_batched(
+                        || $setup,
+                        |$s| {
+                            black_box($run).expect("step failed");
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        };
+    }
+
+    macro_rules! piop {
+        () => {
+            ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>
+        };
+    }
+
+    let p_committed = <piop!()>::step0_commit_with_pcs::<P>(pp, trace, num_vars).unwrap();
+    let p_projected = p_committed
+        .clone()
+        .step1_combined_with_field_cfg(project_scalar, field_cfg.clone())
+        .unwrap();
+    let p_ideal_checked = p_projected.clone().step2_ideal_check().unwrap();
+    let p_eval_projected = p_ideal_checked.clone().step3_eval_projection().unwrap();
+    let p_sumchecked = p_eval_projected.clone().step4_sumcheck().unwrap();
+    let p_mp_evaled = p_sumchecked.clone().step5_multipoint_eval().unwrap();
+    let p_lifted = p_mp_evaled.clone().step6_lift_and_project().unwrap();
+
+    step_bench!(
+        "Prove" / "0: Commit",
+        setup = || {},
+        run = |_s| <piop!()>::step0_commit_with_pcs::<P>(pp, trace, num_vars),
+    );
+
+    step_bench!(
+        "Prove" / "7: PCS open",
+        setup = || p_lifted.clone(),
+        run = |s| s.step7_pcs_open::<PERFORM_CHECKS>(),
+    );
+
+    let proof = <piop!()>::prove_with_pcs_and_field_cfg::<P, false, PERFORM_CHECKS>(
+        pp,
+        trace,
+        num_vars,
+        project_scalar,
+        field_cfg.clone(),
+    )
+    .expect("proof generation for verifier bench");
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+    let v_transcript = <piop!()>::step0_reconstruct_transcript_with_pcs::<IdealOverF, P>(
+        vp,
+        proof,
+        &public_trace,
+        num_vars,
+    )
+    .unwrap();
+    let v_prime_projected = v_transcript
+        .clone()
+        .step1_prime_projection_with_field_cfg(field_cfg.clone())
+        .unwrap();
+    let v_ideal_checked = v_prime_projected
+        .clone()
+        .step2_ideal_check(project_ideal)
+        .unwrap();
+    let v_eval_projected = v_ideal_checked
+        .clone()
+        .step3_eval_projection(project_scalar)
+        .unwrap();
+    let v_sumchecked = v_eval_projected.clone().step4_sumcheck_verify().unwrap();
+    let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
+    let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
+
+    step_bench!(
+        "Verify" / "7: PCS verify",
+        setup = || v_lifted.clone(),
+        run = |s| s.step7_pcs_verify::<U, PERFORM_CHECKS>(),
+    );
+}
+
 //
 // Specific benchmarks for each UAIR
 //
@@ -838,11 +1121,10 @@ fn bench_real_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_real_ecdsa(num_vars);
 
-    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
-                      _: &<F as PrimeField>::Config|
-     -> ImpossibleIdeal {
-        unreachable!("EcdsaUair has only assert_zero constraints")
-    };
+    let proj_ideal =
+        |_: &IdealOrZero<<U as Uair>::Ideal>, _: &<F as PrimeField>::Config| -> ImpossibleIdeal {
+            unreachable!("EcdsaUair has only assert_zero constraints")
+        };
 
     do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
         group,
@@ -862,11 +1144,10 @@ fn bench_real_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize)
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_pp_real_ecdsa(num_vars);
 
-    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
-                      _: &<F as PrimeField>::Config|
-     -> ImpossibleIdeal {
-        unreachable!("EcdsaUair has only assert_zero constraints")
-    };
+    let proj_ideal =
+        |_: &IdealOrZero<<U as Uair>::Ideal>, _: &<F as PrimeField>::Config| -> ImpossibleIdeal {
+            unreachable!("EcdsaUair has only assert_zero constraints")
+        };
 
     do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
         group,
@@ -912,6 +1193,226 @@ fn bench_real_sha256_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize
         &trace,
         zinc_protocol::project_scalar_fn,
         sha256_real_project_ideal,
+    );
+}
+
+fn zip_pcs_params(
+    num_vars: usize,
+) -> (
+    PCSParams<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+) {
+    let pp = setup_pp_real_ecdsa(num_vars);
+    (
+        PCSParams::<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: pp.0.clone(),
+            arbitrary: pp.1.clone(),
+            int: pp.2.clone(),
+        },
+        PCSVerifierParams::<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: pp.0,
+            arbitrary: pp.1,
+            int: pp.2,
+        },
+    )
+}
+
+fn hyrax_pcs_params<C: AffineRepr>(
+    num_vars: usize,
+) -> (
+    PCSParams<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+)
+where
+    BinaryHyraxZipRest<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+            >,
+            IntPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
+            >,
+        >,
+{
+    let pp = setup_pp_real_ecdsa(num_vars);
+    let width = pp.0.linear_code.row_len();
+    let generator = C::Group::generator();
+    let bases = (1..=width)
+        .map(|idx| {
+            let scalar = C::ScalarField::from(
+                u64::try_from(idx).expect("Hyrax basis index must fit in u64"),
+            );
+            (generator * scalar).into_affine()
+        })
+        .collect();
+    let h_scalar = C::ScalarField::from(
+        u64::try_from(width + 1).expect("Hyrax blinding basis index must fit in u64"),
+    );
+    let h = generator * h_scalar;
+    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h)
+        .expect("Hyrax benchmark setup must be valid");
+    (
+        PCSParams::<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: ck,
+            arbitrary: pp.1.clone(),
+            int: pp.2.clone(),
+        },
+        PCSVerifierParams::<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: vk,
+            arbitrary: pp.1,
+            int: pp.2,
+        },
+    )
+}
+
+fn bench_real_sha256_pcs_curve_e2e<C: AffineRepr>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+    zip_label: &str,
+    hyrax_label: &str,
+) where
+    BinaryHyraxZipRest<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+            >,
+            IntPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
+            >,
+        >,
+{
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        C,
+    >();
+
+    let (zip_pp, zip_vp) = zip_pcs_params(num_vars);
+    do_bench_pcs_e2e::<RealEcdsaBenchZincTypes, U, _, AllZipPCSTypes>(
+        group,
+        zip_label,
+        num_vars,
+        &zip_pp,
+        &zip_vp,
+        &trace,
+        field_cfg.clone(),
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+
+    let (hyrax_pp, hyrax_vp) = hyrax_pcs_params::<C>(num_vars);
+    do_bench_pcs_e2e::<RealEcdsaBenchZincTypes, U, _, BinaryHyraxZipRest<C>>(
+        group,
+        hyrax_label,
+        num_vars,
+        &hyrax_pp,
+        &hyrax_vp,
+        &trace,
+        field_cfg,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha256_pcs_curve_steps<C: AffineRepr>(
+    group: &mut BenchmarkGroup<WallTime>,
+    num_vars: usize,
+    zip_label: &str,
+    hyrax_label: &str,
+) where
+    BinaryHyraxZipRest<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+            >,
+            IntPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
+            >,
+        >,
+{
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        C,
+    >();
+
+    let (zip_pp, zip_vp) = zip_pcs_params(num_vars);
+    do_bench_pcs_steps::<RealEcdsaBenchZincTypes, U, _, AllZipPCSTypes>(
+        group,
+        zip_label,
+        num_vars,
+        &zip_pp,
+        &zip_vp,
+        &trace,
+        field_cfg.clone(),
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+
+    let (hyrax_pp, hyrax_vp) = hyrax_pcs_params::<C>(num_vars);
+    do_bench_pcs_steps::<RealEcdsaBenchZincTypes, U, _, BinaryHyraxZipRest<C>>(
+        group,
+        hyrax_label,
+        num_vars,
+        &hyrax_pp,
+        &hyrax_vp,
+        &trace,
+        field_cfg,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_real_sha256_pcs_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    bench_real_sha256_pcs_curve_e2e::<ark_bn254::G1Affine>(
+        group,
+        num_vars,
+        "RealSha256PCS/ZipBn254Fr",
+        "RealSha256PCS/HyraxBn254",
+    );
+    bench_real_sha256_pcs_curve_e2e::<ark_secp256k1::Affine>(
+        group,
+        num_vars,
+        "RealSha256PCS/ZipSecp256k1Fr",
+        "RealSha256PCS/HyraxSecp256k1",
+    );
+}
+
+fn bench_real_sha256_pcs_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    bench_real_sha256_pcs_curve_steps::<ark_bn254::G1Affine>(
+        group,
+        num_vars,
+        "RealSha256PCS/ZipBn254Fr",
+        "RealSha256PCS/HyraxBn254",
+    );
+    bench_real_sha256_pcs_curve_steps::<ark_secp256k1::Affine>(
+        group,
+        num_vars,
+        "RealSha256PCS/ZipSecp256k1Fr",
+        "RealSha256PCS/HyraxSecp256k1",
     );
 }
 
@@ -993,19 +1494,19 @@ fn e2e_benches(c: &mut Criterion) {
     // bench_no_mult_e2e(&mut group, 8);
     // bench_no_mult_e2e(&mut group, 10);
     // bench_no_mult_e2e(&mut group, 12);
-// 
+    //
     // bench_binary_decomposition_e2e(&mut group, 8);
     // bench_binary_decomposition_e2e(&mut group, 10);
     // bench_binary_decomposition_e2e(&mut group, 12);
-// 
+    //
     // bench_big_linear_e2e(&mut group, 8);
     // bench_big_linear_e2e(&mut group, 10);
     // bench_big_linear_e2e(&mut group, 12);
-// 
+    //
     // bench_big_linear_public_input_e2e(&mut group, 8);
     // bench_big_linear_public_input_e2e(&mut group, 10);
     // bench_big_linear_public_input_e2e(&mut group, 12);
-// 
+    //
     // bench_sha_proxy_e2e(&mut group, 8);
     // bench_sha_proxy_e2e(&mut group, 10);
     // bench_sha_proxy_e2e(&mut group, 12);
@@ -1014,6 +1515,7 @@ fn e2e_benches(c: &mut Criterion) {
     // rows (Shamir loop), so num_vars=9 is the smallest meaningful size.
     // bench_real_ecdsa_e2e(&mut group, 9);
     bench_real_sha256_e2e(&mut group, 9);
+    bench_real_sha256_pcs_e2e(&mut group, 9);
     bench_real_sha_ecdsa_e2e(&mut group, 9);
 
     group.finish();
@@ -1025,19 +1527,19 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // bench_no_mult_steps(&mut group, 8);
     // bench_no_mult_steps(&mut group, 10);
     // bench_no_mult_steps(&mut group, 12);
-// 
+    //
     // bench_binary_decomposition_steps(&mut group, 8);
     // bench_binary_decomposition_steps(&mut group, 10);
     // bench_binary_decomposition_steps(&mut group, 12);
-// 
+    //
     // bench_big_linear_steps(&mut group, 8);
     // bench_big_linear_steps(&mut group, 10);
     // bench_big_linear_steps(&mut group, 12);
-// 
+    //
     // bench_big_linear_public_input_steps(&mut group, 8);
     // bench_big_linear_public_input_steps(&mut group, 10);
     // bench_big_linear_public_input_steps(&mut group, 12);
-// 
+    //
     // bench_sha_proxy_steps(&mut group, 8);
     // bench_sha_proxy_steps(&mut group, 10);
     // bench_sha_proxy_steps(&mut group, 12);
@@ -1046,6 +1548,7 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // num_vars=9 lower-bound rationale.
     bench_real_ecdsa_steps(&mut group, 9);
     bench_real_sha256_steps(&mut group, 9);
+    bench_real_sha256_pcs_steps(&mut group, 9);
     bench_real_sha_ecdsa_steps(&mut group, 9);
 
     group.finish();
@@ -1220,7 +1723,6 @@ type FoldedPp4x<ZtF> = (
     >,
 );
 
-
 /// 4× folded e2e bench: routes binary AND int through `MultiZip3` for
 /// shared-Merkle collapse, then opens at the doubly-extended point
 /// `(r_0 ‖ γ₁ ‖ γ₂)`. Calls [`prove_folded_4x`] / [`verify_folded_4x`].
@@ -1313,39 +1815,34 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
-    group.bench_function(
-        BenchmarkId::new("Verify (folded 4×)", &params),
-        |bench| {
-            bench.iter_batched(
-                || proof.clone(),
-                |proof| {
-                    black_box(
-                        zinc_protocol::verifier::verify_folded_4x::<
-                            ZtF,
-                            U,
-                            F,
-                            IdealOverF,
-                            DEGREE_PLUS_ONE,
-                            HALF_DEGREE_PLUS_ONE,
-                            QUARTER_DEGREE_PLUS_ONE,
-                            EC_FP_INT_LIMBS,
-                            INT_QUARTER_LIMBS_BENCH,
-                            PERFORM_CHECKS,
-                        >(
-                            pp,
-                            proof,
-                            &public_trace,
-                            num_vars,
-                            project_scalar,
-                            project_ideal,
-                        ),
-                    )
-                    .expect("Folded 4× verifier failed");
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    group.bench_function(BenchmarkId::new("Verify (folded 4×)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded_4x::<
+                    ZtF,
+                    U,
+                    F,
+                    IdealOverF,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    QUARTER_DEGREE_PLUS_ONE,
+                    EC_FP_INT_LIMBS,
+                    INT_QUARTER_LIMBS_BENCH,
+                    PERFORM_CHECKS,
+                >(
+                    pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    project_scalar,
+                    project_ideal,
+                ))
+                .expect("Folded 4× verifier failed");
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     let label_full = format!("Folded 4×/{params}");
     eprint_proof_size(&label_full, &proof);
@@ -1435,7 +1932,7 @@ fn eprint_folded_4x_per_region_prove_timings<ZtF, U, S, const MLE_FIRST: bool>(
         > + 'static,
     S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
 {
-    use zinc_protocol::prover::{prove_folded_4x_with_timings, FoldedProveTimings};
+    use zinc_protocol::prover::{FoldedProveTimings, prove_folded_4x_with_timings};
 
     const N: u32 = 100;
 
@@ -1579,9 +2076,7 @@ fn eprint_folded_4x_per_region_verify_timings<ZtF, U, IdealOverF, S, I>(
     S: Fn(&U::Scalar, &<F as PrimeField>::Config) -> DynamicPolynomialF<F> + Copy + Sync,
     I: Fn(&IdealOrZero<U::Ideal>, &<F as PrimeField>::Config) -> IdealOverF + Copy,
 {
-    use zinc_protocol::verifier::{
-        verify_folded_4x_with_timings, FoldedVerifyTimings,
-    };
+    use zinc_protocol::verifier::{FoldedVerifyTimings, verify_folded_4x_with_timings};
 
     const N: u32 = 100;
 
@@ -1684,7 +2179,6 @@ fn eprint_folded_4x_per_region_verify_timings<ZtF, U, IdealOverF, S, I>(
     );
 }
 
-
 /// Serialize each `Proof<F>` component into its own byte buffer and report
 /// per-part raw + zstd-compressed sizes, so we can see how much each part
 /// of the proof contributes to the total size. Sizes match the per-field
@@ -1704,8 +2198,9 @@ where
     }
 
     // 3 commitments concatenated (each ConstTranscribable, no length prefix).
-    let mut commits =
-        Vec::with_capacity(3_usize.saturating_mul(<ZipPlusCommitment as ConstTranscribable>::NUM_BYTES));
+    let mut commits = Vec::with_capacity(
+        3_usize.saturating_mul(<ZipPlusCommitment as ConstTranscribable>::NUM_BYTES),
+    );
     commits.extend_from_slice(&to_bytes(&proof.commitments.0));
     commits.extend_from_slice(&to_bytes(&proof.commitments.1));
     commits.extend_from_slice(&to_bytes(&proof.commitments.2));
@@ -1878,8 +2373,6 @@ fn eprint_folded_4x_zip_substep_breakdown<F>(
     );
 }
 
-
-
 //
 // Real-UAIR folded benches (1× and 4×). These reuse the generic
 // `do_bench_e2e_folded` / `do_bench_e2e_folded_4x` helpers above with
@@ -1907,13 +2400,7 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedRealE
         Int<5>,
         DensePolynomial<Int<5>, HALF_DEGREE_PLUS_ONE>,
         BinaryPolyInnerProduct<Self::Chal, HALF_DEGREE_PLUS_ONE>,
-        DensePolyInnerProduct<
-            Int<5>,
-            Self::Chal,
-            Int<5>,
-            MBSInnerProduct,
-            HALF_DEGREE_PLUS_ONE,
-        >,
+        DensePolyInnerProduct<Int<5>, Self::Chal, Int<5>, MBSInnerProduct, HALF_DEGREE_PLUS_ONE>,
         MBSInnerProduct,
     >;
 
@@ -1924,7 +2411,6 @@ impl FoldedZincTypes<DEGREE_PLUS_ONE, HALF_DEGREE_PLUS_ONE> for BenchFoldedRealE
     type ArbitraryLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc;
     type IntLc = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc;
 }
-
 
 //
 // 4× int-fold variant of the bench Zinc-types. Implements
@@ -1993,13 +2479,7 @@ impl
         Int<5>,
         DensePolynomial<Int<5>, QUARTER_DEGREE_PLUS_ONE>,
         BinaryPolyInnerProduct<Self::Chal, QUARTER_DEGREE_PLUS_ONE>,
-        DensePolyInnerProduct<
-            Int<5>,
-            Self::Chal,
-            Int<5>,
-            MBSInnerProduct,
-            QUARTER_DEGREE_PLUS_ONE,
-        >,
+        DensePolyInnerProduct<Int<5>, Self::Chal, Int<5>, MBSInnerProduct, QUARTER_DEGREE_PLUS_ONE>,
         MBSInnerProduct,
     >;
     type ArbitraryZt = <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt;
@@ -2084,11 +2564,10 @@ fn bench_real_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: u
     let trace = U::generate_random_trace(num_vars, &mut rng);
     let pp = setup_folded_pp_real_ecdsa(num_vars);
 
-    let proj_ideal = |_: &IdealOrZero<<U as Uair>::Ideal>,
-                      _: &<F as PrimeField>::Config|
-     -> ImpossibleIdeal {
-        unreachable!("EcdsaUair has only assert_zero constraints")
-    };
+    let proj_ideal =
+        |_: &IdealOrZero<<U as Uair>::Ideal>, _: &<F as PrimeField>::Config| -> ImpossibleIdeal {
+            unreachable!("EcdsaUair has only assert_zero constraints")
+        };
 
     do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
         group,
@@ -2137,14 +2616,10 @@ fn bench_real_sha_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_var
     );
 }
 
-
 /// ShaEcdsa 4× folded: binary AND int both quartered
 /// (BinaryPoly<8> / Int<2>) and committed under one Merkle tree
 /// via `MultiZip3`. One Merkle path per opening instead of three.
-fn bench_real_sha_ecdsa_e2e_folded_4x(
-    group: &mut BenchmarkGroup<WallTime>,
-    num_vars: usize,
-) {
+fn bench_real_sha_ecdsa_e2e_folded_4x(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = ShaEcdsaUair<RealEcdsaInt>;
 
     let mut rng = rng();
@@ -2221,7 +2696,6 @@ fn print_peak_rss(label: &str) {
     let gib = mib / 1024.0;
     eprintln!("[{label}] peak RSS: {bytes} B ({mib:.2} MiB / {gib:.3} GiB)");
 }
-
 
 criterion_group! {
     name = e2e;

@@ -66,8 +66,7 @@ use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
     ConstraintBuilder, PublicColumnLayout, ShiftSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace,
-    ideal::ImpossibleIdeal,
+    UairSignature, UairTrace, ideal::ImpossibleIdeal,
 };
 
 use crate::GenerateRandomTrace;
@@ -215,8 +214,7 @@ where
         let x_sq_x_s = x_sq.clone() * &xs; // X²·X·S = X³·S
         let twelve_x3s = mbs(&x_sq_x_s, &twelve_scalar).expect("12·X³·S overflow");
         let x_sq_xmid = x_sq.clone() * x_mid;
-        let three_xsq_xmid =
-            mbs(&x_sq_xmid, &three_scalar).expect("3·X²·X_mid overflow");
+        let three_xsq_xmid = mbs(&x_sq_xmid, &three_scalar).expect("3·X²·X_mid overflow");
         let s_sq = s_w.clone() * s_w;
         let eight_s_sq = mbs(&s_sq, &eight_scalar).expect("8·S² overflow");
         let c4_inner = y_mid.clone() - &twelve_x3s + &three_xsq_xmid + &eight_s_sq;
@@ -326,10 +324,7 @@ fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIMBS> {
 }
 
 /// `(a · b) mod p`.
-fn mul_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
     let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
     let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
@@ -356,10 +351,7 @@ fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
 }
 
 /// `(a − b) mod p`, allowing `a < b`.
-fn sub_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn sub_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     if a.checked_sub(b).is_some().into() {
         a.wrapping_sub(b).rem_vartime(&p_nz)

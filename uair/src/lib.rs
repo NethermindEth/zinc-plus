@@ -526,9 +526,10 @@ impl UairSignature {
                 spec.witness_col_idx,
             );
             let flat_col = spec.witness_col_idx + num_pub_bin;
-            let matched = self.shifts.iter().any(|s| {
-                s.source_col() == flat_col && s.shift_amount() == spec.shift_amount
-            });
+            let matched = self
+                .shifts
+                .iter()
+                .any(|s| s.source_col() == flat_col && s.shift_amount() == spec.shift_amount);
             assert!(
                 matched,
                 "ShiftedBitSliceSpec(col {}, shift {}) has no matching ShiftSpec",
@@ -556,9 +557,7 @@ impl UairSignature {
                 let mut bin_down_idx = 0usize;
                 for s in &self.shifts {
                     if s.source_col() < num_total_bin {
-                        if s.source_col() == flat_col
-                            && s.shift_amount() == spec.shift_amount
-                        {
+                        if s.source_col() == flat_col && s.shift_amount() == spec.shift_amount {
                             return bin_down_idx;
                         }
                         bin_down_idx += 1;
@@ -661,10 +660,7 @@ impl UairSignature {
     /// binary_poly cols. Per-bit closing overrides on the verifier side
     /// bind each bit's MLE eval to the spec residual.
     #[must_use]
-    pub fn with_virtual_binary_poly_cols(
-        mut self,
-        cols: Vec<VirtualBinaryPolySpec>,
-    ) -> Self {
+    pub fn with_virtual_binary_poly_cols(mut self, cols: Vec<VirtualBinaryPolySpec>) -> Self {
         let num_wit_bin = self.witness_cols.num_binary_poly_cols();
         let num_pub_bin = self.public_cols.num_binary_poly_cols();
         let num_shifted = self.shifted_bit_slice_specs.len();
@@ -1002,8 +998,5 @@ pub enum PublicStructureError {
     /// expected closed-form value (e.g. the tail-corrector boundary
     /// formula).
     #[error("public column '{column}' at row {row} has wrong value")]
-    WrongValue {
-        column: &'static str,
-        row: usize,
-    },
+    WrongValue { column: &'static str, row: usize },
 }

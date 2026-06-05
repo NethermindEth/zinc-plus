@@ -5,6 +5,9 @@ mod phase_verify;
 pub use phase_prove::ZipPlusProveByteBreakdown;
 pub use phase_verify::{VerifyPreOpen, VerifyPreOpenReads};
 pub mod folding;
+pub mod generic;
+pub mod hyrax;
+pub mod msm_commitment;
 pub mod multi_zip;
 pub mod structs;
 #[cfg(test)]
