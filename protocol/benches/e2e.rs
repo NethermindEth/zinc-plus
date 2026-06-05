@@ -55,7 +55,7 @@ use zip_plus::{
         iprs::{IprsCode, PnttConfigF65537},
     },
     pcs::generic::{PCS, ZipPlusPCS},
-    pcs::hyrax::{BinaryLanes, HyraxPCS},
+    pcs::hyrax::{BinaryLanes, HyraxBlindingMode, HyraxPCS},
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     utils::{eprint_bytes_size, eprint_bytes_size_breakdown, eprint_proof_size},
 };
@@ -1255,8 +1255,13 @@ where
         u64::try_from(width + 1).expect("Hyrax blinding basis index must fit in u64"),
     );
     let h = generator * h_scalar;
-    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h)
-        .expect("Hyrax benchmark setup must be valid");
+    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+        width,
+        bases,
+        h,
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("Hyrax benchmark setup must be valid");
     (
         PCSParams::<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
             binary: ck,
@@ -1392,13 +1397,13 @@ fn bench_real_sha256_pcs_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usi
         group,
         num_vars,
         "RealSha256PCS/ZipBn254Fr",
-        "RealSha256PCS/HyraxBn254",
+        "RealSha256PCS/HyraxBn254Unblinded",
     );
     bench_real_sha256_pcs_curve_e2e::<ark_secp256k1::Affine>(
         group,
         num_vars,
         "RealSha256PCS/ZipSecp256k1Fr",
-        "RealSha256PCS/HyraxSecp256k1",
+        "RealSha256PCS/HyraxSecp256k1Unblinded",
     );
 }
 
@@ -1407,13 +1412,13 @@ fn bench_real_sha256_pcs_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: u
         group,
         num_vars,
         "RealSha256PCS/ZipBn254Fr",
-        "RealSha256PCS/HyraxBn254",
+        "RealSha256PCS/HyraxBn254Unblinded",
     );
     bench_real_sha256_pcs_curve_steps::<ark_secp256k1::Affine>(
         group,
         num_vars,
         "RealSha256PCS/ZipSecp256k1Fr",
-        "RealSha256PCS/HyraxSecp256k1",
+        "RealSha256PCS/HyraxSecp256k1Unblinded",
     );
 }
 

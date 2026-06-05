@@ -7,7 +7,7 @@ use std::hint::black_box;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 use zip_plus::pcs::{
     generic::PCS,
-    hyrax::{BinaryLanes, HyraxCommitmentKey, HyraxPCS},
+    hyrax::{BinaryLanes, HyraxBlindingMode, HyraxCommitmentKey, HyraxPCS},
     msm_commitment::{BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, RowMsmStrategy},
 };
 
@@ -35,9 +35,14 @@ fn msm_ck<C: AffineRepr>(width: usize) -> MsmCommitmentKey<C> {
 
 fn hyrax_ck<C: AffineRepr>(width: usize) -> HyraxCommitmentKey<C> {
     let (bases, h) = bases_and_h::<C>(width);
-    HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h)
-        .expect("benchmark setup must be valid")
-        .0
+    HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+        width,
+        bases,
+        h,
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("benchmark setup must be valid")
+    .0
 }
 
 fn bool_row(width: usize) -> Vec<bool> {

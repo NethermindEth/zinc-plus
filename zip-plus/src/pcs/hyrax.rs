@@ -27,8 +27,8 @@ use crate::{
     pcs::{
         generic::PCS,
         msm_commitment::{
-            BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, MsmError, MsmVerifierKey,
-            RowMsmStrategy, ScalarPippengerMsm,
+            BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, MsmError, RowMsmStrategy,
+            ScalarPippengerMsm,
         },
     },
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
@@ -37,11 +37,30 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct HyraxPCS<C: AffineRepr, Lanes>(PhantomData<(C, Lanes)>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HyraxBlindingMode {
+    Blinded,
+    Unblinded,
+}
+
+impl HyraxBlindingMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Blinded => 1,
+            Self::Unblinded => 0,
+        }
+    }
+
+    fn is_blinded(self) -> bool {
+        matches!(self, Self::Blinded)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HyraxCommitmentKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
-    pub(crate) bases: Vec<C>,
-    pub(crate) h: C::Group,
+    pub(crate) blinding_mode: HyraxBlindingMode,
+    pub(crate) msm_ck: MsmCommitmentKey<C>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +68,7 @@ pub struct HyraxVerifierKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
     pub(crate) bases: Vec<C>,
     pub(crate) h: C::Group,
+    pub(crate) blinding_mode: HyraxBlindingMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +76,7 @@ pub struct HyraxCommitment<C: AffineRepr> {
     pub(crate) batch_size: usize,
     pub(crate) num_lanes: usize,
     pub(crate) num_rows: usize,
+    pub(crate) blinding_mode: HyraxBlindingMode,
     pub(crate) comm: Vec<C::Group>,
 }
 
@@ -64,6 +85,7 @@ pub struct HyraxProverData<C: AffineRepr> {
     pub(crate) batch_size: usize,
     pub(crate) num_lanes: usize,
     pub(crate) num_rows: usize,
+    pub(crate) blinding_mode: HyraxBlindingMode,
     pub(crate) blinds: Vec<C::ScalarField>,
 }
 
@@ -250,22 +272,32 @@ impl<C: AffineRepr, Lanes> HyraxPCS<C, Lanes> {
         bases: Vec<C>,
         h: C::Group,
     ) -> Result<(HyraxCommitmentKey<C>, HyraxVerifierKey<C>), ZipError> {
+        Self::setup_from_bases_with_blinding(width, bases, h, HyraxBlindingMode::Blinded)
+    }
+
+    pub fn setup_from_bases_with_blinding(
+        width: usize,
+        bases: Vec<C>,
+        h: C::Group,
+        blinding_mode: HyraxBlindingMode,
+    ) -> Result<(HyraxCommitmentKey<C>, HyraxVerifierKey<C>), ZipError> {
         if !width.is_power_of_two() {
             return Err(ZipError::InvalidPcsParam(format!(
                 "Hyrax row width must be a power of two, got {width}"
             )));
         }
-        let (_ck, _vk) = msm_keys(width, bases.clone(), h)?;
+        let msm_ck = msm_key(width, bases.clone(), h)?;
         Ok((
             HyraxCommitmentKey {
                 num_cols: width,
-                bases: bases.clone(),
-                h,
+                blinding_mode,
+                msm_ck,
             },
             HyraxVerifierKey {
                 num_cols: width,
                 bases,
                 h,
+                blinding_mode,
             },
         ))
     }
@@ -284,9 +316,7 @@ where
     type ProverData = HyraxProverData<C>;
 
     fn precompute_ck(ck: &Self::CommitmentKey) {
-        if let Ok((msm_ck, _)) = msm_keys(ck.num_cols, ck.bases.clone(), ck.h) {
-            Lanes::Strategy::precompute_ck(&msm_ck);
-        }
+        Lanes::Strategy::precompute_ck(&ck.msm_ck);
     }
 
     fn commit(
@@ -299,12 +329,14 @@ where
                     batch_size: 0,
                     num_lanes: Lanes::NUM_LANES,
                     num_rows: 0,
+                    blinding_mode: ck.blinding_mode,
                     blinds: Vec::new(),
                 },
                 HyraxCommitment {
                     batch_size: 0,
                     num_lanes: Lanes::NUM_LANES,
                     num_rows: 0,
+                    blinding_mode: ck.blinding_mode,
                     comm: Vec::new(),
                 },
             ));
@@ -313,20 +345,31 @@ where
         validate_polys(polys)?;
         let n = polys[0].evaluations.len();
         let num_rows = num_rows(n, ck.num_cols)?;
-        let (msm_ck, _) = msm_keys(ck.num_cols, ck.bases.clone(), ck.h)?;
         let mut all_comm = Vec::with_capacity(polys.len() * Lanes::NUM_LANES * num_rows);
-        let mut all_blinds = Vec::with_capacity(polys.len() * Lanes::NUM_LANES * num_rows);
+        let mut all_blinds = if ck.blinding_mode.is_blinded() {
+            Vec::with_capacity(polys.len() * Lanes::NUM_LANES * num_rows)
+        } else {
+            Vec::new()
+        };
 
         for poly in polys {
             for lane in 0..Lanes::NUM_LANES {
                 let values = lane_values::<C, Lanes, Eval, D>(poly, lane)?;
-                let blind = MsmCommitmentEngine::<C>::blind(&msm_ck, values.len());
-                let commitment = MsmCommitmentEngine::<C>::commit_with::<_, Lanes::Strategy>(
-                    &msm_ck, &values, &blind,
-                )
-                .map_err(msm_err)?;
+                let commitment = if ck.blinding_mode.is_blinded() {
+                    let blind = MsmCommitmentEngine::<C>::blind(&ck.msm_ck, values.len());
+                    let commitment = MsmCommitmentEngine::<C>::commit_with::<_, Lanes::Strategy>(
+                        &ck.msm_ck, &values, &blind,
+                    )
+                    .map_err(msm_err)?;
+                    all_blinds.extend(blind.blind);
+                    commitment
+                } else {
+                    MsmCommitmentEngine::<C>::commit_unblinded_with::<_, Lanes::Strategy>(
+                        &ck.msm_ck, &values,
+                    )
+                    .map_err(msm_err)?
+                };
                 all_comm.extend(commitment.comm);
-                all_blinds.extend(blind.blind);
             }
         }
 
@@ -335,12 +378,14 @@ where
                 batch_size: polys.len(),
                 num_lanes: Lanes::NUM_LANES,
                 num_rows,
+                blinding_mode: ck.blinding_mode,
                 blinds: all_blinds,
             },
             HyraxCommitment {
                 batch_size: polys.len(),
                 num_lanes: Lanes::NUM_LANES,
                 num_rows,
+                blinding_mode: ck.blinding_mode,
                 comm: all_comm,
             },
         ))
@@ -351,6 +396,7 @@ where
         transcript.absorb_slice(&(commitment.batch_size as u64).to_le_bytes());
         transcript.absorb_slice(&(commitment.num_lanes as u64).to_le_bytes());
         transcript.absorb_slice(&(commitment.num_rows as u64).to_le_bytes());
+        transcript.absorb_slice(&[commitment.blinding_mode.as_u8()]);
         for comm in &commitment.comm {
             let bytes = group_bytes::<C>(comm).unwrap_or_default();
             transcript.absorb_slice(&bytes);
@@ -360,13 +406,14 @@ where
 
     fn commitment_num_bytes(commitment: &Self::Commitment) -> usize {
         let group_size = C::zero().serialized_size(Compress::Yes);
-        3 * core::mem::size_of::<u64>() + commitment.comm.len() * group_size
+        3 * core::mem::size_of::<u64>() + 1 + commitment.comm.len() * group_size
     }
 
     fn write_commitment_bytes(commitment: &Self::Commitment, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&(commitment.batch_size as u64).to_le_bytes());
         buf.extend_from_slice(&(commitment.num_lanes as u64).to_le_bytes());
         buf.extend_from_slice(&(commitment.num_rows as u64).to_le_bytes());
+        buf.push(commitment.blinding_mode.as_u8());
         for comm in &commitment.comm {
             let bytes = group_bytes::<C>(comm).expect("Hyrax commitment must serialize");
             buf.extend_from_slice(&bytes);
@@ -394,7 +441,12 @@ where
             return Ok(());
         }
         validate_polys(polys)?;
-        validate_hyrax_shape::<C, Lanes, Eval, D>(ck.num_cols, polys, prover_data)?;
+        validate_hyrax_shape::<C, Lanes, Eval, D>(
+            ck.num_cols,
+            ck.blinding_mode,
+            polys,
+            prover_data,
+        )?;
 
         let n = polys[0].evaluations.len();
         if n != (1usize << point.len()) {
@@ -449,14 +501,16 @@ where
                 let alpha = alphas[alpha_index_dynamic(Lanes::NUM_LANES, poly_idx, lane)];
                 for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
                     let coeff = alpha * row_coeffs[row_idx];
-                    let blind_idx = commitment_index_dynamic(
-                        Lanes::NUM_LANES,
-                        poly_idx,
-                        lane,
-                        row_idx,
-                        prover_data.num_rows,
-                    );
-                    rho_star += coeff * prover_data.blinds[blind_idx];
+                    if ck.blinding_mode.is_blinded() {
+                        let blind_idx = commitment_index_dynamic(
+                            Lanes::NUM_LANES,
+                            poly_idx,
+                            lane,
+                            row_idx,
+                            prover_data.num_rows,
+                        );
+                        rho_star += coeff * prover_data.blinds[blind_idx];
+                    }
                     for (col_idx, eval) in row.iter().enumerate() {
                         let value = Lanes::lane_to_scalar(Lanes::lane_value(eval, lane)?);
                         combined_row[col_idx] += coeff * value;
@@ -466,7 +520,9 @@ where
         }
 
         write_scalars::<C>(transcript, &combined_row)?;
-        write_scalar::<C>(transcript, &rho_star)?;
+        if ck.blinding_mode.is_blinded() {
+            write_scalar::<C>(transcript, &rho_star)?;
+        }
 
         if q0_f.len() != b_f.len() {
             return Err(ZipError::InvalidPcsOpen(
@@ -492,6 +548,11 @@ where
         let _ = CHECK_FOR_OVERFLOW;
         if commitment.batch_size == 0 {
             return Ok(());
+        }
+        if commitment.blinding_mode != vk.blinding_mode {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax commitment blinding mode mismatch".to_string(),
+            ));
         }
         validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
         if lifted_evals.len() != commitment.batch_size {
@@ -560,7 +621,11 @@ where
         };
 
         let combined_row = read_scalars::<C>(transcript, vk.num_cols)?;
-        let rho_star = read_scalar::<C>(transcript)?;
+        let rho_star = if vk.blinding_mode.is_blinded() {
+            Some(read_scalar::<C>(transcript)?)
+        } else {
+            None
+        };
 
         let mut lhs = C::ScalarField::zero();
         for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
@@ -593,13 +658,15 @@ where
             }
         }
 
-        let (msm_ck, _) = msm_keys(vk.num_cols, vk.bases.clone(), vk.h)?;
+        let msm_ck = msm_key(vk.num_cols, vk.bases.clone(), vk.h)?;
         let mut expected = <ScalarPippengerMsm as RowMsmStrategy<C, C::ScalarField>>::msm_row(
             &msm_ck,
             &combined_row,
         )
         .map_err(msm_err)?;
-        expected += vk.h * rho_star;
+        if let Some(rho_star) = rho_star {
+            expected += vk.h * rho_star;
+        }
 
         if comm_lc != expected {
             return Err(ZipError::InvalidPcsOpen(
@@ -627,6 +694,7 @@ fn validate_polys<Eval: Clone>(polys: &[DenseMultilinearExtension<Eval>]) -> Res
 
 fn validate_hyrax_shape<C, Lanes, Eval, const D: usize>(
     width: usize,
+    blinding_mode: HyraxBlindingMode,
     polys: &[DenseMultilinearExtension<Eval>],
     prover_data: &HyraxProverData<C>,
 ) -> Result<(), ZipError>
@@ -637,10 +705,16 @@ where
 {
     let n = polys[0].evaluations.len();
     let num_rows = num_rows(n, width)?;
+    let expected_blinds = if blinding_mode.is_blinded() {
+        polys.len() * Lanes::NUM_LANES * num_rows
+    } else {
+        0
+    };
     if prover_data.batch_size != polys.len()
         || prover_data.num_lanes != Lanes::NUM_LANES
         || prover_data.num_rows != num_rows
-        || prover_data.blinds.len() != polys.len() * Lanes::NUM_LANES * num_rows
+        || prover_data.blinding_mode != blinding_mode
+        || prover_data.blinds.len() != expected_blinds
     {
         return Err(ZipError::InvalidPcsParam(
             "Hyrax prover data shape mismatch".to_string(),
@@ -740,12 +814,14 @@ fn uint_from_le_bytes<const LIMBS: usize>(bytes: &[u8]) -> Uint<LIMBS> {
     Uint::<LIMBS>::read_transcription_bytes_exact(&padded)
 }
 
-fn msm_keys<C: AffineRepr>(
+fn msm_key<C: AffineRepr>(
     width: usize,
     bases: Vec<C>,
     h: C::Group,
-) -> Result<(MsmCommitmentKey<C>, MsmVerifierKey<C>), ZipError> {
-    MsmCommitmentEngine::<C>::setup_from_bases(width, bases, h).map_err(msm_err)
+) -> Result<MsmCommitmentKey<C>, ZipError> {
+    MsmCommitmentEngine::<C>::setup_from_bases(width, bases, h)
+        .map(|(ck, _)| ck)
+        .map_err(msm_err)
 }
 
 fn num_rows(n: usize, width: usize) -> Result<usize, ZipError> {
@@ -943,8 +1019,10 @@ mod tests {
             <MontyField<4> as HyraxFieldBridge<ark_secp256k1::Affine>>::field_to_scalar(&bn_field);
     }
 
-    #[test]
-    fn binary_hyrax_open_verify_round_trip() {
+    fn binary_hyrax_open_verify_round_trip_with_modes(
+        commit_mode: HyraxBlindingMode,
+        verify_mode: HyraxBlindingMode,
+    ) -> Result<(), ZipError> {
         type C = ark_bn254::G1Affine;
         type F = MontyField<4>;
         const D: usize = 32;
@@ -958,9 +1036,20 @@ mod tests {
         let generator = <C as AffineRepr>::Group::generator();
         let bases = (1..=width)
             .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
-            .collect();
+            .collect::<Vec<_>>();
         let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
-        let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h).unwrap();
+        let (ck, _) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+            width,
+            bases.clone(),
+            h,
+            commit_mode,
+        )?;
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+            width,
+            bases,
+            h,
+            verify_mode,
+        )?;
 
         let evals0 = (0..width)
             .map(|idx| bp((idx as u32).wrapping_mul(0x9E37_79B1)))
@@ -973,7 +1062,7 @@ mod tests {
             DenseMultilinearExtension::from_evaluations_vec(9, evals1, bp(0)),
         ];
         let (prover_data, commitment) =
-            <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, &polys).unwrap();
+            <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, &polys)?;
 
         let point = [
             [0x11u8; 64],
@@ -1029,8 +1118,7 @@ mod tests {
             &point,
             &prover_data,
             &cfg,
-        )
-        .unwrap();
+        )?;
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
         <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
@@ -1051,6 +1139,32 @@ mod tests {
             &lifted_evals,
             &cfg,
         )
+    }
+
+    #[test]
+    fn binary_hyrax_open_verify_round_trip() {
+        binary_hyrax_open_verify_round_trip_with_modes(
+            HyraxBlindingMode::Blinded,
+            HyraxBlindingMode::Blinded,
+        )
         .unwrap();
+    }
+
+    #[test]
+    fn unblinded_binary_hyrax_open_verify_round_trip() {
+        binary_hyrax_open_verify_round_trip_with_modes(
+            HyraxBlindingMode::Unblinded,
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hyrax_rejects_blinding_mode_mismatch() {
+        let result = binary_hyrax_open_verify_round_trip_with_modes(
+            HyraxBlindingMode::Unblinded,
+            HyraxBlindingMode::Blinded,
+        );
+        assert!(result.is_err());
     }
 }

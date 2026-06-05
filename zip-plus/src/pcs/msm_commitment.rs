@@ -3,18 +3,24 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 
-use std::marker::PhantomData;
+use std::{
+    marker::PhantomData,
+    sync::{Arc, OnceLock},
+};
 
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{AdditiveGroup, BigInteger, One, PrimeField, UniformRand, Zero};
 use num_integer::Integer;
 use thiserror::Error;
 
+const DEFAULT_BOOL_WINDOW_BITS: usize = 6;
+
 #[derive(Clone, Debug)]
 pub struct MsmCommitmentKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
     pub(crate) bases: Vec<C>,
     pub(crate) h: C::Group,
+    bool_tables_6: Arc<OnceLock<BoolWindowTable<C>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +78,47 @@ pub struct BoolSubsetMsm<const WINDOW_BITS: usize = 6>;
 pub struct U8BucketMsm;
 pub struct ScalarPippengerMsm;
 
+#[derive(Clone, Debug)]
+struct BoolWindowTable<C: AffineRepr> {
+    tables: Vec<Vec<C::Group>>,
+    lens: Vec<usize>,
+}
+
+impl<C: AffineRepr> BoolWindowTable<C> {
+    fn new(bases: &[C], window_bits: usize) -> Self {
+        let built = bases
+            .chunks(window_bits)
+            .map(|window| {
+                let len = window.len();
+                let table_len = 1usize << len;
+                let mut table = vec![C::Group::zero(); table_len];
+                for mask in 1..table_len {
+                    let bit = mask.trailing_zeros() as usize;
+                    let previous = mask & !(1usize << bit);
+                    table[mask] = table[previous] + window[bit];
+                }
+                (table, len)
+            })
+            .collect::<Vec<_>>();
+
+        let (tables, lens) = built.into_iter().unzip();
+        Self { tables, lens }
+    }
+
+    fn msm_row(&self, values: &[bool], window_bits: usize) -> C::Group {
+        let mut acc = C::Group::zero();
+        for (window_idx, len) in self.lens.iter().copied().enumerate() {
+            let offset = window_idx * window_bits;
+            if offset >= values.len() {
+                break;
+            }
+            let end = (offset + len).min(values.len());
+            acc += self.tables[window_idx][bit_mask(&values[offset..end])];
+        }
+        acc
+    }
+}
+
 impl<C: AffineRepr> MsmCommitmentEngine<C> {
     pub fn setup_from_bases(
         width: usize,
@@ -97,12 +144,14 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
             num_cols: width,
             bases,
             h,
+            bool_tables_6: Arc::new(OnceLock::new()),
         };
 
         Ok((ck, vk))
     }
 
     pub fn precompute_ck(ck: &MsmCommitmentKey<C>) {
+        <BoolSubsetMsm<DEFAULT_BOOL_WINDOW_BITS> as RowMsmStrategy<C, bool>>::precompute_ck(ck);
         ScalarPippengerMsm::precompute_ck(ck);
     }
 
@@ -144,6 +193,35 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
         }
 
         Ok(MsmCommitment { comm })
+    }
+
+    pub fn commit_unblinded_with<V, S>(
+        ck: &MsmCommitmentKey<C>,
+        values: &[V],
+    ) -> Result<MsmCommitment<C>, MsmError>
+    where
+        V: Copy + Send + Sync,
+        S: RowMsmStrategy<C, V>,
+    {
+        let expected_rows = num_rows(values.len(), ck.num_cols)?;
+        let mut comm = Vec::with_capacity(expected_rows);
+        for row in values.chunks(ck.num_cols) {
+            let row_comm = if row.iter().copied().all(S::is_zero) {
+                C::Group::zero()
+            } else {
+                S::msm_row(ck, row)?
+            };
+            comm.push(row_comm);
+        }
+
+        Ok(MsmCommitment { comm })
+    }
+
+    pub fn commit_unblinded(
+        ck: &MsmCommitmentKey<C>,
+        values: &[C::ScalarField],
+    ) -> Result<MsmCommitment<C>, MsmError> {
+        Self::commit_unblinded_with::<C::ScalarField, ScalarPippengerMsm>(ck, values)
     }
 
     pub fn commit(
@@ -190,11 +268,23 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
 impl<C: AffineRepr, const WINDOW_BITS: usize> RowMsmStrategy<C, bool>
     for BoolSubsetMsm<WINDOW_BITS>
 {
-    fn precompute_ck(_ck: &MsmCommitmentKey<C>) {}
+    fn precompute_ck(ck: &MsmCommitmentKey<C>) {
+        if WINDOW_BITS == DEFAULT_BOOL_WINDOW_BITS {
+            ck.bool_tables_6
+                .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS));
+        }
+    }
 
     fn msm_row(ck: &MsmCommitmentKey<C>, values: &[bool]) -> Result<C::Group, MsmError> {
         validate_row_len(ck, values.len())?;
         validate_window_bits(WINDOW_BITS)?;
+
+        if WINDOW_BITS == DEFAULT_BOOL_WINDOW_BITS {
+            return Ok(ck
+                .bool_tables_6
+                .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS))
+                .msm_row(values, DEFAULT_BOOL_WINDOW_BITS));
+        }
 
         let mut acc = C::Group::zero();
         for (window_idx, bits) in values.chunks(WINDOW_BITS).enumerate() {
@@ -500,6 +590,23 @@ mod tests {
         MsmCommitment { comm }
     }
 
+    fn naive_scalar_commit_unblinded(
+        ck: &MsmCommitmentKey<TestCurve>,
+        values: &[Fr],
+    ) -> MsmCommitment<TestCurve> {
+        let comm = values
+            .chunks(ck.num_cols)
+            .map(|row| {
+                let mut acc = G1Projective::zero();
+                for (scalar, base) in row.iter().zip(ck.bases.iter()) {
+                    acc += *base * scalar;
+                }
+                acc
+            })
+            .collect();
+        MsmCommitment { comm }
+    }
+
     #[test]
     fn bool_commit_matches_scalar_commit_for_configured_widths() {
         for width in [8, 32, 64] {
@@ -518,6 +625,64 @@ mod tests {
                 .expect("scalar commit must succeed");
 
             assert_eq!(bool_comm, scalar_comm);
+        }
+    }
+
+    #[test]
+    fn precomputed_bool_commit_matches_scalar_commit_for_wide_rows() {
+        for width in [8, 32, 64, 512] {
+            let (ck, _) = setup(width);
+            let n = width + 5;
+            let values = bool_values(n);
+            let scalars = scalars_from_bool(&values);
+            let blind = blind(width, n);
+
+            let before_precompute = MsmCommitmentEngine::<TestCurve>::commit_with::<
+                bool,
+                BoolSubsetMsm<6>,
+            >(&ck, &values, &blind)
+            .expect("bool commit before precompute must succeed");
+            MsmCommitmentEngine::<TestCurve>::precompute_ck(&ck);
+            let after_precompute = MsmCommitmentEngine::<TestCurve>::commit_with::<
+                bool,
+                BoolSubsetMsm<6>,
+            >(&ck, &values, &blind)
+            .expect("bool commit after precompute must succeed");
+            let cloned_ck = ck.clone();
+            let after_clone =
+                MsmCommitmentEngine::<TestCurve>::commit_with::<bool, BoolSubsetMsm<6>>(
+                    &cloned_ck, &values, &blind,
+                )
+                .expect("bool commit through cloned ck must succeed");
+            let scalar_comm = MsmCommitmentEngine::<TestCurve>::commit(&ck, &scalars, &blind)
+                .expect("scalar commit must succeed");
+
+            assert_eq!(before_precompute, scalar_comm);
+            assert_eq!(after_precompute, scalar_comm);
+            assert_eq!(after_clone, scalar_comm);
+        }
+    }
+
+    #[test]
+    fn unblinded_bool_commit_matches_scalar_commit_for_wide_rows() {
+        for width in [8, 32, 64, 512] {
+            let (ck, _) = setup(width);
+            let n = width + 7;
+            let values = bool_values(n);
+            let scalars = scalars_from_bool(&values);
+
+            MsmCommitmentEngine::<TestCurve>::precompute_ck(&ck);
+            let bool_comm = MsmCommitmentEngine::<TestCurve>::commit_unblinded_with::<
+                bool,
+                BoolSubsetMsm<6>,
+            >(&ck, &values)
+            .expect("unblinded bool commit must succeed");
+            let scalar_comm = MsmCommitmentEngine::<TestCurve>::commit_unblinded(&ck, &scalars)
+                .expect("unblinded scalar commit must succeed");
+            let naive_comm = naive_scalar_commit_unblinded(&ck, &scalars);
+
+            assert_eq!(bool_comm, scalar_comm);
+            assert_eq!(bool_comm, naive_comm);
         }
     }
 
