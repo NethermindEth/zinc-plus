@@ -26,7 +26,7 @@ use zinc_protocol::{
     FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
     fixed_prime::field_cfg_from_curve_scalar,
     pcs::{
-        AllZipPCSTypes, BinaryHyraxZipRest, PCSCommitments, PCSParams, PCSVerifierParams,
+        AllZipPCSTypes, BinaryIntHyraxZipArbitrary, PCSCommitments, PCSParams, PCSVerifierParams,
         ZincPCSTypes,
     },
 };
@@ -55,7 +55,7 @@ use zip_plus::{
         iprs::{IprsCode, PnttConfigF65537},
     },
     pcs::generic::{PCS, ZipPlusPCS},
-    pcs::hyrax::{BinaryLanes, HyraxBlindingMode, HyraxPCS},
+    pcs::hyrax::{BinaryLanes, HyraxBlindingMode, HyraxPCS, IntScalarLane},
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     utils::{eprint_bytes_size, eprint_bytes_size_breakdown, eprint_proof_size},
 };
@@ -1221,11 +1221,11 @@ fn zip_pcs_params(
 fn hyrax_pcs_params<C: AffineRepr>(
     num_vars: usize,
 ) -> (
-    PCSParams<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
-    PCSVerifierParams<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
 )
 where
-    BinaryHyraxZipRest<C>: ZincPCSTypes<
+    BinaryIntHyraxZipArbitrary<C>: ZincPCSTypes<
             RealEcdsaBenchZincTypes,
             F,
             DEGREE_PLUS_ONE,
@@ -1234,30 +1234,39 @@ where
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
             >,
-            IntPCS = ZipPlusPCS<
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
-            >,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
         >,
 {
     let pp = setup_pp_real_ecdsa(num_vars);
-    let width = pp.0.linear_code.row_len();
-    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup(
-        width,
-        b"zinc-plus-bench-real-sha256-hyrax",
+    let binary_width = pp.0.linear_code.row_len();
+    let int_width = pp.2.linear_code.row_len();
+    let (binary, binary_vk) = HyraxPCS::<C, BinaryLanes>::setup(
+        binary_width,
+        b"zinc-plus-bench-real-sha256-hyrax-binary",
         HyraxBlindingMode::Unblinded,
     )
-    .expect("Hyrax benchmark setup must be valid");
+    .expect("Hyrax binary benchmark setup must be valid");
+    let (int, int_vk) = HyraxPCS::<C, IntScalarLane>::setup(
+        int_width,
+        b"zinc-plus-bench-real-sha256-hyrax-int",
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("Hyrax int benchmark setup must be valid");
     (
-        PCSParams::<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
-            binary: ck,
+        PCSParams::<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary,
             arbitrary: pp.1.clone(),
-            int: pp.2.clone(),
+            int,
         },
-        PCSVerifierParams::<BinaryHyraxZipRest<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
-            binary: vk,
+        PCSVerifierParams::<
+            BinaryIntHyraxZipArbitrary<C>,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        > {
+            binary: binary_vk,
             arbitrary: pp.1,
-            int: pp.2,
+            int: int_vk,
         },
     )
 }
@@ -1268,7 +1277,7 @@ fn bench_real_sha256_pcs_curve_e2e<C: AffineRepr>(
     zip_label: &str,
     hyrax_label: &str,
 ) where
-    BinaryHyraxZipRest<C>: ZincPCSTypes<
+    BinaryIntHyraxZipArbitrary<C>: ZincPCSTypes<
             RealEcdsaBenchZincTypes,
             F,
             DEGREE_PLUS_ONE,
@@ -1277,10 +1286,7 @@ fn bench_real_sha256_pcs_curve_e2e<C: AffineRepr>(
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
             >,
-            IntPCS = ZipPlusPCS<
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
-            >,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
         >,
 {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
@@ -1307,7 +1313,7 @@ fn bench_real_sha256_pcs_curve_e2e<C: AffineRepr>(
     );
 
     let (hyrax_pp, hyrax_vp) = hyrax_pcs_params::<C>(num_vars);
-    do_bench_pcs_e2e::<RealEcdsaBenchZincTypes, U, _, BinaryHyraxZipRest<C>>(
+    do_bench_pcs_e2e::<RealEcdsaBenchZincTypes, U, _, BinaryIntHyraxZipArbitrary<C>>(
         group,
         hyrax_label,
         num_vars,
@@ -1326,7 +1332,7 @@ fn bench_real_sha256_pcs_curve_steps<C: AffineRepr>(
     zip_label: &str,
     hyrax_label: &str,
 ) where
-    BinaryHyraxZipRest<C>: ZincPCSTypes<
+    BinaryIntHyraxZipArbitrary<C>: ZincPCSTypes<
             RealEcdsaBenchZincTypes,
             F,
             DEGREE_PLUS_ONE,
@@ -1335,10 +1341,7 @@ fn bench_real_sha256_pcs_curve_steps<C: AffineRepr>(
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
                 <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
             >,
-            IntPCS = ZipPlusPCS<
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
-                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
-            >,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
         >,
 {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
@@ -1365,7 +1368,7 @@ fn bench_real_sha256_pcs_curve_steps<C: AffineRepr>(
     );
 
     let (hyrax_pp, hyrax_vp) = hyrax_pcs_params::<C>(num_vars);
-    do_bench_pcs_steps::<RealEcdsaBenchZincTypes, U, _, BinaryHyraxZipRest<C>>(
+    do_bench_pcs_steps::<RealEcdsaBenchZincTypes, U, _, BinaryIntHyraxZipArbitrary<C>>(
         group,
         hyrax_label,
         num_vars,

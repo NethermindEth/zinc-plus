@@ -32,6 +32,13 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryU64Poly<DEGREE_PLUS_ONE> {
     pub const fn inner(&self) -> &u64 {
         &self.0
     }
+
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn coeff(&self, idx: usize) -> bool {
+        assert!(idx < DEGREE_PLUS_ONE && idx < u64::BITS as usize);
+        !(self.0 & (1 << idx)).is_zero()
+    }
 }
 
 impl<const DEGREE_PLUS_ONE: usize> From<BinaryU64Poly<DEGREE_PLUS_ONE>> for u64 {
