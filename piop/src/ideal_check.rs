@@ -3,6 +3,7 @@ mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
 
+pub(crate) use batched_ideal_check::batched_ideal_check;
 pub use structs::*;
 
 #[cfg(feature = "parallel")]
@@ -406,6 +407,12 @@ where
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
         let combined_mle_values = proof.combined_mle_values;
+        if combined_mle_values.len() != num_constraints {
+            return Err(IdealCheckError::ProofValueCount {
+                got: combined_mle_values.len(),
+                expected: num_constraints,
+            });
+        }
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -445,6 +452,8 @@ pub enum IdealCheckError<F: PrimeField, I> {
     IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
     #[error("`eq` polynomial construction failure: {0}")]
     EqPolyConstructionError(#[from] PolyArithErrors),
+    #[error("ideal-check proof value count mismatch: got {got}, expected {expected}")]
+    ProofValueCount { got: usize, expected: usize },
 }
 
 #[cfg(test)]
@@ -577,5 +586,37 @@ mod tests {
             num_vars,
             |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
         );
+    }
+
+    #[test]
+    fn verifier_rejects_truncated_proof_values() {
+        let field_cfg = test_config();
+        let num_vars = 2;
+        let mut rng = rng();
+        let transcript = Blake3Transcript::new();
+        type U = TestUairNoMultiplication<Int<5>>;
+
+        let (mut proof, ..) = run_ideal_check_prover_linear::<U, 32>(
+            num_vars,
+            &U::generate_random_trace(num_vars, &mut rng),
+            &mut transcript.clone(),
+        );
+        let num_constraints = count_constraints::<U>();
+        proof.combined_mle_values.pop();
+
+        let result = U::verify_as_subprotocol(
+            &mut transcript.clone(),
+            proof,
+            num_constraints,
+            num_vars,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            &field_cfg,
+        );
+
+        assert!(matches!(
+            result,
+            Err(IdealCheckError::ProofValueCount { got, expected })
+                if got + 1 == expected && expected == num_constraints
+        ));
     }
 }
