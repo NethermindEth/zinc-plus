@@ -4,6 +4,11 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     utils::{ArithErrors, build_eq_x_r_inner, build_eq_x_r_vec},
 };
+use zinc_utils::{
+    UNCHECKED,
+    delayed_reduction::DelayedFieldProductSum,
+    inner_product::{FieldFieldInnerProduct, InnerProduct},
+};
 
 use crate::sumcheck::multi_degree::MultiDegreeSumcheckGroup;
 
@@ -26,6 +31,12 @@ pub enum SumFoldError {
     Ell0TooLarge { ell0: usize, ell: usize },
     #[error("beta length mismatch: got {got}, expected {expected}")]
     BetaLengthMismatch { got: usize, expected: usize },
+    #[error("{label} length mismatch: got {got}, expected {expected}")]
+    WeightLengthMismatch {
+        label: &'static str,
+        got: usize,
+        expected: usize,
+    },
     #[error("sumcheck group construction requires ell0 > 0")]
     SumcheckNeedsNonzeroEll0,
     #[error("equality table construction failed: {0}")]
@@ -91,6 +102,32 @@ pub struct LinearPrefixTable<F: PrimeField> {
 }
 
 impl<F: PrimeField> LinearPrefixTable<F> {
+    pub(crate) fn from_values_for_prefix_vars(
+        values: Vec<F>,
+        ell: usize,
+        prefix_vars: usize,
+    ) -> Result<Self, SumFoldError> {
+        if prefix_vars > ell {
+            return Err(SumFoldError::Ell0TooLarge {
+                ell0: prefix_vars,
+                ell,
+            });
+        }
+        let expected = checked_domain_size(prefix_vars)?;
+        if values.len() != expected {
+            return Err(SumFoldError::InstanceCountMismatch {
+                ell: prefix_vars,
+                got: values.len(),
+                expected,
+            });
+        }
+        Ok(Self {
+            values,
+            ell,
+            ell0: prefix_vars,
+        })
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     pub fn build(
         instance_claims: &LinearInstanceClaims<F>,
@@ -167,9 +204,64 @@ impl<F: PrimeField> LinearPrefixTable<F> {
 
 impl<F> LinearPrefixTable<F>
 where
-    F: PrimeField + 'static,
+    F: PrimeField + DelayedFieldProductSum + 'static,
     F::Inner: num_traits::Zero,
 {
+    pub fn build_sumcheck_claim(
+        &self,
+        prefix_eq_weights: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<F, SumFoldError> {
+        if prefix_eq_weights.len() != self.values.len() {
+            return Err(SumFoldError::WeightLengthMismatch {
+                label: "prefix_eq_weights",
+                got: prefix_eq_weights.len(),
+                expected: self.values.len(),
+            });
+        }
+
+        Ok(FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            prefix_eq_weights,
+            &self.values,
+            F::zero_with_cfg(field_cfg),
+        )
+        .expect("prefix equality weights and table values have matching lengths"))
+    }
+
+    pub fn build_sumcheck_group_from_prefix_weights(
+        &self,
+        prefix_eq_weights: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<MultiDegreeSumcheckGroup<F>, SumFoldError> {
+        if self.ell0 == 0 {
+            return Err(SumFoldError::SumcheckNeedsNonzeroEll0);
+        }
+        if prefix_eq_weights.len() != self.values.len() {
+            return Err(SumFoldError::WeightLengthMismatch {
+                label: "prefix_eq_weights",
+                got: prefix_eq_weights.len(),
+                expected: self.values.len(),
+            });
+        }
+
+        let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+        let eq_prefix = DenseMultilinearExtension::from_evaluations_vec(
+            self.ell0,
+            prefix_eq_weights
+                .iter()
+                .map(|value| value.inner().clone())
+                .collect(),
+            zero_inner,
+        );
+        let table = self.to_mle(field_cfg);
+
+        Ok(MultiDegreeSumcheckGroup::new(
+            2,
+            vec![eq_prefix, table],
+            Box::new(|values: &[F]| values[0].clone() * &values[1]),
+        ))
+    }
+
     pub fn build_sumcheck_group(
         &self,
         beta_prefix: &[F],
@@ -196,7 +288,7 @@ where
     }
 }
 
-fn checked_domain_size(ell: usize) -> Result<usize, SumFoldError> {
+pub(crate) fn checked_domain_size(ell: usize) -> Result<usize, SumFoldError> {
     let shift = u32::try_from(ell).map_err(|_| SumFoldError::DomainTooLarge { ell })?;
     1usize
         .checked_shl(shift)
