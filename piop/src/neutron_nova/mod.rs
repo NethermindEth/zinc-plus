@@ -5,11 +5,17 @@
 //! protocol proof objects or verifier flow.
 
 pub mod accumulator;
+pub mod booleanity;
 pub mod linear_cpr;
 pub mod sumfold;
 
 pub use accumulator::{
     AccumulatorError, RowWeights, SmallValueBitAccumulator, accumulate_binary_column_projected,
+};
+pub use booleanity::{
+    BooleanityAccumulatorError, BooleanityPrefixTable, BooleanityScalarWeights, BooleanityWeights,
+    ExtendedPrefixPoint, build_booleanity_prefix_table, extended_point_from_index,
+    extended_point_index, ternary_domain_size,
 };
 pub use linear_cpr::{
     CoeffClass, LinearBinarySource, LinearCprAccumulatorError, LinearCprScalarWeights,

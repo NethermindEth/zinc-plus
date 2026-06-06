@@ -1,4 +1,4 @@
-use crate::neutron_nova::{RowWeights, sumfold::checked_domain_size};
+use crate::neutron_nova::{RowWeights, accumulator::dmr_flush_adds, sumfold::checked_domain_size};
 use crate::sumcheck::multi_degree::MultiDegreeSumcheckGroup;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, crypto_bigint_uint::Uint};
 use num_traits::Zero;
@@ -17,8 +17,6 @@ use zinc_utils::{
 use super::{LinearPrefixTable, SumFoldError};
 
 const PREFIX_TILE_SIZE: usize = 8;
-const DMR_FLUSH_ADDS: usize = 1 << 20;
-
 /// Precomputed equality weights for the instance-axis SumFold split.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SumFoldEqWeights<F: PrimeField> {
@@ -27,19 +25,34 @@ pub struct SumFoldEqWeights<F: PrimeField> {
 }
 
 /// Precomputed multiplication weights used by the linear CPR accumulator.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct LinearCprWeights<'a, F: PrimeField> {
     pub row_weights: &'a RowWeights<F>,
     pub tail_eq_weights: &'a [F],
-    pub prefix_eq_weights: &'a [F],
 }
 
+impl<F: PrimeField> Clone for LinearCprWeights<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: PrimeField> Copy for LinearCprWeights<'_, F> {}
+
 /// Precomputed scalar weights applied after row/tail DMR reduction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct LinearCprScalarWeights<'a, F: PrimeField> {
     pub family_weights: &'a [F],
     pub scalarization_powers: &'a [F],
 }
+
+impl<F: PrimeField> Clone for LinearCprScalarWeights<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: PrimeField> Copy for LinearCprScalarWeights<'_, F> {}
 
 /// One linear CPR family described as small-coefficient binary source terms.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,7 +178,7 @@ pub enum LinearCprAccumulatorError {
 struct PreparedFamily<F: PrimeField> {
     family_idx: usize,
     active_rows: Vec<usize>,
-    coeff_classes: Vec<CoeffClass<F>>,
+    coeff_values: Vec<F>,
     terms: Vec<PreparedTerm>,
 }
 
@@ -236,13 +249,6 @@ where
             expected: tail_len,
         });
     }
-    if weights.prefix_eq_weights.len() != prefix_len {
-        return Err(LinearCprAccumulatorError::LengthMismatch {
-            label: "prefix_eq_weights",
-            got: weights.prefix_eq_weights.len(),
-            expected: prefix_len,
-        });
-    }
     if scalar_weights.scalarization_powers.len() < D {
         return Err(LinearCprAccumulatorError::LengthMismatch {
             label: "scalarization_powers",
@@ -257,6 +263,7 @@ where
         scalar_weights.family_weights.len(),
         num_binary_cols,
         weights.row_weights.len(),
+        field_cfg,
     )?;
 
     let mut table_values = vec![F::zero_with_cfg(field_cfg); prefix_len];
@@ -264,7 +271,7 @@ where
 
     for family in &prepared {
         let family_weight = &scalar_weights.family_weights[family.family_idx];
-        if family.coeff_classes.is_empty() {
+        if family.coeff_values.is_empty() {
             continue;
         }
 
@@ -314,7 +321,7 @@ where
     Int: Clone,
 {
     let bucket_count = tile_len
-        .checked_mul(family.coeff_classes.len())
+        .checked_mul(family.coeff_values.len())
         .ok_or(LinearCprAccumulatorError::DomainTooLarge { vars: prefix_vars })?;
     let mut buckets: Vec<[Uint<5>; D]> = vec![[Uint::zero(); D]; bucket_count];
     let zero = F::zero_with_cfg(field_cfg);
@@ -322,6 +329,7 @@ where
         .map(|_| array::from_fn(|_| zero.clone()))
         .collect();
     let mut pending_adds = 0usize;
+    let flush_adds = dmr_flush_adds(reduction_params);
 
     for tail in 0..tail_len {
         let tail_weight = &weights.tail_eq_weights[tail];
@@ -341,14 +349,14 @@ where
                     else {
                         continue;
                     };
-                    let bucket_idx = prefix_offset * family.coeff_classes.len() + coeff_idx;
+                    let bucket_idx = prefix_offset * family.coeff_values.len() + coeff_idx;
                     pending_adds = pending_adds.saturating_add(add_poly_bits_to_bucket(
                         poly,
                         &omega,
                         &mut buckets[bucket_idx],
                     ));
 
-                    if pending_adds >= DMR_FLUSH_ADDS {
+                    if pending_adds >= flush_adds {
                         flush_buckets_into_lanes(
                             &mut buckets,
                             &mut lane_accs,
@@ -367,15 +375,15 @@ where
     for prefix_offset in 0..tile_len {
         let prefix = tile_start + prefix_offset;
         let mut family_value = zero.clone();
-        for (coeff_idx, coeff_class) in family.coeff_classes.iter().enumerate() {
-            let bucket_idx = prefix_offset * family.coeff_classes.len() + coeff_idx;
+        for (coeff_idx, coeff_value) in family.coeff_values.iter().enumerate() {
+            let bucket_idx = prefix_offset * family.coeff_values.len() + coeff_idx;
             let projected = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
                 &lane_accs[bucket_idx],
                 &scalarization_powers[..D],
                 zero.clone(),
             )
             .expect("lane accumulator and scalarization powers have matching lengths");
-            family_value += coeff_class.to_field(field_cfg) * projected;
+            family_value += coeff_value.clone() * projected;
         }
         table_values[prefix] += family_weight.clone() * family_value;
     }
@@ -433,6 +441,7 @@ fn prepare_families<F>(
     family_weight_len: usize,
     num_binary_cols: usize,
     row_count: usize,
+    field_cfg: &F::Config,
 ) -> Result<Vec<PreparedFamily<F>>, LinearCprAccumulatorError>
 where
     F: FromPrimitiveWithConfig,
@@ -498,10 +507,15 @@ where
             });
         }
 
+        let coeff_values = coeff_classes
+            .iter()
+            .map(|coeff| coeff.to_field(field_cfg))
+            .collect();
+
         prepared.push(PreparedFamily {
             family_idx: family.family_idx,
             active_rows: family.active_rows.clone(),
-            coeff_classes,
+            coeff_values,
             terms,
         });
     }
@@ -781,7 +795,6 @@ mod tests {
             LinearCprWeights {
                 row_weights: &row_weights,
                 tail_eq_weights: &eq_weights.tail_eq_weights,
-                prefix_eq_weights: &eq_weights.prefix_eq_weights,
             },
             LinearCprScalarWeights {
                 family_weights: &family_weights,
@@ -798,7 +811,6 @@ mod tests {
             LinearCprWeights {
                 row_weights: &row_weights,
                 tail_eq_weights: &eq_weights.tail_eq_weights,
-                prefix_eq_weights: &eq_weights.prefix_eq_weights,
             },
             LinearCprScalarWeights {
                 family_weights: &family_weights,
@@ -878,6 +890,43 @@ mod tests {
     }
 
     #[test]
+    fn optimized_linear_cpr_flushes_dmr_for_small_modulus() {
+        let cfg = test_config();
+        let trace_count = 2048usize;
+        let traces: Vec<_> = (0..trace_count)
+            .map(|_| trace_from_columns(&[u32::MAX], &[0]))
+            .collect();
+        let families = vec![LinearFamilySpec {
+            family_idx: 0,
+            active_rows: vec![0],
+            terms: vec![LinearTermSpec {
+                source: LinearBinarySource::Column { col_idx: 0 },
+                coeffs_by_active_row: vec![CoeffClass::Small(1)],
+            }],
+        }];
+        let row_weights = RowWeights::new(&[], &cfg).unwrap();
+        let max = -F::from_with_cfg(1u64, &cfg);
+        let tail_eq_weights = vec![max; trace_count];
+        let family_weights = vec![F::one_with_cfg(&cfg)];
+        let scalarization_powers = scalar_weights();
+        let weights = LinearCprWeights {
+            row_weights: &row_weights,
+            tail_eq_weights: &tail_eq_weights,
+        };
+        let scalar_weights = LinearCprScalarWeights {
+            family_weights: &family_weights,
+            scalarization_powers: &scalarization_powers,
+        };
+
+        let table =
+            build_linear_cpr_prefix_table(&traces, 0, &families, weights, scalar_weights, &cfg)
+                .unwrap();
+        let expected = naive_linear_cpr_table(&traces, 0, &families, weights, scalar_weights);
+
+        assert_eq!(table.values(), expected.as_slice());
+    }
+
+    #[test]
     fn optimized_linear_cpr_validation_errors_are_reported() {
         let cfg = test_config();
         let traces = sample_traces();
@@ -893,7 +942,6 @@ mod tests {
             LinearCprWeights {
                 row_weights: &row_weights,
                 tail_eq_weights: &[F::one_with_cfg(&cfg)],
-                prefix_eq_weights: &[F::one_with_cfg(&cfg)],
             },
             LinearCprScalarWeights {
                 family_weights: &family_weights,
@@ -910,7 +958,6 @@ mod tests {
             }
         ));
 
-        let wrong_prefix_weights = vec![F::one_with_cfg(&cfg); 4];
         let err = build_linear_cpr_prefix_table(
             &traces,
             2,
@@ -918,7 +965,6 @@ mod tests {
             LinearCprWeights {
                 row_weights: &row_weights,
                 tail_eq_weights: &[],
-                prefix_eq_weights: &wrong_prefix_weights,
             },
             LinearCprScalarWeights {
                 family_weights: &family_weights,
@@ -946,7 +992,6 @@ mod tests {
             LinearCprWeights {
                 row_weights: &row_weights,
                 tail_eq_weights: &eq_weights.tail_eq_weights,
-                prefix_eq_weights: &eq_weights.prefix_eq_weights,
             },
             LinearCprScalarWeights {
                 family_weights: &family_weights,

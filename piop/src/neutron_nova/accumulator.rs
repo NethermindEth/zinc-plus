@@ -1,6 +1,6 @@
 use crypto_primitives::{PrimeField, crypto_bigint_uint::Uint};
 use num_traits::Zero;
-use std::marker::PhantomData;
+use std::array;
 use thiserror::Error;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
@@ -9,10 +9,22 @@ use zinc_poly::{
 };
 use zinc_utils::{
     UNCHECKED,
-    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettReductionParams, DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs,
+    },
     inner_product::{FieldFieldInnerProduct, InnerProduct},
     powers,
 };
+
+const DMR_FLUSH_ADDS: usize = 1 << 20;
+
+pub(crate) fn dmr_flush_adds(reduction_params: &BarrettReductionParams) -> usize {
+    if reduction_params.modulus[3] == 0 {
+        1
+    } else {
+        DMR_FLUSH_ADDS
+    }
+}
 
 /// Errors produced by NeutronNova row-space accumulation helpers.
 #[derive(Clone, Debug, Error)]
@@ -78,39 +90,50 @@ impl<F: PrimeField> RowWeights<F> {
 
 /// DMR-backed bit buckets for one small-value binary-polynomial column.
 #[derive(Clone, Debug)]
-pub struct SmallValueBitAccumulator<F: PrimeField, const D: usize> {
+pub struct SmallValueBitAccumulator<'a, F: PrimeField, const D: usize> {
     buckets: [Uint<5>; D],
-    _field: PhantomData<F>,
+    lane_accs: [F; D],
+    pending_adds: usize,
+    flush_adds: usize,
+    field_cfg: &'a F::Config,
+    reduction_params: BarrettReductionParams,
 }
 
-impl<F: PrimeField, const D: usize> Default for SmallValueBitAccumulator<F, D> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<F: PrimeField, const D: usize> SmallValueBitAccumulator<F, D> {
-    pub fn new() -> Self {
-        Self {
-            buckets: [Uint::zero(); D],
-            _field: PhantomData,
-        }
-    }
-
-    pub fn buckets(&self) -> &[Uint<5>] {
-        &self.buckets
-    }
-}
-
-impl<F, const D: usize> SmallValueBitAccumulator<F, D>
+impl<'a, F, const D: usize> SmallValueBitAccumulator<'a, F, D>
 where
     F: MontgomeryLimbs + Send + Sync,
 {
+    pub fn new(field_cfg: &'a F::Config) -> Self {
+        let reduction_params = F::barrett_reduction_params(field_cfg);
+        let flush_adds = dmr_flush_adds(&reduction_params);
+        let zero = F::zero_with_cfg(field_cfg);
+        Self {
+            buckets: [Uint::zero(); D],
+            lane_accs: array::from_fn(|_| zero.clone()),
+            pending_adds: 0,
+            flush_adds,
+            field_cfg,
+            reduction_params,
+        }
+    }
+
+    /// Pending unreduced DMR buckets.
+    ///
+    /// Flushed contributions live in the reduced lane accumulators, so this is
+    /// only useful for low-level tests and diagnostics.
+    pub fn pending_buckets(&self) -> &[Uint<5>] {
+        &self.buckets
+    }
+
     pub fn add_bit_weight(&mut self, bit_idx: usize, weight: &F) -> Result<(), AccumulatorError> {
         let Some(bucket) = self.buckets.get_mut(bit_idx) else {
             return Err(AccumulatorError::BitIndexOutOfRange { bit_idx, degree: D });
         };
         <Uint<5> as DelayedModularReduction<F>>::add(bucket, weight);
+        self.pending_adds = self.pending_adds.saturating_add(1);
+        if self.pending_adds >= self.flush_adds {
+            self.flush_buckets();
+        }
         Ok(())
     }
 
@@ -144,30 +167,32 @@ where
         Ok(())
     }
 
-    pub fn reduce_buckets(
-        self,
-        field_cfg: &F::Config,
-        reduction_params: &zinc_utils::delayed_reduction::BarrettReductionParams,
-    ) -> Vec<F> {
-        self.buckets
-            .into_iter()
-            .map(|bucket| {
-                <Uint<5> as DelayedModularReduction<F>>::reduce(bucket, field_cfg, reduction_params)
-            })
-            .collect()
+    pub fn reduce_buckets(mut self) -> Vec<F> {
+        self.flush_buckets();
+        self.lane_accs.into_iter().collect()
+    }
+
+    fn flush_buckets(&mut self) {
+        for (bucket, acc) in self.buckets.iter_mut().zip(self.lane_accs.iter_mut()) {
+            if bucket.is_zero() {
+                continue;
+            }
+            let pending = std::mem::replace(bucket, Uint::zero());
+            *acc += <Uint<5> as DelayedModularReduction<F>>::reduce(
+                pending,
+                self.field_cfg,
+                &self.reduction_params,
+            );
+        }
+        self.pending_adds = 0;
     }
 }
 
-impl<F, const D: usize> SmallValueBitAccumulator<F, D>
+impl<F, const D: usize> SmallValueBitAccumulator<'_, F, D>
 where
     F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
-    pub fn project(
-        self,
-        projection_powers: &[F],
-        field_cfg: &F::Config,
-        reduction_params: &zinc_utils::delayed_reduction::BarrettReductionParams,
-    ) -> Result<F, AccumulatorError> {
+    pub fn project(mut self, projection_powers: &[F]) -> Result<F, AccumulatorError> {
         if projection_powers.len() < D {
             return Err(AccumulatorError::ProjectionPowersLengthMismatch {
                 got: projection_powers.len(),
@@ -175,10 +200,10 @@ where
             });
         }
 
-        let zero = F::zero_with_cfg(field_cfg);
-        let bucket_evals = self.reduce_buckets(field_cfg, reduction_params);
+        self.flush_buckets();
+        let zero = F::zero_with_cfg(self.field_cfg);
         Ok(FieldFieldInnerProduct::inner_product::<UNCHECKED>(
-            &bucket_evals,
+            &self.lane_accs,
             &projection_powers[..D],
             zero,
         )
@@ -209,19 +234,19 @@ where
 
     let one = F::one_with_cfg(field_cfg);
     let projection_powers: Vec<F> = powers(projecting_element.clone(), one, D);
-    let reduction_params = F::barrett_reduction_params(field_cfg);
-    let mut accumulator = SmallValueBitAccumulator::<F, D>::new();
+    let mut accumulator = SmallValueBitAccumulator::<F, D>::new(field_cfg);
 
     for (poly, weight) in column.iter().zip(row_weights.as_slice()) {
         accumulator.add_binary_poly(poly, weight)?;
     }
 
-    accumulator.project(&projection_powers, field_cfg, &reduction_params)
+    accumulator.project(&projection_powers)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::test_config;
     use crypto_bigint::{Odd, modular::MontyParams};
     use crypto_primitives::{FromWithConfig, crypto_bigint_monty::MontyField};
     use zinc_utils::powers;
@@ -260,8 +285,8 @@ mod tests {
         column: &DenseMultilinearExtension<BinaryPoly<32>>,
         row_weights: &RowWeights<F>,
         projecting_element: &F,
+        cfg: &MontyParams<4>,
     ) -> F {
-        let cfg = field_cfg();
         let zero = F::zero_with_cfg(&cfg);
         let one = F::one_with_cfg(&cfg);
         let powers = powers(projecting_element.clone(), one, 32);
@@ -299,9 +324,31 @@ mod tests {
         let got =
             accumulate_binary_column_projected(&column, &row_weights, &projecting_element, &cfg)
                 .unwrap();
-        let expected = naive_projected_sum(&column, &row_weights, &projecting_element);
+        let expected = naive_projected_sum(&column, &row_weights, &projecting_element, &cfg);
 
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn small_value_bit_accumulator_flushes_for_small_modulus() {
+        let cfg = test_config();
+        let max = -F::from_with_cfg(1u64, &cfg);
+        let mut accumulator = SmallValueBitAccumulator::<F, 32>::new(&cfg);
+        let mut expected = F::zero_with_cfg(&cfg);
+
+        for _ in 0..2048 {
+            accumulator.add_bit_weight(7, &max).unwrap();
+            expected += &max;
+        }
+
+        let lanes = accumulator.reduce_buckets();
+        assert_eq!(lanes[7], expected);
+        assert!(
+            lanes
+                .iter()
+                .enumerate()
+                .all(|(lane, value)| lane == 7 || F::is_zero(value))
+        );
     }
 
     #[test]
