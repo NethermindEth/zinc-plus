@@ -69,6 +69,35 @@ where
         F::Modulus: Transcribable;
 }
 
+/// Homomorphic extension of [`PCS`] used by instance-axis folding protocols.
+///
+/// Implementations must satisfy:
+///
+/// ```text
+/// fold_commitments([Com(w_i; eta_i)], theta)
+///   = Com(sum_i theta_i w_i; sum_i theta_i eta_i)
+/// ```
+///
+/// Non-homomorphic commitments, such as Merkle roots, must not implement this
+/// trait.
+pub trait FoldablePCS<F, Eval, const D: usize>: PCS<F, Eval, D>
+where
+    F: PrimeField,
+    Eval: Clone + Debug + Send + Sync,
+{
+    fn fold_commitments(
+        commitments: &[Self::Commitment],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::Commitment, ZipError>;
+
+    fn fold_prover_data(
+        prover_data: &[Self::ProverData],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::ProverData, ZipError>;
+}
+
 #[derive(Clone, Debug)]
 pub struct ZipPlusPCS<Zt: ZipTypes, Lc: LinearCode<Zt>>(PhantomData<(Zt, Lc)>);
 

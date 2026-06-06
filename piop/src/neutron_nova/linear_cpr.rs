@@ -1,10 +1,17 @@
 use crate::neutron_nova::{RowWeights, accumulator::dmr_flush_adds, sumfold::checked_domain_size};
-use crate::sumcheck::multi_degree::MultiDegreeSumcheckGroup;
+use crate::sumcheck::{
+    multi_degree::{MultiDegreeSumcheckGroup, PrefixFastPath, PrefixRoundOutput},
+    prover::ProverState as SumcheckProverState,
+};
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, crypto_bigint_uint::Uint};
 use num_traits::Zero;
 use std::array;
 use thiserror::Error;
-use zinc_poly::univariate::binary::BinaryPoly;
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::binary::BinaryPoly,
+    utils::{build_eq_x_r_inner, build_eq_x_r_vec, eq_eval},
+};
 use zinc_uair::UairTrace;
 use zinc_utils::{
     UNCHECKED,
@@ -12,6 +19,7 @@ use zinc_utils::{
         BarrettReductionParams, DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs,
     },
     inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_transparent_field::InnerTransparentField,
 };
 
 use super::{LinearPrefixTable, SumFoldError};
@@ -298,6 +306,367 @@ where
 
     LinearPrefixTable::from_values_for_prefix_vars(table_values, ell, prefix_vars)
         .map_err(LinearCprAccumulatorError::from)
+}
+
+/// Build the post-prefix CPR claim table `claim(r_prefix, tail)`.
+///
+/// Unlike [`build_linear_cpr_prefix_table`], this does not apply tail equality
+/// weights. The resumed ordinary sumcheck keeps
+/// `eq(beta_prefix, r_prefix) * eq(beta_tail, tail)` as its separate equality
+/// MLE, so this table only binds the CPR claim MLE along the prefix variables.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+pub fn build_linear_cpr_prefix_bound_tail_table<F, PolyCoeff, Int, const D: usize>(
+    traces: &[UairTrace<'_, PolyCoeff, Int, D>],
+    prefix_vars: usize,
+    prefix_point: &[F],
+    families: &[LinearFamilySpec<F>],
+    row_weights: &RowWeights<F>,
+    scalar_weights: LinearCprScalarWeights<'_, F>,
+    field_cfg: &F::Config,
+) -> Result<DenseMultilinearExtension<F::Inner>, LinearCprAccumulatorError>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig,
+    F::Inner: Zero,
+    PolyCoeff: Clone,
+    Int: Clone,
+{
+    let ell = validate_trace_count(traces.len())?;
+    if prefix_vars > ell {
+        return Err(LinearCprAccumulatorError::PrefixVarsTooLarge { prefix_vars, ell });
+    }
+    if prefix_point.len() != prefix_vars {
+        return Err(LinearCprAccumulatorError::LengthMismatch {
+            label: "prefix_point",
+            got: prefix_point.len(),
+            expected: prefix_vars,
+        });
+    }
+    if scalar_weights.scalarization_powers.len() < D {
+        return Err(LinearCprAccumulatorError::LengthMismatch {
+            label: "scalarization_powers",
+            got: scalar_weights.scalarization_powers.len(),
+            expected: D,
+        });
+    }
+
+    let prefix_len = checked_domain_size(prefix_vars)?;
+    let tail_vars = ell - prefix_vars;
+    let tail_len = checked_domain_size(tail_vars)?;
+    let prefix_weights = if prefix_vars == 0 {
+        vec![F::one_with_cfg(field_cfg)]
+    } else {
+        zinc_poly::utils::build_eq_x_r_vec(prefix_point, field_cfg)?
+    };
+
+    let num_binary_cols = validate_traces(traces, row_weights.len())?;
+    let prepared = prepare_families(
+        families,
+        scalar_weights.family_weights.len(),
+        num_binary_cols,
+        row_weights.len(),
+        field_cfg,
+    )?;
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut tail_values = vec![zero.clone(); tail_len];
+    for (tail, tail_value) in tail_values.iter_mut().enumerate() {
+        for (prefix, prefix_weight) in prefix_weights.iter().enumerate().take(prefix_len) {
+            let instance_idx = prefix + (tail << prefix_vars);
+            let trace = &traces[instance_idx];
+
+            for family in &prepared {
+                let family_weight = &scalar_weights.family_weights[family.family_idx];
+                let mut family_value = zero.clone();
+
+                for (active_pos, &row) in family.active_rows.iter().enumerate() {
+                    let row_weight = &row_weights.as_slice()[row];
+                    for term in &family.terms {
+                        let Some(coeff_idx) = term.coeff_indices_by_active_row[active_pos] else {
+                            continue;
+                        };
+                        let Some(poly) = source_poly::<PolyCoeff, Int, D>(trace, &term.source, row)
+                        else {
+                            continue;
+                        };
+                        let coeff_value = &family.coeff_values[coeff_idx];
+
+                        for (bit_idx, bit) in poly.iter().enumerate().take(D) {
+                            if bit.into_inner() {
+                                let mut contribution = row_weight.clone();
+                                contribution *= coeff_value;
+                                contribution *= &scalar_weights.scalarization_powers[bit_idx];
+                                family_value += contribution;
+                            }
+                        }
+                    }
+                }
+
+                *tail_value += prefix_weight.clone() * family_weight * family_value;
+            }
+        }
+    }
+
+    let zero_inner = zero.inner().clone();
+    Ok(DenseMultilinearExtension::from_evaluations_vec(
+        tail_vars,
+        tail_values
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner,
+    ))
+}
+
+struct LinearCprPrefixFastPath<
+    F: PrimeField,
+    PolyCoeff: Clone + 'static,
+    Int: Clone + 'static,
+    const D: usize,
+> {
+    traces: Vec<UairTrace<'static, PolyCoeff, Int, D>>,
+    families: Vec<LinearFamilySpec<F>>,
+    row_weights: RowWeights<F>,
+    family_weights: Vec<F>,
+    scalarization_powers: Vec<F>,
+    beta: Vec<F>,
+    prefix_vars: usize,
+    prefix_state: SumcheckProverState<F>,
+}
+
+impl<F, PolyCoeff, Int, const D: usize> LinearCprPrefixFastPath<F, PolyCoeff, Int, D>
+where
+    F: MontgomeryLimbs
+        + InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Zero,
+    PolyCoeff: Clone + Send + Sync + 'static,
+    Int: Clone + Send + Sync + 'static,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        traces: Vec<UairTrace<'static, PolyCoeff, Int, D>>,
+        prefix_vars: usize,
+        beta: Vec<F>,
+        families: Vec<LinearFamilySpec<F>>,
+        row_weights: RowWeights<F>,
+        family_weights: Vec<F>,
+        scalarization_powers: Vec<F>,
+        field_cfg: &F::Config,
+    ) -> Result<Self, LinearCprAccumulatorError> {
+        let eq_weights = build_sumfold_eq_weights(&beta, prefix_vars, field_cfg)?;
+        let table = build_linear_cpr_prefix_table(
+            &traces,
+            prefix_vars,
+            &families,
+            LinearCprWeights {
+                row_weights: &row_weights,
+                tail_eq_weights: &eq_weights.tail_eq_weights,
+            },
+            LinearCprScalarWeights {
+                family_weights: &family_weights,
+                scalarization_powers: &scalarization_powers,
+            },
+            field_cfg,
+        )?;
+        let eq_prefix = build_eq_x_r_inner(&beta[..prefix_vars], field_cfg)?;
+        let prefix_state =
+            SumcheckProverState::new(vec![eq_prefix, table.to_mle(field_cfg)], prefix_vars, 2);
+
+        Ok(Self {
+            traces,
+            families,
+            row_weights,
+            family_weights,
+            scalarization_powers,
+            beta,
+            prefix_vars,
+            prefix_state,
+        })
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn finish_tail_mles(
+        self,
+        prefix_challenges: &[F],
+        field_cfg: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        debug_assert_eq!(prefix_challenges.len(), self.prefix_vars);
+        let tail_vars = self.beta.len() - self.prefix_vars;
+        let beta_tail_weights = build_eq_x_r_vec(&self.beta[self.prefix_vars..], field_cfg)
+            .expect("tail beta equality table should build");
+        let eq_prefix_at_r = eq_eval(
+            prefix_challenges,
+            &self.beta[..self.prefix_vars],
+            F::one_with_cfg(field_cfg),
+        )
+        .expect("prefix challenge and beta prefix lengths match");
+
+        let tail_claims = build_linear_cpr_prefix_bound_tail_table(
+            &self.traces,
+            self.prefix_vars,
+            prefix_challenges,
+            &self.families,
+            &self.row_weights,
+            LinearCprScalarWeights {
+                family_weights: &self.family_weights,
+                scalarization_powers: &self.scalarization_powers,
+            },
+            field_cfg,
+        )
+        .expect("validated CPR tail table should build");
+
+        let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+        let scaled_eq_tail = DenseMultilinearExtension::from_evaluations_vec(
+            tail_vars,
+            beta_tail_weights
+                .iter()
+                .map(|weight| (eq_prefix_at_r.clone() * weight).inner().clone())
+                .collect(),
+            zero_inner,
+        );
+
+        vec![scaled_eq_tail, tail_claims]
+    }
+}
+
+impl<F, PolyCoeff, Int, const D: usize> PrefixFastPath<F>
+    for LinearCprPrefixFastPath<F, PolyCoeff, Int, D>
+where
+    F: MontgomeryLimbs
+        + InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Zero,
+    PolyCoeff: Clone + Send + Sync + 'static,
+    Int: Clone + Send + Sync + 'static,
+{
+    fn prefix_len(&self) -> usize {
+        self.prefix_vars
+    }
+
+    fn prove_prefix_round(
+        &mut self,
+        verifier_msg: &Option<F>,
+        config: &F::Config,
+    ) -> PrefixRoundOutput<F> {
+        let msg = self.prefix_state.prove_round(
+            verifier_msg,
+            |values: &[F]| values[0].clone() * &values[1],
+            config,
+        );
+        let asserted_sum = if self.prefix_state.round == 1 {
+            self.prefix_state.asserted_sum.clone()
+        } else {
+            None
+        };
+
+        PrefixRoundOutput {
+            asserted_sum,
+            tail_evaluations: msg.0.tail_evaluations,
+        }
+    }
+
+    fn finish_prefix(
+        self: Box<Self>,
+        prefix_challenges: &[F],
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        self.finish_tail_mles(prefix_challenges, config)
+    }
+}
+
+/// Build a hybrid SumFold group for linear CPR over owned traces.
+///
+/// `prefix_vars = 0` falls back to an ordinary full sumcheck group over dense
+/// CPR claims. Positive prefixes emit CPR prefix-table sumcheck messages, bind
+/// the prefix at the sampled challenges, and resume the ordinary degree-2
+/// sumcheck over the tail variables.
+#[allow(clippy::too_many_arguments)]
+pub fn build_linear_cpr_hybrid_sumcheck_group<F, PolyCoeff, Int, const D: usize>(
+    traces: Vec<UairTrace<'static, PolyCoeff, Int, D>>,
+    prefix_vars: usize,
+    beta: &[F],
+    families: Vec<LinearFamilySpec<F>>,
+    row_weights: RowWeights<F>,
+    family_weights: Vec<F>,
+    scalarization_powers: Vec<F>,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, LinearCprAccumulatorError>
+where
+    F: MontgomeryLimbs
+        + InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Zero,
+    PolyCoeff: Clone + Send + Sync + 'static,
+    Int: Clone + Send + Sync + 'static,
+{
+    let ell = validate_trace_count(traces.len())?;
+    if beta.len() != ell {
+        return Err(LinearCprAccumulatorError::LengthMismatch {
+            label: "beta",
+            got: beta.len(),
+            expected: ell,
+        });
+    }
+    if prefix_vars > ell {
+        return Err(LinearCprAccumulatorError::PrefixVarsTooLarge { prefix_vars, ell });
+    }
+    if prefix_vars == 0 {
+        let claims = build_linear_cpr_prefix_bound_tail_table(
+            &traces,
+            0,
+            &[],
+            &families,
+            &row_weights,
+            LinearCprScalarWeights {
+                family_weights: &family_weights,
+                scalarization_powers: &scalarization_powers,
+            },
+            field_cfg,
+        )?;
+        let eq_beta = build_eq_x_r_inner(beta, field_cfg)?;
+        return Ok(MultiDegreeSumcheckGroup::new(
+            2,
+            vec![eq_beta, claims],
+            Box::new(|values: &[F]| values[0].clone() * &values[1]),
+        ));
+    }
+    if prefix_vars >= ell {
+        return Err(LinearCprAccumulatorError::SumFold(
+            SumFoldError::HybridPrefixNeedsTail {
+                ell0: prefix_vars,
+                ell,
+            },
+        ));
+    }
+
+    let fast_path = LinearCprPrefixFastPath::new(
+        traces,
+        prefix_vars,
+        beta.to_vec(),
+        families,
+        row_weights,
+        family_weights,
+        scalarization_powers,
+        field_cfg,
+    )?;
+    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+        2,
+        Vec::new(),
+        Box::new(|values: &[F]| values[0].clone() * &values[1]),
+        Box::new(fast_path),
+    ))
 }
 
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
@@ -600,29 +969,18 @@ fn flush_buckets_into_lanes<F, const D: usize>(
     }
 }
 
-impl<F> LinearPrefixTable<F>
-where
-    F: PrimeField + DelayedFieldProductSum + 'static,
-    F::Inner: num_traits::Zero,
-{
-    pub fn build_linear_cpr_sumcheck_group(
-        &self,
-        prefix_eq_weights: &[F],
-        field_cfg: &F::Config,
-    ) -> Result<MultiDegreeSumcheckGroup<F>, SumFoldError> {
-        self.build_sumcheck_group_from_prefix_weights(prefix_eq_weights, field_cfg)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{sumcheck::multi_degree::MultiDegreeSumcheck, test_utils::test_config};
+    use crate::{
+        neutron_nova::LinearInstanceClaims, sumcheck::multi_degree::MultiDegreeSumcheck,
+        test_utils::test_config,
+    };
     use crypto_primitives::{FromWithConfig, crypto_bigint_monty::MontyField};
     use std::borrow::Cow;
     use zinc_poly::{
         mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
-        utils::eq_eval,
+        utils::{build_eq_x_r_vec, eq_eval},
     };
     use zinc_transcript::Blake3Transcript;
     use zinc_utils::powers;
@@ -725,6 +1083,47 @@ mod tests {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
+    fn naive_linear_cpr_claims(
+        traces: &[Trace],
+        families: &[LinearFamilySpec<F>],
+        row_weights: &RowWeights<F>,
+        scalar_weights: LinearCprScalarWeights<'_, F>,
+    ) -> Vec<F> {
+        let cfg = test_config();
+        let mut claims = vec![F::zero_with_cfg(&cfg); traces.len()];
+
+        for (trace, claim) in traces.iter().zip(claims.iter_mut()) {
+            for family in families {
+                let mut family_value = F::zero_with_cfg(&cfg);
+                for (active_pos, &row) in family.active_rows.iter().enumerate() {
+                    for term in &family.terms {
+                        let coeff = &term.coeffs_by_active_row[active_pos];
+                        if coeff.is_zero() {
+                            continue;
+                        }
+                        let coeff_value = coeff.to_field(&cfg);
+                        let Some(poly) = source_poly::<F, F, 32>(trace, &term.source, row) else {
+                            continue;
+                        };
+
+                        for (bit_idx, bit) in poly.iter().enumerate().take(32) {
+                            if bit.into_inner() {
+                                let mut contribution = row_weights.as_slice()[row].clone();
+                                contribution *= &coeff_value;
+                                contribution *= &scalar_weights.scalarization_powers[bit_idx];
+                                family_value += contribution;
+                            }
+                        }
+                    }
+                }
+                *claim += scalar_weights.family_weights[family.family_idx].clone() * family_value;
+            }
+        }
+
+        claims
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
     fn naive_linear_cpr_table(
         traces: &[Trace],
         prefix_vars: usize,
@@ -737,39 +1136,13 @@ mod tests {
             usize::try_from(traces.len().trailing_zeros()).expect("trailing_zeros fits usize");
         let prefix_len = 1usize << prefix_vars;
         let tail_len = 1usize << (ell - prefix_vars);
+        let claims = naive_linear_cpr_claims(traces, families, weights.row_weights, scalar_weights);
         let mut table = vec![F::zero_with_cfg(&cfg); prefix_len];
 
         for (prefix, value) in table.iter_mut().enumerate() {
-            for family in families {
-                let mut family_value = F::zero_with_cfg(&cfg);
-                for tail in 0..tail_len {
-                    let instance_idx = prefix + (tail << prefix_vars);
-                    let trace = &traces[instance_idx];
-                    for (active_pos, &row) in family.active_rows.iter().enumerate() {
-                        for term in &family.terms {
-                            let coeff = &term.coeffs_by_active_row[active_pos];
-                            if coeff.is_zero() {
-                                continue;
-                            }
-                            let coeff_value = coeff.to_field(&cfg);
-                            let Some(poly) = source_poly::<F, F, 32>(trace, &term.source, row)
-                            else {
-                                continue;
-                            };
-
-                            for (bit_idx, bit) in poly.iter().enumerate().take(32) {
-                                if bit.into_inner() {
-                                    let mut contribution = weights.tail_eq_weights[tail].clone();
-                                    contribution *= &weights.row_weights.as_slice()[row];
-                                    contribution *= &coeff_value;
-                                    contribution *= &scalar_weights.scalarization_powers[bit_idx];
-                                    family_value += contribution;
-                                }
-                            }
-                        }
-                    }
-                }
-                *value += scalar_weights.family_weights[family.family_idx].clone() * family_value;
+            for tail in 0..tail_len {
+                let instance_idx = prefix + (tail << prefix_vars);
+                *value += weights.tail_eq_weights[tail].clone() * &claims[instance_idx];
             }
         }
 
@@ -845,47 +1218,157 @@ mod tests {
     }
 
     #[test]
-    fn optimized_linear_cpr_table_builds_degree_two_sumcheck() {
+    fn optimized_linear_cpr_prefix_bound_tail_table_matches_naive_claim_binding() {
         let cfg = test_config();
-        let beta = vec![f(19), f(23)];
-        let (table, eq_weights) = build_table_for_prefix_vars(2);
+        let traces = sample_traces();
+        let families = sample_families();
+        let prefix_vars = 1;
+        let prefix_point = vec![f(29)];
+        let row_weights = RowWeights::new(&[f(11), f(13)], &cfg).unwrap();
+        let family_weights = vec![f(5), f(17)];
+        let scalarization_powers = scalar_weights();
+        let scalar_weights = LinearCprScalarWeights {
+            family_weights: &family_weights,
+            scalarization_powers: &scalarization_powers,
+        };
 
-        let claim = table
-            .build_sumcheck_claim(&eq_weights.prefix_eq_weights, &cfg)
-            .unwrap();
-        let group = table
-            .build_sumcheck_group_from_prefix_weights(&eq_weights.prefix_eq_weights, &cfg)
-            .unwrap();
+        let tail_mle = build_linear_cpr_prefix_bound_tail_table(
+            &traces,
+            prefix_vars,
+            &prefix_point,
+            &families,
+            &row_weights,
+            scalar_weights,
+            &cfg,
+        )
+        .unwrap();
+        let dense_claims =
+            naive_linear_cpr_claims(&traces, &families, &row_weights, scalar_weights);
+        let prefix_weights = build_eq_x_r_vec(&prefix_point, &cfg).unwrap();
+
+        let tail_len = 1usize << (2 - prefix_vars);
+        let mut expected = vec![F::zero_with_cfg(&cfg); tail_len];
+        for (tail, value) in expected.iter_mut().enumerate() {
+            for (prefix, weight) in prefix_weights.iter().enumerate() {
+                let instance_idx = prefix + (tail << prefix_vars);
+                *value += weight.clone() * &dense_claims[instance_idx];
+            }
+        }
+
+        assert_eq!(tail_mle.num_vars, 1);
+        assert_eq!(
+            tail_mle.evaluations,
+            expected
+                .iter()
+                .map(|value| value.inner().clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn optimized_linear_cpr_hybrid_sumfold_matches_full_ordinary_sumcheck() {
+        let cfg = test_config();
+        let traces = sample_traces();
+        let families = sample_families();
+        let beta = vec![f(19), f(23)];
+        let row_weights = RowWeights::new(&[f(11), f(13)], &cfg).unwrap();
+        let family_weights = vec![f(5), f(17)];
+        let scalarization_powers = scalar_weights();
+        let scalar_weights = LinearCprScalarWeights {
+            family_weights: &family_weights,
+            scalarization_powers: &scalarization_powers,
+        };
+        let dense_claims =
+            naive_linear_cpr_claims(&traces, &families, &row_weights, scalar_weights);
+        let claims = LinearInstanceClaims::from_claims_for_ell(dense_claims, 2).unwrap();
+
+        let full_group = claims.build_full_sumcheck_group(&beta, &cfg).unwrap();
+        let optimized_group = build_linear_cpr_hybrid_sumcheck_group(
+            traces.clone(),
+            1,
+            &beta,
+            families.clone(),
+            row_weights.clone(),
+            family_weights.clone(),
+            scalarization_powers.clone(),
+            &cfg,
+        )
+        .unwrap();
+        let fallback_group = build_linear_cpr_hybrid_sumcheck_group(
+            traces,
+            0,
+            &beta,
+            families,
+            row_weights,
+            family_weights,
+            scalarization_powers,
+            &cfg,
+        )
+        .unwrap();
 
         let mut prover_transcript = Blake3Transcript::new();
-        let (proof, _states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        let (full_proof, _states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut prover_transcript,
-            vec![group],
-            table.ell0(),
+            vec![full_group],
+            2,
             &cfg,
         );
-
-        assert_eq!(proof.claimed_sums()[0], claim);
+        let mut prover_transcript = Blake3Transcript::new();
+        let (optimized_proof, _states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            &mut prover_transcript,
+            vec![optimized_group],
+            2,
+            &cfg,
+        );
+        assert_eq!(optimized_proof, full_proof);
+        let mut prover_transcript = Blake3Transcript::new();
+        let (fallback_proof, _states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            &mut prover_transcript,
+            vec![fallback_group],
+            2,
+            &cfg,
+        );
+        assert_eq!(fallback_proof, full_proof);
 
         let mut verifier_transcript = Blake3Transcript::new();
-        let subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+        let full_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut verifier_transcript,
-            table.ell0(),
-            &proof,
+            2,
+            &full_proof,
+            &cfg,
+        )
+        .expect("full linear CPR sumcheck should verify");
+        let mut verifier_transcript = Blake3Transcript::new();
+        let optimized_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+            &mut verifier_transcript,
+            2,
+            &optimized_proof,
             &cfg,
         )
         .expect("optimized linear CPR sumcheck should verify");
+        assert_eq!(optimized_subclaims.point(), full_subclaims.point());
+        assert_eq!(
+            optimized_subclaims.expected_evaluations(),
+            full_subclaims.expected_evaluations()
+        );
 
-        let point = subclaims.point();
+        let point = full_subclaims.point();
         let eq_at_point =
             eq_eval(point, &beta, F::one_with_cfg(&cfg)).expect("same number of variables");
-        let table_eval = table
-            .to_mle(&cfg)
-            .evaluate_with_config(point, &cfg)
-            .unwrap();
+        let zero_inner = F::zero_with_cfg(&cfg).inner().clone();
+        let claims_mle = DenseMultilinearExtension::from_evaluations_vec(
+            2,
+            claims
+                .claims()
+                .iter()
+                .map(|value| value.inner().clone())
+                .collect(),
+            zero_inner,
+        );
+        let claim_eval = claims_mle.evaluate_with_config(point, &cfg).unwrap();
         assert_eq!(
-            subclaims.expected_evaluations()[0],
-            eq_at_point * table_eval
+            full_subclaims.expected_evaluations()[0],
+            eq_at_point * claim_eval
         );
     }
 

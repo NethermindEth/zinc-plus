@@ -25,7 +25,7 @@ use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribabl
 use crate::{
     ZipError,
     pcs::{
-        generic::PCS,
+        generic::{FoldablePCS, PCS},
         msm_commitment::{
             BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, MsmError, RowMsmStrategy,
             ScalarPippengerMsm,
@@ -36,6 +36,114 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct HyraxPCS<C: AffineRepr, Lanes>(PhantomData<(C, Lanes)>);
+
+impl<C, Lanes> HyraxPCS<C, Lanes>
+where
+    C: AffineRepr,
+{
+    /// Open a folded Hyrax commitment whose lane values are already scalar
+    /// field elements.
+    ///
+    /// This is needed for instance-axis folds of binary commitments: after
+    /// folding by transcript-derived weights, each bit lane is a scalar field
+    /// linear combination of bits, not a `bool`.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_open_scalar_lanes<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        ck: &HyraxCommitmentKey<C>,
+        scalar_lanes: &[Vec<Vec<C::ScalarField>>],
+        point: &[F],
+        prover_data: &HyraxProverData<C>,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+        Lanes: Clone + Debug + Send + Sync,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        if scalar_lanes.is_empty() {
+            return Ok(());
+        }
+        validate_scalar_lanes::<C>(ck, scalar_lanes, point.len(), prover_data)?;
+
+        let n = scalar_lanes[0][0].len();
+        let point_scalar = point.iter().map(F::field_to_scalar).collect::<Vec<_>>();
+        let row_vars = prover_data.num_rows.ilog2() as usize;
+        let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
+        let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
+        let alphas = sample_scalars::<C>(
+            &mut transcript.fs_transcript,
+            scalar_lanes.len() * prover_data.num_lanes,
+        );
+
+        let mut b_scalar = vec![C::ScalarField::zero(); prover_data.num_rows];
+        for (poly_idx, lanes) in scalar_lanes.iter().enumerate() {
+            for (lane, values) in lanes.iter().enumerate() {
+                let alpha = alphas[alpha_index_dynamic(prover_data.num_lanes, poly_idx, lane)];
+                for (row_idx, row) in values.chunks(ck.num_cols).enumerate() {
+                    let mut row_eval = C::ScalarField::zero();
+                    for (col_idx, value) in row.iter().enumerate() {
+                        if let Some(weight) = q1_scalar.get(col_idx) {
+                            row_eval += *value * weight;
+                        }
+                    }
+                    b_scalar[row_idx] += alpha * row_eval;
+                }
+            }
+        }
+
+        let b_f = b_scalar
+            .iter()
+            .map(|value| F::scalar_to_field(value, field_cfg))
+            .collect::<Vec<_>>();
+        transcript.write_field_elements(&b_f)?;
+
+        let row_coeffs = if prover_data.num_rows == 1 {
+            vec![C::ScalarField::from(1u64)]
+        } else {
+            sample_scalars::<C>(&mut transcript.fs_transcript, prover_data.num_rows)
+        };
+
+        let mut combined_row = vec![C::ScalarField::zero(); ck.num_cols];
+        let mut rho_star = C::ScalarField::zero();
+        for (poly_idx, lanes) in scalar_lanes.iter().enumerate() {
+            for (lane, values) in lanes.iter().enumerate() {
+                let alpha = alphas[alpha_index_dynamic(prover_data.num_lanes, poly_idx, lane)];
+                for (row_idx, row) in values.chunks(ck.num_cols).enumerate() {
+                    let coeff = alpha * row_coeffs[row_idx];
+                    if ck.blinding_mode.is_blinded() {
+                        let blind_idx = commitment_index_dynamic(
+                            prover_data.num_lanes,
+                            poly_idx,
+                            lane,
+                            row_idx,
+                            prover_data.num_rows,
+                        );
+                        rho_star += coeff * prover_data.blinds[blind_idx];
+                    }
+                    for (col_idx, value) in row.iter().enumerate() {
+                        combined_row[col_idx] += coeff * value;
+                    }
+                }
+            }
+        }
+
+        write_scalars::<C>(transcript, &combined_row)?;
+        if ck.blinding_mode.is_blinded() {
+            write_scalar::<C>(transcript, &rho_star)?;
+        }
+
+        if q0_f.len() != b_f.len() || n != (1usize << point.len()) {
+            return Err(ZipError::InvalidPcsOpen(
+                "Hyrax folded scalar-lane opening shape mismatch".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HyraxBlindingMode {
@@ -115,6 +223,21 @@ where
         let scalar_uint = uint_from_le_bytes::<LIMBS>(&scalar_bigint.to_bytes_le());
         MontyField::<LIMBS>::from_with_cfg(&scalar_uint, cfg)
     }
+}
+
+fn validate_fold_inputs<T>(values: &[T], theta_len: usize, label: &str) -> Result<(), ZipError> {
+    if values.is_empty() {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax cannot fold empty {label}"
+        )));
+    }
+    if values.len() != theta_len {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax fold {label} count mismatch: got {}, expected {theta_len}",
+            values.len()
+        )));
+    }
+    Ok(())
 }
 
 pub trait HyraxLanes<C, Eval, const D: usize>: Clone + Debug + Send + Sync
@@ -678,6 +801,78 @@ where
     }
 }
 
+impl<F, C, Lanes, Eval, const D: usize> FoldablePCS<F, Eval, D> for HyraxPCS<C, Lanes>
+where
+    F: HyraxFieldBridge<C>,
+    C: AffineRepr,
+    Eval: Clone + Debug + Send + Sync,
+    Lanes: HyraxLanes<C, Eval, D>,
+{
+    fn fold_commitments(
+        commitments: &[Self::Commitment],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::Commitment, ZipError> {
+        let _ = field_cfg;
+        validate_fold_inputs(commitments, theta.len(), "commitments")?;
+        let first = &commitments[0];
+        validate_commitment_shape::<C, Lanes, Eval, D>(first)?;
+
+        let mut folded = vec![C::Group::zero(); first.comm.len()];
+        for (commitment, weight) in commitments.iter().zip(theta) {
+            validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
+            if !same_commitment_shape(first, commitment) {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax commitment fold shape mismatch".to_string(),
+                ));
+            }
+            let scalar = F::field_to_scalar(weight);
+            for (out, value) in folded.iter_mut().zip(commitment.comm.iter()) {
+                *out += value.clone() * scalar;
+            }
+        }
+
+        Ok(HyraxCommitment {
+            batch_size: first.batch_size,
+            num_lanes: first.num_lanes,
+            num_rows: first.num_rows,
+            blinding_mode: first.blinding_mode,
+            comm: folded,
+        })
+    }
+
+    fn fold_prover_data(
+        prover_data: &[Self::ProverData],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::ProverData, ZipError> {
+        let _ = field_cfg;
+        validate_fold_inputs(prover_data, theta.len(), "prover data")?;
+        let first = &prover_data[0];
+
+        let mut folded_blinds = vec![C::ScalarField::zero(); first.blinds.len()];
+        for (data, weight) in prover_data.iter().zip(theta) {
+            if !same_prover_data_shape(first, data) {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax prover-data fold shape mismatch".to_string(),
+                ));
+            }
+            let scalar = F::field_to_scalar(weight);
+            for (out, blind) in folded_blinds.iter_mut().zip(data.blinds.iter()) {
+                *out += *blind * scalar;
+            }
+        }
+
+        Ok(HyraxProverData {
+            batch_size: first.batch_size,
+            num_lanes: first.num_lanes,
+            num_rows: first.num_rows,
+            blinding_mode: first.blinding_mode,
+            blinds: folded_blinds,
+        })
+    }
+}
+
 fn validate_polys<Eval: Clone>(polys: &[DenseMultilinearExtension<Eval>]) -> Result<(), ZipError> {
     if let Some(first) = polys.first() {
         for poly in polys {
@@ -690,6 +885,81 @@ fn validate_polys<Eval: Clone>(polys: &[DenseMultilinearExtension<Eval>]) -> Res
         }
     }
     Ok(())
+}
+
+fn validate_scalar_lanes<C>(
+    ck: &HyraxCommitmentKey<C>,
+    scalar_lanes: &[Vec<Vec<C::ScalarField>>],
+    point_len: usize,
+    prover_data: &HyraxProverData<C>,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+{
+    let expected_n = 1usize
+        .checked_shl(u32::try_from(point_len).map_err(|_| {
+            ZipError::InvalidPcsParam(format!("Hyrax point length {point_len} is too large"))
+        })?)
+        .ok_or_else(|| {
+            ZipError::InvalidPcsParam(format!("Hyrax point length {point_len} is too large"))
+        })?;
+    let expected_rows = num_rows(expected_n, ck.num_cols)?;
+    if prover_data.batch_size != scalar_lanes.len()
+        || prover_data.num_rows != expected_rows
+        || prover_data.blinding_mode != ck.blinding_mode
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax scalar-lane prover data shape mismatch".to_string(),
+        ));
+    }
+    let expected_blinds = if ck.blinding_mode.is_blinded() {
+        prover_data.batch_size * prover_data.num_lanes * prover_data.num_rows
+    } else {
+        0
+    };
+    if prover_data.blinds.len() != expected_blinds {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax scalar-lane blind count mismatch".to_string(),
+        ));
+    }
+    for lanes in scalar_lanes {
+        if lanes.len() != prover_data.num_lanes {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax scalar-lane count mismatch".to_string(),
+            ));
+        }
+        for values in lanes {
+            if values.len() != expected_n {
+                return Err(ZipError::InvalidPcsParam(format!(
+                    "Hyrax scalar-lane length mismatch: got {}, expected {expected_n}",
+                    values.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_commitment_shape<C: AffineRepr>(
+    lhs: &HyraxCommitment<C>,
+    rhs: &HyraxCommitment<C>,
+) -> bool {
+    lhs.batch_size == rhs.batch_size
+        && lhs.num_lanes == rhs.num_lanes
+        && lhs.num_rows == rhs.num_rows
+        && lhs.blinding_mode == rhs.blinding_mode
+        && lhs.comm.len() == rhs.comm.len()
+}
+
+fn same_prover_data_shape<C: AffineRepr>(
+    lhs: &HyraxProverData<C>,
+    rhs: &HyraxProverData<C>,
+) -> bool {
+    lhs.batch_size == rhs.batch_size
+        && lhs.num_lanes == rhs.num_lanes
+        && lhs.num_rows == rhs.num_rows
+        && lhs.blinding_mode == rhs.blinding_mode
+        && lhs.blinds.len() == rhs.blinds.len()
 }
 
 fn validate_hyrax_shape<C, Lanes, Eval, const D: usize>(
@@ -1166,5 +1436,222 @@ mod tests {
             HyraxBlindingMode::Blinded,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn folded_binary_hyrax_commitment_opens_from_scalar_lanes() {
+        type C = ark_bn254::G1Affine;
+        type F = MontyField<4>;
+        const D: usize = 32;
+
+        fn bp(bits: u32) -> BinaryPoly<D> {
+            BinaryPoly::<D>::from(bits)
+        }
+
+        let cfg = cfg_from_curve::<C>();
+        let n = 8;
+        let width = n;
+        let generator = <C as AffineRepr>::Group::generator();
+        let bases = (1..=width)
+            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
+            .collect::<Vec<_>>();
+        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
+        let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+            width,
+            bases,
+            h,
+            HyraxBlindingMode::Blinded,
+        )
+        .unwrap();
+
+        let instance_polys = [
+            vec![
+                DenseMultilinearExtension::from_evaluations_vec(
+                    3,
+                    (0..n).map(|idx| bp((idx as u32) * 17 + 3)).collect(),
+                    bp(0),
+                ),
+                DenseMultilinearExtension::from_evaluations_vec(
+                    3,
+                    (0..n).map(|idx| bp(!((idx as u32) * 11))).collect(),
+                    bp(0),
+                ),
+            ],
+            vec![
+                DenseMultilinearExtension::from_evaluations_vec(
+                    3,
+                    (0..n).map(|idx| bp((idx as u32) * 23 + 9)).collect(),
+                    bp(0),
+                ),
+                DenseMultilinearExtension::from_evaluations_vec(
+                    3,
+                    (0..n).map(|idx| bp(!((idx as u32) * 5 + 7))).collect(),
+                    bp(0),
+                ),
+            ],
+        ];
+
+        let mut prover_data = Vec::new();
+        let mut commitments = Vec::new();
+        for polys in &instance_polys {
+            let (data, commitment) =
+                <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, polys).unwrap();
+            prover_data.push(data);
+            commitments.push(commitment);
+        }
+
+        let theta = [F::from_with_cfg(3u64, &cfg), F::from_with_cfg(5u64, &cfg)];
+        let folded_commitment =
+            <HyraxPCS<C, BinaryLanes> as FoldablePCS<F, BinaryPoly<D>, D>>::fold_commitments(
+                &commitments,
+                &theta,
+                &cfg,
+            )
+            .unwrap();
+        let folded_data =
+            <HyraxPCS<C, BinaryLanes> as FoldablePCS<F, BinaryPoly<D>, D>>::fold_prover_data(
+                &prover_data,
+                &theta,
+                &cfg,
+            )
+            .unwrap();
+
+        let theta_scalar = theta
+            .iter()
+            .map(<F as HyraxFieldBridge<C>>::field_to_scalar)
+            .collect::<Vec<_>>();
+        let mut scalar_lanes =
+            vec![vec![vec![<C as AffineRepr>::ScalarField::zero(); n]; D]; instance_polys[0].len()];
+        for (instance_idx, polys) in instance_polys.iter().enumerate() {
+            for (poly_idx, poly) in polys.iter().enumerate() {
+                for (eval_idx, eval) in poly.evaluations.iter().enumerate() {
+                    for (lane, bit) in eval.iter().enumerate() {
+                        if bit.inner() {
+                            scalar_lanes[poly_idx][lane][eval_idx] += theta_scalar[instance_idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        let point = [[0x11u8; 64], [0x22u8; 64], [0x33u8; 64]]
+            .iter()
+            .map(|bytes| {
+                let scalar = <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(bytes);
+                <F as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)
+            })
+            .collect::<Vec<_>>();
+        let eq = eq_tensor_f::<F>(&point, &cfg);
+        let folded_lifted_evals = scalar_lanes
+            .iter()
+            .map(|lanes| {
+                let coeffs = lanes
+                    .iter()
+                    .map(|values| {
+                        values.iter().zip(eq.iter()).fold(
+                            F::zero_with_cfg(&cfg),
+                            |mut acc, (value, weight)| {
+                                acc += <F as HyraxFieldBridge<C>>::scalar_to_field(value, &cfg)
+                                    * weight;
+                                acc
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect::<Vec<_>>();
+
+        let mut prover_transcript = PcsProverTranscript {
+            fs_transcript: Default::default(),
+            stream: Default::default(),
+        };
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
+            &mut prover_transcript.fs_transcript,
+            &folded_commitment,
+        );
+        let mut transcription_buf = vec![0u8; <F as crypto_primitives::Field>::Inner::NUM_BYTES];
+        for lifted_eval in &folded_lifted_evals {
+            prover_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&lifted_eval.coeffs, &mut transcription_buf);
+        }
+        HyraxPCS::<C, BinaryLanes>::prove_open_scalar_lanes::<F, true>(
+            &mut prover_transcript,
+            &ck,
+            &scalar_lanes,
+            &point,
+            &folded_data,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
+            &mut verifier_transcript.fs_transcript,
+            &folded_commitment,
+        );
+        let mut transcription_buf = vec![0u8; <F as crypto_primitives::Field>::Inner::NUM_BYTES];
+        for lifted_eval in &folded_lifted_evals {
+            verifier_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&lifted_eval.coeffs, &mut transcription_buf);
+        }
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::verify_open::<true>(
+            &mut verifier_transcript,
+            &vk,
+            &folded_commitment,
+            &point,
+            &folded_lifted_evals,
+            &cfg,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hyrax_fold_rejects_commitment_shape_mismatch() {
+        type C = ark_bn254::G1Affine;
+        type F = MontyField<4>;
+        const D: usize = 32;
+
+        let cfg = cfg_from_curve::<C>();
+        let generator = <C as AffineRepr>::Group::generator();
+        let bases = (1..=4)
+            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
+            .collect::<Vec<_>>();
+        let h = generator * <C as AffineRepr>::ScalarField::from(5u64);
+        let (ck, _) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+            4,
+            bases,
+            h,
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
+        let polys_one = vec![DenseMultilinearExtension::from_evaluations_vec(
+            2,
+            vec![BinaryPoly::<D>::from(1u32); 4],
+            BinaryPoly::<D>::from(0u32),
+        )];
+        let polys_two = vec![DenseMultilinearExtension::from_evaluations_vec(
+            3,
+            vec![BinaryPoly::<D>::from(2u32); 8],
+            BinaryPoly::<D>::from(0u32),
+        )];
+        let (_, c0) =
+            <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, &polys_one)
+                .unwrap();
+        let (_, c1) =
+            <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, &polys_two)
+                .unwrap();
+
+        let theta = [F::from_with_cfg(1u64, &cfg), F::from_with_cfg(2u64, &cfg)];
+        assert!(matches!(
+            <HyraxPCS<C, BinaryLanes> as FoldablePCS<F, BinaryPoly<D>, D>>::fold_commitments(
+                &[c0, c1],
+                &theta,
+                &cfg,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
     }
 }

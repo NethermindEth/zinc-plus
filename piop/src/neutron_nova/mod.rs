@@ -21,6 +21,7 @@ pub use booleanity::{
 pub use linear_cpr::{
     CoeffClass, LinearBinarySource, LinearCprAccumulatorError, LinearCprScalarWeights,
     LinearCprWeights, LinearFamilySpec, LinearTermSpec, SumFoldEqWeights,
+    build_linear_cpr_hybrid_sumcheck_group, build_linear_cpr_prefix_bound_tail_table,
     build_linear_cpr_prefix_table, build_sumfold_eq_weights,
 };
 pub use projection_sha::{

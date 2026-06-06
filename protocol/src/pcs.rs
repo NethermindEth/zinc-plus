@@ -5,7 +5,7 @@ use crypto_primitives::PrimeField;
 use zinc_poly::univariate::{binary::BinaryPoly, dense::DensePolynomial};
 use zip_plus::pcs::{
     generic::{PCS, ZipPlusPCS},
-    hyrax::{BinaryLanes, HyraxPCS},
+    hyrax::{BinaryLanes, DensePolyScalarLanes, HyraxPCS, IntScalarLane},
     structs::ZipPlusCommitment,
 };
 
@@ -54,6 +54,27 @@ where
     type BinaryPCS = HyraxPCS<C, BinaryLanes>;
     type ArbitraryPCS = ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>;
     type IntPCS = ZipPlusPCS<Zt::IntZt, Zt::IntLc>;
+}
+
+/// Homomorphic PCS bundle for production ProjectionFold paths.
+///
+/// Every witness domain uses Hyrax/MSM commitments so verifier-derived
+/// instance-axis folds can be opened against folded prover data.
+#[derive(Clone, Debug)]
+pub struct AllHyraxPCSTypes<C: AffineRepr>(PhantomData<C>);
+
+impl<Zt, F, C, const D: usize> ZincPCSTypes<Zt, F, D> for AllHyraxPCSTypes<C>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    C: AffineRepr,
+    HyraxPCS<C, BinaryLanes>: PCS<F, BinaryPoly<D>, D>,
+    HyraxPCS<C, DensePolyScalarLanes>: PCS<F, DensePolynomial<Zt::Int, D>, D>,
+    HyraxPCS<C, IntScalarLane>: PCS<F, Zt::Int, D>,
+{
+    type BinaryPCS = HyraxPCS<C, BinaryLanes>;
+    type ArbitraryPCS = HyraxPCS<C, DensePolyScalarLanes>;
+    type IntPCS = HyraxPCS<C, IntScalarLane>;
 }
 
 #[derive(Clone, Debug)]

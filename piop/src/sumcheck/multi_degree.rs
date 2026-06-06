@@ -15,14 +15,10 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
 use std::marker::PhantomData;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_utils::{
-    add, cfg_iter, cfg_iter_mut, inner_transparent_field::InnerTransparentField, mul,
-};
+use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul};
 
 use crate::CombFn;
 
@@ -50,6 +46,14 @@ pub struct Round1Output<F> {
     pub tail_evaluations: Vec<F>,
 }
 
+/// Output of one prefix fast-path round.
+pub struct PrefixRoundOutput<F> {
+    /// Set only on round 1, matching [`Round1Output::asserted_sum`].
+    pub asserted_sum: Option<F>,
+    /// `[p_i(1), p_i(2), ..., p_i(degree)]` for this round.
+    pub tail_evaluations: Vec<F>,
+}
+
 /// Optional per-group hook that lets a degree group bypass the standard
 /// round-1 sumcheck loop. Used when the round-1 polynomial has a closed
 /// form (e.g. booleanity zerocheck on bit-slice MLEs that are 0/1
@@ -74,13 +78,68 @@ pub trait Round1FastPath<F: PrimeField>: Send + Sync {
     ) -> Vec<DenseMultilinearExtension<F::Inner>>;
 }
 
+/// Optional per-group hook that emits a prefix of ordinary sumcheck messages.
+///
+/// A prefix fast path must be transcript-equivalent to running
+/// [`SumcheckProverState::prove_round`] for rounds `1..=prefix_len`. Once the
+/// last prefix challenge is sampled, it returns the MLEs already bound at the
+/// full prefix challenge point, so the standard prover can continue with the
+/// remaining variables.
+pub trait PrefixFastPath<F: PrimeField>: Send + Sync {
+    fn prefix_len(&self) -> usize;
+
+    fn prove_prefix_round(
+        &mut self,
+        verifier_msg: &Option<F>,
+        config: &F::Config,
+    ) -> PrefixRoundOutput<F>;
+
+    fn finish_prefix(
+        self: Box<Self>,
+        prefix_challenges: &[F],
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>>;
+}
+
+struct Round1PrefixAdapter<F: PrimeField> {
+    inner: Box<dyn Round1FastPath<F>>,
+}
+
+impl<F: PrimeField> PrefixFastPath<F> for Round1PrefixAdapter<F> {
+    fn prefix_len(&self) -> usize {
+        1
+    }
+
+    fn prove_prefix_round(
+        &mut self,
+        verifier_msg: &Option<F>,
+        config: &F::Config,
+    ) -> PrefixRoundOutput<F> {
+        debug_assert!(verifier_msg.is_none());
+        let out = self.inner.round_1_message(config);
+        PrefixRoundOutput {
+            asserted_sum: Some(out.asserted_sum),
+            tail_evaluations: out.tail_evaluations,
+        }
+    }
+
+    fn finish_prefix(
+        self: Box<Self>,
+        prefix_challenges: &[F],
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        debug_assert_eq!(prefix_challenges.len(), 1);
+        self.inner.fold_with_r1(&prefix_challenges[0], config)
+    }
+}
+
 /// A single degree group for the multi-degree sumcheck: (degree, mles,
 /// comb_fn).
 pub struct MultiDegreeSumcheckGroup<F: PrimeField> {
     degree: usize,
     poly: Vec<DenseMultilinearExtension<F::Inner>>,
     comb_fn: CombFn<F>,
-    round_1_fast: Option<Box<dyn Round1FastPath<F>>>,
+    prefix_fast: Option<Box<dyn PrefixFastPath<F>>>,
 }
 
 impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
@@ -93,7 +152,7 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
             degree,
             poly,
             comb_fn,
-            round_1_fast: None,
+            prefix_fast: None,
         }
     }
 
@@ -105,12 +164,34 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
         poly: Vec<DenseMultilinearExtension<F::Inner>>,
         comb_fn: CombFn<F>,
         round_1_fast: Box<dyn Round1FastPath<F>>,
+    ) -> Self
+    where
+        F: 'static,
+    {
+        Self {
+            degree,
+            poly,
+            comb_fn,
+            prefix_fast: Some(Box::new(Round1PrefixAdapter {
+                inner: round_1_fast,
+            })),
+        }
+    }
+
+    /// Construct a group whose initial rounds are produced by a custom
+    /// [`PrefixFastPath`]. `poly` may be empty here — the fast path supplies
+    /// post-prefix MLEs via [`PrefixFastPath::finish_prefix`].
+    pub fn with_prefix_fast(
+        degree: usize,
+        poly: Vec<DenseMultilinearExtension<F::Inner>>,
+        comb_fn: CombFn<F>,
+        prefix_fast: Box<dyn PrefixFastPath<F>>,
     ) -> Self {
         Self {
             degree,
             poly,
             comb_fn,
-            round_1_fast: Some(round_1_fast),
+            prefix_fast: Some(prefix_fast),
         }
     }
 }
@@ -134,6 +215,15 @@ impl<F> MultiDegreeSumcheckProof<F> {
     /// sums before running the sumcheck.
     pub fn claimed_sums(&self) -> &[F] {
         &self.claimed_sums
+    }
+
+    pub fn degrees(&self) -> &[usize] {
+        &self.degrees
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_messages_mut_for_testing(&mut self) -> &mut [Vec<SumcheckProverMsg<F>>] {
+        &mut self.group_messages
     }
 }
 
@@ -341,79 +431,89 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
         let mut prover_states: Vec<SumcheckProverState<F>> = Vec::with_capacity(num_groups);
         let mut comb_fns: Vec<CombFn<F>> = Vec::with_capacity(num_groups);
-        let mut fast_paths: Vec<Option<Box<dyn Round1FastPath<F>>>> =
+        let mut fast_paths: Vec<Option<Box<dyn PrefixFastPath<F>>>> =
             Vec::with_capacity(num_groups);
         for group in groups {
             let degree_field = F::from_with_cfg(group.degree as u64, config);
             transcript.absorb_random_field(&degree_field, &mut buf);
+            if let Some(ref fp) = group.prefix_fast {
+                assert!(
+                    fp.prefix_len() > 0 && fp.prefix_len() <= num_vars,
+                    "prefix fast path length must be in 1..=num_vars"
+                );
+            }
             prover_states.push(SumcheckProverState::new(group.poly, num_vars, group.degree));
             comb_fns.push(group.comb_fn);
-            fast_paths.push(group.round_1_fast);
+            fast_paths.push(group.prefix_fast);
         }
 
-        // ---- Round 1 ---------------------------------------------------
-        let mut round_1_msgs: Vec<SumcheckProverMsg<F>> = Vec::with_capacity(num_groups);
-        for ((state, comb_fn), fp_slot) in prover_states
-            .iter_mut()
-            .zip(comb_fns.iter())
-            .zip(fast_paths.iter())
-        {
-            let msg = if let Some(fp) = fp_slot {
-                let out = fp.round_1_message(config);
-                debug_assert_eq!(
-                    out.tail_evaluations.len(),
-                    state.max_degree,
-                    "fast-path round-1 tail must have length equal to group's degree"
-                );
-                state.asserted_sum = Some(out.asserted_sum);
-                state.round = 1;
-                SumcheckProverMsg(NatEvaluatedPolyWithoutConstant::new(out.tail_evaluations))
-            } else {
-                state.prove_round(&None, comb_fn, config)
-            };
-            round_1_msgs.push(msg);
-        }
-        for msg in &round_1_msgs {
-            transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
-        }
-        for (j, msg) in round_1_msgs.into_iter().enumerate() {
-            group_messages[j].push(msg);
-        }
-        let r_1: F = transcript.get_field_challenge(config);
-        transcript.absorb_random_field(&r_1, &mut buf);
-        let mut verifier_msg = Some(r_1.clone());
-
-        // For fast-path groups, materialize the round-1-folded MLEs and
-        // mark the next standard fold to be skipped.
-        for (state, fp_slot) in prover_states.iter_mut().zip(fast_paths.iter_mut()) {
-            if let Some(fp) = fp_slot.take() {
-                let folded = fp.fold_with_r1(&r_1, config);
-                state.mles = folded;
-                state.skip_next_fold = true;
+        let mut verifier_msg = None;
+        let mut challenges = Vec::with_capacity(num_vars);
+        for round_idx in 0..num_vars {
+            let mut round_msgs: Vec<SumcheckProverMsg<F>> = Vec::with_capacity(num_groups);
+            for group_idx in 0..num_groups {
+                let use_fast = fast_paths[group_idx]
+                    .as_ref()
+                    .is_some_and(|fp| round_idx < fp.prefix_len());
+                let msg = if use_fast {
+                    let fp = fast_paths[group_idx]
+                        .as_mut()
+                        .expect("fast path must exist when use_fast is true");
+                    let out = fp.prove_prefix_round(&verifier_msg, config);
+                    debug_assert_eq!(
+                        out.tail_evaluations.len(),
+                        prover_states[group_idx].max_degree,
+                        "prefix fast-path tail must match the group's degree"
+                    );
+                    if round_idx == 0 {
+                        prover_states[group_idx].asserted_sum = Some(
+                            out.asserted_sum
+                                .expect("prefix fast path must provide the first asserted sum"),
+                        );
+                    } else {
+                        debug_assert!(out.asserted_sum.is_none());
+                    }
+                    prover_states[group_idx].round = round_idx + 1;
+                    SumcheckProverMsg(NatEvaluatedPolyWithoutConstant::new(out.tail_evaluations))
+                } else {
+                    prover_states[group_idx].prove_round(
+                        &verifier_msg,
+                        &comb_fns[group_idx],
+                        config,
+                    )
+                };
+                round_msgs.push(msg);
             }
-        }
 
-        // ---- Rounds 2..num_vars ---------------------------------------
-        for _ in 1..num_vars {
-            // Parallel: each group computes its round polynomial independently
-            let round_msgs: Vec<SumcheckProverMsg<F>> = cfg_iter_mut!(prover_states)
-                .zip(cfg_iter!(comb_fns))
-                .map(|(state, comb_fn)| state.prove_round(&verifier_msg, comb_fn, config))
-                .collect();
-
-            // Sequential: absorb in deterministic order, sample one shared challenge
             for msg in &round_msgs {
                 transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
             }
-
             for (j, msg) in round_msgs.into_iter().enumerate() {
                 group_messages[j].push(msg);
             }
 
-            let next_verifier_msg = transcript.get_field_challenge(config);
-            transcript.absorb_random_field(&next_verifier_msg, &mut buf);
+            let challenge: F = transcript.get_field_challenge(config);
+            transcript.absorb_random_field(&challenge, &mut buf);
 
-            verifier_msg = Some(next_verifier_msg);
+            for group_idx in 0..num_groups {
+                let should_finish = fast_paths[group_idx]
+                    .as_ref()
+                    .is_some_and(|fp| fp.prefix_len() == round_idx + 1);
+                if should_finish {
+                    let fp = fast_paths[group_idx]
+                        .take()
+                        .expect("fast path must exist when should_finish is true");
+                    let mut prefix_challenges = challenges.clone();
+                    prefix_challenges.push(challenge.clone());
+                    prover_states[group_idx].mles = fp.finish_prefix(&prefix_challenges, config);
+                    prover_states[group_idx].randomness = challenges.clone();
+                    prover_states[group_idx].round = round_idx + 1;
+                    prover_states[group_idx].skip_next_fold = round_idx + 1 < num_vars;
+                }
+            }
+
+            verifier_msg = Some(challenge.clone());
+            challenges.push(challenge);
         }
 
         prover_states.iter_mut().for_each(|state| {

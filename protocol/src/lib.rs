@@ -19,6 +19,7 @@
 
 pub mod fixed_prime;
 pub mod pcs;
+pub mod production_sha;
 pub mod prover;
 pub mod verifier;
 
@@ -26,8 +27,7 @@ pub mod verifier;
 use rayon::prelude::*;
 
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring,
-    crypto_bigint_uint::Uint,
+    ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring, crypto_bigint_uint::Uint,
 };
 use std::{fmt::Debug, marker::PhantomData};
 use thiserror::Error;
