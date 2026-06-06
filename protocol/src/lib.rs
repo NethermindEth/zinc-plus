@@ -473,6 +473,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    #[error("PCS proof has trailing bytes: consumed {consumed} of {total}")]
+    PcsProofTrailingBytes { consumed: usize, total: usize },
 }
 
 //
@@ -784,7 +786,7 @@ mod tests {
         fixed_prime::field_cfg_from_curve_scalar,
         pcs::{AllZipPCSTypes, BinaryHyraxZipRest, PCSParams, PCSVerifierParams, ZincPCSTypes},
     };
-    use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+    use ark_ec::AffineRepr;
     use crypto_bigint::U64;
     use crypto_primitives::{
         Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
@@ -819,7 +821,7 @@ mod tests {
         },
         pcs::{
             generic::ZipPlusPCS,
-            hyrax::{BinaryLanes, HyraxPCS},
+            hyrax::{BinaryLanes, HyraxBlindingMode, HyraxPCS},
             structs::{ZipPlus, ZipPlusParams},
         },
         pcs_transcript::PcsProverTranscript,
@@ -1883,19 +1885,12 @@ mod tests {
             ),
         );
         let width = pp.0.linear_code.row_len();
-        let generator = C::Group::generator();
-        let bases = (1..=width)
-            .map(|idx| {
-                let scalar =
-                    C::ScalarField::from(u64::try_from(idx).expect("basis index fits in u64"));
-                (generator * scalar).into_affine()
-            })
-            .collect();
-        let h_scalar =
-            C::ScalarField::from(u64::try_from(width + 1).expect("basis index fits in u64"));
-        let (binary, binary_vk) =
-            HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, generator * h_scalar)
-                .expect("Hyrax setup must be valid");
+        let (binary, binary_vk) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-test-sha256-hyrax",
+            HyraxBlindingMode::Unblinded,
+        )
+        .expect("Hyrax setup must be valid");
         (
             PCSParams::<BinaryHyraxZipRest<C>, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE> {
                 binary,
@@ -1950,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_real_sha256_pcs_variants_round_trip() {
+    fn test_real_sha256_pcs_zip_bn_round_trip() {
         const NUM_VARS: usize = 9;
 
         let bn_field_cfg = field_cfg_from_curve_scalar::<
@@ -1960,6 +1955,11 @@ mod tests {
         >();
         let (zip_bn_pp, zip_bn_vp) = sha256_zip_pcs_params(NUM_VARS);
         run_sha256_pcs_round_trip::<AllZipPCSTypes>(&zip_bn_pp, &zip_bn_vp, bn_field_cfg);
+    }
+
+    #[test]
+    fn test_real_sha256_pcs_zip_secp256k1_round_trip() {
+        const NUM_VARS: usize = 9;
 
         let secp_field_cfg = field_cfg_from_curve_scalar::<
             F,
@@ -1968,6 +1968,11 @@ mod tests {
         >();
         let (zip_secp_pp, zip_secp_vp) = sha256_zip_pcs_params(NUM_VARS);
         run_sha256_pcs_round_trip::<AllZipPCSTypes>(&zip_secp_pp, &zip_secp_vp, secp_field_cfg);
+    }
+
+    #[test]
+    fn test_real_sha256_pcs_hyrax_bn_round_trip() {
+        const NUM_VARS: usize = 9;
 
         let bn_field_cfg = field_cfg_from_curve_scalar::<
             F,
@@ -1980,6 +1985,11 @@ mod tests {
             &hyrax_bn_vp,
             bn_field_cfg,
         );
+    }
+
+    #[test]
+    fn test_real_sha256_pcs_hyrax_secp256k1_round_trip() {
+        const NUM_VARS: usize = 9;
 
         let secp_field_cfg = field_cfg_from_curve_scalar::<
             F,
@@ -1993,6 +2003,50 @@ mod tests {
             &hyrax_secp_vp,
             secp_field_cfg,
         );
+    }
+
+    #[test]
+    fn test_real_sha256_rejects_trailing_pcs_bytes() {
+        type U = Sha256CompressionSliceUair<ShaEcdsaInt>;
+        const NUM_VARS: usize = 9;
+
+        let field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_bn254::G1Affine,
+        >();
+        let (pp, vp) = sha256_zip_pcs_params(NUM_VARS);
+        let mut rng = rng();
+        let trace = U::generate_random_trace(NUM_VARS, &mut rng);
+        let public_trace = trace.public(&U::signature());
+
+        let mut proof =
+            ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::prove_with_pcs_and_field_cfg::<
+                AllZipPCSTypes,
+                false,
+                CHECKED,
+            >(&pp, &trace, NUM_VARS, project_scalar_fn, field_cfg.clone())
+            .expect("SHA PCS prover failed");
+        proof.zip.extend_from_slice(b"trailing pcs bytes");
+
+        let result =
+            ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::verify_with_pcs_and_field_cfg::<
+                AllZipPCSTypes,
+                Sha256Ideal<F>,
+                CHECKED,
+            >(
+                &vp,
+                proof,
+                &public_trace,
+                NUM_VARS,
+                project_scalar_fn,
+                sha256_test_project_ideal,
+                field_cfg,
+            );
+        assert!(matches!(
+            result,
+            Err(ProtocolError::PcsProofTrailingBytes { .. })
+        ));
     }
 
     /// `num_vars` for SHA-ECDSA tests. ECDSA's Shamir scalar

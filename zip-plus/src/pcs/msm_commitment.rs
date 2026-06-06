@@ -9,7 +9,7 @@ use std::{
 };
 
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{AdditiveGroup, BigInteger, One, PrimeField, UniformRand, Zero};
+use ark_ff::{AdditiveGroup, One, PrimeField, UniformRand, Zero};
 use num_integer::Integer;
 use thiserror::Error;
 
@@ -435,54 +435,27 @@ fn signed_window_pippenger<C: AffineRepr>(
 
     let num_bits = C::ScalarField::MODULUS_BIT_SIZE as usize;
     let segments = <usize as Integer>::div_ceil(&num_bits, &window_bits);
-    let total_segments = segments + 1;
-    let n = scalars.len();
-    let half = 1usize << (window_bits - 1);
-    let full = 1usize << window_bits;
-    let mut signed_digits = vec![0isize; total_segments * n];
-    let mut carries = vec![0usize; n];
-
-    for (j, scalar) in scalars.iter().enumerate() {
-        let bits = scalar.into_bigint().to_bits_le();
-        for segment in 0..segments {
-            let offset = segment * n;
-            let raw = window_value(&bits, segment * window_bits, window_bits) + carries[j];
-            carries[j] = 0;
-            if raw >= half {
-                signed_digits[offset + j] = -isize::try_from(full - raw)
-                    .map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-                carries[j] = 1;
-            } else {
-                signed_digits[offset + j] =
-                    isize::try_from(raw).map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-            }
-        }
-    }
-
-    let mut highest_segment = segments;
-    let carry_offset = segments * n;
-    for (j, carry) in carries.iter().copied().enumerate() {
-        if carry != 0 {
-            signed_digits[carry_offset + j] =
-                isize::try_from(carry).map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-            highest_segment = segments + 1;
-        }
-    }
+    let bucket_len = (1usize << window_bits) - 1;
+    let bigints = scalars
+        .iter()
+        .map(|scalar| scalar.into_bigint())
+        .collect::<Vec<_>>();
+    let mut buckets = vec![C::Group::zero(); bucket_len];
 
     let mut acc = C::Group::zero();
-    for segment in (0..highest_segment).rev() {
+    for segment in (0..segments).rev() {
         for _ in 0..window_bits {
             acc.double_in_place();
         }
 
-        let mut buckets = vec![C::Group::zero(); half];
-        let offset = segment * n;
-        for j in 0..n {
-            let digit = signed_digits[offset + j];
-            if digit > 0 {
-                buckets[digit as usize - 1] += bases[j];
-            } else if digit < 0 {
-                buckets[(-digit) as usize - 1] -= bases[j];
+        let offset = segment * window_bits;
+        for bucket in &mut buckets {
+            *bucket = C::Group::zero();
+        }
+        for (j, scalar) in bigints.iter().enumerate() {
+            let digit = window_value_from_limbs(scalar.as_ref(), offset, window_bits);
+            if digit != 0 {
+                buckets[digit - 1] += bases[j];
             }
         }
 
@@ -502,9 +475,16 @@ fn scalar_window_bits(n: usize) -> usize {
     }
 }
 
-fn window_value(bits: &[bool], start: usize, width: usize) -> usize {
+fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
     (0..width).fold(0usize, |value, bit_idx| {
-        if bits.get(start + bit_idx).copied().unwrap_or(false) {
+        let absolute_bit = start + bit_idx;
+        let limb_idx = absolute_bit / u64::BITS as usize;
+        let limb_bit = absolute_bit % u64::BITS as usize;
+        if limbs
+            .get(limb_idx)
+            .map(|limb| ((limb >> limb_bit) & 1) == 1)
+            .unwrap_or(false)
+        {
             value | (1usize << bit_idx)
         } else {
             value

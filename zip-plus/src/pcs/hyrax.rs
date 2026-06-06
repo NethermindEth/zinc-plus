@@ -1,6 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use std::{
+    collections::HashSet,
     fmt::Debug,
     io::{Read, Write},
     marker::PhantomData,
@@ -41,6 +42,12 @@ pub struct HyraxPCS<C: AffineRepr, Lanes>(PhantomData<(C, Lanes)>);
 pub enum HyraxBlindingMode {
     Blinded,
     Unblinded,
+}
+
+impl Default for HyraxBlindingMode {
+    fn default() -> Self {
+        Self::Unblinded
+    }
 }
 
 impl HyraxBlindingMode {
@@ -131,6 +138,14 @@ where
 
     fn lane_to_scalar(value: Self::LaneValue) -> C::ScalarField;
 
+    fn commit_poly(
+        _ck: &HyraxCommitmentKey<C>,
+        _poly: &DenseMultilinearExtension<Eval>,
+        _num_rows: usize,
+    ) -> Option<Result<(Vec<C::Group>, Vec<C::ScalarField>), ZipError>> {
+        None
+    }
+
     fn accumulate_b(
         row: &[Eval],
         lane: usize,
@@ -215,6 +230,61 @@ impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLa
         } else {
             C::ScalarField::zero()
         }
+    }
+
+    fn commit_poly(
+        ck: &HyraxCommitmentKey<C>,
+        poly: &DenseMultilinearExtension<BinaryPoly<D>>,
+        num_rows: usize,
+    ) -> Option<Result<(Vec<C::Group>, Vec<C::ScalarField>), ZipError>> {
+        let expected_comm = <Self as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES * num_rows;
+        let mut comm = Vec::with_capacity(expected_comm);
+        let mut blinds = if ck.blinding_mode.is_blinded() {
+            Vec::with_capacity(expected_comm)
+        } else {
+            Vec::new()
+        };
+
+        Some((|| {
+            for lane in 0..<Self as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES {
+                let lane_blinds = if ck.blinding_mode.is_blinded() {
+                    Some(MsmCommitmentEngine::<C>::blind(
+                        &ck.msm_ck,
+                        poly.evaluations.len(),
+                    ))
+                } else {
+                    None
+                };
+
+                for (row_idx, row) in poly.evaluations.chunks(ck.num_cols).enumerate() {
+                    let values = row
+                        .iter()
+                        .map(|eval| {
+                            <Self as HyraxLanes<C, BinaryPoly<D>, D>>::lane_value(eval, lane)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    let mut row_comm = if values.iter().copied().any(|bit| bit) {
+                        <Self as HyraxLanes<C, BinaryPoly<D>, D>>::Strategy::msm_row(
+                            &ck.msm_ck, &values,
+                        )
+                        .map_err(msm_err)?
+                    } else {
+                        C::Group::zero()
+                    };
+
+                    if let Some(lane_blinds) = lane_blinds.as_ref() {
+                        row_comm += ck.msm_ck.h * lane_blinds.blind[row_idx];
+                    }
+                    comm.push(row_comm);
+                }
+
+                if let Some(lane_blinds) = lane_blinds {
+                    blinds.extend(lane_blinds.blind);
+                }
+            }
+            Ok((comm, blinds))
+        })())
     }
 
     fn accumulate_b(
@@ -365,25 +435,26 @@ impl<C: AffineRepr, const LIMBS: usize, const D: usize>
 }
 
 impl<C: AffineRepr, Lanes> HyraxPCS<C, Lanes> {
-    pub fn setup_from_bases(
+    pub fn setup(
         width: usize,
-        bases: Vec<C>,
-        h: C::Group,
+        domain: impl AsRef<[u8]>,
+        blinding_mode: HyraxBlindingMode,
     ) -> Result<(HyraxCommitmentKey<C>, HyraxVerifierKey<C>), ZipError> {
-        Self::setup_from_bases_with_blinding(width, bases, h, HyraxBlindingMode::Blinded)
+        let domain = domain.as_ref();
+        let bases = (0..width)
+            .map(|idx| hash_to_curve::<C>(domain, b"basis", idx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let h = hash_to_curve::<C>(domain, b"blinding", 0)?.into_group();
+        Self::setup_from_trusted_bases(width, bases, h, blinding_mode)
     }
 
-    pub fn setup_from_bases_with_blinding(
+    pub fn setup_from_trusted_bases(
         width: usize,
         bases: Vec<C>,
         h: C::Group,
         blinding_mode: HyraxBlindingMode,
     ) -> Result<(HyraxCommitmentKey<C>, HyraxVerifierKey<C>), ZipError> {
-        if !width.is_power_of_two() {
-            return Err(ZipError::InvalidPcsParam(format!(
-                "Hyrax row width must be a power of two, got {width}"
-            )));
-        }
+        validate_trusted_bases(width, &bases, &h)?;
         let msm_ck = msm_key(width, bases.clone(), h)?;
         Ok((
             HyraxCommitmentKey {
@@ -451,6 +522,12 @@ where
         };
 
         for poly in polys {
+            if let Some(result) = Lanes::commit_poly(ck, poly, num_rows) {
+                let (comm, blinds) = result?;
+                all_comm.extend(comm);
+                all_blinds.extend(blinds);
+                continue;
+            }
             for lane in 0..Lanes::NUM_LANES {
                 let values = lane_values::<C, Lanes, Eval, D>(poly, lane)?;
                 let commitment = if ck.blinding_mode.is_blinded() {
@@ -826,6 +903,52 @@ fn validate_polys<Eval: Clone>(polys: &[DenseMultilinearExtension<Eval>]) -> Res
     Ok(())
 }
 
+fn validate_trusted_bases<C: AffineRepr>(
+    width: usize,
+    bases: &[C],
+    h: &C::Group,
+) -> Result<(), ZipError> {
+    if !width.is_power_of_two() {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax row width must be a power of two, got {width}"
+        )));
+    }
+    if bases.len() != width {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax expected {width} bases, got {}",
+            bases.len()
+        )));
+    }
+
+    let mut seen = HashSet::with_capacity(bases.len());
+    for (idx, base) in bases.iter().copied().enumerate() {
+        if base.is_zero() {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Hyrax base {idx} is the identity"
+            )));
+        }
+        if !seen.insert(base) {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Hyrax base {idx} duplicates an earlier base"
+            )));
+        }
+    }
+
+    let h_affine = h.clone().into_affine();
+    if h_affine.is_zero() {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax blinding base is the identity".to_string(),
+        ));
+    }
+    if seen.contains(&h_affine) {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax blinding base duplicates a witness base".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_hyrax_shape<C, Lanes, Eval, const D: usize>(
     width: usize,
     blinding_mode: HyraxBlindingMode,
@@ -895,6 +1018,51 @@ where
         .iter()
         .map(|eval| Lanes::lane_value(eval, lane))
         .collect()
+}
+
+fn hash_to_curve<C: AffineRepr>(domain: &[u8], label: &[u8], index: usize) -> Result<C, ZipError> {
+    let point_bytes = C::zero().serialized_size(Compress::Yes);
+    let mut counter = 0u64;
+    loop {
+        let mut hasher = blake3::Hasher::new();
+        absorb_hash_part(&mut hasher, b"zinc-plus-hyrax-setup-v1")?;
+        absorb_hash_part(&mut hasher, domain)?;
+        absorb_hash_part(&mut hasher, label)?;
+        hasher.update(
+            &u64::try_from(index)
+                .map_err(|_| {
+                    ZipError::InvalidPcsParam("Hyrax setup index does not fit u64".to_string())
+                })?
+                .to_le_bytes(),
+        );
+        hasher.update(&counter.to_le_bytes());
+
+        let mut bytes = vec![0u8; point_bytes];
+        hasher.finalize_xof().fill(&mut bytes);
+        if let Some(point) = C::from_random_bytes(&bytes).map(|point| point.clear_cofactor()) {
+            if !point.is_zero() {
+                return Ok(point);
+            }
+        }
+
+        counter = counter.checked_add(1).ok_or_else(|| {
+            ZipError::InvalidPcsParam("Hyrax hash-to-curve setup exhausted counters".to_string())
+        })?;
+    }
+}
+
+fn absorb_hash_part(hasher: &mut blake3::Hasher, part: &[u8]) -> Result<(), ZipError> {
+    hasher.update(
+        &u64::try_from(part.len())
+            .map_err(|_| {
+                ZipError::InvalidPcsParam(
+                    "Hyrax setup domain component length does not fit u64".to_string(),
+                )
+            })?
+            .to_le_bytes(),
+    );
+    hasher.update(part);
+    Ok(())
 }
 
 fn int_to_scalar<C: AffineRepr, const LIMBS: usize>(
@@ -1173,6 +1341,112 @@ mod tests {
         assert!(matches!(result, Err(ZipError::InvalidPcsParam(_))));
     }
 
+    #[test]
+    fn setup_derives_distinct_deterministic_bases() {
+        type C = ark_bn254::G1Affine;
+        let width = 32;
+        let (ck_0, vk_0) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-hyrax-setup-test",
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
+        let (ck_1, vk_1) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-hyrax-setup-test",
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
+
+        assert_eq!(ck_0.msm_ck.bases, ck_1.msm_ck.bases);
+        assert_eq!(vk_0.bases, vk_1.bases);
+        assert_eq!(ck_0.msm_ck.h, ck_1.msm_ck.h);
+        assert_eq!(vk_0.h, vk_1.h);
+        assert_eq!(ck_0.blinding_mode, HyraxBlindingMode::Unblinded);
+        assert_eq!(vk_0.blinding_mode, HyraxBlindingMode::Unblinded);
+        assert!(ck_0.msm_ck.bases.iter().all(|base| !base.is_zero()));
+        assert!(!ck_0.msm_ck.h.is_zero());
+
+        let seen = ck_0.msm_ck.bases.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(seen.len(), width);
+        assert!(!seen.contains(&ck_0.msm_ck.h.into_affine()));
+    }
+
+    #[test]
+    fn trusted_setup_rejects_bad_bases() {
+        type C = ark_bn254::G1Affine;
+        let width = 8;
+        let generator = <C as AffineRepr>::Group::generator();
+        let bases = (1..=width)
+            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
+            .collect::<Vec<_>>();
+        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
+
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                0,
+                Vec::new(),
+                <C as AffineRepr>::Group::zero(),
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                width,
+                bases[..width - 1].to_vec(),
+                h,
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+
+        let mut identity_bases = bases.clone();
+        identity_bases[0] = C::zero();
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                width,
+                identity_bases,
+                h,
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+
+        let mut duplicate_bases = bases.clone();
+        duplicate_bases[1] = duplicate_bases[0];
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                width,
+                duplicate_bases,
+                h,
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                width,
+                bases.clone(),
+                <C as AffineRepr>::Group::zero(),
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+
+        assert!(matches!(
+            HyraxPCS::<C, BinaryLanes>::setup_from_trusted_bases(
+                width,
+                bases.clone(),
+                bases[0].into_group(),
+                HyraxBlindingMode::Unblinded,
+            ),
+            Err(ZipError::InvalidPcsParam(_))
+        ));
+    }
+
     fn binary_hyrax_open_verify_round_trip_with_modes(
         commit_mode: HyraxBlindingMode,
         verify_mode: HyraxBlindingMode,
@@ -1187,21 +1461,14 @@ mod tests {
 
         let cfg = cfg_from_curve::<C>();
         let width = 512;
-        let generator = <C as AffineRepr>::Group::generator();
-        let bases = (1..=width)
-            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
-            .collect::<Vec<_>>();
-        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
-        let (ck, _) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+        let (ck, _) = HyraxPCS::<C, BinaryLanes>::setup(
             width,
-            bases.clone(),
-            h,
+            b"zinc-plus-hyrax-round-trip-test",
             commit_mode,
         )?;
-        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup(
             width,
-            bases,
-            h,
+            b"zinc-plus-hyrax-round-trip-test",
             verify_mode,
         )?;
 
@@ -1329,18 +1596,18 @@ mod tests {
         const D: usize = 32;
 
         let width = 8;
-        let generator = <C as AffineRepr>::Group::generator();
-        let bases = (1..=width)
-            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
-            .collect::<Vec<_>>();
-        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
-        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h).unwrap();
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-hyrax-empty-reject-test",
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
 
         let commitment = HyraxCommitment::<C> {
             batch_size: 0,
             num_lanes: D,
             num_rows: 0,
-            blinding_mode: HyraxBlindingMode::Blinded,
+            blinding_mode: HyraxBlindingMode::Unblinded,
             comm: Vec::new(),
         };
         let cfg = cfg_from_curve::<C>();
@@ -1370,18 +1637,18 @@ mod tests {
         const D: usize = 32;
 
         let width = 8;
-        let generator = <C as AffineRepr>::Group::generator();
-        let bases = (1..=width)
-            .map(|idx| (generator * <C as AffineRepr>::ScalarField::from(idx as u64)).into_affine())
-            .collect::<Vec<_>>();
-        let h = generator * <C as AffineRepr>::ScalarField::from((width + 1) as u64);
-        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, h).unwrap();
+        let (_, vk) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-hyrax-empty-reject-test-2",
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
 
         let commitment = HyraxCommitment::<C> {
             batch_size: 0,
             num_lanes: D,
             num_rows: 1,
-            blinding_mode: HyraxBlindingMode::Blinded,
+            blinding_mode: HyraxBlindingMode::Unblinded,
             comm: Vec::new(),
         };
         let cfg = cfg_from_curve::<C>();

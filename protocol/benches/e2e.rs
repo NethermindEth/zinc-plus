@@ -1,6 +1,6 @@
 #![allow(clippy::arithmetic_side_effects)]
 
-use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+use ark_ec::AffineRepr;
 use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
     measurement::WallTime,
@@ -1242,23 +1242,9 @@ where
 {
     let pp = setup_pp_real_ecdsa(num_vars);
     let width = pp.0.linear_code.row_len();
-    let generator = C::Group::generator();
-    let bases = (1..=width)
-        .map(|idx| {
-            let scalar = C::ScalarField::from(
-                u64::try_from(idx).expect("Hyrax basis index must fit in u64"),
-            );
-            (generator * scalar).into_affine()
-        })
-        .collect();
-    let h_scalar = C::ScalarField::from(
-        u64::try_from(width + 1).expect("Hyrax blinding basis index must fit in u64"),
-    );
-    let h = generator * h_scalar;
-    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+    let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup(
         width,
-        bases,
-        h,
+        b"zinc-plus-bench-real-sha256-hyrax",
         HyraxBlindingMode::Unblinded,
     )
     .expect("Hyrax benchmark setup must be valid");
