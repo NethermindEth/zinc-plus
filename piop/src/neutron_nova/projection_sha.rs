@@ -147,6 +147,26 @@ pub enum ShaWordCol {
 }
 
 impl ShaWordCol {
+    pub const ALL: [Self; 17] = [
+        Self::A,
+        Self::E,
+        Self::Sigma0,
+        Self::Sigma1,
+        Self::W,
+        Self::SmallSigma0,
+        Self::SmallSigma1,
+        Self::Uef,
+        Self::UNegEg,
+        Self::Maj,
+        Self::MuPacked,
+        Self::OvSigma0,
+        Self::OvSigma1,
+        Self::OvSmallSigma0,
+        Self::OvSmallSigma1,
+        Self::Ch2Comp,
+        Self::MajComp,
+    ];
+
     pub const COUNT: usize = 17;
 
     pub fn index(self) -> usize {
@@ -165,6 +185,14 @@ pub enum ShaIntCol {
 }
 
 impl ShaIntCol {
+    pub const ALL: [Self; 5] = [
+        Self::CompSchedule,
+        Self::CompUpdateA,
+        Self::CompUpdateE,
+        Self::CompFeedForwardA,
+        Self::CompFeedForwardE,
+    ];
+
     pub const COUNT: usize = 5;
 
     pub fn index(self) -> usize {
@@ -190,6 +218,21 @@ pub enum ShaPublicCol {
 }
 
 impl ShaPublicCol {
+    pub const ALL: [Self; 12] = [
+        Self::K,
+        Self::PAIn,
+        Self::PEIn,
+        Self::PAOut,
+        Self::PEOut,
+        Self::Message,
+        Self::SInit,
+        Self::SMsg,
+        Self::SSched,
+        Self::SUpd,
+        Self::SFf,
+        Self::SOut,
+    ];
+
     pub const COUNT: usize = 12;
 
     pub fn index(self) -> usize {
@@ -906,6 +949,407 @@ where
     Ok(row_integrand_values
         .iter()
         .fold(F::zero_with_cfg(field_cfg), |acc, value| acc + value))
+}
+
+/// Canonical booleanity sources for the production SHA ProjectionFold flow.
+///
+/// This includes every committed binary-polynomial SHA source bit and the
+/// three virtual Ch/Maj residual families. The virtual values are reconstructed
+/// from source bit slices; they are never independent witness columns.
+pub fn production_sha_booleanity_sources() -> Vec<ShaBooleanitySource> {
+    let mut sources = Vec::with_capacity(ShaWordCol::COUNT * SHA_WORD_BITS + 3 * SHA_WORD_BITS);
+    for col_idx in 0..ShaWordCol::COUNT {
+        let col = ShaWordCol::ALL[col_idx];
+        for bit in 0..SHA_WORD_BITS {
+            sources.push(ShaBooleanitySource::WordBit { col, bit });
+        }
+    }
+    for bit in 0..SHA_WORD_BITS {
+        sources.push(ShaBooleanitySource::VirtualCh1 { bit });
+        sources.push(ShaBooleanitySource::VirtualCh2 { bit });
+        sources.push(ShaBooleanitySource::VirtualMaj { bit });
+    }
+    sources
+}
+
+/// Evaluate the linear SHA residual scalarization at one row.
+pub fn sha_linear_residual_row_value<F>(
+    trace: &ProjectedShaTrace<F>,
+    public: &ProjectedShaPublic<F>,
+    row: usize,
+    a: &F,
+    lambda: &F,
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let residuals = residual_values_at_row(trace, public, row, a, field_cfg)?;
+    let lambda_powers = powers(
+        lambda.clone(),
+        F::one_with_cfg(field_cfg),
+        NUM_SHA_RESIDUAL_FAMILIES,
+    );
+    Ok(residuals
+        .iter()
+        .zip(lambda_powers.iter())
+        .fold(F::zero_with_cfg(field_cfg), |acc, (residual, weight)| {
+            acc + weight.clone() * residual
+        }))
+}
+
+/// Evaluate the row-weighted linear SHA residual scalarization for one
+/// instance.
+pub fn sha_linear_residual_sum<F>(
+    trace: &ProjectedShaTrace<F>,
+    public: &ProjectedShaPublic<F>,
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    validate_trace(trace)?;
+    validate_public(public)?;
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+    let mut sum = F::zero_with_cfg(field_cfg);
+    for (row, row_weight) in row_weights.iter().enumerate() {
+        sum += row_weight.clone()
+            * sha_linear_residual_row_value(trace, public, row, a, lambda, field_cfg)?;
+    }
+    Ok(sum)
+}
+
+/// Build the production SHA SumFold group over the instance axis.
+///
+/// The group proves the expression
+///
+/// `eq(beta, b) * (L(b) + xi * B(b))`
+///
+/// where `L` is the row-weighted linear SHA residual scalarization and `B`
+/// is built from source booleanity MLEs. Unlike a table of fresh targets, the
+/// booleanity part is evaluated from source MLEs, so the terminal at `r_b`
+/// is the folded booleanity expression.
+#[allow(clippy::too_many_arguments)]
+pub fn build_dense_sha_sumfold_group<F>(
+    traces: &[ProjectedShaTrace<F>],
+    publics: &[ProjectedShaPublic<F>],
+    beta: &[F],
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    rho: &F,
+    xi: &F,
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    if traces.is_empty() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
+    }
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    if !traces.len().is_power_of_two() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: traces.len() });
+    }
+    let ell = usize::try_from(traces.len().trailing_zeros()).expect("trailing_zeros fits usize");
+    if beta.len() != ell {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta.len(),
+            expected: ell,
+        });
+    }
+    for trace in traces {
+        validate_trace(trace)?;
+    }
+    for public in publics {
+        validate_public(public)?;
+    }
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let zero_inner = zero.inner().clone();
+    let mut mles = Vec::with_capacity(2 + booleanity_sources.len() * SHA_ROW_COUNT);
+
+    let eq_beta = build_eq_x_r_vec(beta, field_cfg)?;
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        ell,
+        eq_beta.iter().map(|value| value.inner().clone()).collect(),
+        zero_inner.clone(),
+    ));
+
+    let linear_values = traces
+        .iter()
+        .zip(publics.iter())
+        .map(|(trace, public)| sha_linear_residual_sum(trace, public, r_ic, a, lambda, field_cfg))
+        .collect::<Result<Vec<_>, _>>()?;
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        ell,
+        linear_values
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner.clone(),
+    ));
+
+    for source in booleanity_sources {
+        for row in 0..SHA_ROW_COUNT {
+            let values = traces
+                .iter()
+                .map(|trace| booleanity_source_value_at_row(trace, row, source, field_cfg))
+                .collect::<Result<Vec<_>, _>>()?;
+            mles.push(DenseMultilinearExtension::from_evaluations_vec(
+                ell,
+                values.iter().map(|value| value.inner().clone()).collect(),
+                zero_inner.clone(),
+            ));
+        }
+    }
+
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+    let rho_powers = powers(
+        rho.clone(),
+        F::one_with_cfg(field_cfg),
+        booleanity_sources.len(),
+    );
+    let xi = xi.clone();
+    let zero_for_comb = F::zero_with_cfg(field_cfg);
+    let one_for_comb = F::one_with_cfg(field_cfg);
+    Ok(MultiDegreeSumcheckGroup::new(
+        3,
+        mles,
+        Box::new(move |values: &[F]| {
+            let eq_beta = values[0].clone();
+            let linear = values[1].clone();
+            let mut bool_sum = zero_for_comb.clone();
+            let mut cursor = 2usize;
+            for rho_power in &rho_powers {
+                for row_weight in &row_weights {
+                    let d = values[cursor].clone();
+                    cursor += 1;
+                    let term = d.clone() * (d - one_for_comb.clone());
+                    bool_sum += row_weight.clone() * rho_power * term;
+                }
+            }
+            eq_beta * (linear + xi.clone() * bool_sum)
+        }),
+    ))
+}
+
+/// Build the expression-backed folded row sumcheck group.
+///
+/// The terminal at the verifier challenge is tied to source MLE endpoint
+/// values, including booleanity sources, rather than to an opaque MLE of
+/// precomputed row-integrand values.
+#[allow(clippy::too_many_arguments)]
+pub fn build_expression_folded_row_sumcheck_group<F>(
+    trace: &ProjectedShaTrace<F>,
+    public: &ProjectedShaPublic<F>,
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    rho: &F,
+    xi: &F,
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    validate_trace(trace)?;
+    validate_public(public)?;
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let zero_inner = zero.inner().clone();
+    let mut mles = Vec::with_capacity(2 + booleanity_sources.len());
+
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        SHA_ROW_VARS,
+        row_weights
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner.clone(),
+    ));
+
+    let linear_values = (0..SHA_ROW_COUNT)
+        .map(|row| sha_linear_residual_row_value(trace, public, row, a, lambda, field_cfg))
+        .collect::<Result<Vec<_>, _>>()?;
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        SHA_ROW_VARS,
+        linear_values
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner.clone(),
+    ));
+
+    for source in booleanity_sources {
+        let values = (0..SHA_ROW_COUNT)
+            .map(|row| booleanity_source_value_at_row(trace, row, source, field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
+        mles.push(DenseMultilinearExtension::from_evaluations_vec(
+            SHA_ROW_VARS,
+            values.iter().map(|value| value.inner().clone()).collect(),
+            zero_inner.clone(),
+        ));
+    }
+
+    let rho_powers = powers(
+        rho.clone(),
+        F::one_with_cfg(field_cfg),
+        booleanity_sources.len(),
+    );
+    let xi = xi.clone();
+    let zero_for_comb = F::zero_with_cfg(field_cfg);
+    let one_for_comb = F::one_with_cfg(field_cfg);
+    Ok(MultiDegreeSumcheckGroup::new(
+        3,
+        mles,
+        Box::new(move |values: &[F]| {
+            let row_weight = values[0].clone();
+            let linear = values[1].clone();
+            let mut bool_sum = zero_for_comb.clone();
+            for (d, rho_power) in values[2..].iter().zip(rho_powers.iter()) {
+                let term = d.clone() * (d.clone() - one_for_comb.clone());
+                bool_sum += rho_power.clone() * term;
+            }
+            row_weight * (linear + xi.clone() * bool_sum)
+        }),
+    ))
+}
+
+/// Claimed sum for the expression-backed folded row check.
+#[allow(clippy::too_many_arguments)]
+pub fn expression_folded_row_sum<F>(
+    trace: &ProjectedShaTrace<F>,
+    public: &ProjectedShaPublic<F>,
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    rho: &F,
+    xi: &F,
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum,
+    F::Inner: Zero,
+{
+    let values = folded_row_integrand_values(
+        trace,
+        public,
+        r_ic,
+        a,
+        lambda,
+        rho,
+        xi,
+        booleanity_sources,
+        field_cfg,
+    )?;
+    folded_row_integrand_sum(&values, field_cfg)
+}
+
+pub fn sha_word_bits_at_point<F>(
+    trace: &ProjectedShaTrace<F>,
+    col: ShaWordCol,
+    shift: usize,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<[F; SHA_WORD_BITS], ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if point.len() != SHA_ROW_VARS {
+        return Err(ShaProjectionError::RowPointLength { got: point.len() });
+    }
+    validate_trace(trace)?;
+    let row_weights = build_eq_x_r_vec(point, field_cfg)?;
+    let mut bits: [F; SHA_WORD_BITS] = std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
+    for (row, row_weight) in row_weights.iter().enumerate() {
+        for (bit, out) in bits.iter_mut().enumerate() {
+            *out += row_weight.clone()
+                * bit_at_shifted_or_zero(trace, col, row, shift, bit, field_cfg)?;
+        }
+    }
+    Ok(bits)
+}
+
+pub fn sha_scalarized_word_at_point<F>(
+    trace: &ProjectedShaTrace<F>,
+    col: ShaWordCol,
+    shift: usize,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if point.len() != SHA_ROW_VARS {
+        return Err(ShaProjectionError::RowPointLength { got: point.len() });
+    }
+    validate_trace(trace)?;
+    let row_weights = build_eq_x_r_vec(point, field_cfg)?;
+    let mut value = F::zero_with_cfg(field_cfg);
+    for (row, row_weight) in row_weights.iter().enumerate() {
+        value += row_weight.clone()
+            * scalarized_word_at_shifted_or_zero(trace, col, row, shift, field_cfg)?;
+    }
+    Ok(value)
+}
+
+pub fn sha_int_at_point<F>(
+    trace: &ProjectedShaTrace<F>,
+    col: ShaIntCol,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if point.len() != SHA_ROW_VARS {
+        return Err(ShaProjectionError::RowPointLength { got: point.len() });
+    }
+    validate_trace(trace)?;
+    let row_weights = build_eq_x_r_vec(point, field_cfg)?;
+    let mut value = F::zero_with_cfg(field_cfg);
+    for (row, row_weight) in row_weights.iter().enumerate() {
+        value += row_weight.clone() * int_scalar(trace, col, row, field_cfg)?;
+    }
+    Ok(value)
+}
+
+pub fn sha_public_at_point<F>(
+    public: &ProjectedShaPublic<F>,
+    col: ShaPublicCol,
+    shift: usize,
+    point: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if point.len() != SHA_ROW_VARS {
+        return Err(ShaProjectionError::RowPointLength { got: point.len() });
+    }
+    validate_public(public)?;
+    let row_weights = build_eq_x_r_vec(point, field_cfg)?;
+    let mut value = F::zero_with_cfg(field_cfg);
+    for (row, row_weight) in row_weights.iter().enumerate() {
+        let shifted = row.checked_add(shift).unwrap_or(SHA_ROW_COUNT);
+        value += row_weight.clone() * public_scalar(public, col, shifted, field_cfg)?;
+    }
+    Ok(value)
 }
 
 pub fn verify_folded_row_sumcheck_claim<F>(

@@ -4,7 +4,7 @@ use ark_ec::AffineRepr;
 use crypto_primitives::PrimeField;
 use zinc_poly::univariate::{binary::BinaryPoly, dense::DensePolynomial};
 use zip_plus::pcs::{
-    generic::{PCS, ZipPlusPCS},
+    generic::{FoldablePCS, PCS, ZipPlusPCS},
     hyrax::{BinaryLanes, DensePolyScalarLanes, HyraxPCS, IntScalarLane},
     structs::ZipPlusCommitment,
 };
@@ -21,6 +21,21 @@ where
     type BinaryPCS: PCS<F, BinaryPoly<D>, D>;
     type ArbitraryPCS: PCS<F, DensePolynomial<Zt::Int, D>, D>;
     type IntPCS: PCS<F, Zt::Int, D>;
+}
+
+/// PCS bundle allowed by production SHA ProjectionFold.
+///
+/// Production ProjectionFold folds instance commitments after SumFold, so all
+/// committed witness domains must be homomorphic. `AllHyraxPCSTypes` satisfies
+/// this today; Zip+/Merkle-based bundles intentionally do not.
+pub trait ProductionShaPCS<Zt, F, const D: usize>: ZincPCSTypes<Zt, F, D>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    Self::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    Self::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    Self::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +90,18 @@ where
     type BinaryPCS = HyraxPCS<C, BinaryLanes>;
     type ArbitraryPCS = HyraxPCS<C, DensePolyScalarLanes>;
     type IntPCS = HyraxPCS<C, IntScalarLane>;
+}
+
+impl<Zt, F, C, const D: usize> ProductionShaPCS<Zt, F, D> for AllHyraxPCSTypes<C>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    C: AffineRepr,
+    HyraxPCS<C, BinaryLanes>: PCS<F, BinaryPoly<D>, D> + FoldablePCS<F, BinaryPoly<D>, D>,
+    HyraxPCS<C, DensePolyScalarLanes>:
+        PCS<F, DensePolynomial<Zt::Int, D>, D> + FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    HyraxPCS<C, IntScalarLane>: PCS<F, Zt::Int, D> + FoldablePCS<F, Zt::Int, D>,
+{
 }
 
 #[derive(Clone, Debug)]
