@@ -379,40 +379,53 @@ degree.
 Expected: ~4× reduction of the arb PCS bytes (the 94% component) → roughly a 3–4×
 smaller Falcon proof.
 
-### Built (committed, compiling)
+### COMPLETE — arb fold works end-to-end (`33cbb36`)
 
-- **`ArbFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS>`** trait (`6c03063`,
-  protocol/src/lib.rs): arb folded to `QUARTER_D` with native narrow coeff
-  `Int<INT_LIMBS>`; binary + int unfolded.
-- **`prove_folded_arb_4x`** (`6c03063`, prover.rs): splits arb 4× (two
-  `split_arb_columns` rounds), commits/opens arb at `r0_ext`, int at `r_0`,
-  binary skipped (asserted empty). Per-lane points → separate Zips (no
-  MultiZip). Lean Falcon shape: no booleanity/bit-op/shift machinery; CPR + norm
-  groups only ([cpr, norm], `norm_group_idx = 1`). Scalar bound relaxed
-  (`project_scalar` generic). Compiles.
+- **`split_arb_columns`** (`029966a`) — degree split, unit-tested.
+- **`ArbFoldedZincTypes4x<D, QUARTER_D>`** trait + **`prove_folded_arb_4x`**
+  (`6c03063`) + **`verify_folded_arb_4x`** + Falcon type instance
+  (`TestArbFoldedZincTypes` + `ArbitraryPolyZipTypesIprsQuarter`, `Eval = Cw =
+  DensePolynomial<i64, 8>`) + e2e round-trip test `test_e2e_falcon_arb_folded`
+  (`33cbb36`).
+- Cell type is **`i64`** (not `Int<INT_LIMBS>` as first drafted) — matches the
+  existing `ArbitraryPolyZipTypesIprs` and avoids the unproven
+  `DensePolynomial<Int<1>,_>` inner-product path.
+- Prover: split arb twice (`D→HALF_D→QUARTER_D`), commit/open **arb at `r0_ext`**,
+  **int at `r_0`** (unsplit), binary skipped (asserted empty) — per-lane points,
+  separate Zips (no MultiZip). Verifier: arb via the **4-block** `eval_f`
+  (`bin_eval_f` copy), int via plain `⟨a, coeffs⟩`. `setup`: `pp_arb` for `4n`,
+  `pp_int`/`pp_bin` for `n`.
 
-### Remaining (turnkey)
+**Result — measured (`num_vars=3`, same trace):**
 
-1. **`verify_folded_arb_4x`** — mirror the lean prover. Steps 0–5 standard
-   (no booleanity, `num_bit_slices = 0`); step-5 `open_evals[i] = bar_u_i(α)`
-   for **all** lanes (no int 4-coeff special-case — int is unfolded). Step 7
-   PCS verify, **per-instance** (arb + int are separate commitments → no shared
-   Merkle):
-   - **arb** at `r0_ext` with the **4-block** `eval_f` — copy `bin_eval_f`
-     (verifier.rs:2410) verbatim, swap `BinaryZt::Chal`→`ArbitraryZt::Chal`,
-     range→`arb_range`, reading the full-`D` arb bar_u quarter-blocks.
-   - **int** at `r_0` with the **standard** `⟨a, coeffs⟩` `eval_f` (today's
-     `arb_eval_f`, verifier.rs:2503).
-   - Norm-slice bit-decomposition consistency as in the unfolded verifier.
-2. **Falcon `ArbFoldedZincTypes4x` instance** + a **quarter-degree
-   (`QUARTER_D=8`) arb IPRS ZipType** (`ArbitraryPolyZipTypesIprsQuarter`:
-   `Eval = Cw = DensePolynomial<i64, 8>`, mirror `ArbitraryPolyZipTypesIprs`).
-   `setup`: `pp_arb` for `4n` (split arb), `pp_int`/`pp_bin` for `n`.
-3. **e2e round-trip test** (`FalconBatchUair<i64>` via `prove_folded_arb_4x` /
-   `verify_folded_arb_4x`) + a folded bench line.
+| | unfolded | arb-folded | reduction |
+|---|---|---|---|
+| arb PCS (`proof.zip`) | 3 130 752 B | **837 888 B** | **3.74×** |
+| total proof | 3 283 510 B | **990 646 B** | **3.31×** |
 
-The `split_arb_columns` primitive (tested) and `bin_eval_f` template are the
-reusable halves; (1) is a faithful copy of the lean prover with the eval_f swap.
+The 4× degree fold of the arb lane (the 94% component), with narrow `i64`
+coeffs preserved, shrinks the Falcon proof ~3.3×.
+
+### ⚠ Pre-existing MLE-first verification bug (found here, NOT the arb fold)
+
+While testing, found that Falcon's **MLE-first proof does not verify**. The
+unfolded `test_e2e_falcon_batch` only runs `prove::<false>` (Combined); flipping
+it to `prove::<true>` fails with `Resolver(WrongSumcheckSum)` — the *same* error
+the arb-fold test hits with `MLE_FIRST=true`. So an MLE-first Falcon proof had
+**never been end-to-end verified**: the Phase-3 bench *times* `prove::<true>`
+but *verifies* a `prove::<false>` proof, so the **Phase-3 "2.3–5.5× MLE-first
+speedup" is for proofs that currently fail verification.**
+
+Root-cause hypothesis: in `prove_linear`, the degree-2 zero-ideal product
+`s_3 − s_2·h` is forced to `ZERO` in the ideal-check value, but the CPR sumcheck
+(`prepare_verifier`) reconstructs `expected_sum` from those ideal-check values
+while the prover's `claimed_sum` folds the *actual* product. The MLE-first
+ideal-check appears to evaluate the product as `s3_eval − s2_eval·h_eval`
+(product-of-MLE-evals, ≠ 0 at a random point) rather than the MLE-of-product
+(= 0 on the hypercube), so `claimed_sum ≠ expected_sum`. This is a piop-level
+issue in the MLE-first lane (`evaluate_combined_polynomials` / the zero-ideal
+slot handling), independent of the arb fold. **Needs separate investigation**;
+the arb fold composes with whichever ideal-check lane verifies (Combined today).
 
 ## How to use this doc
 
