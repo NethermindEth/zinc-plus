@@ -25,8 +25,8 @@ use zinc_protocol::{
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
-    EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
-    ShaProxy, TestUairNoMultiplication,
+    EcdsaUair, FalconBatchUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal,
+    ShaEcdsaUair, ShaProxy, TestUairNoMultiplication,
 };
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable};
@@ -428,6 +428,18 @@ fn sha256_real_project_ideal(
             unreachable!("zero ideals are filtered before this closure runs")
         }
     }
+}
+
+/// Ring degree of the batched Falcon UAIR (`X^N + 1`), `N = 512`.
+const FALCON_N: usize = zinc_test_uair::falcon::N;
+
+/// Project the Falcon negacyclic ideal `(X^N + 1)` to the verifier's field.
+/// Zero ideals are filtered upstream (FalconBatchUair has no `assert_zero`).
+fn falcon_project_ideal(
+    ideal: &IdealOrZero<RotationIdeal<i64, FALCON_N>>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> IdealOrZero<RotationIdeal<F, FALCON_N>> {
+    ideal.map(|r| RotationIdeal::from_with_cfg(r, field_cfg))
 }
 
 //
@@ -949,6 +961,47 @@ fn bench_real_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: us
         &trace,
         zinc_protocol::project_scalar_fn,
         sha256_real_project_ideal,
+    );
+}
+
+// Batched Falcon-512 signature verification (2^num_vars signatures, shared key,
+// per-message). Uses `BenchZincTypes` (i64 cells — Falcon's limb coefficients
+// are small) and the secp256k1 field. The UAIR's scalar degree (N=512, for limb
+// reconstruction) is decoupled from the cell degree (32); `do_bench_e2e` already
+// supports that.
+fn bench_falcon_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = FalconBatchUair<i64>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    do_bench_e2e::<BenchZincTypes, U, _>(
+        group,
+        "Falcon",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        falcon_project_ideal,
+    );
+}
+
+fn bench_falcon_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = FalconBatchUair<i64>;
+
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let pp = setup_pp(num_vars);
+
+    do_bench_steps::<BenchZincTypes, U, _>(
+        group,
+        "Falcon",
+        num_vars,
+        &pp,
+        &trace,
+        zinc_protocol::project_scalar_fn,
+        falcon_project_ideal,
     );
 }
 
@@ -2224,6 +2277,25 @@ fn print_peak_rss(label: &str) {
 }
 
 
+fn falcon_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ Falcon");
+
+    // 2^k batched Falcon-512 signature verifications. The per-row combined
+    // polynomial is degree ~2N (limb reconstruction), so prove cost is heavier
+    // than the linear UAIRs — small sizes by default. Larger batches (up to the
+    // headline 2^10) are valid but slow on the current reconstruction path.
+    bench_falcon_e2e(&mut group, 4);
+    bench_falcon_e2e(&mut group, 6);
+
+    group.finish();
+}
+
+fn falcon_steps_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Zinc+ Falcon Steps");
+    bench_falcon_steps(&mut group, 6);
+    group.finish();
+}
+
 criterion_group! {
     name = e2e;
     config = Criterion::default().sample_size(500);
@@ -2244,4 +2316,14 @@ criterion_group! {
     config = Criterion::default().sample_size(500);
     targets = e2e_folded_4x_benches
 }
-criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x);
+criterion_group! {
+    name = falcon;
+    config = Criterion::default().sample_size(10);
+    targets = falcon_benches
+}
+criterion_group! {
+    name = falcon_steps;
+    config = Criterion::default().sample_size(10);
+    targets = falcon_steps_benches
+}
+criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x, falcon, falcon_steps);

@@ -215,6 +215,20 @@ assertion someday, but the per-UAIR fix is correct and zero-cost here.
 empty, so existing folded tests pass but a folded Falcon proof would skip the
 norm group.
 
+**Benchmarks** (`protocol/benches/e2e.rs`, group `Zinc+ Falcon`): mirrors the
+SHA / SHA+ECDSA e2e benches (Prove + Verify + proof size, plus a per-step
+breakdown), reusing `BenchZincTypes` (i64 cells) and the secp256k1 field;
+defaults to `2^{4,6}` signatures with `sample_size(10)` (the prove is heavier
+than the linear UAIRs). Initial numbers (Apple Silicon, criterion `--quick`):
+**2^4 = 16 sigs → Prove 321 ms, Verify 10.4 ms, proof 3.87 MB raw / 633 KiB
+zstd-3**. The proof is *large* for the signature count: the per-row combined
+polynomial is degree `~2n` (the limb reconstruction), so the multipoint-eval /
+coefficient-MLE data scales with `2n`. This is concrete evidence for the
+degree-`<32`-limb vs whole-poly-`D=2n` trade — the limbs keep cells small (and
+sidestep the untested large-`D` commitment path) but inflate the constraint
+X-degree and hence the proof. Shrinking it is future work (whole-poly cells, or
+the coefficient-MLE Mechanism 1 of §4, or batching the reconstruction).
+
 ## How to use this doc
 
 Ledger for the batched Falcon arithmetization on branch `falcon`. **Out of
