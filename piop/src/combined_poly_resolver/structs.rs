@@ -30,6 +30,11 @@ pub struct Proof<F: PrimeField> {
     /// Bound to the corresponding `down_evals` entry by the projection-
     /// element consistency check (no separate sumcheck participation).
     pub shifted_bit_slice_evals: Vec<F>,
+    /// Value evals (`[coeff_slice_0, …, slack]` at `r*`) of the squared-norm
+    /// zerocheck group (batched lattice-signature verification). Populated by
+    /// `lookup::norm::finalize_norm_prover` when a `NormSpec` is declared;
+    /// empty otherwise.
+    pub norm_value_evals: Vec<F>,
 }
 
 impl<F: PrimeField> GenTranscribable for Proof<F>
@@ -43,6 +48,7 @@ where
         let (bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (bit_op_down_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         let (shifted_bit_slice_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
+        let (norm_value_evals, bytes) = Vec::<F>::read_transcription_bytes_subset(bytes);
         assert!(bytes.is_empty(), "All bytes should be consumed");
         Self {
             up_evals,
@@ -50,6 +56,7 @@ where
             bit_slice_evals,
             bit_op_down_evals,
             shifted_bit_slice_evals,
+            norm_value_evals,
         }
     }
 
@@ -59,6 +66,7 @@ where
         let buf = self.bit_slice_evals.write_transcription_bytes_subset(buf);
         let buf = self.bit_op_down_evals.write_transcription_bytes_subset(buf);
         let buf = self.shifted_bit_slice_evals.write_transcription_bytes_subset(buf);
+        let buf = self.norm_value_evals.write_transcription_bytes_subset(buf);
         assert!(buf.is_empty(), "Entire buffer should be used");
     }
 }
@@ -70,7 +78,7 @@ where
 {
     fn get_num_bytes(&self) -> usize {
         add!(
-            5 * u32::NUM_BYTES,
+            6 * u32::NUM_BYTES,
             add!(
                 self.up_evals.get_num_bytes(),
                 add!(
@@ -79,7 +87,10 @@ where
                         self.bit_slice_evals.get_num_bytes(),
                         add!(
                             self.bit_op_down_evals.get_num_bytes(),
-                            self.shifted_bit_slice_evals.get_num_bytes()
+                            add!(
+                                self.shifted_bit_slice_evals.get_num_bytes(),
+                                self.norm_value_evals.get_num_bytes()
+                            )
                         )
                     )
                 )

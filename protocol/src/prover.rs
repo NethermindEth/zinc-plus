@@ -13,6 +13,7 @@ use zinc_piop::{
         compute_shifted_bit_slice_evals_streaming, finalize_booleanity_prover,
         prepare_booleanity_group,
     },
+    lookup::norm::{compute_coeff_slices_flat, finalize_norm_prover, prepare_norm_group},
     multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
@@ -686,7 +687,34 @@ impl_with_type_bounds!(ProverEvalProjected
             bool_ancillary_opt = Some(ba);
         }
 
-        // 4c: Multi-degree sumcheck on CPR + booleanity groups.
+        // 4b': Squared-norm zerocheck group (batched lattice-signature norm
+        // bound). Reads the coefficient-slices of the declared s_1/s_2 limb
+        // columns and the `slack` int column. Pushed after booleanity so the
+        // group order is [cpr, (booleanity?), norm].
+        let mut norm_ancillary_opt = None;
+        if let Some(spec) = self.base.uair_signature.norm_spec() {
+            let selected: Vec<_> = spec
+                .coeff_slice_arb_cols
+                .iter()
+                .map(|&c| self.base.trace.arbitrary_poly[c].clone())
+                .collect();
+            let slices = compute_coeff_slices_flat::<F, _, D>(&selected, &self.field_cfg);
+            let slack_mle =
+                self.projected_trace_f[int_offset + spec.slack_int_col].clone();
+            let beta_sq = F::from_with_cfg(spec.beta_sq as u64, &self.field_cfg);
+            let (ng, na) = prepare_norm_group(
+                &slices,
+                &slack_mle,
+                beta_sq,
+                &self.ic_eval_point,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Norm)?;
+            groups.push(ng);
+            norm_ancillary_opt = Some(na);
+        }
+
+        // 4c: Multi-degree sumcheck on CPR + booleanity + norm groups.
         let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             groups,
@@ -741,6 +769,20 @@ impl_with_type_bounds!(ProverEvalProjected
             )
             .map_err(ProtocolError::Booleanity)?;
             cpr_proof.bit_slice_evals = bit_slice_evals;
+        }
+
+        // 4f: Finalize the norm zerocheck group (drained after booleanity so
+        // the md_states order matches the [cpr, (booleanity?), norm] push).
+        if let Some(na) = norm_ancillary_opt {
+            let norm_state = md_states.remove(0);
+            let norm_value_evals = finalize_norm_prover(
+                &mut self.base.pcs_transcript.fs_transcript,
+                norm_state,
+                na,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Norm)?;
+            cpr_proof.norm_value_evals = norm_value_evals;
         }
 
         // Legacy stub field — currently always None.

@@ -393,6 +393,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 bit_op_down_evals,
                 // Filled by the protocol-level prover after CPR finalize.
                 shifted_bit_slice_evals: Vec::new(),
+                // Filled by `norm::finalize_norm_prover` when a NormSpec is
+                // declared; left empty here.
+                norm_value_evals: Vec::new(),
             },
             CprProverState {
                 evaluation_point: sumcheck_prover_state.randomness,

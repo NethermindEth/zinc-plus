@@ -462,6 +462,8 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Lookup(#[from] LookupError),
     #[error("booleanity check failed: {0}")]
     Booleanity(zinc_piop::lookup::booleanity::BooleanityError<F>),
+    #[error("squared-norm check failed: {0}")]
+    Norm(zinc_piop::lookup::norm::NormError<F>),
     #[error("public-trace consistency check failed: {0}")]
     PublicConsistency(String),
     #[error("public-column structural check failed: {0}")]

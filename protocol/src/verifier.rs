@@ -12,6 +12,7 @@ use zinc_piop::{
         compute_virtual_closing_overrides, finalize_booleanity_verifier,
         prepare_booleanity_verifier, verify_bit_decomposition_consistency,
     },
+    lookup::norm::{finalize_norm_verifier, prepare_norm_verifier},
     multipoint_eval::{self, MultipointEval},
     projections::{
         ProjectedTrace, ScalarMap, project_scalars, project_scalars_to_field,
@@ -538,6 +539,32 @@ where
             None
         };
 
+        // 4b': Norm zerocheck verifier prep. Group order is
+        // [cpr, (booleanity?), norm], so the norm group's index is
+        // 1 + (booleanity present?) = 1 + (num_bit_slices > 0). Clone the
+        // norm value-evals before `proof_resolver` is consumed below.
+        let norm_group_idx = 1 + usize::from(num_bit_slices > 0);
+        let norm_value_evals = self.proof_resolver.norm_value_evals.clone();
+        let norm_verifier_ancillary_opt =
+            if let Some(spec) = self.base.uair_signature.norm_spec() {
+                let num_slices = spec.coeff_slice_arb_cols.len() * D;
+                let beta_sq = F::from_with_cfg(spec.beta_sq as u64, &self.field_cfg);
+                let norm_claimed_sum =
+                    self.proof_combined_sumcheck.claimed_sums()[norm_group_idx].clone();
+                Some(
+                    prepare_norm_verifier(
+                        norm_claimed_sum,
+                        beta_sq,
+                        num_slices,
+                        &self.ic_subclaim.evaluation_point,
+                        &self.field_cfg,
+                    )
+                    .map_err(ProtocolError::Norm)?,
+                )
+            } else {
+                None
+            };
+
         let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.base.num_vars,
@@ -640,6 +667,43 @@ where
                 md_subclaims.expected_evaluations()[1].clone(),
                 ba,
                 &self.field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+        }
+
+        // 4f: Norm zerocheck verifier finalize. `slack` binds to its committed
+        // int column via `up_eval` (closing override); the coefficient-slices
+        // bind to the s_1/s_2 limb columns by the projection-element
+        // consistency check (up_eval[col] = Σ_p a^p · slice_eval[col·D + p]).
+        if let Some(nva) = norm_verifier_ancillary_opt {
+            let spec = self
+                .base
+                .uair_signature
+                .norm_spec()
+                .expect("norm ancillary implies a norm spec");
+            let num_slices = spec.coeff_slice_arb_cols.len() * D;
+            let slack_up_eval =
+                cpr_subclaim.up_evals[int_offset + spec.slack_int_col].clone();
+            finalize_norm_verifier(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &norm_value_evals,
+                std::slice::from_ref(&slack_up_eval),
+                md_subclaims.point(),
+                md_subclaims.expected_evaluations()[norm_group_idx].clone(),
+                nva,
+                &self.field_cfg,
+            )
+            .map_err(ProtocolError::Norm)?;
+            let parent_evals: Vec<F> = spec
+                .coeff_slice_arb_cols
+                .iter()
+                .map(|&c| cpr_subclaim.up_evals[num_total_bin + c].clone())
+                .collect();
+            verify_bit_decomposition_consistency(
+                &parent_evals,
+                &norm_value_evals[..num_slices],
+                &self.projecting_element_f,
+                D,
             )
             .map_err(ProtocolError::Booleanity)?;
         }
