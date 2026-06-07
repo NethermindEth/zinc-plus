@@ -36,7 +36,7 @@ pub use projection_sha::{
     build_production_sha_sumfold_group, build_production_sha_sumfold_group_owned,
     build_production_sha_sumfold_group_with_linear_cache, build_sha_ideal_values_at_point,
     build_sha_linear_residual_coeff_cache, check_fresh_sha_ideal_cache, check_sha_ideal_values,
-    evaluate_fresh_sha_targets, expression_folded_row_sum, finalize_sha_sumfold,
+    derive_sha_instance_fold_claim, evaluate_fresh_sha_targets, expression_folded_row_sum,
     fold_projected_sha_traces, folded_row_integrand_sum, folded_row_integrand_values,
     production_sha_booleanity_sources, production_sha_nonzero_families,
     production_sha_nonzero_ideals, reconstruct_virtual_ch_maj_at_row, scalarize_trace_words,

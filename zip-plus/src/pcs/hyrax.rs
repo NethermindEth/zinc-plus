@@ -2,7 +2,7 @@
 
 use std::{
     fmt::Debug,
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     marker::PhantomData,
 };
 
@@ -437,6 +437,7 @@ where
     type VerifierKey = HyraxVerifierKey<C>;
     type Commitment = HyraxCommitment<C>;
     type ProverData = HyraxProverData<C>;
+    type OpeningProof = Vec<u8>;
 
     fn precompute_ck(ck: &Self::CommitmentKey) {
         Lanes::Strategy::precompute_ck(&ck.msm_ck);
@@ -554,14 +555,15 @@ where
         point: &[F],
         prover_data: &Self::ProverData,
         field_cfg: &F::Config,
-    ) -> Result<(), ZipError>
+    ) -> Result<Self::OpeningProof, ZipError>
     where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         let _ = CHECK_FOR_OVERFLOW;
+        let start = transcript.stream.position() as usize;
         if polys.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         validate_polys(polys)?;
         validate_hyrax_shape::<C, Lanes, Eval, D>(
@@ -653,7 +655,8 @@ where
             ));
         }
 
-        Ok(())
+        let end = transcript.stream.position() as usize;
+        Ok(transcript.stream.get_ref()[start..end].to_vec())
     }
 
     fn verify_open<const CHECK_FOR_OVERFLOW: bool>(
@@ -662,6 +665,7 @@ where
         commitment: &Self::Commitment,
         point: &[F],
         lifted_evals: &[DynamicPolynomialF<F>],
+        opening_proof: &Self::OpeningProof,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
@@ -669,6 +673,29 @@ where
         F::Modulus: Transcribable,
     {
         let _ = CHECK_FOR_OVERFLOW;
+        if !opening_proof.is_empty() {
+            let original_stream =
+                std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.clone()));
+            let result = <Self as PCS<F, Eval, D>>::verify_open::<CHECK_FOR_OVERFLOW>(
+                transcript,
+                vk,
+                commitment,
+                point,
+                lifted_evals,
+                &Vec::new(),
+                field_cfg,
+            );
+            let consumed = transcript.stream.position() == opening_proof.len() as u64;
+            transcript.stream = original_stream;
+            result?;
+            if !consumed {
+                return Err(ZipError::InvalidPcsOpen(
+                    "PCS opening proof has trailing bytes".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
         if commitment.batch_size == 0 {
             return Ok(());
         }
@@ -1407,6 +1434,7 @@ mod tests {
             &commitment,
             &point,
             &lifted_evals,
+            &Vec::new(),
             &cfg,
         )
     }
@@ -1603,6 +1631,7 @@ mod tests {
             &folded_commitment,
             &point,
             &folded_lifted_evals,
+            &Vec::new(),
             &cfg,
         )
         .unwrap();

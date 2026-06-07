@@ -1043,6 +1043,7 @@ where
             &commitments.binary,
             r_0,
             &all_lifted_evals[num_pub_bin..num_total_bin],
+            &Default::default(),
             field_cfg,
         )
         .map_err(|e| ProtocolError::PcsVerification(0, e))?;
@@ -1052,6 +1053,7 @@ where
             &commitments.arbitrary,
             r_0,
             &all_lifted_evals[add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)],
+            &Default::default(),
             field_cfg,
         )
         .map_err(|e| ProtocolError::PcsVerification(1, e))?;
@@ -1061,6 +1063,7 @@ where
             &commitments.int,
             r_0,
             &all_lifted_evals[add!(add!(num_total_bin, num_total_arb), num_pub_int)..],
+            &Default::default(),
             field_cfg,
         )
         .map_err(|e| ProtocolError::PcsVerification(2, e))?;

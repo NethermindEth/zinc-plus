@@ -105,20 +105,41 @@ pub struct UairInstance<'a, PolyCoeff: Clone, Int: Clone, Commitments, const D: 
 The folded objects should mirror the fresh split:
 
 ```rust
-pub struct FoldedUairWitness<F> {
-    // prover-private folded evaluations, residuals, and randomness
+pub struct FoldedUairWitness<F: PrimeField, OpeningWitness> {
+    pub trace: FoldedUairTrace<F>,
+    pub opening_witness: OpeningWitness,
 }
 
-pub struct FoldedUairInstance<F, Commitments> {
+pub struct FoldedUairTrace<F: PrimeField> {
+    pub binary_poly: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
+    pub arbitrary_poly: Vec<DenseMultilinearExtension<DynamicPolynomialF<F>>>,
+    pub int: Vec<DenseMultilinearExtension<F>>,
+}
+
+pub struct FoldedUairInstance<F, Commitments, Public> {
     pub commitments: Commitments,
-    pub public_evals: Vec<F>,
+    pub public: Public,
     pub u: F,
 }
 ```
 
-The exact fields of the folded objects should be chosen by the folding protocol,
-but the boundary remains the same: witness is private, instance is
-verifier-visible.
+`FoldedUairTrace` intentionally keeps the same top-level column families as
+`UairTrace`, but its cell types are proof-field objects after projection and
+instance folding. Polynomial-valued sources become MLEs whose row values are
+univariate proof-field polynomials. Scalar or integer sources become scalar MLEs
+over the proof field.
+
+`opening_witness` is prover-only data needed by the PCS to open the folded
+commitments, such as commitment randomness or backend-specific prover state. It
+is not part of the proof object. Residual and ideal-polynomial caches should
+remain prover working state unless a later phase genuinely needs to carry them.
+
+The exact field types can be specialized by the folding protocol. For example,
+the SHA-256 production path may use a SHA-specific projected trace with
+`bit_slices`, `scalarized_words`, `int_columns`, and `public_columns`, while the
+generic UAIR object should preserve the `binary_poly`, `arbitrary_poly`, and
+`int` families. The boundary remains the same: witness is prover-private,
+instance is verifier-visible.
 
 ## LinearIdealFold Proof Objects
 
@@ -128,34 +149,190 @@ verifier messages and claimed evaluations. It should not contain prover-side
 caches such as PCS prover data, and it should not contain NeutronNova-specific
 objects such as `comm_E` for a committed power-vector witness.
 
-The family association for ideal polynomials is part of the proof contract. A
-bare `Vec<DynamicPolynomialF<F>>` is not enough unless `UairShape` defines the
-exact canonical order. Prefer an explicit family-tagged form:
+`ProjectionFold Concise` is the source of truth for the production protocol:
+the verifier algorithm, Fiat-Shamir ordering, concrete SHA-256 ideal families,
+degree bounds, and equations. This file records the UAIR object boundaries and
+Rust-facing shape of the proof. If a protocol equation is duplicated here, it is
+included only to make the object model unambiguous.
+
+The implementation should reuse the generic proof objects exercised by
+`protocol/benches/e2e.rs`. The baseline proof shape in `protocol/src/lib.rs` is:
 
 ```rust
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct IdealFamilyId(pub u16);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct IdealPolySlot(pub u16);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IdealFamilyPolys<F: PrimeField> {
-    pub family: IdealFamilyId,
-    pub polys: Vec<IdealFamilyPoly<F>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IdealFamilyPoly<F: PrimeField> {
-    pub slot: IdealPolySlot,
-    pub poly: DynamicPolynomialF<F>,
+pub struct Proof<F: PrimeField, Commitments = pcs::ZipPCSCommitments> {
+    pub commitments: Commitments,
+    pub zip: Vec<u8>,
+    pub ideal_check: IdealCheckProof<F>,
+    pub resolver: CombinedPolyResolverProof<F>,
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    pub multipoint_eval: MultipointEvalProof<F>,
+    pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    pub lookup_proof: Option<BatchedLookupProof<F>>,
 }
 ```
 
-The verifier must check that these families and slots are in the canonical
-shape-defined order, with no missing or duplicate entries. For SHA-256, this
-corresponds to the current `production_sha_nonzero_families()` order, but the
-generic API should make that association shape-level data.
+Here `IdealCheckProof`, `CombinedPolyResolverProof`,
+`MultiDegreeSumcheckProof`, `MultipointEvalProof`, `DynamicPolynomialF`, and
+`BatchedLookupProof` are existing protocol/PIOP types exposed by the baseline
+e2e proof shape. The production object model should reuse the active proof
+components directly. In particular, do not add a separate family-tag proof layer
+such as `IdealFamilyId`, `IdealPolySlot`, `IdealFamilyPolys`, or
+`IdealFamilyPoly` just to carry the batched ideal polynomials.
+
+`lookup_proof` is currently a forward-compatible stub in the e2e proof shape.
+The prover sets it to `None`, serialization skips it, and the verifier only
+carries it through. Production SHA currently has empty `lookup_specs`, so the
+production SHA wrapper omits this field.
+
+The current e2e Rust type calls the serialized PCS opening transcript `zip`
+because the first backend was Zip+. Semantically this field is the PCS opening
+proof. The production object model should not expose this as Zip-specific state.
+
+Production folding may need a thin wrapper around this shape because it also has
+an instance-axis SumFold/NIFS proof and multiple fresh commitments. Those extra
+fields should reuse existing types:
+
+```rust
+pub struct ProductionLinearIdealFoldProof<P, Zt, F, const D: usize>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>,
+{
+    pub instance_commitments: Vec<PCSCommitments<P, Zt, F, D>>,
+    pub ideal_check: IdealCheckProof<F>,
+    pub sumfold_proof: MultiDegreeSumcheckProof<F>,
+    pub resolver: CombinedPolyResolverProof<F>,
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    pub multipoint_eval: MultipointEvalProof<F>,
+    pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    pub opening_proof: PCSOpeningProof<P, Zt, F, D>,
+}
+```
+
+This is intentionally a field-level reuse of the e2e proof object, not a new
+PIOP object model. The production wrapper belongs in `protocol`, if needed; it
+should not introduce new generic proof structs in `piop/src/neutron_nova`.
+
+The PCS backend remains generic through `ZincPCSTypes` and the component `PCS`
+implementations in `zip-plus/src/pcs/generic.rs`. Do not introduce a separate
+SHA-specific PCS trait for the proof object. The proof object only needs the
+associated commitment and opening-proof types. Production code that actually
+folds commitments should put any homomorphic-folding requirements directly on
+the component PCS types at the prover/verifier function boundary.
+
+```rust
+pub struct PCSOpeningProof<P, Zt, F, const D: usize>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>,
+{
+    pub binary: <<P as ZincPCSTypes<Zt, F, D>>::BinaryPCS
+        as PCS<F, BinaryPoly<D>, D>>::OpeningProof,
+    pub arbitrary: <<P as ZincPCSTypes<Zt, F, D>>::ArbitraryPCS
+        as PCS<F, DensePolynomial<Zt::Int, D>, D>>::OpeningProof,
+    pub int: <<P as ZincPCSTypes<Zt, F, D>>::IntPCS
+        as PCS<F, Zt::Int, D>>::OpeningProof,
+}
+```
+
+That requires the PCS trait to expose the opening proof as an associated type:
+
+```rust
+pub trait PCS<F, Eval, const D: usize>: Clone + Debug + Send + Sync
+where
+    F: PrimeField,
+    Eval: Clone + Debug + Send + Sync,
+{
+    type CommitmentKey: Clone + Debug + Send + Sync;
+    type VerifierKey: Clone + Debug + Send + Sync;
+    type Commitment: Clone + Debug + Send + Sync;
+    type ProverData: Clone + Debug + Send + Sync;
+    type OpeningProof: Clone + Debug + Send + Sync + Default;
+
+    fn prove_open<const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        ck: &Self::CommitmentKey,
+        polys: &[DenseMultilinearExtension<Eval>],
+        point: &[F],
+        prover_data: &Self::ProverData,
+        field_cfg: &F::Config,
+    ) -> Result<Self::OpeningProof, ZipError>;
+
+    fn verify_open<const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vk: &Self::VerifierKey,
+        commitment: &Self::Commitment,
+        point: &[F],
+        lifted_evals: &[DynamicPolynomialF<F>],
+        opening_proof: &Self::OpeningProof,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>;
+}
+```
+
+The current trait writes and reads opening data through PCS transcripts and
+returns `Result<(), ZipError>`. That should be treated as the current adapter
+shape, not the production proof-object shape. Zip+ can set
+`type OpeningProof = Vec<u8>` while Hyrax or any future PCS can use its native
+typed proof.
+
+The aggregate ideal component from `ProjectionFold Concise` should be carried by
+the existing ideal-check proof:
+
+```rust
+pub struct IdealCheckProof<F: PrimeField> {
+    pub combined_mle_values: Vec<DynamicPolynomialF<F>>,
+}
+```
+
+The family/order information is setup data, not a new proof object. For
+production SHA-256, `verify_setup` fixes the canonical mapping from entries of
+`combined_mle_values` to the nonzero ideal families:
+
+    ℱ_≠0 = {R₀, R₁, R₄, R₅, R₆, R₉, R₁₀}
+
+The compact production interpretation is:
+
+    ideal_check.combined_mle_values[f] = Ē_f^β(X)
+    for f ∈ ℱ_≠0 in setup-defined order
+
+If the generic e2e verifier path is used unchanged, the vector length/order must
+match `U::verify_as_subprotocol` and `count_constraints::<U>()`. If the
+production verifier uses the seven-family compact form, that compact mapping is
+part of `verify_setup`; the carrier is still `IdealCheckProof<F>`.
+
+The honest aggregate polynomial is:
+
+    Ē_f^β(X)
+      = ∑_{b ∈ {0,1}^ℓ} eq(β,b)
+          ∑_{z ∈ H_row} eq(r_ic,z) · C_f(z,X;w_b,y_b)
+
+In the production transcript, r_ic and β are sampled after binding VS and the
+fresh instances, and before E_agg is read. `ProjectionFold Concise` owns the
+full Fiat-Shamir sequence.
+
+Thus the submitted ideal component is already batched over both verifier-visible
+axes:
+
+    instance axis b via eq(β,b)
+    row axis z      via eq(r_ic,z)
+
+The verifier still does not trust these aggregate polynomials blindly. It checks
+the shape-level degree bound and ideal membership for each family:
+
+    deg_X Ē_f^β(X) < δ_f
+    Ē_f^β(X) ∈ I_f
+
+After accepting and absorbing the aggregate polynomials, the verifier samples
+the scalarization and family-batching challenges and computes the initial
+NIFS/SumFold claim:
+
+    C₀ = ∑_{f ∈ ℱ_≠0} λ^f · Ē_f^β(a)
+
+The later NIFS, row sumcheck, terminal reconstruction, multipoint reduction, and
+PCS opening bind this same scalar to the folded commitments and public trace.
 
 The folded verifier-visible instance is the result of folding fresh instances.
 It contains the folded target claim, folded commitments, and any folded public
@@ -172,7 +349,8 @@ pub struct FoldedLinearIdealInstance<F: PrimeField, Commitments, Public> {
 
 The folded witness is prover-private. Its concrete representation can be an
 owned folded trace, folded source MLEs, or another protocol-specific witness
-bundle:
+bundle. In the generic UAIR model, this is normally a
+`FoldedUairWitness<F, OpeningWitness>`:
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,176 +359,77 @@ pub struct FoldedLinearIdealWitness<Witness> {
 }
 ```
 
-The proof object is:
+Here `OpeningWitness` is the PCS/backend-specific prover-only state needed to
+open the folded commitments.
+
+The ideal-check proof is the production `E_agg` component from
+`ProjectionFold Concise`, represented with `IdealCheckProof<F>`. It contains the
+seven SHA-256 aggregate ideal polynomials for the nonzero families, or the
+shape-defined analogue for another UAIR. These polynomials are verifier-visible
+and must be absorbed before sampling a, λ, ρ, ξ.
+
+`sumfold_proof` is the instance-axis `MultiDegreeSumcheckProof`. It proves the
+SumFold transition from the verifier-computed C₀ to the folded target. The
+verifier derives r_b, folding weights θ_b, and T′:
+
+    θ_b = eq(r_b,b)
+
+    T′ = c_SF / eq(β,r_b)
+
+`resolver` and `combined_sumcheck` are the same terminal-reconstruction objects
+used by e2e step 4. `combined_sumcheck` reduces the folded row claim to r⋆, and
+`resolver` carries the terminal evaluations needed to close the combined
+polynomial resolver:
 
 ```rust
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LinearIdealFoldProof<F: PrimeField> {
-    pub ideal_family_polys: Vec<IdealFamilyPolys<F>>,
-    pub nifs: MultiDegreeSumcheckProof<F>,
-    pub folded_claim_sumcheck: MultiDegreeSumcheckProof<F>,
-    pub terminal_evals: TerminalEvals<F>,
-    pub multipoint: MultipointEvalProof<F>,
-    pub opening_evals: OpeningEvals<F>,
-    pub pcs_opening_bytes: Vec<u8>,
+pub struct CombinedPolyResolverProof<F: PrimeField> {
+    pub up_evals: Vec<F>,
+    pub down_evals: Vec<F>,
+    pub bit_slice_evals: Vec<F>,
+    pub bit_op_down_evals: Vec<F>,
+    pub shifted_bit_slice_evals: Vec<F>,
 }
 ```
 
-`ideal_family_polys` contains the nonzero ideal-witness polynomials, grouped by
-ideal family. These prove ideal membership and define the scalar targets used by
-the instance-axis folding claim.
+Together they prove that the folded target is the row-domain sum of the folded
+residue expression:
 
-For fresh instances \(b \in \{0,\dots,B-1\}\), ideal families
-\(f \in \mathcal F\), and family slots \(k\):
+    T′ = ∑_{x ∈ {0,1}^d} eq(r_ic,x) · Φ_folded(x)
 
-$$
-E_{b,f,k}(X) \in I_f
-$$
+This sumcheck reduces the folded claim to a terminal point r⋆.
 
-The beta-aggregated family polynomial is:
+The verifier uses `resolver` to check:
 
-$$
-\bar E^{\beta}_{f,k}(X)
-=
-\sum_{b=0}^{B-1} \operatorname{eq}(\beta,b)\,E_{b,f,k}(X)
-$$
+    terminal = eq(r_ic,r⋆) · Φ_folded(r⋆)
 
-Because the ideals are linear:
+`multipoint_eval` is the existing e2e multipoint proof. It reduces all terminal
+evaluation claims at r⋆ and shifted points into one batched opening claim at a
+verifier-derived point r₀:
 
-$$
-E_{b,f,k}(X) \in I_f
-\quad\Longrightarrow\quad
-\bar E^{\beta}_{f,k}(X) \in I_f
-$$
+    { p_i(s_i(r⋆)) = v_i }_i  ⇒  P(r₀) = v₀
 
-The fresh scalar target for instance \(b\) is:
-
-$$
-T_b
-=
-\sum_{f \in \mathcal F}
-\lambda_f
-\sum_k E_{b,f,k}(a)
-$$
-
-The initial SumFold claim is:
-
-$$
-C_0
-=
-\sum_{b=0}^{B-1}
-\operatorname{eq}(\beta,b)\,T_b
-$$
-
-`nifs` is the instance-axis `MultiDegreeSumcheckProof`. It proves the SumFold
-transition from \(C_0\) to the folded target. The verifier derives \(r_b\),
-folding weights \(\theta_b\), and \(T'\):
-
-$$
-\theta_b = \operatorname{eq}(r_b,b)
-$$
-
-$$
-T'
-=
-\frac{c_{\mathrm{SF}}}{\operatorname{eq}(\beta,r_b)}
-$$
-
-`folded_claim_sumcheck` proves that the folded target is the row-domain sum of
-the folded residue expression:
-
-$$
-T'
-=
-\sum_{x \in \{0,1\}^{d}}
-\operatorname{eq}(r_{\mathrm{ic}},x)
-\cdot
-\Phi_{\mathrm{folded}}(x)
-$$
-
-This sumcheck reduces the folded claim to a terminal point \(r_\star\).
-
-`terminal_evals` contains the claimed evaluations needed to reconstruct
-\(\Phi_{\mathrm{folded}}(r_\star)\). It should include source identifiers,
-shift identifiers, scalarized values, and any coefficient-level values needed by
-the shape-specific expression. For SHA-256 this corresponds to the current
-endpoint evaluations of folded word and integer sources.
-
-```rust
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SourceId(pub u16);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ShiftId(pub u16);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalEvals<F: PrimeField> {
-    pub polynomial_sources: Vec<TerminalPolynomialEval<F>>,
-    pub scalar_sources: Vec<TerminalScalarEval<F>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalPolynomialEval<F: PrimeField> {
-    pub source: SourceId,
-    pub shift: ShiftId,
-    pub scalarized: F,
-    pub coeffs: Vec<F>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalScalarEval<F: PrimeField> {
-    pub source: SourceId,
-    pub shift: ShiftId,
-    pub value: F,
-}
-```
-
-The verifier uses `terminal_evals` to check:
-
-$$
-\mathrm{terminal}
-=
-\operatorname{eq}(r_{\mathrm{ic}},r_\star)
-\cdot
-\Phi_{\mathrm{folded}}(r_\star)
-$$
-
-`multipoint` reduces all terminal evaluation claims at \(r_\star\) and shifted
-points into one batched opening claim at a verifier-derived point \(r_0\):
-
-$$
-\{p_i(s_i(r_\star)) = v_i\}_i
-\quad\Longrightarrow\quad
-P(r_0)=v_0
-$$
-
-`opening_evals` are the claimed folded committed-source evaluations at \(r_0\).
-`pcs_opening_bytes` is the serialized PCS proof that those evaluations match
-the folded commitments.
-
-```rust
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpeningEvals<F: PrimeField> {
-    pub polynomial_sources: Vec<DynamicPolynomialF<F>>,
-    pub scalar_sources: Vec<F>,
-}
-```
+`witness_lifted_evals` are the existing e2e opening-evaluation carrier. They
+are witness-only lifted MLE evaluations at r₀ in F_q[X], ordered as
+`[wit_bin..., wit_arb..., wit_int...]`. The verifier recomputes public lifted
+evals from the public trace, interleaves public and witness lifted evals,
+derives scalar `open_evals` by ψ_a, derives bit-op virtual opens locally, and
+checks the `multipoint_eval` subclaim. The serialized PCS opening proof is
+`opening_proof`.
 
 The proof chain is:
 
 ```text
-ideal_family_polys
-    -> derive C0 and prove ideal membership
-nifs
-    -> fold C0 into T'
-folded_claim_sumcheck
-    -> reduce T' to terminal point r_star
-terminal_evals
-    -> reconstruct the terminal folded expression
-multipoint
-    -> reduce many endpoint claims to one opening point r_0
-opening_evals + pcs_opening_bytes
-    -> prove consistency with folded commitments
+ideal_check
+    → check ideal membership and derive C₀
+sumfold_proof
+    → fold C₀ into T′
+resolver + combined_sumcheck
+    → reduce T′ to terminal point r⋆
+    → reconstruct the terminal folded expression
+multipoint_eval
+    → reduce many endpoint claims to one opening point r₀
+witness_lifted_evals + opening_proof
+    → prove consistency with folded commitments
 ```
 
 ## SHA-256 Domain Objects
@@ -487,37 +566,84 @@ pub fn prove_linear_ideal_fold<P, U, Zt, F, const D: usize>(
 ) -> Result<
     LinearIdealFoldProveOutput<
         UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
-        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, FoldedPublicEvals<F>>,
-        FoldedLinearIdealWitness<FoldedUairTrace<F>>,
-        LinearIdealFoldProof<F>,
+        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedShaPublic<F>>,
+        FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
+        ProductionLinearIdealFoldProof<P, Zt, F, D>,
     >,
     LinearIdealFoldError<F>,
 >
 where
     U: Uair,
     Zt: ZincTypes<D>,
-    F: PrimeField;
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>;
 ```
 
-The verifier receives the fresh instances and proof. It derives the same folded
-instance, but it never receives the folded witness:
+The SHA production folded witness keeps the structured folded SHA trace and the
+folded PCS opening witness:
+
+```rust
+pub struct ProductionShaFoldedWitness<P, Zt, F, const D: usize>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>,
+{
+    pub trace: ProjectedShaTrace<F>,
+    pub opening_witness: PCSProverData<P, Zt, F, D>,
+}
+```
+
+The folded verifier-visible public value is `ProjectedShaPublic<F>`, not a flat
+field vector, because the verifier needs structured SHA public columns for
+terminal reconstruction and multipoint checks.
+
+The production verifier interface in `ProjectionFold Concise` is the acceptance
+predicate:
+
+    verify(VS, {Inst_b}_{b ∈ {0,1}^ℓ}, π) → {true, false}
+
+When VS is fixed by context, the shorthand is:
+
+    verify({Inst_b}_{b ∈ {0,1}^ℓ}, π) → {true, false}
+
+The Rust-facing API uses the same two-step shape. Setup verification checks and
+stores static material:
+
+```rust
+pub fn setup_verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
+    params: LinearIdealFoldVerifierParams<P, U, Zt, F, D>,
+    shape: UairShape<U>,
+) -> Result<VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>;
+```
+
+The verifier then receives `VS`, fresh instances, and the proof. It derives the
+same folded instance, but it never receives the folded witness:
 
 ```rust
 pub fn verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
-    vp: &LinearIdealFoldVerifierParams<P, U, Zt, F, D>,
-    shape: &UairShape<U>,
+    vs: &VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>],
-    proof: &LinearIdealFoldProof<F>,
+    proof: &ProductionLinearIdealFoldProof<P, Zt, F, D>,
     transcript: &mut impl Transcript,
 ) -> Result<
-    FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, FoldedPublicEvals<F>>,
+    FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedShaPublic<F>>,
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
     Zt: ZincTypes<D>,
-    F: PrimeField;
+    F: PrimeField,
+    P: ZincPCSTypes<Zt, F, D>;
 ```
+
+Returning `Ok(folded_instance)` means the production verifier accepts. Returning
+`Err(_)` means rejection.
 
 ```rust
 Sha256ChainPublicInput

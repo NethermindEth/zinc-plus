@@ -426,7 +426,7 @@ pub struct ShaSumFoldOutput<F> {
     r_b: Vec<F>,
     c_sf: F,
     t_prime: F,
-    theta: Vec<F>,
+    eq_instance_weights: Vec<F>,
 }
 
 impl<F> ShaSumFoldOutput<F> {
@@ -442,8 +442,8 @@ impl<F> ShaSumFoldOutput<F> {
         &self.t_prime
     }
 
-    pub fn theta(&self) -> &[F] {
-        &self.theta
+    pub fn eq_instance_weights(&self) -> &[F] {
+        &self.eq_instance_weights
     }
 }
 
@@ -792,7 +792,7 @@ where
     Ok(())
 }
 
-pub fn finalize_sha_sumfold<F>(
+pub fn derive_sha_instance_fold_claim<F>(
     beta: &[F],
     r_b: Vec<F>,
     c_sf: F,
@@ -827,14 +827,14 @@ where
         return Err(ShaProjectionError::ZeroSumFoldDenominator);
     }
 
-    let theta = build_eq_x_r_vec(&r_b, field_cfg)?;
-    debug_assert_eq!(theta.len(), instance_count);
+    let eq_instance_weights = build_eq_x_r_vec(&r_b, field_cfg)?;
+    debug_assert_eq!(eq_instance_weights.len(), instance_count);
     let t_prime = c_sf.clone() / d;
     Ok(ShaSumFoldOutput {
         r_b,
         c_sf,
         t_prime,
-        theta,
+        eq_instance_weights,
     })
 }
 
@@ -853,9 +853,9 @@ where
             expected: traces.len(),
         });
     }
-    if sumfold.theta.len() != traces.len() {
+    if sumfold.eq_instance_weights.len() != traces.len() {
         return Err(ShaProjectionError::FoldingWeightCount {
-            got: sumfold.theta.len(),
+            got: sumfold.eq_instance_weights.len(),
             expected: traces.len(),
         });
     }
@@ -871,28 +871,28 @@ where
         bit_slices: ShaBitSliceColumns {
             columns: fold_3d(
                 traces.iter().map(|trace| &trace.bit_slices.columns),
-                &sumfold.theta,
+                &sumfold.eq_instance_weights,
                 field_cfg,
             )?,
         },
         scalarized_words: ShaScalarizedRows {
             words: fold_2d(
                 traces.iter().map(|trace| &trace.scalarized_words.words),
-                &sumfold.theta,
+                &sumfold.eq_instance_weights,
                 field_cfg,
             )?,
         },
         int_columns: ShaIntColumns {
             columns: fold_2d(
                 traces.iter().map(|trace| &trace.int_columns.columns),
-                &sumfold.theta,
+                &sumfold.eq_instance_weights,
                 field_cfg,
             )?,
         },
         public_columns: ShaPublicColumns {
             columns: fold_2d(
                 traces.iter().map(|trace| &trace.public_columns.columns),
-                &sumfold.theta,
+                &sumfold.eq_instance_weights,
                 field_cfg,
             )?,
         },
@@ -901,13 +901,13 @@ where
         columns: ShaPublicColumns {
             columns: fold_2d(
                 publics.iter().map(|public| &public.columns.columns),
-                &sumfold.theta,
+                &sumfold.eq_instance_weights,
                 field_cfg,
             )?,
         },
         word_columns: fold_optional_3d(
             publics.iter().map(|public| public.word_columns.as_ref()),
-            &sumfold.theta,
+            &sumfold.eq_instance_weights,
             field_cfg,
         )?
         .map(|columns| ShaPublicWordColumns { columns }),
@@ -4014,19 +4014,23 @@ mod tests {
         let beta = vec![f(2), f(3)];
         let r_b = vec![f(5), f(7)];
         let c_sf = f(11);
-        let out = finalize_sha_sumfold(&beta, r_b.clone(), c_sf.clone(), 4, &cfg).unwrap();
+        let out =
+            derive_sha_instance_fold_claim(&beta, r_b.clone(), c_sf.clone(), 4, &cfg).unwrap();
         let d = eq_eval(&beta, &r_b, F::one_with_cfg(&cfg)).unwrap();
 
         assert_eq!(out.t_prime(), &(c_sf / d));
-        assert_eq!(out.theta(), build_eq_x_r_vec(&r_b, &cfg).unwrap());
+        assert_eq!(
+            out.eq_instance_weights(),
+            build_eq_x_r_vec(&r_b, &cfg).unwrap()
+        );
     }
 
     #[test]
-    fn folding_uses_sumfold_theta() {
+    fn folding_uses_eq_instance_weights() {
         let cfg = test_config();
         let beta = vec![f(2)];
         let r_b = vec![f(3)];
-        let out = finalize_sha_sumfold(&beta, r_b, f(9), 2, &cfg).unwrap();
+        let out = derive_sha_instance_fold_claim(&beta, r_b, f(9), 2, &cfg).unwrap();
 
         let mut left = zero_trace();
         let mut right = zero_trace();
@@ -4042,8 +4046,8 @@ mod tests {
             &cfg,
         )
         .unwrap();
-        let expected = out.theta()[0].clone() * &left.bit_slices.columns[0][0][0]
-            + out.theta()[1].clone() * &right.bit_slices.columns[0][0][0];
+        let expected = out.eq_instance_weights()[0].clone() * &left.bit_slices.columns[0][0][0]
+            + out.eq_instance_weights()[1].clone() * &right.bit_slices.columns[0][0][0];
         assert_eq!(folded.trace.bit_slices.columns[0][0][0], expected);
     }
 
@@ -4182,7 +4186,8 @@ mod tests {
         .unwrap();
         let (_proof, r_b, expected) = prove_and_verify_sumfold(sumfold_group, ell);
         let sumfold =
-            finalize_sha_sumfold(&beta, r_b, expected[0].clone(), traces.len(), &cfg).unwrap();
+            derive_sha_instance_fold_claim(&beta, r_b, expected[0].clone(), traces.len(), &cfg)
+                .unwrap();
         let (folded_witness, folded_public) =
             fold_projected_sha_traces(&traces, &publics, &sumfold, &cfg).unwrap();
 

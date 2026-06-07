@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, io::Cursor, marker::PhantomData};
 
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use zinc_poly::{
@@ -28,6 +28,7 @@ where
     type VerifierKey: Clone + Debug + Send + Sync;
     type Commitment: Clone + Debug + Send + Sync;
     type ProverData: Clone + Debug + Send + Sync;
+    type OpeningProof: Clone + Debug + Send + Sync + Default;
 
     fn precompute_ck(_ck: &Self::CommitmentKey) {}
 
@@ -51,7 +52,7 @@ where
         point: &[F],
         prover_data: &Self::ProverData,
         field_cfg: &F::Config,
-    ) -> Result<(), ZipError>
+    ) -> Result<Self::OpeningProof, ZipError>
     where
         F::Inner: Transcribable,
         F::Modulus: Transcribable;
@@ -62,6 +63,7 @@ where
         commitment: &Self::Commitment,
         point: &[F],
         lifted_evals: &[DynamicPolynomialF<F>],
+        opening_proof: &Self::OpeningProof,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
@@ -119,6 +121,7 @@ where
     type VerifierKey = ZipPlusParams<Zt, Lc>;
     type Commitment = ZipPlusCommitment;
     type ProverData = Option<ZipPlusHint<Zt::Cw>>;
+    type OpeningProof = Vec<u8>;
 
     fn commit(
         ck: &Self::CommitmentKey,
@@ -156,17 +159,19 @@ where
         point: &[F],
         prover_data: &Self::ProverData,
         field_cfg: &F::Config,
-    ) -> Result<(), ZipError>
+    ) -> Result<Self::OpeningProof, ZipError>
     where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
+        let start = transcript.stream.position() as usize;
         if let Some(hint) = prover_data {
             let _ = ZipPlus::<Zt, Lc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                 transcript, ck, polys, point, hint, field_cfg,
             )?;
         }
-        Ok(())
+        let end = transcript.stream.position() as usize;
+        Ok(transcript.stream.get_ref()[start..end].to_vec())
     }
 
     fn verify_open<const CHECK_FOR_OVERFLOW: bool>(
@@ -175,12 +180,36 @@ where
         commitment: &Self::Commitment,
         point: &[F],
         lifted_evals: &[DynamicPolynomialF<F>],
+        opening_proof: &Self::OpeningProof,
         field_cfg: &F::Config,
     ) -> Result<(), ZipError>
     where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
+        if !opening_proof.is_empty() {
+            let original_stream =
+                std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.clone()));
+            let result = <Self as PCS<F, Zt::Eval, D>>::verify_open::<CHECK_FOR_OVERFLOW>(
+                transcript,
+                vk,
+                commitment,
+                point,
+                lifted_evals,
+                &Vec::new(),
+                field_cfg,
+            );
+            let consumed = transcript.stream.position() == opening_proof.len() as u64;
+            transcript.stream = original_stream;
+            result?;
+            if !consumed {
+                return Err(ZipError::InvalidPcsOpen(
+                    "PCS opening proof has trailing bytes".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
         if commitment.batch_size == 0 {
             return Ok(());
         }
