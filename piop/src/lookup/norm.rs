@@ -28,6 +28,8 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::slice;
 use thiserror::Error;
 use zinc_poly::{
