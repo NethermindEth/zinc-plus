@@ -172,6 +172,42 @@ checks + prover/verifier wiring + a real witness generator.
 
 ---
 
+## Phase-2b status & open bug (step-4 wiring + e2e)
+
+**Done & green:** the norm zerocheck group (`piop/src/lookup/norm.rs`,
+unit-tested), the `NormSpec` signature accessor, the valid witness generator,
+and the step-4 norm-group wiring into the **unfolded** prover/verifier
+(`CprProof.norm_value_evals` + serialization, `ProtocolError::Norm`, dynamic
+group index). All 12 pre-existing protocol e2e tests still pass (no regression;
+the new serialized field round-trips). The architecture is confirmed viable:
+`prove()` takes `project_scalar` generically and the combined poly is
+`DynamicPolynomialF`, so the scalar degree (`N=512`, for limb reconstruction)
+is decoupled from the cell degree (`W=32`); only the `do_test` *helper* coupled
+them, so the Falcon e2e uses a custom harness.
+
+**Open bug** (`protocol` test `test_e2e_falcon_batch`, currently `#[ignore]`):
+the end-to-end test compiles and the **prover succeeds**, but the **verifier
+fails the ring-equation ideal check** — `ProtocolError::IdealCheck(NotInIdeal)`,
+*not* `ProtocolError::Norm`, so the norm wiring is **not** implicated. The i64
+witness test proves the residual reduces to exactly `0 mod (X^n+1)`, so the
+defect is in the full protocol's handling of the **limb-reconstruction ring
+constraint** — a regime no prior UAIR exercised: cell-poly X-degree `~2n`,
+a `W=n` rotation ideal, and a degree-`n` scalar (`X^{32m}`). The prover only
+*claims* the constraint value, so it doesn't notice; the verifier's membership
+check rejects. **Next:** isolate whether it's (a) scalar projection /
+`MulByScalar` of the high-degree `X^{32m}` scalars, (b) the combined-poly
+product of two reconstructed operands, or (c) the `RotationIdeal<_, 512>`
+reduction at this degree — e.g. by unit-testing the ideal check on a single
+hand-built reconstructed residual. (A fallback worth weighing: whole-poly
+`D=2n` cells with the one-line ideal check and **no** reconstruction, trading
+the native-cell-size benefit of degree-`<32` limbs for a simpler constraint —
+this is the design tension flagged when the limb layout was chosen.)
+
+**Not yet wired:** the folded prover/verifier paths (`prove_folded`,
+`prove_folded_4x_inner` and their verifiers) — they leave `norm_value_evals`
+empty, so existing folded tests pass but a folded Falcon proof would skip the
+norm group.
+
 ## How to use this doc
 
 Ledger for the batched Falcon arithmetization on branch `falcon`. **Out of

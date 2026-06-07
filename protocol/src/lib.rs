@@ -1121,6 +1121,68 @@ mod tests {
         );
     }
 
+    /// End-to-end test: batched Falcon verification (`FalconBatchUair`).
+    ///
+    /// Exercises the full protocol on a real (synthetic) Falcon batch: the
+    /// per-signature negacyclic ring ideal-check `s_1 + s_2·h − c − q·u ∈
+    /// (X^n+1)` (`RotationIdeal<_, 512>`, reconstructed from degree-<32 limbs,
+    /// so the combined poly reaches degree ~2n) AND the squared-norm zerocheck
+    /// group, both bound to committed columns. Custom harness: the scalar
+    /// degree (N=512, for limb reconstruction) is decoupled from the cell
+    /// degree (32), and the ideal projects to `RotationIdeal<F, N>` rather than
+    /// `DegreeOneIdeal`.
+    ///
+    /// STATUS: compiles, and the prover + the entire generic harness succeed
+    /// (scalar-degree/cell-degree decoupling, the `RotationIdeal<F, N>`
+    /// projection, `project_scalar_fn` inference). It currently FAILS in the
+    /// verifier's *ring-equation* ideal check —
+    /// `ProtocolError::IdealCheck(NotInIdeal)`, NOT `ProtocolError::Norm`, so
+    /// the norm-group wiring is not implicated. The i64 witness test
+    /// (`falcon::tests::falcon_witness_satisfies_ring_eq_and_norm`) proves the
+    /// residual reduces to exactly 0 mod (X^n+1), so the bug is in the full
+    /// protocol's handling of the limb-reconstruction ring constraint — the
+    /// previously-unexercised regime of cell-poly X-degree ~2n with a W=n
+    /// ideal and a degree-n scalar (the `X^{32m}` reconstruction). Likely
+    /// suspects: `MulByScalar`/scalar-projection of the high-degree `X^{32m}`
+    /// scalars, or the combined-poly product for two reconstructed operands.
+    /// Tracked in `documentation/falcon-arithmetization-design.md`.
+    #[test]
+    #[ignore = "ring-eq reconstruction ideal-check fails in full protocol; see fn doc + design note"]
+    fn test_e2e_falcon_batch() {
+        use zinc_test_uair::FalconBatchUair;
+        const FN: usize = zinc_test_uair::falcon::N;
+
+        let num_vars = 3; // 2^3 = 8 signatures (IPRS row length must be a mult of 8).
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+
+        let mut rng = rng();
+        let trace = FalconBatchUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let sig = <FalconBatchUair<ZtInt> as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        let proof = ZincPlusPiop::<
+            TestZincTypesIprs,
+            FalconBatchUair<ZtInt>,
+            F,
+            DEGREE_PLUS_ONE,
+        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("Falcon prover failed");
+
+        let project_ideal = |ideal: &IdealOrZero<RotationIdeal<ZtInt, FN>>,
+                             field_cfg: &<F as PrimeField>::Config| {
+            ideal.map(|i| RotationIdeal::<F, FN>::from_with_cfg(i, field_cfg))
+        };
+
+        ZincPlusPiop::<TestZincTypesIprs, FalconBatchUair<ZtInt>, F, DEGREE_PLUS_ONE>::verify::<
+            _,
+            CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, project_ideal)
+        .expect("Falcon verifier failed");
+    }
+
     /// End-to-end test: TestUairSimpleMultiplication.
     ///
     /// UAIR constraints (3 total, no ideals):
