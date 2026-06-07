@@ -1130,24 +1130,15 @@ mod tests {
     /// group, both bound to committed columns. Custom harness: the scalar
     /// degree (N=512, for limb reconstruction) is decoupled from the cell
     /// degree (32), and the ideal projects to `RotationIdeal<F, N>` rather than
-    /// `DegreeOneIdeal`.
+    /// `DegreeOneIdeal`. Exercises the per-signature negacyclic ring ideal-check
+    /// AND the squared-norm zerocheck against committed columns.
     ///
-    /// STATUS: compiles, and the prover + the entire generic harness succeed
-    /// (scalar-degree/cell-degree decoupling, the `RotationIdeal<F, N>`
-    /// projection, `project_scalar_fn` inference). It currently FAILS in the
-    /// verifier's *ring-equation* ideal check —
-    /// `ProtocolError::IdealCheck(NotInIdeal)`, NOT `ProtocolError::Norm`, so
-    /// the norm-group wiring is not implicated. The i64 witness test
-    /// (`falcon::tests::falcon_witness_satisfies_ring_eq_and_norm`) proves the
-    /// residual reduces to exactly 0 mod (X^n+1), so the bug is in the full
-    /// protocol's handling of the limb-reconstruction ring constraint — the
-    /// previously-unexercised regime of cell-poly X-degree ~2n with a W=n
-    /// ideal and a degree-n scalar (the `X^{32m}` reconstruction). Likely
-    /// suspects: `MulByScalar`/scalar-projection of the high-degree `X^{32m}`
-    /// scalars, or the combined-poly product for two reconstructed operands.
-    /// Tracked in `documentation/falcon-arithmetization-design.md`.
+    /// (Root cause of an earlier failure, now fixed: the `X^{32m}`
+    /// reconstruction scalars were built in a reused stack local, so the
+    /// pointer-keyed `piop::scalar_proj_cache` aliased them all to one address
+    /// and returned `X^W`'s projection for every `X^{W·m}`. `FalconBatchUair`
+    /// now materializes them into a `Vec` for distinct addresses.)
     #[test]
-    #[ignore = "ring-eq reconstruction ideal-check fails in full protocol; see fn doc + design note"]
     fn test_e2e_falcon_batch() {
         use zinc_test_uair::FalconBatchUair;
         const FN: usize = zinc_test_uair::falcon::N;
@@ -1181,6 +1172,179 @@ mod tests {
             CHECKED,
         >(&pp, proof, &public_trace, num_vars, project_scalar_fn, project_ideal)
         .expect("Falcon verifier failed");
+    }
+
+    /// Diagnostic: does `Σ_m project(X^{32m}) · limb_m` reconstruct the full
+    /// degree-<512 polynomial, using the exact combined-poly ops (project_scalar
+    /// + DynamicPolynomialF mul/add)? Isolates the limb-reconstruction bug.
+    #[test]
+    fn falcon_limb_reconstruction_roundtrip() {
+        use num_traits::Zero;
+        use zinc_poly::univariate::{
+            dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        };
+        const W: usize = 32;
+        const L: usize = 16;
+        const NN: usize = W * L; // 512
+        let cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Uint<FIELD_LIMBS>>();
+
+        // A known degree-<512 polynomial with mixed-sign coefficients.
+        let poly: Vec<i64> = (0..NN as i64).map(|i| (i * 7 + 3) % 251 - 125).collect();
+
+        let mut full: DynamicPolynomialF<F> =
+            poly.iter().map(|c| F::from_with_cfg(c, &cfg)).collect();
+        full.trim();
+
+        let mut recon = DynamicPolynomialF::<F>::zero();
+        for m in 0..L {
+            let limb: DensePolynomial<i64, W> =
+                DensePolynomial::new(core::array::from_fn::<i64, W, _>(|p| poly[m * W + p]));
+            let limb_proj = project_scalar_fn::<i64, F, W>(&limb, &cfg);
+
+            let mut x_coeffs = [0i64; NN];
+            x_coeffs[W * m] = 1;
+            let x_scalar: DensePolynomial<i64, NN> = DensePolynomial::new(x_coeffs);
+            let x_proj = project_scalar_fn::<i64, F, NN>(&x_scalar, &cfg);
+
+            recon = recon + x_proj * limb_proj;
+        }
+        recon.trim();
+
+        assert_eq!(recon, full, "limb reconstruction mismatch");
+    }
+
+    /// Diagnostic: build the full ring-equation residual `s_1 + s_2·h − c −
+    /// q·u` from limbs using the exact combined-poly ops, and check it lies in
+    /// `(X^N+1)` — the same membership check the verifier's ideal check runs.
+    #[test]
+    fn falcon_residual_in_ideal_diagnostic() {
+        use num_traits::Zero;
+        use zinc_poly::univariate::{
+            dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        };
+        use zinc_uair::ideal::{IdealCheck, rotation::RotationIdeal};
+        const W: usize = 32;
+        const L: usize = 16;
+        const NN: usize = W * L;
+        const Q: i64 = 12289;
+        let cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Uint<FIELD_LIMBS>>();
+
+        // Deterministic short witness, mirroring the generator's math.
+        let h: Vec<i64> = (0..NN as i64).map(|i| (i * 5 + 1).rem_euclid(Q)).collect();
+        let s1: Vec<i64> = (0..NN as i64).map(|i| (i % 21) - 10).collect();
+        let s2: Vec<i64> = (0..NN as i64).map(|i| (i * 3 % 21) - 10).collect();
+        let mut p = vec![0i64; NN]; // s2 * h mod (X^N + 1)
+        for i in 0..NN {
+            for j in 0..NN {
+                let prod = s2[i] * h[j];
+                let k = i + j;
+                if k < NN {
+                    p[k] += prod;
+                } else {
+                    p[k - NN] -= prod;
+                }
+            }
+        }
+        let mut c = vec![0i64; NN];
+        let mut u = vec![0i64; NN];
+        for k in 0..NN {
+            let val = s1[k] + p[k];
+            c[k] = val.rem_euclid(Q);
+            u[k] = val.div_euclid(Q);
+        }
+
+        let reconstruct = |poly: &[i64]| -> DynamicPolynomialF<F> {
+            let mut recon = DynamicPolynomialF::<F>::zero();
+            for m in 0..L {
+                let limb: DensePolynomial<i64, W> =
+                    DensePolynomial::new(core::array::from_fn::<i64, W, _>(|pp| poly[m * W + pp]));
+                let limb_proj = project_scalar_fn::<i64, F, W>(&limb, &cfg);
+                let mut xc = [0i64; NN];
+                xc[W * m] = 1;
+                let x_scalar: DensePolynomial<i64, NN> = DensePolynomial::new(xc);
+                let x_proj = project_scalar_fn::<i64, F, NN>(&x_scalar, &cfg);
+                recon = recon + x_proj * limb_proj;
+            }
+            recon
+        };
+
+        let mut q_coeffs = [0i64; NN];
+        q_coeffs[0] = Q;
+        let q_proj =
+            project_scalar_fn::<i64, F, NN>(&DensePolynomial::<i64, NN>::new(q_coeffs), &cfg);
+
+        let prod = reconstruct(&s2) * reconstruct(&h);
+        let qu = q_proj * reconstruct(&u);
+        let mut residual = reconstruct(&s1) + prod - reconstruct(&c) - qu;
+        residual.trim();
+
+        let ideal = RotationIdeal::<F, NN>::new(F::from_with_cfg(&(-1i64), &cfg));
+        let in_ideal = IdealOrZero::NonZero(ideal).contains(&residual).unwrap();
+        assert!(in_ideal, "ring-eq residual is NOT in (X^N+1) — reproduces the bug");
+    }
+
+    /// Diagnostic: for an actual generated trace, extract each row's committed
+    /// limbs and check that row's ring-eq residual lies in `(X^N+1)`. Isolates
+    /// a witness/storage bug (fails here) from a protocol-machinery bug (passes
+    /// here but the e2e still fails).
+    #[test]
+    fn falcon_trace_rows_residual_in_ideal() {
+        use num_traits::Zero;
+        use zinc_poly::univariate::{
+            dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        };
+        use zinc_uair::ideal::{IdealCheck, rotation::RotationIdeal};
+        use zinc_test_uair::FalconBatchUair;
+        const W: usize = 32;
+        const L: usize = 16;
+        const NN: usize = W * L;
+        const Q: i64 = 12289;
+        let cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Uint<FIELD_LIMBS>>();
+
+        let mut rng = rng();
+        let num_vars = 3;
+        let trace = FalconBatchUair::<ZtInt>::generate_random_trace(num_vars, &mut rng);
+        let arb = &trace.arbitrary_poly;
+        let n_rows = 1usize << num_vars;
+
+        let reconstruct = |poly: &[i64]| -> DynamicPolynomialF<F> {
+            let mut recon = DynamicPolynomialF::<F>::zero();
+            for m in 0..L {
+                let limb: DensePolynomial<i64, W> =
+                    DensePolynomial::new(core::array::from_fn::<i64, W, _>(|pp| poly[m * W + pp]));
+                let limb_proj = project_scalar_fn::<i64, F, W>(&limb, &cfg);
+                let mut xc = [0i64; NN];
+                xc[W * m] = 1;
+                let x_proj =
+                    project_scalar_fn::<i64, F, NN>(&DensePolynomial::<i64, NN>::new(xc), &cfg);
+                recon = recon + x_proj * limb_proj;
+            }
+            recon
+        };
+        let mut q_coeffs = [0i64; NN];
+        q_coeffs[0] = Q;
+        let q_proj =
+            project_scalar_fn::<i64, F, NN>(&DensePolynomial::<i64, NN>::new(q_coeffs), &cfg);
+        let ideal = RotationIdeal::<F, NN>::new(F::from_with_cfg(&(-1i64), &cfg));
+
+        for row in 0..n_rows {
+            // bases: H=0, C=16, S1=32, S2=48, U=64 (each L=16 limb columns).
+            let extract = |base: usize| -> Vec<i64> {
+                (0..L)
+                    .flat_map(|m| arb[base + m].evaluations[row].coeffs.iter().copied())
+                    .collect()
+            };
+            let (h, c, s1, s2, u) =
+                (extract(0), extract(16), extract(32), extract(48), extract(64));
+            let prod = reconstruct(&s2) * reconstruct(&h);
+            let qu = q_proj.clone() * reconstruct(&u);
+            let mut residual = reconstruct(&s1) + prod - reconstruct(&c) - qu;
+            residual.trim();
+            assert!(
+                IdealOrZero::NonZero(ideal.clone()).contains(&residual).unwrap(),
+                "row {row}: residual not in (X^N+1)"
+            );
+        }
     }
 
     /// End-to-end test: TestUairSimpleMultiplication.

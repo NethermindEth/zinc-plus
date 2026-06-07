@@ -158,15 +158,27 @@ where
     {
         let arb = up.arbitrary_poly;
 
+        // Reconstruction scalars X^{W·m} for m = 1..L, materialized into a Vec
+        // so each has a *stable, distinct address* for the whole call. The
+        // protocol's scalar-projection cache (`piop::scalar_proj_cache`) keys
+        // on pointer identity; building these in a reused stack local would
+        // alias all of them to one address, so the cache would return X^{W}'s
+        // projection for every X^{W·m} and collapse the reconstruction.
+        let x_pows: Vec<DensePolynomial<R, N>> = (1..L)
+            .map(|m| {
+                let mut coeffs: [R; N] = core::array::from_fn(|_| R::ZERO);
+                coeffs[W * m] = R::ONE; // X^{W·m}
+                DensePolynomial::new(coeffs)
+            })
+            .collect();
+
         // Reconstruct a degree-<N polynomial from its L limbs:
         //   P(X) = Σ_{m<L} X^{W·m} · limb_m(X),   deg(limb_m) < W.
         let reconstruct = |base: usize| -> B::Expr {
             let mut acc = arb[base].clone(); // m = 0: X^0 = 1
             for m in 1..L {
-                let mut coeffs: [R; N] = core::array::from_fn(|_| R::ZERO);
-                coeffs[W * m] = R::ONE; // X^{W·m}
-                let x_pow = DensePolynomial::<R, N>::new(coeffs);
-                acc = acc + &mbs(&arb[base + m], &x_pow).expect("X^{Wm}·limb overflow");
+                acc = acc
+                    + &mbs(&arb[base + m], &x_pows[m - 1]).expect("X^{Wm}·limb overflow");
             }
             acc
         };

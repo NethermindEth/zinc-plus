@@ -172,7 +172,7 @@ checks + prover/verifier wiring + a real witness generator.
 
 ---
 
-## Phase-2b status & open bug (step-4 wiring + e2e)
+## Phase-2b status (step-4 wiring + e2e) — COMPLETE
 
 **Done & green:** the norm zerocheck group (`piop/src/lookup/norm.rs`,
 unit-tested), the `NormSpec` signature accessor, the valid witness generator,
@@ -185,23 +185,30 @@ the new serialized field round-trips). The architecture is confirmed viable:
 is decoupled from the cell degree (`W=32`); only the `do_test` *helper* coupled
 them, so the Falcon e2e uses a custom harness.
 
-**Open bug** (`protocol` test `test_e2e_falcon_batch`, currently `#[ignore]`):
-the end-to-end test compiles and the **prover succeeds**, but the **verifier
-fails the ring-equation ideal check** — `ProtocolError::IdealCheck(NotInIdeal)`,
-*not* `ProtocolError::Norm`, so the norm wiring is **not** implicated. The i64
-witness test proves the residual reduces to exactly `0 mod (X^n+1)`, so the
-defect is in the full protocol's handling of the **limb-reconstruction ring
-constraint** — a regime no prior UAIR exercised: cell-poly X-degree `~2n`,
-a `W=n` rotation ideal, and a degree-`n` scalar (`X^{32m}`). The prover only
-*claims* the constraint value, so it doesn't notice; the verifier's membership
-check rejects. **Next:** isolate whether it's (a) scalar projection /
-`MulByScalar` of the high-degree `X^{32m}` scalars, (b) the combined-poly
-product of two reconstructed operands, or (c) the `RotationIdeal<_, 512>`
-reduction at this degree — e.g. by unit-testing the ideal check on a single
-hand-built reconstructed residual. (A fallback worth weighing: whole-poly
-`D=2n` cells with the one-line ideal check and **no** reconstruction, trading
-the native-cell-size benefit of degree-`<32` limbs for a simpler constraint —
-this is the design tension flagged when the limb layout was chosen.)
+**End-to-end test passes** (`protocol` test `test_e2e_falcon_batch`): a real
+synthetic Falcon batch proves and verifies, exercising both the per-signature
+negacyclic ring ideal-check (`s_1 + s_2·h − c − q·u ∈ (X^n+1)`, reconstructed
+from degree-`<32` limbs) and the squared-norm zerocheck against committed
+columns. The custom harness decouples scalar degree (`N`) from cell degree
+(`32`) and projects the ideal to `RotationIdeal<F, N>`.
+
+**Root cause of an earlier failure (fixed).** The first e2e run failed the
+verifier's ring-equation ideal check (`IdealCheck(NotInIdeal)`), with the
+combined polynomial collapsing to degree `2·63 = 126` instead of `~2n`.
+Diagnosis (the `falcon_*` unit tests in `protocol/src/lib.rs` plus a
+`max_degree`/cell-degree print): the reconstruction `Σ_m X^{W·m}·limb_m` was
+collapsing to `arb[base] + X^W·Σ(other limbs)` because **every `X^{W·m}` scalar
+was returning `X^W`'s projection**. The culprit is `piop::scalar_proj_cache`,
+which keys projected-scalar lookups on **pointer identity** (`scalar as *const
+S`) on the documented assumption that a UAIR passes each scalar by reference to
+a stable local. `FalconBatchUair` built the `X^{W·m}` scalars in a *reused
+stack local* inside the reconstruction loop, so all 15 aliased one address; the
+cache stored `X^W`'s projection there and returned it for every `X^{W·m}`. Fix:
+materialize the reconstruction scalars into a `Vec` (stable, distinct
+addresses) — a 5-line change in `FalconBatchUair::constrain_general`. The
+pointer-identity cache is a latent footgun for any UAIR that builds distinct
+scalar values at the same address; worth a value-keyed fallback or a debug
+assertion someday, but the per-UAIR fix is correct and zero-cost here.
 
 **Not yet wired:** the folded prover/verifier paths (`prove_folded`,
 `prove_folded_4x_inner` and their verifiers) — they leave `norm_value_evals`
