@@ -13,7 +13,11 @@ pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
 pub use generate_trace::*;
 pub use sha_ecdsa::ShaEcdsaUair;
-pub use sha256::{Sha256CompressionSliceUair, Sha256Ideal};
+pub use sha256::{
+    Sha256CompressionSliceUair, Sha256Ideal, Sha256MessageBlock, Sha256State, Sha256WitnessError,
+    sha256_compress_native, synthesize_one_sha256_compression_trace,
+    synthesize_sha256_chain_witnesses,
+};
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
 use num_traits::Zero;

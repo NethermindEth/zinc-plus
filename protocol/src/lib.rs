@@ -826,8 +826,9 @@ mod tests {
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BitOpRotUair,
         EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal,
-        ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        Sha256MessageBlock, Sha256State, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication, sha256_compress_native,
+        synthesize_sha256_chain_witnesses,
     };
     use zinc_uair::{
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
@@ -2035,6 +2036,63 @@ mod tests {
             field_cfg,
         )
         .expect("SHA PCS verifier rejected an honest proof");
+    }
+
+    #[test]
+    fn test_synthesized_sha256_single_witness_round_trip() {
+        type U = Sha256CompressionSliceUair<ShaEcdsaInt>;
+
+        const NUM_VARS: usize = 9;
+        let initial_state: Sha256State = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let message_blocks: [Sha256MessageBlock; 1] = [std::array::from_fn(|idx| {
+            0x0102_0304u32.wrapping_mul(idx as u32 + 1)
+        })];
+
+        let (witnesses, final_state) =
+            synthesize_sha256_chain_witnesses::<ShaEcdsaInt, 1>(initial_state, message_blocks)
+                .expect("synthesized SHA witness generation should succeed");
+        assert_eq!(
+            final_state,
+            sha256_compress_native(initial_state, message_blocks[0])
+        );
+
+        let (pp, vp) = sha256_zip_pcs_params(NUM_VARS);
+        let field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_bn254::G1Affine,
+        >();
+        let public_trace = witnesses[0].trace.public(&U::signature());
+        let proof = ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::prove_with_pcs_and_field_cfg::<
+            AllZipPCSTypes,
+            false,
+            CHECKED,
+        >(
+            &pp,
+            &witnesses[0].trace,
+            NUM_VARS,
+            project_scalar_fn,
+            field_cfg.clone(),
+        )
+        .expect("synthesized SHA PCS prover failed");
+
+        ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::verify_with_pcs_and_field_cfg::<
+            AllZipPCSTypes,
+            Sha256Ideal<F>,
+            CHECKED,
+        >(
+            &vp,
+            proof,
+            &public_trace,
+            NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+            field_cfg,
+        )
+        .expect("SHA PCS verifier rejected a synthesized witness proof");
     }
 
     #[test]

@@ -163,10 +163,12 @@
 //!   these would let a verifier pin the initial compression state. The
 //!   init boundary currently only constrains `a[0] = pa_a[0]`.
 
-use core::marker::PhantomData;
+use core::{fmt, marker::PhantomData};
 
 use crypto_primitives::{ConstSemiring, PrimeField, Semiring};
 use rand::RngCore;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::{
@@ -176,10 +178,10 @@ use zinc_poly::{
 use zinc_uair::{
     BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
     PublicStructureError, ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair,
-    UairSignature, UairTrace, VirtualBinaryPolySource, VirtualBinaryPolySpec,
+    UairSignature, UairTrace, UairWitness, VirtualBinaryPolySource, VirtualBinaryPolySpec,
     ideal::{Ideal, IdealCheck, IdealCheckError, rotation::RotationIdeal},
 };
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{cfg_into_iter, from_ref::FromRef};
 
 use crate::GenerateRandomTrace;
 
@@ -246,6 +248,60 @@ where
 /// in-scope public-input wiring.
 #[derive(Clone, Debug)]
 pub struct Sha256CompressionSliceUair<R>(PhantomData<R>);
+
+/// Canonical SHA-256 compression state `[a, b, c, d, e, f, g, h]`.
+pub type Sha256State = [u32; 8];
+
+/// One 512-bit SHA-256 message block as sixteen big-endian words.
+pub type Sha256MessageBlock = [u32; 16];
+
+/// Errors surfaced by deterministic SHA-256 witness synthesis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sha256WitnessError {
+    /// The requested packed trace would not fit in the requested MLE size.
+    TraceTooSmall {
+        num_compressions: usize,
+        active_rows: usize,
+        num_vars: usize,
+    },
+    /// A synthesized compression trace did not return the expected terminal state.
+    FinalStateMismatch {
+        index: usize,
+        expected: Sha256State,
+        got: Sha256State,
+    },
+    /// Internal conversion from `Vec` to fixed-size array failed.
+    InternalLengthMismatch { expected: usize, got: usize },
+}
+
+impl fmt::Display for Sha256WitnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TraceTooSmall {
+                num_compressions,
+                active_rows,
+                num_vars,
+            } => write!(
+                f,
+                "trace too small for {num_compressions} SHA-256 compression(s): \
+                 {active_rows} active rows do not fit in 2^{num_vars} rows"
+            ),
+            Self::FinalStateMismatch {
+                index,
+                expected,
+                got,
+            } => write!(
+                f,
+                "SHA-256 witness {index} ended at {got:08x?}, expected {expected:08x?}"
+            ),
+            Self::InternalLengthMismatch { expected, got } => {
+                write!(f, "expected {expected} synthesized witness(es), got {got}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Sha256WitnessError {}
 
 /// Column indices within the flat trace (binary || arbitrary || int).
 ///
@@ -463,7 +519,8 @@ where
             ShiftSpec::new(cols::FLAT_W_E, 4),
             // w_sig1: Sigma_1(e[t]) at anchor t-3.
             ShiftSpec::new(cols::FLAT_W_SIG1, 3),
-            // w_W: message-schedule 9, 16 AND register-update 3.
+            // w_W: message-schedule shifts 9 and 16. Shift 3 is retained
+            // for signature-slot stability; round updates consume up.w_W.
             ShiftSpec::new(cols::FLAT_W_W, 3),
             ShiftSpec::new(cols::FLAT_W_W, 9),
             ShiftSpec::new(cols::FLAT_W_W, 16),
@@ -721,7 +778,7 @@ where
         let _down_w_e_sh2 = &down.binary_poly[5];
         let down_w_e_sh4 = &down.binary_poly[6];
         let down_w_sig1_sh3 = &down.binary_poly[7];
-        let down_w_w_sh3 = &down.binary_poly[8];
+        let _down_w_w_sh3 = &down.binary_poly[8];
         let down_w_w_sh9 = &down.binary_poly[9];
         let down_w_w_sh16 = &down.binary_poly[10];
         let down_w_lsig0_sh1 = &down.binary_poly[11];
@@ -877,7 +934,7 @@ where
         //   a[t]         = down.w_a^↓3     Sigma_1(e[t]) = down.w_sig1^↓3
         //   Sigma_0(a[t]) = down.w_sig0^↓3 u_ef[t]       = down.w_u_ef^↓3
         //   u_{¬e,g}[t]  = down.w_u_neg_e_g^↓3
-        //   Maj[t]       = down.w_maj^↓3   W[t]         = down.w_W^↓3
+        //   Maj[t]       = down.w_maj^↓3   W[t]         = up.w_W
         //   K[t]         = down.pa_K^↓3   mu_a[t]       = down.w_mu_a^↓3
         // pa_c_c8 is the witness compensator (see C7 note); zero-on-active
         // pinned in-circuit by C19: `pa_c_c8 · S_ACTIVE_UPD = 0`.
@@ -887,7 +944,7 @@ where
             - down_w_u_ef_sh3             // Ch[t] = u_ef + u_{¬e,g}
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3               // K[t]
-            - down_w_w_sh3                // W[t]
+            - w_big_w                     // W[t]
             - down_w_sig0_sh3             // Sigma_0(a[t])
             - down_w_maj_sh3              // Maj[t]
             + &mu_a_contrib; // = 2^32 · mu_a (bits 2-4 of W_MU_PACKED)
@@ -906,7 +963,7 @@ where
             - down_w_u_ef_sh3             // Ch[t] = u_ef + u_{¬e,g}
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
-            - down_w_w_sh3
+            - w_big_w
             + &mu_e_contrib; // = 2^32 · mu_e (bits 5-7 of W_MU_PACKED)
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 
@@ -1231,13 +1288,699 @@ fn lsig1_overflow(w_val: u32, lsig1_val: u32) -> u32 {
     rotation_overflow(w_val, &[13, 15], shr10, lsig1_val)
 }
 
+fn state_to_trace_halves(state: Sha256State) -> ([u32; 4], [u32; 4]) {
+    (
+        [state[3], state[2], state[1], state[0]],
+        [state[7], state[6], state[5], state[4]],
+    )
+}
+
+fn trace_halves_to_state(h_a: [u32; 4], h_e: [u32; 4]) -> Sha256State {
+    [
+        h_a[3], h_a[2], h_a[1], h_a[0], h_e[3], h_e[2], h_e[1], h_e[0],
+    ]
+}
+
+/// Native SHA-256 compression of one 512-bit message block.
+///
+/// The returned state is `initial_state + round_state` componentwise, in
+/// canonical `[a, b, c, d, e, f, g, h]` order.
+pub fn sha256_compress_native(
+    initial_state: Sha256State,
+    message_block: Sha256MessageBlock,
+) -> Sha256State {
+    let mut w = [0u32; cols::ROUNDS_PER_COMP];
+    w[..16].copy_from_slice(&message_block);
+    for t in 16..cols::ROUNDS_PER_COMP {
+        w[t] = w[t - 16]
+            .wrapping_add(small_sigma0(w[t - 15]))
+            .wrapping_add(w[t - 7])
+            .wrapping_add(small_sigma1(w[t - 2]));
+    }
+
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = initial_state;
+    for t in 0..cols::ROUNDS_PER_COMP {
+        let t1 = h
+            .wrapping_add(big_sigma1(e))
+            .wrapping_add(ch(e, f, g))
+            .wrapping_add(K_CANONICAL[t])
+            .wrapping_add(w[t]);
+        let t2 = big_sigma0(a).wrapping_add(maj(a, b, c));
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(t2);
+    }
+
+    [
+        initial_state[0].wrapping_add(a),
+        initial_state[1].wrapping_add(b),
+        initial_state[2].wrapping_add(c),
+        initial_state[3].wrapping_add(d),
+        initial_state[4].wrapping_add(e),
+        initial_state[5].wrapping_add(f),
+        initial_state[6].wrapping_add(g),
+        initial_state[7].wrapping_add(h),
+    ]
+}
+
+/// Synthesize one fresh SHA-256 compression UAIR trace.
+pub fn synthesize_one_sha256_compression_trace<R>(
+    initial_state: Sha256State,
+    message_block: Sha256MessageBlock,
+) -> Result<(UairTrace<'static, R, R, 32>, Sha256State), Sha256WitnessError>
+where
+    R: ConstSemiring + From<u32> + Clone + Send + Sync + 'static,
+{
+    synthesize_sha256_compression_chain_trace::<R>(
+        cols::MIN_NUM_VARS,
+        initial_state,
+        &[message_block],
+    )
+}
+
+/// Synthesize `N` ordered fresh SHA-256 compression witnesses for a chain.
+///
+/// State computation is sequential (`H_{i+1} = compress(H_i, M_i)`); once all
+/// states are known, trace synthesis is parallelized when the crate's
+/// `parallel` feature is enabled.
+pub fn synthesize_sha256_chain_witnesses<R, const N: usize>(
+    initial_state: Sha256State,
+    message_blocks: [Sha256MessageBlock; N],
+) -> Result<([UairWitness<'static, R, R, 32>; N], Sha256State), Sha256WitnessError>
+where
+    R: ConstSemiring + From<u32> + Clone + Send + Sync + 'static,
+{
+    let mut states = Vec::with_capacity(N + 1);
+    states.push(initial_state);
+    let mut state = initial_state;
+    for message_block in &message_blocks {
+        state = sha256_compress_native(state, *message_block);
+        states.push(state);
+    }
+
+    let witnesses_vec = cfg_into_iter!(0..N)
+        .map(|index| {
+            let (trace, got) =
+                synthesize_one_sha256_compression_trace::<R>(states[index], message_blocks[index])?;
+            let expected = states[index + 1];
+            if got != expected {
+                return Err(Sha256WitnessError::FinalStateMismatch {
+                    index,
+                    expected,
+                    got,
+                });
+            }
+            Ok(UairWitness { trace })
+        })
+        .collect::<Result<Vec<_>, Sha256WitnessError>>()?;
+
+    let got = witnesses_vec.len();
+    let witnesses = witnesses_vec
+        .try_into()
+        .map_err(|_| Sha256WitnessError::InternalLengthMismatch { expected: N, got })?;
+    Ok((witnesses, states[N]))
+}
+
+fn synthesize_sha256_compression_chain_trace<R>(
+    num_vars: usize,
+    initial_state: Sha256State,
+    message_blocks: &[Sha256MessageBlock],
+) -> Result<(UairTrace<'static, R, R, 32>, Sha256State), Sha256WitnessError>
+where
+    R: ConstSemiring + From<u32> + Clone + 'static,
+{
+    let n = 1usize << num_vars;
+    let big_n = message_blocks.len();
+    let rpc = cols::ROWS_PER_COMP;
+    let rounds = cols::ROUNDS_PER_COMP;
+    let active_rows = big_n * rpc + 4;
+    if active_rows > n {
+        return Err(Sha256WitnessError::TraceTooSmall {
+            num_compressions: big_n,
+            active_rows,
+            num_vars,
+        });
+    }
+
+    // ===== Chained-compression layout =====
+    //
+    // Run NUM_COMPRESSIONS independent SHA-256 compressions chained
+    // via the spec's feed-forward addition `H_{i+1} = compress(H_i,
+    // M_i) + H_i mod 2^32` componentwise. Compression i ∈ [0, N) uses
+    // rows [i·RPC, (i+1)·RPC) where RPC = ROWS_PER_COMP = 68:
+    //   - rows [start, start+4):    init prefix (= H_i, pinned to pa_a/pa_e
+    //                               by S_INIT_PREFIX). Under the shift-
+    //                               register convention, w_a[start+j] holds
+    //                               H_i's (d, c, b, a) for j=0..3, w_e[start+j]
+    //                               holds H_i's (h, g, f, e).
+    //   - rows [start+4, start+68): 64 round-update outputs.
+    //   - rows [start+64, start+68): "junction window" — w_a/w_e hold
+    //                                internal_final_i; pa_a/pa_e hold a SECOND
+    //                                copy of H_i so the feed-forward constraint
+    //                                can read the prior init via `up.pa_a`.
+    // After the last compression, rows [N·RPC, N·RPC+4) hold the H_N output
+    // prefix, pinned by S_INIT_PREFIX in the same way.
+    //
+    // Slack rows [N·RPC + 4, n) are zero-padded; all SHA constraints
+    // are inactive there (compensators absorb C7/C8/C9; selectors
+    // gate off C13–C15 and the boundary/junction families).
+    // Trace-row buffers, all length n, zero-initialized.
+    let mut a_vals = vec![0u32; n];
+    let mut e_vals = vec![0u32; n];
+    let mut w_vals = vec![0u32; n];
+    let mut k_vals = vec![0u32; n];
+    let mut mu_w_vals = vec![0u32; n];
+    let mut mu_a_vals = vec![0u32; n];
+    let mut mu_e_vals = vec![0u32; n];
+    let mut mu_junction_a_vals = vec![0u32; n];
+    let mut mu_junction_e_vals = vec![0u32; n];
+
+    // pa_a / pa_e: H_i values at init-prefix rows (gated by
+    // S_INIT_PREFIX) AND at junction rows (read by the feed-forward
+    // constraint). Both copies hold the same H_i values; they live
+    // at different rows for different constraint uses.
+    let mut pa_a_vals = vec![0u32; n];
+    let mut pa_e_vals = vec![0u32; n];
+    // pa_m: per-compression message-block words. Holds M_i[0..16]
+    // at rows [start, start+16) for compression i; zero elsewhere.
+    // Pinned to w_W at those rows by C16 (s_msg_init).
+    let mut pa_m_vals = vec![0u32; n];
+
+    // H_0: caller-supplied initial state. Stored as two 4-arrays
+    // (d, c, b, a) for the a-half and (h, g, f, e) for the e-half, in
+    // the order they appear at the init prefix rows (so index j → row
+    // `start + j` directly).
+    let (mut h_a, mut h_e) = state_to_trace_halves(initial_state);
+
+    for i in 0..big_n {
+        let start = i * rpc;
+
+        // 1) Init prefix [start, start+4): pin to H_i.
+        for j in 0..4 {
+            a_vals[start + j] = h_a[j];
+            e_vals[start + j] = h_e[j];
+            pa_a_vals[start + j] = h_a[j];
+            pa_e_vals[start + j] = h_e[j];
+        }
+
+        // 2) Per-compression message block. 16 caller-supplied seeds
+        //    (which also populate the public pa_m column so C16 pins them),
+        //    then 48 derived via the SHA-256 message-schedule
+        //    recurrence — contained entirely within compression i's
+        //    window.
+        for j in 0..16 {
+            let m_word = message_blocks[i][j];
+            w_vals[start + j] = m_word;
+            pa_m_vals[start + j] = m_word;
+        }
+        for j in 16..rpc {
+            let t = start + j;
+            let sum_u64: u64 = (w_vals[t - 16] as u64)
+                + (small_sigma0(w_vals[t - 15]) as u64)
+                + (w_vals[t - 7] as u64)
+                + (small_sigma1(w_vals[t - 2]) as u64);
+            w_vals[t] = sum_u64 as u32;
+            let carry = (sum_u64 >> 32) as u32;
+            debug_assert!(carry <= 3, "message-schedule carry out of [0,3]: {carry}");
+            // Store mu_W at the C7 anchor row k = t − 16 (not at
+            // spec row t) so C7 reads it via `up.w_mu_packed` bits
+            // 0-1 with no shift.
+            mu_w_vals[t - 16] = carry;
+        }
+
+        // 3) Per-compression round constants. Cycle the canonical
+        //    SHA-256 K table per compression at rows
+        //    `[start + 3, start + 67)` so that C8/C9 at active
+        //    anchors `k ∈ [start, start + 64)` (which read
+        //    `down.pa_K^↓3 = pa_K[k+3]`) see `K_CANONICAL[k - start]`.
+        //    Rows `start..start+3` and `start+67` are not read by
+        //    any active anchor of compression i, so they're left
+        //    as zero. (The compensator pa_c_c8/c9 absorbs whatever
+        //    those rows contain.)
+        for j in 0..cols::ROUNDS_PER_COMP {
+            k_vals[start + 3 + j] = K_CANONICAL[j];
+        }
+
+        // 4) Round-update: 64 rounds, anchor k = start+0..=start+63
+        //    produces a[k+4]/e[k+4] from the 4-row window a[k..=k+3]
+        //    / e[k..=k+3]. All back-references stay within
+        //    compression i (the first round's reads land on the init
+        //    prefix at [start, start+4); the last round's reads land
+        //    on rows [start+60, start+64)).
+        //
+        //    Bounds: T1 = h + Σ_1(e) + Ch + K + W (5 terms of <2^32).
+        //            T2 = Σ_0(a) + Maj (2 terms).
+        //            a_sum = T1 + T2 (7 terms ⇒ mu_a ∈ {0..=6}).
+        //            e_sum = d + T1   (6 terms ⇒ mu_e ∈ {0..=5}).
+        for j in 0..rounds {
+            let k = start + j;
+            let t = k + 3; // register/K row under the t = k+3 anchor convention
+
+            let a_t = a_vals[k + 3]; // a[t]
+            let a_t1 = a_vals[k + 2]; // a[t-1] = b
+            let a_t2 = a_vals[k + 1]; // a[t-2] = c
+            let e_t = e_vals[k + 3]; // e[t]
+            let e_t1 = e_vals[k + 2]; // e[t-1] = f
+            let e_t2 = e_vals[k + 1]; // e[t-2] = g
+
+            let sig0_a_t = big_sigma0(a_t);
+            let sig1_e_t = big_sigma1(e_t);
+            let ch_t = ch(e_t, e_t1, e_t2);
+            let maj_t = maj(a_t, a_t1, a_t2);
+
+            let t1: u64 = (e_vals[k] as u64) // h = e[t-3]
+                    + (sig1_e_t as u64)
+                    + (ch_t as u64)
+                    + (k_vals[t] as u64)
+                    + (w_vals[k] as u64);
+            let t2: u64 = (sig0_a_t as u64) + (maj_t as u64);
+            let a_sum: u64 = t1 + t2;
+            let e_sum: u64 = (a_vals[k] as u64) + t1; // d + T1, d = a[t-3]
+
+            a_vals[k + 4] = a_sum as u32;
+            e_vals[k + 4] = e_sum as u32;
+            let mu_a_t = (a_sum >> 32) as u32;
+            let mu_e_t = (e_sum >> 32) as u32;
+            debug_assert!(mu_a_t <= 6, "mu_a out of [0,6]: {mu_a_t}");
+            debug_assert!(mu_e_t <= 5, "mu_e out of [0,5]: {mu_e_t}");
+            // Store mu_a/mu_e at the C8/C9 anchor row k (not at
+            // spec row t = k+3) so C8/C9 read via `up.w_mu_packed`
+            // bits 2-4 / 5-7 with no shift.
+            mu_a_vals[k] = mu_a_t;
+            mu_e_vals[k] = mu_e_t;
+        }
+
+        // 5) Feed-forward: H_{i+1} = internal_final_i + H_i mod 2^32
+        //    componentwise. internal_final_i lives at rows
+        //    [start+64, start+68); we place a second copy of H_i in
+        //    pa_a/pa_e at the same rows (so the feed-forward
+        //    constraint can read the prior init via `up.pa_a`), and
+        //    record the per-component carry in w_mu_junction_{a,e}.
+        //    Each carry is in {0, 1} since both summands are < 2^32.
+        let mut h_a_next: [u32; 4] = [0; 4];
+        let mut h_e_next: [u32; 4] = [0; 4];
+        for j in 0..4 {
+            let internal_a = a_vals[start + 64 + j];
+            let internal_e = e_vals[start + 64 + j];
+            let prior_a = h_a[j];
+            let prior_e = h_e[j];
+            let sum_a: u64 = (internal_a as u64) + (prior_a as u64);
+            let sum_e: u64 = (internal_e as u64) + (prior_e as u64);
+            h_a_next[j] = sum_a as u32;
+            h_e_next[j] = sum_e as u32;
+            let carry_a = (sum_a >> 32) as u32;
+            let carry_e = (sum_e >> 32) as u32;
+            debug_assert!(
+                carry_a <= 1,
+                "feed-forward a-carry out of {{0,1}}: {carry_a}"
+            );
+            debug_assert!(
+                carry_e <= 1,
+                "feed-forward e-carry out of {{0,1}}: {carry_e}"
+            );
+
+            pa_a_vals[start + 64 + j] = prior_a;
+            pa_e_vals[start + 64 + j] = prior_e;
+            mu_junction_a_vals[start + 64 + j] = carry_a;
+            mu_junction_e_vals[start + 64 + j] = carry_e;
+        }
+        h_a = h_a_next;
+        h_e = h_e_next;
+    }
+
+    // 6) H_N output prefix at rows [big_n·rpc, big_n·rpc + 4): pin
+    //    to H_N (the final compression's output) so the verifier can
+    //    read the digest from the public columns.
+    let h_out_start = big_n * rpc;
+    for j in 0..4 {
+        a_vals[h_out_start + j] = h_a[j];
+        e_vals[h_out_start + j] = h_e[j];
+        pa_a_vals[h_out_start + j] = h_a[j];
+        pa_e_vals[h_out_start + j] = h_e[j];
+    }
+
+    // ===== Per-row Ch / Maj operand witnesses =====
+    //
+    // Computed honestly on every row from a_vals / e_vals contents.
+    // The truth-table values must hold on every row (not only
+    // SHA-active ones) to keep the Ch/Maj virtual residuals
+    // (`r_ch1` / `r_ch2` / `r_maj`, declared in `signature()`'s
+    // `with_virtual_binary_poly_cols`) bit-valid per coefficient
+    // across compression-junction boundaries: the booleanity
+    // sumcheck checks every row, including ones the spec doesn't
+    // care about.
+    let u_ef_vals: Vec<u32> = (0..n)
+        .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
+        .collect();
+    let u_neg_e_g_vals: Vec<u32> = (0..n)
+        .map(|t| {
+            if t >= 2 {
+                (!e_vals[t]) & e_vals[t - 2]
+            } else {
+                0
+            }
+        })
+        .collect();
+    let maj_vals: Vec<u32> = (0..n)
+        .map(|t| {
+            if t >= 2 {
+                maj(a_vals[t], a_vals[t - 1], a_vals[t - 2])
+            } else {
+                0
+            }
+        })
+        .collect();
+
+    // ===== Tail compensators for the Ch (63) / Maj (64) virtual residuals =====
+    //
+    // Zero on every row except `k ∈ {n−2, n−1}` where the length-2
+    // forward shifts in r_ch2 / r_maj read into off-trace zero-
+    // padding and the residual would slip outside `{0,1}` per
+    // coefficient. Match the compensator logic in option-a-virtual-
+    // residuals (8787cbd):
+    //   r_ch2 (alt complement form) at boundary k = n-2 / n-1:
+    //     u_{¬e,g}[k+2] = 0 (off-trace), e[k+2] = 0, e[k] real.
+    //     residual = -e[k] + 2·comp_ch2 ∈ {0,1} ⇒ comp_ch2[k] = e[k].
+    //   r_maj at boundary k = n-2:
+    //     a[k+2] = Maj[k+2] = 0 (off-trace), a[k+1] real.
+    //     residual = a[k] + a[k+1] − 2·comp_maj ∈ {0,1}
+    //     ⇒ comp_maj[k] = AND(a[k], a[k+1]).
+    //   r_maj at k = n-1: a[k+1] = a[k+2] = 0, residual = a[k] ∈
+    //     {0,1} already; comp_maj = 0.
+    let mut pa_r_ch2_comp_vals: Vec<u32> = vec![0; n];
+    let mut pa_r_maj_comp_vals: Vec<u32> = vec![0; n];
+    for k in 0..n {
+        let off_kp1 = k + 1 >= n;
+        let off_kp2 = k + 2 >= n;
+        if off_kp2 {
+            pa_r_ch2_comp_vals[k] = e_vals[k];
+        }
+        if off_kp2 && !off_kp1 {
+            pa_r_maj_comp_vals[k] = a_vals[k] & a_vals[k + 1];
+        }
+    }
+
+    // Derived values.
+    let sig0_vals: Vec<u32> = a_vals.iter().copied().map(big_sigma0).collect();
+    let sig1_vals: Vec<u32> = e_vals.iter().copied().map(big_sigma1).collect();
+    let lsig0_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma0).collect();
+    let lsig1_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma1).collect();
+
+    let ov_sig0_vals: Vec<u32> = a_vals
+        .iter()
+        .zip(&sig0_vals)
+        .map(|(&a, &s)| sigma0_overflow(a, s))
+        .collect();
+    let ov_sig1_vals: Vec<u32> = e_vals
+        .iter()
+        .zip(&sig1_vals)
+        .map(|(&e, &s)| sigma1_overflow(e, s))
+        .collect();
+    let ov_lsig0_vals: Vec<u32> = w_vals
+        .iter()
+        .zip(&lsig0_vals)
+        .map(|(&w, &l)| lsig0_overflow(w, l))
+        .collect();
+    let ov_lsig1_vals: Vec<u32> = w_vals
+        .iter()
+        .zip(&lsig1_vals)
+        .map(|(&w, &l)| lsig1_overflow(w, l))
+        .collect();
+
+    // The σ_0/σ_1 right-shift decomposition columns S_i / T_i are
+    // gone — their role (carrying SHR(W, k) for the F_2[X] sum) is
+    // taken over by the `BitOp::ShiftR(k)` virtual columns over W.
+    // `lsig0_overflow` / `lsig1_overflow` already compute the
+    // matching `pa_ov_lsig{0,1}` per-bit values for the new
+    // constraint (the algebraic identity is unchanged).
+
+    // Pack all 5 carries per row into the W_MU_PACKED binary_poly
+    // column. Each carry was stored at its constraint's anchor row
+    // (mu_W at C7-anchor k = t-16, mu_a/mu_e at C8/C9-anchor k =
+    // t-3, mu_ff_a/e at junction-anchor k). Bit layout:
+    //   bits 0-1: mu_W,  2-4: mu_a,  5-7: mu_e,  8: mu_ff_a,  9: mu_ff_e.
+    // Positions 10..31 stay 0 (pinned by C22's high-bits-zero
+    // assert_zero on ShiftR(10)(W_MU_PACKED)).
+    let w_mu_packed_vals: Vec<u32> = (0..n)
+        .map(|k| {
+            (mu_w_vals[k] & 0b11)
+                | ((mu_a_vals[k] & 0b111) << 2)
+                | ((mu_e_vals[k] & 0b111) << 5)
+                | ((mu_junction_a_vals[k] & 0b1) << 8)
+                | ((mu_junction_e_vals[k] & 0b1) << 9)
+        })
+        .collect();
+
+    let to_bits = |v: &[u32]| -> Vec<BinaryPoly<32>> {
+        v.iter().copied().map(BinaryPoly::<32>::from).collect()
+    };
+
+    let to_bin_mle = |col: Vec<BinaryPoly<32>>| -> DenseMultilinearExtension<BinaryPoly<32>> {
+        col.into_iter().collect()
+    };
+
+    // Layout: 8 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
+    // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_COMP,
+    // PA_R_MAJ_COMP) + 10 witness cols. pa_a / pa_e were populated
+    // above with H_i values at init-prefix rows (for compression i
+    // and the H_N output block) AND at junction rows (where the
+    // feed-forward constraint reads the prior H_i). The two
+    // PA_R_*_COMP columns are zero except on the trace tail.
+    let binary_poly = vec![
+        to_bin_mle(to_bits(&pa_a_vals)),
+        to_bin_mle(to_bits(&pa_e_vals)),
+        to_bin_mle(to_bits(&ov_sig0_vals)),
+        to_bin_mle(to_bits(&ov_sig1_vals)),
+        to_bin_mle(to_bits(&ov_lsig0_vals)),
+        to_bin_mle(to_bits(&ov_lsig1_vals)),
+        to_bin_mle(to_bits(&pa_r_ch2_comp_vals)),
+        to_bin_mle(to_bits(&pa_r_maj_comp_vals)),
+        to_bin_mle(to_bits(&pa_m_vals)),
+        to_bin_mle(to_bits(&a_vals)),
+        to_bin_mle(to_bits(&sig0_vals)),
+        to_bin_mle(to_bits(&e_vals)),
+        to_bin_mle(to_bits(&sig1_vals)),
+        to_bin_mle(to_bits(&w_vals)),
+        to_bin_mle(to_bits(&lsig0_vals)),
+        to_bin_mle(to_bits(&lsig1_vals)),
+        to_bin_mle(to_bits(&u_ef_vals)),
+        to_bin_mle(to_bits(&u_neg_e_g_vals)),
+        to_bin_mle(to_bits(&maj_vals)),
+        to_bin_mle(to_bits(&w_mu_packed_vals)),
+    ];
+
+    // ===== Selectors =====
+    //
+    // s_init_prefix: 1 on the init-prefix windows for every compression
+    //                (4 rows × NUM_COMPRESSIONS) plus the H_N output
+    //                block (4 more rows). Pins w_a / w_e to pa_a / pa_e.
+    // s_feedforward: 1 on the junction windows [start+64, start+68) for
+    //                every compression. Gates the SHA-256 inter-
+    //                compression addition constraint.
+    let mut s_init_prefix_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+    for i in 0..=big_n {
+        // i = big_n: the H_N output block.
+        for j in 0..4 {
+            s_init_prefix_col[i * rpc + j] = R::ONE;
+        }
+    }
+    let mut s_feedforward_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+    for i in 0..big_n {
+        for j in 0..4 {
+            s_feedforward_col[i * rpc + 64 + j] = R::ONE;
+        }
+    }
+    // s_msg_init: 1 on the 16 message-block-seed rows of every
+    // compression, 0 elsewhere. Gates C16 (`w_W − pa_m == 0`).
+    let mut s_msg_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+    for i in 0..big_n {
+        for j in 0..16 {
+            s_msg_init_col[i * rpc + j] = R::ONE;
+        }
+    }
+    // s_active_sched / s_active_upd: pin each compensator to 0 on
+    // its constraint's honest active range. Read by the
+    // `pa_c_* · s_active_* == 0` zero-ideal constraints in
+    // `constrain_general`.
+    //
+    // s_active_sched: 1 on C7's 48 anchors per compression
+    // [start, start + ROUNDS_PER_COMP - 16), 0 elsewhere.
+    // s_active_upd:   1 on C8/C9's 64 anchors per compression
+    // [start, start + ROUNDS_PER_COMP), 0 elsewhere.
+    let mut s_active_sched_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+    let mut s_active_upd_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
+    for i in 0..big_n {
+        let start = i * rpc;
+        for j in 0..(rounds - 16) {
+            s_active_sched_col[start + j] = R::ONE;
+        }
+        for j in 0..rounds {
+            s_active_upd_col[start + j] = R::ONE;
+        }
+    }
+    // (PA_C_FF_{A,E} reuse `s_feedforward_col` as their
+    // compensator-zero selector — it is already 1 exactly on the
+    // junction window where the feed-forward addition holds
+    // honestly.)
+
+    let k_col: Vec<R> = k_vals.iter().copied().map(R::from).collect();
+    // mu_w_vals / mu_a_vals / mu_e_vals / mu_junction_{a,e}_vals
+    // are no longer materialized as separate int columns — they're
+    // packed into the W_MU_PACKED binary_poly column above.
+
+    // ----- Compensator columns (replace s_sched_anch / s_upd_anch). -----
+    //
+    // For each constraint Cᵢ ∈ {C7, C8, C9}, we publish a public column
+    // `pa_c_cᵢ[k]` with the property that (innerᵢ + pa_c_cᵢ) ∈ (X − 2)
+    // on every row k. Concretely we pick `pa_c_cᵢ[k] = −innerᵢ(2)` mod
+    // R's modulus; the protocol projects R into the random field, so
+    // the negation lands as `−innerᵢ(2) mod p` — exactly the value
+    // needed for the constraint to lie in (X − 2).
+    //
+    // On the corresponding active range (where the original selector
+    // was 1), the SHA recurrence makes `innerᵢ(2) = 0` for an honest
+    // prover, so `pa_c_cᵢ[k] = 0` automatically. On inactive rows the
+    // compensator absorbs whatever `innerᵢ(2)` happens to be.
+    let two_to_32: R = R::from(0x10000u32) * &R::from(0x10000u32);
+    let load = |arr: &[u32], idx: usize| -> R { if idx < n { R::from(arr[idx]) } else { R::ZERO } };
+
+    // C7: inner(2) = w_W[k+16] − w_W[k] − lsig0[k+1] − w_W[k+9]
+    //               − lsig1[k+14] + 2^32 · mu_W[k+16]
+    let pa_c_c7_col: Vec<R> = (0..n)
+        .map(|k| {
+            let w_k16 = load(&w_vals, k + 16);
+            let w_k = load(&w_vals, k);
+            let lsig0_k1 = load(&lsig0_vals, k + 1);
+            let w_k9 = load(&w_vals, k + 9);
+            let lsig1_k14 = load(&lsig1_vals, k + 14);
+            // mu_W stored at C7-anchor row k (= round t = k+16 was
+            // formerly stored at k+16; with chained-comp re-anchoring
+            // it's now at row k).
+            let mu_k = load(&mu_w_vals, k);
+            let two32_mu = two_to_32.clone() * &mu_k;
+            // comp = −inner(2) = w_k + lsig0_k1 + w_k9 + lsig1_k14
+            //                    − 2^32·mu_k16 − w_k16
+            w_k + &lsig0_k1 + &w_k9 + &lsig1_k14 - &two32_mu - &w_k16
+        })
+        .collect();
+
+    // C8: inner(2) = w_a[k+4] − w_e[k] − sig1[k+3] − Ch[k+3] − K[k+3]
+    //               − W[k] − sig0[k+3] − maj[k+3] + 2^32 · mu_a[k]
+    // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
+    let pa_c_c8_col: Vec<R> = (0..n)
+        .map(|k| {
+            let w_a_k4 = load(&a_vals, k + 4);
+            let w_e_k = load(&e_vals, k);
+            let sig1_k3 = load(&sig1_vals, k + 3);
+            let u_ef_k3 = load(&u_ef_vals, k + 3);
+            let u_neg_e_g_k3 = load(&u_neg_e_g_vals, k + 3);
+            let k_k3 = load(&k_vals, k + 3);
+            let w_k = load(&w_vals, k);
+            let sig0_k3 = load(&sig0_vals, k + 3);
+            let maj_k3 = load(&maj_vals, k + 3);
+            // mu_a stored at C8-anchor row k (= round t = k+3 was
+            // formerly stored at k+3; now at row k).
+            let mu_a_k = load(&mu_a_vals, k);
+            let two32_mu = two_to_32.clone() * &mu_a_k;
+            w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k + &sig0_k3 + &maj_k3
+                - &two32_mu
+                - &w_a_k4
+        })
+        .collect();
+
+    // C9: inner(2) = w_e[k+4] − w_a[k] − w_e[k] − sig1[k+3] − Ch[k+3]
+    //               − K[k+3] − W[k] + 2^32 · mu_e[k]
+    // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
+    let pa_c_c9_col: Vec<R> = (0..n)
+        .map(|k| {
+            let w_e_k4 = load(&e_vals, k + 4);
+            let w_a_k = load(&a_vals, k);
+            let w_e_k = load(&e_vals, k);
+            let sig1_k3 = load(&sig1_vals, k + 3);
+            let u_ef_k3 = load(&u_ef_vals, k + 3);
+            let u_neg_e_g_k3 = load(&u_neg_e_g_vals, k + 3);
+            let k_k3 = load(&k_vals, k + 3);
+            let w_k = load(&w_vals, k);
+            // mu_e stored at C9-anchor row k (analogous to mu_a).
+            let mu_e_k = load(&mu_e_vals, k);
+            let two32_mu = two_to_32.clone() * &mu_e_k;
+            w_a_k + &w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k
+                - &two32_mu
+                - &w_e_k4
+        })
+        .collect();
+
+    // C12/C13 feed-forward compensators. inner_a(2) at row k =
+    //   w_a[k+4] − w_a[k] − pa_a[k] + 2^32 · mu_junction_a[k]
+    // (e-half symmetric). On junction rows the SHA-256 feed-forward
+    // makes inner = 0 honestly, so the compensator is 0. Off-
+    // junction (init prefix straddle, round-update windows, slack)
+    // it absorbs whatever inner happens to be so that
+    // `(inner + pa_c_ff) ∈ (X − 2)` everywhere.
+    let pa_c_ff_a_col: Vec<R> = (0..n)
+        .map(|k| {
+            let w_a_k4 = load(&a_vals, k + 4);
+            let w_a_k = load(&a_vals, k);
+            let pa_a_k = load(&pa_a_vals, k);
+            let mu_ff_k = load(&mu_junction_a_vals, k);
+            let two32_mu = two_to_32.clone() * &mu_ff_k;
+            // comp = −inner(2) = w_a_k + pa_a_k − 2^32·mu_ff_k − w_a_k4
+            w_a_k + &pa_a_k - &two32_mu - &w_a_k4
+        })
+        .collect();
+    let pa_c_ff_e_col: Vec<R> = (0..n)
+        .map(|k| {
+            let w_e_k4 = load(&e_vals, k + 4);
+            let w_e_k = load(&e_vals, k);
+            let pa_e_k = load(&pa_e_vals, k);
+            let mu_ff_k = load(&mu_junction_e_vals, k);
+            let two32_mu = two_to_32.clone() * &mu_ff_k;
+            w_e_k + &pa_e_k - &two32_mu - &w_e_k4
+        })
+        .collect();
+
+    let to_int_mle = |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
+    // Layout: public int prefix (selectors + K + active-range
+    // selectors) followed by witness int suffix (the five linear-
+    // constraint compensators). Order matches cols::S_INIT_PREFIX..
+    // PA_C_FF_E. The 5 prior int carry columns (mu_W/a/e/
+    // junction_a/e) are gone — packed into W_MU_PACKED above.
+    let int = vec![
+        to_int_mle(s_init_prefix_col),
+        to_int_mle(s_feedforward_col),
+        to_int_mle(s_msg_init_col),
+        to_int_mle(k_col),
+        to_int_mle(s_active_sched_col),
+        to_int_mle(s_active_upd_col),
+        to_int_mle(pa_c_c7_col),
+        to_int_mle(pa_c_c8_col),
+        to_int_mle(pa_c_c9_col),
+        to_int_mle(pa_c_ff_a_col),
+        to_int_mle(pa_c_ff_e_col),
+    ];
+
+    Ok((
+        UairTrace {
+            binary_poly: binary_poly.into(),
+            int: int.into(),
+            ..Default::default()
+        },
+        trace_halves_to_state(h_a, h_e),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // GenerateRandomTrace for the slice.
 // ---------------------------------------------------------------------------
 
 impl<R> GenerateRandomTrace<32> for Sha256CompressionSliceUair<R>
 where
-    R: ConstSemiring + From<u32> + 'static,
+    R: ConstSemiring + From<u32> + Clone + 'static,
 {
     type PolyCoeff = R;
     type Int = R;
@@ -1246,573 +1989,12 @@ where
         num_vars: usize,
         rng: &mut Rng,
     ) -> UairTrace<'static, R, R, 32> {
-        let n = 1usize << num_vars;
-        assert!(
-            num_vars >= cols::MIN_NUM_VARS,
-            "trace too small for {} chained compressions: need num_vars ≥ {}, got {num_vars}",
-            cols::NUM_COMPRESSIONS,
-            cols::MIN_NUM_VARS,
-        );
-
-        // ===== Chained-compression layout =====
-        //
-        // Run NUM_COMPRESSIONS independent SHA-256 compressions chained
-        // via the spec's feed-forward addition `H_{i+1} = compress(H_i,
-        // M_i) + H_i mod 2^32` componentwise. Compression i ∈ [0, N) uses
-        // rows [i·RPC, (i+1)·RPC) where RPC = ROWS_PER_COMP = 68:
-        //   - rows [start, start+4):    init prefix (= H_i, pinned to pa_a/pa_e
-        //                               by S_INIT_PREFIX). Under the shift-
-        //                               register convention, w_a[start+j] holds
-        //                               H_i's (d, c, b, a) for j=0..3, w_e[start+j]
-        //                               holds H_i's (h, g, f, e).
-        //   - rows [start+4, start+68): 64 round-update outputs.
-        //   - rows [start+64, start+68): "junction window" — w_a/w_e hold
-        //                                internal_final_i; pa_a/pa_e hold a SECOND
-        //                                copy of H_i so the feed-forward constraint
-        //                                can read the prior init via `up.pa_a`.
-        // After the last compression, rows [N·RPC, N·RPC+4) hold the H_N output
-        // prefix, pinned by S_INIT_PREFIX in the same way.
-        //
-        // Slack rows [N·RPC + 4, n) are zero-padded; all SHA constraints
-        // are inactive there (compensators absorb C7/C8/C9; selectors
-        // gate off C13–C15 and the boundary/junction families).
-        let big_n = cols::NUM_COMPRESSIONS;
-        let rpc = cols::ROWS_PER_COMP;
-        let rounds = cols::ROUNDS_PER_COMP;
-
-        // Trace-row buffers, all length n, zero-initialized.
-        let mut a_vals = vec![0u32; n];
-        let mut e_vals = vec![0u32; n];
-        let mut w_vals = vec![0u32; n];
-        let mut k_vals = vec![0u32; n];
-        let mut mu_w_vals = vec![0u32; n];
-        let mut mu_a_vals = vec![0u32; n];
-        let mut mu_e_vals = vec![0u32; n];
-        let mut mu_junction_a_vals = vec![0u32; n];
-        let mut mu_junction_e_vals = vec![0u32; n];
-
-        // pa_a / pa_e: H_i values at init-prefix rows (gated by
-        // S_INIT_PREFIX) AND at junction rows (read by the feed-forward
-        // constraint). Both copies hold the same H_i values; they live
-        // at different rows for different constraint uses.
-        let mut pa_a_vals = vec![0u32; n];
-        let mut pa_e_vals = vec![0u32; n];
-        // pa_m: per-compression message-block words. Holds M_i[0..16]
-        // at rows [start, start+16) for compression i; zero elsewhere.
-        // Pinned to w_W at those rows by C16 (s_msg_init).
-        let mut pa_m_vals = vec![0u32; n];
-
-        // H_0: random initial state for testing. Stored as two 4-arrays
-        // (d, c, b, a) for the a-half and (h, g, f, e) for the e-half, in
-        // the order they appear at the init prefix rows (so index j → row
-        // `start + j` directly).
-        let mut h_a: [u32; 4] = [
-            rng.next_u32(),
-            rng.next_u32(),
-            rng.next_u32(),
-            rng.next_u32(),
-        ];
-        let mut h_e: [u32; 4] = [
-            rng.next_u32(),
-            rng.next_u32(),
-            rng.next_u32(),
-            rng.next_u32(),
-        ];
-
-        for i in 0..big_n {
-            let start = i * rpc;
-
-            // 1) Init prefix [start, start+4): pin to H_i.
-            for j in 0..4 {
-                a_vals[start + j] = h_a[j];
-                e_vals[start + j] = h_e[j];
-                pa_a_vals[start + j] = h_a[j];
-                pa_e_vals[start + j] = h_e[j];
-            }
-
-            // 2) Per-compression message block. 16 random seeds (which
-            //    also populate the public pa_m column so C16 pins them),
-            //    then 48 derived via the SHA-256 message-schedule
-            //    recurrence — contained entirely within compression i's
-            //    window.
-            for j in 0..16 {
-                let m_word = rng.next_u32();
-                w_vals[start + j] = m_word;
-                pa_m_vals[start + j] = m_word;
-            }
-            for j in 16..rpc {
-                let t = start + j;
-                let sum_u64: u64 = (w_vals[t - 16] as u64)
-                    + (small_sigma0(w_vals[t - 15]) as u64)
-                    + (w_vals[t - 7] as u64)
-                    + (small_sigma1(w_vals[t - 2]) as u64);
-                w_vals[t] = sum_u64 as u32;
-                let carry = (sum_u64 >> 32) as u32;
-                debug_assert!(carry <= 3, "message-schedule carry out of [0,3]: {carry}");
-                // Store mu_W at the C7 anchor row k = t − 16 (not at
-                // spec row t) so C7 reads it via `up.w_mu_packed` bits
-                // 0-1 with no shift.
-                mu_w_vals[t - 16] = carry;
-            }
-
-            // 3) Per-compression round constants. Cycle the canonical
-            //    SHA-256 K table per compression at rows
-            //    `[start + 3, start + 67)` so that C8/C9 at active
-            //    anchors `k ∈ [start, start + 64)` (which read
-            //    `down.pa_K^↓3 = pa_K[k+3]`) see `K_CANONICAL[k - start]`.
-            //    Rows `start..start+3` and `start+67` are not read by
-            //    any active anchor of compression i, so they're left
-            //    as zero. (The compensator pa_c_c8/c9 absorbs whatever
-            //    those rows contain.)
-            for j in 0..cols::ROUNDS_PER_COMP {
-                k_vals[start + 3 + j] = K_CANONICAL[j];
-            }
-
-            // 4) Round-update: 64 rounds, anchor k = start+0..=start+63
-            //    produces a[k+4]/e[k+4] from the 4-row window a[k..=k+3]
-            //    / e[k..=k+3]. All back-references stay within
-            //    compression i (the first round's reads land on the init
-            //    prefix at [start, start+4); the last round's reads land
-            //    on rows [start+60, start+64)).
-            //
-            //    Bounds: T1 = h + Σ_1(e) + Ch + K + W (5 terms of <2^32).
-            //            T2 = Σ_0(a) + Maj (2 terms).
-            //            a_sum = T1 + T2 (7 terms ⇒ mu_a ∈ {0..=6}).
-            //            e_sum = d + T1   (6 terms ⇒ mu_e ∈ {0..=5}).
-            for j in 0..rounds {
-                let k = start + j;
-                let t = k + 3; // spec round number under the t = k+3 anchor convention
-
-                let a_t = a_vals[k + 3]; // a[t]
-                let a_t1 = a_vals[k + 2]; // a[t-1] = b
-                let a_t2 = a_vals[k + 1]; // a[t-2] = c
-                let e_t = e_vals[k + 3]; // e[t]
-                let e_t1 = e_vals[k + 2]; // e[t-1] = f
-                let e_t2 = e_vals[k + 1]; // e[t-2] = g
-
-                let sig0_a_t = big_sigma0(a_t);
-                let sig1_e_t = big_sigma1(e_t);
-                let ch_t = ch(e_t, e_t1, e_t2);
-                let maj_t = maj(a_t, a_t1, a_t2);
-
-                let t1: u64 = (e_vals[k] as u64) // h = e[t-3]
-                    + (sig1_e_t as u64)
-                    + (ch_t as u64)
-                    + (k_vals[t] as u64)
-                    + (w_vals[t] as u64);
-                let t2: u64 = (sig0_a_t as u64) + (maj_t as u64);
-                let a_sum: u64 = t1 + t2;
-                let e_sum: u64 = (a_vals[k] as u64) + t1; // d + T1, d = a[t-3]
-
-                a_vals[k + 4] = a_sum as u32;
-                e_vals[k + 4] = e_sum as u32;
-                let mu_a_t = (a_sum >> 32) as u32;
-                let mu_e_t = (e_sum >> 32) as u32;
-                debug_assert!(mu_a_t <= 6, "mu_a out of [0,6]: {mu_a_t}");
-                debug_assert!(mu_e_t <= 5, "mu_e out of [0,5]: {mu_e_t}");
-                // Store mu_a/mu_e at the C8/C9 anchor row k (not at
-                // spec row t = k+3) so C8/C9 read via `up.w_mu_packed`
-                // bits 2-4 / 5-7 with no shift.
-                mu_a_vals[k] = mu_a_t;
-                mu_e_vals[k] = mu_e_t;
-            }
-
-            // 5) Feed-forward: H_{i+1} = internal_final_i + H_i mod 2^32
-            //    componentwise. internal_final_i lives at rows
-            //    [start+64, start+68); we place a second copy of H_i in
-            //    pa_a/pa_e at the same rows (so the feed-forward
-            //    constraint can read the prior init via `up.pa_a`), and
-            //    record the per-component carry in w_mu_junction_{a,e}.
-            //    Each carry is in {0, 1} since both summands are < 2^32.
-            let mut h_a_next: [u32; 4] = [0; 4];
-            let mut h_e_next: [u32; 4] = [0; 4];
-            for j in 0..4 {
-                let internal_a = a_vals[start + 64 + j];
-                let internal_e = e_vals[start + 64 + j];
-                let prior_a = h_a[j];
-                let prior_e = h_e[j];
-                let sum_a: u64 = (internal_a as u64) + (prior_a as u64);
-                let sum_e: u64 = (internal_e as u64) + (prior_e as u64);
-                h_a_next[j] = sum_a as u32;
-                h_e_next[j] = sum_e as u32;
-                let carry_a = (sum_a >> 32) as u32;
-                let carry_e = (sum_e >> 32) as u32;
-                debug_assert!(
-                    carry_a <= 1,
-                    "feed-forward a-carry out of {{0,1}}: {carry_a}"
-                );
-                debug_assert!(
-                    carry_e <= 1,
-                    "feed-forward e-carry out of {{0,1}}: {carry_e}"
-                );
-
-                pa_a_vals[start + 64 + j] = prior_a;
-                pa_e_vals[start + 64 + j] = prior_e;
-                mu_junction_a_vals[start + 64 + j] = carry_a;
-                mu_junction_e_vals[start + 64 + j] = carry_e;
-            }
-            h_a = h_a_next;
-            h_e = h_e_next;
-        }
-
-        // 6) H_N output prefix at rows [big_n·rpc, big_n·rpc + 4): pin
-        //    to H_N (the final compression's output) so the verifier can
-        //    read the digest from the public columns.
-        let h_out_start = big_n * rpc;
-        for j in 0..4 {
-            a_vals[h_out_start + j] = h_a[j];
-            e_vals[h_out_start + j] = h_e[j];
-            pa_a_vals[h_out_start + j] = h_a[j];
-            pa_e_vals[h_out_start + j] = h_e[j];
-        }
-
-        // ===== Per-row Ch / Maj operand witnesses =====
-        //
-        // Computed honestly on every row from a_vals / e_vals contents.
-        // The truth-table values must hold on every row (not only
-        // SHA-active ones) to keep the Ch/Maj virtual residuals
-        // (`r_ch1` / `r_ch2` / `r_maj`, declared in `signature()`'s
-        // `with_virtual_binary_poly_cols`) bit-valid per coefficient
-        // across compression-junction boundaries: the booleanity
-        // sumcheck checks every row, including ones the spec doesn't
-        // care about.
-        let u_ef_vals: Vec<u32> = (0..n)
-            .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
-            .collect();
-        let u_neg_e_g_vals: Vec<u32> = (0..n)
-            .map(|t| {
-                if t >= 2 {
-                    (!e_vals[t]) & e_vals[t - 2]
-                } else {
-                    0
-                }
-            })
-            .collect();
-        let maj_vals: Vec<u32> = (0..n)
-            .map(|t| {
-                if t >= 2 {
-                    maj(a_vals[t], a_vals[t - 1], a_vals[t - 2])
-                } else {
-                    0
-                }
-            })
-            .collect();
-
-        // ===== Tail compensators for the Ch (63) / Maj (64) virtual residuals =====
-        //
-        // Zero on every row except `k ∈ {n−2, n−1}` where the length-2
-        // forward shifts in r_ch2 / r_maj read into off-trace zero-
-        // padding and the residual would slip outside `{0,1}` per
-        // coefficient. Match the compensator logic in option-a-virtual-
-        // residuals (8787cbd):
-        //   r_ch2 (alt complement form) at boundary k = n-2 / n-1:
-        //     u_{¬e,g}[k+2] = 0 (off-trace), e[k+2] = 0, e[k] real.
-        //     residual = -e[k] + 2·comp_ch2 ∈ {0,1} ⇒ comp_ch2[k] = e[k].
-        //   r_maj at boundary k = n-2:
-        //     a[k+2] = Maj[k+2] = 0 (off-trace), a[k+1] real.
-        //     residual = a[k] + a[k+1] − 2·comp_maj ∈ {0,1}
-        //     ⇒ comp_maj[k] = AND(a[k], a[k+1]).
-        //   r_maj at k = n-1: a[k+1] = a[k+2] = 0, residual = a[k] ∈
-        //     {0,1} already; comp_maj = 0.
-        let mut pa_r_ch2_comp_vals: Vec<u32> = vec![0; n];
-        let mut pa_r_maj_comp_vals: Vec<u32> = vec![0; n];
-        for k in 0..n {
-            let off_kp1 = k + 1 >= n;
-            let off_kp2 = k + 2 >= n;
-            if off_kp2 {
-                pa_r_ch2_comp_vals[k] = e_vals[k];
-            }
-            if off_kp2 && !off_kp1 {
-                pa_r_maj_comp_vals[k] = a_vals[k] & a_vals[k + 1];
-            }
-        }
-
-        // Derived values.
-        let sig0_vals: Vec<u32> = a_vals.iter().copied().map(big_sigma0).collect();
-        let sig1_vals: Vec<u32> = e_vals.iter().copied().map(big_sigma1).collect();
-        let lsig0_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma0).collect();
-        let lsig1_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma1).collect();
-
-        let ov_sig0_vals: Vec<u32> = a_vals
-            .iter()
-            .zip(&sig0_vals)
-            .map(|(&a, &s)| sigma0_overflow(a, s))
-            .collect();
-        let ov_sig1_vals: Vec<u32> = e_vals
-            .iter()
-            .zip(&sig1_vals)
-            .map(|(&e, &s)| sigma1_overflow(e, s))
-            .collect();
-        let ov_lsig0_vals: Vec<u32> = w_vals
-            .iter()
-            .zip(&lsig0_vals)
-            .map(|(&w, &l)| lsig0_overflow(w, l))
-            .collect();
-        let ov_lsig1_vals: Vec<u32> = w_vals
-            .iter()
-            .zip(&lsig1_vals)
-            .map(|(&w, &l)| lsig1_overflow(w, l))
-            .collect();
-
-        // The σ_0/σ_1 right-shift decomposition columns S_i / T_i are
-        // gone — their role (carrying SHR(W, k) for the F_2[X] sum) is
-        // taken over by the `BitOp::ShiftR(k)` virtual columns over W.
-        // `lsig0_overflow` / `lsig1_overflow` already compute the
-        // matching `pa_ov_lsig{0,1}` per-bit values for the new
-        // constraint (the algebraic identity is unchanged).
-
-        // Pack all 5 carries per row into the W_MU_PACKED binary_poly
-        // column. Each carry was stored at its constraint's anchor row
-        // (mu_W at C7-anchor k = t-16, mu_a/mu_e at C8/C9-anchor k =
-        // t-3, mu_ff_a/e at junction-anchor k). Bit layout:
-        //   bits 0-1: mu_W,  2-4: mu_a,  5-7: mu_e,  8: mu_ff_a,  9: mu_ff_e.
-        // Positions 10..31 stay 0 (pinned by C22's high-bits-zero
-        // assert_zero on ShiftR(10)(W_MU_PACKED)).
-        let w_mu_packed_vals: Vec<u32> = (0..n)
-            .map(|k| {
-                (mu_w_vals[k] & 0b11)
-                    | ((mu_a_vals[k] & 0b111) << 2)
-                    | ((mu_e_vals[k] & 0b111) << 5)
-                    | ((mu_junction_a_vals[k] & 0b1) << 8)
-                    | ((mu_junction_e_vals[k] & 0b1) << 9)
-            })
-            .collect();
-
-        let to_bits = |v: &[u32]| -> Vec<BinaryPoly<32>> {
-            v.iter().copied().map(BinaryPoly::<32>::from).collect()
-        };
-
-        let to_bin_mle = |col: Vec<BinaryPoly<32>>| -> DenseMultilinearExtension<BinaryPoly<32>> {
-            col.into_iter().collect()
-        };
-
-        // Layout: 8 public bin_poly cols (PA_A, PA_E, PA_OV_SIG0,
-        // PA_OV_SIG1, PA_OV_LSIG0, PA_OV_LSIG1, PA_R_CH2_COMP,
-        // PA_R_MAJ_COMP) + 10 witness cols. pa_a / pa_e were populated
-        // above with H_i values at init-prefix rows (for compression i
-        // and the H_N output block) AND at junction rows (where the
-        // feed-forward constraint reads the prior H_i). The two
-        // PA_R_*_COMP columns are zero except on the trace tail.
-        let binary_poly = vec![
-            to_bin_mle(to_bits(&pa_a_vals)),
-            to_bin_mle(to_bits(&pa_e_vals)),
-            to_bin_mle(to_bits(&ov_sig0_vals)),
-            to_bin_mle(to_bits(&ov_sig1_vals)),
-            to_bin_mle(to_bits(&ov_lsig0_vals)),
-            to_bin_mle(to_bits(&ov_lsig1_vals)),
-            to_bin_mle(to_bits(&pa_r_ch2_comp_vals)),
-            to_bin_mle(to_bits(&pa_r_maj_comp_vals)),
-            to_bin_mle(to_bits(&pa_m_vals)),
-            to_bin_mle(to_bits(&a_vals)),
-            to_bin_mle(to_bits(&sig0_vals)),
-            to_bin_mle(to_bits(&e_vals)),
-            to_bin_mle(to_bits(&sig1_vals)),
-            to_bin_mle(to_bits(&w_vals)),
-            to_bin_mle(to_bits(&lsig0_vals)),
-            to_bin_mle(to_bits(&lsig1_vals)),
-            to_bin_mle(to_bits(&u_ef_vals)),
-            to_bin_mle(to_bits(&u_neg_e_g_vals)),
-            to_bin_mle(to_bits(&maj_vals)),
-            to_bin_mle(to_bits(&w_mu_packed_vals)),
-        ];
-
-        // ===== Selectors =====
-        //
-        // s_init_prefix: 1 on the init-prefix windows for every compression
-        //                (4 rows × NUM_COMPRESSIONS) plus the H_N output
-        //                block (4 more rows). Pins w_a / w_e to pa_a / pa_e.
-        // s_feedforward: 1 on the junction windows [start+64, start+68) for
-        //                every compression. Gates the SHA-256 inter-
-        //                compression addition constraint.
-        let mut s_init_prefix_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..=big_n {
-            // i = big_n: the H_N output block.
-            for j in 0..4 {
-                s_init_prefix_col[i * rpc + j] = R::ONE;
-            }
-        }
-        let mut s_feedforward_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            for j in 0..4 {
-                s_feedforward_col[i * rpc + 64 + j] = R::ONE;
-            }
-        }
-        // s_msg_init: 1 on the 16 message-block-seed rows of every
-        // compression, 0 elsewhere. Gates C16 (`w_W − pa_m == 0`).
-        let mut s_msg_init_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            for j in 0..16 {
-                s_msg_init_col[i * rpc + j] = R::ONE;
-            }
-        }
-        // s_active_sched / s_active_upd: pin each compensator to 0 on
-        // its constraint's honest active range. Read by the
-        // `pa_c_* · s_active_* == 0` zero-ideal constraints in
-        // `constrain_general`.
-        //
-        // s_active_sched: 1 on C7's 48 anchors per compression
-        // [start, start + ROUNDS_PER_COMP - 16), 0 elsewhere.
-        // s_active_upd:   1 on C8/C9's 64 anchors per compression
-        // [start, start + ROUNDS_PER_COMP), 0 elsewhere.
-        let mut s_active_sched_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        let mut s_active_upd_col: Vec<R> = (0..n).map(|_| R::ZERO).collect();
-        for i in 0..big_n {
-            let start = i * rpc;
-            for j in 0..(rounds - 16) {
-                s_active_sched_col[start + j] = R::ONE;
-            }
-            for j in 0..rounds {
-                s_active_upd_col[start + j] = R::ONE;
-            }
-        }
-        // (PA_C_FF_{A,E} reuse `s_feedforward_col` as their
-        // compensator-zero selector — it is already 1 exactly on the
-        // junction window where the feed-forward addition holds
-        // honestly.)
-
-        let k_col: Vec<R> = k_vals.iter().copied().map(R::from).collect();
-        // mu_w_vals / mu_a_vals / mu_e_vals / mu_junction_{a,e}_vals
-        // are no longer materialized as separate int columns — they're
-        // packed into the W_MU_PACKED binary_poly column above.
-
-        // ----- Compensator columns (replace s_sched_anch / s_upd_anch). -----
-        //
-        // For each constraint Cᵢ ∈ {C7, C8, C9}, we publish a public column
-        // `pa_c_cᵢ[k]` with the property that (innerᵢ + pa_c_cᵢ) ∈ (X − 2)
-        // on every row k. Concretely we pick `pa_c_cᵢ[k] = −innerᵢ(2)` mod
-        // R's modulus; the protocol projects R into the random field, so
-        // the negation lands as `−innerᵢ(2) mod p` — exactly the value
-        // needed for the constraint to lie in (X − 2).
-        //
-        // On the corresponding active range (where the original selector
-        // was 1), the SHA recurrence makes `innerᵢ(2) = 0` for an honest
-        // prover, so `pa_c_cᵢ[k] = 0` automatically. On inactive rows the
-        // compensator absorbs whatever `innerᵢ(2)` happens to be.
-        let two_to_32: R = R::from(0x10000u32) * &R::from(0x10000u32);
-        let load =
-            |arr: &[u32], idx: usize| -> R { if idx < n { R::from(arr[idx]) } else { R::ZERO } };
-
-        // C7: inner(2) = w_W[k+16] − w_W[k] − lsig0[k+1] − w_W[k+9]
-        //               − lsig1[k+14] + 2^32 · mu_W[k+16]
-        let pa_c_c7_col: Vec<R> = (0..n)
-            .map(|k| {
-                let w_k16 = load(&w_vals, k + 16);
-                let w_k = load(&w_vals, k);
-                let lsig0_k1 = load(&lsig0_vals, k + 1);
-                let w_k9 = load(&w_vals, k + 9);
-                let lsig1_k14 = load(&lsig1_vals, k + 14);
-                // mu_W stored at C7-anchor row k (= round t = k+16 was
-                // formerly stored at k+16; with chained-comp re-anchoring
-                // it's now at row k).
-                let mu_k = load(&mu_w_vals, k);
-                let two32_mu = two_to_32.clone() * &mu_k;
-                // comp = −inner(2) = w_k + lsig0_k1 + w_k9 + lsig1_k14
-                //                    − 2^32·mu_k16 − w_k16
-                w_k + &lsig0_k1 + &w_k9 + &lsig1_k14 - &two32_mu - &w_k16
-            })
-            .collect();
-
-        // C8: inner(2) = w_a[k+4] − w_e[k] − sig1[k+3] − Ch[k+3] − K[k+3]
-        //               − W[k+3] − sig0[k+3] − maj[k+3] + 2^32 · mu_a[k+3]
-        // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
-        let pa_c_c8_col: Vec<R> = (0..n)
-            .map(|k| {
-                let w_a_k4 = load(&a_vals, k + 4);
-                let w_e_k = load(&e_vals, k);
-                let sig1_k3 = load(&sig1_vals, k + 3);
-                let u_ef_k3 = load(&u_ef_vals, k + 3);
-                let u_neg_e_g_k3 = load(&u_neg_e_g_vals, k + 3);
-                let k_k3 = load(&k_vals, k + 3);
-                let w_k3 = load(&w_vals, k + 3);
-                let sig0_k3 = load(&sig0_vals, k + 3);
-                let maj_k3 = load(&maj_vals, k + 3);
-                // mu_a stored at C8-anchor row k (= round t = k+3 was
-                // formerly stored at k+3; now at row k).
-                let mu_a_k = load(&mu_a_vals, k);
-                let two32_mu = two_to_32.clone() * &mu_a_k;
-                w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k3 + &sig0_k3 + &maj_k3
-                    - &two32_mu
-                    - &w_a_k4
-            })
-            .collect();
-
-        // C9: inner(2) = w_e[k+4] − w_a[k] − w_e[k] − sig1[k+3] − Ch[k+3]
-        //               − K[k+3] − W[k+3] + 2^32 · mu_e[k+3]
-        // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
-        let pa_c_c9_col: Vec<R> = (0..n)
-            .map(|k| {
-                let w_e_k4 = load(&e_vals, k + 4);
-                let w_a_k = load(&a_vals, k);
-                let w_e_k = load(&e_vals, k);
-                let sig1_k3 = load(&sig1_vals, k + 3);
-                let u_ef_k3 = load(&u_ef_vals, k + 3);
-                let u_neg_e_g_k3 = load(&u_neg_e_g_vals, k + 3);
-                let k_k3 = load(&k_vals, k + 3);
-                let w_k3 = load(&w_vals, k + 3);
-                // mu_e stored at C9-anchor row k (analogous to mu_a).
-                let mu_e_k = load(&mu_e_vals, k);
-                let two32_mu = two_to_32.clone() * &mu_e_k;
-                w_a_k + &w_e_k + &sig1_k3 + &u_ef_k3 + &u_neg_e_g_k3 + &k_k3 + &w_k3
-                    - &two32_mu
-                    - &w_e_k4
-            })
-            .collect();
-
-        // C12/C13 feed-forward compensators. inner_a(2) at row k =
-        //   w_a[k+4] − w_a[k] − pa_a[k] + 2^32 · mu_junction_a[k]
-        // (e-half symmetric). On junction rows the SHA-256 feed-forward
-        // makes inner = 0 honestly, so the compensator is 0. Off-
-        // junction (init prefix straddle, round-update windows, slack)
-        // it absorbs whatever inner happens to be so that
-        // `(inner + pa_c_ff) ∈ (X − 2)` everywhere.
-        let pa_c_ff_a_col: Vec<R> = (0..n)
-            .map(|k| {
-                let w_a_k4 = load(&a_vals, k + 4);
-                let w_a_k = load(&a_vals, k);
-                let pa_a_k = load(&pa_a_vals, k);
-                let mu_ff_k = load(&mu_junction_a_vals, k);
-                let two32_mu = two_to_32.clone() * &mu_ff_k;
-                // comp = −inner(2) = w_a_k + pa_a_k − 2^32·mu_ff_k − w_a_k4
-                w_a_k + &pa_a_k - &two32_mu - &w_a_k4
-            })
-            .collect();
-        let pa_c_ff_e_col: Vec<R> = (0..n)
-            .map(|k| {
-                let w_e_k4 = load(&e_vals, k + 4);
-                let w_e_k = load(&e_vals, k);
-                let pa_e_k = load(&pa_e_vals, k);
-                let mu_ff_k = load(&mu_junction_e_vals, k);
-                let two32_mu = two_to_32.clone() * &mu_ff_k;
-                w_e_k + &pa_e_k - &two32_mu - &w_e_k4
-            })
-            .collect();
-
-        let to_int_mle =
-            |col: Vec<R>| -> DenseMultilinearExtension<R> { col.into_iter().collect() };
-        // Layout: public int prefix (selectors + K + active-range
-        // selectors) followed by witness int suffix (the five linear-
-        // constraint compensators). Order matches cols::S_INIT_PREFIX..
-        // PA_C_FF_E. The 5 prior int carry columns (mu_W/a/e/
-        // junction_a/e) are gone — packed into W_MU_PACKED above.
-        let int = vec![
-            to_int_mle(s_init_prefix_col),
-            to_int_mle(s_feedforward_col),
-            to_int_mle(s_msg_init_col),
-            to_int_mle(k_col),
-            to_int_mle(s_active_sched_col),
-            to_int_mle(s_active_upd_col),
-            to_int_mle(pa_c_c7_col),
-            to_int_mle(pa_c_c8_col),
-            to_int_mle(pa_c_c9_col),
-            to_int_mle(pa_c_ff_a_col),
-            to_int_mle(pa_c_ff_e_col),
-        ];
-
-        UairTrace {
-            binary_poly: binary_poly.into(),
-            int: int.into(),
-            ..Default::default()
-        }
+        let initial_state: Sha256State = std::array::from_fn(|_| rng.next_u32());
+        let message_blocks: [Sha256MessageBlock; cols::NUM_COMPRESSIONS] =
+            std::array::from_fn(|_| std::array::from_fn(|_| rng.next_u32()));
+        synthesize_sha256_compression_chain_trace::<R>(num_vars, initial_state, &message_blocks)
+            .map(|(trace, _)| trace)
+            .expect("random SHA-256 trace synthesis failed")
     }
 }
 
@@ -1823,7 +2005,52 @@ where
 mod tests {
     use super::*;
     use crypto_primitives::crypto_bigint_int::Int;
-    use zinc_uair::degree_counter::{count_effective_max_degree, count_max_degree};
+    use zinc_uair::{
+        Uair,
+        degree_counter::{count_effective_max_degree, count_max_degree},
+    };
+
+    fn test_initial_state() -> Sha256State {
+        [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ]
+    }
+
+    fn test_message_blocks<const N: usize>() -> [Sha256MessageBlock; N] {
+        std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                ((i as u32) << 24) ^ ((j as u32) << 16) ^ 0xa5a5_0000u32.wrapping_add(j as u32)
+            })
+        })
+    }
+
+    fn native_chain<const N: usize>(
+        initial_state: Sha256State,
+        message_blocks: &[Sha256MessageBlock; N],
+    ) -> Sha256State {
+        message_blocks.iter().fold(initial_state, |state, block| {
+            sha256_compress_native(state, *block)
+        })
+    }
+
+    fn assert_sha_trace_splits_cleanly(trace: &UairTrace<'static, Int<5>, Int<5>, 32>) {
+        let sig = <Sha256CompressionSliceUair<Int<5>> as Uair>::signature();
+        let public = trace.public(&sig);
+        let witness = trace.witness(&sig);
+
+        assert_eq!(public.binary_poly.len(), cols::NUM_BIN_PUB);
+        assert_eq!(public.arbitrary_poly.len(), 0);
+        assert_eq!(public.int.len(), cols::NUM_INT_PUB);
+        assert_eq!(witness.binary_poly.len(), cols::NUM_BIN - cols::NUM_BIN_PUB);
+        assert_eq!(witness.arbitrary_poly.len(), 0);
+        assert_eq!(witness.int.len(), cols::NUM_INT - cols::NUM_INT_PUB);
+        <Sha256CompressionSliceUair<Int<5>> as Uair>::verify_public_structure(
+            &public,
+            cols::MIN_NUM_VARS,
+        )
+        .expect("generated SHA public trace should satisfy public structure checks");
+    }
 
     /// All non-zero-ideal SHA constraints (C1, C2, C4, C6, C7, C8, C9,
     /// and the new feed-forward C12/C13) must stay degree-1 in the
@@ -1838,6 +2065,36 @@ mod tests {
         // assert_zero constraints (init-prefix pinning, B_i materializations)
         // can have higher degree without disqualifying MLE-first.
         assert!(count_max_degree::<U>() >= 2);
+    }
+
+    #[test]
+    fn synthesize_sha256_chain_witnesses_n1_matches_native() {
+        let initial_state = test_initial_state();
+        let message_blocks = test_message_blocks::<1>();
+        let expected = sha256_compress_native(initial_state, message_blocks[0]);
+
+        let (witnesses, final_state) =
+            synthesize_sha256_chain_witnesses::<Int<5>, 1>(initial_state, message_blocks)
+                .expect("N=1 SHA witness synthesis should succeed");
+
+        assert_eq!(final_state, expected);
+        assert_sha_trace_splits_cleanly(&witnesses[0].trace);
+    }
+
+    #[test]
+    fn synthesize_sha256_chain_witnesses_n8_matches_native() {
+        let initial_state = test_initial_state();
+        let message_blocks = test_message_blocks::<8>();
+        let expected = native_chain(initial_state, &message_blocks);
+
+        let (witnesses, final_state) =
+            synthesize_sha256_chain_witnesses::<Int<5>, 8>(initial_state, message_blocks)
+                .expect("N=8 SHA witness synthesis should succeed");
+
+        assert_eq!(final_state, expected);
+        for witness in &witnesses {
+            assert_sha_trace_splits_cleanly(&witness.trace);
+        }
     }
 
     /// Cross-check the K_CANONICAL table against the canonical SHA-256

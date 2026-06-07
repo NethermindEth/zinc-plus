@@ -782,6 +782,16 @@ pub struct UairTrace<'a, PolyCoeff: Clone, Int: Clone, const D: usize> {
     pub int: Cow<'a, [DenseMultilinearExtension<Int>]>,
 }
 
+/// Prover-private UAIR witness data.
+///
+/// The wrapped trace may still contain public-prefix columns; callers can split
+/// it with [`UairTrace::public`] and [`UairTrace::witness`] using the UAIR
+/// signature.
+#[derive(Debug, Clone)]
+pub struct UairWitness<'a, PolyCoeff: Clone, Int: Clone, const D: usize> {
+    pub trace: UairTrace<'a, PolyCoeff, Int, D>,
+}
+
 impl<PolyCoeff: Clone, Int: Clone, const D: usize> UairTrace<'static, PolyCoeff, Int, D> {
     /// Returns a sub-trace containing only public columns.
     /// Returned trace is borrowed from the full trace.
