@@ -430,6 +430,63 @@ pub trait IntFoldedZincTypes4x<
     type IntLc: LinearCode<Self::IntZt>;
 }
 
+/// 4× fold of the **arbitrary-poly** lane along the polynomial-degree
+/// dimension, leaving binary and int unfolded. The arb-heavy counterpart of
+/// [`IntFoldedZincTypes4x`]: each `DensePolynomial<Int<INT_LIMBS>, D>` arb
+/// witness column is split twice (`D → D/2 → QUARTER_D`) into a length-`4n`
+/// column of `DensePolynomial<Int<INT_LIMBS>, QUARTER_D>` entries, committed
+/// and opened at `(r_0 ‖ γ_1 ‖ γ_2)`; binary and int commit/open unsplit at
+/// `r_0`. The verifier reassembles the arb lane with the 4-block degree algebra
+/// `(1−γ_1)(1−γ_2) c[0] + γ_1(1−γ_2) c[2] + (1−γ_1)γ_2 c[1] + γ_1·γ_2 c[3]`
+/// (identical to the binary 4× fold) over the **full-`D`** arb bar_u; binary and
+/// int use the plain `⟨a, coeffs⟩` evaluation.
+///
+/// Unlike [`IntFoldedZincTypes4x`], the arb coefficient width (`INT_LIMBS`) is
+/// **not** forced to `≥ 4` by an int split — it stays the UAIR's native narrow
+/// width — so the degree fold actually shrinks the arb PCS (column size ∝
+/// width × degree: `Int<1>×D` → `Int<1>×QUARTER_D`, a 4× reduction). This is
+/// the lane that carries ~94% of a Falcon proof.
+pub trait ArbFoldedZincTypes4x<const D: usize, const QUARTER_D: usize, const INT_LIMBS: usize>:
+    Clone + Debug
+{
+    type Chal: ConstIntRing + ConstTranscribable + Named;
+    type Pt: ConstIntRing;
+    type Fmod: ConstIntSemiring + ConstTranscribable + Named;
+    type PrimeTest: PrimalityTest<Self::Fmod>;
+
+    /// Binary lane, **unfolded** (full degree `D`).
+    type BinaryZt: ZipTypes<
+            Eval = BinaryPoly<D>,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    /// Arbitrary-poly lane, **folded** to quarter degree (`QUARTER_D = D/4`),
+    /// native narrow coefficient `Int<INT_LIMBS>`.
+    type ArbitraryZt: ZipTypes<
+            Eval = DensePolynomial<crypto_primitives::crypto_bigint_int::Int<INT_LIMBS>, QUARTER_D>,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    /// Int lane, **unfolded** (`Int<INT_LIMBS>`).
+    type IntZt: ZipTypes<
+            Eval = crypto_primitives::crypto_bigint_int::Int<INT_LIMBS>,
+            Chal = Self::Chal,
+            Pt = Self::Pt,
+            Fmod = Self::Fmod,
+            PrimeTest = Self::PrimeTest,
+        >;
+
+    type BinaryLc: LinearCode<Self::BinaryZt>;
+    type ArbitraryLc: LinearCode<Self::ArbitraryZt>;
+    type IntLc: LinearCode<Self::IntZt>;
+}
+
 /// Main struct for the Zinc+ PIOP. The protocol is implemented as associated
 /// functions on it.
 ///
