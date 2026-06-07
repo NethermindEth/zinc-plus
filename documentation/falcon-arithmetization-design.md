@@ -307,6 +307,81 @@ is the headline gain. Shrinking the proof (whole-poly cells, coefficient-MLE
 Mechanism 1 of §4, or a smaller `s_3` encoding) remains future work, as does
 wiring `s_3` through the **folded** paths (still not wired — see Phase-2b).
 
+## Phase-4 status (folded paths + arb-lane degree fold) — IN PROGRESS
+
+Goal: shrink the Falcon proof. Measured composition of an unfolded Falcon proof
+(`nvars=6`, MLE-first): **`zip` (PCS) = 94.4%**, ideal_check 2.0%, resolver
+1.1%, combined_sumcheck + multipoint_eval < 0.1%. For Falcon the binary lane is
+empty and the int lane is 1 `slack` column, so the PCS bytes are *essentially
+all arbitrary-poly*. **Folding the arb lane is the only lever that matters.**
+
+### Done (committed, tested)
+
+- **Norm zerocheck wired into the folded (1× + 4×) prover/verifier**
+  (`c7ba13d`). The folded paths inline steps 1–6 and previously skipped the
+  norm group, leaving `norm_value_evals` empty. Now mirrored from the unfolded
+  `step4_sumcheck` / `step4_sumcheck_verify`, gated on `norm_spec()` (no-op for
+  SHA/ECDSA; existing folded tests still pass).
+- **`split_arb_column` / `split_arb_columns`** in `zip-plus/src/pcs/folding.rs`
+  (`029966a`): degree-split a `DensePolynomial<C, D>` column into
+  `DensePolynomial<C, HALF_D>` (`v = u + X^{D/2}·w`), the arb analogue of the
+  binary `split_column`. Two rounds (D→D/2→D/4) give the **same 4-block layout**
+  (c[0]=a0, c[1]=a2, c[2]=a1, c[3]=a3) as the binary 4× fold, so the verifier's
+  `(1−γ₁)(1−γ₂)c[0] + γ₁(1−γ₂)c[2] + (1−γ₁)γ₂c[1] + γ₁γ₂c[3]` reassembly applies
+  unchanged. Unit-tested (reconstruction + block layout).
+
+### Three obstacles found (why this is its own path, not a shared-trait edit)
+
+1. **Scalar-degree coupling.** `prove_folded_4x` bounds
+   `U::Scalar = DensePolynomial<Int<INT_LIMBS>, D>` (scalar degree = cell degree
+   `D=32`). Falcon's scalar is degree `2N=1024` (decoupled, holds `X^{992}`), so
+   Falcon cannot even instantiate the bound. Fix: relax to a generic
+   `project_scalar` closure as the unfolded `prove` already does.
+2. **Arb/int width coupling (the killer).** The shared `IntFoldedZincTypes4x`
+   trace is `UairTrace<Int<INT_LIMBS>, Int<INT_LIMBS>, D>` — arb-cell coeff width
+   = int-cell width = `INT_LIMBS` — and `split_int_column_4x` requires
+   `INT_LIMBS ≥ 4`. So folding arb through the shared trait forces `Int<4>`
+   (256-bit) arb coeffs, though Falcon's are ≤30 bits. PCS column size ∝
+   (coeff width)×(degree): unfolded `Int<1>×32 = 32`; shared-trait fold
+   `Int<4>×8 = 32` — **the 4× degree win is exactly cancelled by the 4× width
+   bloat.** Net zero. The arb fold MUST keep narrow `Int<1>` coeffs, which means
+   decoupling arb width from the int lane — a dedicated path, not the shared
+   `IntFoldedZincTypes4x`.
+3. **MultiZip single-point coupling.** `MultiZip3::prove_f` opens all three
+   lanes at one shared point. A folded arb opens at `r0_ext = r_0‖γ₁‖γ₂`
+   (num_vars+2) while Falcon's unfolded int lane opens at `r_0` (num_vars) —
+   different points, can't share one `MultiZip3`. **Resolved by** the existing
+   **non-multi** step-7 branch, which already opens each lane at its own point
+   (today: arb at `r_0`, binary/int at `r0_ext`). The focused arb fold simply
+   *inverts* this: arb at `r0_ext` (split), int/binary at `r_0` (unsplit).
+
+### Design — focused arb-degree fold (narrow coeffs, arb-only)
+
+Fold **only** the arb lane along degree (binary empty, int tiny → left at
+`r_0`). New `ArbFoldedZincTypes4x<D, QUARTER_D>` trait:
+`ArbitraryZt::Eval = DensePolynomial<C, QUARTER_D>` with the UAIR's *native
+narrow* coeff `C` (Falcon: `i64`/`Int<1>`); `BinaryZt`/`IntZt` unfolded at full
+degree.
+
+- **Prover** (new `prove_folded_arb_4x`, modelled on `prove_folded_4x_inner`):
+  step 0 `split_arb_columns` twice (D→HALF_D→QUARTER_D), commit narrow
+  quarter-degree arb; binary/int commit unsplit. Step 6: arb bar_u is the
+  full-`D` degree poly already produced by `compute_lifted_evals_capped`
+  (no change); sample γ₁,γ₂. Step 7 (non-multi): open **arb at `r0_ext`**, int
+  at `r_0`, binary skipped.
+- **Verifier**: change `arb_eval_f` from the plain `⟨a, coeffs⟩` inner product
+  to the **4-block reassembly** — copy `bin_eval_f` (verifier.rs:2410) verbatim,
+  swapping `ZtF::BinaryZt::Chal`→`ArbitraryZt::Chal` and the range to
+  `arb_range`. int/binary stay unfolded (`open_eval = bar_u(α)` at `r_0`).
+- **Types/test**: a Falcon `ArbFoldedZincTypes4x` instance with a quarter-degree
+  (`QUARTER_D=8`) arb IPRS code; an e2e round-trip test + a folded bench line.
+
+Expected: ~4× reduction of the arb PCS bytes (the 94% component) → roughly a 3–4×
+smaller Falcon proof. The `split_arb_columns` primitive and the `bin_eval_f`
+4-block template are the reusable halves; the remaining work is the new
+trait + `prove_folded_arb_4x` + the `arb_eval_f` swap + the Falcon type
+instance + test.
+
 ## How to use this doc
 
 Ledger for the batched Falcon arithmetization on branch `falcon`. **Out of
