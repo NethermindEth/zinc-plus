@@ -2739,7 +2739,6 @@ pub fn verify_folded_arb_4x<
     const D: usize,
     const HALF_D: usize,
     const QUARTER_D: usize,
-    const INT_LIMBS: usize,
     const CHECK_FOR_OVERFLOW: bool,
 >(
     vp: &(
@@ -2748,14 +2747,14 @@ pub fn verify_folded_arb_4x<
         ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
     ),
     mut proof: Proof<F>,
-    public_trace: &UairTrace<Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    public_trace: &UairTrace<i64, i64, D>,
     num_vars: usize,
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
 ) -> Result<(), ProtocolError<F, IdealOverF>>
 where
-    ZtF: crate::ArbFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS>,
-    Int<INT_LIMBS>: ProjectableToField<F>,
+    ZtF: crate::ArbFoldedZincTypes4x<D, QUARTER_D>,
+    i64: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <ZtF::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -2763,7 +2762,7 @@ where
     U::Scalar: Clone + Eq + std::hash::Hash,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
-        + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
+        + for<'b> FromWithConfig<&'b i64>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
@@ -2933,10 +2932,8 @@ where
     let num_wit_bin = wit_cols.num_binary_poly_cols();
     let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
     let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
-        let projected_public = project_trace_coeffs_row_major::<F, Int<INT_LIMBS>, Int<INT_LIMBS>, D>(
-            public_trace,
-            &field_cfg,
-        );
+        let projected_public =
+            project_trace_coeffs_row_major::<F, i64, i64, D>(public_trace, &field_cfg);
         crate::compute_lifted_evals::<F, D>(
             &r_0,
             &public_trace.binary_poly,

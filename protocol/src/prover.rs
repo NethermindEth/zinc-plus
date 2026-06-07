@@ -2524,7 +2524,6 @@ pub fn prove_folded_arb_4x<
     const D: usize,
     const HALF_D: usize,
     const QUARTER_D: usize,
-    const INT_LIMBS: usize,
     const MLE_FIRST: bool,
     const CHECK_FOR_OVERFLOW: bool,
 >(
@@ -2533,19 +2532,19 @@ pub fn prove_folded_arb_4x<
         ZipPlusParams<ZtF::ArbitraryZt, ZtF::ArbitraryLc>,
         ZipPlusParams<ZtF::IntZt, ZtF::IntLc>,
     ),
-    trace: &UairTrace<'static, Int<INT_LIMBS>, Int<INT_LIMBS>, D>,
+    trace: &UairTrace<'static, i64, i64, D>,
     num_vars: usize,
     project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
 ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>>
 where
-    ZtF: crate::ArbFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS>,
-    Int<INT_LIMBS>: ProjectableToField<F>,
+    ZtF: crate::ArbFoldedZincTypes4x<D, QUARTER_D>,
+    i64: ProjectableToField<F>,
     <ZtF::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     U: Uair + 'static,
     U::Scalar: Clone + Eq + std::hash::Hash,
     F: InnerTransparentField
         + FromPrimitiveWithConfig
-        + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
+        + for<'a> FromWithConfig<&'a i64>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
@@ -2570,11 +2569,11 @@ where
     );
 
     // ── Step 0: Commit (unsplit binary[empty] / int, degree-quartered arb) ──
-    let split1 = zip_plus::pcs::folding::split_arb_columns::<Int<INT_LIMBS>, D, HALF_D>(
+    let split1 = zip_plus::pcs::folding::split_arb_columns::<i64, D, HALF_D>(
         &witness_trace.arbitrary_poly,
     );
     let split_arb_witness =
-        zip_plus::pcs::folding::split_arb_columns::<Int<INT_LIMBS>, HALF_D, QUARTER_D>(&split1);
+        zip_plus::pcs::folding::split_arb_columns::<i64, HALF_D, QUARTER_D>(&split1);
     drop(split1);
 
     // Per-lane points differ (arb at r0_ext, int at r_0), so we cannot batch
@@ -2677,11 +2676,8 @@ where
     // ── Step 3: Eval projection (ψ_a) ───────────────────────────────────────
     let projecting_element: ZtF::Chal = pcs_transcript.fs_transcript.get_challenge();
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
-    let projected_trace_f = evaluate_trace_to_column_mles_fast::<F, Int<INT_LIMBS>, Int<INT_LIMBS>, D>(
-        trace,
-        &projecting_element_f,
-        &field_cfg,
-    );
+    let projected_trace_f =
+        evaluate_trace_to_column_mles_fast::<F, i64, i64, D>(trace, &projecting_element_f, &field_cfg);
     let projected_scalars_f =
         project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
             .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;

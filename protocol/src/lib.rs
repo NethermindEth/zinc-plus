@@ -441,14 +441,13 @@ pub trait IntFoldedZincTypes4x<
 /// (identical to the binary 4× fold) over the **full-`D`** arb bar_u; binary and
 /// int use the plain `⟨a, coeffs⟩` evaluation.
 ///
-/// Unlike [`IntFoldedZincTypes4x`], the arb coefficient width (`INT_LIMBS`) is
-/// **not** forced to `≥ 4` by an int split — it stays the UAIR's native narrow
-/// width — so the degree fold actually shrinks the arb PCS (column size ∝
-/// width × degree: `Int<1>×D` → `Int<1>×QUARTER_D`, a 4× reduction). This is
-/// the lane that carries ~94% of a Falcon proof.
-pub trait ArbFoldedZincTypes4x<const D: usize, const QUARTER_D: usize, const INT_LIMBS: usize>:
-    Clone + Debug
-{
+/// Unlike [`IntFoldedZincTypes4x`], the arb coefficient width is **not** forced
+/// to `≥ 4` by an int split — it stays the UAIR's native narrow `i64` width — so
+/// the degree fold actually shrinks the arb PCS (column size ∝ width × degree:
+/// `i64×D` → `i64×QUARTER_D`, a 4× reduction). This is the lane that carries
+/// ~94% of a Falcon proof. Cell type is `i64` (matching the unfolded arb
+/// ZipType and Falcon's native trace).
+pub trait ArbFoldedZincTypes4x<const D: usize, const QUARTER_D: usize>: Clone + Debug {
     type Chal: ConstIntRing + ConstTranscribable + Named;
     type Pt: ConstIntRing;
     type Fmod: ConstIntSemiring + ConstTranscribable + Named;
@@ -464,18 +463,18 @@ pub trait ArbFoldedZincTypes4x<const D: usize, const QUARTER_D: usize, const INT
         >;
 
     /// Arbitrary-poly lane, **folded** to quarter degree (`QUARTER_D = D/4`),
-    /// native narrow coefficient `Int<INT_LIMBS>`.
+    /// native narrow `i64` coefficient.
     type ArbitraryZt: ZipTypes<
-            Eval = DensePolynomial<crypto_primitives::crypto_bigint_int::Int<INT_LIMBS>, QUARTER_D>,
+            Eval = DensePolynomial<i64, QUARTER_D>,
             Chal = Self::Chal,
             Pt = Self::Pt,
             Fmod = Self::Fmod,
             PrimeTest = Self::PrimeTest,
         >;
 
-    /// Int lane, **unfolded** (`Int<INT_LIMBS>`).
+    /// Int lane, **unfolded** (`i64`).
     type IntZt: ZipTypes<
-            Eval = crypto_primitives::crypto_bigint_int::Int<INT_LIMBS>,
+            Eval = i64,
             Chal = Self::Chal,
             Pt = Self::Pt,
             Fmod = Self::Fmod,
@@ -1229,6 +1228,117 @@ mod tests {
             CHECKED,
         >(&pp, proof, &public_trace, num_vars, project_scalar_fn, project_ideal)
         .expect("Falcon verifier failed");
+    }
+
+    // Quarter-degree arb IPRS ZipType for the arb-lane fold (mirror of
+    // `ArbitraryPolyZipTypesIprs` at degree `QUARTER_DEGREE_PLUS_ONE = 8`).
+    #[derive(Debug, Clone)]
+    pub struct ArbitraryPolyZipTypesIprsQuarter {}
+    impl ZipTypes for ArbitraryPolyZipTypesIprsQuarter {
+        const NUM_COLUMN_OPENINGS: usize = NUM_COL_OPENINGS_FOR_REP;
+        type Eval = DensePolynomial<i64, QUARTER_DEGREE_PLUS_ONE>;
+        type Cw = DensePolynomial<i64, QUARTER_DEGREE_PLUS_ONE>;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type Chal = i128;
+        type Pt = i128;
+        type CombR = Int<M>;
+        type Comb = DensePolynomial<Self::CombR, QUARTER_DEGREE_PLUS_ONE>;
+        type EvalDotChal = DensePolyInnerProduct<
+            i64,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            QUARTER_DEGREE_PLUS_ONE,
+        >;
+        type CombDotChal = DensePolyInnerProduct<
+            Self::CombR,
+            Self::Chal,
+            Self::CombR,
+            MBSInnerProduct,
+            QUARTER_DEGREE_PLUS_ONE,
+        >;
+        type ArrCombRDotChal = MBSInnerProduct;
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestArbFoldedZincTypes;
+    impl crate::ArbFoldedZincTypes4x<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>
+        for TestArbFoldedZincTypes
+    {
+        type Chal = i128;
+        type Pt = i128;
+        type Fmod = Uint<FIELD_LIMBS>;
+        type PrimeTest = MillerRabin;
+        type BinaryZt = BinPolyZipTypes;
+        type ArbitraryZt = ArbitraryPolyZipTypesIprsQuarter;
+        type IntZt = IntZipTypes;
+        type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, CHECKED>;
+        type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, CHECKED>;
+        type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, CHECKED>;
+    }
+
+    /// End-to-end test: batched Falcon via the **arb-lane degree fold**
+    /// (`prove_folded_arb_4x` / `verify_folded_arb_4x`). The 112 arb columns are
+    /// committed at quarter degree (8) and opened at `(r_0 ‖ γ_1 ‖ γ_2)`; the
+    /// `slack` int column is unsplit at `r_0`.
+    #[test]
+    fn test_e2e_falcon_arb_folded() {
+        use zinc_test_uair::FalconBatchUair;
+        const FN: usize = zinc_test_uair::falcon::N;
+        let num_vars = 3;
+        // arb columns split 4× along degree → length 4n = 2^(num_vars+2);
+        // binary (empty) + int unsplit at 2^num_vars.
+        let pp = (
+            ZipPlus::<BinPolyZipTypes, _>::setup(
+                1 << num_vars,
+                make_iprs::<BinPolyZipTypes>(num_vars),
+            ),
+            ZipPlus::<ArbitraryPolyZipTypesIprsQuarter, _>::setup(
+                1 << (num_vars + 2),
+                make_iprs::<ArbitraryPolyZipTypesIprsQuarter>(num_vars + 2),
+            ),
+            ZipPlus::<IntZipTypes, _>::setup(1 << num_vars, make_iprs::<IntZipTypes>(num_vars)),
+        );
+        let mut rng = rng();
+        let trace = FalconBatchUair::<i64>::generate_random_trace(num_vars, &mut rng);
+        let sig = <FalconBatchUair<i64> as Uair>::signature();
+        let public_trace = trace.public(&sig);
+
+        // MLE_FIRST = false (Combined ideal-check lane). The MLE-first lane
+        // (`prove_linear`) currently produces a Falcon proof that does not
+        // verify — a *pre-existing* issue independent of the arb fold: the
+        // unfolded `test_e2e_falcon_batch` also only runs `prove::<false>`, and
+        // the bench times `prove::<true>` but verifies a `prove::<false>`
+        // proof, so an MLE-first Falcon proof had never been end-to-end
+        // verified. The arb fold composes with whichever ideal-check lane works.
+        let proof = crate::prover::prove_folded_arb_4x::<
+            TestArbFoldedZincTypes,
+            FalconBatchUair<i64>,
+            F,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            false,
+            CHECKED,
+        >(&pp, &trace, num_vars, project_scalar_fn)
+        .expect("arb-folded Falcon prover failed");
+
+        let project_ideal = |ideal: &IdealOrZero<RotationIdeal<i64, FN>>,
+                             field_cfg: &<F as PrimeField>::Config| {
+            ideal.map(|i| RotationIdeal::<F, FN>::from_with_cfg(i, field_cfg))
+        };
+        crate::verifier::verify_folded_arb_4x::<
+            TestArbFoldedZincTypes,
+            FalconBatchUair<i64>,
+            F,
+            _,
+            DEGREE_PLUS_ONE,
+            HALF_DEGREE_PLUS_ONE,
+            QUARTER_DEGREE_PLUS_ONE,
+            CHECKED,
+        >(&pp, proof, &public_trace, num_vars, project_scalar_fn, project_ideal)
+        .expect("arb-folded Falcon verifier rejected a valid proof");
     }
 
     /// Diagnostic: does `Σ_m project(X^{32m}) · limb_m` reconstruct the full
