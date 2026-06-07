@@ -342,6 +342,24 @@ pub struct VirtualBinaryPolySpec {
     pub terms: Vec<(i64, VirtualBinaryPolySource)>,
 }
 
+/// Declares a per-row squared-norm bound for the protocol's norm
+/// zerocheck group (batched lattice-signature verification). The group
+/// proves, per row `j`,
+/// `Σ_slices slice(j)² + slack(j) = beta_sq`, where the `slice`s are the
+/// coefficient-slices of the named `arbitrary_poly` columns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormSpec {
+    /// Absolute `arbitrary_poly` column indices whose coefficient-slices
+    /// form the squared-norm slices (e.g. the `s_1` limbs followed by the
+    /// `s_2` limbs). Order is load-bearing: it fixes the slice ordering the
+    /// prover extracts and the verifier binds against `up_evals`.
+    pub coeff_slice_arb_cols: Vec<usize>,
+    /// Absolute `int` column index of the per-row `slack` witness.
+    pub slack_int_col: usize,
+    /// The acceptance bound `⌊β²⌋`.
+    pub beta_sq: i64,
+}
+
 /// The signature of a UAIR.
 ///
 /// Public columns precede witness columns within each type group.
@@ -399,6 +417,10 @@ pub struct UairSignature {
     /// cols (one XOR per row pair); per-bit closing overrides bind
     /// them to the spec residual.
     virtual_binary_poly_cols: Vec<VirtualBinaryPolySpec>,
+    /// Optional per-row squared-norm bound (batched lattice-signature
+    /// verification). When `Some`, the protocol runs a degree-3 norm
+    /// zerocheck group over the named columns. `None` for every other UAIR.
+    norm_spec: Option<NormSpec>,
 }
 
 impl UairSignature {
@@ -481,7 +503,34 @@ impl UairSignature {
             shifted_bit_slice_specs: Vec::new(),
             virtual_booleanity_cols: Vec::new(),
             virtual_binary_poly_cols: Vec::new(),
+            norm_spec: None,
         }
+    }
+
+    /// Declare a per-row squared-norm bound (see [`NormSpec`]). Validates
+    /// the referenced columns against the layout.
+    #[must_use]
+    pub fn with_norm_spec(mut self, spec: NormSpec) -> Self {
+        let num_arb = self.total_cols.num_arbitrary_poly_cols();
+        let num_int = self.total_cols.num_int_cols();
+        for &c in &spec.coeff_slice_arb_cols {
+            assert!(
+                c < num_arb,
+                "NormSpec coeff_slice_arb_col {c} out of range (num arbitrary_poly = {num_arb})"
+            );
+        }
+        assert!(
+            spec.slack_int_col < num_int,
+            "NormSpec slack_int_col {} out of range (num int = {num_int})",
+            spec.slack_int_col,
+        );
+        self.norm_spec = Some(spec);
+        self
+    }
+
+    /// The declared per-row squared-norm bound, if any.
+    pub fn norm_spec(&self) -> Option<&NormSpec> {
+        self.norm_spec.as_ref()
     }
 
     /// Replace the set of witness binary_poly columns the protocol

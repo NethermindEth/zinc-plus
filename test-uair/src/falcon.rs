@@ -59,8 +59,8 @@ use crypto_primitives::{ConstSemiring, Semiring};
 use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
-    ConstraintBuilder, PublicColumnLayout, TotalColumnLayout, TraceRow, Uair, UairSignature,
-    UairTrace, ideal::rotation::RotationIdeal,
+    ConstraintBuilder, NormSpec, PublicColumnLayout, TotalColumnLayout, TraceRow, Uair,
+    UairSignature, UairTrace, ideal::rotation::RotationIdeal,
 };
 
 use crate::GenerateRandomTrace;
@@ -130,10 +130,17 @@ where
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, cols::NUM_ARB, cols::NUM_INT);
         let public = PublicColumnLayout::new(0, cols::NUM_ARB_PUB, cols::NUM_INT_PUB);
-        // No shifts: the ring equation is row-local (one signature per row). The
-        // per-signature norm zerocheck consumes the s_1/s_2 limb columns through
-        // a separate group (follow-up), not through this signature.
-        UairSignature::new(total, public, vec![], vec![], vec![])
+        // No shifts: the ring equation is row-local (one signature per row).
+        // The per-signature norm zerocheck consumes the s_1 then s_2 limb
+        // columns' coefficient-slices, plus the `slack` int column.
+        let mut coeff_slice_arb_cols: Vec<usize> = (cols::S1_BASE..cols::S1_BASE + L).collect();
+        coeff_slice_arb_cols.extend(cols::S2_BASE..cols::S2_BASE + L);
+        let norm_spec = NormSpec {
+            coeff_slice_arb_cols,
+            slack_int_col: cols::SLACK,
+            beta_sq: BETA_SQ_FALCON512 as i64,
+        };
+        UairSignature::new(total, public, vec![], vec![], vec![]).with_norm_spec(norm_spec)
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR>(
