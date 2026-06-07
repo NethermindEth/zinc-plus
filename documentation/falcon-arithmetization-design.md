@@ -377,10 +377,42 @@ degree.
   (`QUARTER_D=8`) arb IPRS code; an e2e round-trip test + a folded bench line.
 
 Expected: ~4× reduction of the arb PCS bytes (the 94% component) → roughly a 3–4×
-smaller Falcon proof. The `split_arb_columns` primitive and the `bin_eval_f`
-4-block template are the reusable halves; the remaining work is the new
-trait + `prove_folded_arb_4x` + the `arb_eval_f` swap + the Falcon type
-instance + test.
+smaller Falcon proof.
+
+### Built (committed, compiling)
+
+- **`ArbFoldedZincTypes4x<D, QUARTER_D, INT_LIMBS>`** trait (`6c03063`,
+  protocol/src/lib.rs): arb folded to `QUARTER_D` with native narrow coeff
+  `Int<INT_LIMBS>`; binary + int unfolded.
+- **`prove_folded_arb_4x`** (`6c03063`, prover.rs): splits arb 4× (two
+  `split_arb_columns` rounds), commits/opens arb at `r0_ext`, int at `r_0`,
+  binary skipped (asserted empty). Per-lane points → separate Zips (no
+  MultiZip). Lean Falcon shape: no booleanity/bit-op/shift machinery; CPR + norm
+  groups only ([cpr, norm], `norm_group_idx = 1`). Scalar bound relaxed
+  (`project_scalar` generic). Compiles.
+
+### Remaining (turnkey)
+
+1. **`verify_folded_arb_4x`** — mirror the lean prover. Steps 0–5 standard
+   (no booleanity, `num_bit_slices = 0`); step-5 `open_evals[i] = bar_u_i(α)`
+   for **all** lanes (no int 4-coeff special-case — int is unfolded). Step 7
+   PCS verify, **per-instance** (arb + int are separate commitments → no shared
+   Merkle):
+   - **arb** at `r0_ext` with the **4-block** `eval_f` — copy `bin_eval_f`
+     (verifier.rs:2410) verbatim, swap `BinaryZt::Chal`→`ArbitraryZt::Chal`,
+     range→`arb_range`, reading the full-`D` arb bar_u quarter-blocks.
+   - **int** at `r_0` with the **standard** `⟨a, coeffs⟩` `eval_f` (today's
+     `arb_eval_f`, verifier.rs:2503).
+   - Norm-slice bit-decomposition consistency as in the unfolded verifier.
+2. **Falcon `ArbFoldedZincTypes4x` instance** + a **quarter-degree
+   (`QUARTER_D=8`) arb IPRS ZipType** (`ArbitraryPolyZipTypesIprsQuarter`:
+   `Eval = Cw = DensePolynomial<i64, 8>`, mirror `ArbitraryPolyZipTypesIprs`).
+   `setup`: `pp_arb` for `4n` (split arb), `pp_int`/`pp_bin` for `n`.
+3. **e2e round-trip test** (`FalconBatchUair<i64>` via `prove_folded_arb_4x` /
+   `verify_folded_arb_4x`) + a folded bench line.
+
+The `split_arb_columns` primitive (tested) and `bin_eval_f` template are the
+reusable halves; (1) is a faithful copy of the lean prover with the eval_f swap.
 
 ## How to use this doc
 
