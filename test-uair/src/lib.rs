@@ -3,11 +3,13 @@ pub mod ecdsa;
 pub mod ecdsa_addition;
 pub mod ecdsa_affine;
 pub mod ecdsa_doubling;
+pub mod falcon;
 mod generate_trace;
 pub mod sha256;
 pub mod sha_ecdsa;
 
 pub use ecdsa::EcdsaUair;
+pub use falcon::{FalconBatchUair, falcon_norm_comb_fn};
 pub use ecdsa_addition::JacobianAdditionUair;
 pub use ecdsa_affine::AffineConversionUair;
 pub use ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing, JacobianDoublingUair};
