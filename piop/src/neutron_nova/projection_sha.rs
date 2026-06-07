@@ -247,6 +247,45 @@ impl ShaPublicCol {
     }
 }
 
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShaPublicWordCol {
+    PAIn = 0,
+    PEIn = 1,
+    PAOut = 2,
+    PEOut = 3,
+    Message = 4,
+}
+
+impl ShaPublicWordCol {
+    pub const ALL: [Self; 5] = [
+        Self::PAIn,
+        Self::PEIn,
+        Self::PAOut,
+        Self::PEOut,
+        Self::Message,
+    ];
+
+    pub const COUNT: usize = 5;
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+impl ShaPublicCol {
+    fn public_word_col(self) -> Option<ShaPublicWordCol> {
+        match self {
+            Self::PAIn => Some(ShaPublicWordCol::PAIn),
+            Self::PEIn => Some(ShaPublicWordCol::PEIn),
+            Self::PAOut => Some(ShaPublicWordCol::PAOut),
+            Self::PEOut => Some(ShaPublicWordCol::PEOut),
+            Self::Message => Some(ShaPublicWordCol::Message),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaBitSliceColumns<F> {
     /// Indexed as `[word_col][row][bit]`.
@@ -272,6 +311,12 @@ pub struct ShaPublicColumns<F> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaPublicWordColumns<F> {
+    /// Indexed as `[public_word_col][row][bit]`.
+    pub columns: Vec<Vec<Vec<F>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedShaTrace<F> {
     pub rows: usize,
     pub bit_slices: ShaBitSliceColumns<F>,
@@ -283,6 +328,7 @@ pub struct ProjectedShaTrace<F> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedShaPublic<F> {
     pub columns: ShaPublicColumns<F>,
+    pub word_columns: Option<ShaPublicWordColumns<F>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +337,88 @@ pub struct FreshShaIdealCache<F: PrimeField> {
     pub ideal_polys: Vec<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]>,
     pub taus_at_a: Vec<[F; NUM_NONZERO_SHA_FAMILIES]>,
     pub fresh_targets: Vec<F>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaLinearResidualCoeffCache<F: PrimeField> {
+    /// Logical layout is `[family][instance][degree_slot]`.
+    coeffs_by_instance: Vec<[DynamicPolynomialF<F>; NUM_SHA_RESIDUAL_FAMILIES]>,
+}
+
+impl<F> ShaLinearResidualCoeffCache<F>
+where
+    F: PrimeField,
+{
+    pub fn instance_count(&self) -> usize {
+        self.coeffs_by_instance.len()
+    }
+
+    pub fn coeffs_for_instance(
+        &self,
+        instance: usize,
+    ) -> Option<&[DynamicPolynomialF<F>; NUM_SHA_RESIDUAL_FAMILIES]> {
+        self.coeffs_by_instance.get(instance)
+    }
+
+    pub fn beta_aggregate_nonzero_ideal_polys(
+        &self,
+        beta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError> {
+        let weights = build_eq_x_r_vec(beta, field_cfg)?;
+        if weights.len() != self.coeffs_by_instance.len() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: weights.len(),
+                expected: self.coeffs_by_instance.len(),
+            });
+        }
+
+        let mut aggregate: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES] =
+            std::array::from_fn(|_| DynamicPolynomialF::ZERO);
+        for (weight, instance) in weights.iter().zip(&self.coeffs_by_instance) {
+            for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
+                let weighted = scale_poly(&instance[family.index()], weight);
+                aggregate[slot] += &weighted;
+            }
+        }
+        aggregate.iter_mut().for_each(DynamicPolynomialF::trim);
+        Ok(aggregate)
+    }
+}
+
+impl<F> ShaLinearResidualCoeffCache<F>
+where
+    F: DelayedFieldProductSum,
+{
+    pub fn linear_values_at_a_lambda(
+        &self,
+        a: &F,
+        lambda: &F,
+        field_cfg: &F::Config,
+    ) -> Result<Vec<F>, ShaProjectionError> {
+        let lambda_powers = powers(
+            lambda.clone(),
+            F::one_with_cfg(field_cfg),
+            NUM_SHA_RESIDUAL_FAMILIES,
+        );
+        let a_powers = powers(
+            a.clone(),
+            F::one_with_cfg(field_cfg),
+            SHA_RESIDUAL_EVAL_POWER_COUNT,
+        );
+
+        self.coeffs_by_instance
+            .iter()
+            .map(|instance| {
+                let mut target = F::zero_with_cfg(field_cfg);
+                for (family_idx, residual) in instance.iter().enumerate() {
+                    target += lambda_powers[family_idx].clone()
+                        * evaluate_poly_at_powers_dmr(residual, &a_powers, field_cfg)?;
+                }
+                Ok(target)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +537,8 @@ pub enum ShaProjectionError {
     InstanceCountNotPowerOfTwo { got: usize },
     #[error("instance count mismatch: got {got}, expected {expected}")]
     InstanceCountMismatch { got: usize, expected: usize },
+    #[error("public word column presence mismatch across folded instances")]
+    PublicWordColumnPresenceMismatch,
     #[error("folding weight count mismatch: got {got}, expected {expected}")]
     FoldingWeightCount { got: usize, expected: usize },
     #[error("SumFold denominator eq(beta, r_b) is zero")]
@@ -575,6 +705,44 @@ where
     })
 }
 
+pub fn build_sha_linear_residual_coeff_cache<F>(
+    traces: &[ProjectedShaTrace<F>],
+    publics: &[ProjectedShaPublic<F>],
+    r_ic: &[F; SHA_ROW_VARS],
+    field_cfg: &F::Config,
+) -> Result<ShaLinearResidualCoeffCache<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+    let coeffs_by_instance = traces
+        .iter()
+        .zip(publics)
+        .map(|(trace, public)| {
+            validate_trace(trace)?;
+            validate_public(public)?;
+            let mut coeffs: [DynamicPolynomialF<F>; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|_| DynamicPolynomialF::ZERO);
+            for (row, row_weight) in row_weights.iter().enumerate().take(SHA_ROW_COUNT) {
+                let residuals = residual_polys_at_row(trace, public, row, field_cfg)?;
+                for (family_idx, residual) in residuals.iter().enumerate() {
+                    let weighted = scale_poly(residual, row_weight);
+                    coeffs[family_idx] += &weighted;
+                }
+            }
+            coeffs.iter_mut().for_each(DynamicPolynomialF::trim);
+            Ok::<[DynamicPolynomialF<F>; NUM_SHA_RESIDUAL_FAMILIES], ShaProjectionError>(coeffs)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ShaLinearResidualCoeffCache { coeffs_by_instance })
+}
+
 pub fn check_fresh_sha_ideal_cache<F>(
     cache: &FreshShaIdealCache<F>,
     field_cfg: &F::Config,
@@ -737,6 +905,12 @@ where
                 field_cfg,
             )?,
         },
+        word_columns: fold_optional_3d(
+            publics.iter().map(|public| public.word_columns.as_ref()),
+            &sumfold.theta,
+            field_cfg,
+        )?
+        .map(|columns| ShaPublicWordColumns { columns }),
     };
 
     Ok((
@@ -1391,6 +1565,38 @@ where
         prefix_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<Self, ShaProjectionError> {
+        let coeff_cache = build_sha_linear_residual_coeff_cache(&traces, publics, r_ic, field_cfg)?;
+        Self::new_owned_with_linear_cache(
+            traces,
+            publics,
+            beta,
+            r_ic,
+            a,
+            lambda,
+            rho,
+            xi,
+            booleanity_sources,
+            prefix_vars,
+            &coeff_cache,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_owned_with_linear_cache(
+        traces: Box<[ProjectedShaTrace<F>]>,
+        publics: &[ProjectedShaPublic<F>],
+        beta: &[F],
+        r_ic: &[F; SHA_ROW_VARS],
+        a: &F,
+        lambda: &F,
+        rho: &F,
+        xi: &F,
+        booleanity_sources: &[ShaBooleanitySource],
+        prefix_vars: usize,
+        coeff_cache: &ShaLinearResidualCoeffCache<F>,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
         let ell = validate_sha_sumfold_inputs(&traces, publics, beta)?;
         if prefix_vars == 0 || prefix_vars > ell {
             return Err(SumFoldError::Ell0TooLarge {
@@ -1399,40 +1605,23 @@ where
             }
             .into());
         }
+        if coeff_cache.instance_count() != traces.len() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: coeff_cache.instance_count(),
+                expected: traces.len(),
+            });
+        }
 
         let tail_vars = ell - prefix_vars;
         let tail_len = binary_len(tail_vars);
         let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
-        let lambda_powers = powers(
-            lambda.clone(),
-            F::one_with_cfg(field_cfg),
-            NUM_SHA_RESIDUAL_FAMILIES,
-        );
-        let a_powers = powers(
-            a.clone(),
-            F::one_with_cfg(field_cfg),
-            SHA_RESIDUAL_EVAL_POWER_COUNT,
-        );
         let rho_powers = powers(
             rho.clone(),
             F::one_with_cfg(field_cfg),
             booleanity_sources.len(),
         );
 
-        let linear_values = traces
-            .iter()
-            .zip(publics.iter())
-            .map(|(trace, public)| {
-                sha_linear_residual_sum_with_weights(
-                    trace,
-                    public,
-                    &row_weights,
-                    &a_powers,
-                    &lambda_powers,
-                    field_cfg,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let linear_values = coeff_cache.linear_values_at_a_lambda(a, lambda, field_cfg)?;
         let linear = BinaryPrefixTailTable::new(linear_values, prefix_vars, tail_len);
         let booleanity = TernaryPrefixTailTable::new(
             build_sha_booleanity_prefix_tail_table(
@@ -1806,6 +1995,156 @@ where
             field_cfg,
         ),
         Box::new(fast_path?),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_production_sha_sumfold_group_with_linear_cache<F>(
+    traces: &[ProjectedShaTrace<F>],
+    publics: &[ProjectedShaPublic<F>],
+    linear_cache: &ShaLinearResidualCoeffCache<F>,
+    beta: &[F],
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    rho: &F,
+    xi: &F,
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
+    if linear_cache.instance_count() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_cache.instance_count(),
+            expected: traces.len(),
+        });
+    }
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        return build_dense_sha_sumfold_group_with_linear_cache(
+            traces,
+            linear_cache,
+            beta,
+            r_ic,
+            a,
+            lambda,
+            rho,
+            xi,
+            booleanity_sources,
+            field_cfg,
+        );
+    }
+
+    let fast_path = ShaSumFoldPrefixFastPath::new_owned_with_linear_cache(
+        traces.to_vec().into_boxed_slice(),
+        publics,
+        beta,
+        r_ic,
+        a,
+        lambda,
+        rho,
+        xi,
+        booleanity_sources,
+        prefix_vars,
+        linear_cache,
+        field_cfg,
+    );
+
+    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+        3,
+        Vec::new(),
+        sha_sumfold_comb_fn(
+            build_eq_x_r_vec(r_ic, field_cfg)?,
+            powers(
+                rho.clone(),
+                F::one_with_cfg(field_cfg),
+                booleanity_sources.len(),
+            ),
+            xi.clone(),
+            field_cfg,
+        ),
+        Box::new(fast_path?),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dense_sha_sumfold_group_with_linear_cache<F>(
+    traces: &[ProjectedShaTrace<F>],
+    linear_cache: &ShaLinearResidualCoeffCache<F>,
+    beta: &[F],
+    r_ic: &[F; SHA_ROW_VARS],
+    a: &F,
+    lambda: &F,
+    rho: &F,
+    xi: &F,
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    let ell = beta.len();
+    let zero = F::zero_with_cfg(field_cfg);
+    let zero_inner = zero.inner().clone();
+    let mut mles = Vec::with_capacity(2 + booleanity_sources.len() * SHA_ROW_COUNT);
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+    let eq_beta = build_eq_x_r_vec(beta, field_cfg)?;
+
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        ell,
+        eq_beta.iter().map(|value| value.inner().clone()).collect(),
+        zero_inner.clone(),
+    ));
+
+    let linear_values = linear_cache.linear_values_at_a_lambda(a, lambda, field_cfg)?;
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        ell,
+        linear_values
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner.clone(),
+    ));
+
+    for source in booleanity_sources {
+        for row in 0..SHA_ROW_COUNT {
+            let values = traces
+                .iter()
+                .map(|trace| booleanity_source_value_at_row(trace, row, source, field_cfg))
+                .collect::<Result<Vec<_>, _>>()?;
+            mles.push(DenseMultilinearExtension::from_evaluations_vec(
+                ell,
+                values.iter().map(|value| value.inner().clone()).collect(),
+                zero_inner.clone(),
+            ));
+        }
+    }
+
+    Ok(MultiDegreeSumcheckGroup::new(
+        3,
+        mles,
+        sha_sumfold_comb_fn(
+            row_weights,
+            powers(
+                rho.clone(),
+                F::one_with_cfg(field_cfg),
+                booleanity_sources.len(),
+            ),
+            xi.clone(),
+            field_cfg,
+        ),
     ))
 }
 
@@ -2539,7 +2878,7 @@ where
         - &word_poly_shifted(trace, ShaWordCol::Uef, row, 3, field_cfg)?
         - &word_poly_shifted(trace, ShaWordCol::UNegEg, row, 3, field_cfg)?
         - &public_const_poly(public, ShaPublicCol::K, row + 3, field_cfg)?
-        - &word_poly_shifted(trace, ShaWordCol::W, row, 3, field_cfg)?
+        - &w
         - &word_poly_shifted(trace, ShaWordCol::Sigma0, row, 3, field_cfg)?
         - &word_poly_shifted(trace, ShaWordCol::Maj, row, 3, field_cfg)?
         + &mu_a
@@ -2552,7 +2891,7 @@ where
         - &word_poly_shifted(trace, ShaWordCol::Uef, row, 3, field_cfg)?
         - &word_poly_shifted(trace, ShaWordCol::UNegEg, row, 3, field_cfg)?
         - &public_const_poly(public, ShaPublicCol::K, row + 3, field_cfg)?
-        - &word_poly_shifted(trace, ShaWordCol::W, row, 3, field_cfg)?
+        - &w
         + &mu_e
         + &int_const_poly(trace, ShaIntCol::CompUpdateE, row, field_cfg)?;
 
@@ -2564,17 +2903,17 @@ where
     let s_out = public_scalar(public, ShaPublicCol::SOut, row, field_cfg)?;
 
     let r7 = scale_poly(
-        &(a.clone() - &public_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?),
+        &(a.clone() - &public_word_or_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?),
         &s_init,
     ) + &scale_poly(
-        &(a.clone() - &public_const_poly(public, ShaPublicCol::PAOut, row, field_cfg)?),
+        &(a.clone() - &public_word_or_const_poly(public, ShaPublicCol::PAOut, row, field_cfg)?),
         &s_out,
     );
     let r8 = scale_poly(
-        &(e.clone() - &public_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?),
+        &(e.clone() - &public_word_or_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?),
         &s_init,
     ) + &scale_poly(
-        &(e.clone() - &public_const_poly(public, ShaPublicCol::PEOut, row, field_cfg)?),
+        &(e.clone() - &public_word_or_const_poly(public, ShaPublicCol::PEOut, row, field_cfg)?),
         &s_out,
     );
 
@@ -2589,7 +2928,7 @@ where
         + &mu_ff_e
         + &int_const_poly(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
     let r11 = scale_poly(
-        &(w - &public_const_poly(public, ShaPublicCol::Message, row, field_cfg)?),
+        &(w - &public_word_or_const_poly(public, ShaPublicCol::Message, row, field_cfg)?),
         &s_msg,
     );
 
@@ -2656,7 +2995,43 @@ fn validate_trace<F>(trace: &ProjectedShaTrace<F>) -> Result<(), ShaProjectionEr
 }
 
 fn validate_public<F>(public: &ProjectedShaPublic<F>) -> Result<(), ShaProjectionError> {
-    validate_matrix("public.columns", &public.columns.columns, SHA_ROW_COUNT)
+    validate_matrix("public.columns", &public.columns.columns, SHA_ROW_COUNT)?;
+    if let Some(word_columns) = &public.word_columns {
+        validate_public_word_columns(word_columns)?;
+    }
+    Ok(())
+}
+
+fn validate_public_word_columns<F>(
+    word_columns: &ShaPublicWordColumns<F>,
+) -> Result<(), ShaProjectionError> {
+    if word_columns.columns.len() != ShaPublicWordCol::COUNT {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "public.word_columns",
+            col: ShaPublicWordCol::COUNT,
+        });
+    }
+    for (col, rows) in word_columns.columns.iter().enumerate() {
+        if rows.len() != SHA_ROW_COUNT {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "public.word_columns",
+                col,
+                got: rows.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        for (row, bits) in rows.iter().enumerate() {
+            if bits.len() != SHA_WORD_BITS {
+                return Err(ShaProjectionError::BitCount {
+                    col,
+                    row,
+                    got: bits.len(),
+                    expected: SHA_WORD_BITS,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_matrix<F>(
@@ -2834,6 +3209,49 @@ where
         public_scalar(public, col, row, field_cfg)?,
         field_cfg,
     ))
+}
+
+fn public_word_or_const_poly<F>(
+    public: &ProjectedShaPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let Some(word_col) = col.public_word_col() else {
+        return public_const_poly(public, col, row, field_cfg);
+    };
+    let Some(word_columns) = &public.word_columns else {
+        return public_const_poly(public, col, row, field_cfg);
+    };
+    if row >= SHA_ROW_COUNT {
+        return Ok(DynamicPolynomialF::ZERO);
+    }
+    let col_idx = word_col.index();
+    let rows = word_columns
+        .columns
+        .get(col_idx)
+        .ok_or(ShaProjectionError::MissingColumn {
+            kind: "public.word_columns",
+            col: col_idx,
+        })?;
+    let bits = rows.get(row).ok_or(ShaProjectionError::ColumnRowCount {
+        kind: "public.word_columns",
+        col: col_idx,
+        got: rows.len(),
+        expected: SHA_ROW_COUNT,
+    })?;
+    if bits.len() != SHA_WORD_BITS {
+        return Err(ShaProjectionError::BitCount {
+            col: col_idx,
+            row,
+            got: bits.len(),
+            expected: SHA_WORD_BITS,
+        });
+    }
+    Ok(DynamicPolynomialF::new_trimmed(bits.clone()))
 }
 
 fn int_scalar<F>(
@@ -3246,6 +3664,29 @@ where
     Ok(out)
 }
 
+fn fold_optional_3d<'a, F, I>(
+    tensors: I,
+    theta: &[F],
+    field_cfg: &F::Config,
+) -> Result<Option<Vec<Vec<Vec<F>>>>, ShaProjectionError>
+where
+    F: PrimeField + 'a,
+    I: IntoIterator<Item = Option<&'a ShaPublicWordColumns<F>>>,
+{
+    let tensors = tensors.into_iter().collect::<Vec<_>>();
+    if tensors.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut present = Vec::with_capacity(tensors.len());
+    for tensor in tensors {
+        let Some(tensor) = tensor else {
+            return Err(ShaProjectionError::PublicWordColumnPresenceMismatch);
+        };
+        present.push(&tensor.columns);
+    }
+    fold_3d(present, theta, field_cfg).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3286,6 +3727,7 @@ mod tests {
             columns: ShaPublicColumns {
                 columns: vec![vec![F::zero_with_cfg(&cfg); SHA_ROW_COUNT]; ShaPublicCol::COUNT],
             },
+            word_columns: None,
         }
     }
 
