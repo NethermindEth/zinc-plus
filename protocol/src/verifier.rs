@@ -37,7 +37,8 @@ use zinc_utils::{
     add, cfg_join,
     delayed_reduction::{DelayedFieldProductSum, MontgomeryLimbs},
     from_ref::FromRef,
-    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
+    inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
@@ -48,7 +49,10 @@ use zip_plus::{
     pcs_transcript::PcsVerifierTranscript,
 };
 
-use crate::pcs::{AllZipPCSTypes, PCSCommitments, PCSVerifierParams, ZincPCSTypes};
+use crate::{
+    multipoint_reduction::verify_multipoint_reduction,
+    pcs::{AllZipPCSTypes, PCSCommitments, PCSVerifierParams, ZincPCSTypes},
+};
 
 /// Drop the witness binary_poly column evals the UAIR opted out of
 /// (sorted, dedup'd `skip_indices` relative to the witness slice). The
@@ -840,7 +844,7 @@ where
         let mut up_evals_with_bit_op = self.cpr_subclaim.up_evals.clone();
         up_evals_with_bit_op.extend(self.cpr_subclaim.bit_op_down_evals.iter().cloned());
 
-        let mp_subclaim = MultipointEval::verify_as_subprotocol(
+        let mp_subclaim = verify_multipoint_reduction(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_multipoint_eval,
             &cpr_eval_point,
@@ -1486,7 +1490,7 @@ where
     let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
     let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
     up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
-    let mp_subclaim = MultipointEval::verify_as_subprotocol(
+    let mp_subclaim = verify_multipoint_reduction(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
         &cpr_eval_point,
@@ -2219,7 +2223,7 @@ where
     let cpr_eval_point = cpr_subclaim.evaluation_point.clone();
     let mut up_evals_with_bit_op = cpr_subclaim.up_evals.clone();
     up_evals_with_bit_op.extend(cpr_subclaim.bit_op_down_evals.iter().cloned());
-    let mp_subclaim = MultipointEval::verify_as_subprotocol(
+    let mp_subclaim = verify_multipoint_reduction(
         &mut pcs_transcript.fs_transcript,
         proof.multipoint_eval,
         &cpr_eval_point,

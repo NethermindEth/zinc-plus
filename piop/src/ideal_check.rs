@@ -3,14 +3,13 @@ mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
 
-pub(crate) use batched_ideal_check::batched_ideal_check;
+pub use batched_ideal_check::{BatchedIdealCheckError, batched_ideal_check};
 pub use structs::*;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, RowMajorTrace, ScalarMap};
-use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use num_traits::ConstZero;
 use thiserror::Error;

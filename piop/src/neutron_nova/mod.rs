@@ -38,8 +38,9 @@ pub use projection_sha::{
     production_sha_nonzero_families, production_sha_nonzero_ideals,
     reconstruct_virtual_ch_maj_at_row, scalarize_trace_words, sha_int_at_point,
     sha_linear_residual_row_value, sha_linear_residual_sum, sha_public_at_point,
-    sha_scalarized_word_at_point, sha_word_bits_at_point, verify_folded_row_sumcheck_claim,
-    verify_folded_scalarization_links, verify_folded_scalarization_links_at_point,
-    verify_folded_shifted_scalarization_link_at_point,
+    sha_scalarized_word_at_point, sha_word_bits_at_point, validate_fresh_sha_ideal_polys_canonical,
+    verify_folded_row_sumcheck_claim, verify_folded_scalarization_links,
+    verify_folded_scalarization_links_at_point, verify_folded_shifted_scalarization_link_at_point,
+    verify_fresh_sha_ideal_polys,
 };
 pub use sumfold::{LinearInstanceClaims, LinearPrefixTable, SumFoldError};

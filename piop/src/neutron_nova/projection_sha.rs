@@ -412,6 +412,8 @@ pub enum ShaProjectionError {
     FoldedRowClaimMismatch,
     #[error("booleanity bit index out of range: {bit}")]
     BitIndexOutOfRange { bit: usize },
+    #[error("non-canonical proof object: {0}")]
+    NonCanonicalProofObject(&'static str),
     #[error("ideal membership check failed")]
     IdealMembership,
     #[error("polynomial evaluation failed: {0}")]
@@ -439,6 +441,62 @@ pub fn production_sha_nonzero_ideals<F: PrimeField>(
         ShaProductionIdeal::RotX2(RotationIdeal::new(two.clone())),
         ShaProductionIdeal::RotX2(RotationIdeal::new(two)),
     ]
+}
+
+fn production_sha_ideal_max_degree(family: ShaResidualFamily) -> Result<usize, ShaProjectionError> {
+    match family {
+        ShaResidualFamily::R0BigSigmaA | ShaResidualFamily::R1BigSigmaE => Ok(61),
+        ShaResidualFamily::R4Schedule
+        | ShaResidualFamily::R5UpdateA
+        | ShaResidualFamily::R6UpdateE
+        | ShaResidualFamily::R9FeedForwardA
+        | ShaResidualFamily::R10FeedForwardE => Ok(31),
+        _ => Err(ShaProjectionError::NonCanonicalProofObject(
+            "unexpected nonzero SHA ideal family",
+        )),
+    }
+}
+
+pub fn validate_fresh_sha_ideal_polys_canonical<F>(
+    ideal_polys: &[[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]],
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    for instance in ideal_polys {
+        for (slot, poly) in instance.iter().enumerate() {
+            if poly.coeffs.last().is_some_and(F::is_zero) {
+                return Err(ShaProjectionError::NonCanonicalProofObject(
+                    "fresh ideal polynomial has trailing zero coefficients",
+                ));
+            }
+
+            let family = production_sha_nonzero_families()[slot];
+            let max_degree = production_sha_ideal_max_degree(family)?;
+            if poly.coeffs.len() > max_degree + 1 {
+                return Err(ShaProjectionError::NonCanonicalProofObject(
+                    "fresh ideal polynomial exceeds production degree cap",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn verify_fresh_sha_ideal_polys<F>(
+    ideal_polys: &[[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]],
+    field_cfg: &F::Config,
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    validate_fresh_sha_ideal_polys_canonical(ideal_polys)?;
+
+    let ideals = production_sha_nonzero_ideals(field_cfg);
+    for values in ideal_polys {
+        batched_ideal_check(&ideals, values).map_err(|_err| ShaProjectionError::IdealMembership)?;
+    }
+    Ok(())
 }
 
 pub fn build_sha_ideal_values_at_point<F>(
@@ -515,10 +573,7 @@ pub fn check_fresh_sha_ideal_cache<F>(
 where
     F: PrimeField,
 {
-    for values in &cache.ideal_polys {
-        check_sha_ideal_values(values, field_cfg)?;
-    }
-    Ok(())
+    verify_fresh_sha_ideal_polys(&cache.ideal_polys, field_cfg)
 }
 
 pub fn evaluate_fresh_sha_targets<F>(
@@ -2105,6 +2160,36 @@ mod tests {
         assert!(matches!(
             check_sha_ideal_values(&values, &cfg),
             Err(ShaProjectionError::IdealMembership)
+        ));
+    }
+
+    #[test]
+    fn fresh_sha_ideal_polys_are_verified_by_reusable_helper() {
+        let cfg = test_config();
+        let valid_zero = vec![std::array::from_fn(|_| {
+            DynamicPolynomialF::new(Vec::<F>::new())
+        })];
+        verify_fresh_sha_ideal_polys(&valid_zero, &cfg).expect("zero ideal set passes");
+
+        let mut tampered_x_minus_two = valid_zero.clone();
+        tampered_x_minus_two[0][2] = DynamicPolynomialF::new_trimmed([f(1)]);
+        assert!(matches!(
+            verify_fresh_sha_ideal_polys(&tampered_x_minus_two, &cfg),
+            Err(ShaProjectionError::IdealMembership)
+        ));
+
+        let mut trailing_zero = valid_zero.clone();
+        trailing_zero[0][0] = DynamicPolynomialF::new(vec![f(1), F::zero_with_cfg(&cfg)]);
+        assert!(matches!(
+            verify_fresh_sha_ideal_polys(&trailing_zero, &cfg),
+            Err(ShaProjectionError::NonCanonicalProofObject(_))
+        ));
+
+        let mut high_degree = valid_zero;
+        high_degree[0][2] = DynamicPolynomialF::new(vec![f(1); 33]);
+        assert!(matches!(
+            verify_fresh_sha_ideal_polys(&high_degree, &cfg),
+            Err(ShaProjectionError::NonCanonicalProofObject(_))
         ));
     }
 

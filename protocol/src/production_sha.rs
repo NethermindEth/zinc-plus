@@ -8,6 +8,7 @@ use std::io::Cursor;
 
 use crate::{
     ZincTypes,
+    multipoint_reduction::{prove_multipoint_reduction, verify_multipoint_reduction},
     pcs::{
         AllHyraxPCSTypes, PCSCommitments, PCSParams, PCSProverData, PCSVerifierParams,
         ProductionShaPCS, ZincPCSTypes,
@@ -30,9 +31,9 @@ use zinc_piop::{
         build_dense_sha_sumfold_group, build_expression_folded_row_sumcheck_group,
         build_folded_row_sumcheck_group, build_fresh_sha_ideal_cache, evaluate_fresh_sha_targets,
         finalize_sha_sumfold, fold_projected_sha_traces, folded_row_integrand_sum,
-        production_sha_booleanity_sources, production_sha_nonzero_families,
-        production_sha_nonzero_ideals, sha_int_at_point, sha_public_at_point,
-        sha_scalarized_word_at_point, sha_word_bits_at_point, verify_folded_row_sumcheck_claim,
+        production_sha_booleanity_sources, production_sha_nonzero_families, sha_int_at_point,
+        sha_public_at_point, sha_scalarized_word_at_point, sha_word_bits_at_point,
+        verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
     },
     sumcheck::{
         SumCheckError,
@@ -50,7 +51,6 @@ use zinc_poly::{
 use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_uair::ShiftSpec;
-use zinc_uair::ideal::IdealCheck;
 use zinc_utils::{
     delayed_reduction::DelayedFieldProductSum, inner_transparent_field::InnerTransparentField,
 };
@@ -481,18 +481,7 @@ pub fn check_fresh_sha_ideal_membership<F>(
 where
     F: PrimeField,
 {
-    validate_fresh_sha_ideal_polys_canonical(ideal_polys)?;
-    let ideals = production_sha_nonzero_ideals(field_cfg);
-    for values in ideal_polys {
-        for (ideal, value) in ideals.iter().zip(values.iter()) {
-            if !ideal
-                .contains(value)
-                .map_err(|_| ProductionShaError::IdealMembership)?
-            {
-                return Err(ProductionShaError::IdealMembership);
-            }
-        }
-    }
+    verify_fresh_sha_ideal_polys(ideal_polys, field_cfg)?;
     Ok(())
 }
 
@@ -668,43 +657,6 @@ where
         }
         Ok(())
     }
-}
-
-fn validate_fresh_sha_ideal_polys_canonical<F>(
-    ideal_polys: &[[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]],
-) -> Result<(), ProductionShaError<F>>
-where
-    F: PrimeField,
-{
-    for instance in ideal_polys {
-        for (slot, poly) in instance.iter().enumerate() {
-            if poly.coeffs.last().is_some_and(F::is_zero) {
-                return Err(ProductionShaError::NonCanonicalProofObject(
-                    "fresh ideal polynomial has trailing zero coefficients",
-                ));
-            }
-            let family = production_sha_nonzero_families()[slot];
-            let max_degree = match family {
-                ShaResidualFamily::R0BigSigmaA | ShaResidualFamily::R1BigSigmaE => 61,
-                ShaResidualFamily::R4Schedule
-                | ShaResidualFamily::R5UpdateA
-                | ShaResidualFamily::R6UpdateE
-                | ShaResidualFamily::R9FeedForwardA
-                | ShaResidualFamily::R10FeedForwardE => 31,
-                _ => {
-                    return Err(ProductionShaError::NonCanonicalProofObject(
-                        "unexpected nonzero SHA ideal family",
-                    ));
-                }
-            };
-            if poly.coeffs.len() > max_degree + 1 {
-                return Err(ProductionShaError::NonCanonicalProofObject(
-                    "fresh ideal polynomial exceeds production degree cap",
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn ensure_production_sha_word_degree<F, const D: usize>() -> Result<(), ProductionShaError<F>>
@@ -2180,7 +2132,7 @@ where
         &layout,
         field_cfg,
     )?;
-    let (proof, state) = MultipointEval::prove_as_subprotocol(
+    prove_multipoint_reduction(
         transcript,
         &trace_mles,
         r_star,
@@ -2188,8 +2140,8 @@ where
         &down_evals,
         &shift_specs,
         field_cfg,
-    )?;
-    Ok((proof, state.eval_point))
+    )
+    .map_err(ProductionShaError::from)
 }
 
 pub fn verify_sha_endpoint_multipoint<F>(
@@ -2221,7 +2173,7 @@ where
         &layout,
         field_cfg,
     )?;
-    let subclaim = MultipointEval::verify_as_subprotocol(
+    let subclaim = verify_multipoint_reduction(
         transcript,
         proof.clone(),
         r_star,
@@ -3629,7 +3581,9 @@ mod tests {
         ideals[0][0] = DynamicPolynomialF::new(vec![f(1), F::zero_with_cfg(&field_cfg)]);
         assert!(matches!(
             check_fresh_sha_ideal_membership(&ideals, &field_cfg),
-            Err(ProductionShaError::NonCanonicalProofObject(_))
+            Err(ProductionShaError::ShaProjection(
+                ShaProjectionError::NonCanonicalProofObject(_)
+            ))
         ));
 
         let mut high_degree = vec![std::array::from_fn(|_| {
@@ -3638,7 +3592,9 @@ mod tests {
         high_degree[0][2] = DynamicPolynomialF::new(vec![f(1); 33]);
         assert!(matches!(
             check_fresh_sha_ideal_membership(&high_degree, &field_cfg),
-            Err(ProductionShaError::NonCanonicalProofObject(_))
+            Err(ProductionShaError::ShaProjection(
+                ShaProjectionError::NonCanonicalProofObject(_)
+            ))
         ));
     }
 

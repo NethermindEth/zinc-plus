@@ -18,6 +18,7 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod fixed_prime;
+mod multipoint_reduction;
 pub mod pcs;
 pub mod production_sha;
 pub mod prover;

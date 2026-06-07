@@ -13,7 +13,7 @@ use zinc_piop::{
         compute_shifted_bit_slice_evals_streaming, finalize_booleanity_prover,
         prepare_booleanity_group,
     },
-    multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
+    multipoint_eval::Proof as MultipointEvalProof,
     projections::{
         ColumnMajorTrace, ProjectedTrace, RowMajorTrace, ScalarMap,
         evaluate_trace_to_column_mles_fast, project_scalars, project_scalars_to_field,
@@ -48,7 +48,10 @@ use zip_plus::{
     pcs_transcript::PcsProverTranscript,
 };
 
-use crate::pcs::{AllZipPCSTypes, PCSCommitments, PCSParams, PCSProverData, ZincPCSTypes};
+use crate::{
+    multipoint_reduction::prove_multipoint_reduction,
+    pcs::{AllZipPCSTypes, PCSCommitments, PCSParams, PCSProverData, ZincPCSTypes},
+};
 
 /// Drop the witness binary_poly columns the UAIR opted out of (sorted,
 /// dedup'd `skip_indices` relative to `witness_cols`) and return the
@@ -994,7 +997,7 @@ impl_with_type_bounds!(ProverSumchecked
         let mut up_evals = self.cpr_proof.up_evals.clone();
         up_evals.extend(self.cpr_proof.bit_op_down_evals.iter().cloned());
 
-        let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+        let (mp_proof, r_0) = prove_multipoint_reduction(
             &mut self.base.pcs_transcript.fs_transcript,
             &sources,
             &self.cpr_eval_point,
@@ -1013,7 +1016,7 @@ impl_with_type_bounds!(ProverSumchecked
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
             mp_proof,
-            r_0: mp_prover_state.eval_point,
+            r_0,
         })
     }
 });
@@ -1658,7 +1661,7 @@ where
     sources.extend(bit_op_mles);
     let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
     up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
-    let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+    let (mp_proof, r_0) = prove_multipoint_reduction(
         &mut pcs_transcript.fs_transcript,
         &sources,
         &cpr_eval_point,
@@ -1667,7 +1670,6 @@ where
         uair_signature.shifts(),
         &field_cfg,
     )?;
-    let r_0 = mp_prover_state.eval_point;
 
     // ── Step 6: Lift-and-project + sample γ for folding ─────────────────
     let lifted_evals =
@@ -2441,7 +2443,7 @@ where
     sources.extend(bit_op_mles);
     let mut up_evals_with_bit_op = cpr_proof.up_evals.clone();
     up_evals_with_bit_op.extend(cpr_proof.bit_op_down_evals.iter().cloned());
-    let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+    let (mp_proof, r_0) = prove_multipoint_reduction(
         &mut pcs_transcript.fs_transcript,
         &sources,
         &cpr_eval_point,
@@ -2450,7 +2452,6 @@ where
         uair_signature.shifts(),
         &field_cfg,
     )?;
-    let r_0 = mp_prover_state.eval_point;
     if let Some(t) = timings.as_mut() {
         t.step5_multipoint_eval = _t_step5.elapsed();
     }

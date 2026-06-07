@@ -75,14 +75,13 @@ use zinc_uair::{
     ideal::rotation::RotationIdeal,
 };
 
+#[cfg(test)]
+use crate::ecdsa::FINAL_ROW as ECDSA_FINAL_ROW;
 use crate::{
-    GenerateRandomTrace,
-    ecdsa,
+    GenerateRandomTrace, ecdsa,
     ecdsa_doubling::{EC_FP_INT_LIMBS, EcdsaFpRing},
     sha256::{self, Sha256CompressionSliceUair, Sha256Ideal},
 };
-#[cfg(test)]
-use crate::ecdsa::FINAL_ROW as ECDSA_FINAL_ROW;
 
 use crypto_primitives::crypto_bigint_int::Int;
 
