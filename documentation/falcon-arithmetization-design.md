@@ -281,8 +281,10 @@ Silicon, `--features parallel,simd,unchecked`, `sample_size(10)`:
 |---|---|---|---|
 | `2^4` = 16 sigs | 107.2 ms | **45.8 ms** | **2.34×** |
 | `2^6` = 64 sigs | 384.4 ms | **69.7 ms** | **5.51×** |
+| `2^10` = 1024 sigs (headline) | 7.38 s | **1.31 s** | **5.65×** |
 
-The win **grows with batch size** because the Combined lane builds the full
+At the headline `2^10` batch the proof is 6.35 MB raw / 3.04 MB zstd-3. The win
+**grows with batch size** (plateauing ≈ 5.6×) because the Combined lane builds the full
 row-by-row combined polynomial for the degree-2 product (over `~2n`-coefficient
 `F[X]` values) in the ideal check, whereas MLE-first evaluates the *linear* ring
 equation via cheap column-MLE evaluations and forces the product slot to `ZERO`

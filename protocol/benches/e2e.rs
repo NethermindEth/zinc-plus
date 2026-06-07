@@ -2282,12 +2282,14 @@ fn print_peak_rss(label: &str) {
 fn falcon_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("Zinc+ Falcon");
 
-    // 2^k batched Falcon-512 signature verifications. The per-row combined
-    // polynomial is degree ~2N (limb reconstruction), so prove cost is heavier
-    // than the linear UAIRs — small sizes by default. Larger batches (up to the
-    // headline 2^10) are valid but slow on the current reconstruction path.
+    // 2^k batched Falcon-512 signature verifications. The product-witness split
+    // makes the ring equation linear, so the MLE-first lane avoids the heavy
+    // degree-~2N combined-polynomial construction — large batches (up to the
+    // headline 2^10 = 1024 signatures) are tractable. `nvars=10` is slow under
+    // the Combined lane but fast under MLE-first; see the two `Prove` lines.
     bench_falcon_e2e(&mut group, 4);
     bench_falcon_e2e(&mut group, 6);
+    bench_falcon_e2e(&mut group, 10);
 
     group.finish();
 }
