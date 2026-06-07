@@ -41,10 +41,12 @@ use zinc_piop::{
     },
 };
 use zinc_poly::{
-    EvaluatablePolynomial, EvaluationError,
+    EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
-        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+        binary::BinaryPoly,
+        dense::DensePolynomial,
+        dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
     },
     utils::{ArithErrors, build_eq_x_r_vec, eq_eval},
 };
@@ -52,7 +54,8 @@ use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_uair::ShiftSpec;
 use zinc_utils::{
-    delayed_reduction::DelayedFieldProductSum, inner_transparent_field::InnerTransparentField,
+    UNCHECKED, delayed_reduction::DelayedFieldProductSum, inner_product::InnerProduct,
+    inner_transparent_field::InnerTransparentField,
 };
 use zip_plus::{
     ZipError,
@@ -172,6 +175,7 @@ const SHA256_ROUND_CONSTANTS: [u32; 64] = [
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
+const SHA_IDEAL_EVAL_POWER_COUNT: usize = 62;
 
 const PRODUCTION_SHA_FRESH_BATCH_DOMAIN: &[u8] = b"PF_CONCISE_SHA256_FRESH_BATCH_V1";
 
@@ -444,7 +448,7 @@ pub fn sample_pre_ideal_challenge<F>(
     field_cfg: &F::Config,
 ) -> [F; SHA_ROW_VARS]
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
     F::Inner: ConstTranscribable,
 {
     std::array::from_fn(|_| transcript.get_field_challenge(field_cfg))
@@ -750,7 +754,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Transcribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Transcribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable + Transcribable,
     P: ProductionShaOpeningPCS<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
@@ -915,7 +919,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Transcribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Transcribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable + Transcribable,
     P: ProductionShaOpeningPCS<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
@@ -1054,7 +1058,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Transcribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Transcribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable + Transcribable,
     P: ProductionShaOpeningPCS<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
@@ -1079,7 +1083,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Transcribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Transcribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable + Transcribable,
     P: ProductionShaOpeningPCS<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
@@ -1096,24 +1100,59 @@ fn evaluate_fresh_targets_from_ideal_polys<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let lambda_powers = zinc_utils::powers(
         lambda.clone(),
         F::one_with_cfg(field_cfg),
         NUM_SHA_RESIDUAL_FAMILIES,
     );
+    let a_powers = zinc_utils::powers(
+        a.clone(),
+        F::one_with_cfg(field_cfg),
+        SHA_IDEAL_EVAL_POWER_COUNT,
+    );
     ideal_polys
         .iter()
         .map(|instance| {
             let mut target = F::zero_with_cfg(field_cfg);
             for (slot, family) in production_sha_nonzero_families().iter().enumerate() {
-                target +=
-                    lambda_powers[family.index()].clone() * instance[slot].evaluate_at_point(a)?;
+                target += lambda_powers[family.index()].clone()
+                    * evaluate_production_sha_poly_at_powers(
+                        &instance[slot],
+                        &a_powers,
+                        field_cfg,
+                    )?;
             }
             Ok(target)
         })
         .collect()
+}
+
+fn evaluate_production_sha_poly_at_powers<F>(
+    poly: &DynamicPolynomialF<F>,
+    powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    if poly.coeffs.is_empty() {
+        return Ok(F::zero_with_cfg(field_cfg));
+    }
+    if poly.coeffs.len() > powers.len() {
+        return Err(ProductionShaError::NonCanonicalProofObject(
+            "production SHA polynomial exceeds scalarization power bound",
+        ));
+    }
+    DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
+        &poly.coeffs,
+        &powers[..poly.coeffs.len()],
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject("production SHA polynomial dot product failed")
+    })
 }
 
 fn eq_weighted_sum<F>(
@@ -1476,7 +1515,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     let claims = zinc_piop::neutron_nova::LinearInstanceClaims::new(fresh_targets.to_vec())?;
@@ -1511,7 +1550,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     require_single_sumcheck_group(proof, "SHA SumFold")?;
@@ -1559,7 +1598,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     let group = build_dense_sha_sumfold_group(
@@ -1638,7 +1677,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     require_single_sumcheck_group(proof, "SHA SumFold")?;
@@ -1762,7 +1801,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     let claimed = folded_row_integrand_sum(row_integrand_values, field_cfg)?;
@@ -1794,7 +1833,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     let claimed = zinc_piop::neutron_nova::expression_folded_row_sum(
@@ -1846,7 +1885,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     let claimed = zinc_piop::neutron_nova::expression_folded_row_sum(
@@ -1918,7 +1957,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero,
+    F::Inner: ConstTranscribable + Zero,
     F::Modulus: ConstTranscribable,
 {
     require_single_sumcheck_group(proof, "folded row sumcheck")?;
@@ -2117,7 +2156,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable,
 {
     validate_sha_endpoint_layout(endpoint_evals)?;
@@ -2159,7 +2198,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable,
 {
     validate_sha_endpoint_layout(endpoint_evals)?;
@@ -2199,7 +2238,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + num_traits::Zero + Default + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
     F::Modulus: ConstTranscribable,
 {
     Ok(MultipointEval::verify_subclaim(
@@ -2224,7 +2263,7 @@ pub fn reconstruct_folded_row_terminal_from_endpoints<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     if r_star.len() != SHA_ROW_VARS {
         return Err(ProductionShaError::LengthMismatch {
@@ -2241,9 +2280,15 @@ where
         residual_polys_from_endpoints(endpoint_evals, folded_public, r_star, field_cfg)?;
     let lambda_powers =
         zinc_utils::powers(lambda.clone(), F::one_with_cfg(field_cfg), residuals.len());
+    let a_powers = zinc_utils::powers(
+        a.clone(),
+        F::one_with_cfg(field_cfg),
+        SHA_IDEAL_EVAL_POWER_COUNT,
+    );
     let mut linear = F::zero_with_cfg(field_cfg);
     for (residual, weight) in residuals.iter().zip(lambda_powers.iter()) {
-        linear += weight.clone() * residual.evaluate_at_point(a)?;
+        linear += weight.clone()
+            * evaluate_production_sha_poly_at_powers(residual, &a_powers, field_cfg)?;
     }
 
     let rho_powers = zinc_utils::powers(
@@ -2267,17 +2312,16 @@ pub fn verify_endpoint_scalarization<F>(
     field_cfg: &F::Config,
 ) -> Result<(), ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), 32);
     for source in &endpoint_evals.sources {
-        let recombined = source
-            .bits
-            .iter()
-            .zip(powers.iter())
-            .fold(F::zero_with_cfg(field_cfg), |acc, (bit, power)| {
-                acc + bit.clone() * power
-            });
+        let recombined = zinc_utils::inner_product::FieldFieldInnerProduct::inner_product::<
+            UNCHECKED,
+        >(&source.bits, &powers, F::zero_with_cfg(field_cfg))
+        .map_err(|_| {
+            ProductionShaError::NonCanonicalProofObject("endpoint scalarization dot product failed")
+        })?;
         if recombined != source.scalarized {
             return Err(ProductionShaError::EndpointScalarizationMismatch {
                 col: source.col,

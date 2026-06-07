@@ -54,3 +54,6 @@ harness = false
 name = "multipoint_eval"
 harness = false
 
+[[bench]]
+name = "neutron_nova_sumfold"
+harness = false
