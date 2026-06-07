@@ -28,8 +28,13 @@ degree-`<W` `arbitrary_poly` cell of 32 integer coefficients:
 
 | piece | constraint | how |
 |---|---|---|
-| **ring eq (per row = per sig)** | `s_1 + s_2·h − c − q·u ∈ (X^n+1)` | reconstruct each poly from its `L` limbs, one `assert_in_ideal` vs `RotationIdeal::<R,N>::new(−1)` — **one constraint verifies all 2^10 sigs** |
+| **ring eq (per row = per sig)** | `s_1 + s_3 − c − q·u ∈ (X^n+1)` | reconstruct each poly from its limbs, one `assert_in_ideal` vs `RotationIdeal::<R,N>::new(−1)`. **Linear** (degree 1): the `s_2·h` product is carried by the committed witness `s_3` (see below) — **one constraint verifies all 2^10 sigs** |
+| **product witness** | `s_3 − s_2·h = 0` (zero ideal) | `s_3` = the *full unreduced* product `s_2·h`; degree-2 **`assert_zero`** so it is excluded from the effective degree (keeping the ring eq's effective degree at 1 → **MLE-first**), still bound by the step-4 sumcheck. See Phase-3 status. |
 | **norm bound (per sig)** | `Σ_i s_1[i]² + Σ_i s_2[i]² + slack = ⌊β²⌋`, `slack ≥ 0` | a **booleanity-adapted zerocheck over the signature rows**, reading the coefficient-slices of the `s_1, s_2` limb cells — **no second representation** |
+
+The product-witness split makes the UAIR **MLE-first eligible**
+(`count_effective_max_degree = 1`), giving a **2.3–5.5× prover speedup** over the
+Combined lane (Phase-3 status).
 
 Why limbs of degree `< 32` rather than one `D = n` cell: it keeps cells at the
 native, exercised width **and** makes the coefficients directly available to the
@@ -51,10 +56,13 @@ polynomial = `L = 16` limb cells of degree `< 32`):
 | `s_1[0..L]` | recomputed short-vector half (centered) | witness |
 | `s_2[0..L]` | decompressed signature half | witness |
 | `u[0..L]` | mod-`q`/negacyclic quotient (Option B) | witness |
+| `s_3[0..L3]` | full unreduced product `s_2·h` (`L3 = 2L = 32` limbs) | witness |
 
 Plus one `int` column `slack` (per-signature squared-norm slack, witness). Total
-`5·L = 80` `arbitrary_poly` columns + 1 `int`. (Shared-key/per-message: `h` is
-one public polynomial broadcast to every row; `c` varies per row.)
+`5·L + L3 = 112` `arbitrary_poly` columns + 1 `int`. (Shared-key/per-message:
+`h` is one public polynomial broadcast to every row; `c` varies per row.) The
+`s_3` column is the Phase-3 product-witness that makes the ring equation linear
+(MLE-first eligible).
 
 The full degree-`<n` polynomial is the limb reconstruction
 `P(X) = Σ_{m<L} X^{W·m} · limb_m(X)`.
@@ -229,9 +237,77 @@ sidestep the untested large-`D` commitment path) but inflate the constraint
 X-degree and hence the proof. Shrinking it is future work (whole-poly cells, or
 the coefficient-MLE Mechanism 1 of §4, or batching the reconstruction).
 
+## Phase-3 status (MLE-first product-witness split) — COMPLETE
+
+**What.** The ring equation was `s_1 + s_2·h − c − q·u ∈ (X^n+1)` — a single
+degree-2 constraint (the `s_2·h` product of two trace polynomials). Degree 2
+made `count_effective_max_degree::<FalconBatchUair>() = 2`, so the prover could
+only ever take the **Combined** lane; the fast **MLE-first** lane (which
+requires all non-zero-ideal constraints to be linear) never fired. We split the
+quadratic out behind a committed **product witness** `s_3`:
+
+- New witness column `s_3` = the **full, unreduced** product `s_2·h` over `Z[X]`
+  (degree `< 2n−1`), stored in `L3 = 2L = 32` limb cells. The scalar degree bound
+  rises to `2N = 1024` (the reconstruction needs `X^{W·(L3−1)} = X^{992}`).
+- **Ring equation** becomes **linear** (degree 1): `s_1 + s_3 − c − q·u ∈
+  (X^n+1)` — `s_3` is a trace value, not a product. `RotationIdeal` reduces the
+  degree-`<2n` residual mod `X^n+1` exactly as before (the old `s_2·h` residual
+  was already degree `<2n`, so this is not new territory).
+- **Product constraint** `s_3 − s_2·h = 0` is a degree-2 **`assert_zero`** (zero
+  ideal). Because `s_3` carries the *full unreduced* product, the difference is
+  *identically* the zero polynomial over `Z[X]`, so the `assert_zero` is honest
+  and complete (a *reduced* `s_3` would differ from `s_2·h` by a multiple of
+  `X^n+1` and break completeness — hence the full product / 32 limbs).
+
+**Why it's sound.** Zero-ideal constraints are excluded from
+`count_effective_max_degree` (now `= 1` → MLE-first eligible) but are **still
+bound to the witness**: the step-4 sumcheck runs at `count_max_degree + 2 = 4`
+(`protocol/src/prover.rs` `count_max_degree`, `combined_poly_resolver` `+ 2`),
+and `ConstraintFolder::assert_zero` folds the product into the RLC like any
+other constraint (`combined_poly_resolver/folder.rs`). The ideal-check (step 2)
+merely sends `ZERO` for the product's slot (its honest value); the *binding*
+lives in the sumcheck. This is exactly the SHA-256 UAIR's pattern (degree-2
+`assert_zero` pinning constraints that preserve MLE-first eligibility). The
+degree-2 term is **witness×public** (`s_2` witness, `h` public), structurally
+identical to SHA's `s_msg_init·(w_W − pa_m)`.
+
+**Result — MLE-first not only fires, it's a large win.** `do_bench_e2e` now
+emits a `Prove (MLE-first)` line (gated on `count_effective_max_degree ≤ 1`),
+and `test_e2e_falcon_batch` exercises the lane (dispatch `(any_linear=true,
+any_nonlinear=false) → step1_mle_first → prove_linear`) and verifies. Apple
+Silicon, `--features parallel,simd,unchecked`, `sample_size(10)`:
+
+| batch | Prove (Combined) | Prove (MLE-first) | speedup |
+|---|---|---|---|
+| `2^4` = 16 sigs | 107.2 ms | **45.8 ms** | **2.34×** |
+| `2^6` = 64 sigs | 384.4 ms | **69.7 ms** | **5.51×** |
+
+The win **grows with batch size** because the Combined lane builds the full
+row-by-row combined polynomial for the degree-2 product (over `~2n`-coefficient
+`F[X]` values) in the ideal check, whereas MLE-first evaluates the *linear* ring
+equation via cheap column-MLE evaluations and forces the product slot to `ZERO`
+— the product is then handled only in the sumcheck, which **both** lanes pay
+equally (both run at degree 4). The 32 extra `s_3` columns add commit cost to
+*both* lanes (apples-to-apples), and that cost is far outweighed by the
+combined-poly savings. MLE-first (45.8 ms @ `2^4`) also beats the *previous*
+single-constraint Combined path (≈ 69.7 ms with features, Phase-2b).
+
+**Why we keep `s_3` as the full product (not reduced + quotient).** A reduced
+`s_3` (16 limbs) would need an explicit negacyclic quotient `w` and the
+constraint `s_2·h − s_3 − (X^n+1)·w = 0` — two extra witnesses (32 limbs total,
+same as the full product's 32) *and* an `X^n`-degree scalar. The full product is
+strictly simpler (one witness) for the same limb budget, so it wins.
+
+**Cost / open.** `s_3` adds 32 `arbitrary_poly` witness columns (80 → 112) and
+bumps the scalar degree to `2N`. The committed witness grows accordingly, so the
+proof size is comparable to (slightly larger than) Phase-2b; the prover *time*
+is the headline gain. Shrinking the proof (whole-poly cells, coefficient-MLE
+Mechanism 1 of §4, or a smaller `s_3` encoding) remains future work, as does
+wiring `s_3` through the **folded** paths (still not wired — see Phase-2b).
+
 ## How to use this doc
 
 Ledger for the batched Falcon arithmetization on branch `falcon`. **Out of
 scope** for `documentation/f2x-sha-todo.md` (that tracks the `F_2` SHA-256
-prover path; this is a separate arithmetization). Append Phase-2 outcomes here
+prover path; this is a separate arithmetization). Append phase outcomes here
 (lead with *what*, then *why*, then *result*).

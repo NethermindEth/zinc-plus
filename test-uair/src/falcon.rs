@@ -21,16 +21,28 @@
 //!   its limbs, `P = Σ_{m<L} X^{32 m} · limb_m`, for a single per-row ideal
 //!   check.
 //!
-//! Per signature there are 5 logical polynomials — `h` (shared public), `c`
-//! (per-sig public), `s_1`, `s_2`, `u` (witness) — each `L` limbs, so
-//! `5·L = 80` `arbitrary_poly` columns, plus one `int` column `slack`.
+//! Per signature there are 6 logical polynomials — `h` (shared public), `c`
+//! (per-sig public), `s_1`, `s_2`, `u` (witness, `L` limbs each) and the
+//! product witness `s_3 = s_2·h` (witness, `L3 = 2L` limbs for the full
+//! unreduced product) — so `5·L + L3 = 112` `arbitrary_poly` columns, plus one
+//! `int` column `slack`.
 //!
 //! ## Constraints
 //!
-//! - **Ring equation (per row = per signature)** — Option B (`Z[X]` + quotient):
-//!   `s_1 + s_2·h − c − q·u ∈ (X^n+1)`, one `assert_in_ideal` against
-//!   `RotationIdeal::<R, N>::new(−1)`. One constraint verifies all 2^10 sigs.
-//!   This is [`FalconBatchUair::constrain_general`] below.
+//! - **Ring equation (per row = per signature)** — Option B (`Z[X]` + quotient),
+//!   in **product-witness form** so it is *linear*:
+//!   `s_1 + s_3 − c − q·u ∈ (X^n+1)`, one `assert_in_ideal` against
+//!   `RotationIdeal::<R, N>::new(−1)`, where `s_3` is the committed product
+//!   `s_2·h`. One constraint verifies all 2^10 sigs.
+//!
+//! - **Product witness** — `s_3 − s_2·h = 0`, a degree-2 **`assert_zero`**
+//!   (zero ideal). Because `s_3` carries the *full unreduced* product, the
+//!   difference is identically zero. Splitting the quadratic `s_2·h` out as a
+//!   zero-ideal constraint keeps the ring equation's effective degree at 1, so
+//!   `count_effective_max_degree = 1` and the prover takes the **MLE-first**
+//!   lane; the product is still bound to the witness by the step-4 sumcheck
+//!   (run at `count_max_degree + 2 = 4`). Same trick the SHA-256 UAIR uses.
+//!   Both constraints are [`FalconBatchUair::constrain_general`] below.
 //!
 //! - **Per-signature norm bound** — `Σ_i s_1[i]² + Σ_i s_2[i]² + slack = ⌊β²⌋`,
 //!   `slack ≥ 0`, *for each signature*. This is a booleanity-adapted **zerocheck
@@ -75,6 +87,13 @@ pub const W: usize = 32;
 pub const L: usize = 16;
 /// Ring degree `n = W · L` (`512` for Falcon-512).
 pub const N: usize = W * L;
+/// Limbs for the **full, unreduced** product witness `s_3 = s_2·h`, whose
+/// degree is `< 2N−1`. `L3 = 2L = 32` cells of degree `< W` cover its
+/// `≤ 2N−1` coefficients (zero-padded to `L3·W = 2N`).
+pub const L3: usize = 2 * L;
+/// Scalar degree bound. The `s_3` reconstruction needs the monomial
+/// `X^{W·(L3−1)} = X^{992}`, so the scalar type must hold degree `< 2N`.
+pub const SCALAR_DEG: usize = 2 * N;
 /// Number of signatures verified at once is `2^SIGS_LOG`.
 pub const SIGS_LOG: usize = 10;
 
@@ -87,7 +106,7 @@ pub const BETA_SQ_FALCON512: i32 = 34_034_726;
 
 /// Flat `arbitrary_poly` column bases (each logical polynomial spans `L` limbs).
 pub mod cols {
-    use super::L;
+    use super::{L, L3};
     /// Shared public key `h` (public; identical on every row).
     pub const H_BASE: usize = 0;
     /// Per-signature hash point `c` (public; varies per row).
@@ -98,8 +117,16 @@ pub mod cols {
     pub const S2_BASE: usize = 3 * L;
     /// Mod-`q` / negacyclic quotient `u` (witness; Option B).
     pub const U_BASE: usize = 4 * L;
-    /// Total `arbitrary_poly` columns: `h, c, s_1, s_2, u`, each `L` limbs.
-    pub const NUM_ARB: usize = 5 * L;
+    /// Full product witness `s_3 = s_2·h` (witness; `L3 = 2L` limbs). Carrying
+    /// the product as a committed value lets the ring equation be **linear**
+    /// (`s_1 + s_3 − c − q·u`, degree 1), which makes the UAIR MLE-first
+    /// eligible; the product relation itself is enforced by a separate
+    /// **zero-ideal** constraint `s_3 − s_2·h = 0` (degree 2, excluded from the
+    /// effective degree, still bound by the step-4 sumcheck).
+    pub const S3_BASE: usize = 5 * L;
+    /// Total `arbitrary_poly` columns: `h, c, s_1, s_2, u` (`L` each) + `s_3`
+    /// (`L3`).
+    pub const NUM_ARB: usize = 5 * L + L3;
     /// Public `arbitrary_poly` columns: `h, c`.
     pub const NUM_ARB_PUB: usize = 2 * L;
 
@@ -123,9 +150,9 @@ where
     R: ConstSemiring + From<i32> + 'static,
 {
     type Ideal = RotationIdeal<R, N>;
-    /// Scalars must hold `X^{W·(L−1)}` (degree `W·(L−1) = 480 < N`) for limb
-    /// reconstruction, so the scalar degree bound is `N`.
-    type Scalar = DensePolynomial<R, N>;
+    /// Scalars must hold `X^{W·(L3−1)} = X^{992}` for the full product-witness
+    /// `s_3` reconstruction, so the scalar degree bound is `2N`.
+    type Scalar = DensePolynomial<R, SCALAR_DEG>;
 
     fn signature() -> UairSignature {
         let total = TotalColumnLayout::new(0, cols::NUM_ARB, cols::NUM_INT);
@@ -158,57 +185,95 @@ where
     {
         let arb = up.arbitrary_poly;
 
-        // Reconstruction scalars X^{W·m} for m = 1..L, materialized into a Vec
+        // Reconstruction scalars X^{W·m} for m = 1..L3, materialized into a Vec
         // so each has a *stable, distinct address* for the whole call. The
         // protocol's scalar-projection cache (`piop::scalar_proj_cache`) keys
         // on pointer identity; building these in a reused stack local would
         // alias all of them to one address, so the cache would return X^{W}'s
         // projection for every X^{W·m} and collapse the reconstruction.
-        let x_pows: Vec<DensePolynomial<R, N>> = (1..L)
+        let x_pows: Vec<DensePolynomial<R, SCALAR_DEG>> = (1..L3)
             .map(|m| {
-                let mut coeffs: [R; N] = core::array::from_fn(|_| R::ZERO);
+                let mut coeffs: [R; SCALAR_DEG] = core::array::from_fn(|_| R::ZERO);
                 coeffs[W * m] = R::ONE; // X^{W·m}
                 DensePolynomial::new(coeffs)
             })
             .collect();
 
-        // Reconstruct a degree-<N polynomial from its L limbs:
-        //   P(X) = Σ_{m<L} X^{W·m} · limb_m(X),   deg(limb_m) < W.
-        let reconstruct = |base: usize| -> B::Expr {
+        // Reconstruct a polynomial from its `n_limbs` limbs:
+        //   P(X) = Σ_{m<n_limbs} X^{W·m} · limb_m(X),   deg(limb_m) < W.
+        // (`h, c, s_1, s_2, u` use `L = 16` limbs; the full product `s_3`
+        // spans `L3 = 32`.)
+        let reconstruct = |base: usize, n_limbs: usize| -> B::Expr {
             let mut acc = arb[base].clone(); // m = 0: X^0 = 1
-            for m in 1..L {
+            for m in 1..n_limbs {
                 acc = acc
                     + &mbs(&arb[base + m], &x_pows[m - 1]).expect("X^{Wm}·limb overflow");
             }
             acc
         };
 
-        let h = reconstruct(cols::H_BASE);
-        let c = reconstruct(cols::C_BASE);
-        let s1 = reconstruct(cols::S1_BASE);
-        let s2 = reconstruct(cols::S2_BASE);
-        let u = reconstruct(cols::U_BASE);
+        let h = reconstruct(cols::H_BASE, L);
+        let c = reconstruct(cols::C_BASE, L);
+        let s1 = reconstruct(cols::S1_BASE, L);
+        let s2 = reconstruct(cols::S2_BASE, L);
+        let u = reconstruct(cols::U_BASE, L);
+        // Full (unreduced) product witness, degree < 2N−1, in L3 limbs.
+        let s3 = reconstruct(cols::S3_BASE, L3);
 
         // q·u  (Option B: explicit mod-q quotient).
         let q_scalar = {
-            let mut cf: [R; N] = core::array::from_fn(|_| R::ZERO);
+            let mut cf: [R; SCALAR_DEG] = core::array::from_fn(|_| R::ZERO);
             cf[0] = R::from(Q_FALCON);
-            DensePolynomial::<R, N>::new(cf)
+            DensePolynomial::<R, SCALAR_DEG>::new(cf)
         };
         let q_u = mbs(&u, &q_scalar).expect("q·u overflow");
 
-        // residual = s_1 + s_2·h − c − q·u  ∈  (X^n + 1)
-        let s2_h = s2 * &h;
-        let residual = s1 + &s2_h - &c - &q_u;
-
+        // ── Ring equation (ideal (X^n+1), degree 1 — LINEAR) ───────────────
+        // The product `s_2·h` is replaced by its committed witness `s_3`:
+        //   s_1 + s_3 − c − q·u  ∈  (X^n + 1).
+        // `s_3` is a trace value here (not a product), so the residual is
+        // degree 1. This is the only non-zero-ideal constraint, so the UAIR's
+        // *effective* max degree is 1 → MLE-first eligible. (The residual has
+        // degree < 2N−1 because `s_3` is the full product; `RotationIdeal`
+        // reduces it mod X^n+1, exactly as the previous `s_1 + s_2·h − …`
+        // residual was reduced.)
+        let residual = s1 + &s3 - &c - &q_u;
         let negacyclic = ideal_from_ref(&RotationIdeal::<R, N>::new(R::from(-1)));
         b.assert_in_ideal(residual, &negacyclic);
+
+        // ── Product witness (zero ideal, degree 2) ─────────────────────────
+        // `s_3` is the *full, unreduced* product `s_2·h` over Z[X]. Because it
+        // is unreduced, `s_3 − s_2·h` is identically the zero polynomial, so
+        // this is a genuine `assert_zero`. As a zero-ideal constraint it is
+        // excluded from `count_effective_max_degree` (keeping the UAIR
+        // MLE-first eligible) yet is still bound to the witness by the step-4
+        // sumcheck, which runs at `count_max_degree + 2 = 4` and folds every
+        // constraint — zero-ideal ones included. This mirrors the SHA-256
+        // UAIR's degree-2 `assert_zero` pinning constraints.
+        let s2_h = s2 * &h;
+        b.assert_zero(s3 - &s2_h);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Witness generation (integer arithmetic; not generic over R).
 // ---------------------------------------------------------------------------
+
+/// `a · b` over `Z[X]` **without** the negacyclic reduction — the full
+/// product, degree `< 2N−1`. Used for the product witness `s_3`, for which
+/// `s_3 − s_2·h = 0` must hold *exactly* (not merely mod `X^N+1`).
+fn full_mul(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let mut out = vec![0i64; 2 * N - 1];
+    for (i, &ai) in a.iter().enumerate() {
+        if ai == 0 {
+            continue;
+        }
+        for (j, &bj) in b.iter().enumerate() {
+            out[i + j] += ai * bj;
+        }
+    }
+    out
+}
 
 /// `a · b mod (X^N + 1)` — negacyclic convolution over the integers.
 fn negacyclic_mul(a: &[i64], b: &[i64]) -> Vec<i64> {
@@ -300,6 +365,10 @@ where
         for _ in 0..n_rows {
             let (s1, s2, c, u, slack) =
                 gen_falcon_signature(&h, q, beta_sq, COEFF_BOUND, rng);
+            // s_3 = full, *unreduced* product s_2·h over Z[X] (degree < 2N−1),
+            // so the zero-ideal constraint `s_3 − s_2·h = 0` holds exactly. Its
+            // coefficients (≤ N·bound·q ≈ 7.5e8) fit i32.
+            let s3 = full_mul(&s2, &h);
             for (base, poly) in [
                 (cols::H_BASE, &h),
                 (cols::C_BASE, &c),
@@ -314,6 +383,14 @@ where
                         core::array::from_fn(|p| R::from(poly[m * W + p] as i32));
                     arb_cols[base + m].push(DensePolynomial::new(coeffs));
                 }
+            }
+            // s_3 spans L3 = 2L limbs; its 2N−1 coefficients are zero-padded to
+            // the L3·W = 2N slots.
+            for m in 0..L3 {
+                let coeffs: [R; W] = core::array::from_fn(|p| {
+                    R::from(s3.get(m * W + p).copied().unwrap_or(0) as i32)
+                });
+                arb_cols[cols::S3_BASE + m].push(DensePolynomial::new(coeffs));
             }
             slack_col.push(R::from(slack as i32));
         }
@@ -374,10 +451,42 @@ mod tests {
     const LIMBS: usize = 4;
 
     #[test]
-    fn falcon_batch_ring_eq_is_one_ideal_constraint() {
-        // The per-signature ring equation is a single ideal-membership
-        // constraint, applied to every row (signature).
-        assert_eq!(count_constraints::<FalconBatchUair<Int<LIMBS>>>(), 1);
+    fn falcon_batch_constraints_keep_mle_first_eligibility() {
+        use zinc_uair::degree_counter::{count_effective_max_degree, count_max_degree};
+        type U = FalconBatchUair<Int<LIMBS>>;
+        // Two constraints: the linear ring equation (ideal (X^n+1)) and the
+        // degree-2 product witness `s_3 = s_2·h` (zero ideal).
+        assert_eq!(count_constraints::<U>(), 2);
+        // The product is a *zero-ideal* constraint, excluded from the effective
+        // degree — so the UAIR stays MLE-first eligible (effective degree 1)
+        // even though its true max degree is 2. This is exactly the gate the
+        // prover dispatch and the bench use to pick the MLE-first lane.
+        assert_eq!(count_effective_max_degree::<U>(), 1);
+        assert_eq!(count_max_degree::<U>(), 2);
+    }
+
+    #[test]
+    fn full_mul_reduces_to_negacyclic_mul() {
+        // The full product (degree < 2N−1), reduced mod X^N+1, must equal the
+        // negacyclic product — this is what makes `s_3` a valid replacement for
+        // `s_2·h` in the ring equation.
+        let mut rng = StdRng::seed_from_u64(3);
+        let a: Vec<i64> = (0..N).map(|_| sample_centered(&mut rng, 120)).collect();
+        let b: Vec<i64> = (0..N)
+            .map(|_| (rng.next_u32() % Q_FALCON as u32) as i64)
+            .collect();
+        let full = full_mul(&a, &b);
+        let neg = negacyclic_mul(&a, &b);
+        // Reduce `full` mod X^N+1: X^{N+k} ≡ −X^k.
+        let mut reduced = vec![0i64; N];
+        for (k, &coeff) in full.iter().enumerate() {
+            if k < N {
+                reduced[k] += coeff;
+            } else {
+                reduced[k - N] -= coeff;
+            }
+        }
+        assert_eq!(reduced, neg);
     }
 
     #[test]

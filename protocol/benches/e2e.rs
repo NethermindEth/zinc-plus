@@ -966,9 +966,11 @@ fn bench_real_sha_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: us
 
 // Batched Falcon-512 signature verification (2^num_vars signatures, shared key,
 // per-message). Uses `BenchZincTypes` (i64 cells — Falcon's limb coefficients
-// are small) and the secp256k1 field. The UAIR's scalar degree (N=512, for limb
-// reconstruction) is decoupled from the cell degree (32); `do_bench_e2e` already
-// supports that.
+// are small) and the secp256k1 field. The UAIR's scalar degree (2N=1024, to
+// reconstruct the full product witness `s_3 = s_2·h`) is decoupled from the cell
+// degree (32); `do_bench_e2e` already supports that. The product-witness split
+// makes the ring equation linear, so `do_bench_e2e` emits both a
+// "Prove (Combined)" and a "Prove (MLE-first)" line (effective max degree 1).
 fn bench_falcon_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = FalconBatchUair<i64>;
 
