@@ -406,6 +406,12 @@ smaller Falcon proof.
 The 4× degree fold of the arb lane (the 94% component), with narrow `i64`
 coeffs preserved, shrinks the Falcon proof ~3.3×.
 
+**Bench** (`bench_falcon_arb_folded`, "Zinc+ Falcon" group, Apple Silicon,
+`--features parallel,simd,unchecked`, MLE-first, `nvars=4`): Prove **44.8 ms**
+(≈ the unfolded MLE-first 45.8 ms — same), Verify **4.5 ms**, proof **1.77 MB
+raw** vs the unfolded **6.37 MB** = **3.6× smaller** at the same prove time.
+(MLE-first verifies thanks to the zero-ideal fix below.)
+
 ### MLE-first verification bug — FIXED (`556d723`)
 
 While testing, found that Falcon's **MLE-first proof did not verify** (the
