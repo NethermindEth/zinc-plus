@@ -27,7 +27,10 @@
 
 use crypto_primitives::{crypto_bigint_int::Int, semiring::boolean::Boolean};
 use num_traits::Zero;
-use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -105,6 +108,84 @@ pub fn split_columns<const D: usize, const HALF_D: usize>(
         columns
             .iter()
             .map(|col| split_column::<D, HALF_D>(col))
+            .collect()
+    }
+}
+
+/// Split a column of `DensePolynomial<C, D>` entries (arbitrary-poly cells)
+/// into a concatenated column of `DensePolynomial<C, HALF_D>` entries, along
+/// the **polynomial-degree** dimension — the arbitrary-poly analogue of
+/// [`split_column`].
+///
+/// Each entry `v[i]` (degree `< D`) splits as `v[i] = u[i] + X^HALF_D · w[i]`,
+/// where `u[i]` holds the low `HALF_D` coefficients (`coeffs[0..HALF_D]`) and
+/// `w[i]` the high `HALF_D` (`coeffs[HALF_D..D]`). Returns a length-`2n` column
+/// `u[0..n] || w[0..n]`; the MLE gains one variable selecting low (0) /
+/// high (1). Because the split is along degree (not coefficient magnitude),
+/// this mirrors the binary [`split_column`] exactly, so two rounds produce the
+/// same 4-block layout the verifier's `(1−γ₁)(1−γ₂)c[0] + …` algebra expects.
+///
+/// # Panics
+/// Panics if `D != 2 * HALF_D`.
+pub fn split_arb_column<C, const D: usize, const HALF_D: usize>(
+    column: &DenseMultilinearExtension<DensePolynomial<C, D>>,
+) -> DenseMultilinearExtension<DensePolynomial<C, HALF_D>>
+where
+    C: Clone + Zero,
+{
+    assert_eq!(
+        D,
+        2 * HALF_D,
+        "split_arb_column: D ({D}) must equal 2 * HALF_D ({HALF_D})"
+    );
+
+    let n = column.evaluations.len();
+    let mut lo_evals = Vec::with_capacity(n);
+    let mut hi_evals = Vec::with_capacity(n);
+
+    for entry in &column.evaluations {
+        let lo: [C; HALF_D] = std::array::from_fn(|i| entry.coeffs[i].clone());
+        let hi: [C; HALF_D] = std::array::from_fn(|i| entry.coeffs[HALF_D + i].clone());
+        lo_evals.push(DensePolynomial { coeffs: lo });
+        hi_evals.push(DensePolynomial { coeffs: hi });
+    }
+
+    // Concatenate: v' = u || w (low halves first, high halves second).
+    lo_evals.extend(hi_evals);
+
+    DenseMultilinearExtension::from_evaluations_vec(
+        column
+            .num_vars
+            .checked_add(1)
+            .expect("split_arb_column: num_vars overflow"),
+        lo_evals,
+        DensePolynomial {
+            coeffs: std::array::from_fn(|_| C::zero()),
+        },
+    )
+}
+
+/// Split each `DensePolynomial<C, D>` column into a concatenated column of
+/// `DensePolynomial<C, HALF_D>` entries (see [`split_arb_column`]). Parallel
+/// across columns when the `parallel` feature is enabled.
+pub fn split_arb_columns<C, const D: usize, const HALF_D: usize>(
+    columns: &[DenseMultilinearExtension<DensePolynomial<C, D>>],
+) -> Vec<DenseMultilinearExtension<DensePolynomial<C, HALF_D>>>
+where
+    C: Clone + Zero + Send + Sync,
+{
+    #[cfg(feature = "parallel")]
+    {
+        return columns
+            .par_iter()
+            .map(|col| split_arb_column::<C, D, HALF_D>(col))
+            .collect();
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        columns
+            .iter()
+            .map(|col| split_arb_column::<C, D, HALF_D>(col))
             .collect()
     }
 }
@@ -381,5 +462,60 @@ mod tests {
             assert_eq!(s.num_vars, 2);
             assert_eq!(s.evaluations.len(), 4);
         }
+    }
+
+    #[test]
+    fn split_arb_column_reconstructs() {
+        // A degree-<32 integer polynomial with mixed-sign coefficients.
+        let coeffs: [i64; 32] = std::array::from_fn(|i| (i as i64 * 7 + 3) % 251 - 125);
+        let poly = DensePolynomial::<i64, 32>::new(coeffs);
+        let col = DenseMultilinearExtension::from_evaluations_vec(
+            0,
+            vec![poly],
+            DensePolynomial::<i64, 32>::new([0i64; 32]),
+        );
+
+        let split = split_arb_column::<i64, 32, 16>(&col);
+        assert_eq!(split.num_vars, 1);
+        assert_eq!(split.evaluations.len(), 2);
+
+        // lo = coeffs[0..16], hi = coeffs[16..32].
+        let lo = &split.evaluations[0];
+        let hi = &split.evaluations[1];
+        for i in 0..16 {
+            assert_eq!(lo.coeffs[i], coeffs[i]);
+            assert_eq!(hi.coeffs[i], coeffs[16 + i]);
+        }
+        // Reconstruction at X=3: v(3) = lo(3) + 3^16 · hi(3).
+        let lo3: i64 = lo.evaluate_at_point(&3i64).unwrap();
+        let hi3: i64 = hi.evaluate_at_point(&3i64).unwrap();
+        let v3: i64 = col.evaluations[0].evaluate_at_point(&3i64).unwrap();
+        assert_eq!(lo3 + 3i64.pow(16) * hi3, v3);
+    }
+
+    #[test]
+    fn split_arb_columns_4x_block_layout() {
+        // Two degree-split rounds (32 → 16 → 8) must produce the SAME 4-block
+        // layout as the binary 4× fold, so the verifier's
+        // `(1−γ₁)(1−γ₂)c[0] + γ₁(1−γ₂)c[2] + (1−γ₁)γ₂c[1] + γ₁γ₂c[3]` algebra
+        // applies unchanged. With v = a0 + a1·X^8 + a2·X^16 + a3·X^24, the
+        // blocks are c[0]=a0, c[1]=a2, c[2]=a1, c[3]=a3.
+        let coeffs: [i64; 32] = std::array::from_fn(|i| i as i64 + 1);
+        let poly = DensePolynomial::<i64, 32>::new(coeffs);
+        let col = DenseMultilinearExtension::from_evaluations_vec(
+            0,
+            vec![poly],
+            DensePolynomial::<i64, 32>::new([0i64; 32]),
+        );
+        let round1 = split_arb_columns::<i64, 32, 16>(&[col]);
+        let round2 = split_arb_columns::<i64, 16, 8>(&round1);
+        assert_eq!(round2.len(), 1);
+        let q = &round2[0];
+        assert_eq!(q.num_vars, 2);
+        assert_eq!(q.evaluations.len(), 4);
+        assert_eq!(q.evaluations[0].coeffs[0], coeffs[0]); // c[0] = a0
+        assert_eq!(q.evaluations[1].coeffs[0], coeffs[16]); // c[1] = a2
+        assert_eq!(q.evaluations[2].coeffs[0], coeffs[8]); // c[2] = a1
+        assert_eq!(q.evaluations[3].coeffs[0], coeffs[24]); // c[3] = a3
     }
 }
