@@ -2402,6 +2402,51 @@ mod tests {
         .expect("Verifier rejected an honest SHA-ECDSA proof");
     }
 
+    /// SHA-256 (standalone) via the **MLE-first** ideal-check lane, verified
+    /// end-to-end. SHA-256 is MLE-first eligible
+    /// (`count_effective_max_degree == 1`) and has degree-2 zero-ideal
+    /// `assert_zero` selector pins (`pa_c_* · s_active_* == 0`, etc.) — exactly
+    /// the shape that exposed the MLE-first zero-ideal bug (the MLE-first lane
+    /// evaluated `product-of-MLE-evals`, nonzero at a random point, instead of
+    /// forcing ZERO; see `IdealCheckProtocol::prove_linear`). This is the only
+    /// MLE-first verification coverage for a degree-≥2-`assert_zero` UAIR, so it
+    /// guards the headline SHA-256 demo against regressing that class of bug.
+    #[test]
+    fn test_e2e_sha256_mle_first() {
+        type Zt = TestShaEcdsaZincTypes;
+        type U = Sha256CompressionSliceUair<ShaEcdsaInt>;
+        let mut rng = rng();
+        let pp = setup_pp::<Zt>(
+            SHA_ECDSA_NUM_VARS,
+            (
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+                make_iprs(SHA_ECDSA_NUM_VARS),
+            ),
+        );
+        let sig = <U as Uair>::signature();
+        let trace = U::generate_random_trace(SHA_ECDSA_NUM_VARS, &mut rng);
+        let public_trace = trace.public(&sig);
+
+        let proof = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::prove::<true, CHECKED>(
+            &pp,
+            &trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+        )
+        .expect("SHA-256 MLE-first prover failed");
+
+        ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            SHA_ECDSA_NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+        )
+        .expect("Verifier rejected an honest SHA-256 MLE-first proof");
+    }
+
     #[test]
     fn test_big_linear_tamper_ideal_check() {
         let num_vars = 8;
