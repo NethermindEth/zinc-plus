@@ -194,6 +194,63 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Witness generation (integer arithmetic; not generic over R).
+// ---------------------------------------------------------------------------
+
+/// `a · b mod (X^N + 1)` — negacyclic convolution over the integers.
+fn negacyclic_mul(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let mut out = vec![0i64; N];
+    for i in 0..N {
+        let ai = a[i];
+        if ai == 0 {
+            continue;
+        }
+        for (j, &bj) in b.iter().enumerate() {
+            let prod = ai * bj;
+            let k = i + j;
+            if k < N {
+                out[k] += prod;
+            } else {
+                out[k - N] -= prod; // X^N ≡ −1
+            }
+        }
+    }
+    out
+}
+
+/// Sample an integer uniformly in `[−bound, bound]`.
+fn sample_centered(rng: &mut (impl RngCore + ?Sized), bound: i64) -> i64 {
+    (rng.next_u32() % (2 * bound as u32 + 1)) as i64 - bound
+}
+
+/// Generate a valid short `(s_1, s_2)` under public key `h`, the matching hash
+/// point `c = s_1 + s_2·h mod q ∈ [0, q)`, the mod-`q`/negacyclic quotient `u`
+/// (so `s_1[k] + (s_2·h mod X^N+1)[k] = c[k] + q·u[k]`, hence the residual
+/// `s_1 + s_2·h − c − q·u` is exactly `0 mod (X^N+1)`), and `slack = ⌊β²⌋ −
+/// ‖(s_1, s_2)‖²`. Returns length-`N` coefficient vectors.
+fn gen_falcon_signature(
+    h: &[i64],
+    q: i64,
+    beta_sq: i64,
+    bound: i64,
+    rng: &mut (impl RngCore + ?Sized),
+) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>, i64) {
+    let s1: Vec<i64> = (0..N).map(|_| sample_centered(rng, bound)).collect();
+    let s2: Vec<i64> = (0..N).map(|_| sample_centered(rng, bound)).collect();
+    let p = negacyclic_mul(&s2, h);
+    let mut c = vec![0i64; N];
+    let mut u = vec![0i64; N];
+    for k in 0..N {
+        let val = s1[k] + p[k];
+        c[k] = val.rem_euclid(q);
+        u[k] = val.div_euclid(q);
+    }
+    let norm: i64 = (0..N).map(|k| s1[k] * s1[k] + s2[k] * s2[k]).sum();
+    let slack = beta_sq - norm;
+    (s1, s2, c, u, slack)
+}
+
 impl<R> GenerateRandomTrace<W> for FalconBatchUair<R>
 where
     R: ConstSemiring + From<i32> + 'static,
@@ -201,27 +258,64 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    /// Trivial placeholder witness: all-zero limbs, for which the residual is
-    /// exactly `0 ∈ (X^n+1)`. A real generator fills `h, c` (public), the
-    /// decompressed `s_2`, the recomputed `s_1`, the quotient `u`, and `slack`
-    /// per signature — future work.
+    /// Generate a batch of valid Falcon signatures under a freshly sampled
+    /// shared public key `h` (one signature per row). HashToPoint/Decompress
+    /// are out of scope, so the hash point `c` is *chosen* as the point the
+    /// generated short `(s_1, s_2)` verifies against. Coefficients are stored
+    /// in their `L`-limb decomposition (`L = N/W` cells of degree `< W`).
     fn generate_random_trace<Rng: RngCore + ?Sized>(
         num_vars: usize,
-        _rng: &mut Rng,
+        rng: &mut Rng,
     ) -> UairTrace<'static, R, R, W> {
         let n_rows = 1usize << num_vars;
-        let zero_cell = || -> DensePolynomial<R, W> {
-            let cf: [R; W] = core::array::from_fn(|_| R::ZERO);
-            DensePolynomial::new(cf)
-        };
-        let zero_col = || -> DenseMultilinearExtension<DensePolynomial<R, W>> {
-            (0..n_rows).map(|_| zero_cell()).collect()
-        };
-        let arb: Vec<_> = (0..cols::NUM_ARB).map(|_| zero_col()).collect();
-        let slack: DenseMultilinearExtension<R> = (0..n_rows).map(|_| R::ZERO).collect();
+        let q = Q_FALCON as i64;
+        let beta_sq = BETA_SQ_FALCON512 as i64;
+        // |coeff| ≤ COEFF_BOUND keeps ‖(s_1,s_2)‖² ≤ 2·N·bound² < ⌊β²⌋, so
+        // `slack ≥ 0`. (Real Falcon norms sit just under ⌊β²⌋; this is a
+        // valid, comfortably-short synthetic instance.)
+        const COEFF_BOUND: i64 = 120;
+
+        // Shared public key h ∈ [0, q), broadcast to every row.
+        let h: Vec<i64> = (0..N)
+            .map(|_| (rng.next_u32() % Q_FALCON as u32) as i64)
+            .collect();
+
+        let mut arb_cols: Vec<Vec<DensePolynomial<R, W>>> = (0..cols::NUM_ARB)
+            .map(|_| Vec::with_capacity(n_rows))
+            .collect();
+        let mut slack_col: Vec<R> = Vec::with_capacity(n_rows);
+
+        for _ in 0..n_rows {
+            let (s1, s2, c, u, slack) =
+                gen_falcon_signature(&h, q, beta_sq, COEFF_BOUND, rng);
+            for (base, poly) in [
+                (cols::H_BASE, &h),
+                (cols::C_BASE, &c),
+                (cols::S1_BASE, &s1),
+                (cols::S2_BASE, &s2),
+                (cols::U_BASE, &u),
+            ] {
+                for m in 0..L {
+                    // All stored coefficients fit i32 (h, c < q; s_1, s_2
+                    // small; |u| ≲ N·bound; slack ≤ ⌊β²⌋). m·W+p < N always.
+                    let coeffs: [R; W] =
+                        core::array::from_fn(|p| R::from(poly[m * W + p] as i32));
+                    arb_cols[base + m].push(DensePolynomial::new(coeffs));
+                }
+            }
+            slack_col.push(R::from(slack as i32));
+        }
+
+        let arbitrary_poly: Vec<DenseMultilinearExtension<DensePolynomial<R, W>>> =
+            arb_cols
+                .into_iter()
+                .map(|cells| cells.into_iter().collect())
+                .collect();
+        let int: Vec<DenseMultilinearExtension<R>> =
+            vec![slack_col.into_iter().collect()];
         UairTrace {
-            arbitrary_poly: arb.into(),
-            int: vec![slack].into(),
+            arbitrary_poly: arbitrary_poly.into(),
+            int: int.into(),
             ..Default::default()
         }
     }
@@ -260,7 +354,10 @@ pub fn falcon_norm_comb_fn<F: Semiring>(vals: &[F]) -> F {
 mod tests {
     use super::*;
     use crypto_primitives::crypto_bigint_int::Int;
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
     use zinc_uair::constraint_counter::count_constraints;
+
+    use crate::GenerateRandomTrace;
 
     const LIMBS: usize = 4;
 
@@ -280,5 +377,50 @@ mod tests {
             Int::<LIMBS>::from_i8(4),
         ];
         assert_eq!(falcon_norm_comb_fn(&vals), Int::<LIMBS>::from_i8(17));
+    }
+
+    #[test]
+    fn negacyclic_mul_wraps_with_sign() {
+        // X^{N-1} · X = X^N ≡ −1 (mod X^N + 1): a constant −1.
+        let mut a = vec![0i64; N];
+        let mut b = vec![0i64; N];
+        a[N - 1] = 1;
+        b[1] = 1;
+        let p = negacyclic_mul(&a, &b);
+        assert_eq!(p[0], -1);
+        assert!(p[1..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn falcon_witness_satisfies_ring_eq_and_norm() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let q = Q_FALCON as i64;
+        let beta_sq = BETA_SQ_FALCON512 as i64;
+        let h: Vec<i64> = (0..N)
+            .map(|_| (rng.next_u32() % Q_FALCON as u32) as i64)
+            .collect();
+        for _ in 0..4 {
+            let (s1, s2, c, u, slack) = gen_falcon_signature(&h, q, beta_sq, 120, &mut rng);
+            // Reduced ring residual s_1 + (s_2·h mod X^N+1) − c − q·u must be 0.
+            let p = negacyclic_mul(&s2, &h);
+            for k in 0..N {
+                assert_eq!(s1[k] + p[k] - c[k] - q * u[k], 0, "ring eq at coeff {k}");
+                assert!((0..q).contains(&c[k]), "c[{k}] out of [0, q)");
+            }
+            // Norm bound: Σ s_1² + Σ s_2² + slack = ⌊β²⌋, slack ≥ 0.
+            let norm: i64 = (0..N).map(|k| s1[k] * s1[k] + s2[k] * s2[k]).sum();
+            assert_eq!(norm + slack, beta_sq);
+            assert!(slack >= 0);
+        }
+    }
+
+    #[test]
+    fn generate_random_trace_has_expected_shape() {
+        let mut rng = StdRng::seed_from_u64(7);
+        // 2^2 = 4 signatures.
+        let trace = FalconBatchUair::<Int<LIMBS>>::generate_random_trace(2, &mut rng);
+        assert_eq!(trace.arbitrary_poly.len(), cols::NUM_ARB);
+        assert_eq!(trace.int.len(), 1);
+        assert_eq!(trace.arbitrary_poly[0].evaluations.len(), 4);
     }
 }
