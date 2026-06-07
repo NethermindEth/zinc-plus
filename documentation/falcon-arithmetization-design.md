@@ -406,26 +406,33 @@ smaller Falcon proof.
 The 4× degree fold of the arb lane (the 94% component), with narrow `i64`
 coeffs preserved, shrinks the Falcon proof ~3.3×.
 
-### ⚠ Pre-existing MLE-first verification bug (found here, NOT the arb fold)
+### MLE-first verification bug — FIXED (`556d723`)
 
-While testing, found that Falcon's **MLE-first proof does not verify**. The
-unfolded `test_e2e_falcon_batch` only runs `prove::<false>` (Combined); flipping
-it to `prove::<true>` fails with `Resolver(WrongSumcheckSum)` — the *same* error
-the arb-fold test hits with `MLE_FIRST=true`. So an MLE-first Falcon proof had
-**never been end-to-end verified**: the Phase-3 bench *times* `prove::<true>`
-but *verifies* a `prove::<false>` proof, so the **Phase-3 "2.3–5.5× MLE-first
-speedup" is for proofs that currently fail verification.**
+While testing, found that Falcon's **MLE-first proof did not verify** (the
+unfolded `test_e2e_falcon_batch` only ran `prove::<false>`; flipping to
+`prove::<true>` failed with `Resolver(WrongSumcheckSum)`, the same error the
+arb-fold test hit with `MLE_FIRST=true`). So an MLE-first Falcon proof had
+**never been end-to-end verified** — the Phase-3 bench *times* `prove::<true>`
+but *verified* a `prove::<false>` proof.
 
-Root-cause hypothesis: in `prove_linear`, the degree-2 zero-ideal product
-`s_3 − s_2·h` is forced to `ZERO` in the ideal-check value, but the CPR sumcheck
-(`prepare_verifier`) reconstructs `expected_sum` from those ideal-check values
-while the prover's `claimed_sum` folds the *actual* product. The MLE-first
-ideal-check appears to evaluate the product as `s3_eval − s2_eval·h_eval`
-(product-of-MLE-evals, ≠ 0 at a random point) rather than the MLE-of-product
-(= 0 on the hypercube), so `claimed_sum ≠ expected_sum`. This is a piop-level
-issue in the MLE-first lane (`evaluate_combined_polynomials` / the zero-ideal
-slot handling), independent of the arb fold. **Needs separate investigation**;
-the arb fold composes with whichever ideal-check lane verifies (Combined today).
+Root cause: `prove_linear`'s MLE-first ideal-check
+(`evaluate_combined_polynomials`) applies each constraint to the *evaluated*
+column MLEs, so the degree-2 zero-ideal product `s_3 − s_2·h` became
+`s3_eval − s2_eval·h_eval` (product-of-MLE-evals, ≠ 0 at a random point) instead
+of the MLE-of-product (= 0 on the hypercube). The CPR sumcheck folds the real
+expression, so `claimed_sum ≠ expected_sum`.
+`CombinedPolyRowBuilder::assert_zero` used to force ZERO but was changed to
+preserve the F[X] expression (the Combined lane needs it), and the MLE-first
+lane's "ZERO is forced" comment went stale.
+
+Fix: `prove_linear` now forces zero-ideal slots to ZERO explicitly (mirroring
+`prove_hybrid`). Sound — ZERO is the only member of the zero ideal (so the
+verifier's membership check already requires it) and the actual constraint is
+bound by the step-4 sumcheck at `count_max_degree + 2`. **The Phase-3 MLE-first
+numbers are now valid** (proofs verify), and both Falcon e2e tests run MLE-first
+end-to-end. The fix affects every UAIR with a degree-≥2 `assert_zero` constraint
+(e.g. SHA-256's selector pins) — worth confirming the headline SHA+ECDSA
+MLE-first demo verifies too. All 26 protocol + 54 piop tests pass.
 
 ## How to use this doc
 
