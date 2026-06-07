@@ -21,7 +21,7 @@ use zinc_poly::{
 };
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{
-    FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
+    ArbFoldedZincTypes4x, FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
@@ -335,6 +335,47 @@ type BenchZincTypes = GenericBenchZincTypes<
     MillerRabin,
     DEGREE_PLUS_ONE,
 >;
+
+// Quarter-degree (`QUARTER_DEGREE_PLUS_ONE = D/4 = 8`) arbitrary-poly ZipType
+// for the Falcon arb-lane degree fold — mirrors `BenchZincTypes`'s arb
+// ZipType at the quarter width.
+type FalconArbQuarterZt = GenericBenchZipTypes<
+    DensePolynomial<i64, QUARTER_DEGREE_PLUS_ONE>,
+    DensePolynomial<i128, QUARTER_DEGREE_PLUS_ONE>,
+    Uint<FIELD_LIMBS>,
+    MillerRabin,
+    i128,
+    i128,
+    Int<{ INT_LIMBS * 6 }>,
+    DensePolynomial<Int<{ INT_LIMBS * 6 }>, QUARTER_DEGREE_PLUS_ONE>,
+    DensePolyInnerProduct<i64, i128, Int<{ INT_LIMBS * 6 }>, MBSInnerProduct, QUARTER_DEGREE_PLUS_ONE>,
+    DensePolyInnerProduct<
+        Int<{ INT_LIMBS * 6 }>,
+        i128,
+        Int<{ INT_LIMBS * 6 }>,
+        MBSInnerProduct,
+        QUARTER_DEGREE_PLUS_ONE,
+    >,
+    MBSInnerProduct,
+>;
+
+/// Falcon arb-lane fold types: binary + int unfolded (from `BenchZincTypes`),
+/// arb folded to quarter degree (`FalconArbQuarterZt`).
+#[derive(Clone, Debug)]
+struct BenchFalconArbFoldedZincTypes;
+impl ArbFoldedZincTypes4x<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE> for BenchFalconArbFoldedZincTypes {
+    type Chal = i128;
+    type Pt = i128;
+    type Fmod = Uint<FIELD_LIMBS>;
+    type PrimeTest = MillerRabin;
+    type BinaryZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::BinaryZt;
+    type ArbitraryZt = FalconArbQuarterZt;
+    type IntZt = <BenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt;
+    type BinaryLc = IprsCode<Self::BinaryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type ArbitraryLc = IprsCode<Self::ArbitraryZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+    type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, REP, PERFORM_CHECKS>;
+}
+
 type Pp<Zt> = (
     ZipPlusParams<
         <Zt as ZincTypes<DEGREE_PLUS_ONE>>::BinaryZt,
@@ -1005,6 +1046,100 @@ fn bench_falcon_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
         zinc_protocol::project_scalar_fn,
         falcon_project_ideal,
     );
+}
+
+// Batched Falcon-512 via the **arb-lane degree fold** (`prove_folded_arb_4x` /
+// `verify_folded_arb_4x`): the 112 arb columns commit at quarter degree (8) and
+// open at `(r_0 ‖ γ_1 ‖ γ_2)`; the `slack` int column is unsplit at `r_0`,
+// binary empty. Targets the arb PCS (~94% of the proof) for a ~3.3× smaller
+// proof. Uses MLE-first (the zero-ideal fix makes it verify).
+fn bench_falcon_arb_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = FalconBatchUair<i64>;
+    type ZtF = BenchFalconArbFoldedZincTypes;
+    let mut rng = rng();
+    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let sig = U::signature();
+    let public_trace = trace.public(&sig);
+
+    // arb split 4× along degree → length 4n; binary (empty) + int unsplit at n.
+    let pp = (
+        ZipPlus::<
+            <ZtF as ArbFoldedZincTypes4x<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>>::BinaryZt,
+            _,
+        >::setup(1 << num_vars, IprsCode::new_with_optimal_depth(1 << num_vars).unwrap()),
+        ZipPlus::<
+            <ZtF as ArbFoldedZincTypes4x<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>>::ArbitraryZt,
+            _,
+        >::setup(
+            1 << (num_vars + 2),
+            IprsCode::new_with_optimal_depth(1 << (num_vars + 2)).unwrap(),
+        ),
+        ZipPlus::<
+            <ZtF as ArbFoldedZincTypes4x<DEGREE_PLUS_ONE, QUARTER_DEGREE_PLUS_ONE>>::IntZt,
+            _,
+        >::setup(1 << num_vars, IprsCode::new_with_optimal_depth(1 << num_vars).unwrap()),
+    );
+    let params = format!("Falcon/nvars={num_vars}");
+
+    group.bench_function(BenchmarkId::new("Prove (arb-folded 4×)", &params), |bench| {
+        bench.iter(|| {
+            black_box(zinc_protocol::prover::prove_folded_arb_4x::<
+                ZtF,
+                U,
+                F,
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+                true,
+                PERFORM_CHECKS,
+            >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn))
+            .expect("arb-folded Falcon prover failed");
+        });
+    });
+
+    let proof: Proof<F> = zinc_protocol::prover::prove_folded_arb_4x::<
+        ZtF,
+        U,
+        F,
+        DEGREE_PLUS_ONE,
+        HALF_DEGREE_PLUS_ONE,
+        QUARTER_DEGREE_PLUS_ONE,
+        true,
+        PERFORM_CHECKS,
+    >(&pp, &trace, num_vars, zinc_protocol::project_scalar_fn)
+    .expect("proof for arb-folded verify bench");
+    eprintln!(
+        "    Proof size (Falcon arb-folded 4×/nvars={num_vars}, raw): {} bytes (zip {} bytes)",
+        proof.get_num_bytes(),
+        proof.zip.len(),
+    );
+
+    group.bench_function(BenchmarkId::new("Verify (arb-folded 4×)", &params), |bench| {
+        bench.iter_batched(
+            || proof.clone(),
+            |proof| {
+                black_box(zinc_protocol::verifier::verify_folded_arb_4x::<
+                    ZtF,
+                    U,
+                    F,
+                    _,
+                    DEGREE_PLUS_ONE,
+                    HALF_DEGREE_PLUS_ONE,
+                    QUARTER_DEGREE_PLUS_ONE,
+                    PERFORM_CHECKS,
+                >(
+                    &pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    zinc_protocol::project_scalar_fn,
+                    falcon_project_ideal,
+                ))
+                .expect("arb-folded Falcon verifier failed");
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
 }
 
 fn bench_no_mult_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -2290,6 +2425,13 @@ fn falcon_benches(c: &mut Criterion) {
     bench_falcon_e2e(&mut group, 4);
     bench_falcon_e2e(&mut group, 6);
     bench_falcon_e2e(&mut group, 10);
+
+    // Arb-lane degree fold (~3.3× smaller proof). Compare "Prove/Verify
+    // (arb-folded 4×)" against the unfolded "Prove (MLE-first)" / "Verify"
+    // lines above at the same nvars.
+    bench_falcon_arb_folded(&mut group, 4);
+    bench_falcon_arb_folded(&mut group, 6);
+    bench_falcon_arb_folded(&mut group, 10);
 
     group.finish();
 }
