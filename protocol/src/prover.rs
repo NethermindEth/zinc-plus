@@ -1408,6 +1408,25 @@ where
         bool_ancillary_opt = Some(ba);
     }
 
+    // 4b': Squared-norm zerocheck group (batched lattice-signature norm bound).
+    // Pushed after booleanity so the group order is [cpr, (booleanity?), norm] —
+    // mirrors the unfolded `ProverSumchecked::step4_sumcheck`.
+    let mut norm_ancillary_opt = None;
+    if let Some(spec) = uair_signature.norm_spec() {
+        let selected: Vec<_> = spec
+            .coeff_slice_arb_cols
+            .iter()
+            .map(|&c| trace.arbitrary_poly[c].clone())
+            .collect();
+        let slices = compute_coeff_slices_flat::<F, _, D>(&selected, &field_cfg);
+        let slack_mle = projected_trace_f[int_offset + spec.slack_int_col].clone();
+        let beta_sq = F::from_with_cfg(spec.beta_sq as u64, &field_cfg);
+        let (ng, na) = prepare_norm_group(&slices, &slack_mle, beta_sq, &ic_eval_point, &field_cfg)
+            .map_err(ProtocolError::Norm)?;
+        groups.push(ng);
+        norm_ancillary_opt = Some(na);
+    }
+
     let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         groups,
@@ -1447,6 +1466,15 @@ where
         )
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
+    }
+    // 4f: Finalize the norm zerocheck group (drained after booleanity so the
+    // md_states order matches the [cpr, (booleanity?), norm] push).
+    if let Some(na) = norm_ancillary_opt {
+        let norm_state = md_states.remove(0);
+        let norm_value_evals =
+            finalize_norm_prover(&mut pcs_transcript.fs_transcript, norm_state, na, &field_cfg)
+                .map_err(ProtocolError::Norm)?;
+        cpr_proof.norm_value_evals = norm_value_evals;
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
 
@@ -2170,6 +2198,25 @@ where
         bool_ancillary_opt = Some(ba);
     }
 
+    // 4b': Squared-norm zerocheck group (batched lattice-signature norm bound).
+    // Pushed after booleanity so the group order is [cpr, (booleanity?), norm] —
+    // mirrors the unfolded `ProverSumchecked::step4_sumcheck`.
+    let mut norm_ancillary_opt = None;
+    if let Some(spec) = uair_signature.norm_spec() {
+        let selected: Vec<_> = spec
+            .coeff_slice_arb_cols
+            .iter()
+            .map(|&c| trace.arbitrary_poly[c].clone())
+            .collect();
+        let slices = compute_coeff_slices_flat::<F, _, D>(&selected, &field_cfg);
+        let slack_mle = projected_trace_f[int_offset + spec.slack_int_col].clone();
+        let beta_sq = F::from_with_cfg(spec.beta_sq as u64, &field_cfg);
+        let (ng, na) = prepare_norm_group(&slices, &slack_mle, beta_sq, &ic_eval_point, &field_cfg)
+            .map_err(ProtocolError::Norm)?;
+        groups.push(ng);
+        norm_ancillary_opt = Some(na);
+    }
+
     let (combined_sumcheck, mut md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
         &mut pcs_transcript.fs_transcript,
         groups,
@@ -2199,6 +2246,15 @@ where
         )
         .map_err(ProtocolError::Booleanity)?;
         cpr_proof.bit_slice_evals = bit_slice_evals;
+    }
+    // 4f: Finalize the norm zerocheck group (drained after booleanity so the
+    // md_states order matches the [cpr, (booleanity?), norm] push).
+    if let Some(na) = norm_ancillary_opt {
+        let norm_state = md_states.remove(0);
+        let norm_value_evals =
+            finalize_norm_prover(&mut pcs_transcript.fs_transcript, norm_state, na, &field_cfg)
+                .map_err(ProtocolError::Norm)?;
+        cpr_proof.norm_value_evals = norm_value_evals;
     }
     let lookup_proof: Option<BatchedLookupProof<F>> = None;
     if let Some(t) = timings.as_mut() {
