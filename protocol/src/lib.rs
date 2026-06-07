@@ -1215,7 +1215,7 @@ mod tests {
             FalconBatchUair<ZtInt>,
             F,
             DEGREE_PLUS_ONE,
-        >::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
+        >::prove::<true, CHECKED>(&pp, &trace, num_vars, project_scalar_fn)
         .expect("Falcon prover failed");
 
         let project_ideal = |ideal: &IdealOrZero<RotationIdeal<ZtInt, FN>>,
@@ -1305,13 +1305,11 @@ mod tests {
         let sig = <FalconBatchUair<i64> as Uair>::signature();
         let public_trace = trace.public(&sig);
 
-        // MLE_FIRST = false (Combined ideal-check lane). The MLE-first lane
-        // (`prove_linear`) currently produces a Falcon proof that does not
-        // verify — a *pre-existing* issue independent of the arb fold: the
-        // unfolded `test_e2e_falcon_batch` also only runs `prove::<false>`, and
-        // the bench times `prove::<true>` but verifies a `prove::<false>`
-        // proof, so an MLE-first Falcon proof had never been end-to-end
-        // verified. The arb fold composes with whichever ideal-check lane works.
+        // MLE_FIRST = true (the fast linear ideal-check lane), exercised
+        // end-to-end with verification — see the zero-ideal fix in
+        // `IdealCheckProtocol::prove_linear` (the MLE-first lane must force
+        // zero-ideal slots to ZERO; the product-of-MLE-evals it would otherwise
+        // emit for `s_3 − s_2·h` is nonzero at a random point).
         let proof = crate::prover::prove_folded_arb_4x::<
             TestArbFoldedZincTypes,
             FalconBatchUair<i64>,
@@ -1319,7 +1317,7 @@ mod tests {
             DEGREE_PLUS_ONE,
             HALF_DEGREE_PLUS_ONE,
             QUARTER_DEGREE_PLUS_ONE,
-            false,
+            true,
             CHECKED,
         >(&pp, &trace, num_vars, project_scalar_fn)
         .expect("arb-folded Falcon prover failed");

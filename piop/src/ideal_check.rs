@@ -186,23 +186,42 @@ where
         F::Inner: ConstTranscribable,
         F::Modulus: ConstTranscribable,
     {
-        // Zero-ideal (`assert_zero`) constraints are identically zero on the
-        // hypercube for an honest prover, and the MLE-first evaluation of a
-        // nonlinear constraint produces a meaningless value. Both cases are
-        // handled inside `CombinedPolyRowBuilder::assert_zero`, which writes
-        // `ZERO` into the corresponding slot regardless of the input
-        // expression — so no post-hoc overwrite is needed here.
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
         // Evaluate combined polynomials using MLE-first approach:
         // evaluate trace columns at the point, then apply constraints.
-        let combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
+        let mut combined_mle_values = combined_poly_builder::evaluate_combined_polynomials::<_, U>(
             trace_matrix,
             projected_scalars,
             num_constraints,
             &evaluation_point,
             field_cfg,
         )?;
+
+        // Force zero-ideal (`assert_zero`) slots to ZERO. The MLE-first
+        // evaluator applies the constraint to the *evaluated* column MLEs, so a
+        // degree-2 zero-ideal term (e.g. `s_3 − s_2·h`) becomes
+        // `s3_eval − s2_eval·h_eval` — the product-of-MLE-evals, which is
+        // nonzero at a random point even though the constraint vanishes on the
+        // hypercube (MLE-of-product ≠ product-of-MLE-evals). Sending that
+        // nonzero value would (a) fail the verifier's zero-ideal membership
+        // check and (b) make the CPR `expected_sum` disagree with the
+        // prover's `claimed_sum`. ZERO is the only value in the zero ideal; the
+        // actual constraint is bound by the step-4 sumcheck, which folds the
+        // real expression at `count_max_degree + 2`. Mirrors `prove_hybrid`'s
+        // zero-ideal handling. (`CombinedPolyRowBuilder::assert_zero` no longer
+        // forces ZERO — it preserves the F[X] expression, which the *Combined*
+        // lane needs — so this MLE-first lane must force it here.)
+        let is_zero_ideal: Vec<bool> = collect_ideals::<U>(num_constraints)
+            .ideals
+            .iter()
+            .map(|i| i.is_zero_ideal())
+            .collect();
+        for (val, zero_ideal) in combined_mle_values.iter_mut().zip(is_zero_ideal) {
+            if zero_ideal {
+                *val = DynamicPolynomialF::ZERO;
+            }
+        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Inner::NUM_BYTES];
 
