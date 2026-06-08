@@ -409,8 +409,7 @@ where
                         kind: "linear_residual_coeffs",
                         col: family.index(),
                     })?;
-            let weighted = scale_poly(residual, weight);
-            aggregate[slot] += &weighted;
+            add_scaled_poly_assign(&mut aggregate[slot], residual, weight);
         }
     }
     aggregate.iter_mut().for_each(DynamicPolynomialF::trim);
@@ -750,8 +749,7 @@ where
     for (row, row_weight) in row_weights.iter().enumerate().take(SHA_ROW_COUNT) {
         let residuals = residual_polys_at_row(trace, public, row, field_cfg)?;
         for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
-            let weighted = scale_poly(&residuals[family.index()], row_weight);
-            out[slot] += &weighted;
+            add_scaled_poly_assign(&mut out[slot], &residuals[family.index()], row_weight);
         }
     }
     out.iter_mut().for_each(DynamicPolynomialF::trim);
@@ -901,8 +899,7 @@ where
                     trace, public, row, &rho_sig0, &rho_sig1, field_cfg,
                 )?;
                 for (family_idx, residual) in residuals.iter().enumerate() {
-                    let weighted = scale_poly(residual, row_weight);
-                    coeffs[family_idx] += &weighted;
+                    add_scaled_poly_assign(&mut coeffs[family_idx], residual, row_weight);
                 }
             }
             coeffs.iter_mut().for_each(DynamicPolynomialF::trim);
@@ -4441,6 +4438,23 @@ fn scale_poly<F: PrimeField>(poly: &DynamicPolynomialF<F>, scalar: &F) -> Dynami
             .map(|coeff| coeff.clone() * scalar)
             .collect::<Vec<_>>(),
     )
+}
+
+fn add_scaled_poly_assign<F: PrimeField>(
+    acc: &mut DynamicPolynomialF<F>,
+    poly: &DynamicPolynomialF<F>,
+    scalar: &F,
+) {
+    if poly.is_zero() || F::is_zero(scalar) {
+        return;
+    }
+    if acc.coeffs.len() < poly.coeffs.len() {
+        acc.coeffs
+            .resize_with(poly.coeffs.len(), || F::zero_with_cfg(scalar.cfg()));
+    }
+    for (dst, coeff) in acc.coeffs.iter_mut().zip(&poly.coeffs) {
+        *dst += coeff.clone() * scalar;
+    }
 }
 
 fn pow_two<F: PrimeField>(exp: usize, field_cfg: &F::Config) -> F {
