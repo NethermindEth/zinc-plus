@@ -325,7 +325,7 @@ pub struct LinearResidualCoeffTable<F: PrimeField> {
 
 impl<F> LinearResidualCoeffTable<F>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     pub fn coeffs_for_family(&self, family: ShaResidualFamily) -> Option<&DynamicPolynomialF<F>> {
         self.coeffs.get(family.index())
@@ -338,7 +338,7 @@ pub fn beta_aggregate_nonzero_ideal_polys<F>(
     field_cfg: &F::Config,
 ) -> Result<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let weights = build_eq_x_r_vec(beta, field_cfg)?;
     beta_aggregate_nonzero_ideal_polys_with_weights(tables, &weights)
@@ -415,6 +415,23 @@ where
         .collect()
 }
 
+fn selected_nonzero_sha_lambda_powers<F>(
+    lambda_powers: &[F],
+) -> Result<[F; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "lambda_powers",
+            col: lambda_powers.len(),
+        });
+    }
+    Ok(std::array::from_fn(|slot| {
+        lambda_powers[NONZERO_SHA_FAMILIES[slot].index()].clone()
+    }))
+}
+
 pub fn build_sha_sumfold_linear_accumulator<F>(
     tables: &[LinearResidualCoeffTable<F>],
     a_powers: &[F],
@@ -445,12 +462,17 @@ where
                     col: table.coeffs.len(),
                 });
             }
-            let mut target = F::zero_with_cfg(field_cfg);
+            let mut values: [F; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
             for (family_idx, residual) in table.coeffs.iter().enumerate() {
-                target += lambda_powers[family_idx].clone()
-                    * evaluate_poly_at_powers_dmr(residual, &a_powers, field_cfg)?;
+                values[family_idx] = evaluate_poly_at_powers_dmr(residual, &a_powers, field_cfg)?;
             }
-            Ok(target)
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &values,
+                lambda_powers,
+                F::zero_with_cfg(field_cfg),
+            )
+            .map_err(ShaProjectionError::from)
         })
         .collect()
 }
@@ -872,6 +894,7 @@ where
         F::one_with_cfg(field_cfg),
         SHA_RESIDUAL_EVAL_POWER_COUNT,
     );
+    let nonzero_lambda_powers = selected_nonzero_sha_lambda_powers(&lambda_powers)?;
 
     cache.taus_at_a.clear();
     cache.fresh_targets.clear();
@@ -884,10 +907,12 @@ where
         let taus: [F; NUM_NONZERO_SHA_FAMILIES] = tau_values
             .try_into()
             .unwrap_or_else(|_| unreachable!("exactly seven SHA ideal values were evaluated"));
-        let mut target = zero.clone();
-        for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
-            target += lambda_powers[family.index()].clone() * &taus[slot];
-        }
+        let target = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            &nonzero_lambda_powers,
+            &taus,
+            zero.clone(),
+        )
+        .map_err(ShaProjectionError::from)?;
         cache.taus_at_a.push(taus);
         cache.fresh_targets.push(target);
     }
@@ -1328,7 +1353,7 @@ where
             field_cfg,
         )?;
 
-        let mut bool_sum = F::zero_with_cfg(field_cfg);
+        let mut bool_terms = Vec::with_capacity(booleanity_sources.len());
         let virtuals = if needs_virtuals {
             Some(reconstruct_virtual_ch_maj_at_row_unchecked(
                 trace, row, field_cfg,
@@ -1336,7 +1361,7 @@ where
         } else {
             None
         };
-        for (idx, source) in booleanity_sources.iter().enumerate() {
+        for source in booleanity_sources {
             let d = booleanity_source_value_at_row_with_virtuals(
                 trace,
                 row,
@@ -1345,8 +1370,14 @@ where
                 field_cfg,
             )?;
             let term = d.clone() * (d - F::one_with_cfg(field_cfg));
-            bool_sum += booleanity_weights[idx].clone() * term;
+            bool_terms.push(term);
         }
+        let bool_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            booleanity_weights,
+            &bool_terms,
+            F::zero_with_cfg(field_cfg),
+        )
+        .map_err(ShaProjectionError::from)?;
         out.push(row_weights[row].clone() * (linear + bool_sum));
     }
     Ok(out)
@@ -1504,19 +1535,23 @@ fn sha_linear_residual_sum_with_weights<F>(
 where
     F: DelayedFieldProductSum,
 {
-    let mut sum = F::zero_with_cfg(field_cfg);
-    for (row, row_weight) in row_weights.iter().enumerate() {
-        sum += row_weight.clone()
-            * sha_linear_residual_row_value_with_powers(
-                trace,
-                public,
-                row,
-                a_powers,
-                lambda_powers,
-                field_cfg,
-            )?;
+    let mut values = Vec::with_capacity(row_weights.len());
+    for row in 0..row_weights.len() {
+        values.push(sha_linear_residual_row_value_with_powers(
+            trace,
+            public,
+            row,
+            a_powers,
+            lambda_powers,
+            field_cfg,
+        )?);
     }
-    Ok(sum)
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        row_weights,
+        &values,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(ShaProjectionError::from)
 }
 
 fn sha_linear_residual_row_value_with_powers<F>(
@@ -2912,13 +2947,14 @@ fn bind_sha_booleanity_sources_to_prefix<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<Vec<F>>, ShaProjectionError>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let prefix_len = binary_len(prefix_vars);
     let source_count = booleanity_sources.len();
     let needs_virtuals = sources_need_virtuals(booleanity_sources);
     let mut source_values = vec![F::zero_with_cfg(field_cfg); prefix_len * source_count];
     let mut out = vec![vec![F::zero_with_cfg(field_cfg); tail_len]; source_count * SHA_ROW_COUNT];
+    let mut source_column_values = Vec::with_capacity(prefix_len);
 
     for tail in 0..tail_len {
         for row in 0..SHA_ROW_COUNT {
@@ -2933,10 +2969,17 @@ where
                 field_cfg,
             )?;
             for source_idx in 0..source_count {
-                let mut acc = F::zero_with_cfg(field_cfg);
-                for (prefix, weight) in prefix_weights.iter().enumerate().take(prefix_len) {
-                    acc += weight.clone() * &source_values[prefix * source_count + source_idx];
+                source_column_values.clear();
+                for prefix in 0..prefix_len {
+                    source_column_values
+                        .push(source_values[prefix * source_count + source_idx].clone());
                 }
+                let acc = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                    prefix_weights,
+                    &source_column_values,
+                    F::zero_with_cfg(field_cfg),
+                )
+                .map_err(ShaProjectionError::from)?;
                 out[source_idx * SHA_ROW_COUNT + row][tail] = acc;
             }
         }

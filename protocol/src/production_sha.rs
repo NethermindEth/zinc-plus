@@ -62,8 +62,8 @@ use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
-    UNCHECKED, delayed_reduction::DelayedFieldProductSum, inner_product::InnerProduct,
-    inner_transparent_field::InnerTransparentField,
+    UNCHECKED, delayed_reduction::DelayedFieldProductSum, inner_product::FieldFieldInnerProduct,
+    inner_product::InnerProduct, inner_transparent_field::InnerTransparentField,
 };
 use zip_plus::{
     ZipError,
@@ -1074,7 +1074,7 @@ pub fn check_fresh_sha_ideal_membership<F>(
     field_cfg: &F::Config,
 ) -> Result<(), ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     verify_fresh_sha_ideal_polys(ideal_polys, field_cfg)?;
     Ok(())
@@ -1381,8 +1381,12 @@ where
     let lambda_powers = build_sha_lambda_powers(&lambda, field_cfg);
     let booleanity_weights =
         build_booleanity_weights(&rho, &xi, booleanity_sources.len(), field_cfg);
-    let initial_claim =
-        evaluate_aggregate_sha_ideal_claim(&aggregate_ideal_polys, &a, &lambda, field_cfg)?;
+    let initial_claim = evaluate_aggregate_sha_ideal_claim_with_powers(
+        &aggregate_ideal_polys,
+        &a_powers,
+        &lambda_powers,
+        field_cfg,
+    )?;
 
     let linear_accumulator_start = std::time::Instant::now();
     let linear_accumulator =
@@ -2504,19 +2508,25 @@ where
         F::one_with_cfg(field_cfg),
         SHA_IDEAL_EVAL_POWER_COUNT,
     );
+    let nonzero_lambda_powers = selected_nonzero_sha_lambda_powers(&lambda_powers)?;
     ideal_polys
         .iter()
         .map(|instance| {
-            let mut target = F::zero_with_cfg(field_cfg);
-            for (slot, family) in production_sha_nonzero_families().iter().enumerate() {
-                target += lambda_powers[family.index()].clone()
-                    * evaluate_production_sha_poly_at_powers(
-                        &instance[slot],
-                        &a_powers,
-                        field_cfg,
-                    )?;
+            let mut values: [F; NUM_NONZERO_SHA_FAMILIES] =
+                std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
+            for (slot, poly) in instance.iter().enumerate() {
+                values[slot] = evaluate_production_sha_poly_at_powers(poly, &a_powers, field_cfg)?;
             }
-            Ok(target)
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &values,
+                &nonzero_lambda_powers,
+                F::zero_with_cfg(field_cfg),
+            )
+            .map_err(|_| {
+                ProductionShaError::NonCanonicalProofObject(
+                    "production SHA nonzero-family dot product failed",
+                )
+            })
         })
         .collect()
 }
@@ -2583,12 +2593,115 @@ where
         F::one_with_cfg(field_cfg),
         SHA_IDEAL_EVAL_POWER_COUNT,
     );
-    let mut target = F::zero_with_cfg(field_cfg);
-    for (slot, family) in production_sha_nonzero_families().iter().enumerate() {
-        target += lambda_powers[family.index()].clone()
-            * evaluate_production_sha_poly_at_powers(&ideal_polys[slot], &a_powers, field_cfg)?;
+    evaluate_aggregate_sha_ideal_claim_with_powers(
+        ideal_polys,
+        &a_powers,
+        &lambda_powers,
+        field_cfg,
+    )
+}
+
+fn evaluate_aggregate_sha_ideal_claim_with_powers<F>(
+    ideal_polys: &[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    if a_powers.len() < SHA_IDEAL_EVAL_POWER_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "aggregate SHA ideal a powers",
+            got: a_powers.len(),
+            expected: SHA_IDEAL_EVAL_POWER_COUNT,
+        });
     }
-    Ok(target)
+    let mut values: [F; NUM_NONZERO_SHA_FAMILIES] =
+        std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
+    for (slot, poly) in ideal_polys.iter().enumerate() {
+        values[slot] = evaluate_production_sha_poly_at_powers(poly, a_powers, field_cfg)?;
+    }
+    lambda_weighted_nonzero_sha_values(&values, lambda_powers, field_cfg)
+}
+
+fn selected_nonzero_sha_lambda_powers<F>(
+    lambda_powers: &[F],
+) -> Result<[F; NUM_NONZERO_SHA_FAMILIES], ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "lambda powers",
+            got: lambda_powers.len(),
+            expected: NUM_SHA_RESIDUAL_FAMILIES,
+        });
+    }
+    Ok(std::array::from_fn(|slot| {
+        lambda_powers[production_sha_nonzero_families()[slot].index()].clone()
+    }))
+}
+
+fn lambda_weighted_nonzero_sha_values<F>(
+    values: &[F; NUM_NONZERO_SHA_FAMILIES],
+    lambda_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    let weights = selected_nonzero_sha_lambda_powers(lambda_powers)?;
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        values,
+        &weights,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject(
+            "production SHA nonzero-family dot product failed",
+        )
+    })
+}
+
+fn lambda_weighted_sha_residual_polys_at_powers<F>(
+    residuals: &[DynamicPolynomialF<F>],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    if residuals.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "SHA residual families",
+            got: residuals.len(),
+            expected: NUM_SHA_RESIDUAL_FAMILIES,
+        });
+    }
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "lambda powers",
+            got: lambda_powers.len(),
+            expected: NUM_SHA_RESIDUAL_FAMILIES,
+        });
+    }
+    let mut values: [F; NUM_SHA_RESIDUAL_FAMILIES] =
+        std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
+    for (idx, residual) in residuals.iter().enumerate() {
+        values[idx] = evaluate_production_sha_poly_at_powers(residual, a_powers, field_cfg)?;
+    }
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        &values,
+        lambda_powers,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject(
+            "production SHA residual-family dot product failed",
+        )
+    })
 }
 
 fn evaluate_production_sha_poly_at_powers<F>(
@@ -2624,7 +2737,7 @@ fn eq_weighted_sum<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let expected = 1usize
         .checked_shl(u32::try_from(point.len()).map_err(|_| {
@@ -2647,12 +2760,14 @@ where
         });
     }
     let weights = build_eq_x_r_vec(point, field_cfg)?;
-    Ok(weights
-        .iter()
-        .zip(values.iter())
-        .fold(F::zero_with_cfg(field_cfg), |acc, (weight, value)| {
-            acc + weight.clone() * value
-        }))
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        &weights,
+        values,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject("eq-weighted value dot product failed")
+    })
 }
 
 fn fold_mle_tables<F>(
@@ -4201,17 +4316,19 @@ where
             let residuals = [
                 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
             ];
-            let mut linear = zero.clone();
-            for (residual, weight) in residuals.iter().zip(lambda_powers.iter()) {
-                linear += weight.clone() * eval_poly(residual);
-            }
+            let residual_evals: [F; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|idx| eval_poly(&residuals[idx]));
+            let linear = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &residual_evals,
+                &lambda_powers,
+                zero.clone(),
+            )
+            .expect("row expression residual dot product lengths match");
 
             let source_bit =
                 |col: ShaWordCol, shift: usize, bit: usize| word_bits(col, shift)[bit].clone();
-            let mut bool_sum = zero.clone();
-            for (source, booleanity_weight) in
-                booleanity_sources.iter().zip(booleanity_weights.iter())
-            {
+            let mut bool_terms = Vec::with_capacity(booleanity_sources.len());
+            for source in &booleanity_sources {
                 let d = match *source {
                     ShaBooleanitySource::WordBit { col, bit } => source_bit(col, 0, bit),
                     ShaBooleanitySource::VirtualCh1 { bit: bit_idx } => {
@@ -4233,8 +4350,14 @@ where
                             - two.clone() * source_bit(ShaWordCol::MajComp, 0, bit_idx)
                     }
                 };
-                bool_sum += booleanity_weight.clone() * d.clone() * (d - one.clone());
+                bool_terms.push(d.clone() * (d - one.clone()));
             }
+            let bool_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &booleanity_weights,
+                &bool_terms,
+                zero.clone(),
+            )
+            .expect("row expression booleanity dot product lengths match");
 
             values[0].clone() * (linear + bool_sum)
         }),
@@ -4986,17 +5109,26 @@ where
         row_weights,
         field_cfg,
     )?;
-    let mut linear = F::zero_with_cfg(field_cfg);
-    for (residual, weight) in residuals.iter().zip(lambda_powers.iter()) {
-        linear += weight.clone()
-            * evaluate_production_sha_poly_at_powers(residual, &a_powers, field_cfg)?;
-    }
+    let linear = lambda_weighted_sha_residual_polys_at_powers(
+        &residuals,
+        a_powers,
+        lambda_powers,
+        field_cfg,
+    )?;
 
-    let mut bool_sum = F::zero_with_cfg(field_cfg);
-    for (source, booleanity_weight) in booleanity_sources.iter().zip(booleanity_weights.iter()) {
+    let mut bool_terms = Vec::with_capacity(booleanity_sources.len());
+    for source in booleanity_sources {
         let d = booleanity_endpoint_value(endpoint_evals, source, field_cfg)?;
-        bool_sum += booleanity_weight.clone() * d.clone() * (d - F::one_with_cfg(field_cfg));
+        bool_terms.push(d.clone() * (d - F::one_with_cfg(field_cfg)));
     }
+    let bool_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        booleanity_weights,
+        &bool_terms,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject("endpoint booleanity dot product failed")
+    })?;
 
     let row_weight = eq_eval(r_ic, r_star, F::one_with_cfg(field_cfg))?;
     Ok(row_weight * (linear + bool_sum))
@@ -5382,7 +5514,7 @@ fn residual_polys_from_endpoints_with_row_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<DynamicPolynomialF<F>>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     if row_weights.len() != SHA_ROW_COUNT {
         return Err(ProductionShaError::LengthMismatch {
@@ -5667,7 +5799,7 @@ fn endpoint_public_word_or_const_poly_with_row_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<DynamicPolynomialF<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let Some(col_idx) = public_word_col_index(col) else {
         return endpoint_public_const_poly_with_row_weights(
@@ -5685,28 +5817,35 @@ where
             .ok_or(ProductionShaError::NonCanonicalProofObject(
                 "production SHA public word columns are required",
             ))?;
-    let mut coeffs = vec![F::zero_with_cfg(field_cfg); SHA_WORD_BITS];
-    for (row, row_weight) in row_weights.iter().enumerate() {
-        for (bit, coeff) in coeffs.iter_mut().enumerate() {
-            let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
-            let bit_column =
-                bit_slices
-                    .get(table_idx)
-                    .ok_or(ProductionShaError::LengthMismatch {
-                        label: "SHA public word bit column",
-                        got: table_idx,
-                        expected: bit_slices.len(),
-                    })?;
-            if bit_column.num_vars != SHA_ROW_VARS || bit_column.evaluations.len() != SHA_ROW_COUNT
-            {
-                return Err(ProductionShaError::LengthMismatch {
-                    label: "SHA public word row count",
-                    got: bit_column.evaluations.len(),
-                    expected: SHA_ROW_COUNT,
-                });
-            }
-            *coeff += row_weight.clone() * &bit_column.evaluations[row];
+    let mut coeffs = Vec::with_capacity(SHA_WORD_BITS);
+    for bit in 0..SHA_WORD_BITS {
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        let bit_column = bit_slices
+            .get(table_idx)
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "SHA public word bit column",
+                got: table_idx,
+                expected: bit_slices.len(),
+            })?;
+        if bit_column.num_vars != SHA_ROW_VARS || bit_column.evaluations.len() != SHA_ROW_COUNT {
+            return Err(ProductionShaError::LengthMismatch {
+                label: "SHA public word row count",
+                got: bit_column.evaluations.len(),
+                expected: SHA_ROW_COUNT,
+            });
         }
+        coeffs.push(
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                row_weights,
+                &bit_column.evaluations,
+                F::zero_with_cfg(field_cfg),
+            )
+            .map_err(|_| {
+                ProductionShaError::NonCanonicalProofObject(
+                    "SHA public word row-weight dot product failed",
+                )
+            })?,
+        );
     }
     Ok(DynamicPolynomialF::new_trimmed(coeffs))
 }
@@ -5802,7 +5941,7 @@ fn sumfold_expected_eval<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let d = eq_eval(beta, r_b, F::one_with_cfg(field_cfg))?;
     let weights = build_eq_x_r_vec(r_b, field_cfg)?;
@@ -5813,12 +5952,14 @@ where
             expected: fresh_targets.len(),
         });
     }
-    let claim_at_r = weights
-        .iter()
-        .zip(fresh_targets)
-        .fold(F::zero_with_cfg(field_cfg), |acc, (weight, target)| {
-            acc + weight.clone() * target
-        });
+    let claim_at_r = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        &weights,
+        fresh_targets,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject("SumFold expected-value dot product failed")
+    })?;
     Ok(d * claim_at_r)
 }
 
