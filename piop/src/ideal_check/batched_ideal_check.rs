@@ -11,7 +11,7 @@ use zinc_utils::cfg_iter;
 pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
     ideals: &[I],
     values: &[R],
-) -> Result<(), BatchedIdealCheckError<R, I>> {
+) -> Result<(), BatchedIdealCheckError<R>> {
     if ideals.len() != values.len() {
         return Err(BatchedIdealCheckError::LengthMismatch {
             num_ideals: ideals.len(),
@@ -25,7 +25,7 @@ pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
             if !ideal.contains(value)? {
                 Err(BatchedIdealCheckError::NotInIdeal(
                     value.clone(),
-                    ideal.clone(),
+                    ideal.to_string(),
                 ))
             } else {
                 Ok(())
@@ -34,7 +34,7 @@ pub fn batched_ideal_check<I: Ideal + IdealCheck<R>, R: Clone + Send + Sync>(
 }
 
 #[derive(Clone, Debug, Error)]
-pub enum BatchedIdealCheckError<R, I> {
+pub enum BatchedIdealCheckError<R> {
     #[error(
         "length mismatch: the collector has {num_ideals} ideals, provided {provided_values} values to check"
     )]
@@ -43,7 +43,7 @@ pub enum BatchedIdealCheckError<R, I> {
         provided_values: usize,
     },
     #[error("{0} does not belong to the ideal {1}")]
-    NotInIdeal(R, I),
+    NotInIdeal(R, String),
     #[error("Ideal check failed: {}", 0.0)]
     IdealCheckFailed(#[from] IdealCheckError),
 }

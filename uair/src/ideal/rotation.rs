@@ -4,6 +4,7 @@ use crate::{
 };
 use crypto_primitives::{FromWithConfig, PrimeField, Semiring};
 use num_traits::{Euclid, Zero};
+use std::fmt::{Display, Formatter};
 use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
 use zinc_utils::from_ref::FromRef;
 
@@ -37,6 +38,12 @@ impl<R: Semiring, const W: usize> FromRef<RotationIdeal<R, W>> for RotationIdeal
 }
 
 impl<R: Semiring, const W: usize> Ideal for RotationIdeal<R, W> {}
+
+impl<R: Semiring, const W: usize> Display for RotationIdeal<R, W> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RotationIdeal<{}, {W}>", self.generating_root)
+    }
+}
 
 impl<F: PrimeField, const W: usize> RotationIdeal<F, W> {
     pub fn from_with_cfg<R>(ideal_over_ring: &RotationIdeal<R, W>, field_cfg: &F::Config) -> Self

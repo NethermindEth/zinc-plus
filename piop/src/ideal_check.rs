@@ -3,6 +3,7 @@ mod batched_ideal_check;
 mod combined_poly_builder;
 mod structs;
 
+pub use batched_ideal_check::BatchedIdealCheckError;
 pub use structs::*;
 
 use crate::projections::{
@@ -11,6 +12,7 @@ use crate::projections::{
 use batched_ideal_check::*;
 use crypto_primitives::PrimeField;
 use num_traits::ConstZero;
+use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
     EvaluationError, univariate::dynamic::over_field::DynamicPolynomialF,
@@ -26,7 +28,16 @@ use zinc_uair::{
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
 /// Ideal-check subprotocol.
-pub trait IdealCheckProtocol: Uair {
+///
+/// Each $F_q[X]$ per-prime invocation samples its own ideal-check evaluation
+/// point $\mathbf r_i \in \mathbb F_{q_i}^\mu$ from the transcript. Under the
+/// current "no challenge unification" design, the $n + 1$ branches sample
+/// independent challenges; see the `TODO(fq-unify)` notes for the planned
+/// optimization that collapses to one shared $\mathbf r$ in $[0, q^*)^\mu$.
+#[derive(Default, Clone, Copy)]
+pub struct IdealCheckProtocol<U: Uair>(PhantomData<U>);
+
+impl<U: Uair> IdealCheckProtocol<U> {
     /// Prover using MLE-first evaluation (column-indexed trace).
     ///
     /// Routes each constraint through the most efficient evaluation path:
@@ -41,110 +52,31 @@ pub trait IdealCheckProtocol: Uair {
     ///   combined polynomial value is zero by construction for an honest
     ///   prover).
     ///
+    /// For $F_{q_i}[X]$ constraints, `trace_matrix` and `projected_scalars`
+    /// must already be projected mod $q_i$.
+    ///
     /// # Parameters
     /// - `transcript`: the Fiat-Shamir transcript.
     /// - `trace_matrix`: input trace for the UAIR `U` projected to
     ///   `DynamicPolynomialF<F>`, column-indexed: `trace_matrix[col][row]`.
     /// - `projected_scalars`: UAIR scalars projected to
     ///   `DynamicPolynomialF<F>`.
+    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
+    ///   be proven, `None` for $Q[X]$ constraints
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `num_vars`: number of variables in trace MLEs.
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
-        transcript: &mut impl Transcript,
-        trace_matrix: &ColumnMajorTrace<F>,
-        projected_scalars: &ProjectedScalars<Self::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
-    where
-        F: InnerTransparentField,
-        F::Integer: ConstTranscribable;
-
-    /// Prover for any UAIR using combined polynomial construction.
-    ///
-    /// Uses row-indexed (transposed) trace for efficient row-by-row
-    /// combined polynomial construction.
-    ///
-    /// # Parameters
-    /// - `transcript`: the Fiat-Shamir transcript.
-    /// - `trace_matrix`: input trace for the UAIR `U` projected to
-    ///   `DynamicPolynomialF<F>`, row-indexed: `trace_matrix[row][col]`.
-    /// - `projected_scalars`: UAIR scalars projected to
-    ///   `DynamicPolynomialF<F>`.
-    /// - `num_constraints`: number of constraints this UAIR encodes.
-    /// - `num_vars`: number of variables in trace MLEs.
-    /// - `field_cfg`: random field configuration sampled on the previous steps
-    ///   of the overall protocol.
-    #[allow(clippy::type_complexity)]
-    fn prove_combined<F, const DEGREE_PLUS_ONE: usize>(
-        transcript: &mut impl Transcript,
-        trace_matrix: &RowMajorTrace<F>,
-        projected_scalars: &ProjectedScalars<Self::Scalar, DynamicPolynomialF<F>>,
-        num_constraints: usize,
-        num_vars: usize,
-        field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, Self::Ideal>>
-    where
-        F: InnerTransparentField,
-        F::Integer: ConstTranscribable;
-
-    /// The verifier part of the ideal-check subprotocol.
-    ///
-    /// The verifier samples a random field element
-    /// the same way the prover sampled a random field
-    /// element for projecting coefficients but disregards it
-    /// as the verifier does not need to project anything.
-    /// Then it computes the ideals encoded by the UAIR `U`,
-    /// samples a random evaluation point and receives
-    /// the evaluations of the combined polynomials sent by the prover
-    /// and checks they belong to the corresponding ideals defined
-    /// by the UAIR `U`.
-    ///
-    /// # Parameters
-    /// - `transcript`: the Fiat-Shamir transcript.
-    /// - `proof`: a purported proof produced by the prover.
-    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
-    /// - `num_vars`: the number of variables the trace row MLEs have.
-    /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
-    ///   the ideal check is operating on it defines ideals over the ring
-    ///   `IcTypes::Witness`. `ideal_over_f_from_ref` allows to convert the
-    ///   ideals over `IcTypes::Witness` into ideals over the field
-    ///   `IcTypes::F`. Think of this as a projection for ideals.
-    /// - `field_cfg`: random field configuration sampled on the previous steps
-    ///   of the overall protocol.
-    #[allow(clippy::type_complexity)]
-    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
-        transcript: &mut impl Transcript,
-        proof: Proof<F>,
-        num_constraints: usize,
-        num_vars: usize,
-        ideal_over_f_from_ref: IdealOverFFromRef,
-        field_cfg: &F::Config,
-    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
-    where
-        F: InnerTransparentField,
-        F::Integer: ConstTranscribable,
-        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-        IdealOverFFromRef: Fn(&IdealOrZero<Self::Ideal>) -> IdealOverF;
-}
-
-impl<U> IdealCheckProtocol for U
-where
-    U: Uair,
-{
-    #[allow(clippy::type_complexity)]
-    fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
+    pub fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+        prime_idx: Option<usize>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F>>
     where
         F: InnerTransparentField,
         F::Integer: ConstTranscribable,
@@ -158,26 +90,33 @@ where
         // * Non-linear non-zero-ideal goes through the row-major fallback
         // * Non-linear zero-ideal entries are zeroed afterwards.
         let ideal_collector = collect_ideals::<U>(num_constraints);
-        if !ideal_collector.fq_ideals.is_empty() {
-            // TODO(fq): Flavor-1 F_q[X] ideal-check prover path. Needs a
-            // separate per-prime projection `phi_{q_i}` of the trace plus a
-            // parallel combined-poly builder accumulating an F_q[X]-valued
-            // claim. See plan / paper Section "Zinc+ Compiler".
-            todo!("F_q[X] ideal-check prover path (MLE-first)");
-        }
         let degrees = count_constraint_degrees::<U>();
 
         let mut has_linear_nonzero: bool = false;
         let mut nonlinear_zero: Vec<usize> = Vec::new();
         let mut nonlinear_nonzero: Vec<usize> = Vec::new();
-        for (idx, ideal) in ideal_collector.ideals.iter().enumerate() {
-            if degrees[idx] <= 1 {
-                has_linear_nonzero |= !ideal.is_zero_ideal();
-            } else if ideal.is_zero_ideal() {
-                nonlinear_zero.push(idx);
-            } else {
-                nonlinear_nonzero.push(idx);
-            }
+
+        macro_rules! categorize_ideals {
+            ($ideals:expr, $degrees:expr) => {
+                for (idx, ideal) in $ideals.iter().enumerate() {
+                    if $degrees[idx] <= 1 {
+                        has_linear_nonzero |= !ideal.is_zero_ideal();
+                    } else if ideal.is_zero_ideal() {
+                        nonlinear_zero.push(idx);
+                    } else {
+                        nonlinear_nonzero.push(idx);
+                    }
+                }
+            };
+        }
+
+        if let Some(prime_idx) = prime_idx {
+            categorize_ideals!(
+                ideal_collector.fq_ideals[prime_idx],
+                degrees.fq_degrees[prime_idx]
+            );
+        } else {
+            categorize_ideals!(ideal_collector.ideals, degrees.q_degrees);
         }
 
         // When any linear non-zero-ideal constraint exists, run
@@ -189,6 +128,7 @@ where
                 combined_poly_builder::evaluate_combined_polynomials::<_, U, DEGREE_PLUS_ONE>(
                     trace_matrix,
                     projected_scalars,
+                    prime_idx,
                     num_constraints,
                     &evaluation_point,
                     field_cfg,
@@ -213,6 +153,7 @@ where
             let values = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 &row_major,
                 projected_scalars,
+                prime_idx,
                 num_constraints,
                 field_cfg,
                 &nonlinear_nonzero,
@@ -224,10 +165,8 @@ where
         }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        combined_mle_values.iter().for_each(|cv| {
+            transcript.absorb_random_field_slice(&cv.coeffs, &mut transcription_buf);
         });
 
         Ok((
@@ -238,15 +177,36 @@ where
         ))
     }
 
+    /// Prover for any UAIR using combined polynomial construction.
+    ///
+    /// Uses row-indexed (transposed) trace for efficient row-by-row
+    /// combined polynomial construction.
+    ///
+    /// For $F_{q_i}[X]$ constraints, `trace_matrix` and `projected_scalars`
+    /// must already be projected mod $q_i$.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `trace_matrix`: input trace for the UAIR `U` projected to
+    ///   `DynamicPolynomialF<F>`, row-indexed: `trace_matrix[row][col]`.
+    /// - `projected_scalars`: UAIR scalars projected to
+    ///   `DynamicPolynomialF<F>`.
+    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
+    ///   be proven, `None` for $Q[X]$ constraints
+    /// - `num_constraints`: number of constraints this UAIR encodes.
+    /// - `num_vars`: number of variables in trace MLEs.
+    /// - `field_cfg`: random field configuration sampled on the previous steps
+    ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
-    fn prove_combined<F, const DEGREE_PLUS_ONE: usize>(
+    pub fn prove_combined<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+        prime_idx: Option<usize>,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F, U::Ideal>>
+    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F>>
     where
         F: InnerTransparentField,
         F::Integer: ConstTranscribable,
@@ -254,18 +214,24 @@ where
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
         let ideal_collector = collect_ideals::<U>(num_constraints);
-        if !ideal_collector.fq_ideals.is_empty() {
-            // TODO(fq): Flavor-1 F_q[X] ideal-check prover path
-            // (combined / row-major). Same caveat as `prove_mle_first`.
-            todo!("F_q[X] ideal-check prover path (combined)");
-        }
-        let non_zero_indices: Vec<usize> = ideal_collector
-            .ideals
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| !i.is_zero_ideal())
-            .map(|(idx, _)| idx)
-            .collect();
+        let non_zero_indices: Vec<usize> = if let Some(prime_idx) = prime_idx {
+            let per_prime_ideals = &ideal_collector.fq_ideals[prime_idx];
+
+            per_prime_ideals
+                .into_iter()
+                .enumerate()
+                .filter(|(_, i)| !i.is_zero_ideal())
+                .map(|(idx, _)| idx)
+                .collect()
+        } else {
+            ideal_collector
+                .ideals
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| !i.is_zero_ideal())
+                .map(|(idx, _)| idx)
+                .collect()
+        };
 
         let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
 
@@ -274,6 +240,7 @@ where
             let computed = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 trace_matrix,
                 projected_scalars,
+                prime_idx,
                 num_constraints,
                 field_cfg,
                 &non_zero_indices,
@@ -287,9 +254,8 @@ where
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 
-        combined_mle_values.iter().for_each(|combined_mle_value| {
-            transcript
-                .absorb_random_field_slice(&combined_mle_value.coeffs, &mut transcription_buf);
+        combined_mle_values.iter().for_each(|v| {
+            transcript.absorb_random_field_slice(&v.coeffs, &mut transcription_buf);
         });
 
         Ok((
@@ -300,19 +266,49 @@ where
         ))
     }
 
-    fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef>(
+    /// The verifier part of the ideal-check subprotocol.
+    ///
+    /// The verifier samples a random field element
+    /// the same way the prover sampled a random field
+    /// element for projecting coefficients but disregards it
+    /// as the verifier does not need to project anything.
+    /// Then it computes the ideals encoded by the UAIR `U`,
+    /// samples a random evaluation point and receives
+    /// the evaluations of the combined polynomials sent by the prover
+    /// and checks they belong to the corresponding ideals defined
+    /// by the UAIR `U`.
+    ///
+    /// # Parameters
+    /// - `transcript`: the Fiat-Shamir transcript.
+    /// - `proof`: a purported proof produced by the prover.
+    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
+    ///   be verified, `None` for $Q[X]$ constraints
+    /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
+    /// - `num_vars`: the number of variables the trace row MLEs have.
+    /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
+    ///   the ideal check is operating on it defines ideals over the ring
+    ///   `IcTypes::Witness`. `ideal_over_f_from_ref` allows to convert the
+    ///   ideals over `IcTypes::Witness` into ideals over the field
+    ///   `IcTypes::F`. Think of this as a projection for ideals.
+    /// - `field_cfg`: random field configuration sampled on the previous steps
+    ///   of the overall protocol.
+    #[allow(clippy::type_complexity)]
+    pub fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef, IdealOverFFromFqRef>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
+        prime_idx: Option<usize>,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
+        ideal_over_f_from_fq_ref: IdealOverFFromFqRef,
         field_cfg: &F::Config,
-    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F, IdealOverF>>
+    ) -> Result<VerifierSubclaim<F>, IdealCheckError<F>>
     where
         F: InnerTransparentField,
         F::Integer: ConstTranscribable,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+        IdealOverFFromFqRef: Fn(&IdealOrZero<U::FqIdeal>) -> IdealOverF,
     {
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 
@@ -325,11 +321,16 @@ where
         }
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
-        if !ideal_collector.fq_ideals.is_empty() {
-            // TODO(fq): Flavor-1 F_q[X] ideal-check verifier path. Needs to
-            // recompute per-prime projected ideals and check the claimed
-            // F_q[X]-valued combined-poly evaluations against them.
-            todo!("F_q[X] ideal-check verifier path");
+
+        macro_rules! collect_non_trival {
+            ($ideals:expr, $ideal_from_ref:ident) => {
+                $ideals
+                    .iter()
+                    .zip(combined_mle_values.iter())
+                    .filter(|(ideal, _)| !ideal.is_zero_ideal())
+                    .map(|(ideal, value)| ($ideal_from_ref(ideal), value.clone()))
+                    .unzip()
+            };
         }
 
         // Only check non-trivial ideals. For assert_zero constraints
@@ -337,13 +338,15 @@ where
         // value is zero by construction; the sumcheck that follows
         // verifies consistency of the claimed evaluations with the
         // actual trace.
-        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = ideal_collector
-            .ideals
-            .iter()
-            .zip(combined_mle_values.iter())
-            .filter(|(ideal, _)| !ideal.is_zero_ideal())
-            .map(|(ideal, value)| (ideal_over_f_from_ref(ideal), value.clone()))
-            .unzip();
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) =
+            if let Some(prime_idx) = prime_idx {
+                collect_non_trival!(
+                    ideal_collector.fq_ideals[prime_idx],
+                    ideal_over_f_from_fq_ref
+                )
+            } else {
+                collect_non_trival!(ideal_collector.ideals, ideal_over_f_from_ref)
+            };
 
         batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
 
@@ -355,11 +358,11 @@ where
 }
 
 #[derive(Clone, Debug, Error)]
-pub enum IdealCheckError<F: PrimeField, I> {
+pub enum IdealCheckError<F: PrimeField> {
     #[error("ideal check prover failed to evaluate an mle: {0}")]
     MleEvaluationError(#[from] EvaluationError),
     #[error("mle evaluation ideal check failure: {0}")]
-    IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>, I>),
+    IdealCollectorError(#[from] BatchedIdealCheckError<DynamicPolynomialF<F>>),
     #[error("`eq` polynomial construction failure: {0}")]
     EqPolyConstructionError(#[from] PolyArithErrors),
 }
@@ -368,6 +371,9 @@ pub enum IdealCheckError<F: PrimeField, I> {
 mod tests {
     use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 
+    use crate::test_utils::{
+        LIMBS, run_ideal_check_prover_combined, run_ideal_check_prover_linear, test_config,
+    };
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
     use zinc_test_uair::{
@@ -380,27 +386,36 @@ mod tests {
         ideal::{DegreeOneIdeal, Ideal, IdealCheck},
     };
 
-    use crate::test_utils::{
-        LIMBS, run_ideal_check_prover_combined, run_ideal_check_prover_linear, test_config,
-    };
-
     use super::*;
 
     // TODO(Ilia): These tests are absolute joke.
     //             Once we have time we need to create a comprehensive test suite
     //             akin to the one we have for the PCS or the sumcheck.
 
-    fn do_test<U, IdealOverF, IdealOverFFromRef, const DEGREE_PLUS_ONE: usize>(
+    fn do_test<
+        U,
+        IdealOverF,
+        IdealOverFFromRef,
+        IdealOverFFromFqRef,
+        const DEGREE_PLUS_ONE: usize,
+    >(
         num_vars: usize,
+        prime_idx: Option<usize>,
         ideal_over_f_from_ref: IdealOverFFromRef,
+        ideal_over_f_from_fq_ref: IdealOverFFromFqRef,
     ) where
         U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
-            + IdealCheckProtocol,
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF + Copy,
+        IdealOverFFromFqRef: Fn(&IdealOrZero<U::FqIdeal>) -> IdealOverF + Copy,
     {
         let mut rng = rng();
+
+        let num_constraints = count_constraints::<U>();
+        let num_constraints = prime_idx
+            .map(|i| num_constraints.for_prime(i))
+            .unwrap_or(num_constraints.q);
 
         // Combined approach
         {
@@ -408,17 +423,18 @@ mod tests {
             let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &U::generate_random_trace(num_vars, &mut rng),
+                prime_idx,
                 &mut transcript.clone(),
             );
 
-            let num_constraints = count_constraints::<U>();
-
-            let verifier_result = U::verify_as_subprotocol(
+            let verifier_result = IdealCheckProtocol::<U>::verify_as_subprotocol(
                 &mut transcript.clone(),
                 proof,
+                prime_idx,
                 num_constraints,
                 num_vars,
                 ideal_over_f_from_ref,
+                ideal_over_f_from_fq_ref,
                 &test_config(),
             )
             .expect("Verification failed");
@@ -435,17 +451,18 @@ mod tests {
             let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &U::generate_random_trace(num_vars, &mut rng),
+                prime_idx,
                 &mut transcript.clone(),
             );
 
-            let num_constraints = count_constraints::<U>();
-
-            let verifier_result = U::verify_as_subprotocol(
+            let verifier_result = IdealCheckProtocol::<U>::verify_as_subprotocol(
                 &mut transcript.clone(),
                 proof,
+                prime_idx,
                 num_constraints,
                 num_vars,
                 ideal_over_f_from_ref,
+                ideal_over_f_from_fq_ref,
                 &test_config(),
             )
             .expect("Verification failed");
@@ -464,18 +481,27 @@ mod tests {
         let num_vars = 2;
 
         // Linear UAIR with non-zero ideals
-        do_test::<TestUairNoMultiplication<Int<5>>, _, _, 32>(num_vars, |ideal_over_ring| {
-            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
-        });
+        do_test::<TestUairNoMultiplication<Int<5>>, _, _, _, 32>(
+            num_vars,
+            None,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_| unreachable!("F_q[X] should not be used for this UAIR"),
+        );
 
         // Non-linear UAIR with all-zero ideals
-        do_test::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(num_vars, |_ideal_over_ring| {
-            IdealOrZero::<DegreeOneIdeal<_>>::zero()
-        });
+        do_test::<TestUairSimpleMultiplication<Int<5>>, _, _, _, 32>(
+            num_vars,
+            None,
+            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
+            |_| unreachable!("F_q[X] should not be used for this UAIR"),
+        );
 
         // Linear UAIR with bit-op virtuals and mixed down-row splicing.
-        do_test::<TestUairBitOpsMixedSplice<Int<5>>, _, _, 32>(num_vars, |ideal_over_ring| {
-            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
-        });
+        do_test::<TestUairBitOpsMixedSplice<Int<5>>, _, _, _, 32>(
+            num_vars,
+            None,
+            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
+            |_| unreachable!("F_q[X] should not be used for this UAIR"),
+        );
     }
 }

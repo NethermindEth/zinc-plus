@@ -32,6 +32,7 @@ type F = MontyField<4>;
 pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
+    prime_idx: Option<usize>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -41,8 +42,7 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
 )
 where
     U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
-        + IdealCheckProtocol,
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
     F: FromWithConfig<Int<5>>,
 {
     // These helpers intentionally accept mixed-type signatures. The projection
@@ -51,6 +51,9 @@ where
     let field_cfg = test_config();
 
     let num_constraints = count_constraints::<U>();
+    let num_constraints = prime_idx
+        .map(|i| num_constraints.for_prime(i))
+        .unwrap_or(num_constraints.q);
 
     let scalars = project_scalars::<F, U>(|scalar| {
         scalar
@@ -61,10 +64,11 @@ where
 
     let trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(trace, &field_cfg);
 
-    let (proof, state) = U::prove_mle_first::<_, DEGREE_PLUS_ONE>(
+    let (proof, state) = IdealCheckProtocol::<U>::prove_mle_first::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
+        prime_idx,
         num_constraints,
         num_vars,
         &field_cfg,
@@ -80,6 +84,7 @@ where
 pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
+    prime_idx: Option<usize>,
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
@@ -89,8 +94,7 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
 )
 where
     U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
-        + IdealCheckProtocol,
+        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
     F: FromWithConfig<Int<5>>,
 {
     // These helpers intentionally accept mixed-type signatures. The projection
@@ -99,6 +103,9 @@ where
     let field_cfg = test_config();
 
     let num_constraints = count_constraints::<U>();
+    let num_constraints = prime_idx
+        .map(|i| num_constraints.for_prime(i))
+        .unwrap_or(num_constraints.q);
 
     let scalars = project_scalars::<F, U>(|scalar| {
         scalar
@@ -109,10 +116,11 @@ where
 
     let trace: RowMajorTrace<F> = project_trace_coeffs_row_major(trace, &field_cfg);
 
-    let (proof, state) = U::prove_combined::<_, DEGREE_PLUS_ONE>(
+    let (proof, state) = IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
+        prime_idx,
         num_constraints,
         num_vars,
         &field_cfg,

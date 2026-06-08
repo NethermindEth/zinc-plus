@@ -897,6 +897,7 @@ where
     R: ConstSemiring + 'static,
 {
     type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = ImpossibleIdeal;
     type Scalar = DensePolynomial<R, 32>;
 
     fn signature() -> UairSignature {
@@ -911,13 +912,14 @@ where
         sig
     }
 
-    fn constrain_general<B, FromR, MulByScalar, IFromR>(
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,
         down: TraceRow<B::Expr>,
         _from_ref: FromR,
         _mbs: MulByScalar,
         ideal_from_ref: IFromR,
+        _fq_ideal_from_ref: IFqFromR,
     ) where
         B: ConstraintBuilder,
         IFromR: Fn(&Self::Ideal) -> B::Ideal,
@@ -1058,11 +1060,107 @@ where
         // u = up.binary_poly[0], v = up.binary_poly[1].
         //   phi_2(v) - X^{W-r} * phi_2(u) ∈ (X^W - 1) over F_2[X].
         b.assert_in_fq_ideal(
-            /* prime_index = */ 0,
+            /* prime_idx = */ 0,
             up.binary_poly[1].clone()
                 - &mbs(&up.binary_poly[0], &x_w_minus_r).expect("mul-by-X^(W-r) overflow"),
             &fq_ideal_from_ref(&RotationIdeal::<R, W>::new(R::ONE)),
         );
+    }
+}
+
+/// A UAIR exercising the Flavor-1 $\mathbb{F}_{q}[X]$-constraint surface
+/// for a **large** prime $q$ (large enough to project under the existing
+/// PIOP infrastructure, in contrast to [`TestUairFqRotation`] which uses
+/// $q = 2$ and is therefore out of scope of the current end-to-end PIOP).
+///
+/// Single arbitrary-poly witness column `a`. One $\mathbb F_q[X]$-constraint:
+///
+/// $$
+///   \phi_q(a) \in (X - 0) \quad \text{in } \mathbb F_q[X],
+/// $$
+///
+/// i.e. $\phi_q(a)(0) = 0$ — the constant term of `a` is divisible by $q$.
+/// The trace generator builds `a` so that this holds (by zeroing its
+/// $X^0$ coefficient).
+///
+/// Used to exercise the per-prime $\mathbb F_q[X]$ ideal-check branch of
+/// the Zinc$+$ protocol end-to-end with a large prime.
+#[derive(Clone, Debug)]
+pub struct TestUairFqLargePrime<R>(PhantomData<R>);
+
+/// Large 64-bit prime used by [`TestUairFqLargePrime`].
+/// `0xFFFFFFFFFFFFFFC5` is the largest prime that fits in `u64`.
+pub const TEST_UAIR_FQ_LARGE_PRIME: u64 = 0xFFFF_FFFF_FFFF_FFC5;
+
+impl<R> Uair for TestUairFqLargePrime<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type Ideal = ImpossibleIdeal;
+    type FqIdeal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+
+    fn signature() -> UairSignature {
+        // 1 arbitrary-poly witness column `a`, no shifts, no lookups.
+        let total = TotalColumnLayout::new(0, 1, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+            .with_primes(vec![TEST_UAIR_FQ_LARGE_PRIME])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        _down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        _ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
+    {
+        // `phi_q(a) \in (X - 0)`.
+        b.assert_in_fq_ideal(
+            /* prime_idx = */ 0,
+            up.arbitrary_poly[0].clone(),
+            &fq_ideal_from_ref(&DegreeOneIdeal::<R>::new(R::ZERO)),
+        );
+    }
+}
+
+impl<R> GenerateRandomTrace<32> for TestUairFqLargePrime<R>
+where
+    R: ConstSemiring + From<i32> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32, 32> {
+        // Build the witness column: random polynomials whose constant term
+        // is forced to zero (so `phi_q(a)(0) = 0` regardless of `q`).
+        let a: DenseMultilinearExtension<DensePolynomial<R, 32>> =
+            DenseMultilinearExtension::rand(num_vars, rng)
+                .into_iter()
+                .map(|x: u32| {
+                    let poly = DensePolynomial::from_ref(&DensePolynomial::<Boolean, _>::from(
+                        BinaryPoly::<32>::from(x),
+                    ));
+                    // Zero out the X^0 coefficient.
+                    let mut coeffs = [R::ZERO; 32];
+                    coeffs[1..].clone_from_slice(&poly.coeffs[1..]);
+                    DensePolynomial::new(coeffs)
+                })
+                .collect();
+
+        UairTrace {
+            arbitrary_poly: vec![a].into(),
+            ..Default::default()
+        }
     }
 }
 
@@ -1071,8 +1169,8 @@ mod tests {
     use crypto_primitives::crypto_bigint_int::Int;
     use zinc_uair::{
         collect_scalars::collect_scalars,
-        constraint_counter::count_constraints,
-        degree_counter::{count_constraint_degrees, count_max_degree},
+        constraint_counter::count_constraints_total,
+        degree_counter::{count_constraint_degrees_flattened, count_max_degree},
         ideal_collector::collect_ideals,
     };
 
@@ -1083,8 +1181,11 @@ mod tests {
     #[test]
     fn test_constraint_degrees() {
         fn assert_uair_shape<U: Uair>(expected_degrees: &[usize]) {
-            assert_eq!(count_constraints::<U>(), expected_degrees.len());
-            assert_eq!(count_constraint_degrees::<U>(), expected_degrees);
+            assert_eq!(count_constraints_total::<U>(), expected_degrees.len());
+            assert_eq!(
+                count_constraint_degrees_flattened::<U>(),
+                expected_degrees
+            );
             assert_eq!(
                 count_max_degree::<U>(),
                 *expected_degrees.iter().max().unwrap()
@@ -1100,12 +1201,14 @@ mod tests {
         assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>>>(&[1, 1, 1]);
         // TestUairFqRotation: a single F_2[X] linear constraint.
         assert_uair_shape::<TestUairFqRotation<u32>>(&[1]);
+        // TestUairFqLargePrime: a single F_q[X] linear constraint.
+        assert_uair_shape::<TestUairFqLargePrime<Int<LIMBS>>>(&[1]);
     }
 
     /// `TestUairFqRotation` declares one prime (q = 2) on its signature and
     /// emits exactly one $\mathbb{F}_2[X]$-ideal-membership constraint via
     /// [`ConstraintBuilder::assert_in_fq_ideal`]. The `IdealCollector` must
-    /// route it into `fq_ideals` (tagged with `prime_index = 0`) and leave
+    /// route it into `fq_ideals` (tagged with `prime_idx = 0`) and leave
     /// the legacy `ideals` vector empty.
     #[test]
     fn test_fq_rotation_signature_and_collector() {
@@ -1117,15 +1220,17 @@ mod tests {
             collector.ideals.is_empty(),
             "Q[X] ideal vector should be empty (no assert_in_ideal / assert_zero calls)"
         );
+        // `fq_ideals` is indexed by `prime_idx`; the single ideal here lives
+        // under `prime_idx = 0` (-> primes[0] = 2).
         assert_eq!(
             collector.fq_ideals.len(),
             1,
-            "exactly one F_q[X] ideal collected"
+            "F_q[X] ideals indexed up to prime_idx 0",
         );
         assert_eq!(
-            collector.fq_ideals[0].0,
-            0,
-            "F_q[X] ideal tagged with prime_index 0 (-> primes[0] = 2)"
+            collector.fq_ideals[0].len(),
+            1,
+            "exactly one F_q[X] ideal collected under prime_idx 0",
         );
     }
 

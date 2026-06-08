@@ -397,13 +397,12 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
 
 /// Project scalars of a UAIR onto F[X].
 ///
-/// TODO(fq): For Flavor-1 F_q[X]-constraints (scalars used inside
-/// `assert_in_fq_ideal`), this needs to be paralleled by a per-prime
-/// `project_scalars_to_fq_i` returning a `ProjectedScalars` keyed by
-/// `prime_index`. The current projection samples a random verifier prime
-/// (`get_random_field_cfg`); the F_q[X] path requires *deterministic*
-/// projections at each `q_i` in `UairSignature::primes()`. Deferred behind
-/// the PIOP-side `todo!()`s in `ideal_check::{prove_*,verify_as_subprotocol}`.
+/// This is the projection map used by both the Q[X] and F_q[X] branches of
+/// the Zinc$+$ PIOP; the only difference between branches is which
+/// `field_cfg` is in scope inside the `project` closure. For Q[X], the
+/// `field_cfg` is built from a verifier-sampled prime
+/// (`get_random_field_cfg`); for F_q[X] branch $i$, it is built
+/// deterministically from `q_i` in [`zinc_uair::UairSignature::primes`].
 pub fn project_scalars<F: PrimeField, U: Uair>(
     project: impl Fn(&U::Scalar) -> DynamicPolynomialF<F>,
 ) -> ProjectedScalars<U::Scalar, DynamicPolynomialF<F>> {

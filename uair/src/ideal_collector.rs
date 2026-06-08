@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use zinc_utils::from_ref::FromRef;
 
 use crate::{
@@ -20,10 +21,10 @@ use crate::{
 /// no `assert_fq_zero`) but downstream consumers may construct it.
 pub struct IdealCollector<I: Ideal, IFq: Ideal> {
     pub ideals: Vec<IdealOrZero<I>>,
-    /// $\mathbb{F}_{q_i}[X]$-ideals tagged by their `prime_index` into the
+    /// $\mathbb{F}_{q_i}[X]$-ideals indexed by their `prime_idx` into the
     /// owning UAIR's [`crate::UairSignature::primes`] tuple. Empty for legacy
     /// UAIRs with $\mathbb{Q}[X]$-only constraints.
-    pub fq_ideals: Vec<(usize, IdealOrZero<IFq>)>,
+    pub fq_ideals: Vec<Vec<IdealOrZero<IFq>>>,
 }
 
 impl<I: Ideal, IFq: Ideal> IdealCollector<I, IFq> {
@@ -71,13 +72,11 @@ where
         self.ideals.push(IdealOrZero::zero());
     }
 
-    fn assert_in_fq_ideal(
-        &mut self,
-        prime_index: usize,
-        _expr: Self::Expr,
-        ideal: &Self::FqIdeal,
-    ) {
-        self.fq_ideals.push((prime_index, ideal.clone()));
+    fn assert_in_fq_ideal(&mut self, prime_idx: usize, _expr: Self::Expr, ideal: &Self::FqIdeal) {
+        if self.fq_ideals.len() <= prime_idx {
+            self.fq_ideals.resize(prime_idx + 1, Vec::new());
+        }
+        self.fq_ideals[prime_idx].push(ideal.clone());
     }
 }
 
@@ -105,6 +104,18 @@ impl<I: Ideal> IdealOrZero<I> {
             IdealOrZero::NonZero(ideal) => IdealOrZero::NonZero(f(ideal)),
             IdealOrZero::Zero => IdealOrZero::Zero,
         }
+    }
+}
+
+impl<I: Ideal> Display for IdealOrZero<I> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IdealOrZero<")?;
+        match self {
+            Self::Zero => write!(f, "Zero")?,
+            Self::NonZero(ideal) => write!(f, "{}", ideal)?,
+        }
+        write!(f, ">")?;
+        Ok(())
     }
 }
 

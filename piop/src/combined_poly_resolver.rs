@@ -38,13 +38,19 @@ use zinc_utils::{
     inner_transparent_field::InnerTransparentField, powers,
 };
 
-// TODO(fq): Flavor-1 F_q[X]-constraint integration. CPR currently builds a
-// single sumcheck group over the Q[X]-projected trace; supporting F_q[X]
-// constraints will require either a parallel CPR group per declared prime
-// (each over `phi_{q_i}(trace)`) or a unified group folding both families
-// together. Either way the sumcheck batching shape changes, which is why
-// the protocol-level guard rejects UAIRs with non-empty `primes()` before
-// reaching CPR.
+/// Combined polynomial resolver.
+///
+/// Builds one sumcheck group over either the Q[X]-projected trace and the
+/// $\mathbb{Q}[X]$ family of constraints, or the $\mathbb{F}_{q_i}[X]$ family
+/// (for a specific $q_i$ prime). The `MultiDegreeSumcheck` at the protocol
+/// layer batches them all together.
+///
+/// TODO(fq-unify): once challenge unification lands, all $n+1$ CPR groups can
+/// be merged into a single `MultiDegreeSumcheck` over a shared evaluation
+/// point, soundness factor $q_i / q^*$ per branch.
+///
+/// TODO(fq-unify): merge with the Q[X] CPR group via a shared sumcheck once
+/// challenge unification lands.
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
@@ -76,6 +82,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `bit_op_specs().len()`.
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
+    /// - `prime_idx`: The index of the prime $q$ for which constraints are
+    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]`.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
@@ -88,6 +96,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         bit_op_down_mles: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
+        prime_idx: Option<usize>,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
@@ -168,6 +177,9 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             },
         };
 
+        // TODO(fq-unify): when challenge unification lands, the folding
+        // challenge α can be shared with the Q[X] branch's CPR. Today every
+        // branch samples its own.
         // The challenge '\alpha' to batch multiple evaluation claims
         let folding_challenge: F = transcript.get_field_challenge(field_cfg);
 
@@ -197,7 +209,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = ConstraintFolder::new(&folding_challenge_powers, &zero);
+            let mut folder = if let Some(prime_idx) = prime_idx {
+                ConstraintFolder::new_fq(prime_idx, &folding_challenge_powers, &zero)
+            } else {
+                ConstraintFolder::new_z(&folding_challenge_powers, &zero)
+            };
 
             let project = |scalar: &U::Scalar| {
                 projected_scalars
@@ -212,10 +228,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 project,
                 |x, y| Some(project(y) * x),
                 ImpossibleIdeal::from_ref,
-                // TODO(fq): Flavor-1 Fq[X] ideal projection. The
-                // ConstraintFolder rejects assert_in_fq_ideal at runtime; the
-                // protocol layer guards against any UAIR with non-empty
-                // UairSignature::primes reaching this code path.
                 ImpossibleIdeal::from_ref,
             );
 
@@ -253,7 +265,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Integer: ConstTranscribable + Zero,
     {
         // Sumcheck prover stops evaluating MLEs
-        // at the second to last challenge
+        // at the second-to-last challenge
         // leaving all MLEs in num_vars=1
         // state. We need to evaluate them up
         // and send to the verifier.
@@ -330,6 +342,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `combined_sumcheck.claimed_sums()[0]`.
     /// - `ic_check_subclaim`: Subclaim from the ideal check; provides the
     ///   evaluation point and claimed values used to verify the sumcheck sum.
+    /// - `prime_idx`: The index of the prime $q$ for which constraints are
+    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]$.
     /// - `num_constraints`: Number of constraint polynomials in `U`.
     /// - `num_vars`: Number of variables of the trace MLEs.
     /// - `projecting_element`: The random challenge used to project `F[X] → F`.
@@ -340,6 +354,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         proof: &CprProof<F>,
         claimed_sum: F,
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
+        prime_idx: Option<usize>,
         num_constraints: usize,
         num_vars: usize,
         projecting_element: &F,
@@ -349,6 +364,13 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Integer: ConstTranscribable,
         U: Uair,
     {
+        // `prime_idx` is currently unused: `prepare_verifier` only re-derives
+        // the folding challenge α and the expected sum from `ic_check_subclaim`,
+        // both of which are branch-agnostic. The parameter is kept for symmetry
+        // with `prepare_sumcheck_group` / `finalize_verifier` and to leave a
+        // hook for the per-prime soundness chain (TODO(fq-soundness)) and the
+        // shared-challenge unification (TODO(fq-unify)).
+        let _ = prime_idx;
         let uair_sig = U::signature();
         proof.validate_evaluation_sizes(
             uair_sig.total_cols().cols(),
@@ -423,6 +445,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `ancillary`: Produced by [`prepare_verifier`]; carries folding
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
+    /// - `prime_idx`: The index of the prime $q$ for which constraints are
+    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]`.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_verifier<U>(
@@ -432,6 +456,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         expected_evaluation: F,
         ancillary: CprVerifierAncillary<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
+        prime_idx: Option<usize>,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
@@ -450,7 +475,11 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             one.clone(),
         )?;
 
-        let mut folder = ConstraintFolder::new(&ancillary.folding_challenge_powers, &zero);
+        let mut folder = if let Some(prime_idx) = prime_idx {
+            ConstraintFolder::new_fq(prime_idx, &ancillary.folding_challenge_powers, &zero)
+        } else {
+            ConstraintFolder::new_z(&ancillary.folding_challenge_powers, &zero)
+        };
 
         let project = |scalar: &U::Scalar| {
             projected_scalars
@@ -479,9 +508,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
-            // TODO(fq): Flavor-1 Fq[X] ideal projection on the verifier side.
-            // The protocol layer guards against any UAIR with non-empty
-            // UairSignature::primes reaching this code path.
             ImpossibleIdeal::from_ref,
         );
 
@@ -582,11 +608,11 @@ mod tests {
         const DEGREE_PLUS_ONE: usize,
     >(
         num_vars: usize,
+        prime_idx: Option<usize>,
         ideal_over_f_from_ref: IdealOverFFromRef,
     ) where
         U: Uair<Scalar = DensePolynomial<Int<5>, DEGREE_PLUS_ONE>>
-            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>
-            + IdealCheckProtocol,
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<5>, Int = Int<5>>,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<MontyField<LIMBS>>>,
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     {
@@ -601,17 +627,20 @@ mod tests {
             run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &trace,
+                prime_idx,
                 &mut prover_transcript,
             );
 
         let num_constraints = count_constraints::<U>();
 
-        let ic_check_subclaim = U::verify_as_subprotocol(
+        let ic_check_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             num_vars,
             ideal_over_f_from_ref,
+            |_| panic!("F_q[X] not supported here!"),
             &test_config(),
         )
         .expect("Verification failed");
@@ -634,7 +663,8 @@ mod tests {
             Vec::new(),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             num_vars,
             max_degree,
             &test_config(),
@@ -665,7 +695,8 @@ mod tests {
             &proof,
             md_proof.claimed_sums()[0].clone(),
             &ic_check_subclaim,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             num_vars,
             &projecting_element,
             &test_config(),
@@ -688,6 +719,7 @@ mod tests {
                 md_subclaims.expected_evaluations()[0].clone(),
                 cpr_verifier_ancillary,
                 &projected_scalars,
+                /* prime_idx = */ None,
                 &test_config(),
             )
             .is_ok()
@@ -702,10 +734,12 @@ mod tests {
 
         test_successful_verification_generic::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
             num_vars,
+            None,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
         );
         test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
             num_vars,
+            None,
             |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
         );
     }

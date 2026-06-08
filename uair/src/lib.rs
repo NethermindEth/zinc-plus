@@ -51,8 +51,20 @@ pub trait ConstraintBuilder {
     /// mod $q_{\text{prime\_index}}$ (the paper's $\phi_{q_i}$), belongs to
     /// the $\mathbb{F}_{q_i}[X]$-ideal `ideal`.
     ///
-    /// `prime_index` indexes into [`UairSignature::primes`] and must be a
+    /// `prime_idx` indexes into [`UairSignature::primes`] and must be a
     /// valid index for any UAIR that calls this method.
+    ///
+    /// # Ordering convention
+    ///
+    /// To make `count_constraints` / `count_constraint_degrees` /
+    /// `IdealCollector::ideals` / `IdealCollector::fq_ideals` line up with
+    /// the per-branch dispatch in the PIOP, UAIRs MUST emit *all* of their
+    /// $\mathbb{Q}[X]$ constraints (via `assert_in_ideal` / `assert_zero`)
+    /// before any $\mathbb{F}_{q_i}[X]$ constraints (via this method).
+    /// Within each family the order is arbitrary but must be stable across
+    /// `constrain_general` calls on the same UAIR. Inside the
+    /// $\mathbb{F}_{q_i}[X]$ family, constraints may interleave primes
+    /// freely — the PIOP filters by `prime_idx` at use time.
     ///
     /// # Flavor-1 scope (current implementation)
     ///
@@ -60,14 +72,8 @@ pub trait ConstraintBuilder {
     /// supplied to [`Uair::constrain_general`] (i.e. projections of
     /// $\hat{f}_0$ in `def:uairplus`); no new $\hat{f}_i$ witness lane is
     /// introduced. The reduction $\phi_{q_i}$ is applied at proving / verifying
-    /// time by the PIOP layer, which is currently unimplemented for any UAIR
-    /// with non-empty [`UairSignature::primes`].
-    fn assert_in_fq_ideal(
-        &mut self,
-        prime_index: usize,
-        expr: Self::Expr,
-        ideal: &Self::FqIdeal,
-    );
+    /// time by the PIOP layer.
+    fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, ideal: &Self::FqIdeal);
 }
 
 /// Specifies a shifted column
@@ -644,12 +650,12 @@ pub trait Uair: Clone {
     ///   convenient to provide a closure instead of a `FromRef` implementation.
     /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
     ///   rationale as for `from_ref`.
-    /// - `ideal_from_ref`: a closure that turns a `Self::Ideal` into
-    ///   `B::Ideal` for the legacy $\mathbb{Q}[X]$-ideal-membership family.
+    /// - `ideal_from_ref`: a closure that turns a `Self::Ideal` into `B::Ideal`
+    ///   for the legacy $\mathbb{Q}[X]$-ideal-membership family.
     /// - `fq_ideal_from_ref`: a closure that turns a `Self::FqIdeal` into
-    ///   `B::FqIdeal` for the new $\mathbb{F}_{q_i}[X]$-ideal-membership
-    ///   family emitted via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs
-    ///   without $\mathbb{F}_q[X]$-constraints can ignore this closure.
+    ///   `B::FqIdeal` for the new $\mathbb{F}_{q_i}[X]$-ideal-membership family
+    ///   emitted via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs without
+    ///   $\mathbb{F}_q[X]$-constraints can ignore this closure.
     fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,

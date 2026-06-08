@@ -56,7 +56,7 @@ use zinc_poly::{
 };
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_uair::{Uair, ideal::Ideal};
+use zinc_uair::Uair;
 use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named, powers};
 use zip_plus::{
     ZipError,
@@ -75,7 +75,7 @@ pub struct Proof<F: PrimeField> {
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
-    /// Randomized ideal check proof.
+    /// Randomized ideal check proof (Q[X] branch).
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof (up_evals + down_evals).
     pub cpr_proof: CombinedPolyResolverProof<F>,
@@ -97,6 +97,20 @@ pub struct Proof<F: PrimeField> {
     /// has no witness binary-poly columns (the argument is omitted from
     /// the multi-degree sumcheck in that case).
     pub booleanity_proof: Option<BooleanityProof<F>>,
+    /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
+    /// prime in [`zinc_uair::UairSignature::primes`], in the same order.
+    /// Empty for legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
+    ///
+    /// TODO(fq-soundness): each branch's ideal-check claim is currently only
+    /// checked for ideal-membership; the downstream CPR + sumcheck +
+    /// multipoint-eval + per-prime PCS-open chain that closes the
+    /// soundness loop against the committed trace is **not** present yet.
+    /// This proof field will gain `Vec<CombinedPolyResolverProof<F>>` and
+    /// `Vec<MultiDegreeSumcheckProof<F>>` per prime once that lands -- or
+    /// be unified into a single shared sumcheck via the `TODO(fq-unify)`
+    /// optimization that samples one $\mathbf r \in [0, q^*)^\mu$ and
+    /// reduces it mod each $q_i$.
+    pub ideal_checks_fq: Vec<IdealCheckProof<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -135,6 +149,17 @@ where
             (None, bytes)
         };
 
+        // ideal_checks_fq: u32 count, then that many length-prefixed
+        // IdealCheckProof entries (one per declared prime).
+        let (n_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_fq = usize::try_from(n_fq).expect("n_fq must fit into usize");
+        let mut ideal_checks_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(n_fq);
+        for _ in 0..n_fq {
+            let (ic, rest) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+            ideal_checks_fq.push(ic);
+            bytes = rest;
+        }
+
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         assert!(bytes.is_empty(), "All bytes should be consumed");
@@ -149,6 +174,7 @@ where
             witness_lifted_evals,
             lookup_proof: None,
             booleanity_proof,
+            ideal_checks_fq,
         }
     }
 
@@ -194,6 +220,15 @@ where
             buf = bp.write_transcription_bytes_subset(buf);
         }
 
+        // ideal_checks_fq: u32 count + that many length-prefixed entries.
+        let n_fq = u32::try_from(self.ideal_checks_fq.len())
+            .expect("ideal_checks_fq length must fit into u32");
+        n_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        for ic in &self.ideal_checks_fq {
+            buf = ic.write_transcription_bytes_subset(buf);
+        }
+
         // TODO: serialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         let _ = buf;
@@ -212,6 +247,11 @@ where
             Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
             None => 0,
         };
+        let ideal_checks_fq_bytes: usize = self
+            .ideal_checks_fq
+            .iter()
+            .map(|ic| IdealCheckProof::<F>::LENGTH_NUM_BYTES + ic.get_num_bytes())
+            .sum();
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -230,6 +270,9 @@ where
             // booleanity presence flag + optional payload
             + u32::NUM_BYTES
             + booleanity_bytes
+            // ideal_checks_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + ideal_checks_fq_bytes
     }
 }
 
@@ -326,9 +369,9 @@ where
 /// Error type for error happening during the protocol execution (prover and
 /// verifier).
 #[derive(Debug, Error)]
-pub enum ProtocolError<F: PrimeField, I: Ideal> {
+pub enum ProtocolError<F: PrimeField> {
     #[error("ideal check failed: {0}")]
-    IdealCheck(#[from] IdealCheckError<F, I>),
+    IdealCheck(#[from] IdealCheckError<F>),
     #[error("combined poly resolver failed: {0}")]
     Resolver(#[from] CombinedPolyResolverError<F>),
     #[error("scalar projection failed: {0}")]
@@ -347,6 +390,12 @@ pub enum ProtocolError<F: PrimeField, I: Ideal> {
     Pcs(#[from] ZipError),
     #[error("PCS verification failed at column {0}: {1}")]
     PcsVerification(usize, ZipError),
+    #[error("F_q[X] ideal check failed at prime_idx {prime_idx} (q = {q}): {source}")]
+    FqIdealCheck {
+        prime_idx: usize,
+        q: u64,
+        source: IdealCheckError<F>,
+    },
 }
 
 //
@@ -531,9 +580,12 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        ShaProxy, TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        ShaProxy, TestUairFqLargePrime, TestUairMixedShifts, TestUairNoMultiplication,
+        TestUairSimpleMultiplication,
     };
-    use zinc_uair::{ideal::DegreeOneIdeal, ideal_collector::IdealOrZero};
+    use zinc_uair::{
+        constraint_counter::count_constraints, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
+    };
     use zinc_utils::{
         CHECKED,
         from_ref::FromRef,
@@ -728,6 +780,17 @@ mod tests {
         };
     }
 
+    /// Legacy test UAIRs declare no primes, so the F_q[X] ideal projection
+    /// is never invoked at runtime. UAIRs that exercise the F_q[X] branch
+    /// must pass a concrete projection closure.
+    macro_rules! default_project_fq_ideal {
+        () => {
+            |_ideal, _cfg| -> IdealOrZero<DegreeOneIdeal<F>> {
+                unreachable!("legacy UAIR has no F_q[X] constraints")
+            }
+        };
+    }
+
     fn do_test<Zt, U>(
         num_vars: usize,
         linear_codes: (Zt::BinaryLc, Zt::ArbitraryLc, Zt::IntLc),
@@ -736,8 +799,13 @@ mod tests {
             &<F as HasPrimeFieldConfig>::Config,
         ) -> IdealOrZero<DegreeOneIdeal<F>>
         + Copy,
+        project_fq_ideal: impl Fn(
+            &IdealOrZero<U::FqIdeal>,
+            &<F as HasPrimeFieldConfig>::Config,
+        ) -> IdealOrZero<DegreeOneIdeal<F>>
+        + Copy,
         tamper: impl Fn(&mut Proof<F>),
-        check_verification: impl Fn(Result<(), ProtocolError<F, IdealOrZero<DegreeOneIdeal<F>>>>),
+        check_verification: impl Fn(Result<(), ProtocolError<F>>),
     ) where
         Zt: ZincTypes<D, QUARTER_D>,
         <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -752,6 +820,7 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>,
         <F as Field>::Integer: FromRef<Zt::Fmod>,
+        Zt::Fmod: From<u64>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -788,6 +857,7 @@ mod tests {
                         num_vars,
                         project_scalar_fn,
                         project_ideal,
+                        project_fq_ideal,
                     );
                 check_verification(verification_result);
             };
@@ -813,6 +883,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -842,6 +913,7 @@ mod tests {
                 RaaCode::new(num_vars),
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -862,6 +934,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -882,6 +955,39 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
+    /// End-to-end test: [`TestUairFqLargePrime`] -- exercises the per-prime
+    /// $\mathbb F_q[X]$ ideal-check branch with a large prime
+    /// ($q = $ [`TEST_UAIR_FQ_LARGE_PRIME`]).
+    ///
+    /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_q[X]$
+    /// constraint $\phi_q(a) \in (X - 0)$.
+    ///
+    /// TODO(fq-soundness): this only checks honest-prover correctness of the
+    /// ideal-membership claim. The per-prime CPR + sumcheck +
+    /// multipoint-eval + PCS-open chain that ties $e_{i,t}$ back to the
+    /// committed trace is NYI; once that lands this test will also catch
+    /// "ideal-membership-by-construction" cheaters.
+    #[test]
+    fn test_e2e_fq_large_prime() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            // No Q[X] constraints -> Q[X] ideal projection is never invoked.
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            // F_q[X] ideal projection: `DegreeOneIdeal<R>` -> `DegreeOneIdeal<F>`
+            // by lifting the generating root through the per-prime field cfg.
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
             |_| {},
             |res| res.unwrap(),
         );
@@ -907,6 +1013,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -927,6 +1034,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -955,6 +1063,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |_| {},
             |res| res.unwrap(),
         );
@@ -976,6 +1085,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| proof.witness_lifted_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
@@ -997,6 +1107,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| proof.cpr_proof.up_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
@@ -1020,6 +1131,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| proof.cpr_proof.down_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
@@ -1046,6 +1158,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| proof.commitments.0.root = Default::default(),
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
@@ -1077,6 +1190,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| {
                 let bp = proof
                     .booleanity_proof
@@ -1113,6 +1227,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| {
                 let bp = proof
                     .booleanity_proof
@@ -1142,6 +1257,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| {
                 proof.booleanity_proof = None;
             },
@@ -1177,10 +1293,11 @@ mod tests {
         use zinc_piop::{
             combined_poly_resolver::CombinedPolyResolver, lookup::booleanity::BooleanityChecker,
         };
-        use zinc_uair::constraint_counter::count_constraints;
 
         type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt>, F, D, QUARTER_D>;
         type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
+
+        let num_constraints = count_constraints::<BigLinearUair<ZtInt>>();
 
         let num_vars = 8;
         let iprs = (
@@ -1205,7 +1322,9 @@ mod tests {
                 num_vars,
             )
             .and_then(|s| s.step1_prime_projection())
-            .and_then(|s| s.step2_ideal_check(default_project_ideal!()))
+            .and_then(|s| {
+                s.step2_ideal_check(default_project_ideal!(), default_project_fq_ideal!())
+            })
             .and_then(|s| s.step3_eval_projection(project_scalar_fn))
             .expect("steps 0..=3");
 
@@ -1226,7 +1345,8 @@ mod tests {
                 &proof_cpr,
                 claimed_sums[0].clone(),
                 &ic_subclaim,
-                count_constraints::<BigLinearUair<ZtInt>>(),
+                /* prime_idx = */ None,
+                num_constraints.q,
                 nv,
                 &a,
                 &cfg,
@@ -1286,6 +1406,7 @@ mod tests {
             num_vars,
             project_scalar_fn,
             default_project_ideal!(),
+            default_project_fq_ideal!(),
         )
         .expect_err("verifier must reject alpha-prime-tampered proof");
         assert!(
@@ -1308,6 +1429,7 @@ mod tests {
                 make_iprs(num_vars),
             ),
             default_project_ideal!(),
+            default_project_fq_ideal!(),
             |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));

@@ -69,14 +69,15 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             });
 
         let (ic_proof, ic_prover_state) =
-            <TestUairNoMultiplication<_> as IdealCheckProtocol>::prove_combined::<
+            IdealCheckProtocol::<TestUairNoMultiplication<_>>::prove_combined::<
                 _,
                 DEGREE_PLUS_ONE,
             >(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
-                num_constraints,
+                /* prime_idx = */ None,
+                num_constraints.q,
                 num_vars,
                 field_cfg,
             )
@@ -98,7 +99,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 Vec::new(),
                 &ic_prover_state.evaluation_point,
                 &scalars_f,
-                num_constraints,
+                /* prime_idx = */ None,
+                num_constraints.q,
                 num_vars,
                 max_degree,
                 field_cfg,
@@ -153,18 +155,21 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
         let ic_check_subclaim =
-            <TestUairNoMultiplication<_> as IdealCheckProtocol>::verify_as_subprotocol::<
+            IdealCheckProtocol::<TestUairNoMultiplication<_>>::verify_as_subprotocol::<
                 F<FIELD_LIMBS>,
+                _,
                 _,
                 _,
             >(
                 &mut verifier_transcript,
                 ic_proof,
-                num_constraints,
+                /* prime_idx = */ None,
+                num_constraints.q,
                 num_vars,
                 |ideal_over_ring| {
                     ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
                 },
+                |_| unreachable!("not used here"),
                 &field_cfg,
             )
             .expect("IC Verifier failed");
@@ -187,7 +192,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
-                        num_constraints,
+                        /* prime_idx = */ None,
+                        num_constraints.q,
                         num_vars,
                         &verifier_projecting_element,
                         &field_cfg,
@@ -210,6 +216,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         md_subclaims.expected_evaluations()[0].clone(),
                         ancillary,
                         &scalars_f,
+                        /* prime_idx = */ None,
                         &field_cfg,
                     )
                     .expect("CPR finalize_verifier failed"),
@@ -254,19 +261,18 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
-        let (ic_proof, ic_prover_state) =
-            <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::prove_combined::<
-                _,
-                DEGREE_PLUS_ONE,
-            >(
-                transcript,
-                &projected_trace,
-                &projected_scalars,
-                num_constraints,
-                num_vars,
-                field_cfg,
-            )
-            .expect("IC Prover failed");
+        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<
+            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
+        >::prove_combined::<_, DEGREE_PLUS_ONE>(
+            transcript,
+            &projected_trace,
+            &projected_scalars,
+            /* prime_idx = */ None,
+            num_constraints.q,
+            num_vars,
+            field_cfg,
+        )
+        .expect("IC Prover failed");
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
@@ -285,7 +291,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             Vec::new(),
             &ic_prover_state.evaluation_point,
             &scalars_f,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             num_vars,
             max_degree,
             field_cfg,
@@ -343,16 +350,19 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
             let ic_check_subclaim =
-                <TestUairSimpleMultiplication<Int<INT_LIMBS>> as IdealCheckProtocol>::verify_as_subprotocol::<
+                IdealCheckProtocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>::verify_as_subprotocol::<
                     F<FIELD_LIMBS>,
+                    _,
                     _,
                     _,
                 >(
                     &mut verifier_transcript,
                     ic_proof,
-                    num_constraints,
+                    /* prime_idx = */ None,
+                    num_constraints.q,
                     num_vars,
                     |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
+                    |_| unreachable!("not used here"),
                     &field_cfg,
                 )
                 .expect("IC Verifier failed");
@@ -376,7 +386,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
-                        num_constraints,
+                        /* prime_idx = */ None,
+                        num_constraints.q,
                         num_vars,
                         &verifier_projecting_element,
                         &field_cfg,
@@ -401,6 +412,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                             md_subclaims.expected_evaluations()[0].clone(),
                             ancillary,
                             &scalars_f,
+                            /* prime_idx = */ None,
                             &field_cfg,
                         )
                         .expect("CPR finalize_verifier failed"),

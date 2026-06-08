@@ -21,6 +21,10 @@ use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
 /// an `assert_*` method is called it adds it to the RLC
 /// with the next power of the challenge `\alpha`.
 pub struct ConstraintFolder<'a, F: PrimeField> {
+    /// If `None`, this would fold $Z[X]$ contraints.
+    /// If `Some(i)`, this would fold $F_{q_i}[X]$ constraints.
+    /// All unrelated constraints are skipped.
+    prime_idx: Option<usize>,
     /// A reference to precomputed powers of the challenge.
     challenge_powers: &'a [F],
     /// Index of the current constraint,
@@ -31,8 +35,18 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
 }
 
 impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
-    pub fn new(challenge_powers: &'a [F], zero: &F) -> Self {
+    pub fn new_z(challenge_powers: &'a [F], zero: &F) -> Self {
         Self {
+            prime_idx: None,
+            challenge_powers,
+            current_constraint: 0,
+            folded_constraints: zero.clone(),
+        }
+    }
+
+    pub fn new_fq(prime_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
+        Self {
+            prime_idx: Some(prime_idx),
             challenge_powers,
             current_constraint: 0,
             folded_constraints: zero.clone(),
@@ -54,26 +68,22 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        self.fold_constraint(expr);
+        if self.prime_idx.is_none() {
+            self.fold_constraint(expr);
+        }
     }
 
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
-        self.fold_constraint(expr);
+        if self.prime_idx.is_none() {
+            self.fold_constraint(expr);
+        }
     }
 
     #[inline(always)]
-    fn assert_in_fq_ideal(
-        &mut self,
-        _prime_index: usize,
-        _expr: Self::Expr,
-        _ideal: &Self::FqIdeal,
-    ) {
-        // TODO(fq): Flavor-1 Fq[X] constraints will require a separate folding
-        // term over phi_{q_i}(expr); the current PIOP folds only the Q[X]
-        // family. Any UAIR with non-empty `UairSignature::primes` is rejected
-        // at the protocol layer before reaching this folder, so we panic
-        // loudly here as a defense-in-depth guard.
-        todo!("Fq[X] constraint accumulation in CPR folder");
+    fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
+        if self.prime_idx.is_some_and(|i| i == prime_idx) {
+            self.fold_constraint(expr);
+        }
     }
 }

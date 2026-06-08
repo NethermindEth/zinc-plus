@@ -19,12 +19,7 @@ impl ConstraintBuilder for DoNothingBuilder {
     }
 
     #[inline(always)]
-    fn assert_in_fq_ideal(
-        &mut self,
-        _prime_index: usize,
-        _expr: Self::Expr,
-        _ideal: &Self::FqIdeal,
-    ) {
+    fn assert_in_fq_ideal(&mut self, _prime_idx: usize, _expr: Self::Expr, _ideal: &Self::FqIdeal) {
         // do nothing
     }
 }

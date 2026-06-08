@@ -31,6 +31,32 @@ use zip_plus::{
 };
 
 //
+// Per-prime F_q[X] branch helpers
+//
+
+/// Build a [`PrimeField`] config from a `u64` prime declared in
+/// [`UairSignature::primes`].
+///
+/// `Zt::Fmod` is constructed from the `u64` via [`From`]; `F::Modulus` is
+/// then derived from `Zt::Fmod` via [`FromRef`]; finally `F::make_cfg`
+/// produces the runtime config.
+///
+/// Primality of `prime` is the UAIR author's responsibility: the UAIR
+/// (including its `primes()` tuple) is part of the relation index, agreed
+/// upon by prover and verifier ahead of time.
+#[inline]
+fn build_fq_field_cfg<Zt, F, const D: usize, const FD: usize>(prime: u64) -> F::Config
+where
+    Zt: ZincTypes<D, FD>,
+    Zt::Fmod: From<u64>,
+    F: PrimeField,
+    F::Modulus: FromRef<Zt::Fmod>,
+{
+    let fmod = Zt::Fmod::from(prime);
+    F::make_cfg(&F::Modulus::from_ref(&fmod)).expect("declared prime is assumed prime")
+}
+
+//
 // Type-state structs
 //
 
@@ -100,6 +126,14 @@ pub struct ProverProjectedCombined<
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+    /// Per-prime $\mathbb{F}_{q_i}[X]$ projections (one entry per prime in
+    /// `UairSignature::primes()`), pre-staged in step 2 so step 3's per-prime
+    /// ideal check can read them. Empty for legacy UAIRs.
+    ///
+    /// TODO(fq-perf): the row-major projection is duplicated -- once for the
+    /// Q[X] branch and once per prime here. The `fq-unify` optimization
+    /// would emit all projections in one trace sweep.
+    fq_staging: Vec<FqProjStagingRowMajor<U, F>>,
 }
 
 /// After step 2 via [`step2_mle_first`](ProverCommitted::step2_mle_first)
@@ -114,6 +148,27 @@ pub struct ProverProjectedMleFirst<
     const FD: usize,
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
+    field_cfg: F::Config,
+    projected_trace: ColumnMajorTrace<F>,
+    projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+    /// Per-prime $\mathbb{F}_{q_i}[X]$ projections, column-major layout
+    /// counterpart of [`ProverProjectedCombined::fq_staging`].
+    fq_staging: Vec<FqProjStagingColumnMajor<U, F>>,
+}
+
+/// Per-prime $\phi_{q_i}$ projection of the integer trace and UAIR scalars
+/// in row-major layout, pre-built at step 2 for step 3's per-prime ideal
+/// check.
+#[derive(Clone, Debug)]
+pub struct FqProjStagingRowMajor<U: Uair, F: PrimeField> {
+    field_cfg: F::Config,
+    projected_trace: RowMajorTrace<F>,
+    projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+}
+
+/// Column-major counterpart of [`FqProjStagingRowMajor`].
+#[derive(Clone, Debug)]
+pub struct FqProjStagingColumnMajor<U: Uair, F: PrimeField> {
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
@@ -137,6 +192,17 @@ pub struct ProverIdealChecked<
     // New
     ic_proof: IdealCheckProof<F>,
     ic_eval_point: Vec<F>,
+    /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
+    /// prime in `base.uair_signature.primes()`, in order.
+    ///
+    /// TODO(fq-soundness): each entry is currently only a standalone
+    /// ideal-membership check on the per-prime combined polynomial
+    /// $e_{i,t}$; the downstream per-prime CPR + sumcheck +
+    /// multipoint-eval + PCS-open chain that ties $e_{i,t}$ back to the
+    /// committed trace via $\phi_{q_i}(\hat f_0)$ is **not** present yet.
+    /// See [`Proof::ideal_checks_fq`] for the soundness gap and the planned
+    /// unification optimization (one shared $\mathbf r \in [0, q^*)^\mu$).
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
 }
 
 /// After step 4 (eval projection). `projected_scalars_fx` has been consumed.
@@ -154,6 +220,7 @@ pub struct ProverEvalProjected<
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     ic_eval_point: Vec<F>,
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
 
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
@@ -175,6 +242,7 @@ pub struct ProverSumchecked<
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
     /// Trace MLEs at the original $\psi_a$ projecting element, as built
     /// by `evaluate_trace_to_column_mles` in a previous step.
     ///
@@ -214,6 +282,7 @@ pub struct ProverMultipointEvaled<
     field_cfg: F::Config,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
@@ -237,6 +306,7 @@ pub struct ProverLifted<
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     ic_proof: IdealCheckProof<F>,
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
@@ -263,6 +333,7 @@ pub struct ProverPcsOpened<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     ic_proof: IdealCheckProof<F>,
+    ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     lookup_proof: Option<BatchedLookupProof<F>>,
@@ -297,6 +368,11 @@ macro_rules! impl_with_type_bounds {
                 + 'static,
             F::Integer:
                 ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync,
+            // Per-prime F_q[X] branches need to build a `F::Config` from each
+            // `u64` in `UairSignature::primes()`. Concrete `Zt::Fmod`
+            // instantiations (`Uint<LIMBS>`, etc.) all satisfy this; legacy
+            // UAIRs with an empty `primes()` never exercise the conversion.
+            Zt::Fmod: From<u64>,
         {
             $($code)*
         }
@@ -314,20 +390,8 @@ where
     #[allow(clippy::type_complexity)]
     pub fn step0_fold<'a>(
         trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
-    ) -> Result<ProverFolded<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverFolded<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let uair_signature = U::signature();
-        // TODO(fq): Flavor-1 F_q[X] PIOP path. The protocol currently only
-        // proves the Q[X]-ideal-membership family of UAIR constraints; any
-        // UAIR declaring F_q[X]-constraints (non-empty `primes()`) needs a
-        // deterministic per-prime projection `phi_{q_i}` of the trace plus a
-        // parallel ideal-check / CPR group, none of which is implemented
-        // yet. Fail loudly here so misuse is obvious.
-        assert!(
-            uair_signature.primes().is_empty(),
-            "F_q[X] PIOP path NYI: UAIR declares primes {:?} but the prover \
-             only supports Q[X]-only constraints",
-            uair_signature.primes()
-        );
         let witness_trace = trace.witness(&uair_signature);
 
         let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)
@@ -363,7 +427,7 @@ impl_with_type_bounds!(ProverFolded
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         num_vars: usize,
-    ) -> Result<ProverCommitted<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverCommitted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let sig = &self.uair_signature;
         let public_trace = self.original_trace.public(sig);
 
@@ -413,7 +477,7 @@ impl_with_type_bounds!(ProverCommitted
     fn project_common<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
         &mut self,
         project_scalar: S,
-    ) -> Result<(F::Config, ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F, U::Ideal>>
+    ) -> Result<(F::Config, ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>), ProtocolError<F>>
     {
         let field_cfg = self
             .pcs_transcript
@@ -428,36 +492,71 @@ impl_with_type_bounds!(ProverCommitted
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the row-major layout.
     /// Works for both linear and non-linear constraints.
-    pub fn step2_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step2_combined<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Copy>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedCombined<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
 
         let projected_trace = project_trace_coeffs_row_major(self.original_trace, &field_cfg);
+
+        // Per-prime F_q[X] staging: project trace + scalars under each
+        // `phi_{q_i}` deterministically. `project_scalar` is reused with the
+        // per-prime cfg.
+        let primes = self.uair_signature.primes().to_vec();
+        let mut fq_staging: Vec<FqProjStagingRowMajor<U, F>> = Vec::with_capacity(primes.len());
+        for &q_i in &primes {
+            let cfg_i = build_fq_field_cfg::<Zt, F, D, FD>(q_i);
+            let projected_trace_i =
+                project_trace_coeffs_row_major(self.original_trace, &cfg_i);
+            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, &cfg_i));
+            fq_staging.push(FqProjStagingRowMajor {
+                field_cfg: cfg_i,
+                projected_trace: projected_trace_i,
+                projected_scalars_fx: projected_scalars_i,
+            });
+        }
+
         Ok(ProverProjectedCombined {
             base: self,
             field_cfg,
             projected_trace,
             projected_scalars_fx,
+            fq_staging,
         })
     }
 
     /// Step 2 (MLE-first / column-major): Prime projection
     /// (`\phi_q`: `Z[X] -> F_q[X]`). Samples a random prime, projects the
     /// full trace and scalars using the column-major layout.
-    pub fn step2_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>>(
+    pub fn step2_mle_first<S: Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Copy>(
         mut self,
         project_scalar: S,
-    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverProjectedMleFirst<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let (field_cfg, projected_scalars_fx) = self.project_common(project_scalar)?;
 
         let projected_trace = project_trace_coeffs_column_major(self.original_trace, &field_cfg);
+
+        let primes = self.uair_signature.primes().to_vec();
+        let mut fq_staging: Vec<FqProjStagingColumnMajor<U, F>> = Vec::with_capacity(primes.len());
+        for &q_i in &primes {
+            let cfg_i = build_fq_field_cfg::<Zt, F, D, FD>(q_i);
+            let projected_trace_i =
+                project_trace_coeffs_column_major(self.original_trace, &cfg_i);
+            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, &cfg_i));
+            fq_staging.push(FqProjStagingColumnMajor {
+                field_cfg: cfg_i,
+                projected_trace: projected_trace_i,
+                projected_scalars_fx: projected_scalars_i,
+            });
+        }
+
         Ok(ProverProjectedMleFirst {
             base: self,
             field_cfg,
             projected_trace,
             projected_scalars_fx,
+            fq_staging,
         })
     }
 });
@@ -466,19 +565,65 @@ impl_with_type_bounds!(ProverProjectedCombined
 {
     /// Step 3 (combined): Ideal check via `prove_combined` on the row-major
     /// trace. Works for both linear and non-linear constraints.
+    ///
+    /// Also runs one per-prime $\mathbb{F}_{q_i}[X]$ ideal check
+    /// ([`prove_combined_fq`]) per declared prime in
+    /// `UairSignature::primes()`, in order. The per-prime trace and scalars
+    /// are projected deterministically with `q_i`'s `field_cfg`.
+    ///
+    /// TODO(fq-unify): each per-prime branch samples its own ideal-check
+    /// challenge $\mathbf r_i$ from the transcript. With challenge
+    /// unification, all $n+1$ branches would share one $\mathbf r$ sampled
+    /// in $[0, q^*)^\mu$ and reduced mod each $q_i$, eliminating $n$
+    /// independent `get_field_challenges` calls and collapsing the
+    /// downstream CPR / PCS chain to a single shared instance.
+    ///
+    /// TODO(fq-soundness): the per-prime claims produced here are only
+    /// ideal-membership checks on the combined polynomials $e_{i,t}$; the
+    /// per-prime CPR + sumcheck + multipoint-eval + PCS-open chain that
+    /// ties $e_{i,t}$ to the committed trace is not implemented yet.
+    /// Adding it means duplicating the post-step3 chain (steps 5..=8) once
+    /// per declared prime -- or, equivalently, performing the
+    /// `fq-unify` optimization that lets the chain be run once and shared.
     pub fn step3_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let num_constraints = count_constraints::<U>();
 
-        let (ic_proof, ic_prover_state) = U::prove_combined::<_, D>(
+        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             self.base.num_vars,
             &self.field_cfg,
         )?;
+
+        // Per-prime F_q[X] ideal checks, in `primes()` order. Uses the
+        // per-prime trace/scalar projections pre-built in step 2.
+        let primes = self.base.uair_signature.primes().to_vec();
+        let mut ic_proof_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(primes.len());
+        for (prime_idx, (&q_i, staging)) in
+            primes.iter().zip(self.fq_staging.iter()).enumerate()
+        {
+            let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &staging.projected_trace,
+                &staging.projected_scalars_fx,
+                Some(prime_idx),
+                num_constraints.for_prime(prime_idx),
+                self.base.num_vars,
+                &staging.field_cfg,
+            )
+            .map_err(|source| ProtocolError::FqIdealCheck {
+                prime_idx,
+                q: q_i,
+                source,
+            })?;
+
+            ic_proof_fq.push(ic_proof_i);
+        }
 
         Ok(ProverIdealChecked {
             base: self.base,
@@ -487,6 +632,7 @@ impl_with_type_bounds!(ProverProjectedCombined
             projected_scalars_fx: self.projected_scalars_fx,
             ic_proof,
             ic_eval_point: ic_prover_state.evaluation_point,
+            ic_proof_fq,
         })
     }
 });
@@ -501,17 +647,47 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     /// to zero.
     pub fn step3_ideal_check(
         mut self,
-    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+        // The Q[X]-branch ideal check only consumes Q[X] constraints; F_q[X]
+        // constraints are handled by the per-prime branch below.
         let num_constraints = count_constraints::<U>();
 
-        let (ic_proof, ic_prover_state) = U::prove_mle_first::<_, D>(
+        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             self.base.num_vars,
             &self.field_cfg,
         )?;
+
+        // Per-prime F_q[X] ideal checks (MLE-first / column-major), in
+        // `primes()` order. Uses the per-prime trace/scalar projections
+        // pre-built in step 2. See `step3_ideal_check` on
+        // `ProverProjectedCombined` for the TODO(fq-*) notes -- same caveats.
+        let primes = self.base.uair_signature.primes().to_vec();
+        let mut ic_proof_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(primes.len());
+        for (prime_idx, (&q_i, staging)) in
+            primes.iter().zip(self.fq_staging.iter()).enumerate()
+        {
+            let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                &staging.projected_trace,
+                &staging.projected_scalars_fx,
+                Some(prime_idx),
+                num_constraints.for_prime(prime_idx),
+                self.base.num_vars,
+                &staging.field_cfg,
+            )
+            .map_err(|source| ProtocolError::FqIdealCheck {
+                prime_idx,
+                q: q_i,
+                source,
+            })?;
+
+            ic_proof_fq.push(ic_proof_i);
+        }
 
         Ok(ProverIdealChecked {
             base: self.base,
@@ -520,6 +696,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             projected_scalars_fx: self.projected_scalars_fx,
             ic_proof,
             ic_eval_point: ic_prover_state.evaluation_point,
+            ic_proof_fq,
         })
     }
 });
@@ -530,7 +707,7 @@ impl_with_type_bounds!(ProverIdealChecked
     /// `a in F_q`, evaluates polynomials at `X = a`.
     pub fn step4_eval_projection(
         mut self,
-    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
@@ -547,6 +724,7 @@ impl_with_type_bounds!(ProverIdealChecked
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_eval_point: self.ic_eval_point,
+            ic_proof_fq: self.ic_proof_fq,
             projected_trace_f,
             projected_scalars_f,
         })
@@ -581,7 +759,10 @@ impl_with_type_bounds!(ProverEvalProjected
     /// underconstrained $\psi_a$ linear pin-down (sound only for $D=1$).
     pub fn step5_sumcheck(
         mut self,
-    ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+        // CPR folds only the Q[X] family in this branch; F_q[X] constraints
+        // get folded in the per-prime CPR sumcheck added later in the
+        // pipeline.
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
@@ -595,7 +776,8 @@ impl_with_type_bounds!(ProverEvalProjected
             bit_op_down_mles,
             &self.ic_eval_point,
             &self.projected_scalars_f,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             self.base.num_vars,
             max_degree,
             &self.field_cfg,
@@ -680,6 +862,7 @@ impl_with_type_bounds!(ProverEvalProjected
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
+            ic_proof_fq: self.ic_proof_fq,
             projected_trace_f: self.projected_trace_f,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
@@ -712,7 +895,7 @@ impl_with_type_bounds!(ProverSumchecked
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step6_multipoint_eval(
         mut self,
-    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let (trace_mles, up_evals) = if let Some(alpha_prime) = &self.alpha_prime_f {
             let sig = &self.base.uair_signature;
             let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -765,6 +948,7 @@ impl_with_type_bounds!(ProverSumchecked
             field_cfg: self.field_cfg,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
+            ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
@@ -781,7 +965,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
     /// evaluations at `r_0` in `F_q[X]` and absorbs them into the transcript.
     pub fn step7_lift_and_project(
         mut self,
-    ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
         // (after \phi_q but before \psi_a). The verifier derives the scalar
         // open_evals via \psi_a for the sumcheck consistency check, and
@@ -805,6 +989,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             base: self.base,
             field_cfg: self.field_cfg,
             ic_proof: self.ic_proof,
+            ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
@@ -821,7 +1006,7 @@ impl_with_type_bounds!(ProverLifted
     /// Step 8: PCS open at `r_0` (witness columns only).
     pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F, U::Ideal>> {
+    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let witness_trace = &self.base.folded_witness_trace;
 
         // Folded witness columns are proved using the extended evaluation point
@@ -868,6 +1053,7 @@ impl_with_type_bounds!(ProverLifted
         Ok(ProverPcsOpened {
             base: self.base,
             ic_proof: self.ic_proof,
+            ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
             lookup_proof: self.lookup_proof,
@@ -881,7 +1067,7 @@ impl_with_type_bounds!(ProverLifted
 impl_with_type_bounds!(ProverPcsOpened
 {
     /// Assemble the final proof from accumulated state.
-    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F>> {
         let sig = self.base.uair_signature;
         let zip_proof = self.base.pcs_transcript.stream.into_inner();
         let commitments = (
@@ -921,6 +1107,7 @@ impl_with_type_bounds!(ProverPcsOpened
             witness_lifted_evals,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
+            ideal_checks_fq: self.ic_proof_fq,
         })
     }
 });
@@ -947,6 +1134,7 @@ where
         + 'static,
     F::Integer: ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + Send + Sync,
     U: Uair + 'static,
+    Zt::Fmod: From<u64>,
 {
     /// Zinc+ full PIOP prover.
     ///
@@ -962,8 +1150,8 @@ where
         ),
         trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-    ) -> Result<Proof<F>, ProtocolError<F, U::Ideal>> {
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Copy,
+    ) -> Result<Proof<F>, ProtocolError<F>> {
         let committed = Self::step0_fold(trace)?.step1_commit(pp, num_vars)?;
 
         let ideal_checked = if MLE_FIRST {

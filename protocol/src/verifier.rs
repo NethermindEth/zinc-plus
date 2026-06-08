@@ -34,6 +34,27 @@ use zip_plus::{
 };
 
 //
+// Per-prime F_q[X] branch helpers
+//
+
+/// Build a [`PrimeField`] config from a `u64` prime declared in
+/// [`UairSignature::primes`]. Verifier-side mirror of the prover's helper.
+///
+/// Primality is the UAIR author's responsibility (the UAIR is part of the
+/// pre-agreed relation index); no runtime check needed here.
+#[inline]
+fn build_verifier_fq_field_cfg<Zt, F, const D: usize, const FD: usize>(prime: u64) -> F::Config
+where
+    Zt: ZincTypes<D, FD>,
+    Zt::Fmod: From<u64>,
+    F: PrimeField,
+    F::Modulus: FromRef<Zt::Fmod>,
+{
+    let fmod = Zt::Fmod::from(prime);
+    F::make_cfg(&F::Modulus::from_ref(&fmod)).expect("declared prime is assumed prime")
+}
+
+//
 // Shared base
 //
 
@@ -77,6 +98,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
+    proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -103,6 +125,7 @@ pub struct VerifierPrimeProjected<
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
+    proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -274,10 +297,7 @@ where
         mut proof: Proof<F>,
         public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-    ) -> Result<
-        VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>,
-        ProtocolError<F, IdealOverF>,
-    >
+    ) -> Result<VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>>
     where
         IdealOverF: Ideal,
     {
@@ -287,16 +307,6 @@ where
         );
         let zip_proof = std::mem::take(&mut proof.zip);
         let uair_signature = U::signature();
-        // TODO(fq): Flavor-1 F_q[X] PIOP path -- see prover's `step0_fold`.
-        // The verifier-side ideal-check / CPR currently has no per-prime
-        // projection branch; mirror the prover's loud-panic guard so any
-        // attempt to verify a F_q[X]-declaring UAIR fails up-front.
-        assert!(
-            uair_signature.primes().is_empty(),
-            "F_q[X] PIOP path NYI: UAIR declares primes {:?} but the verifier \
-             only supports Q[X]-only constraints",
-            uair_signature.primes()
-        );
         let mut base = VerifierBase {
             num_vars,
             uair_signature,
@@ -341,6 +351,7 @@ where
             proof_witness_lifted_evals: proof.witness_lifted_evals,
             proof_lookup_proof: proof.lookup_proof,
             proof_booleanity: proof.booleanity_proof,
+            proof_ideal_checks_fq: proof.ideal_checks_fq,
             _phantom: PhantomData,
         })
     }
@@ -359,8 +370,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn step1_prime_projection(
         mut self,
-    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
-    {
+    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let field_cfg = self
             .base
             .pcs_transcript
@@ -378,6 +388,7 @@ where
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
+            proof_ideal_checks_fq: self.proof_ideal_checks_fq,
             _phantom: PhantomData,
         })
     }
@@ -400,26 +411,88 @@ where
         + Sync
         + 'static,
     F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
+    Zt::Fmod: From<u64>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
-    /// Step 2: Ideal check verification. Consumes `project_ideal`.
+    /// Step 2: Ideal check verification.
+    ///
+    /// `project_fq_ideal` is only invoked when the UAIR declares at least
+    /// one prime; legacy UAIRs can pass `|_, _| unreachable!()`.
+    ///
+    /// TODO(fq-soundness): the per-prime ideal-check subclaims produced
+    /// here are *discarded* -- this only verifies that each combined
+    /// polynomial $e_{i,t}$ lies in its claimed ideal, not that
+    /// $e_{i,t}$ was correctly derived from the committed trace. The
+    /// per-prime CPR/sumcheck/multipoint-eval/PCS-open chain that closes
+    /// the soundness loop is NYI; see `Proof::fq_ideal_checks` doc.
     #[allow(clippy::type_complexity)]
     pub fn step2_ideal_check(
         mut self,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
-    {
+        project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F::Config) -> IdealOverF,
+    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
+        // The Q[X]-branch ideal check only consumes Q[X] constraints; F_q[X]
+        // constraints are handled by the per-prime branch below.
         let num_constraints = count_constraints::<U>();
 
-        let ic_subclaim = U::verify_as_subprotocol::<_, IdealOverF, _>(
+        let ic_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_ideal_check,
-            num_constraints,
+            None,
+            num_constraints.q,
             self.base.num_vars,
             |ideal| project_ideal(ideal, &self.field_cfg),
+            |_| unreachable!("Q[X] branch"),
             &self.field_cfg,
         )?;
+
+        // Per-prime F_q[X] ideal-check verifications. The transcript
+        // ordering MUST match the prover: Q[X] first, then per-prime in
+        // `primes()` order.
+        let primes = self.base.uair_signature.primes().to_vec();
+        if primes.len() != self.proof_ideal_checks_fq.len() {
+            // Honest prover always emits one proof per declared prime; a
+            // mismatch is a malformed proof.
+            return Err(ProtocolError::FqIdealCheck {
+                prime_idx: self.proof_ideal_checks_fq.len(),
+                q: primes
+                    .get(self.proof_ideal_checks_fq.len())
+                    .copied()
+                    .unwrap_or(0),
+                source: IdealCheckError::IdealCollectorError(
+                    zinc_piop::ideal_check::BatchedIdealCheckError::LengthMismatch {
+                        num_ideals: primes.len(),
+                        provided_values: self.proof_ideal_checks_fq.len(),
+                    },
+                ),
+            });
+        }
+
+        for (prime_idx, (&q_i, fq_proof)) in
+            primes.iter().zip(self.proof_ideal_checks_fq).enumerate()
+        {
+            let cfg_i = build_verifier_fq_field_cfg::<Zt, F, D, FD>(q_i);
+            // The per-prime subclaim is currently discarded -- see the
+            // TODO(fq-soundness) on the method doc.
+            let _ = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                fq_proof,
+                Some(prime_idx),
+                num_constraints.for_prime(prime_idx),
+                self.base.num_vars,
+                |_| unreachable!("F_{q_i}[X] branch"),
+                // The lifted F_q[X] ideal's coefficient modulus must match
+                // the per-prime field config
+                |ideal| project_fq_ideal(ideal, &cfg_i),
+                &cfg_i,
+            )
+            .map_err(|source| ProtocolError::FqIdealCheck {
+                prime_idx,
+                q: q_i,
+                source,
+            })?;
+        }
 
         Ok(VerifierIdealChecked {
             base: self.base,
@@ -455,8 +528,7 @@ where
     pub fn step3_eval_projection(
         mut self,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
-    {
+    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
 
@@ -508,8 +580,10 @@ where
     /// challenge $\alpha'$ when booleanity ran.
     pub fn step4_sumcheck_verify(
         mut self,
-    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
-    {
+    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
+        // CPR folds only the Q[X] family in this branch; F_q[X] constraints
+        // get folded in the per-prime CPR sumcheck added later in the
+        // pipeline.
         let num_constraints = count_constraints::<U>();
 
         // CPR pre-sumcheck: squeezes folding challenge \alpha.
@@ -518,7 +592,8 @@ where
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaim,
-            num_constraints,
+            /* prime_idx = */ None,
+            num_constraints.q,
             self.base.num_vars,
             &self.projecting_element_f,
             &self.field_cfg,
@@ -571,6 +646,7 @@ where
             md_subclaims.expected_evaluations()[0].clone(),
             cpr_verifier_ancillary,
             &self.projected_scalars_f,
+            /* prime_idx = */ None,
             &self.field_cfg,
         )?;
 
@@ -655,8 +731,7 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
-    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F, IdealOverF>>
-    {
+    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let up_evals: Vec<F> = if let (Some(bit_slice_evals), Some(alpha_prime)) =
             (&self.bool_bit_slice_evals, &self.alpha_prime_f)
         {
@@ -729,10 +804,7 @@ where
     /// step 5 and close the Schwartz-Zippel bridge to the bit-slice claims.
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
-    ) -> Result<
-        VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>,
-        ProtocolError<F, IdealOverF>,
-    > {
+    ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
 
         let pub_cols = self.base.uair_signature.public_cols();
@@ -846,7 +918,7 @@ where
     /// Step 7: PCS verification at `r_0` (witness columns only).
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F, IdealOverF>> {
+    ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F>> {
         let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
         let commitments = &self.proof_commitments;
 
@@ -970,7 +1042,7 @@ where
 
 impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
     /// Complete verification.
-    pub fn finish<F: PrimeField>(self) -> Result<(), ProtocolError<F, IdealOverF>> {
+    pub fn finish<F: PrimeField>(self) -> Result<(), ProtocolError<F>> {
         Ok(())
     }
 }
@@ -998,6 +1070,7 @@ where
         + Sync
         + 'static,
     F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
+    Zt::Fmod: From<u64>,
     U: Uair + 'static,
 {
     /// Zinc+ full PIOP verifier.
@@ -1018,7 +1091,8 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<(), ProtocolError<F, IdealOverF>>
+        project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F::Config) -> IdealOverF,
+    ) -> Result<(), ProtocolError<F>>
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
@@ -1029,7 +1103,7 @@ where
             num_vars,
         )?
         .step1_prime_projection()?
-        .step2_ideal_check(project_ideal)?
+        .step2_ideal_check(project_ideal, project_fq_ideal)?
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?
         .step5_multipoint_eval::<U>()?

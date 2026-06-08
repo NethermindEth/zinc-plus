@@ -1,12 +1,12 @@
 pub mod rotation;
 
 use crypto_primitives::Semiring;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use thiserror::Error;
 use zinc_utils::from_ref::FromRef;
 
 /// A trait for types describing ideals.
-pub trait Ideal: FromRef<Self> + Clone + Debug + Send + Sync {}
+pub trait Ideal: FromRef<Self> + Clone + Debug + Display + Send + Sync {}
 
 /// A trait for ideals that implement
 /// membership check for an algebraic structure
@@ -23,6 +23,12 @@ pub trait IdealCheck<T> {
 pub struct ImpossibleIdeal;
 
 impl Ideal for ImpossibleIdeal {}
+
+impl Display for ImpossibleIdeal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ImpossibleIdeal")
+    }
+}
 
 impl<R: Semiring> IdealCheck<R> for ImpossibleIdeal {
     #[inline(always)]

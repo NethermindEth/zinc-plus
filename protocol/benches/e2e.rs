@@ -349,6 +349,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
         + 'static,
     F: for<'a> FromWithConfig<&'a Zt::Int>,
     <F as Field>::Integer: ConstTranscribable + FromRef<Zt::Fmod>,
+    Zt::Fmod: From<u64>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -397,6 +398,8 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
                     num_vars,
                     project_scalar,
                     project_ideal,
+                    // Bench UAIRs are Q[X]-only; F_q[X] branch unreachable.
+                    |_, _| unreachable!("bench UAIR has no F_q[X] constraints"),
                 ))
                 .expect("Verifier failed");
             },
@@ -440,6 +443,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         + 'static,
     F: for<'a> FromWithConfig<&'a Zt::Int>,
     <F as Field>::Integer: ConstTranscribable + FromRef<Zt::Fmod>,
+    Zt::Fmod: From<u64>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -577,7 +581,9 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
     let v_ideal_checked = v_prime_projected
         .clone()
-        .step2_ideal_check(project_ideal)
+        .step2_ideal_check(project_ideal, |_, _| {
+            unreachable!("bench UAIR has no F_q[X] constraints")
+        })
         .unwrap();
     let v_eval_projected = v_ideal_checked
         .clone()
@@ -607,7 +613,9 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "2: Ideal check",
         setup = || v_prime_projected.clone(),
-        run = |s| s.step2_ideal_check(project_ideal),
+        run = |s| s.step2_ideal_check(project_ideal, |_, _| {
+            unreachable!("bench UAIR has no F_q[X] constraints")
+        }),
     );
 
     step_bench!(
