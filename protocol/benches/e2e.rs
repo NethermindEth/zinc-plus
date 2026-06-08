@@ -10,6 +10,7 @@ use crypto_primitives::{
     ConstIntRing, ConstIntSemiring, ConstSemiring, Field, FixedSemiring, FromWithConfig,
     PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
+use num_traits::Zero;
 use rand::rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -61,6 +62,7 @@ use zinc_uair::{
 };
 use zinc_utils::{
     cfg_into_iter, cfg_iter,
+    delayed_reduction::{BarrettDelayedReduction, DelayedModularReductionAlgorithm},
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -699,12 +701,12 @@ fn projection_sha_scalarize_bit_slices(
 ) -> Result<MleTable<F>, ProductionShaError<F>> {
     let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
     let word_count = bit_slices.len() / SHA_WORD_BITS;
+    let one = F::one_with_cfg(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
     let words = cfg_into_iter!(0..word_count)
         .map(|col_idx| {
-            let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
-            for row in 0..SHA_ROW_COUNT {
-                let mut value = F::zero_with_cfg(field_cfg);
-                for (bit, power) in powers.iter().enumerate() {
+            let bit_cols = (0..SHA_WORD_BITS)
+                .map(|bit| {
                     let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
                     if bit_col.num_vars != SHA_ROW_VARS
                         || bit_col.evaluations.len() != SHA_ROW_COUNT
@@ -715,14 +717,67 @@ fn projection_sha_scalarize_bit_slices(
                             expected: SHA_ROW_COUNT,
                         });
                     }
-                    value += bit_col.evaluations[row].clone() * power;
-                }
-                out_col.push(value);
+                    Ok(bit_col)
+                })
+                .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+            let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
+            for row in 0..SHA_ROW_COUNT {
+                out_col.push(projection_sha_scalarize_binary_row_dmr(
+                    &bit_cols, row, &powers, &one, field_cfg, &reducer,
+                ));
             }
             Ok(out_col)
         })
         .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
     Ok(projection_sha_mle_table_from_columns(words))
+}
+
+fn projection_sha_scalarize_binary_row_dmr(
+    bit_cols: &[&DenseMultilinearExtension<F>],
+    row: usize,
+    powers: &[F],
+    one: &F,
+    field_cfg: &<F as PrimeField>::Config,
+    reducer: &BarrettDelayedReduction<'_, F>,
+) -> F {
+    let mut bucket = Uint::<5>::zero();
+    let mut pending_adds = 0usize;
+    let mut acc = F::zero_with_cfg(field_cfg);
+
+    for (bit_col, power) in bit_cols.iter().zip(powers) {
+        let bit = &bit_col.evaluations[row];
+        if F::is_zero(bit) {
+            continue;
+        }
+        if bit != one {
+            return projection_sha_scalarize_row_naive(bit_cols, row, powers, field_cfg);
+        }
+        reducer.add(&mut bucket, power);
+        pending_adds = pending_adds.saturating_add(1);
+        if pending_adds >= reducer.flush_adds() {
+            let pending = std::mem::replace(&mut bucket, Uint::zero());
+            acc += reducer.reduce(pending);
+            pending_adds = 0;
+        }
+    }
+
+    if !bucket.is_zero() {
+        acc += reducer.reduce(bucket);
+    }
+    acc
+}
+
+fn projection_sha_scalarize_row_naive(
+    bit_cols: &[&DenseMultilinearExtension<F>],
+    row: usize,
+    powers: &[F],
+    field_cfg: &<F as PrimeField>::Config,
+) -> F {
+    let mut value = F::zero_with_cfg(field_cfg);
+    for (bit_col, power) in bit_cols.iter().zip(powers) {
+        value += bit_col.evaluations[row].clone() * power;
+    }
+    value
 }
 
 fn projection_sha_selector_expected(
@@ -978,40 +1033,26 @@ where
     .expect("Hyrax benchmark setup must be valid")
 }
 
-fn projection_sha_hyrax_pcs_params_bn254() -> (
-    PCSParams<AllHyraxPCSTypes<ark_bn254::G1Affine>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
-    PCSVerifierParams<
-        AllHyraxPCSTypes<ark_bn254::G1Affine>,
-        RealEcdsaBenchZincTypes,
-        F,
-        DEGREE_PLUS_ONE,
-    >,
-) {
+fn projection_sha_hyrax_pcs_params<C>() -> (
+    PCSParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+)
+where
+    C: AffineRepr,
+{
     let width = SHA_ROW_COUNT;
-    let (binary_ck, binary_vk) =
-        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, BinaryLanes>(width, 0);
+    let (binary_ck, binary_vk) = projection_sha_hyrax_key_pair::<C, BinaryLanes>(width, 0);
     let (arbitrary_ck, arbitrary_vk) =
-        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, DensePolyScalarLanes>(width, 1_000);
-    let (int_ck, int_vk) =
-        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, IntScalarLane>(width, 2_000);
+        projection_sha_hyrax_key_pair::<C, DensePolyScalarLanes>(width, 1_000);
+    let (int_ck, int_vk) = projection_sha_hyrax_key_pair::<C, IntScalarLane>(width, 2_000);
 
     (
-        PCSParams::<
-            AllHyraxPCSTypes<ark_bn254::G1Affine>,
-            RealEcdsaBenchZincTypes,
-            F,
-            DEGREE_PLUS_ONE,
-        > {
+        PCSParams::<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
             binary: binary_ck,
             arbitrary: arbitrary_ck,
             int: int_ck,
         },
-        PCSVerifierParams::<
-            AllHyraxPCSTypes<ark_bn254::G1Affine>,
-            RealEcdsaBenchZincTypes,
-            F,
-            DEGREE_PLUS_ONE,
-        > {
+        PCSVerifierParams::<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
             binary: binary_vk,
             arbitrary: arbitrary_vk,
             int: int_vk,
@@ -2021,9 +2062,12 @@ fn bench_og_sha256_zip_compare(group: &mut BenchmarkGroup<WallTime>, num_vars: u
     );
 }
 
-fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<WallTime>) {
-    type C = ark_bn254::G1Affine;
-    type P = AllHyraxPCSTypes<C>;
+fn bench_projectionfold_sha256_concise_hyrax<C>(group: &mut BenchmarkGroup<WallTime>, label: &str)
+where
+    C: AffineRepr + Send + Sync + 'static,
+    F: zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
+{
+    type P<C> = AllHyraxPCSTypes<C>;
     type U = ProjectionShaBenchUair<RealEcdsaInt>;
 
     let message_blocks = real_sha256_chain_blocks();
@@ -2047,25 +2091,27 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
         <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
         C,
     >();
-    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params_bn254();
-    let pp = LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
-        pcs_params,
-        field_cfg.clone(),
-        3,
-    );
-    let vs = setup_verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-        LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
-        shape.clone(),
-    )
-    .expect("ProjectionFold SHA verifier setup succeeds");
+    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params::<C>();
+    let pp =
+        LinearIdealFoldProverParams::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
+            pcs_params,
+            field_cfg.clone(),
+            3,
+        );
+    let vs =
+        setup_verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+            LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+            shape.clone(),
+        )
+        .expect("ProjectionFold SHA verifier setup succeeds");
 
-    let params = format!("ProjectionFoldConcise-HyraxBn254/SHA256Chain8/row-vars={SHA_ROW_VARS}");
+    let params = format!("{label}/SHA256Chain8/row-vars={SHA_ROW_VARS}");
 
     group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
             black_box(prove_linear_ideal_fold::<
-                P,
+                P<C>,
                 U,
                 RealEcdsaBenchZincTypes,
                 F,
@@ -2076,7 +2122,7 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
     });
 
     let mut prover_transcript = Blake3Transcript::new();
-    let output = prove_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+    let output = prove_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
         &pp,
         &shape,
         &witnesses,
@@ -2085,13 +2131,14 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
     .expect("proof generation for ProjectionFold verifier bench");
 
     let mut verifier_transcript = Blake3Transcript::new();
-    let verified = verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-        &vs,
-        &output.fresh_instances,
-        &output.proof,
-        &mut verifier_transcript,
-    )
-    .expect("ProjectionFold verifier preflight failed");
+    let verified =
+        verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+            &vs,
+            &output.fresh_instances,
+            &output.proof,
+            &mut verifier_transcript,
+        )
+        .expect("ProjectionFold verifier preflight failed");
     assert_eq!(verified.target, output.folded_instance.target);
     assert_eq!(verified.public, output.folded_instance.public);
 
@@ -2104,7 +2151,7 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
     tracing::subscriber::with_default(subscriber, || {
         let mut prover_transcript = Blake3Transcript::new();
         let traced_output = prove_linear_ideal_fold::<
-            P,
+            P<C>,
             U,
             RealEcdsaBenchZincTypes,
             F,
@@ -2114,7 +2161,7 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
 
         let mut verifier_transcript = Blake3Transcript::new();
         let traced_verified =
-            verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+            verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
                 &vs,
                 &traced_output.fresh_instances,
                 &traced_output.proof,
@@ -2129,7 +2176,7 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
             black_box(verify_linear_ideal_fold::<
-                P,
+                P<C>,
                 U,
                 RealEcdsaBenchZincTypes,
                 F,
@@ -2143,6 +2190,20 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
             .expect("ProjectionFold Concise verifier failed");
         });
     });
+}
+
+fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<WallTime>) {
+    bench_projectionfold_sha256_concise_hyrax::<ark_bn254::G1Affine>(
+        group,
+        "ProjectionFoldConcise-HyraxBn254",
+    );
+}
+
+fn bench_projectionfold_sha256_concise_hyrax_secp256k1(group: &mut BenchmarkGroup<WallTime>) {
+    bench_projectionfold_sha256_concise_hyrax::<ark_secp256k1::Affine>(
+        group,
+        "ProjectionFoldConcise-HyraxSecp256k1",
+    );
 }
 
 fn bench_real_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -2288,6 +2349,7 @@ fn sha256_proving_system_compare_benches(c: &mut Criterion) {
 
     bench_og_sha256_zip_compare(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
     bench_projectionfold_sha256_concise_hyrax_bn254(&mut group);
+    bench_projectionfold_sha256_concise_hyrax_secp256k1(&mut group);
 
     group.finish();
 }

@@ -55,3 +55,9 @@ unwrap_used = "deny"
 [profile.release]
 lto = true # Enable Link Time Optimization
 codegen-units = 1 # Slower compilation but potentially better optimization
+
+[profile.bench]
+inherits = "release"
+debug = 2
+strip = false
+split-debuginfo = "unpacked"
