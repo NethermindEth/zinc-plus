@@ -378,26 +378,64 @@ where
     Ok(aggregate)
 }
 
-fn linear_values_at_a_lambda<F>(
+pub fn build_sha_residual_eval_powers<F>(a: &F, field_cfg: &F::Config) -> Vec<F>
+where
+    F: PrimeField,
+{
+    powers(
+        a.clone(),
+        F::one_with_cfg(field_cfg),
+        SHA_RESIDUAL_EVAL_POWER_COUNT,
+    )
+}
+
+pub fn build_sha_lambda_powers<F>(lambda: &F, field_cfg: &F::Config) -> Vec<F>
+where
+    F: PrimeField,
+{
+    powers(
+        lambda.clone(),
+        F::one_with_cfg(field_cfg),
+        NUM_SHA_RESIDUAL_FAMILIES,
+    )
+}
+
+pub fn build_booleanity_weights<F>(
+    rho: &F,
+    xi: &F,
+    source_count: usize,
+    field_cfg: &F::Config,
+) -> Vec<F>
+where
+    F: PrimeField,
+{
+    powers(rho.clone(), F::one_with_cfg(field_cfg), source_count)
+        .into_iter()
+        .map(|rho_power| xi.clone() * rho_power)
+        .collect()
+}
+
+pub fn build_sha_sumfold_linear_accumulator<F>(
     tables: &[LinearResidualCoeffTable<F>],
-    a: &F,
-    lambda: &F,
+    a_powers: &[F],
+    lambda_powers: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: DelayedFieldProductSum,
 {
-    let lambda_powers = powers(
-        lambda.clone(),
-        F::one_with_cfg(field_cfg),
-        NUM_SHA_RESIDUAL_FAMILIES,
-    );
-    let a_powers = powers(
-        a.clone(),
-        F::one_with_cfg(field_cfg),
-        SHA_RESIDUAL_EVAL_POWER_COUNT,
-    );
-
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "lambda_powers",
+            col: lambda_powers.len(),
+        });
+    }
+    if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "a_powers",
+            col: a_powers.len(),
+        });
+    }
     tables
         .iter()
         .map(|table| {
@@ -1217,6 +1255,36 @@ where
     F: InnerTransparentField + DelayedFieldProductSum,
     F::Inner: Zero,
 {
+    let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
+    let a_powers = build_sha_residual_eval_powers(a, field_cfg);
+    let booleanity_weights = build_booleanity_weights(rho, xi, booleanity_sources.len(), field_cfg);
+    folded_row_integrand_values_with_vectors(
+        trace,
+        public,
+        row_weights,
+        &a_powers,
+        &lambda_powers,
+        &booleanity_weights,
+        booleanity_sources,
+        field_cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn folded_row_integrand_values_with_vectors<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum,
+    F::Inner: Zero,
+{
     validate_trace(trace)?;
     validate_public(public)?;
     if row_weights.len() != SHA_ROW_COUNT {
@@ -1227,21 +1295,26 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
-    let lambda_powers = powers(
-        lambda.clone(),
-        F::one_with_cfg(field_cfg),
-        NUM_SHA_RESIDUAL_FAMILIES,
-    );
-    let a_powers = powers(
-        a.clone(),
-        F::one_with_cfg(field_cfg),
-        SHA_RESIDUAL_EVAL_POWER_COUNT,
-    );
-    let rho_powers = powers(
-        rho.clone(),
-        F::one_with_cfg(field_cfg),
-        booleanity_sources.len(),
-    );
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "lambda_powers",
+            col: lambda_powers.len(),
+        });
+    }
+    if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "a_powers",
+            col: a_powers.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
     let needs_virtuals = sources_need_virtuals(booleanity_sources);
 
     let mut out = Vec::with_capacity(SHA_ROW_COUNT);
@@ -1272,9 +1345,9 @@ where
                 field_cfg,
             )?;
             let term = d.clone() * (d - F::one_with_cfg(field_cfg));
-            bool_sum += rho_powers[idx].clone() * term;
+            bool_sum += booleanity_weights[idx].clone() * term;
         }
-        out.push(row_weights[row].clone() * (linear + xi.clone() * bool_sum));
+        out.push(row_weights[row].clone() * (linear + bool_sum));
     }
     Ok(out)
 }
@@ -1591,7 +1664,6 @@ where
 struct RelationSumFoldPrefixFastPath<F: PrimeField> {
     traces: Box<[ProjectedTrace<F>]>,
     beta: Vec<F>,
-    xi: F,
     booleanity_sources: Vec<ShaBooleanitySource>,
     linear: BinaryPrefixTailTable<F>,
     booleanity: TernaryPrefixTailTable<F>,
@@ -1717,27 +1789,74 @@ where
 
         let tail_vars = ell - prefix_vars;
         let tail_len = binary_len(tail_vars);
-        let rho_powers = powers(
-            rho.clone(),
-            F::one_with_cfg(field_cfg),
-            booleanity_sources.len(),
-        );
-
-        let linear_values = linear_values_at_a_lambda(coeff_tables, a, lambda, field_cfg)?;
-        let linear = BinaryPrefixTailTable::new(linear_values, prefix_vars, tail_len);
-        let booleanity = TernaryPrefixTailTable::new(
-            build_sha_booleanity_prefix_tail_table(
-                &traces,
-                booleanity_sources,
-                prefix_vars,
-                tail_len,
-                &row_weights,
-                &rho_powers,
-                field_cfg,
-            )?,
+        let a_powers = build_sha_residual_eval_powers(a, field_cfg);
+        let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
+        let booleanity_weights =
+            build_booleanity_weights(rho, xi, booleanity_sources.len(), field_cfg);
+        let linear_values = build_sha_sumfold_linear_accumulator(
+            coeff_tables,
+            &a_powers,
+            &lambda_powers,
+            field_cfg,
+        )?;
+        let quadratic_values = build_sha_booleanity_prefix_tail_table(
+            &traces,
+            booleanity_sources,
             prefix_vars,
             tail_len,
-        )?;
+            row_weights,
+            &booleanity_weights,
+            field_cfg,
+        );
+        Self::new_owned_with_accumulators(
+            traces,
+            beta,
+            &linear_values,
+            &quadratic_values?,
+            booleanity_sources,
+            prefix_vars,
+            field_cfg,
+        )
+    }
+
+    fn new_owned_with_accumulators(
+        traces: Box<[ProjectedTrace<F>]>,
+        beta: &[F],
+        linear_values: &[F],
+        quadratic_values: &[F],
+        booleanity_sources: &[ShaBooleanitySource],
+        prefix_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        let ell = validate_sha_sumfold_traces(&traces, beta)?;
+        if prefix_vars == 0 || prefix_vars > ell {
+            return Err(SumFoldError::Ell0TooLarge {
+                ell0: prefix_vars,
+                ell,
+            }
+            .into());
+        }
+
+        let tail_vars = ell - prefix_vars;
+        let tail_len = binary_len(tail_vars);
+        let linear_len = binary_len(prefix_vars) * tail_len;
+        if linear_values.len() != linear_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: linear_values.len(),
+                expected: linear_len,
+            });
+        }
+        let quadratic_len = checked_ternary_len(prefix_vars)? * tail_len;
+        if quadratic_values.len() != quadratic_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: quadratic_values.len(),
+                expected: quadratic_len,
+            });
+        }
+
+        let linear = BinaryPrefixTailTable::new(linear_values.to_vec(), prefix_vars, tail_len);
+        let booleanity =
+            TernaryPrefixTailTable::new(quadratic_values.to_vec(), prefix_vars, tail_len)?;
 
         let tail_eq_weights = eq_weights_or_one(&beta[prefix_vars..], field_cfg)?;
         let mut prefix_suffix_eq_weights = Vec::with_capacity(prefix_vars);
@@ -1749,7 +1868,6 @@ where
         Ok(Self {
             traces,
             beta: beta.to_vec(),
-            xi: xi.clone(),
             booleanity_sources: booleanity_sources.to_vec(),
             linear,
             booleanity,
@@ -1786,9 +1904,7 @@ where
                 let booleanity =
                     self.booleanity
                         .value_with_first_axis(ternary_rest, tail, x, field_cfg)?;
-                acc += self.tail_eq_weights[tail].clone()
-                    * suffix_weight
-                    * (linear + self.xi.clone() * booleanity);
+                acc += self.tail_eq_weights[tail].clone() * suffix_weight * (linear + booleanity);
             }
         }
 
@@ -1986,7 +2102,7 @@ where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
 {
-    let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
+    let _ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
     if beta_eq_weights.len() != traces.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
             got: beta_eq_weights.len(),
@@ -2001,29 +2117,9 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
-    let zero = F::zero_with_cfg(field_cfg);
-    let zero_inner = zero.inner().clone();
-    let mut mles = Vec::with_capacity(2 + booleanity_sources.len() * SHA_ROW_COUNT);
-    let lambda_powers = powers(
-        lambda.clone(),
-        F::one_with_cfg(field_cfg),
-        NUM_SHA_RESIDUAL_FAMILIES,
-    );
-    let a_powers = powers(
-        a.clone(),
-        F::one_with_cfg(field_cfg),
-        SHA_RESIDUAL_EVAL_POWER_COUNT,
-    );
-
-    mles.push(DenseMultilinearExtension::from_evaluations_vec(
-        ell,
-        beta_eq_weights
-            .iter()
-            .map(|value| value.inner().clone())
-            .collect(),
-        zero_inner.clone(),
-    ));
-
+    let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
+    let a_powers = build_sha_residual_eval_powers(a, field_cfg);
+    let booleanity_weights = build_booleanity_weights(rho, xi, booleanity_sources.len(), field_cfg);
     let linear_values = traces
         .iter()
         .zip(publics.iter())
@@ -2038,9 +2134,77 @@ where
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    build_dense_sha_sumfold_group_from_accumulators(
+        traces,
+        beta,
+        beta_eq_weights,
+        row_weights,
+        &linear_values,
+        &booleanity_weights,
+        booleanity_sources,
+        field_cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dense_sha_sumfold_group_from_accumulators<F>(
+    traces: &[ProjectedTrace<F>],
+    beta: &[F],
+    beta_eq_weights: &[F],
+    row_weights: &[F],
+    linear_accumulator: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    let ell = validate_sha_sumfold_traces(traces, beta)?;
+    if beta_eq_weights.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta_eq_weights.len(),
+            expected: traces.len(),
+        });
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if linear_accumulator.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_accumulator.len(),
+            expected: traces.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+
+    let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
+    let mut mles = Vec::with_capacity(2 + booleanity_sources.len() * SHA_ROW_COUNT);
+
     mles.push(DenseMultilinearExtension::from_evaluations_vec(
         ell,
-        linear_values
+        beta_eq_weights
+            .iter()
+            .map(|value| value.inner().clone())
+            .collect(),
+        zero_inner.clone(),
+    ));
+    mles.push(DenseMultilinearExtension::from_evaluations_vec(
+        ell,
+        linear_accumulator
             .iter()
             .map(|value| value.inner().clone())
             .collect(),
@@ -2064,16 +2228,97 @@ where
     Ok(MultiDegreeSumcheckGroup::new(
         3,
         mles,
-        sha_sumfold_comb_fn(
-            row_weights.to_vec(),
-            powers(
-                rho.clone(),
-                F::one_with_cfg(field_cfg),
-                booleanity_sources.len(),
-            ),
-            xi.clone(),
+        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights.to_vec(), field_cfg),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F>(
+    traces: &[ProjectedTrace<F>],
+    beta: &[F],
+    beta_eq_weights: &[F],
+    row_weights: &[F],
+    linear_accumulator: &[F],
+    quadratic_prefix_accumulator: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    let ell = validate_sha_sumfold_traces(traces, beta)?;
+    if beta_eq_weights.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta_eq_weights.len(),
+            expected: traces.len(),
+        });
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if linear_accumulator.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_accumulator.len(),
+            expected: traces.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        if !quadratic_prefix_accumulator.is_empty() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: quadratic_prefix_accumulator.len(),
+                expected: 0,
+            });
+        }
+        return build_dense_sha_sumfold_group_from_accumulators(
+            traces,
+            beta,
+            beta_eq_weights,
+            row_weights,
+            linear_accumulator,
+            booleanity_weights,
+            booleanity_sources,
             field_cfg,
-        ),
+        );
+    }
+
+    let fast_path = RelationSumFoldPrefixFastPath::new_owned_with_accumulators(
+        traces.to_vec().into_boxed_slice(),
+        beta,
+        linear_accumulator,
+        quadratic_prefix_accumulator,
+        booleanity_sources,
+        prefix_vars,
+        field_cfg,
+    );
+
+    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+        3,
+        Vec::new(),
+        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights.to_vec(), field_cfg),
+        Box::new(fast_path?),
     ))
 }
 
@@ -2304,7 +2549,6 @@ where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
 {
-    let ell = beta.len();
     if beta_eq_weights.len() != traces.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
             got: beta_eq_weights.len(),
@@ -2319,57 +2563,21 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
-    let zero = F::zero_with_cfg(field_cfg);
-    let zero_inner = zero.inner().clone();
-    let mut mles = Vec::with_capacity(2 + booleanity_sources.len() * SHA_ROW_COUNT);
-
-    mles.push(DenseMultilinearExtension::from_evaluations_vec(
-        ell,
-        beta_eq_weights
-            .iter()
-            .map(|value| value.inner().clone())
-            .collect(),
-        zero_inner.clone(),
-    ));
-
-    let linear_values = linear_values_at_a_lambda(linear_cache, a, lambda, field_cfg)?;
-    mles.push(DenseMultilinearExtension::from_evaluations_vec(
-        ell,
-        linear_values
-            .iter()
-            .map(|value| value.inner().clone())
-            .collect(),
-        zero_inner.clone(),
-    ));
-
-    for source in booleanity_sources {
-        for row in 0..SHA_ROW_COUNT {
-            let values = traces
-                .iter()
-                .map(|trace| booleanity_source_value_at_row(trace, row, source, field_cfg))
-                .collect::<Result<Vec<_>, _>>()?;
-            mles.push(DenseMultilinearExtension::from_evaluations_vec(
-                ell,
-                values.iter().map(|value| value.inner().clone()).collect(),
-                zero_inner.clone(),
-            ));
-        }
-    }
-
-    Ok(MultiDegreeSumcheckGroup::new(
-        3,
-        mles,
-        sha_sumfold_comb_fn(
-            row_weights.to_vec(),
-            powers(
-                rho.clone(),
-                F::one_with_cfg(field_cfg),
-                booleanity_sources.len(),
-            ),
-            xi.clone(),
-            field_cfg,
-        ),
-    ))
+    let a_powers = build_sha_residual_eval_powers(a, field_cfg);
+    let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
+    let booleanity_weights = build_booleanity_weights(rho, xi, booleanity_sources.len(), field_cfg);
+    let linear_values =
+        build_sha_sumfold_linear_accumulator(linear_cache, &a_powers, &lambda_powers, field_cfg)?;
+    build_dense_sha_sumfold_group_from_accumulators(
+        traces,
+        beta,
+        beta_eq_weights,
+        row_weights,
+        &linear_values,
+        &booleanity_weights,
+        booleanity_sources,
+        field_cfg,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2453,6 +2661,21 @@ fn sha_sumfold_comb_fn<F>(
 where
     F: PrimeField + Send + Sync + 'static,
 {
+    let booleanity_weights = rho_powers
+        .into_iter()
+        .map(|rho_power| xi.clone() * rho_power)
+        .collect();
+    sha_weighted_sumfold_comb_fn(row_weights, booleanity_weights, field_cfg)
+}
+
+fn sha_weighted_sumfold_comb_fn<F>(
+    row_weights: Vec<F>,
+    booleanity_weights: Vec<F>,
+    field_cfg: &F::Config,
+) -> CombFn<F>
+where
+    F: PrimeField + Send + Sync + 'static,
+{
     let zero_for_comb = F::zero_with_cfg(field_cfg);
     let one_for_comb = F::one_with_cfg(field_cfg);
     Box::new(move |values: &[F]| {
@@ -2460,15 +2683,15 @@ where
         let linear = values[1].clone();
         let mut bool_sum = zero_for_comb.clone();
         let mut cursor = 2usize;
-        for rho_power in &rho_powers {
+        for booleanity_weight in &booleanity_weights {
             for row_weight in &row_weights {
                 let d = values[cursor].clone();
                 cursor += 1;
                 let term = d.clone() * (d - one_for_comb.clone());
-                bool_sum += row_weight.clone() * rho_power * term;
+                bool_sum += row_weight.clone() * booleanity_weight * term;
             }
         }
-        eq_beta * (linear + xi.clone() * bool_sum)
+        eq_beta * (linear + bool_sum)
     })
 }
 
@@ -2540,6 +2763,90 @@ where
     x.clone() * beta + (one.clone() - x) * (one - beta)
 }
 
+fn validate_sha_sumfold_traces<F>(
+    traces: &[ProjectedTrace<F>],
+    beta: &[F],
+) -> Result<usize, ShaProjectionError> {
+    if traces.is_empty() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
+    }
+    if !traces.len().is_power_of_two() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: traces.len() });
+    }
+    let ell = usize::try_from(traces.len().trailing_zeros()).expect("trailing_zeros fits usize");
+    if beta.len() != ell {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta.len(),
+            expected: ell,
+        });
+    }
+    for trace in traces {
+        validate_trace(trace)?;
+    }
+    Ok(ell)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_sha_sumfold_quadratic_prefix_accumulator<F>(
+    traces: &[ProjectedTrace<F>],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    row_weights: &[F],
+    booleanity_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if traces.is_empty() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
+    }
+    if !traces.len().is_power_of_two() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: traces.len() });
+    }
+    let ell = usize::try_from(traces.len().trailing_zeros()).expect("trailing_zeros fits usize");
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+    for trace in traces {
+        validate_trace(trace)?;
+    }
+    if prefix_vars == 0 {
+        return Ok(Vec::new());
+    }
+
+    let tail_len = binary_len(ell - prefix_vars);
+    build_sha_booleanity_prefix_tail_table(
+        traces,
+        booleanity_sources,
+        prefix_vars,
+        tail_len,
+        row_weights,
+        booleanity_weights,
+        field_cfg,
+    )
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 fn build_sha_booleanity_prefix_tail_table<F>(
     traces: &[ProjectedTrace<F>],
@@ -2547,7 +2854,7 @@ fn build_sha_booleanity_prefix_tail_table<F>(
     prefix_vars: usize,
     tail_len: usize,
     row_weights: &[F],
-    rho_powers: &[F],
+    booleanity_weights: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
@@ -2577,8 +2884,8 @@ where
                 field_cfg,
             )?;
 
-            for (source_idx, rho_power) in rho_powers.iter().enumerate() {
-                let source_weight = row_weight.clone() * rho_power;
+            for (source_idx, booleanity_weight) in booleanity_weights.iter().enumerate() {
+                let source_weight = row_weight.clone() * booleanity_weight;
                 for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
                     let coeff = booleanity_degree_two_coeff(
                         &source_values,
@@ -3000,6 +3307,34 @@ where
         lambda,
         rho,
         xi,
+        booleanity_sources,
+        field_cfg,
+    )?;
+    folded_row_integrand_sum(&values, field_cfg)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn expression_folded_row_sum_with_vectors<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum,
+    F::Inner: Zero,
+{
+    let values = folded_row_integrand_values_with_vectors(
+        trace,
+        public,
+        row_weights,
+        a_powers,
+        lambda_powers,
+        booleanity_weights,
         booleanity_sources,
         field_cfg,
     )?;
