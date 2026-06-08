@@ -1,0 +1,72 @@
+% ===========================================================================
+\section{The norm bound: a sum-of-squares zerocheck}\label{sec:norm}
+% ===========================================================================
+
+The acceptance bound \eqref{eq:norm} is a \emph{direct} sum of squares
+over $\Z$ of the committed coefficients --- not a per-row accumulator
+recurrence. We introduce a non-negative slack and arithmetize, per
+signature $j$,
+\begin{equation}\label{eq:normeq}
+  \sum_{i=0}^{n-1} s_1[i]^2 + \sum_{i=0}^{n-1} s_2[i]^2 + \col{slack}(j)
+  \;=\; \nbound, \qquad \col{slack}(j) \ge 0 .
+\end{equation}
+
+\paragraph{Coefficient slices.}
+The norm needs the individual integer coefficients $s_1[i], s_2[i]$.
+These are already present, uncombined, as the coefficients of the limb
+cells $\col{s_1}_m, \col{s_2}_m$. We read them with the
+\emph{coefficient-slice} machinery --- the integer-coefficient analogue
+of the booleanity check's bit-slice extraction. For a selected set of
+limb columns, \texttt{compute\_coeff\_slices\_flat} produces, for each
+coefficient position, an MLE over the signature rows whose value at row
+$j$ is that coefficient of that limb in signature $j$. The norm group
+consumes the $2N$ slices of the $\col{s_1},\col{s_2}$ limb cells (here
+$N = n = LW$), plus the per-row $\col{slack}$.
+
+\paragraph{The zerocheck.}
+Following \texttt{piop/src/lookup/booleanity.rs}, the bound is enforced as
+an $\eqop$-weighted zerocheck over the $2^{\nu}$ signature rows. With
+$r$ the sumcheck challenge point and $\{\mathrm{slice}_k\}_{k<2N}$ the
+coefficient slices, the group proves
+\begin{equation}\label{eq:norm-zerocheck}
+  \sum_{j \in \{0,1\}^{\nu}} \eqop(r, j)\,
+  \Bigl( \underbrace{\textstyle\sum_{k=0}^{2N-1} \mathrm{slice}_k(j)^2
+         + \col{slack}(j)}_{=:\ \mathrm{comb}(j)}
+         \;-\; \nbound \Bigr) \;=\; 0 .
+\end{equation}
+The per-row combiner $\mathrm{comb}(j) = \sum_k \mathrm{slice}_k(j)^2 +
+\col{slack}(j)$ is \texttt{falcon\_norm\_comb\_fn}; the group multiplies
+by $\eqop(r,j)$ and subtracts the public constant $\nbound$. Because the
+$\eqop$ weights select each row independently, \eqref{eq:norm-zerocheck}
+holds iff \eqref{eq:normeq} holds for \emph{every} signature --- exactly as
+booleanity's $\sum_j \eqop(r,j)(v_j^2 - v_j) = 0$ enforces $v_j\in\{0,1\}$
+per row.
+
+\paragraph{Degree and group.}
+The combiner is degree~$2$ in the slices (the squares); with the
+$\eqop$ factor the group is degree~$3$. Unlike booleanity, the
+coefficients are not bits, so there is no round-one fast path: the group
+uses the plain multi-degree sumcheck constructor
+(\texttt{MultiDegreeSumcheckGroup::new}) with claimed sum~$0$. It is run
+\emph{alongside} the combined-polynomial resolver group in the same
+multi-degree sumcheck (group order $[\,\text{cpr}, (\text{booleanity?}),
+\text{norm}\,]$; Falcon has no binary columns, so booleanity is absent and
+the norm group sits at index~$1$).
+
+\paragraph{Binding to the committed columns.}
+The verifier binds the slice evaluations to the committed
+$\col{s_1},\col{s_2}$ limb cells by the projection-element consistency
+check
+$\mle{\col{P}_m}(r^\ast) = \sum_{p<W} a^{\,p}\,\mathrm{slice}_{mW+p}(r^\ast)$,
+where $a$ is the evaluation-projection element ($\evalproj{a}$) used in
+the inner field PIOP, and binds $\col{slack}$ via its own committed-column
+opening. No separate equality argument is needed.
+
+\paragraph{Range checks (out of scope here).}
+Two non-negativity / range facts complete soundness and are a separate
+bit-decomposition $+$ booleanity pass, not yet wired in the reference
+instance: \emph{(i)}~$\col{slack}(j)\ge 0$ (so \eqref{eq:normeq} is a
+genuine upper bound, not an equality that a large $\col{slack}$ could
+satisfy from above); and \emph{(ii)}~the centering
+$s_1[i],s_2[i]\in(-\half,\half\,]$, which pins the representatives in
+\eqref{eq:s1}. Both are standard range arguments over the same limb cells.

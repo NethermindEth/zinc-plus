@@ -1,0 +1,68 @@
+% ===========================================================================
+\section{Falcon overview and target relation}\label{sec:overview}
+% ===========================================================================
+
+We briefly recall Falcon to fix notation, then state the relation our
+UAIR$^+$ arithmetizes.
+
+\paragraph{The ring.}
+Fix the prime $q = 12289$ and the degree $n = 512$ (Falcon-512; the
+$n=1024$ variant is identical up to parameters). Let
+\[
+  \Rring := \Z[X]/(X^n+1), \qquad \Rq := \Z_q[X]/(X^n+1).
+\]
+$\Rring$ is the \emph{negacyclic} ring: multiplication reduces modulo
+$X^n+1$, so $X^n \equiv -1$ and a wrap past degree $n$ flips sign. We
+represent ring elements by their \emph{centered} coefficient vectors,
+each coefficient in $(-\half, \half\,]$ with $\half = 6144$. The
+acceptance bound is $\nbound = 34{,}034{,}726$ for Falcon-512.
+
+\paragraph{Verification.}
+A Falcon public key is $h \in \Rq$. A signature on a message $m$ (with
+salt) consists of a short vector recovered by decompression as
+$s_2 \in \Rring$; the verifier computes the hash point
+$c = \HashToPoint(\text{salt}\,\Vert\,m) \in \Rq$, recovers the second
+half
+\begin{equation}\label{eq:s1}
+  s_1 \;\equiv\; c - s_2\, h \pmod{q}, \qquad
+  s_1 \in (-\half, \half\,]^n \text{ (centered)},
+\end{equation}
+and \emph{accepts} iff the Euclidean norm bound holds:
+\begin{equation}\label{eq:norm}
+  \lVert (s_1, s_2) \rVert^2
+  \;=\; \sum_{i=0}^{n-1} s_1[i]^2 + \sum_{i=0}^{n-1} s_2[i]^2
+  \;\le\; \nbound .
+\end{equation}
+Equivalently to \cref{eq:s1}, the pair $(s_1, s_2)$ satisfies the
+\emph{ring equation}
+\begin{equation}\label{eq:ring}
+  s_1 + s_2\, h \;\equiv\; c \pmod{q}\ \text{in } \Rq .
+\end{equation}
+
+\paragraph{Scope.}
+We arithmetize the \emph{algebraic core}:
+\cref{eq:ring} and \cref{eq:norm}. The two hashing steps are out of
+scope, mirroring how the Zinc+ SHA-256$+$ECDSA demonstration covers the
+multi-scalar-multiplication bulk rather than every mod-$n$ reduction:
+\begin{itemize}[leftmargin=1.5em]
+  \item $\HashToPoint$ (a SHAKE-256 expansion mod $q$) is \emph{not}
+  arithmetized; the hash point $c$ is supplied as a \emph{public}
+  input. A verifier who recomputes $c$ in the clear can bind it to the
+  trace.
+  \item $\Decompress$ (the variable-length signature encoding) is
+  \emph{not} arithmetized; $s_2$ is supplied as a \emph{witness}, and
+  $s_1$ is supplied as a witness recomputed by the (honest) prover.
+\end{itemize}
+Both are standard, hash-/encoding-only steps that compose with the core
+relation; we focus on the lattice arithmetic, which is where the Zinc+
+ring machinery (ideal-membership constraints over $\Rring$, bit/coefficient
+slicing) earns its keep.
+
+\paragraph{Batching.}
+Real deployments verify \emph{many} signatures under one key (e.g.\ a
+validator checking a block of attestations). We therefore arithmetize a
+\emph{batch} of $2^{\nu}$ signatures under a single shared public key
+$h$, with a per-signature hash point $c$. Each signature occupies one
+row of a $2^{\nu}$-row trace, so a single per-row constraint discharges
+all $2^{\nu}$ ring equations and a single per-row zerocheck discharges
+all $2^{\nu}$ norm bounds.

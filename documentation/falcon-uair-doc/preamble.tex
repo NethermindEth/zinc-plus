@@ -1,0 +1,72 @@
+% ===========================================================================
+% Preamble: packages, theorem environments, macros.
+% Style mirrors the Zinc+ paper / the SHA-256 UAIR note.
+% ===========================================================================
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,
+            linkcolor={teal!70!black},
+            citecolor={teal!70!black},
+            urlcolor={teal!70!black}]{hyperref}
+\usepackage{cleveref}
+
+% --- Theorem environments (paper style: shared counter, italic body) -------
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{claim}[theorem]{Claim}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- Operators -------------------------------------------------------------
+\DeclareMathOperator{\HashToPoint}{HashToPoint}
+\DeclareMathOperator{\Decompress}{Decompress}
+\DeclareMathOperator{\Verify}{Verify}
+\DeclareMathOperator{\eqop}{eq}
+
+% --- Number sets -----------------------------------------------------------
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\N}{\mathbb{N}}
+
+% --- Falcon-specific ring and bounds ---------------------------------------
+% Ring of integers modulo X^n+1, and its reduction mod q.
+\newcommand{\Rring}{\mathcal{R}}               % Z[X]/(X^n+1)
+\newcommand{\Rq}{\mathcal{R}_q}                % Z_q[X]/(X^n+1)
+\newcommand{\negacyc}{\langle X^{n}+1\rangle}  % the negacyclic ideal
+\newcommand{\nbound}{\lfloor \beta^2 \rfloor}  % squared-norm acceptance bound
+\newcommand{\half}{\tfrac{q-1}{2}}
+
+% --- Projections (Zinc+ paper notation) ------------------------------------
+\newcommand{\proj}[1]{\phi_{#1}}               % ring projection mod prime
+\newcommand{\evalproj}[1]{\psi_{#1}}           % evaluation projection X->a
+\newcommand{\mle}[1]{\widetilde{#1}}           % MLE tilde
+
+% --- Ideals / column branding ----------------------------------------------
+\newcommand{\ideal}[1]{\langle #1 \rangle}
+\newcommand{\col}[1]{\ensuremath{\mathsf{#1}}}
+\newcommand{\rowidx}[1]{[#1]}
+
+% Hyperref-friendly section refs
+\renewcommand{\sectionautorefname}{Section}
+\renewcommand{\subsectionautorefname}{Section}
+\renewcommand{\subsubsectionautorefname}{Section}

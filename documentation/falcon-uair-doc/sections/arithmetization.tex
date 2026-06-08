@@ -1,0 +1,149 @@
+% ===========================================================================
+\section{The ring equation: limbs, quotient, and product witness}\label{sec:arith}
+% ===========================================================================
+
+\subsection{Trace layout}\label{sec:layout}
+
+The trace has $2^{\nu}$ rows, \emph{one signature per row}. Fix the
+\emph{cell width} $W = 32$ (the native commitment-cell degree bound) and
+the \emph{limb count} $L = n/W = 16$. Each degree-$<n$ ring element is
+stored as $L$ \emph{limb cells}, each a degree-$<W$ \texttt{arbitrary\_poly}
+cell holding $W$ consecutive integer coefficients. A polynomial
+$P(X) = \sum_{j=0}^{n-1} P[j] X^j$ is recovered from its limbs
+$\{\col{P}_m\}_{m<L}$, $\col{P}_m(X) = \sum_{p<W} P[mW+p]X^p$, by the
+\emph{limb reconstruction}
+\begin{equation}\label{eq:recon}
+  P(X) \;=\; \sum_{m=0}^{L-1} X^{W m}\, \col{P}_m(X).
+\end{equation}
+Keeping cells at the native width $W=32$ (rather than one giant
+degree-$n$ cell) lets the \emph{same} cells feed both the ring equation
+(via \cref{eq:recon}) and the norm zerocheck (\cref{sec:norm}, which reads
+the coefficients off the limb cells directly) --- no second
+representation, no consistency bridge. Crucially, the trace cell degree
+$W$ is \emph{decoupled} from the ring degree $n$: the scalars $X^{Wm}$
+used in \cref{eq:recon} live in a separate scalar ring whose degree bound
+is independent of $W$.
+
+\smallskip
+\noindent The columns, all \texttt{arbitrary\_poly} unless noted, are:
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+columns & role & kind & limbs \\
+\midrule
+$\col{h}_{0..L}$       & shared public key (identical on every row) & public  & $L$ \\
+$\col{c}_{0..L}$       & per-signature hash point                   & public  & $L$ \\
+$\col{s_1}_{0..L}$     & recomputed short-vector half (centered)    & witness & $L$ \\
+$\col{s_2}_{0..L}$     & signature short-vector half                & witness & $L$ \\
+$\col{u}_{0..L}$       & mod-$q$ / negacyclic quotient (Option B)   & witness & $L$ \\
+$\col{s_3}_{0..L_3}$   & product witness $s_2 h$ (full, unreduced)  & witness & $L_3 = 2L$ \\
+$\col{slack}$          & per-signature squared-norm slack ($\Z$ column) & witness & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+Public columns ($\col{h}$, $\col{c}$) are absorbed into the transcript;
+$\col{h}$ is shared, so it is one public polynomial broadcast to every
+row, while $\col{c}$ varies per row. With $5L + L_3 = 112$
+\texttt{arbitrary\_poly} columns and one $\Z$ column.
+
+\subsection{Option B: the ring equation over \texorpdfstring{$\Z[X]$}{Z[X]}}\label{sec:optionb}
+
+The Zinc+ UAIR supports \emph{ideal-membership} constraints
+$Q(\cdot)\in\ideal{g}$ over $\Z[X]$ (equality is the special case
+$g=0$). The negacyclic ring is the quotient by
+$g = X^n+1$, realized in the implementation as the rotation ideal
+$\langle X^{W'} - a\rangle$ with $W' = n$ and $a = -1$, whose membership
+test \texttt{RotationIdeal::remainder\_is\_zero} reduces a polynomial of
+\emph{any} degree modulo $X^n+1$ in $O(n)$ by Horner folding (so degrees
+up to $<2n-1$ are handled natively).
+
+The reduction modulo $q$ in \cref{eq:ring} is made explicit by an integer
+\emph{quotient} witness $u$ (``Option B''): \cref{eq:ring} holds in $\Rq$
+iff there is $u\in\Rring$ with
+$s_1 + s_2 h - c = q\,u$ in $\Rring$, i.e.
+\begin{equation}\label{eq:ring-z}
+  s_1 + s_2 h - c - q\,u \;\in\; \negacyc \quad\text{over } \Z[X].
+\end{equation}
+For the honest prover, $u$ is the centered quotient of the (negacyclically
+reduced) value $s_1 + (s_2 h \bmod X^n{+}1) - c$ by $q$; its coefficients
+fit comfortably in a machine word.
+
+\subsection{The product witness: keeping the ring equation linear}\label{sec:s3}
+
+Written directly, \cref{eq:ring-z} contains the product $s_2 h$ of two
+\emph{trace} polynomials. The constraint degree counter (which assigns
+degree $1$ to each trace cell and adds degrees on multiplication) reports
+this constraint at \emph{degree~$2$}. A degree-$2$ effective constraint
+forces the prover onto the slow \emph{combined-polynomial} ideal-check
+lane; the fast \emph{MLE-first} lane (column-major, no per-row combined
+polynomial) requires every non-zero-ideal constraint to be linear.
+
+We therefore carry the product as a committed witness. Introduce
+$\col{s_3}$ holding the \textbf{full, unreduced} product $s_3 := s_2 h$
+over $\Z[X]$ (degree $<2n-1$, hence $L_3 = 2L = 32$ limbs), and split the
+constraint into two:
+\begin{align}
+  \text{\textbf{ring equation}}\quad
+    & s_1 + s_3 - c - q\,u \;\in\; \negacyc,
+      \label{eq:ring-linear}\\[2pt]
+  \text{\textbf{product witness}}\quad
+    & s_3 - s_2 h \;=\; 0.
+      \label{eq:product}
+\end{align}
+In \cref{eq:ring-linear} the term $\col{s_3}$ is a trace value (recovered
+from its $L_3$ limbs by \cref{eq:recon}), \emph{not} a product, so the
+residual is \emph{degree~$1$ --- linear}. \cref{eq:product} is the only
+nonlinear constraint, and we assert it as a \textbf{zero ideal}
+(\texttt{assert\_zero}). This is sound and complete precisely because
+$\col{s_3}$ carries the \emph{full} product: $s_3 - s_2 h$ is then
+\emph{identically} the zero polynomial over $\Z[X]$, not merely a multiple
+of $X^n+1$. (Had $\col{s_3}$ stored the negacyclically reduced product, it
+would differ from $s_2 h$ by $(X^n{+}1)\cdot(\text{quotient})$ and the
+\texttt{assert\_zero} would be incomplete.)
+
+\subsection{Why this is MLE-first eligible}\label{sec:mlefirst}
+
+The Zinc+ degree machinery distinguishes \emph{two} degrees:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{count\_max\_degree} --- the maximum per-variable degree
+  over \emph{all} constraints; drives the inner sumcheck, which runs at
+  \texttt{count\_max\_degree}$+2$.
+  \item \texttt{count\_effective\_max\_degree} --- the same maximum but
+  \emph{excluding zero-ideal} constraints; drives the ideal-check lane
+  selection (MLE-first requires it to be $\le 1$).
+\end{itemize}
+For our instance the ring equation \eqref{eq:ring-linear} is degree~$1$
+(non-zero ideal) and the product \eqref{eq:product} is degree~$2$ (zero
+ideal). Hence
+\[
+  \texttt{count\_effective\_max\_degree} = 1, \qquad
+  \texttt{count\_max\_degree} = 2,
+\]
+so the instance is \textbf{MLE-first eligible}, while the inner sumcheck
+runs at degree $2+2 = 4$.
+
+\begin{remark}[Soundness of the zero-ideal split]\label{rem:soundness}
+Excluding \eqref{eq:product} from the \emph{effective} degree does
+\emph{not} drop it from the proof. Its ideal-check value is forced to the
+only member of the zero ideal --- $0$ --- so the verifier's membership
+check is satisfied vacuously; but the inner sumcheck (at degree~$4$)
+folds the \emph{actual} expression $s_3 - s_2 h$ against the committed
+$\col{s_2},\col{h},\col{s_3}$. A cheating prover with $s_3 \ne s_2 h$ on
+some row produces a sumcheck sum that disagrees with the (zero) ideal-check
+value and is rejected. This is the same pattern the SHA-256 UAIR uses for
+its degree-$2$ \texttt{assert\_zero} selector pins; here the quadratic term
+$s_2 h$ is a witness $\times$ public product, structurally identical to
+SHA's $\col{s\_msg\_init}\cdot(\col{w\_W}-\col{pa\_m})$.
+\end{remark}
+
+\begin{remark}[A subtlety in the MLE-first lane]\label{rem:mlefirst-zero}
+The MLE-first ideal check evaluates each constraint on the
+\emph{point-evaluated} column MLEs. For a degree-$2$ zero-ideal term this
+yields $s_3^\ast - s_2^\ast h^\ast$ (a product of MLE evaluations), which
+is \emph{nonzero} at a random point even though the constraint vanishes on
+the hypercube ($\mle{s_3 - s_2 h}$ is the MLE of the product, not the
+product of MLEs). The implementation must therefore force the zero-ideal
+slot to $0$ before transcript absorption; otherwise the ideal-check value
+and the sumcheck disagree. This is enforced in
+\texttt{IdealCheckProtocol::prove\_linear}.
+\end{remark}

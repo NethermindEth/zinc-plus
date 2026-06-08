@@ -1,0 +1,53 @@
+\documentclass[11pt]{article}
+
+\input{preamble}
+
+\title{The Falcon (FN-DSA) Verification UAIR$^+$ \\
+       \large As implemented in the Zinc+ reference codebase}
+\author{Alex Abdugafarov \\[2pt] \normalsize Nethermind Research \and Albert Garreta \\[2pt] \normalsize Nethermind Research}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textcolor{blue}{\textit{Albert: AI generated report from our codebase. Reviewed and edited by authors}}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+We describe the Universal AIR with lookups (UAIR$^+$) instance that
+arithmetizes the algebraic core of \textbf{Falcon} (FN-DSA, FIPS~206)
+signature verification, as deployed in the Zinc+ reference
+implementation. We verify a \emph{batch} of $2^{\nu}$ signatures
+\emph{at once} under a shared public key, one signature per trace row.
+We follow the conventions and notation of the main Zinc+ paper and
+focus on the design choices specific to lattice-signature verification:
+\emph{(i)}~a direct $\Z[X]$ ($+$~explicit mod-$q$ quotient)
+arithmetization of the negacyclic ring relation
+$s_1 + s_2 h \equiv c \pmod{q, X^n+1}$, expressed against the rotation
+(negacyclic) ideal $\negacyc$; \emph{(ii)}~a \emph{product witness}
+$s_3 = s_2 h$ that keeps the ring equation algebraically \emph{linear}
+in the trace MLEs (so the instance is MLE-first eligible), with the
+quadratic product relation discharged by a zero-ideal constraint bound
+in the inner sumcheck; \emph{(iii)}~a direct sum-of-squares
+arithmetization of the Euclidean-norm acceptance bound
+$\lVert (s_1,s_2)\rVert^2 \le \nbound$ as a booleanity-adapted zerocheck
+over the signature rows, reading the coefficient slices of the committed
+limb cells; and \emph{(iv)}~a polynomial-commitment optimization that
+folds the arbitrary-poly lane along the cell-degree axis, shrinking the
+proof roughly $3.6\times$. $\HashToPoint$ (SHAKE-256) and $\Decompress$
+are out of scope: the hash point $c$ is taken as public input and the
+short vector $s_2$ as a witness.
+\end{abstract}
+
+\tableofcontents
+
+\input{sections/overview}
+\input{sections/arithmetization}
+\input{sections/norm}
+\input{sections/folding}
+\input{sections/summary}
+
+\end{document}

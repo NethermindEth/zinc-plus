@@ -1,0 +1,66 @@
+% ===========================================================================
+\section{Proof-size optimization: folding the arbitrary-poly lane}\label{sec:folding}
+% ===========================================================================
+
+\paragraph{Where the bytes are.}
+For this instance the proof is overwhelmingly polynomial-commitment data.
+A measured breakdown of an (MLE-first) Falcon proof gives
+\emph{$94.4\%$} in the Zip$+$ commitment-opening bytes
+(\texttt{proof.zip}); the ideal check ($2.0\%$), the combined-poly resolver
+($1.1\%$), the inner sumcheck and multipoint evaluation
+($<0.1\%$ each) are negligible. Within \texttt{proof.zip}, the binary lane
+is \emph{empty} (Falcon has no binary columns) and the integer lane is a
+single $\col{slack}$ column, so the bytes are essentially \emph{all}
+arbitrary-poly: the $112$ committed arb columns of \cref{sec:layout}.
+Shrinking the proof therefore means shrinking the arbitrary-poly opening.
+
+\paragraph{Degree folding.}
+The Zip$+$ PCS supports \emph{column splitting} along the cell-degree axis,
+the workhorse of its folded variants. A degree-$<W$ cell
+$v = u + X^{W/2} w$ splits into low/high halves $u, w$ of degree $<W/2$;
+applying this twice ($W \to W/2 \to W/4$) turns a length-$n$ column of
+degree-$<W$ cells into a length-$4n$ column of degree-$<W/4$ cells, gaining
+two multilinear variables that index the four degree-quarters. Committing
+the quarter-degree column makes every codeword element a quarter of the
+size, so the column openings shrink correspondingly. The bridge from the
+PIOP's evaluation claim on the original column $v$ at point $r_0$ to a PCS
+claim on the split column is a pair of Fiat--Shamir folding challenges
+$\gamma_1, \gamma_2$: the prover opens the split column at the
+\emph{extended point} $(r_0 \,\Vert\, \gamma_1 \,\Vert\, \gamma_2)$, and the
+verifier reassembles the four quarter-evaluations $c_{00}, c_{10}, c_{01},
+c_{11}$ (the inner products of the quarter-blocks of the lifted evaluation
+with the code's powers) by the bilinear corner weights
+\begin{equation}\label{eq:fourblock}
+  (1-\gamma_1)(1-\gamma_2)\,c_{00}
+  + \gamma_1(1-\gamma_2)\,c_{10}
+  + (1-\gamma_1)\gamma_2\,c_{01}
+  + \gamma_1\gamma_2\,c_{11}.
+\end{equation}
+
+\paragraph{Why a dedicated arb fold (and not the generic 4$\times$ fold).}
+A Zip$+$ column opening costs (coefficient width) $\times$ (cell degree).
+The generic $4\times$ folded path couples the arbitrary-poly coefficient
+width to the integer lane, which the $4\times$ integer split forces to
+$\ge 4$ machine limbs. Folding Falcon's arb cells \emph{through that path}
+would widen each $\approx 30$-bit coefficient to $256$ bits: cell size
+$1{\times}W$ becomes $4{\times}(W/4)$, and the $4\times$ degree win is
+exactly cancelled by the $4\times$ width bloat --- net zero. Falcon's arb
+coefficients are narrow, so we use a \emph{dedicated} fold that splits
+\emph{only} the arbitrary-poly lane along degree while keeping the native
+narrow ($64$-bit) coefficient type, and leaves the (empty) binary and
+(tiny) integer lanes unfolded. Concretely the arb lane commits and opens at
+the extended point $(r_0\,\Vert\,\gamma_1\,\Vert\,\gamma_2)$ with the
+quarter-degree reassembly \eqref{eq:fourblock}, while the integer lane
+commits and opens unsplit at $r_0$; since the two lanes open at different
+points they are committed as separate Merkle instances.
+
+\paragraph{Result.}
+The degree fold reduces the arbitrary-poly opening --- the $94\%$
+component --- by close to $4\times$. End-to-end (Falcon-512, $2^4$
+signatures, identical trace) the proof shrinks from
+\(\approx 6.37\,\mathrm{MB}\) to \(\approx 1.77\,\mathrm{MB}\), a
+\(\mathbf{3.6\times}\) reduction, at essentially unchanged prover time
+($\approx 45\,$ms with the MLE-first lane) and a negligible increase in
+verifier time. The optimization is orthogonal to the arithmetization of
+\cref{sec:arith,sec:norm}: it composes with whichever ideal-check lane is
+used.

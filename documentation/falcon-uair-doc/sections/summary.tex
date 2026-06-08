@@ -1,0 +1,75 @@
+% ===========================================================================
+\section{Summary}\label{sec:summary}
+% ===========================================================================
+
+\paragraph{Constraints.}
+The instance imposes, per signature row $j$:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+constraint & form & degree / ideal \\
+\midrule
+ring equation
+  & $s_1 + s_3 - c - q\,u \in \negacyc$
+  & $1$, ideal $\langle X^n{+}1\rangle$ \\
+product witness
+  & $s_3 - s_2 h = 0$
+  & $2$, zero ideal (\texttt{assert\_zero}) \\
+norm bound
+  & $\sum_i s_1[i]^2 + \sum_i s_2[i]^2 + \col{slack} = \nbound$
+  & $3$ zerocheck (\cref{sec:norm}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+A single per-row ideal constraint discharges all $2^{\nu}$ ring equations;
+a single zerocheck discharges all $2^{\nu}$ norm bounds. Effective max
+degree is $1$ (the product is zero-ideal), so the instance runs on the
+MLE-first ideal-check lane; the inner sumcheck runs at
+\texttt{count\_max\_degree}$+2 = 4$.
+
+\paragraph{Soundness map.}
+\begin{itemize}[leftmargin=1.5em]
+  \item \emph{Ring relation} \eqref{eq:ring}: \eqref{eq:ring-linear}
+  $+$ \eqref{eq:product}, the latter bound by the inner sumcheck
+  (\cref{rem:soundness}). $\col{c}$ is public; $\col{h}$ is public and
+  shared. The mod-$q$ quotient $\col{u}$ is range-bounded.
+  \item \emph{Norm bound} \eqref{eq:norm}: the zerocheck
+  \eqref{eq:norm-zerocheck}, with $\col{slack}\ge 0$ and centering of
+  $s_1,s_2$ supplied by range arguments (\cref{sec:norm}, future work).
+  \item Everything is checked over the random soundness prime $q_0$ of
+  the Zinc$+$ projection $\proj{q_0}$; $q_0 \gg \nbound$, so the integer
+  norm does not wrap.
+\end{itemize}
+
+\paragraph{Costs.}
+Falcon-512, Apple~Silicon, rate-$1/4$ IPRS, MLE-first lane:
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+$2^{\nu}$ signatures & prover & verifier & proof (raw) \\
+\midrule
+$2^{4} = 16$    & $45.8$\,ms & $3.4$\,ms & $6.37$\,MB \\
+$2^{6} = 64$    & $69.7$\,ms & ---       & --- \\
+$2^{10} = 1024$ & $1.31$\,s  & ---       & --- \\
+\midrule
+$2^{4}$, arb-folded (\cref{sec:folding}) & $44.8$\,ms & $4.5$\,ms & $\mathbf{1.77}$\,\textbf{MB} \\
+\bottomrule
+\end{tabular}
+\end{center}
+The MLE-first lane is $2.3$--$5.5\times$ faster to prove than the
+combined-polynomial lane (the gap grows with batch size); the
+arbitrary-poly degree fold shrinks the proof $\approx 3.6\times$ at
+unchanged prover time.
+
+\paragraph{Reference implementation.}
+The UAIR is \texttt{test-uair/src/falcon.rs}
+(\texttt{FalconBatchUair}, \texttt{falcon\_norm\_comb\_fn}). The
+norm zerocheck group is \texttt{piop/src/lookup/norm.rs}; the negacyclic
+ideal is \texttt{uair/src/ideal/rotation.rs}; the arbitrary-poly degree
+split is \texttt{zip-plus/src/pcs/folding.rs}
+(\texttt{split\_arb\_columns}); the dedicated arb-fold prover/verifier are
+\texttt{prove\_folded\_arb\_4x} / \texttt{verify\_folded\_arb\_4x} in
+\texttt{protocol/src/}. End-to-end tests:
+\texttt{test\_e2e\_falcon\_batch} (unfolded) and
+\texttt{test\_e2e\_falcon\_arb\_folded} (folded); the bench is
+\texttt{bench\_falcon\_arb\_folded}.
