@@ -151,13 +151,12 @@ where
         }
         let zero = F::zero_with_cfg(config);
         let zero_vec_deg = vec![zero.clone(); degree + 1];
-        let zero_vec_poly = vec![zero.clone(); polys.len()];
         let scratch = || Scratch {
             evals: zero_vec_deg.clone(),
-            steps: zero_vec_poly.clone(),
-            vals0: zero_vec_poly.clone(),
-            vals: zero_vec_poly.clone(),
-            levals: zero_vec_deg.clone(),
+            steps: Vec::with_capacity(polys.len()),
+            vals0: Vec::with_capacity(polys.len()),
+            vals: Vec::with_capacity(polys.len()),
+            levals: Vec::with_capacity(degree + 1),
         };
 
         #[cfg(not(feature = "parallel"))]
@@ -180,26 +179,35 @@ where
             //             My bet is that it won't affect running time, but better safe than
             // sorry.
 
-            s.vals0.iter_mut().zip(polys.iter()).for_each(|(v0, poly)| {
-                *v0 = F::new_unchecked_with_cfg(poly[index].clone(), config);
-            });
-            s.levals[0] = comb_fn(&s.vals0);
+            s.vals0.clear();
+            s.vals0.extend(
+                polys
+                    .iter()
+                    .map(|poly| F::new_unchecked_with_cfg(poly[index].clone(), config)),
+            );
+            s.levals.clear();
+            s.levals.push(comb_fn(&s.vals0));
 
             if degree > 0 {
-                s.vals.iter_mut().zip(polys.iter()).for_each(|(v1, poly)| {
-                    *v1 = F::new_unchecked_with_cfg(poly[index + 1].clone(), config);
-                });
-                s.levals[1] = comb_fn(&s.vals);
+                s.vals.clear();
+                s.vals.extend(
+                    polys
+                        .iter()
+                        .map(|poly| F::new_unchecked_with_cfg(poly[index + 1].clone(), config)),
+                );
+                s.levals.push(comb_fn(&s.vals));
 
-                for (i, (v1, v0)) in s.vals.iter().zip(s.vals0.iter()).enumerate() {
-                    s.steps[i] = v1.clone() - v0.clone();
-                }
+                s.steps.clear();
+                s.steps
+                    .extend(s.vals.iter().zip(s.vals0.iter()).map(|(v1, v0)| {
+                        v1.clone() - v0.clone()
+                    }));
 
-                for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
-                    for poly_i in 0..polys.len() {
-                        s.vals[poly_i] += &s.steps[poly_i];
+                for _ in 2..=degree {
+                    for (value, step) in s.vals.iter_mut().zip(s.steps.iter()) {
+                        *value += step;
                     }
-                    *eval_point = comb_fn(&s.vals);
+                    s.levals.push(comb_fn(&s.vals));
                 }
             }
 
