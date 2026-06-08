@@ -4,7 +4,7 @@
 //! `Proof`: production ProjectionFold has a different transcript order and
 //! derives folded commitments only after SumFold fixes the instance-axis point.
 
-use std::{borrow::Cow, io::Cursor, marker::PhantomData};
+use std::{borrow::Cow, io::Cursor, marker::PhantomData, time::Duration};
 
 use crate::{
     ZincTypes,
@@ -212,6 +212,158 @@ pub struct ProductionShaChallenges<F> {
     pub rho: F,
     pub xi: F,
     pub beta: Vec<F>,
+}
+
+/// Heavy-region wall-time breakdown for a production SHA prover run.
+///
+/// These regions intentionally omit cheap challenge/equality-vector setup and
+/// final struct assembly, so [`Self::total`] is the sum of measured heavy
+/// regions rather than exact end-to-end wall time.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ProductionShaProveTimings {
+    pub witness_generation: Duration,
+    pub commitment: Duration,
+    pub residual_coeff_tables: Duration,
+    pub aggregate_ideal: Duration,
+    pub sumfold_linear_accumulator: Duration,
+    pub sumfold_quadratic_prefix_accumulator: Duration,
+    pub sumfold_group_build: Duration,
+    pub sumfold_prove: Duration,
+    pub fold_projected_traces: Duration,
+    pub row_claim_derivation: Duration,
+    pub fold_pcs_commitments: Duration,
+    pub fold_pcs_prover_data: Duration,
+    pub row_sumcheck: Duration,
+    pub endpoint_resolver: Duration,
+    pub multipoint_eval: Duration,
+    pub lifted_evals: Duration,
+    pub pcs_opening: Duration,
+}
+
+impl ProductionShaProveTimings {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.witness_generation += other.witness_generation;
+        self.commitment += other.commitment;
+        self.residual_coeff_tables += other.residual_coeff_tables;
+        self.aggregate_ideal += other.aggregate_ideal;
+        self.sumfold_linear_accumulator += other.sumfold_linear_accumulator;
+        self.sumfold_quadratic_prefix_accumulator += other.sumfold_quadratic_prefix_accumulator;
+        self.sumfold_group_build += other.sumfold_group_build;
+        self.sumfold_prove += other.sumfold_prove;
+        self.fold_projected_traces += other.fold_projected_traces;
+        self.row_claim_derivation += other.row_claim_derivation;
+        self.fold_pcs_commitments += other.fold_pcs_commitments;
+        self.fold_pcs_prover_data += other.fold_pcs_prover_data;
+        self.row_sumcheck += other.row_sumcheck;
+        self.endpoint_resolver += other.endpoint_resolver;
+        self.multipoint_eval += other.multipoint_eval;
+        self.lifted_evals += other.lifted_evals;
+        self.pcs_opening += other.pcs_opening;
+    }
+
+    pub fn divide_by(&mut self, n: u32) {
+        self.witness_generation /= n;
+        self.commitment /= n;
+        self.residual_coeff_tables /= n;
+        self.aggregate_ideal /= n;
+        self.sumfold_linear_accumulator /= n;
+        self.sumfold_quadratic_prefix_accumulator /= n;
+        self.sumfold_group_build /= n;
+        self.sumfold_prove /= n;
+        self.fold_projected_traces /= n;
+        self.row_claim_derivation /= n;
+        self.fold_pcs_commitments /= n;
+        self.fold_pcs_prover_data /= n;
+        self.row_sumcheck /= n;
+        self.endpoint_resolver /= n;
+        self.multipoint_eval /= n;
+        self.lifted_evals /= n;
+        self.pcs_opening /= n;
+    }
+
+    pub fn total(&self) -> Duration {
+        self.witness_generation
+            + self.commitment
+            + self.residual_coeff_tables
+            + self.aggregate_ideal
+            + self.sumfold_linear_accumulator
+            + self.sumfold_quadratic_prefix_accumulator
+            + self.sumfold_group_build
+            + self.sumfold_prove
+            + self.fold_projected_traces
+            + self.row_claim_derivation
+            + self.fold_pcs_commitments
+            + self.fold_pcs_prover_data
+            + self.row_sumcheck
+            + self.endpoint_resolver
+            + self.multipoint_eval
+            + self.lifted_evals
+            + self.pcs_opening
+    }
+}
+
+/// Heavy-region wall-time breakdown for a production SHA verifier run.
+///
+/// These regions intentionally omit cheap challenge/equality-vector setup, so
+/// [`Self::total`] is the sum of measured heavy regions rather than exact
+/// end-to-end wall time.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ProductionShaVerifyTimings {
+    pub public_projection: Duration,
+    pub aggregate_ideal_verify: Duration,
+    pub sumfold_verify: Duration,
+    pub fold_pcs_commitments: Duration,
+    pub row_sumcheck_verify: Duration,
+    pub fold_projected_publics: Duration,
+    pub resolver_terminal_verify: Duration,
+    pub multipoint_verify: Duration,
+    pub multipoint_open_eval_checks: Duration,
+    pub lifted_eval_absorb: Duration,
+    pub pcs_verify: Duration,
+}
+
+impl ProductionShaVerifyTimings {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.public_projection += other.public_projection;
+        self.aggregate_ideal_verify += other.aggregate_ideal_verify;
+        self.sumfold_verify += other.sumfold_verify;
+        self.fold_pcs_commitments += other.fold_pcs_commitments;
+        self.row_sumcheck_verify += other.row_sumcheck_verify;
+        self.fold_projected_publics += other.fold_projected_publics;
+        self.resolver_terminal_verify += other.resolver_terminal_verify;
+        self.multipoint_verify += other.multipoint_verify;
+        self.multipoint_open_eval_checks += other.multipoint_open_eval_checks;
+        self.lifted_eval_absorb += other.lifted_eval_absorb;
+        self.pcs_verify += other.pcs_verify;
+    }
+
+    pub fn divide_by(&mut self, n: u32) {
+        self.public_projection /= n;
+        self.aggregate_ideal_verify /= n;
+        self.sumfold_verify /= n;
+        self.fold_pcs_commitments /= n;
+        self.row_sumcheck_verify /= n;
+        self.fold_projected_publics /= n;
+        self.resolver_terminal_verify /= n;
+        self.multipoint_verify /= n;
+        self.multipoint_open_eval_checks /= n;
+        self.lifted_eval_absorb /= n;
+        self.pcs_verify /= n;
+    }
+
+    pub fn total(&self) -> Duration {
+        self.public_projection
+            + self.aggregate_ideal_verify
+            + self.sumfold_verify
+            + self.fold_pcs_commitments
+            + self.row_sumcheck_verify
+            + self.fold_projected_publics
+            + self.resolver_terminal_verify
+            + self.multipoint_verify
+            + self.multipoint_open_eval_checks
+            + self.lifted_eval_absorb
+            + self.pcs_verify
+    }
 }
 
 const SHA256_ROUND_CONSTANTS: [u32; 64] = [
@@ -1047,6 +1199,83 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
+    prove_linear_ideal_fold_inner(pp, shape, witnesses, transcript, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prove_linear_ideal_fold_with_timings<P, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<P, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    transcript: &mut impl Transcript,
+) -> Result<
+    (
+        LinearIdealFoldProveOutput<
+            UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
+            FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
+            FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
+            ProductionLinearIdealFoldProof<P, Zt, F, D>,
+        >,
+        ProductionShaProveTimings,
+    ),
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P: ProductionShaFoldedPcsOpen<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
+    let mut timings = ProductionShaProveTimings::default();
+    let output =
+        prove_linear_ideal_fold_inner(pp, shape, witnesses, transcript, Some(&mut timings))?;
+    Ok((output, timings))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_linear_ideal_fold_inner<P, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<P, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    transcript: &mut impl Transcript,
+    mut timings: Option<&mut ProductionShaProveTimings>,
+) -> Result<
+    LinearIdealFoldProveOutput<
+        UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
+        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
+        FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
+        ProductionLinearIdealFoldProof<P, Zt, F, D>,
+    >,
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P: ProductionShaFoldedPcsOpen<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
     let field_cfg = &pp.field_cfg;
     ensure_production_sha_word_degree::<F, D>()?;
     if witnesses.len() < 2 {
@@ -1062,25 +1291,38 @@ where
     absorb_production_sha_statement_metadata(transcript);
     absorb_uair_shape_metadata(transcript, shape);
 
-    let instance_artifacts = witnesses
-        .iter()
-        .enumerate()
-        .map(|(instance_idx, witness)| {
-            let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
-            let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
-            absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &public_trace);
-            let (trace, public, witness_polys) =
-                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
-            let (data, commitment) =
-                commit_production_sha_instance::<P, Zt, F, D>(&pp.pcs_params, &witness_polys)?;
-            let fresh_instance = UairInstance {
-                public_trace: own_uair_trace(&public_trace),
-                commitments: commitment.clone(),
-            };
+    let mut instance_artifacts = Vec::with_capacity(witnesses.len());
+    for (instance_idx, witness) in witnesses.iter().enumerate() {
+        let witness_start = std::time::Instant::now();
+        let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
+        let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
+        if let Some(t) = timings.as_mut() {
+            t.witness_generation += witness_start.elapsed();
+        }
 
-            Ok::<_, ProductionShaError<F>>((fresh_instance, commitment, data, trace, public))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &public_trace);
+
+        let witness_start = std::time::Instant::now();
+        let (trace, public, witness_polys) =
+            U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
+        if let Some(t) = timings.as_mut() {
+            t.witness_generation += witness_start.elapsed();
+        }
+
+        let commitment_start = std::time::Instant::now();
+        let (data, commitment) =
+            commit_production_sha_instance::<P, Zt, F, D>(&pp.pcs_params, &witness_polys)?;
+        if let Some(t) = timings.as_mut() {
+            t.commitment += commitment_start.elapsed();
+        }
+
+        let fresh_instance = UairInstance {
+            public_trace: own_uair_trace(&public_trace),
+            commitments: commitment.clone(),
+        };
+
+        instance_artifacts.push((fresh_instance, commitment, data, trace, public));
+    }
 
     let (fresh_instances, instance_artifacts): (Vec<_>, Vec<_>) = instance_artifacts
         .into_iter()
@@ -1108,14 +1350,20 @@ where
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let r_ic_eq_weights = build_eq_x_r_vec(&r_ic, field_cfg)?;
+    let residual_start = std::time::Instant::now();
     let coeff_tables = build_linear_residual_coeff_tables_with_row_weights(
         &traces,
         &publics,
         &r_ic_eq_weights,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.residual_coeff_tables = residual_start.elapsed();
+    }
+
     let beta = sample_instance_batch_challenge(transcript, witnesses.len(), field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(&beta, field_cfg)?;
+    let aggregate_start = std::time::Instant::now();
     let aggregate_ideal_polys =
         beta_aggregate_nonzero_ideal_polys_with_weights(&coeff_tables, &beta_eq_weights)?;
     let ideal_check = IdealCheckProof {
@@ -1124,6 +1372,9 @@ where
     let aggregate_ideal_polys = aggregate_sha_ideal_polys_from_proof(&ideal_check)?;
     check_aggregate_sha_ideal_membership(&aggregate_ideal_polys, field_cfg)?;
     absorb_aggregate_sha_ideal_polys(transcript, &aggregate_ideal_polys, field_cfg);
+    if let Some(t) = timings.as_mut() {
+        t.aggregate_ideal = aggregate_start.elapsed();
+    }
 
     let (a, lambda, rho, xi) = sample_post_aggregate_ideal_challenges(transcript, field_cfg);
     let a_powers = build_sha_residual_eval_powers(&a, field_cfg);
@@ -1132,8 +1383,15 @@ where
         build_booleanity_weights(&rho, &xi, booleanity_sources.len(), field_cfg);
     let initial_claim =
         evaluate_aggregate_sha_ideal_claim(&aggregate_ideal_polys, &a, &lambda, field_cfg)?;
+
+    let linear_accumulator_start = std::time::Instant::now();
     let linear_accumulator =
         build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, field_cfg)?;
+    if let Some(t) = timings.as_mut() {
+        t.sumfold_linear_accumulator = linear_accumulator_start.elapsed();
+    }
+
+    let quadratic_accumulator_start = std::time::Instant::now();
     let quadratic_prefix_accumulator = build_sha_sumfold_quadratic_prefix_accumulator(
         &traces,
         &booleanity_sources,
@@ -1142,6 +1400,11 @@ where
         &booleanity_weights,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.sumfold_quadratic_prefix_accumulator = quadratic_accumulator_start.elapsed();
+    }
+
+    let sumfold_group_start = std::time::Instant::now();
     let sumfold_group = build_production_sha_sumfold_group_from_prefix_accumulators(
         &traces,
         &beta,
@@ -1154,6 +1417,11 @@ where
         pp.prefix_vars,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.sumfold_group_build = sumfold_group_start.elapsed();
+    }
+
+    let sumfold_prove_start = std::time::Instant::now();
     let (sumfold_proof, sumfold_r_b) = prove_optimized_sha_sumfold_with_weights(
         transcript,
         sumfold_group,
@@ -1161,6 +1429,10 @@ where
         beta.len(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.sumfold_prove = sumfold_prove_start.elapsed();
+    }
+
     let provisional_sumfold_output = derive_instance_fold_claim(
         &beta,
         sumfold_r_b.clone(),
@@ -1168,8 +1440,15 @@ where
         witnesses.len(),
         field_cfg,
     )?;
+
+    let fold_traces_start = std::time::Instant::now();
     let (folded, folded_public) =
         fold_projected_traces(&traces, &publics, &provisional_sumfold_output, field_cfg)?;
+    if let Some(t) = timings.as_mut() {
+        t.fold_projected_traces = fold_traces_start.elapsed();
+    }
+
+    let row_claim_start = std::time::Instant::now();
     let row_claim = expression_folded_row_sum_with_vectors(
         &folded.trace,
         &folded_public,
@@ -1187,17 +1466,29 @@ where
         witnesses.len(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.row_claim_derivation = row_claim_start.elapsed();
+    }
 
+    let fold_commitments_start = std::time::Instant::now();
     let folded_commitments = fold_pcs_commitments::<P, Zt, F, D>(
         &instance_commitments,
         sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.fold_pcs_commitments = fold_commitments_start.elapsed();
+    }
+
+    let fold_prover_data_start = std::time::Instant::now();
     let folded_prover_data = fold_pcs_prover_data::<P, Zt, F, D>(
         &instance_prover_data,
         sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.fold_pcs_prover_data = fold_prover_data_start.elapsed();
+    }
     absorb_production_sha_commitments::<P, Zt, F, D>(
         transcript,
         b"production_sha_derived_folded_commitments",
@@ -1205,6 +1496,7 @@ where
     );
 
     verify_folded_row_sumcheck_claim(&row_claim, sumfold_output.final_round_sumcheck_claim())?;
+    let row_sumcheck_start = std::time::Instant::now();
     let (combined_sumcheck, row_output) =
         prove_expression_folded_row_sumcheck_with_output_and_vectors(
             transcript,
@@ -1219,6 +1511,11 @@ where
             field_cfg,
         )?;
     verify_folded_row_sumcheck_claim(&combined_sumcheck.claimed_sums()[0], &row_claim)?;
+    if let Some(t) = timings.as_mut() {
+        t.row_sumcheck = row_sumcheck_start.elapsed();
+    }
+
+    let endpoint_resolver_start = std::time::Instant::now();
     let endpoint_evals = build_sha_endpoint_evals_from_trace_with_row_weights(
         &folded.trace,
         &row_output.r_star_eq_weights,
@@ -1241,7 +1538,11 @@ where
         field_cfg,
     )?;
     verify_folded_row_terminal_value(&row_output, &terminal)?;
+    if let Some(t) = timings.as_mut() {
+        t.endpoint_resolver = endpoint_resolver_start.elapsed();
+    }
 
+    let multipoint_start = std::time::Instant::now();
     let (multipoint_eval, r_0) = prove_sha_endpoint_multipoint_with_row_weights(
         transcript,
         &folded.trace,
@@ -1251,13 +1552,23 @@ where
         &row_output.r_star_eq_weights,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.multipoint_eval = multipoint_start.elapsed();
+    }
+
     let r_0_eq_weights = build_eq_x_r_vec(&r_0, field_cfg)?;
+    let lifted_evals_start = std::time::Instant::now();
     let witness_lifted_evals = build_folded_sha_pcs_lifted_evals_with_row_weights(
         &folded.trace,
         &r_0_eq_weights,
         field_cfg,
     )?;
     absorb_folded_lifted_evals(transcript, &witness_lifted_evals, field_cfg);
+    if let Some(t) = timings.as_mut() {
+        t.lifted_evals = lifted_evals_start.elapsed();
+    }
+
+    let pcs_opening_start = std::time::Instant::now();
     let opening_proof = P::prove_folded_pcs_opening(
         &pp.pcs_params,
         &folded_commitments,
@@ -1267,6 +1578,9 @@ where
         &witness_lifted_evals,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.pcs_opening = pcs_opening_start.elapsed();
+    }
 
     Ok(LinearIdealFoldProveOutput {
         fresh_instances,
@@ -1487,6 +1801,69 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
+    verify_linear_ideal_fold_inner(vs, instances, proof, transcript, None)
+}
+
+pub fn verify_linear_ideal_fold_with_timings<P, U, Zt, F, const D: usize>(
+    vs: &VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>,
+    instances: &[UairInstance<'_, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>],
+    proof: &ProductionLinearIdealFoldProof<P, Zt, F, D>,
+    transcript: &mut impl Transcript,
+) -> Result<
+    (
+        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
+        ProductionShaVerifyTimings,
+    ),
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
+    let mut timings = ProductionShaVerifyTimings::default();
+    let folded_instance =
+        verify_linear_ideal_fold_inner(vs, instances, proof, transcript, Some(&mut timings))?;
+    Ok((folded_instance, timings))
+}
+
+fn verify_linear_ideal_fold_inner<P, U, Zt, F, const D: usize>(
+    vs: &VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>,
+    instances: &[UairInstance<'_, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>],
+    proof: &ProductionLinearIdealFoldProof<P, Zt, F, D>,
+    transcript: &mut impl Transcript,
+    mut timings: Option<&mut ProductionShaVerifyTimings>,
+) -> Result<
+    FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
     let field_cfg = &vs.field_cfg;
     ensure_production_sha_word_degree::<F, D>()?;
     if instances.len() < 2 {
@@ -1508,6 +1885,7 @@ where
     absorb_production_sha_statement_metadata(transcript);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
+    let public_projection_start = std::time::Instant::now();
     let mut publics = Vec::with_capacity(instances.len());
     for (instance_idx, instance) in instances.iter().enumerate() {
         validate_public_uair_trace_shape::<Zt::Int, Zt::Int, F, D>(
@@ -1531,17 +1909,22 @@ where
     }
 
     validate_production_sha_publics(&publics, field_cfg)?;
-    let booleanity_sources = production_sha_booleanity_sources();
-
     absorb_production_sha_commitments::<P, Zt, F, D>(
         transcript,
         b"production_sha_fresh_commitments",
         &proof.instance_commitments,
     );
     absorb_projected_sha_publics(transcript, &publics, field_cfg);
+    if let Some(t) = timings.as_mut() {
+        t.public_projection = public_projection_start.elapsed();
+    }
+
+    let booleanity_sources = production_sha_booleanity_sources();
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let beta = sample_instance_batch_challenge(transcript, instances.len(), field_cfg)?;
+
+    let aggregate_ideal_start = std::time::Instant::now();
     let aggregate_ideal_polys = aggregate_sha_ideal_polys_from_proof(&proof.ideal_check)?;
     check_aggregate_sha_ideal_membership(&aggregate_ideal_polys, field_cfg)?;
     absorb_aggregate_sha_ideal_polys(transcript, &aggregate_ideal_polys, field_cfg);
@@ -1549,7 +1932,11 @@ where
     let (a, lambda, rho, xi) = sample_post_aggregate_ideal_challenges(transcript, field_cfg);
     let initial_claim =
         evaluate_aggregate_sha_ideal_claim(&aggregate_ideal_polys, &a, &lambda, field_cfg)?;
+    if let Some(t) = timings.as_mut() {
+        t.aggregate_ideal_verify = aggregate_ideal_start.elapsed();
+    }
 
+    let sumfold_verify_start = std::time::Instant::now();
     let verified_sumfold = verify_full_sha_sumfold(
         transcript,
         &proof.sumfold_proof,
@@ -1564,25 +1951,44 @@ where
         instances.len(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.sumfold_verify = sumfold_verify_start.elapsed();
+    }
+
+    let fold_commitments_start = std::time::Instant::now();
     let folded_commitments = fold_pcs_commitments::<P, Zt, F, D>(
         &proof.instance_commitments,
         sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.fold_pcs_commitments = fold_commitments_start.elapsed();
+    }
     absorb_production_sha_commitments::<P, Zt, F, D>(
         transcript,
         b"production_sha_derived_folded_commitments",
         std::slice::from_ref(&folded_commitments),
     );
 
+    let row_sumcheck_start = std::time::Instant::now();
     let row_output = verify_folded_row_sumcheck(
         transcript,
         &proof.combined_sumcheck,
         sumfold_output.final_round_sumcheck_claim(),
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.row_sumcheck_verify = row_sumcheck_start.elapsed();
+    }
+
+    let fold_publics_start = std::time::Instant::now();
     let folded_public =
         fold_projected_publics(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
+    if let Some(t) = timings.as_mut() {
+        t.fold_projected_publics = fold_publics_start.elapsed();
+    }
+
+    let resolver_terminal_start = std::time::Instant::now();
     absorb_sha_resolver_proof(transcript, &proof.resolver, field_cfg);
     let endpoint_evals = sha_endpoint_evals_from_resolver(&proof.resolver, &a, field_cfg)?;
     let terminal = reconstruct_folded_row_terminal_from_endpoints(
@@ -1598,7 +2004,11 @@ where
         field_cfg,
     )?;
     verify_folded_row_terminal_value(&row_output, &terminal)?;
+    if let Some(t) = timings.as_mut() {
+        t.resolver_terminal_verify = resolver_terminal_start.elapsed();
+    }
 
+    let multipoint_start = std::time::Instant::now();
     let (subclaim, shift_specs) = verify_sha_endpoint_multipoint(
         transcript,
         &proof.multipoint_eval,
@@ -1607,6 +2017,11 @@ where
         &row_output.r_star,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.multipoint_verify = multipoint_start.elapsed();
+    }
+
+    let open_eval_start = std::time::Instant::now();
     let open_evals = multipoint_open_evals_from_pcs_lifted(
         &proof.witness_lifted_evals,
         &production_sha_multipoint_layout(),
@@ -1615,7 +2030,17 @@ where
         field_cfg,
     )?;
     verify_sha_endpoint_multipoint_open_evals(&subclaim, &open_evals, &shift_specs, field_cfg)?;
+    if let Some(t) = timings.as_mut() {
+        t.multipoint_open_eval_checks = open_eval_start.elapsed();
+    }
+
+    let lifted_absorb_start = std::time::Instant::now();
     absorb_folded_lifted_evals(transcript, &proof.witness_lifted_evals, field_cfg);
+    if let Some(t) = timings.as_mut() {
+        t.lifted_eval_absorb = lifted_absorb_start.elapsed();
+    }
+
+    let pcs_verify_start = std::time::Instant::now();
     verify_production_sha_pcs_opening::<P, Zt, F, D>(
         &vs.pcs_params,
         &folded_commitments,
@@ -1624,6 +2049,9 @@ where
         &proof.opening_proof,
         field_cfg,
     )?;
+    if let Some(t) = timings.as_mut() {
+        t.pcs_verify = pcs_verify_start.elapsed();
+    }
 
     Ok(FoldedLinearIdealInstance {
         target: sumfold_output.final_round_sumcheck_claim().clone(),
@@ -6177,6 +6605,73 @@ mod tests {
         )
         .expect("production SHA ProjectionFold proof verifies");
 
+        assert_eq!(verified.target, output.folded_instance.target);
+        assert_eq!(verified.public, output.folded_instance.public);
+        assert!(pcs_commitments_match::<
+            P,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(
+            &verified.commitments, &output.folded_instance.commitments
+        ));
+    }
+
+    #[test]
+    fn linear_ideal_fold_timing_apis_smoke_test_with_hyrax() {
+        type C = ark_bn254::G1Affine;
+        type P = AllHyraxPCSTypes<C>;
+        type U = Sha256CompressionSliceUair<ShaInt>;
+
+        let field_cfg = fixed_prime::field_cfg_from_curve_scalar::<F, Uint<TEST_FIELD_LIMBS>, C>();
+        let initial_state = SHA256_INITIAL_STATE;
+        let message = vec!["hello world"; 40].join(" ");
+        let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("test message should canonically pad to 8 SHA-256 blocks");
+        let (witnesses, _final_state) =
+            synthesize_sha256_chain_witnesses::<ShaInt, 8>(initial_state, message_blocks)
+                .expect("SHA-256 UAIR witnesses synthesize");
+        let shape = UairShape::<U>::new(SHA_ROW_VARS);
+        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C>();
+        let pp =
+            LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
+                pcs_params,
+                field_cfg.clone(),
+                3,
+            );
+        let vs = setup_verify_linear_ideal_fold::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>(
+            LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+            shape.clone(),
+        )
+        .expect("production SHA verifier setup succeeds");
+
+        let mut prover_transcript = Blake3Transcript::new();
+        let (output, prove_timings) = prove_linear_ideal_fold_with_timings::<
+            P,
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(&pp, &shape, &witnesses, &mut prover_transcript)
+        .expect("production SHA timed ProjectionFold proof succeeds");
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let (verified, verify_timings) = verify_linear_ideal_fold_with_timings::<
+            P,
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(
+            &vs,
+            &output.fresh_instances,
+            &output.proof,
+            &mut verifier_transcript,
+        )
+        .expect("production SHA timed ProjectionFold proof verifies");
+
+        assert!(prove_timings.total() > Duration::ZERO);
+        assert!(verify_timings.total() > Duration::ZERO);
         assert_eq!(verified.target, output.folded_instance.target);
         assert_eq!(verified.public, output.folded_instance.public);
         assert!(pcs_commitments_match::<
