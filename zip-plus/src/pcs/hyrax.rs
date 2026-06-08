@@ -498,20 +498,22 @@ impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLa
                     let row_idx = job_idx % num_rows;
                     let lower = row_idx * ck.num_cols;
                     let upper = (lower + ck.num_cols).min(poly.evaluations.len());
-                    let row = &poly.evaluations[lower..upper];
-                    let values = row
-                        .iter()
-                        .map(|eval| {
-                            <Self as HyraxLanes<C, BinaryPoly<D>, D>>::lane_value(eval, lane)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-
-                    let mut row_comm = if values.iter().copied().any(|bit| bit) {
-                        BoolSubsetMsm::<6>::msm_bool_row(&ck.msm_ck, &values, use_inner_parallelism)
-                            .map_err(msm_err)?
-                    } else {
-                        C::Group::zero()
-                    };
+                    let row_len = upper - lower;
+                    let mut row_comm = BoolSubsetMsm::<6>::msm_bool_row_from_window_masks(
+                        &ck.msm_ck,
+                        row_len,
+                        use_inner_parallelism,
+                        |offset, len| {
+                            let mut mask = 0usize;
+                            for bit_idx in 0..len {
+                                if poly.evaluations[lower + offset + bit_idx].coeff(lane) {
+                                    mask |= 1usize << bit_idx;
+                                }
+                            }
+                            mask
+                        },
+                    )
+                    .map_err(msm_err)?;
 
                     if ck.blinding_mode.is_blinded() {
                         row_comm += ck.msm_ck.h * blinds[job_idx];

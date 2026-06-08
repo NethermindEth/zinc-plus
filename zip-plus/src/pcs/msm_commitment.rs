@@ -148,6 +148,46 @@ impl<C: AffineRepr> BoolWindowTable<C> {
         }
         acc
     }
+
+    fn msm_row_from_window_masks<M>(
+        &self,
+        value_len: usize,
+        window_bits: usize,
+        _use_parallelism_internally: bool,
+        mask_at: M,
+    ) -> C::Group
+    where
+        M: Fn(usize, usize) -> usize + Sync,
+    {
+        #[cfg(feature = "parallel")]
+        if _use_parallelism_internally && self.lens.len() > 1 {
+            return self
+                .lens
+                .par_iter()
+                .copied()
+                .enumerate()
+                .map(|(window_idx, len)| {
+                    let offset = window_idx * window_bits;
+                    if offset >= value_len {
+                        return C::Group::zero();
+                    }
+                    let end = (offset + len).min(value_len);
+                    self.tables[window_idx][mask_at(offset, end - offset)]
+                })
+                .reduce(C::Group::zero, |acc, point| acc + point);
+        }
+
+        let mut acc = C::Group::zero();
+        for (window_idx, len) in self.lens.iter().copied().enumerate() {
+            let offset = window_idx * window_bits;
+            if offset >= value_len {
+                break;
+            }
+            let end = (offset + len).min(value_len);
+            acc += self.tables[window_idx][mask_at(offset, end - offset)];
+        }
+        acc
+    }
 }
 
 impl<C: AffineRepr> MsmCommitmentEngine<C> {
@@ -340,6 +380,40 @@ impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
             let end = start + bits.len();
             let table = subset_table::<C>(&ck.bases[start..end])?;
             acc += table[bit_mask(bits)];
+        }
+        Ok(acc)
+    }
+
+    pub(crate) fn msm_bool_row_from_window_masks<C, M>(
+        ck: &MsmCommitmentKey<C>,
+        value_len: usize,
+        use_parallelism_internally: bool,
+        mask_at: M,
+    ) -> Result<C::Group, MsmError>
+    where
+        C: AffineRepr,
+        M: Fn(usize, usize) -> usize + Sync,
+    {
+        validate_row_len(ck, value_len)?;
+        validate_window_bits(WINDOW_BITS)?;
+
+        if WINDOW_BITS == DEFAULT_BOOL_WINDOW_BITS {
+            return Ok(ck
+                .bool_tables_6
+                .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS))
+                .msm_row_from_window_masks(
+                    value_len,
+                    DEFAULT_BOOL_WINDOW_BITS,
+                    use_parallelism_internally,
+                    mask_at,
+                ));
+        }
+
+        let mut acc = C::Group::zero();
+        for (window_idx, window) in ck.bases[..value_len].chunks(WINDOW_BITS).enumerate() {
+            let offset = window_idx * WINDOW_BITS;
+            let table = subset_table::<C>(window)?;
+            acc += table[mask_at(offset, window.len())];
         }
         Ok(acc)
     }
