@@ -9,9 +9,10 @@ use std::{
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, PrimeField as ArkPrimeField, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
+use crypto_bigint::{BoxedUint, modular::BoxedMontyForm};
 use crypto_primitives::{
-    FromWithConfig, IntRing, PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
-    crypto_bigint_uint::Uint,
+    FromWithConfig, IntRing, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use num_integer::Integer;
 use zinc_poly::{
@@ -222,6 +223,31 @@ where
         let scalar_bigint: <C::ScalarField as ArkPrimeField>::BigInt = value.clone().into();
         let scalar_uint = uint_from_le_bytes::<LIMBS>(&scalar_bigint.to_bytes_le());
         MontyField::<LIMBS>::from_with_cfg(&scalar_uint, cfg)
+    }
+}
+
+impl<C> HyraxFieldBridge<C> for BoxedMontyField
+where
+    C: AffineRepr,
+{
+    fn field_to_scalar(value: &Self) -> C::ScalarField {
+        assert_curve_scalar_modulus_boxed::<C>(&value.modulus());
+
+        let canonical = BoxedMontyForm::from(value.clone()).retrieve();
+        C::ScalarField::from_le_bytes_mod_order(&canonical.to_le_bytes())
+    }
+
+    fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Self {
+        let actual_modulus = cfg.modulus().clone().get();
+        assert_curve_scalar_modulus_boxed::<C>(&actual_modulus);
+
+        let scalar_bigint: <C::ScalarField as ArkPrimeField>::BigInt = value.clone().into();
+        let scalar_uint = BoxedUint::from_le_slice(
+            &scalar_bigint.to_bytes_le(),
+            actual_modulus.bits_precision(),
+        )
+        .expect("curve scalar must fit protocol field precision");
+        BoxedMontyField::from_with_cfg(&scalar_uint, cfg)
     }
 }
 
@@ -1094,6 +1120,21 @@ where
 {
     let expected =
         uint_from_le_bytes::<LIMBS>(&<C::ScalarField as ArkPrimeField>::MODULUS.to_bytes_le());
+    assert_eq!(
+        actual, &expected,
+        "Hyrax field mismatch: protocol field modulus must equal curve scalar modulus",
+    );
+}
+
+fn assert_curve_scalar_modulus_boxed<C>(actual: &BoxedUint)
+where
+    C: AffineRepr,
+{
+    let expected = BoxedUint::from_le_slice(
+        &<C::ScalarField as ArkPrimeField>::MODULUS.to_bytes_le(),
+        actual.bits_precision(),
+    )
+    .expect("curve scalar modulus must fit protocol field precision");
     assert_eq!(
         actual, &expected,
         "Hyrax field mismatch: protocol field modulus must equal curve scalar modulus",

@@ -257,15 +257,15 @@ where
         let nv = self.num_vars;
         let dim = partial_point.len();
 
-        let mut r = partial_point[0].clone();
         for i in 1..dim + 1 {
+            let r_base = &partial_point[i - 1];
             for b in 0..1 << (nv - i) {
-                *r.inner_mut() = partial_point[i - 1].inner().clone();
                 if self[2 * b + 1] != self[2 * b] {
                     // a = f(1) - f(0)
                     let a = F::sub_inner(&self[2 * b + 1], &self[2 * b], config);
 
                     // self[b] = f(0) + r * a
+                    let mut r = r_base.clone();
                     r.mul_assign_by_inner(&a);
                     self[b] = F::add_inner(&self[2 * b], r.inner(), config);
                 } else {

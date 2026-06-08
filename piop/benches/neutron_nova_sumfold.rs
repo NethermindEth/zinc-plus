@@ -6,13 +6,14 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use crypto_primitives::{Field, FromWithConfig, PrimeField, crypto_bigint_monty::MontyField};
 use zinc_piop::{
     neutron_nova::{
-        ProjectedShaPublic, ProjectedShaTrace, SHA_ROW_COUNT, SHA_WORD_BITS, ShaBitSliceColumns,
-        ShaBooleanitySource, ShaIntCol, ShaIntColumns, ShaPublicCol, ShaPublicColumns, ShaWordCol,
+        MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
+        ShaBooleanitySource, ShaIntCol, ShaPublicCol, ShaWordCol, bit_slice_index,
         build_dense_sha_sumfold_group, build_production_sha_sumfold_group_owned,
-        scalarize_trace_words,
+        scalarize_bit_slices,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
+use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
 
@@ -30,11 +31,35 @@ fn f(value: u64, cfg: &<F as PrimeField>::Config) -> F {
     F::from_with_cfg(value, cfg)
 }
 
+fn mle_table_from_columns(columns: Vec<Vec<F>>) -> MleTable<F> {
+    columns
+        .into_iter()
+        .map(|evaluations| DenseMultilinearExtension {
+            evaluations,
+            num_vars: SHA_ROW_VARS,
+        })
+        .collect()
+}
+
+fn flatten_bits(bits: Vec<Vec<Vec<F>>>) -> MleTable<F> {
+    let mut flattened = (0..bits.len() * SHA_WORD_BITS)
+        .map(|_| Vec::new())
+        .collect::<Vec<_>>();
+    for (col_idx, rows) in bits.into_iter().enumerate() {
+        for row in rows {
+            for (bit_idx, value) in row.into_iter().enumerate() {
+                flattened[bit_slice_index(col_idx, bit_idx, SHA_WORD_BITS)].push(value);
+            }
+        }
+    }
+    mle_table_from_columns(flattened)
+}
+
 fn synthetic_boolean_trace(
     instance_idx: u64,
     a: &F,
     cfg: &<F as PrimeField>::Config,
-) -> ProjectedShaTrace<F> {
+) -> ProjectedTrace<F> {
     let zero = F::zero_with_cfg(cfg);
     let mut bits = vec![vec![vec![zero.clone(); SHA_WORD_BITS]; SHA_ROW_COUNT]; ShaWordCol::COUNT];
     for (col_idx, col) in bits.iter_mut().enumerate() {
@@ -49,26 +74,29 @@ fn synthetic_boolean_trace(
             }
         }
     }
-    let bit_slices = ShaBitSliceColumns { columns: bits };
-    let scalarized_words = scalarize_trace_words(&bit_slices, a, cfg).unwrap();
-    ProjectedShaTrace {
-        rows: SHA_ROW_COUNT,
+    let bit_slices = flatten_bits(bits);
+    let scalarized = scalarize_bit_slices(&bit_slices, a, cfg).unwrap();
+    ProjectedTrace {
         bit_slices,
-        scalarized_words,
-        int_columns: ShaIntColumns {
-            columns: vec![vec![zero.clone(); SHA_ROW_COUNT]; ShaIntCol::COUNT],
-        },
-        public_columns: ShaPublicColumns {
-            columns: vec![vec![zero; SHA_ROW_COUNT]; ShaPublicCol::COUNT],
-        },
+        scalarized,
+        int_columns: mle_table_from_columns(vec![
+            vec![zero.clone(); SHA_ROW_COUNT];
+            ShaIntCol::COUNT
+        ]),
+        public_columns: mle_table_from_columns(vec![
+            vec![zero; SHA_ROW_COUNT];
+            ShaPublicCol::COUNT
+        ]),
     }
 }
 
-fn zero_public(cfg: &<F as PrimeField>::Config) -> ProjectedShaPublic<F> {
-    ProjectedShaPublic {
-        columns: ShaPublicColumns {
-            columns: vec![vec![F::zero_with_cfg(cfg); SHA_ROW_COUNT]; ShaPublicCol::COUNT],
-        },
+fn zero_public(cfg: &<F as PrimeField>::Config) -> ProjectedPublic<F> {
+    ProjectedPublic {
+        columns: mle_table_from_columns(vec![
+            vec![F::zero_with_cfg(cfg); SHA_ROW_COUNT];
+            ShaPublicCol::COUNT
+        ]),
+        bit_slices: None,
     }
 }
 

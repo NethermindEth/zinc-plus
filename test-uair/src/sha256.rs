@@ -252,12 +252,23 @@ pub struct Sha256CompressionSliceUair<R>(PhantomData<R>);
 /// Canonical SHA-256 compression state `[a, b, c, d, e, f, g, h]`.
 pub type Sha256State = [u32; 8];
 
+/// Canonical SHA-256 initial hash state H_0 (FIPS 180-4 section 5.3.3).
+pub const SHA256_INITIAL_STATE: Sha256State = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
 /// One 512-bit SHA-256 message block as sixteen big-endian words.
 pub type Sha256MessageBlock = [u32; 16];
 
 /// Errors surfaced by deterministic SHA-256 witness synthesis.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sha256WitnessError {
+    /// A byte message is too long to encode its bit length in SHA-256's u64
+    /// length suffix.
+    MessageBitLengthOverflow { bytes: usize },
+    /// The canonical SHA-256 padding of a byte message did not produce the
+    /// caller-requested fixed number of blocks.
+    PaddedBlockCountMismatch { expected: usize, got: usize },
     /// The requested packed trace would not fit in the requested MLE size.
     TraceTooSmall {
         num_compressions: usize,
@@ -277,6 +288,16 @@ pub enum Sha256WitnessError {
 impl fmt::Display for Sha256WitnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MessageBitLengthOverflow { bytes } => {
+                write!(
+                    f,
+                    "message of {bytes} byte(s) is too long for SHA-256 padding"
+                )
+            }
+            Self::PaddedBlockCountMismatch { expected, got } => write!(
+                f,
+                "expected canonical SHA-256 padding to produce {expected} block(s), got {got}"
+            ),
             Self::TraceTooSmall {
                 num_compressions,
                 active_rows,
@@ -1348,6 +1369,70 @@ pub fn sha256_compress_native(
     ]
 }
 
+/// Canonically pad `message` as SHA-256 input and return exactly `N` 512-bit
+/// blocks as big-endian words.
+///
+/// This intentionally rejects messages whose canonical padding would require a
+/// different number of blocks; callers that ask for `[Sha256MessageBlock; 8]`
+/// should pass a message whose SHA-256 padding really spans eight blocks.
+pub fn sha256_padded_message_blocks<const N: usize>(
+    message: &[u8],
+) -> Result<[Sha256MessageBlock; N], Sha256WitnessError> {
+    const BLOCK_BYTES: usize = 64;
+    const LENGTH_BYTES: usize = 8;
+    const WORD_BYTES: usize = 4;
+
+    let message_len_u64 =
+        u64::try_from(message.len()).map_err(|_| Sha256WitnessError::MessageBitLengthOverflow {
+            bytes: message.len(),
+        })?;
+    let bit_len =
+        message_len_u64
+            .checked_mul(8)
+            .ok_or(Sha256WitnessError::MessageBitLengthOverflow {
+                bytes: message.len(),
+            })?;
+    let padded_len = message
+        .len()
+        .checked_add(1)
+        .and_then(|len| len.checked_add(LENGTH_BYTES))
+        .ok_or(Sha256WitnessError::MessageBitLengthOverflow {
+            bytes: message.len(),
+        })?;
+    let required_blocks = padded_len.div_ceil(BLOCK_BYTES);
+    if required_blocks != N {
+        return Err(Sha256WitnessError::PaddedBlockCountMismatch {
+            expected: N,
+            got: required_blocks,
+        });
+    }
+
+    let requested_len =
+        N.checked_mul(BLOCK_BYTES)
+            .ok_or(Sha256WitnessError::MessageBitLengthOverflow {
+                bytes: message.len(),
+            })?;
+    let mut padded = vec![0u8; requested_len];
+    padded[..message.len()].copy_from_slice(message);
+    padded[message.len()] = 0x80;
+    padded[requested_len - LENGTH_BYTES..].copy_from_slice(&bit_len.to_be_bytes());
+
+    let mut blocks = [[0u32; 16]; N];
+    for (block_idx, block) in blocks.iter_mut().enumerate() {
+        let block_start = block_idx * BLOCK_BYTES;
+        for (word_idx, word) in block.iter_mut().enumerate() {
+            let word_start = block_start + word_idx * WORD_BYTES;
+            *word = u32::from_be_bytes([
+                padded[word_start],
+                padded[word_start + 1],
+                padded[word_start + 2],
+                padded[word_start + 3],
+            ]);
+        }
+    }
+    Ok(blocks)
+}
+
 /// Synthesize one fresh SHA-256 compression UAIR trace.
 pub fn synthesize_one_sha256_compression_trace<R>(
     initial_state: Sha256State,
@@ -2004,17 +2089,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::crypto_bigint_int::Int;
+    use crypto_primitives::{crypto_bigint_int::Int, semiring::boolean::Boolean};
     use zinc_uair::{
         Uair,
         degree_counter::{count_effective_max_degree, count_max_degree},
     };
 
     fn test_initial_state() -> Sha256State {
-        [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ]
+        SHA256_INITIAL_STATE
     }
 
     fn test_message_blocks<const N: usize>() -> [Sha256MessageBlock; N] {
@@ -2032,6 +2114,72 @@ mod tests {
         message_blocks.iter().fold(initial_state, |state, block| {
             sha256_compress_native(state, *block)
         })
+    }
+
+    #[test]
+    fn padded_message_blocks_encode_short_message() {
+        let blocks = sha256_padded_message_blocks::<1>(b"abc")
+            .expect("abc should canonically pad to one SHA-256 block");
+
+        assert_eq!(blocks[0][0], 0x6162_6380);
+        assert_eq!(blocks[0][14], 0);
+        assert_eq!(blocks[0][15], 24);
+    }
+
+    #[test]
+    fn padded_message_blocks_reject_wrong_fixed_count() {
+        let err = sha256_padded_message_blocks::<8>(b"abc")
+            .expect_err("abc should not canonically pad to eight SHA-256 blocks");
+
+        assert!(matches!(
+            err,
+            Sha256WitnessError::PaddedBlockCountMismatch {
+                expected: 8,
+                got: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn padded_message_blocks_can_make_eight_block_fixture_from_string() {
+        let message = vec!["hello world"; 40].join(" ");
+        let blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("test message should canonically pad to eight SHA-256 blocks");
+
+        assert_eq!(blocks[0][0], u32::from_be_bytes(*b"hell"));
+        assert_eq!(blocks[7][14], 0);
+        assert_eq!(blocks[7][15], u32::try_from(message.len() * 8).unwrap());
+    }
+
+    fn binary_word_to_u32(word: &BinaryPoly<32>) -> u32 {
+        let dense: DensePolynomial<Boolean, 32> = word.clone().into();
+        dense
+            .coeffs
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (bit, coeff)| {
+                if coeff.inner() {
+                    let shift = u32::try_from(bit).expect("SHA-256 bit index fits u32");
+                    acc | 1u32
+                        .checked_shl(shift)
+                        .expect("SHA-256 bit index is below word width")
+                } else {
+                    acc
+                }
+            })
+    }
+
+    fn public_sha_state_at<P: Clone, I: Clone>(
+        trace: &UairTrace<'_, P, I, 32>,
+        row_start: usize,
+    ) -> Sha256State {
+        let h_a = std::array::from_fn(|j| {
+            binary_word_to_u32(&trace.binary_poly[cols::PA_A].evaluations[row_start + j])
+        });
+        let h_e = std::array::from_fn(|j| {
+            binary_word_to_u32(&trace.binary_poly[cols::PA_E].evaluations[row_start + j])
+        });
+        trace_halves_to_state(h_a, h_e)
     }
 
     fn assert_sha_trace_splits_cleanly(trace: &UairTrace<'static, Int<5>, Int<5>, 32>) {
@@ -2097,6 +2245,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn synthesize_sha256_chain_witnesses_links_adjacent_states() {
+        let initial_state = test_initial_state();
+        let message_blocks = test_message_blocks::<8>();
+
+        let (witnesses, final_state) =
+            synthesize_sha256_chain_witnesses::<Int<5>, 8>(initial_state, message_blocks)
+                .expect("N=8 SHA witness synthesis should succeed");
+
+        assert_eq!(public_sha_state_at(&witnesses[0].trace, 0), initial_state);
+        for (index, pair) in witnesses.windows(2).enumerate() {
+            let left_output = public_sha_state_at(&pair[0].trace, cols::ROWS_PER_COMP);
+            let right_input = public_sha_state_at(&pair[1].trace, 0);
+            assert_eq!(
+                left_output, right_input,
+                "SHA witness {index} output must feed the next witness input"
+            );
+        }
+        assert_eq!(
+            public_sha_state_at(&witnesses[witnesses.len() - 1].trace, cols::ROWS_PER_COMP),
+            final_state
+        );
+    }
+
     /// Cross-check the K_CANONICAL table against the canonical SHA-256
     /// initial hash values H_0 — running one full compression of the
     /// empty-padding block (with H_0 as input) must produce the
@@ -2106,11 +2278,7 @@ mod tests {
     /// logic itself).
     #[test]
     fn k_canonical_matches_sha256_empty_string_digest() {
-        // SHA-256 H_0 (FIPS 180-4 §5.3.3).
-        let h_in: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ];
+        let h_in = SHA256_INITIAL_STATE;
         // Empty-string padded block: single 0x80 byte then 63 zero bytes.
         let mut m = [0u32; 16];
         m[0] = 0x80000000;

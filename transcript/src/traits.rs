@@ -340,6 +340,30 @@ pub trait Transcript {
         F::new_with_cfg(random_inner, cfg)
     }
 
+    fn get_variable_field_challenge<F: PrimeField>(
+        &mut self,
+        cfg: &F::Config,
+        num_bytes: usize,
+    ) -> F
+    where
+        F::Inner: GenTranscribable,
+    {
+        let mut buf = vec![0u8; num_bytes];
+        for chunk in buf.chunks_mut(u64::NUM_BYTES) {
+            let word = self.get_challenge::<u64>();
+            chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+        }
+        F::new_with_cfg(F::Inner::read_transcription_bytes_exact(&buf), cfg)
+    }
+
+    fn get_transcribable_field_challenge<F: PrimeField>(&mut self, cfg: &F::Config) -> F
+    where
+        F::Inner: Transcribable,
+    {
+        let zero = F::zero_with_cfg(cfg);
+        self.get_variable_field_challenge(cfg, zero.inner().get_num_bytes())
+    }
+
     /// Generates a pseudorandom transcribable values as challenges based on the
     /// current transcript state, updating it.
     // TODO(Alex): `get_field_challenge` is not efficient
@@ -351,6 +375,19 @@ pub trait Transcript {
         F::Inner: ConstTranscribable,
     {
         (0..n).map(|_| self.get_field_challenge(cfg)).collect()
+    }
+
+    fn get_transcribable_field_challenges<F: PrimeField>(
+        &mut self,
+        n: usize,
+        cfg: &F::Config,
+    ) -> Vec<F>
+    where
+        F::Inner: Transcribable,
+    {
+        (0..n)
+            .map(|_| self.get_transcribable_field_challenge(cfg))
+            .collect()
     }
 
     /// Generates a pseudorandom transcribable values as challenges based on the
@@ -412,6 +449,16 @@ pub trait Transcript {
         self.absorb_inner(&[0x3])
     }
 
+    fn absorb_random_field_owned<F>(&mut self, v: &F)
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let mut buf = vec![0u8; v.inner().get_num_bytes()];
+        self.absorb_random_field(v, &mut buf);
+    }
+
     /// Absorbs a slice of field element into the transcript.
     /// Delegates to the field element's implementation of
     /// absorb_into_transcript.
@@ -422,6 +469,15 @@ pub trait Transcript {
         F::Modulus: Transcribable,
     {
         v.iter().for_each(|x| self.absorb_random_field(x, buf));
+    }
+
+    fn absorb_random_field_slice_owned<F>(&mut self, v: &[F])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        v.iter().for_each(|x| self.absorb_random_field_owned(x));
     }
 }
 

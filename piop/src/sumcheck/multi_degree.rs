@@ -408,8 +408,8 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ) -> (MultiDegreeSumcheckProof<F>, Vec<SumcheckProverState<F>>)
     where
         F: InnerTransparentField + Send + Sync,
-        F::Inner: ConstTranscribable + Zero,
-        F::Modulus: ConstTranscribable,
+        F::Inner: Transcribable + Zero,
+        F::Modulus: Transcribable,
     {
         assert!(
             num_vars > 0,
@@ -418,7 +418,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         assert!(!groups.is_empty(), "need at least one degree group");
 
         let num_groups = groups.len();
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::zero_with_cfg(config).inner().get_num_bytes()];
         let nvars_field = F::from_with_cfg(num_vars as u64, config);
         let ngroups_field = F::from_with_cfg(num_groups as u64, config);
         transcript.absorb_random_field(&nvars_field, &mut buf);
@@ -492,7 +492,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 group_messages[j].push(msg);
             }
 
-            let challenge: F = transcript.get_field_challenge(config);
+            let challenge: F = transcript.get_transcribable_field_challenge(config);
             transcript.absorb_random_field(&challenge, &mut buf);
 
             for group_idx in 0..num_groups {
@@ -588,8 +588,8 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ) -> Result<MultiDegreeSubClaims<F>, SumCheckError<F>>
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         assert!(
             num_vars > 0,
@@ -598,7 +598,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         let num_groups = proof.degrees.len();
         assert!(num_groups != 0, "need at least one degree group");
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::zero_with_cfg(config).inner().get_num_bytes()];
         let nvars_field = F::from_with_cfg(num_vars as u64, config);
         let ngroups_field = F::from_with_cfg(num_groups as u64, config);
         transcript.absorb_random_field(&nvars_field, &mut buf);
@@ -636,7 +636,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 transcript.absorb_random_field_slice(&msg[i].0.tail_evaluations, &mut buf)
             });
 
-            let shared_challenge: F = transcript.get_field_challenge(config);
+            let shared_challenge: F = transcript.get_transcribable_field_challenge(config);
             transcript.absorb_random_field(&shared_challenge, &mut buf);
 
             verifier_states

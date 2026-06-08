@@ -566,7 +566,7 @@ pub fn prove_linear_ideal_fold<P, U, Zt, F, const D: usize>(
 ) -> Result<
     LinearIdealFoldProveOutput<
         UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
-        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedShaPublic<F>>,
+        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
         FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
         ProductionLinearIdealFoldProof<P, Zt, F, D>,
     >,
@@ -589,12 +589,12 @@ where
     F: PrimeField,
     P: ZincPCSTypes<Zt, F, D>,
 {
-    pub trace: ProjectedShaTrace<F>,
+    pub trace: ProjectedTrace<F>,
     pub opening_witness: PCSProverData<P, Zt, F, D>,
 }
 ```
 
-The folded verifier-visible public value is `ProjectedShaPublic<F>`, not a flat
+The folded verifier-visible public value is `ProjectedPublic<F>`, not a flat
 field vector, because the verifier needs structured SHA public columns for
 terminal reconstruction and multipoint checks.
 
@@ -632,7 +632,7 @@ pub fn verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     proof: &ProductionLinearIdealFoldProof<P, Zt, F, D>,
     transcript: &mut impl Transcript,
 ) -> Result<
-    FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedShaPublic<F>>,
+    FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
     LinearIdealFoldError<F>,
 >
 where

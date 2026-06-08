@@ -825,10 +825,10 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, BitOpRotUair,
-        EC_FP_INT_LIMBS, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal,
-        Sha256MessageBlock, Sha256State, ShaEcdsaUair, TestUairMixedDegrees, TestUairMixedShifts,
-        TestUairNoMultiplication, TestUairSimpleMultiplication, sha256_compress_native,
-        synthesize_sha256_chain_witnesses,
+        EC_FP_INT_LIMBS, GenerateRandomTrace, SHA256_INITIAL_STATE, Sha256CompressionSliceUair,
+        Sha256Ideal, Sha256MessageBlock, Sha256State, ShaEcdsaUair, TestUairMixedDegrees,
+        TestUairMixedShifts, TestUairNoMultiplication, TestUairSimpleMultiplication,
+        sha256_compress_native, sha256_padded_message_blocks, synthesize_sha256_chain_witnesses,
     };
     use zinc_uair::{
         ideal::{DegreeOneIdeal, rotation::RotationIdeal},
@@ -2043,13 +2043,10 @@ mod tests {
         type U = Sha256CompressionSliceUair<ShaEcdsaInt>;
 
         const NUM_VARS: usize = 9;
-        let initial_state: Sha256State = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ];
-        let message_blocks: [Sha256MessageBlock; 1] = [std::array::from_fn(|idx| {
-            0x0102_0304u32.wrapping_mul(idx as u32 + 1)
-        })];
+        let initial_state: Sha256State = SHA256_INITIAL_STATE;
+        let message_blocks: [Sha256MessageBlock; 1] =
+            sha256_padded_message_blocks(b"zinc-plus synthesized SHA witness")
+                .expect("test message should canonically pad to one SHA-256 block");
 
         let (witnesses, final_state) =
             synthesize_sha256_chain_witnesses::<ShaEcdsaInt, 1>(initial_state, message_blocks)

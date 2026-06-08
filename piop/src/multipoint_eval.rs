@@ -44,7 +44,7 @@ use zinc_poly::{
 };
 use zinc_transcript::{
     delegate_transcribable,
-    traits::{ConstTranscribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_uair::ShiftSpec;
 use zinc_utils::{
@@ -115,8 +115,8 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
-    F::Modulus: ConstTranscribable,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
 {
     /// Multi-point evaluation protocol prover.
     ///
@@ -143,8 +143,9 @@ where
 
         // Step 1: Sample multi-point batching coefficient \alpha and column
         // batching coefficients \gamma_1,...,\gamma_J.
-        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
-        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+        let alphas: Vec<F> =
+            transcript.get_transcribable_field_challenges(num_down_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_transcribable_field_challenges(num_cols, field_cfg);
 
         // Step 2: Build the two selector MLEs:
         //   eq_r(b)   = eq(b, r')
@@ -259,8 +260,9 @@ where
         let one = F::one_with_cfg(field_cfg);
 
         // Step 1: Sample \alpha_k and \gamma_j (must match prover).
-        let alphas: Vec<F> = transcript.get_field_challenges(num_down_cols, field_cfg);
-        let gammas: Vec<F> = transcript.get_field_challenges(num_cols, field_cfg);
+        let alphas: Vec<F> =
+            transcript.get_transcribable_field_challenges(num_down_cols, field_cfg);
+        let gammas: Vec<F> = transcript.get_transcribable_field_challenges(num_cols, field_cfg);
 
         // Step 2: Compute expected sum
         let expected_sum: F =

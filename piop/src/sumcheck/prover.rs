@@ -182,17 +182,15 @@ where
             //             My bet is that it won't affect running time, but better safe than
             // sorry.
 
-            s.vals0
-                .iter_mut()
-                .zip(polys.iter())
-                .for_each(|(v0, poly)| *v0.inner_mut() = poly[index].clone());
+            s.vals0.iter_mut().zip(polys.iter()).for_each(|(v0, poly)| {
+                *v0 = F::new_unchecked_with_cfg(poly[index].clone(), config);
+            });
             s.levals[0] = comb_fn(&s.vals0);
 
             if degree > 0 {
-                s.vals1
-                    .iter_mut()
-                    .zip(polys.iter())
-                    .for_each(|(v1, poly)| *v1.inner_mut() = poly[index + 1].clone());
+                s.vals1.iter_mut().zip(polys.iter()).for_each(|(v1, poly)| {
+                    *v1 = F::new_unchecked_with_cfg(poly[index + 1].clone(), config);
+                });
                 s.levals[1] = comb_fn(&s.vals1);
 
                 for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {

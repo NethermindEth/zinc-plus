@@ -481,7 +481,7 @@ where
         let _down_w_e_sh2 = &down.binary_poly[5];
         let down_w_e_sh4 = &down.binary_poly[6];
         let down_w_sig1_sh3 = &down.binary_poly[7];
-        let down_w_w_sh3 = &down.binary_poly[8];
+        let _down_w_w_sh3 = &down.binary_poly[8];
         let down_w_w_sh9 = &down.binary_poly[9];
         let down_w_w_sh16 = &down.binary_poly[10];
         let down_w_lsig0_sh1 = &down.binary_poly[11];
@@ -602,7 +602,7 @@ where
             - down_w_u_ef_sh3
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
-            - down_w_w_sh3
+            - w_big_w
             - down_w_sig0_sh3
             - down_w_maj_sh3
             + &mu_a_contrib;
@@ -616,7 +616,7 @@ where
             - down_w_u_ef_sh3
             - down_w_u_neg_e_g_sh3
             - down_pa_k_sh3
-            - down_w_w_sh3
+            - w_big_w
             + &mu_e_contrib;
         b.assert_in_ideal(e_update_inner + pa_c_c9, &ideal_rot_x2);
 

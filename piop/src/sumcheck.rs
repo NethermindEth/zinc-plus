@@ -170,14 +170,14 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F: InnerTransparentField,
-        F::Inner: ConstTranscribable + Zero,
-        F::Modulus: ConstTranscribable,
+        F::Inner: Transcribable + Zero,
+        F::Modulus: Transcribable,
     {
         if nvars == 0 {
             panic!("Attempt to prove a constant")
         }
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::zero_with_cfg(config).inner().get_num_bytes()];
         let nvars_field = F::from_with_cfg(nvars as u64, config);
         let degree_field = F::from_with_cfg(degree as u64, config);
 
@@ -192,7 +192,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
             let prover_msg = prover_state.prove_round(&verifier_msg, &comb_fn, config);
             transcript.absorb_random_field_slice(&prover_msg.0.tail_evaluations, &mut buf);
             prover_msgs.push(prover_msg);
-            let next_verifier_msg = transcript.get_field_challenge(config);
+            let next_verifier_msg = transcript.get_transcribable_field_challenge(config);
             transcript.absorb_random_field(&next_verifier_msg, &mut buf);
 
             verifier_msg = Some(next_verifier_msg);
@@ -273,14 +273,14 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
         config: &F::Config,
     ) -> Result<Subclaim<F>, SumCheckError<F>>
     where
-        F::Inner: ConstTranscribable,
-        F::Modulus: ConstTranscribable,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
     {
         if num_vars == 0 {
             panic!("Attempt to verify a sumcheck claim for 0 variables")
         }
 
-        let mut buf = vec![0; F::Inner::NUM_BYTES];
+        let mut buf = vec![0; F::zero_with_cfg(config).inner().get_num_bytes()];
 
         let (nvars_field, degree_field): (F, F) = {
             (

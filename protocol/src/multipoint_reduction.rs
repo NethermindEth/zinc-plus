@@ -5,7 +5,7 @@ use zinc_piop::multipoint_eval::{
     Subclaim as MultipointSubclaim,
 };
 use zinc_poly::mle::DenseMultilinearExtension;
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_uair::ShiftSpec;
 use zinc_utils::{
     delayed_reduction::DelayedFieldProductSum, inner_transparent_field::InnerTransparentField,
@@ -27,8 +27,8 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
-    F::Modulus: ConstTranscribable,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
 {
     let (proof, state) = MultipointEval::prove_as_subprotocol(
         transcript, trace_mles, eval_point, up_evals, down_evals, shifts, field_cfg,
@@ -53,8 +53,8 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
-    F::Modulus: ConstTranscribable,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
 {
     MultipointEval::verify_as_subprotocol(
         transcript, proof, eval_point, up_evals, down_evals, shifts, num_vars, field_cfg,

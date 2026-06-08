@@ -2,7 +2,7 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use zinc_poly::{EvaluatablePolynomial, univariate::nat_evaluation::NatEvaluatedPoly};
-use zinc_transcript::traits::{ConstTranscribable, Transcript};
+use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_utils::add;
 
 use crate::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
@@ -65,9 +65,9 @@ impl<F: FromPrimitiveWithConfig> VerifierState<F> {
     /// [`Self::verify_round_with_challenge`]. Returns the sampled challenge.
     pub fn verify_round(&mut self, prover_msg: &ProverMsg<F>, transcript: &mut impl Transcript) -> F
     where
-        F::Inner: ConstTranscribable,
+        F::Inner: Transcribable,
     {
-        let challenge: F = transcript.get_field_challenge(&self.config);
+        let challenge: F = transcript.get_transcribable_field_challenge(&self.config);
         self.verify_round_with_challenge(prover_msg, challenge.clone());
         challenge
     }

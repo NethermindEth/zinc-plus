@@ -5,7 +5,8 @@ use crypto_primitives::{
 };
 
 use crate::{
-    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef, mul_by_scalar::MulByScalar,
+    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef,
+    inner_transparent_field::InnerTransparentField, mul_by_scalar::MulByScalar,
     projectable_to_field::ProjectableToField,
 };
 
@@ -66,6 +67,25 @@ where
     ) -> impl Fn(&Self) -> BoxedMontyField + Send + Sync + 'static {
         let config = sampled_value.cfg().clone();
         move |value: &T| value.into_with_cfg(&config)
+    }
+}
+
+impl InnerTransparentField for BoxedMontyField {
+    fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, config: &Self::Config) -> Self::Inner {
+        let lhs = BoxedMontyForm::from_montgomery(lhs.clone(), config.clone());
+        let rhs = BoxedMontyForm::from_montgomery(rhs.clone(), config.clone());
+        (lhs + rhs).to_montgomery()
+    }
+
+    fn sub_inner(lhs: &Self::Inner, rhs: &Self::Inner, config: &Self::Config) -> Self::Inner {
+        let lhs = BoxedMontyForm::from_montgomery(lhs.clone(), config.clone());
+        let rhs = BoxedMontyForm::from_montgomery(rhs.clone(), config.clone());
+        (lhs - rhs).to_montgomery()
+    }
+
+    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
+        let rhs = Self::new_unchecked_with_cfg(rhs.clone(), self.cfg());
+        *self *= rhs;
     }
 }
 
