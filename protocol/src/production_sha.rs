@@ -21,6 +21,8 @@ use num_traits::{ConstZero, Zero};
 use rayon::prelude::*;
 use thiserror::Error;
 #[cfg(debug_assertions)]
+use zinc_piop::neutron_nova::expression_folded_row_sum_with_vectors;
+#[cfg(debug_assertions)]
 use zinc_piop::neutron_nova::validate_projected_trace;
 use zinc_piop::{
     combined_poly_resolver::Proof as CombinedPolyResolverProof,
@@ -41,8 +43,8 @@ use zinc_piop::{
         build_production_sha_sumfold_group_from_prefix_accumulators, build_sha_lambda_powers,
         build_sha_residual_eval_powers, build_sha_sumfold_linear_accumulator,
         build_sha_sumfold_quadratic_prefix_accumulator, derive_instance_fold_claim,
-        expression_folded_row_sum_with_row_weights, expression_folded_row_sum_with_vectors,
-        fold_projected_traces, folded_row_integrand_sum, production_sha_booleanity_sources,
+        expression_folded_row_sum_with_row_weights, fold_projected_traces,
+        folded_row_integrand_sum, production_sha_booleanity_sources,
         production_sha_nonzero_families, sha_int_at_point_with_weights_unchecked,
         sha_public_at_point, sha_public_at_point_with_weights,
         sha_word_bits_at_point_with_weights_unchecked, verify_folded_row_sumcheck_claim,
@@ -1253,7 +1255,7 @@ where
             field_cfg,
         )?;
 
-    let (sumfold_proof, sumfold_r_b) = prove_sumfold_phase(
+    let (sumfold_proof, sumfold_r_b, sumfold_c_sf) = prove_sumfold_phase(
         transcript,
         sumfold_group,
         &initial_claim,
@@ -1261,10 +1263,10 @@ where
         field_cfg,
     )?;
 
-    let provisional_sumfold_output = derive_instance_fold_claim(
+    let sumfold_output = derive_instance_fold_claim(
         &beta,
         sumfold_r_b.clone(),
-        F::one_with_cfg(field_cfg),
+        sumfold_c_sf,
         witnesses.len(),
         field_cfg,
     )?;
@@ -1273,9 +1275,7 @@ where
         prove_fold_after_sumfold_phase::<P, Zt, F, D>(
             &traces,
             &publics,
-            &provisional_sumfold_output,
-            &beta,
-            sumfold_r_b,
+            sumfold_output,
             &r_ic_eq_weights,
             &a_powers,
             &lambda_powers,
@@ -1596,7 +1596,7 @@ fn prove_sumfold_phase<F>(
     initial_claim: &F,
     instance_vars: usize,
     field_cfg: &F::Config,
-) -> Result<(MultiDegreeSumcheckProof<F>, Vec<F>), ProductionShaError<F>>
+) -> Result<(MultiDegreeSumcheckProof<F>, Vec<F>, F), ProductionShaError<F>>
 where
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -1626,9 +1626,7 @@ where
 fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
     traces: &[ProjectedTrace<F>],
     publics: &[ProjectedPublic<F>],
-    provisional_sumfold_output: &InstanceFoldClaim<F>,
-    beta: &[F],
-    sumfold_r_b: Vec<F>,
+    sumfold_output: InstanceFoldClaim<F>,
     r_ic_eq_weights: &[F],
     a_powers: &[F],
     lambda_powers: &[F],
@@ -1652,39 +1650,32 @@ where
         side = "prove",
         phase = "fold_projected_traces",
     )
-    .in_scope(|| fold_projected_traces(traces, publics, provisional_sumfold_output, field_cfg))?;
+    .in_scope(|| fold_projected_traces(traces, publics, &sumfold_output, field_cfg))?;
     let row_claim = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "fold_row_claim",
         side = "prove",
         phase = "fold_row_claim",
     )
-    .in_scope(|| {
-        production_sha_folded_row_sum_fast(
-            &folded.trace,
-            &folded_public,
-            r_ic_eq_weights,
-            a_powers,
-            lambda_powers,
-            booleanity_weights,
-            booleanity_sources,
-            field_cfg,
-        )
-    })?;
-    let sumfold_output = tracing::info_span!(
-        target: "zinc_protocol::production_sha",
-        "fold_claim",
-        side = "prove",
-        phase = "fold_claim",
-    )
-    .in_scope(|| {
-        derive_instance_fold_claim_from_row_claim(
-            beta,
-            sumfold_r_b,
-            &row_claim,
-            traces.len(),
-            field_cfg,
-        )
+    .in_scope(|| -> Result<F, ProductionShaError<F>> {
+        let row_claim = sumfold_output.final_round_sumcheck_claim().clone();
+        #[cfg(debug_assertions)]
+        {
+            let recomputed = production_sha_folded_row_sum_fast(
+                &folded.trace,
+                &folded_public,
+                r_ic_eq_weights,
+                a_powers,
+                lambda_powers,
+                booleanity_weights,
+                booleanity_sources,
+                field_cfg,
+            )?;
+            if recomputed != row_claim {
+                return Err(ShaProjectionError::FoldedRowClaimMismatch.into());
+            }
+        }
+        Ok(row_claim)
     })?;
     let folded_prover_data = tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -1710,6 +1701,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(debug_assertions)]
 fn production_sha_folded_row_sum_fast<F>(
     trace: &ProjectedTrace<F>,
     public: &ProjectedPublic<F>,
@@ -1926,6 +1918,7 @@ where
     folded_row_integrand_sum(&values, field_cfg).map_err(ProductionShaError::from)
 }
 
+#[cfg(debug_assertions)]
 fn trace_word_eval_at_row_with_weights<F>(
     trace: &ProjectedTrace<F>,
     col: ShaWordCol,
@@ -1944,6 +1937,7 @@ where
     Ok(acc)
 }
 
+#[cfg(debug_assertions)]
 fn public_word_or_const_eval_at_row<F>(
     public: &ProjectedPublic<F>,
     col: ShaPublicCol,
@@ -1967,6 +1961,7 @@ where
     Ok(acc)
 }
 
+#[cfg(debug_assertions)]
 fn booleanity_source_value_at_fast<F>(
     trace: &ProjectedTrace<F>,
     row: usize,
@@ -4413,35 +4408,38 @@ where
         prefix_vars,
         field_cfg,
     )?;
-    let (proof, r_b) = prove_optimized_sha_sumfold_with_weights(
+    let (proof, r_b, c_sf) = prove_optimized_sha_sumfold_with_weights(
         transcript,
         group,
         initial_claim,
         beta.len(),
         field_cfg,
     )?;
-    let provisional = derive_instance_fold_claim(
-        beta,
-        r_b.clone(),
-        F::one_with_cfg(field_cfg),
-        traces.len(),
-        field_cfg,
-    )?;
-    let (folded, folded_public) =
-        zinc_piop::neutron_nova::fold_projected_traces(traces, publics, &provisional, field_cfg)?;
-    let row_claim = expression_folded_row_sum_with_vectors(
-        &folded.trace,
-        &folded_public,
-        &r_ic_eq_weights,
-        &a_powers,
-        &lambda_powers,
-        &booleanity_weights,
-        booleanity_sources,
-        field_cfg,
-    )?;
+    #[cfg(debug_assertions)]
+    {
+        let provisional =
+            derive_instance_fold_claim(beta, r_b.clone(), c_sf.clone(), traces.len(), field_cfg)?;
+        let (folded, folded_public) = zinc_piop::neutron_nova::fold_projected_traces(
+            traces,
+            publics,
+            &provisional,
+            field_cfg,
+        )?;
+        let row_claim = expression_folded_row_sum_with_vectors(
+            &folded.trace,
+            &folded_public,
+            &r_ic_eq_weights,
+            &a_powers,
+            &lambda_powers,
+            &booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        )?;
+        verify_folded_row_sumcheck_claim(provisional.final_round_sumcheck_claim(), &row_claim)?;
+    }
     Ok((
         proof,
-        derive_instance_fold_claim_from_row_claim(beta, r_b, &row_claim, traces.len(), field_cfg)?,
+        derive_instance_fold_claim(beta, r_b, c_sf, traces.len(), field_cfg)?,
     ))
 }
 
@@ -4451,7 +4449,7 @@ pub fn prove_optimized_sha_sumfold_with_weights<F>(
     initial_claim: &F,
     instance_vars: usize,
     field_cfg: &F::Config,
-) -> Result<(MultiDegreeSumcheckProof<F>, Vec<F>), ProductionShaError<F>>
+) -> Result<(MultiDegreeSumcheckProof<F>, Vec<F>, F), ProductionShaError<F>>
 where
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -4462,15 +4460,23 @@ where
     F::Inner: Transcribable + Zero,
     F::Modulus: Transcribable,
 {
-    let (proof, states) = MultiDegreeSumcheck::prove_as_subprotocol(
-        transcript,
-        vec![group],
-        instance_vars,
-        field_cfg,
-    );
+    let (proof, states, expected_evaluations) =
+        MultiDegreeSumcheck::prove_as_subprotocol_with_expected_evaluations(
+            transcript,
+            vec![group],
+            instance_vars,
+            field_cfg,
+        );
     require_single_sumcheck_group(&proof, "SHA SumFold")?;
     if proof.claimed_sums()[0] != *initial_claim {
         return Err(ProductionShaError::SumFoldTerminalMismatch);
+    }
+    if expected_evaluations.len() != 1 {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "sumfold expected evaluations",
+            got: expected_evaluations.len(),
+            expected: 1,
+        });
     }
 
     Ok((
@@ -4484,6 +4490,7 @@ where
             })?
             .randomness
             .clone(),
+        expected_evaluations[0].clone(),
     ))
 }
 
@@ -4734,6 +4741,7 @@ impl RowExpressionLayout {
     }
 }
 
+#[cfg(debug_assertions)]
 fn trace_word_bit_at_row<F>(
     trace: &ProjectedTrace<F>,
     col: ShaWordCol,
@@ -4770,6 +4778,7 @@ where
         })
 }
 
+#[cfg(debug_assertions)]
 fn trace_int_at_row<F>(
     trace: &ProjectedTrace<F>,
     col: ShaIntCol,
@@ -4794,6 +4803,7 @@ where
         })
 }
 
+#[cfg(debug_assertions)]
 fn public_scalar_at_row<F>(
     public: &ProjectedPublic<F>,
     col: ShaPublicCol,
@@ -4822,6 +4832,7 @@ where
         })
 }
 
+#[cfg(debug_assertions)]
 fn public_word_col_index(col: ShaPublicCol) -> Option<usize> {
     match col {
         ShaPublicCol::PAIn => Some(0),
@@ -4833,6 +4844,7 @@ fn public_word_col_index(col: ShaPublicCol) -> Option<usize> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn public_word_bit_at_row<F>(
     public: &ProjectedPublic<F>,
     col: ShaPublicCol,
@@ -8051,7 +8063,7 @@ mod tests {
         .unwrap();
         let mut sumfold_prover_transcript = Blake3Transcript::new();
         sumfold_prover_transcript.absorb_slice(b"sha-sumfold-row-bridge");
-        let (sumfold_proof, r_b) = prove_optimized_sha_sumfold_with_weights(
+        let (sumfold_proof, r_b, c_sf) = prove_optimized_sha_sumfold_with_weights(
             &mut sumfold_prover_transcript,
             group,
             &initial_claim,
@@ -8072,14 +8084,9 @@ mod tests {
         .unwrap();
         assert_eq!(verified_sumfold.r_b, r_b);
 
-        let provisional = derive_instance_fold_claim(
-            &beta,
-            r_b.clone(),
-            F::one_with_cfg(&field_cfg),
-            traces.len(),
-            &field_cfg,
-        )
-        .unwrap();
+        let provisional =
+            derive_instance_fold_claim(&beta, r_b.clone(), c_sf.clone(), traces.len(), &field_cfg)
+                .unwrap();
         let (folded, folded_public) =
             fold_projected_traces(&traces, &publics, &provisional, &field_cfg).unwrap();
         let row_claim = expression_folded_row_sum_with_vectors(
@@ -8093,14 +8100,8 @@ mod tests {
             &field_cfg,
         )
         .unwrap();
-        let sumfold_output = derive_instance_fold_claim_from_row_claim(
-            &beta,
-            r_b,
-            &row_claim,
-            traces.len(),
-            &field_cfg,
-        )
-        .unwrap();
+        let sumfold_output =
+            derive_instance_fold_claim(&beta, r_b, c_sf, traces.len(), &field_cfg).unwrap();
         assert_eq!(verified_sumfold.c_sf, *sumfold_output.c_sf());
         assert_eq!(sumfold_output.final_round_sumcheck_claim(), &row_claim);
 

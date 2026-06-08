@@ -16,7 +16,10 @@
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 use std::marker::PhantomData;
-use zinc_poly::mle::DenseMultilinearExtension;
+use zinc_poly::{
+    EvaluatablePolynomial, mle::DenseMultilinearExtension,
+    univariate::nat_evaluation::NatEvaluatedPoly,
+};
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul};
 
@@ -415,6 +418,30 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         F::Inner: Transcribable + Zero,
         F::Modulus: Transcribable,
     {
+        let (proof, states, _) = Self::prove_as_subprotocol_with_expected_evaluations(
+            transcript, groups, num_vars, config,
+        );
+        (proof, states)
+    }
+
+    /// Prove a multi-degree sumcheck and also return each group's expected
+    /// terminal evaluation at the sampled point.
+    #[allow(clippy::type_complexity)]
+    pub fn prove_as_subprotocol_with_expected_evaluations(
+        transcript: &mut impl Transcript,
+        groups: Vec<MultiDegreeSumcheckGroup<F>>,
+        num_vars: usize,
+        config: &F::Config,
+    ) -> (
+        MultiDegreeSumcheckProof<F>,
+        Vec<SumcheckProverState<F>>,
+        Vec<F>,
+    )
+    where
+        F: InnerTransparentField + Send + Sync,
+        F::Inner: Transcribable + Zero,
+        F::Modulus: Transcribable,
+    {
         assert!(
             num_vars > 0,
             "Attempts to prove a constant: num_vars must be > 0"
@@ -532,7 +559,18 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             }
         });
 
-        let degrees = prover_states.iter().map(|s| s.max_degree).collect();
+        let degrees = prover_states
+            .iter()
+            .map(|s| s.max_degree)
+            .collect::<Vec<_>>();
+        let expected_evaluations = group_messages
+            .iter()
+            .zip(claimed_sums.iter())
+            .zip(degrees.iter())
+            .map(|((messages, claimed_sum), degree)| {
+                Self::expected_evaluation_from_messages(claimed_sum, messages, *degree, &challenges)
+            })
+            .collect();
 
         (
             MultiDegreeSumcheckProof {
@@ -541,7 +579,42 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 degrees,
             },
             prover_states,
+            expected_evaluations,
         )
+    }
+
+    fn expected_evaluation_from_messages(
+        claimed_sum: &F,
+        messages: &[SumcheckProverMsg<F>],
+        degree: usize,
+        challenges: &[F],
+    ) -> F {
+        assert_eq!(
+            messages.len(),
+            challenges.len(),
+            "generated sumcheck proof should have one message per challenge"
+        );
+        let mut expected = claimed_sum.clone();
+        for (message, challenge) in messages.iter().zip(challenges.iter()) {
+            let tail = &message.0.tail_evaluations;
+            assert_eq!(
+                tail.len(),
+                degree,
+                "generated sumcheck message should match group degree"
+            );
+            let constant_term = if degree == 0 {
+                expected.clone()
+            } else {
+                expected.clone() - tail[0].clone()
+            };
+            let mut reconstructed_evaluations = Vec::with_capacity(tail.len() + 1);
+            reconstructed_evaluations.push(constant_term);
+            reconstructed_evaluations.extend_from_slice(tail);
+            expected = NatEvaluatedPoly::new(reconstructed_evaluations)
+                .evaluate_at_point(challenge)
+                .expect("generated sumcheck message should interpolate");
+        }
+        expected
     }
 
     /// Multi-degree sumcheck verifier.
