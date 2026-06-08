@@ -492,35 +492,50 @@ impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLa
 
         Some((|| {
             let use_inner_parallelism = use_inner_bool_parallelism(expected_comm);
-            let comm = cfg_into_iter!(0..expected_comm)
-                .map(|job_idx| {
-                    let lane = job_idx / num_rows;
-                    let row_idx = job_idx % num_rows;
+            let per_row = cfg_into_iter!(0..num_rows)
+                .map(|row_idx| {
                     let lower = row_idx * ck.num_cols;
                     let upper = (lower + ck.num_cols).min(poly.evaluations.len());
                     let row_len = upper - lower;
-                    let mut row_comm = BoolSubsetMsm::<6>::msm_bool_row_from_window_masks(
+                    let mut row_comms = BoolSubsetMsm::<6>::msm_bool_rows_from_window_masks::<
+                        C,
+                        D,
+                        _,
+                    >(
                         &ck.msm_ck,
                         row_len,
                         use_inner_parallelism,
                         |offset, len| {
-                            let mut mask = 0usize;
+                            let mut masks = [0usize; D];
                             for bit_idx in 0..len {
-                                if poly.evaluations[lower + offset + bit_idx].coeff(lane) {
-                                    mask |= 1usize << bit_idx;
+                                let eval = &poly.evaluations[lower + offset + bit_idx];
+                                for (lane, mask) in masks.iter_mut().enumerate() {
+                                    if eval.coeff(lane) {
+                                        *mask |= 1usize << bit_idx;
+                                    }
                                 }
                             }
-                            mask
+                            masks
                         },
                     )
                     .map_err(msm_err)?;
 
                     if ck.blinding_mode.is_blinded() {
-                        row_comm += ck.msm_ck.h * blinds[job_idx];
+                        for (lane, row_comm) in row_comms.iter_mut().enumerate() {
+                            let blind_idx = lane * num_rows + row_idx;
+                            *row_comm += ck.msm_ck.h * blinds[blind_idx];
+                        }
                     }
-                    Ok::<C::Group, ZipError>(row_comm)
+                    Ok::<[C::Group; D], ZipError>(row_comms)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+
+            let mut comm = Vec::with_capacity(expected_comm);
+            for lane in 0..D {
+                for row_comms in &per_row {
+                    comm.push(row_comms[lane]);
+                }
+            }
             Ok((comm, blinds))
         })())
     }

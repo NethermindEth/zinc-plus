@@ -149,15 +149,15 @@ impl<C: AffineRepr> BoolWindowTable<C> {
         acc
     }
 
-    fn msm_row_from_window_masks<M>(
+    fn msm_rows_from_window_masks<const LANES: usize, M>(
         &self,
         value_len: usize,
         window_bits: usize,
         _use_parallelism_internally: bool,
         mask_at: M,
-    ) -> C::Group
+    ) -> [C::Group; LANES]
     where
-        M: Fn(usize, usize) -> usize + Sync,
+        M: Fn(usize, usize) -> [usize; LANES] + Sync,
     {
         #[cfg(feature = "parallel")]
         if _use_parallelism_internally && self.lens.len() > 1 {
@@ -167,24 +167,40 @@ impl<C: AffineRepr> BoolWindowTable<C> {
                 .copied()
                 .enumerate()
                 .map(|(window_idx, len)| {
+                    let mut partial = std::array::from_fn(|_| C::Group::zero());
                     let offset = window_idx * window_bits;
                     if offset >= value_len {
-                        return C::Group::zero();
+                        return partial;
                     }
                     let end = (offset + len).min(value_len);
-                    self.tables[window_idx][mask_at(offset, end - offset)]
+                    let masks = mask_at(offset, end - offset);
+                    for lane in 0..LANES {
+                        partial[lane] += self.tables[window_idx][masks[lane]];
+                    }
+                    partial
                 })
-                .reduce(C::Group::zero, |acc, point| acc + point);
+                .reduce(
+                    || std::array::from_fn(|_| C::Group::zero()),
+                    |mut acc, partial| {
+                        for lane in 0..LANES {
+                            acc[lane] += partial[lane];
+                        }
+                        acc
+                    },
+                );
         }
 
-        let mut acc = C::Group::zero();
+        let mut acc = std::array::from_fn(|_| C::Group::zero());
         for (window_idx, len) in self.lens.iter().copied().enumerate() {
             let offset = window_idx * window_bits;
             if offset >= value_len {
                 break;
             }
             let end = (offset + len).min(value_len);
-            acc += self.tables[window_idx][mask_at(offset, end - offset)];
+            let masks = mask_at(offset, end - offset);
+            for lane in 0..LANES {
+                acc[lane] += self.tables[window_idx][masks[lane]];
+            }
         }
         acc
     }
@@ -384,15 +400,15 @@ impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
         Ok(acc)
     }
 
-    pub(crate) fn msm_bool_row_from_window_masks<C, M>(
+    pub(crate) fn msm_bool_rows_from_window_masks<C, const LANES: usize, M>(
         ck: &MsmCommitmentKey<C>,
         value_len: usize,
         use_parallelism_internally: bool,
         mask_at: M,
-    ) -> Result<C::Group, MsmError>
+    ) -> Result<[C::Group; LANES], MsmError>
     where
         C: AffineRepr,
-        M: Fn(usize, usize) -> usize + Sync,
+        M: Fn(usize, usize) -> [usize; LANES] + Sync,
     {
         validate_row_len(ck, value_len)?;
         validate_window_bits(WINDOW_BITS)?;
@@ -401,7 +417,7 @@ impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
             return Ok(ck
                 .bool_tables_6
                 .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS))
-                .msm_row_from_window_masks(
+                .msm_rows_from_window_masks(
                     value_len,
                     DEFAULT_BOOL_WINDOW_BITS,
                     use_parallelism_internally,
@@ -409,11 +425,14 @@ impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
                 ));
         }
 
-        let mut acc = C::Group::zero();
+        let mut acc = std::array::from_fn(|_| C::Group::zero());
         for (window_idx, window) in ck.bases[..value_len].chunks(WINDOW_BITS).enumerate() {
             let offset = window_idx * WINDOW_BITS;
+            let masks = mask_at(offset, window.len());
             let table = subset_table::<C>(window)?;
-            acc += table[mask_at(offset, window.len())];
+            for lane in 0..LANES {
+                acc[lane] += table[masks[lane]];
+            }
         }
         Ok(acc)
     }
