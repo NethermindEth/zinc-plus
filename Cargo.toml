@@ -26,6 +26,8 @@ rand = "0.9"
 rand_core = "0.9"
 rayon = { version = "1.10" }
 thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 zinc-primality = { path = "primality/" }
 zinc-test-uair = { path = "test-uair/" }
 zinc-transcript = { path = "transcript/" }

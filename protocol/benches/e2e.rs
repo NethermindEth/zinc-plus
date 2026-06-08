@@ -2089,6 +2089,36 @@ fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<Wa
     assert_eq!(verified.target, output.folded_instance.target);
     assert_eq!(verified.public, output.folded_instance.public);
 
+    eprintln!("    ProjectionFold Concise tracing ({params}):");
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut prover_transcript = Blake3Transcript::new();
+        let traced_output = prove_linear_ideal_fold::<
+            P,
+            U,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        >(&pp, &shape, &witnesses, &mut prover_transcript)
+        .expect("ProjectionFold traced prover failed");
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let traced_verified =
+            verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+                &vs,
+                &traced_output.fresh_instances,
+                &traced_output.proof,
+                &mut verifier_transcript,
+            )
+            .expect("ProjectionFold traced verifier failed");
+        assert_eq!(traced_verified.target, traced_output.folded_instance.target);
+        assert_eq!(traced_verified.public, traced_output.folded_instance.public);
+    });
+
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
