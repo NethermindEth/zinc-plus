@@ -5830,7 +5830,7 @@ pub fn production_sha_endpoint_word_sources() -> Vec<(ShaWordCol, usize)> {
         (ShaWordCol::E, &[1usize, 2, 4][..]),
         (ShaWordCol::Sigma0, &[3usize][..]),
         (ShaWordCol::Sigma1, &[3usize][..]),
-        (ShaWordCol::W, &[3usize, 9, 16][..]),
+        (ShaWordCol::W, &[9usize, 16][..]),
         (ShaWordCol::SmallSigma0, &[1usize][..]),
         (ShaWordCol::SmallSigma1, &[14usize][..]),
         (ShaWordCol::Uef, &[2usize, 3][..]),
@@ -5864,9 +5864,6 @@ pub fn production_sha_multipoint_layout() -> ShaMultipointLayout {
     for col in production_sha_endpoint_int_sources() {
         push_source(ShaMpSource::Int { col });
     }
-    for col in ShaPublicCol::ALL {
-        push_source(ShaMpSource::Public { col });
-    }
 
     let mut shifts = Vec::new();
     let mut push_shift = |shift| {
@@ -5882,10 +5879,6 @@ pub fn production_sha_multipoint_layout() -> ShaMultipointLayout {
             push_shift(ShaMpShiftSource::WordBit { col, bit, shift });
         }
     }
-    push_shift(ShaMpShiftSource::Public {
-        col: ShaPublicCol::K,
-        shift: 3,
-    });
 
     ShaMultipointLayout { sources, shifts }
 }
@@ -8917,20 +8910,19 @@ mod tests {
                     }
             })
             .unwrap();
-        let public_idx = layout
-            .sources
-            .iter()
-            .position(|source| {
-                *source
-                    == ShaMpSource::Public {
-                        col: ShaPublicCol::K,
-                    }
-            })
-            .unwrap();
+        assert!(!layout.sources.iter().any(|source| matches!(
+            source,
+            ShaMpSource::Public {
+                col: ShaPublicCol::K
+            }
+        )));
 
         assert_eq!(open_evals[a0_idx], f(3));
         assert_eq!(open_evals[int_idx], f(7));
-        assert_eq!(open_evals[public_idx], f(99));
+        assert_eq!(
+            sha_public_at_point(&public, ShaPublicCol::K, 0, &r_0, &field_cfg).unwrap(),
+            f(99)
+        );
     }
 
     #[test]
