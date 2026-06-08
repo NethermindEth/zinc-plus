@@ -893,12 +893,35 @@ where
             }
             let constants = ShaResidualPolyConstants::new(field_cfg);
             let mut coeffs = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
-            for (row, row_weight) in row_weights.iter().enumerate().take(SHA_ROW_COUNT) {
-                let residuals = residual_polys_at_row_with_constants(
-                    trace, public, row, &constants, field_cfg,
-                )?;
-                for (family_idx, residual) in residuals.iter().enumerate() {
-                    add_scaled_poly_assign(&mut coeffs[family_idx], residual, row_weight);
+            let partials = cfg_chunks!(row_weights, 8)
+                .enumerate()
+                .map(|(chunk_idx, row_weight_chunk)| {
+                    let mut partial = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
+                    let row_offset = chunk_idx * 8;
+                    for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
+                        let row = row_offset + row_in_chunk;
+                        let residuals = residual_polys_at_row_with_constants(
+                            trace, public, row, &constants, field_cfg,
+                        )?;
+                        for (family_idx, residual) in residuals.iter().enumerate() {
+                            add_scaled_poly_assign(&mut partial[family_idx], residual, row_weight);
+                        }
+                    }
+                    Ok(partial)
+                })
+                .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+            for partial in partials {
+                for (dst, residual) in coeffs.iter_mut().zip(partial) {
+                    if residual.is_zero() {
+                        continue;
+                    }
+                    if dst.coeffs.len() < residual.coeffs.len() {
+                        dst.coeffs
+                            .resize_with(residual.coeffs.len(), || F::zero_with_cfg(field_cfg));
+                    }
+                    for (dst_coeff, coeff) in dst.coeffs.iter_mut().zip(residual.coeffs) {
+                        *dst_coeff += coeff;
+                    }
                 }
             }
             coeffs.iter_mut().for_each(DynamicPolynomialF::trim);
