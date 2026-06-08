@@ -7,11 +7,16 @@ use criterion::{
 };
 use crypto_bigint::U64;
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, Field, FixedSemiring, FromWithConfig, PrimeField,
-    crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    ConstIntRing, ConstIntSemiring, ConstSemiring, Field, FixedSemiring, FromWithConfig,
+    PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use rand::rng;
-use std::{fmt::Debug, hint::black_box, marker::PhantomData, ops::Neg};
+use std::{borrow::Cow, fmt::Debug, hint::black_box, marker::PhantomData, ops::Neg};
+use zinc_piop::neutron_nova::{
+    MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
+    ShaPublicCol, bit_slice_index,
+};
+use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
 use zinc_poly::{
     ConstCoeffBitWidth, Polynomial,
@@ -26,18 +31,28 @@ use zinc_protocol::{
     FoldedZincTypes, IntFoldedZincTypes4x, Proof, ZincPlusPiop, ZincTypes,
     fixed_prime::field_cfg_from_curve_scalar,
     pcs::{
-        AllZipPCSTypes, BinaryHyraxZipRest, PCSCommitments, PCSParams, PCSVerifierParams,
-        ZincPCSTypes,
+        AllHyraxPCSTypes, AllZipPCSTypes, BinaryHyraxZipRest, PCSCommitments, PCSParams,
+        PCSVerifierParams, ZincPCSTypes,
+    },
+    production_sha::{
+        LinearIdealFoldProverParams, LinearIdealFoldVerifierParams, ProductionShaError,
+        ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
+        prove_linear_ideal_fold, setup_verify_linear_ideal_fold, verify_linear_ideal_fold,
     },
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, EC_FP_INT_LIMBS,
-    EcdsaUair, GenerateRandomTrace, Sha256CompressionSliceUair, Sha256Ideal, ShaEcdsaUair,
-    ShaProxy, TestUairNoMultiplication,
+    EcdsaUair, GenerateRandomTrace, SHA256_INITIAL_STATE, Sha256CompressionSliceUair, Sha256Ideal,
+    Sha256MessageBlock, ShaEcdsaUair, ShaProxy, TestUairNoMultiplication,
+    sha256::{K_CANONICAL, cols as sha256_cols},
+    sha256_padded_message_blocks, synthesize_sha256_chain_trace, synthesize_sha256_chain_witnesses,
 };
-use zinc_transcript::traits::{ConstTranscribable, Transcribable};
+use zinc_transcript::{
+    Blake3Transcript,
+    traits::{ConstTranscribable, Transcribable},
+};
 use zinc_uair::{
-    Uair, UairTrace,
+    ConstraintBuilder, PublicStructureError, TraceRow, Uair, UairSignature, UairTrace,
     degree_counter::count_effective_max_degree,
     ideal::{DegreeOneIdeal, Ideal, IdealCheck, ImpossibleIdeal, rotation::RotationIdeal},
     ideal_collector::IdealOrZero,
@@ -55,7 +70,7 @@ use zip_plus::{
         iprs::{IprsCode, PnttConfigF65537},
     },
     pcs::generic::{PCS, ZipPlusPCS},
-    pcs::hyrax::{BinaryLanes, HyraxBlindingMode, HyraxPCS},
+    pcs::hyrax::{BinaryLanes, DensePolyScalarLanes, HyraxBlindingMode, HyraxPCS, IntScalarLane},
     pcs::structs::{ZipPlus, ZipPlusCommitment, ZipPlusParams, ZipTypes},
     utils::{eprint_bytes_size, eprint_bytes_size_breakdown, eprint_proof_size},
 };
@@ -426,6 +441,565 @@ fn sha256_real_project_ideal(
             unreachable!("zero ideals are filtered before this closure runs")
         }
     }
+}
+
+const REAL_SHA256_CHAIN_BLOCKS: usize = 8;
+const REAL_SHA256_CHAIN_NUM_VARS: usize = 10;
+
+fn real_sha256_chain_message() -> String {
+    vec!["hello world"; 40].join(" ")
+}
+
+#[allow(clippy::unwrap_used)]
+fn real_sha256_chain_blocks() -> [Sha256MessageBlock; REAL_SHA256_CHAIN_BLOCKS] {
+    let message = real_sha256_chain_message();
+    sha256_padded_message_blocks::<REAL_SHA256_CHAIN_BLOCKS>(message.as_bytes())
+        .expect("real SHA-256 benchmark fixture should canonically pad to eight blocks")
+}
+
+#[allow(clippy::unwrap_used)]
+fn real_sha256_chain_trace(
+    num_vars: usize,
+) -> UairTrace<'static, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE> {
+    let (trace, _final_state) = synthesize_sha256_chain_trace::<
+        RealEcdsaInt,
+        REAL_SHA256_CHAIN_BLOCKS,
+    >(num_vars, SHA256_INITIAL_STATE, real_sha256_chain_blocks())
+    .expect("real SHA-256 monolithic chain trace synthesis should succeed");
+    trace
+}
+
+#[derive(Clone, Debug)]
+struct ProjectionShaBenchUair<R>(PhantomData<R>);
+
+impl<R> Uair for ProjectionShaBenchUair<R>
+where
+    R: ConstSemiring + 'static,
+{
+    type Ideal = Sha256Ideal<R>;
+    type Scalar = DensePolynomial<R, DEGREE_PLUS_ONE>;
+
+    fn signature() -> UairSignature {
+        Sha256CompressionSliceUair::<R>::signature()
+    }
+
+    fn constrain_general<B, FromR, MulByScalarFn, IFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        from_ref: FromR,
+        mbs: MulByScalarFn,
+        ideal_from_ref: IFromR,
+    ) where
+        B: ConstraintBuilder,
+        FromR: Fn(&Self::Scalar) -> B::Expr,
+        MulByScalarFn: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+    {
+        Sha256CompressionSliceUair::<R>::constrain_general(
+            b,
+            up,
+            down,
+            from_ref,
+            mbs,
+            ideal_from_ref,
+        );
+    }
+
+    fn verify_public_structure<RT, IntT, const D: usize>(
+        public_trace: &UairTrace<'_, RT, IntT, D>,
+        num_vars: usize,
+    ) -> Result<(), PublicStructureError>
+    where
+        RT: Clone,
+        IntT: Clone + num_traits::Zero,
+    {
+        Sha256CompressionSliceUair::<R>::verify_public_structure(public_trace, num_vars)
+    }
+}
+
+fn projection_sha_binary_col<'a>(
+    public_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+    witness_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+    flat_col: usize,
+) -> Result<&'a DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>, ProductionShaError<F>> {
+    if flat_col < sha256_cols::NUM_BIN_PUB {
+        public_trace
+            .binary_poly
+            .get(flat_col)
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "SHA binary public source columns",
+                got: public_trace.binary_poly.len(),
+                expected: flat_col + 1,
+            })
+    } else {
+        let witness_col = flat_col - sha256_cols::NUM_BIN_PUB;
+        witness_trace
+            .binary_poly
+            .get(witness_col)
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "SHA binary witness source columns",
+                got: witness_trace.binary_poly.len(),
+                expected: witness_col + 1,
+            })
+    }
+}
+
+fn projection_sha_int_col<'a>(
+    public_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+    witness_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+    flat_col: usize,
+) -> Result<&'a DenseMultilinearExtension<RealEcdsaInt>, ProductionShaError<F>> {
+    if flat_col < sha256_cols::NUM_INT_PUB {
+        public_trace
+            .int
+            .get(flat_col)
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "SHA int public source columns",
+                got: public_trace.int.len(),
+                expected: flat_col + 1,
+            })
+    } else {
+        let witness_col = flat_col - sha256_cols::NUM_INT_PUB;
+        witness_trace
+            .int
+            .get(witness_col)
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "SHA int witness source columns",
+                got: witness_trace.int.len(),
+                expected: witness_col + 1,
+            })
+    }
+}
+
+fn projection_sha_project_binary_source(
+    col: &DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Result<Vec<Vec<F>>, ProductionShaError<F>> {
+    if col.evaluations.len() < SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "SHA binary source rows",
+            got: col.evaluations.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    Ok(col
+        .evaluations
+        .iter()
+        .take(SHA_ROW_COUNT)
+        .map(|poly| {
+            poly.iter()
+                .take(SHA_WORD_BITS)
+                .map(|bit| {
+                    if bit.into_inner() {
+                        F::one_with_cfg(field_cfg)
+                    } else {
+                        F::zero_with_cfg(field_cfg)
+                    }
+                })
+                .collect()
+        })
+        .collect())
+}
+
+fn projection_sha_project_int_source(
+    col: &DenseMultilinearExtension<RealEcdsaInt>,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Result<Vec<F>, ProductionShaError<F>> {
+    if col.evaluations.len() < SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "SHA int source rows",
+            got: col.evaluations.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    Ok(col
+        .evaluations
+        .iter()
+        .take(SHA_ROW_COUNT)
+        .map(|value| F::from_with_cfg(value, field_cfg))
+        .collect())
+}
+
+fn projection_sha_truncate_row_domain<Eval: Clone>(
+    col: &DenseMultilinearExtension<Eval>,
+    label: &'static str,
+) -> Result<DenseMultilinearExtension<Eval>, ProductionShaError<F>> {
+    if col.evaluations.len() < SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label,
+            got: col.evaluations.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    Ok(DenseMultilinearExtension {
+        evaluations: col.evaluations[..SHA_ROW_COUNT].to_vec(),
+        num_vars: SHA_ROW_VARS,
+    })
+}
+
+fn projection_sha_word_scalar_at_two(bits: &[F], field_cfg: &<F as PrimeField>::Config) -> F {
+    let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
+    let mut power = F::one_with_cfg(field_cfg);
+    let mut value = F::zero_with_cfg(field_cfg);
+    for bit in bits {
+        value += bit.clone() * &power;
+        power *= &two;
+    }
+    value
+}
+
+fn projection_sha_mle_table_from_columns<T>(columns: Vec<Vec<T>>) -> MleTable<T> {
+    columns
+        .into_iter()
+        .map(|evaluations| DenseMultilinearExtension {
+            evaluations,
+            num_vars: SHA_ROW_VARS,
+        })
+        .collect()
+}
+
+fn projection_sha_flatten_bit_columns<T>(columns: Vec<Vec<Vec<T>>>) -> MleTable<T> {
+    let mut flattened = (0..columns.len() * SHA_WORD_BITS)
+        .map(|_| Vec::with_capacity(SHA_ROW_COUNT))
+        .collect::<Vec<_>>();
+    for (col_idx, rows) in columns.into_iter().enumerate() {
+        for bits in rows {
+            for (bit, value) in bits.into_iter().enumerate() {
+                flattened[bit_slice_index(col_idx, bit, SHA_WORD_BITS)].push(value);
+            }
+        }
+    }
+    projection_sha_mle_table_from_columns(flattened)
+}
+
+fn projection_sha_scalarize_bit_slices(
+    bit_slices: &MleTable<F>,
+    a: &F,
+    field_cfg: &<F as PrimeField>::Config,
+) -> Result<MleTable<F>, ProductionShaError<F>> {
+    let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
+    let word_count = bit_slices.len() / SHA_WORD_BITS;
+    let mut words = Vec::with_capacity(word_count);
+    for col_idx in 0..word_count {
+        let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
+        for row in 0..SHA_ROW_COUNT {
+            let mut value = F::zero_with_cfg(field_cfg);
+            for (bit, power) in powers.iter().enumerate() {
+                let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
+                if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
+                    return Err(ProductionShaError::LengthMismatch {
+                        label: "SHA scalarized bit-slice rows",
+                        got: bit_col.evaluations.len(),
+                        expected: SHA_ROW_COUNT,
+                    });
+                }
+                value += bit_col.evaluations[row].clone() * power;
+            }
+            out_col.push(value);
+        }
+        words.push(out_col);
+    }
+    Ok(projection_sha_mle_table_from_columns(words))
+}
+
+fn projection_sha_selector_expected(
+    selector: ShaPublicCol,
+    row: usize,
+    field_cfg: &<F as PrimeField>::Config,
+) -> F {
+    let active = match selector {
+        ShaPublicCol::SInit => row < 4,
+        ShaPublicCol::SMsg => row < 16,
+        ShaPublicCol::SSched => row < 48,
+        ShaPublicCol::SUpd => row < 64,
+        ShaPublicCol::SFf => (64..68).contains(&row),
+        ShaPublicCol::SOut => (68..72).contains(&row),
+        _ => false,
+    };
+    if active {
+        F::one_with_cfg(field_cfg)
+    } else {
+        F::zero_with_cfg(field_cfg)
+    }
+}
+
+fn projection_sha_k_expected(row: usize, field_cfg: &<F as PrimeField>::Config) -> F {
+    if (3..67).contains(&row) {
+        F::from_with_cfg(K_CANONICAL[row - 3] as u64, field_cfg)
+    } else {
+        F::zero_with_cfg(field_cfg)
+    }
+}
+
+fn projection_sha_projected_public_from_sources(
+    pa_a: &[Vec<F>],
+    pa_e: &[Vec<F>],
+    message: &[Vec<F>],
+    field_cfg: &<F as PrimeField>::Config,
+) -> MleTable<F> {
+    let mut columns = vec![vec![F::zero_with_cfg(field_cfg); SHA_ROW_COUNT]; ShaPublicCol::COUNT];
+    for row in 0..SHA_ROW_COUNT {
+        columns[ShaPublicCol::K.index()][row] = projection_sha_k_expected(row, field_cfg);
+        columns[ShaPublicCol::PAIn.index()][row] =
+            projection_sha_word_scalar_at_two(&pa_a[row], field_cfg);
+        columns[ShaPublicCol::PEIn.index()][row] =
+            projection_sha_word_scalar_at_two(&pa_e[row], field_cfg);
+        columns[ShaPublicCol::PAOut.index()][row] =
+            projection_sha_word_scalar_at_two(&pa_a[row], field_cfg);
+        columns[ShaPublicCol::PEOut.index()][row] =
+            projection_sha_word_scalar_at_two(&pa_e[row], field_cfg);
+        columns[ShaPublicCol::Message.index()][row] =
+            projection_sha_word_scalar_at_two(&message[row], field_cfg);
+    }
+    for selector in [
+        ShaPublicCol::SInit,
+        ShaPublicCol::SMsg,
+        ShaPublicCol::SSched,
+        ShaPublicCol::SUpd,
+        ShaPublicCol::SFf,
+        ShaPublicCol::SOut,
+    ] {
+        for row in 0..SHA_ROW_COUNT {
+            columns[selector.index()][row] =
+                projection_sha_selector_expected(selector, row, field_cfg);
+        }
+    }
+    projection_sha_mle_table_from_columns(columns)
+}
+
+impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
+    for ProjectionShaBenchUair<RealEcdsaInt>
+{
+    fn project_production_sha_public(
+        _shape: &UairShape<Self>,
+        public_trace: &UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> Result<ProjectedPublic<F>, ProductionShaError<F>> {
+        let empty_witness = UairTrace {
+            binary_poly: Cow::Borrowed(&[]),
+            arbitrary_poly: Cow::Borrowed(&[]),
+            int: Cow::Borrowed(&[]),
+        };
+        let pa_a = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, &empty_witness, sha256_cols::PA_A)?,
+            field_cfg,
+        )?;
+        let pa_e = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, &empty_witness, sha256_cols::PA_E)?,
+            field_cfg,
+        )?;
+        let message = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, &empty_witness, sha256_cols::PA_M)?,
+            field_cfg,
+        )?;
+        let public_columns =
+            projection_sha_projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
+        Ok(ProjectedPublic {
+            columns: public_columns,
+            bit_slices: Some(projection_sha_flatten_bit_columns(vec![
+                pa_a.clone(),
+                pa_e.clone(),
+                pa_a,
+                pa_e,
+                message,
+            ])),
+        })
+    }
+
+    fn project_production_sha_witness(
+        _shape: &UairShape<Self>,
+        public_trace: &UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+        witness_trace: &UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> Result<
+        (
+            ProjectedTrace<F>,
+            ProjectedPublic<F>,
+            ProductionShaWitnessPolys<RealEcdsaBenchZincTypes, DEGREE_PLUS_ONE>,
+        ),
+        ProductionShaError<F>,
+    > {
+        let word_sources = [
+            sha256_cols::W_A,
+            sha256_cols::W_E,
+            sha256_cols::W_SIG0,
+            sha256_cols::W_SIG1,
+            sha256_cols::W_W,
+            sha256_cols::W_LSIG0,
+            sha256_cols::W_LSIG1,
+            sha256_cols::W_U_EF,
+            sha256_cols::W_U_NEG_E_G,
+            sha256_cols::W_MAJ,
+            sha256_cols::W_MU_PACKED,
+            sha256_cols::PA_OV_SIG0,
+            sha256_cols::PA_OV_SIG1,
+            sha256_cols::PA_OV_LSIG0,
+            sha256_cols::PA_OV_LSIG1,
+            sha256_cols::PA_R_CH2_COMP,
+            sha256_cols::PA_R_MAJ_COMP,
+        ];
+        let int_sources = [
+            sha256_cols::PA_C_C7,
+            sha256_cols::PA_C_C8,
+            sha256_cols::PA_C_C9,
+            sha256_cols::PA_C_FF_A,
+            sha256_cols::PA_C_FF_E,
+        ];
+
+        let bit_columns = word_sources
+            .iter()
+            .map(|&col| {
+                projection_sha_project_binary_source(
+                    projection_sha_binary_col(public_trace, witness_trace, col)?,
+                    field_cfg,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bit_slices = projection_sha_flatten_bit_columns(bit_columns);
+        let scalarized = projection_sha_scalarize_bit_slices(
+            &bit_slices,
+            &F::from_with_cfg(2u64, field_cfg),
+            field_cfg,
+        )?;
+        let pa_a = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, witness_trace, sha256_cols::PA_A)?,
+            field_cfg,
+        )?;
+        let pa_e = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, witness_trace, sha256_cols::PA_E)?,
+            field_cfg,
+        )?;
+        let message = projection_sha_project_binary_source(
+            projection_sha_binary_col(public_trace, witness_trace, sha256_cols::PA_M)?,
+            field_cfg,
+        )?;
+        let public_columns =
+            projection_sha_projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
+        let int_columns = int_sources
+            .iter()
+            .map(|&col| {
+                projection_sha_project_int_source(
+                    projection_sha_int_col(public_trace, witness_trace, col)?,
+                    field_cfg,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let trace = ProjectedTrace {
+            bit_slices,
+            scalarized,
+            int_columns: projection_sha_mle_table_from_columns(int_columns),
+            public_columns: public_columns.clone(),
+        };
+        let public = ProjectedPublic {
+            columns: public_columns,
+            bit_slices: Some(projection_sha_flatten_bit_columns(vec![
+                pa_a.clone(),
+                pa_e.clone(),
+                pa_a,
+                pa_e,
+                message,
+            ])),
+        };
+        Ok((
+            trace,
+            public,
+            ProductionShaWitnessPolys {
+                binary: word_sources
+                    .iter()
+                    .map(|&col| {
+                        projection_sha_truncate_row_domain(
+                            projection_sha_binary_col(public_trace, witness_trace, col)?,
+                            "SHA binary witness row-domain projection",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                arbitrary: Vec::new(),
+                int: int_sources
+                    .iter()
+                    .map(|&col| {
+                        projection_sha_truncate_row_domain(
+                            projection_sha_int_col(public_trace, witness_trace, col)?,
+                            "SHA int witness row-domain projection",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+        ))
+    }
+}
+
+fn projection_sha_hyrax_key_pair<C, Lanes>(
+    width: usize,
+    offset: u64,
+) -> (
+    zip_plus::pcs::hyrax::HyraxCommitmentKey<C>,
+    zip_plus::pcs::hyrax::HyraxVerifierKey<C>,
+)
+where
+    C: AffineRepr,
+    Lanes: Clone + Debug + Send + Sync,
+{
+    let generator = C::Group::generator();
+    let bases = (0..width)
+        .map(|idx| {
+            let scalar = C::ScalarField::from(
+                offset + u64::try_from(idx).expect("Hyrax basis index fits u64") + 1,
+            );
+            (generator * scalar).into_affine()
+        })
+        .collect::<Vec<_>>();
+    let h = generator
+        * C::ScalarField::from(offset + u64::try_from(width).expect("Hyrax width fits u64") + 1);
+    HyraxPCS::<C, Lanes>::setup_from_bases_with_blinding(
+        width,
+        bases,
+        h,
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("Hyrax benchmark setup must be valid")
+}
+
+fn projection_sha_hyrax_pcs_params_bn254() -> (
+    PCSParams<AllHyraxPCSTypes<ark_bn254::G1Affine>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<
+        AllHyraxPCSTypes<ark_bn254::G1Affine>,
+        RealEcdsaBenchZincTypes,
+        F,
+        DEGREE_PLUS_ONE,
+    >,
+) {
+    let width = SHA_ROW_COUNT;
+    let (binary_ck, binary_vk) =
+        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, BinaryLanes>(width, 0);
+    let (arbitrary_ck, arbitrary_vk) =
+        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, DensePolyScalarLanes>(width, 1_000);
+    let (int_ck, int_vk) =
+        projection_sha_hyrax_key_pair::<ark_bn254::G1Affine, IntScalarLane>(width, 2_000);
+
+    (
+        PCSParams::<
+            AllHyraxPCSTypes<ark_bn254::G1Affine>,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        > {
+            binary: binary_ck,
+            arbitrary: arbitrary_ck,
+            int: int_ck,
+        },
+        PCSVerifierParams::<
+            AllHyraxPCSTypes<ark_bn254::G1Affine>,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        > {
+            binary: binary_vk,
+            arbitrary: arbitrary_vk,
+            int: int_vk,
+        },
+    )
 }
 
 //
@@ -1163,13 +1737,12 @@ fn bench_real_ecdsa_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize)
 fn bench_real_sha256_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
 
-    let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace = real_sha256_chain_trace(num_vars);
     let pp = setup_pp_real_ecdsa(num_vars);
 
     do_bench_e2e::<RealEcdsaBenchZincTypes, U, _>(
         group,
-        "RealSha256",
+        "RealSha256Chain8",
         num_vars,
         &pp,
         &trace,
@@ -1181,13 +1754,12 @@ fn bench_real_sha256_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) 
 fn bench_real_sha256_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
 
-    let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace = real_sha256_chain_trace(num_vars);
     let pp = setup_pp_real_ecdsa(num_vars);
 
     do_bench_steps::<RealEcdsaBenchZincTypes, U, _>(
         group,
-        "RealSha256",
+        "RealSha256Chain8",
         num_vars,
         &pp,
         &trace,
@@ -1298,8 +1870,7 @@ fn bench_real_sha256_pcs_curve_e2e<C: AffineRepr>(
 {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
 
-    let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace = real_sha256_chain_trace(num_vars);
     let field_cfg = field_cfg_from_curve_scalar::<
         F,
         <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
@@ -1356,8 +1927,7 @@ fn bench_real_sha256_pcs_curve_steps<C: AffineRepr>(
 {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
 
-    let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace = real_sha256_chain_trace(num_vars);
     let field_cfg = field_cfg_from_curve_scalar::<
         F,
         <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
@@ -1395,14 +1965,14 @@ fn bench_real_sha256_pcs_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usi
     bench_real_sha256_pcs_curve_e2e::<ark_bn254::G1Affine>(
         group,
         num_vars,
-        "RealSha256PCS/ZipBn254Fr",
-        "RealSha256PCS/HyraxBn254Unblinded",
+        "RealSha256Chain8PCS/ZipBn254Fr",
+        "RealSha256Chain8PCS/HyraxBn254Unblinded",
     );
     bench_real_sha256_pcs_curve_e2e::<ark_secp256k1::Affine>(
         group,
         num_vars,
-        "RealSha256PCS/ZipSecp256k1Fr",
-        "RealSha256PCS/HyraxSecp256k1Unblinded",
+        "RealSha256Chain8PCS/ZipSecp256k1Fr",
+        "RealSha256Chain8PCS/HyraxSecp256k1Unblinded",
     );
 }
 
@@ -1410,15 +1980,133 @@ fn bench_real_sha256_pcs_steps(group: &mut BenchmarkGroup<WallTime>, num_vars: u
     bench_real_sha256_pcs_curve_steps::<ark_bn254::G1Affine>(
         group,
         num_vars,
-        "RealSha256PCS/ZipBn254Fr",
-        "RealSha256PCS/HyraxBn254Unblinded",
+        "RealSha256Chain8PCS/ZipBn254Fr",
+        "RealSha256Chain8PCS/HyraxBn254Unblinded",
     );
     bench_real_sha256_pcs_curve_steps::<ark_secp256k1::Affine>(
         group,
         num_vars,
-        "RealSha256PCS/ZipSecp256k1Fr",
-        "RealSha256PCS/HyraxSecp256k1Unblinded",
+        "RealSha256Chain8PCS/ZipSecp256k1Fr",
+        "RealSha256Chain8PCS/HyraxSecp256k1Unblinded",
     );
+}
+
+fn bench_og_sha256_zip_compare(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+
+    let trace = real_sha256_chain_trace(num_vars);
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        ark_bn254::G1Affine,
+    >();
+    let (zip_pp, zip_vp) = zip_pcs_params(num_vars);
+
+    do_bench_pcs_e2e::<RealEcdsaBenchZincTypes, U, _, AllZipPCSTypes>(
+        group,
+        "OG-ZincPlus-ZipBn254/SHA256Chain8",
+        num_vars,
+        &zip_pp,
+        &zip_vp,
+        &trace,
+        field_cfg,
+        zinc_protocol::project_scalar_fn,
+        sha256_real_project_ideal,
+    );
+}
+
+fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<WallTime>) {
+    type C = ark_bn254::G1Affine;
+    type P = AllHyraxPCSTypes<C>;
+    type U = ProjectionShaBenchUair<RealEcdsaInt>;
+
+    let message_blocks = real_sha256_chain_blocks();
+    let (_mono_trace, mono_final_state) =
+        synthesize_sha256_chain_trace::<RealEcdsaInt, REAL_SHA256_CHAIN_BLOCKS>(
+            REAL_SHA256_CHAIN_NUM_VARS,
+            SHA256_INITIAL_STATE,
+            message_blocks,
+        )
+        .expect("monolithic N=8 SHA trace synthesis should succeed");
+    let (witnesses, projection_final_state) = synthesize_sha256_chain_witnesses::<
+        RealEcdsaInt,
+        REAL_SHA256_CHAIN_BLOCKS,
+    >(SHA256_INITIAL_STATE, message_blocks)
+    .expect("ProjectionFold SHA witness synthesis should succeed");
+    assert_eq!(mono_final_state, projection_final_state);
+
+    let shape = UairShape::<U>::new(SHA_ROW_VARS);
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        C,
+    >();
+    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params_bn254();
+    let pp = LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
+        pcs_params,
+        field_cfg.clone(),
+        3,
+    );
+    let vs = setup_verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+        LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+        shape.clone(),
+    )
+    .expect("ProjectionFold SHA verifier setup succeeds");
+
+    let params = format!("ProjectionFoldConcise-HyraxBn254/SHA256Chain8/row-vars={SHA_ROW_VARS}");
+
+    group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            black_box(prove_linear_ideal_fold::<
+                P,
+                U,
+                RealEcdsaBenchZincTypes,
+                F,
+                DEGREE_PLUS_ONE,
+            >(&pp, &shape, &witnesses, &mut transcript))
+            .expect("ProjectionFold Concise prover failed");
+        });
+    });
+
+    let mut prover_transcript = Blake3Transcript::new();
+    let output = prove_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+        &pp,
+        &shape,
+        &witnesses,
+        &mut prover_transcript,
+    )
+    .expect("proof generation for ProjectionFold verifier bench");
+
+    let mut verifier_transcript = Blake3Transcript::new();
+    let verified = verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+        &vs,
+        &output.fresh_instances,
+        &output.proof,
+        &mut verifier_transcript,
+    )
+    .expect("ProjectionFold verifier preflight failed");
+    assert_eq!(verified.target, output.folded_instance.target);
+    assert_eq!(verified.public, output.folded_instance.public);
+
+    group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            black_box(verify_linear_ideal_fold::<
+                P,
+                U,
+                RealEcdsaBenchZincTypes,
+                F,
+                DEGREE_PLUS_ONE,
+            >(
+                &vs,
+                &output.fresh_instances,
+                &output.proof,
+                &mut transcript,
+            ))
+            .expect("ProjectionFold Concise verifier failed");
+        });
+    });
 }
 
 fn bench_real_sha_ecdsa_e2e(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
@@ -1519,8 +2207,8 @@ fn e2e_benches(c: &mut Criterion) {
     // Real UAIRs ported from main-gamma. Trace size for ECDSA needs >= 256
     // rows (Shamir loop), so num_vars=9 is the smallest meaningful size.
     // bench_real_ecdsa_e2e(&mut group, 9);
-    bench_real_sha256_e2e(&mut group, 9);
-    bench_real_sha256_pcs_e2e(&mut group, 9);
+    bench_real_sha256_e2e(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
+    bench_real_sha256_pcs_e2e(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
     bench_real_sha_ecdsa_e2e(&mut group, 9);
 
     group.finish();
@@ -1552,9 +2240,18 @@ fn e2e_steps_benches(c: &mut Criterion) {
     // Real UAIRs ported from main-gamma. See `e2e_benches` for the
     // num_vars=9 lower-bound rationale.
     bench_real_ecdsa_steps(&mut group, 9);
-    bench_real_sha256_steps(&mut group, 9);
-    bench_real_sha256_pcs_steps(&mut group, 9);
+    bench_real_sha256_steps(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
+    bench_real_sha256_pcs_steps(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
     bench_real_sha_ecdsa_steps(&mut group, 9);
+
+    group.finish();
+}
+
+fn sha256_proving_system_compare_benches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("SHA-256 Proving System Comparison");
+
+    bench_og_sha256_zip_compare(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
+    bench_projectionfold_sha256_concise_hyrax_bn254(&mut group);
 
     group.finish();
 }
@@ -2588,13 +3285,12 @@ fn bench_real_ecdsa_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: u
 fn bench_real_sha256_e2e_folded(group: &mut BenchmarkGroup<WallTime>, num_vars: usize) {
     type U = Sha256CompressionSliceUair<RealEcdsaInt>;
 
-    let mut rng = rng();
-    let trace = U::generate_random_trace(num_vars, &mut rng);
+    let trace = real_sha256_chain_trace(num_vars);
     let pp = setup_folded_pp_real_ecdsa(num_vars);
 
     do_bench_e2e_folded::<BenchFoldedRealEcdsaZincTypes, U, _>(
         group,
-        "RealSha256",
+        "RealSha256Chain8",
         num_vars,
         &pp,
         &trace,
@@ -2660,7 +3356,7 @@ fn e2e_folded_benches(c: &mut Criterion) {
     // bench_sha_proxy_e2e_folded(&mut group, 12);
 
     bench_real_ecdsa_e2e_folded(&mut group, 9);
-    bench_real_sha256_e2e_folded(&mut group, 9);
+    bench_real_sha256_e2e_folded(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
     bench_real_sha_ecdsa_e2e_folded(&mut group, 9);
 
     group.finish();
@@ -2713,6 +3409,11 @@ criterion_group! {
     targets = e2e_steps_benches
 }
 criterion_group! {
+    name = sha256_compare;
+    config = Criterion::default().sample_size(20);
+    targets = sha256_proving_system_compare_benches
+}
+criterion_group! {
     name = e2e_folded;
     config = Criterion::default().sample_size(500);
     targets = e2e_folded_benches
@@ -2722,4 +3423,4 @@ criterion_group! {
     config = Criterion::default().sample_size(500);
     targets = e2e_folded_4x_benches
 }
-criterion_main!(e2e, e2e_steps, e2e_folded, e2e_folded_4x);
+criterion_main!(e2e, e2e_steps, sha256_compare, e2e_folded, e2e_folded_4x);

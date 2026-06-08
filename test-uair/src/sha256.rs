@@ -1448,6 +1448,24 @@ where
     )
 }
 
+/// Synthesize one monolithic SHA-256 compression-chain trace.
+///
+/// This packs all `N` chained compressions into a single UAIR trace, using
+/// `num_vars` to choose the MLE row domain. It is the deterministic,
+/// message-driven counterpart to [`GenerateRandomTrace`] for benchmark cases
+/// that need to compare a monolithic proof against a batched/folded proof over
+/// the same SHA-256 chain.
+pub fn synthesize_sha256_chain_trace<R, const N: usize>(
+    num_vars: usize,
+    initial_state: Sha256State,
+    message_blocks: [Sha256MessageBlock; N],
+) -> Result<(UairTrace<'static, R, R, 32>, Sha256State), Sha256WitnessError>
+where
+    R: ConstSemiring + From<u32> + Clone + 'static,
+{
+    synthesize_sha256_compression_chain_trace::<R>(num_vars, initial_state, &message_blocks)
+}
+
 /// Synthesize `N` ordered fresh SHA-256 compression witnesses for a chain.
 ///
 /// State computation is sequential (`H_{i+1} = compress(H_i, M_i)`); once all
@@ -2243,6 +2261,62 @@ mod tests {
         for witness in &witnesses {
             assert_sha_trace_splits_cleanly(&witness.trace);
         }
+    }
+
+    #[test]
+    fn synthesize_sha256_chain_trace_n8_matches_native() {
+        let initial_state = test_initial_state();
+        let message_blocks = test_message_blocks::<8>();
+        let expected = native_chain(initial_state, &message_blocks);
+
+        let (trace, final_state) =
+            synthesize_sha256_chain_trace::<Int<5>, 8>(10, initial_state, message_blocks)
+                .expect("monolithic N=8 SHA trace synthesis should succeed");
+        let sig = <Sha256CompressionSliceUair<Int<5>> as Uair>::signature();
+        let public = trace.public(&sig);
+
+        assert_eq!(final_state, expected);
+        assert_eq!(
+            public_sha_state_at(&trace, 8 * cols::ROWS_PER_COMP),
+            final_state
+        );
+        <Sha256CompressionSliceUair<Int<5>> as Uair>::verify_public_structure(&public, 10)
+            .expect("generated monolithic SHA public trace should satisfy public structure checks");
+    }
+
+    #[test]
+    fn sha256_chain_trace_and_projection_witnesses_expose_same_h8() {
+        let initial_state = SHA256_INITIAL_STATE;
+        let message = vec!["hello world"; 40].join(" ");
+        let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("fixture should canonically pad to eight SHA-256 blocks");
+        let expected = native_chain(initial_state, &message_blocks);
+
+        let (mono_trace, mono_final_state) =
+            synthesize_sha256_chain_trace::<Int<5>, 8>(10, initial_state, message_blocks)
+                .expect("monolithic N=8 SHA trace synthesis should succeed");
+        let (pf_witnesses, pf_final_state) =
+            synthesize_sha256_chain_witnesses::<Int<5>, 8>(initial_state, message_blocks)
+                .expect("N=8 SHA witness synthesis should succeed");
+
+        let mono_public_final = public_sha_state_at(&mono_trace, 8 * cols::ROWS_PER_COMP);
+        let pf_public_final = public_sha_state_at(
+            &pf_witnesses[pf_witnesses.len() - 1].trace,
+            cols::ROWS_PER_COMP,
+        );
+
+        assert_eq!(mono_final_state, expected);
+        assert_eq!(pf_final_state, expected);
+        assert_eq!(mono_final_state, pf_final_state);
+        assert_eq!(mono_public_final, pf_public_final);
+        assert_eq!(mono_public_final, mono_final_state);
+        assert_eq!(pf_public_final, pf_final_state);
+
+        let digest_hex = mono_final_state
+            .iter()
+            .map(|word| format!("{word:08x}"))
+            .collect::<String>();
+        println!("final chained SHA-256 H_8 = {digest_hex}");
     }
 
     #[test]

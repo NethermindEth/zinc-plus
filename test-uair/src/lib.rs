@@ -16,7 +16,8 @@ pub use sha_ecdsa::ShaEcdsaUair;
 pub use sha256::{
     SHA256_INITIAL_STATE, Sha256CompressionSliceUair, Sha256Ideal, Sha256MessageBlock, Sha256State,
     Sha256WitnessError, sha256_compress_native, sha256_padded_message_blocks,
-    synthesize_one_sha256_compression_trace, synthesize_sha256_chain_witnesses,
+    synthesize_one_sha256_compression_trace, synthesize_sha256_chain_trace,
+    synthesize_sha256_chain_witnesses,
 };
 
 use crypto_primitives::{ConstSemiring, FixedSemiring, Semiring, boolean::Boolean};
