@@ -146,7 +146,6 @@ where
             evals: Vec<R>,
             steps: Vec<R>,
             vals0: Vec<R>,
-            vals1: Vec<R>,
             vals: Vec<R>,
             levals: Vec<R>,
         }
@@ -157,7 +156,6 @@ where
             evals: zero_vec_deg.clone(),
             steps: zero_vec_poly.clone(),
             vals0: zero_vec_poly.clone(),
-            vals1: zero_vec_poly.clone(),
             vals: zero_vec_poly.clone(),
             levals: zero_vec_deg.clone(),
         };
@@ -188,14 +186,13 @@ where
             s.levals[0] = comb_fn(&s.vals0);
 
             if degree > 0 {
-                s.vals1.iter_mut().zip(polys.iter()).for_each(|(v1, poly)| {
+                s.vals.iter_mut().zip(polys.iter()).for_each(|(v1, poly)| {
                     *v1 = F::new_unchecked_with_cfg(poly[index + 1].clone(), config);
                 });
-                s.levals[1] = comb_fn(&s.vals1);
+                s.levals[1] = comb_fn(&s.vals);
 
-                for (i, (v1, v0)) in s.vals1.iter().zip(s.vals0.iter()).enumerate() {
+                for (i, (v1, v0)) in s.vals.iter().zip(s.vals0.iter()).enumerate() {
                     s.steps[i] = v1.clone() - v0.clone();
-                    s.vals[i] = v1.clone();
                 }
 
                 for eval_point in s.levals.iter_mut().take(degree + 1).skip(2) {
