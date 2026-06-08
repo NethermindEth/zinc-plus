@@ -1737,10 +1737,10 @@ where
     // across compression-junction boundaries: the booleanity
     // sumcheck checks every row, including ones the spec doesn't
     // care about.
-    let u_ef_vals: Vec<u32> = (0..n)
+    let u_ef_vals: Vec<u32> = cfg_into_iter!(0..n)
         .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
         .collect();
-    let u_neg_e_g_vals: Vec<u32> = (0..n)
+    let u_neg_e_g_vals: Vec<u32> = cfg_into_iter!(0..n)
         .map(|t| {
             if t >= 2 {
                 (!e_vals[t]) & e_vals[t - 2]
@@ -1749,7 +1749,7 @@ where
             }
         })
         .collect();
-    let maj_vals: Vec<u32> = (0..n)
+    let maj_vals: Vec<u32> = cfg_into_iter!(0..n)
         .map(|t| {
             if t >= 2 {
                 maj(a_vals[t], a_vals[t - 1], a_vals[t - 2])
@@ -1775,44 +1775,44 @@ where
     //     ⇒ comp_maj[k] = AND(a[k], a[k+1]).
     //   r_maj at k = n-1: a[k+1] = a[k+2] = 0, residual = a[k] ∈
     //     {0,1} already; comp_maj = 0.
-    let mut pa_r_ch2_comp_vals: Vec<u32> = vec![0; n];
-    let mut pa_r_maj_comp_vals: Vec<u32> = vec![0; n];
-    for k in 0..n {
-        let off_kp1 = k + 1 >= n;
-        let off_kp2 = k + 2 >= n;
-        if off_kp2 {
-            pa_r_ch2_comp_vals[k] = e_vals[k];
-        }
-        if off_kp2 && !off_kp1 {
-            pa_r_maj_comp_vals[k] = a_vals[k] & a_vals[k + 1];
-        }
-    }
+    let pa_r_ch2_comp_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|k| if k + 2 >= n { e_vals[k] } else { 0 })
+        .collect();
+    let pa_r_maj_comp_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|k| {
+            if k + 2 >= n && k + 1 < n {
+                a_vals[k] & a_vals[k + 1]
+            } else {
+                0
+            }
+        })
+        .collect();
 
     // Derived values.
-    let sig0_vals: Vec<u32> = a_vals.iter().copied().map(big_sigma0).collect();
-    let sig1_vals: Vec<u32> = e_vals.iter().copied().map(big_sigma1).collect();
-    let lsig0_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma0).collect();
-    let lsig1_vals: Vec<u32> = w_vals.iter().copied().map(small_sigma1).collect();
+    let sig0_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| big_sigma0(a_vals[t]))
+        .collect();
+    let sig1_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| big_sigma1(e_vals[t]))
+        .collect();
+    let lsig0_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| small_sigma0(w_vals[t]))
+        .collect();
+    let lsig1_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| small_sigma1(w_vals[t]))
+        .collect();
 
-    let ov_sig0_vals: Vec<u32> = a_vals
-        .iter()
-        .zip(&sig0_vals)
-        .map(|(&a, &s)| sigma0_overflow(a, s))
+    let ov_sig0_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| sigma0_overflow(a_vals[t], sig0_vals[t]))
         .collect();
-    let ov_sig1_vals: Vec<u32> = e_vals
-        .iter()
-        .zip(&sig1_vals)
-        .map(|(&e, &s)| sigma1_overflow(e, s))
+    let ov_sig1_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| sigma1_overflow(e_vals[t], sig1_vals[t]))
         .collect();
-    let ov_lsig0_vals: Vec<u32> = w_vals
-        .iter()
-        .zip(&lsig0_vals)
-        .map(|(&w, &l)| lsig0_overflow(w, l))
+    let ov_lsig0_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| lsig0_overflow(w_vals[t], lsig0_vals[t]))
         .collect();
-    let ov_lsig1_vals: Vec<u32> = w_vals
-        .iter()
-        .zip(&lsig1_vals)
-        .map(|(&w, &l)| lsig1_overflow(w, l))
+    let ov_lsig1_vals: Vec<u32> = cfg_into_iter!(0..n)
+        .map(|t| lsig1_overflow(w_vals[t], lsig1_vals[t]))
         .collect();
 
     // The σ_0/σ_1 right-shift decomposition columns S_i / T_i are
@@ -1829,7 +1829,7 @@ where
     //   bits 0-1: mu_W,  2-4: mu_a,  5-7: mu_e,  8: mu_ff_a,  9: mu_ff_e.
     // Positions 10..31 stay 0 (pinned by C22's high-bits-zero
     // assert_zero on ShiftR(10)(W_MU_PACKED)).
-    let w_mu_packed_vals: Vec<u32> = (0..n)
+    let w_mu_packed_vals: Vec<u32> = cfg_into_iter!(0..n)
         .map(|k| {
             (mu_w_vals[k] & 0b11)
                 | ((mu_a_vals[k] & 0b111) << 2)
@@ -1840,7 +1840,9 @@ where
         .collect();
 
     let to_bits = |v: &[u32]| -> Vec<BinaryPoly<32>> {
-        v.iter().copied().map(BinaryPoly::<32>::from).collect()
+        cfg_into_iter!(0..v.len())
+            .map(|idx| BinaryPoly::<32>::from(v[idx]))
+            .collect()
     };
 
     let to_bin_mle = |col: Vec<BinaryPoly<32>>| -> DenseMultilinearExtension<BinaryPoly<32>> {
@@ -1931,7 +1933,9 @@ where
     // junction window where the feed-forward addition holds
     // honestly.)
 
-    let k_col: Vec<R> = k_vals.iter().copied().map(R::from).collect();
+    let k_col: Vec<R> = cfg_into_iter!(0..n)
+        .map(|idx| R::from(k_vals[idx]))
+        .collect();
     // mu_w_vals / mu_a_vals / mu_e_vals / mu_junction_{a,e}_vals
     // are no longer materialized as separate int columns — they're
     // packed into the W_MU_PACKED binary_poly column above.
@@ -1954,7 +1958,7 @@ where
 
     // C7: inner(2) = w_W[k+16] − w_W[k] − lsig0[k+1] − w_W[k+9]
     //               − lsig1[k+14] + 2^32 · mu_W[k+16]
-    let pa_c_c7_col: Vec<R> = (0..n)
+    let pa_c_c7_col: Vec<R> = cfg_into_iter!(0..n)
         .map(|k| {
             let w_k16 = load(&w_vals, k + 16);
             let w_k = load(&w_vals, k);
@@ -1975,7 +1979,7 @@ where
     // C8: inner(2) = w_a[k+4] − w_e[k] − sig1[k+3] − Ch[k+3] − K[k+3]
     //               − W[k] − sig0[k+3] − maj[k+3] + 2^32 · mu_a[k]
     // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
-    let pa_c_c8_col: Vec<R> = (0..n)
+    let pa_c_c8_col: Vec<R> = cfg_into_iter!(0..n)
         .map(|k| {
             let w_a_k4 = load(&a_vals, k + 4);
             let w_e_k = load(&e_vals, k);
@@ -1999,7 +2003,7 @@ where
     // C9: inner(2) = w_e[k+4] − w_a[k] − w_e[k] − sig1[k+3] − Ch[k+3]
     //               − K[k+3] − W[k] + 2^32 · mu_e[k]
     // with Ch[k+3] = u_ef[k+3] + u_{¬e,g}[k+3].
-    let pa_c_c9_col: Vec<R> = (0..n)
+    let pa_c_c9_col: Vec<R> = cfg_into_iter!(0..n)
         .map(|k| {
             let w_e_k4 = load(&e_vals, k + 4);
             let w_a_k = load(&a_vals, k);
@@ -2025,7 +2029,7 @@ where
     // junction (init prefix straddle, round-update windows, slack)
     // it absorbs whatever inner happens to be so that
     // `(inner + pa_c_ff) ∈ (X − 2)` everywhere.
-    let pa_c_ff_a_col: Vec<R> = (0..n)
+    let pa_c_ff_a_col: Vec<R> = cfg_into_iter!(0..n)
         .map(|k| {
             let w_a_k4 = load(&a_vals, k + 4);
             let w_a_k = load(&a_vals, k);
@@ -2036,7 +2040,7 @@ where
             w_a_k + &pa_a_k - &two32_mu - &w_a_k4
         })
         .collect();
-    let pa_c_ff_e_col: Vec<R> = (0..n)
+    let pa_c_ff_e_col: Vec<R> = cfg_into_iter!(0..n)
         .map(|k| {
             let w_e_k4 = load(&e_vals, k + 4);
             let w_e_k = load(&e_vals, k);

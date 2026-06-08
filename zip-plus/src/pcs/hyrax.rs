@@ -1117,19 +1117,27 @@ where
         let first = &commitments[0];
         validate_commitment_shape::<C, Lanes, Eval, D>(first)?;
 
-        let mut folded = vec![C::Group::zero(); first.comm.len()];
-        for (commitment, weight) in commitments.iter().zip(theta) {
+        let scalars = theta
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        for commitment in commitments {
             validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
             if !same_commitment_shape(first, commitment) {
                 return Err(ZipError::InvalidPcsParam(
                     "Hyrax commitment fold shape mismatch".to_string(),
                 ));
             }
-            let scalar = F::field_to_scalar(weight)?;
-            for (out, value) in folded.iter_mut().zip(commitment.comm.iter()) {
-                *out += value.clone() * scalar;
-            }
         }
+        let folded = cfg_into_iter!(0..first.comm.len())
+            .map(|idx| {
+                let mut acc = C::Group::zero();
+                for (commitment, scalar) in commitments.iter().zip(&scalars) {
+                    acc += commitment.comm[idx] * scalar;
+                }
+                acc
+            })
+            .collect();
 
         Ok(HyraxCommitment {
             batch_size: first.batch_size,
@@ -1149,18 +1157,26 @@ where
         validate_fold_inputs(prover_data, theta.len(), "prover data")?;
         let first = &prover_data[0];
 
-        let mut folded_blinds = vec![C::ScalarField::zero(); first.blinds.len()];
-        for (data, weight) in prover_data.iter().zip(theta) {
+        let scalars = theta
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        for data in prover_data {
             if !same_prover_data_shape(first, data) {
                 return Err(ZipError::InvalidPcsParam(
                     "Hyrax prover-data fold shape mismatch".to_string(),
                 ));
             }
-            let scalar = F::field_to_scalar(weight)?;
-            for (out, blind) in folded_blinds.iter_mut().zip(data.blinds.iter()) {
-                *out += *blind * scalar;
-            }
         }
+        let folded_blinds = cfg_into_iter!(0..first.blinds.len())
+            .map(|idx| {
+                let mut acc = C::ScalarField::zero();
+                for (data, scalar) in prover_data.iter().zip(&scalars) {
+                    acc += data.blinds[idx] * scalar;
+                }
+                acc
+            })
+            .collect();
 
         Ok(HyraxProverData {
             batch_size: first.batch_size,

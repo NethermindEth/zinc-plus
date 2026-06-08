@@ -14,6 +14,8 @@ use crate::{
 };
 use crypto_primitives::{PrimeField, crypto_bigint_uint::Uint};
 use num_traits::{ConstZero, Zero};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use thiserror::Error;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
@@ -25,7 +27,7 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
-    UNCHECKED,
+    UNCHECKED, cfg_chunks, cfg_into_iter, cfg_iter,
     delayed_reduction::{
         BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
         MontgomeryLimbs,
@@ -456,8 +458,7 @@ where
             col: a_powers.len(),
         });
     }
-    tables
-        .iter()
+    cfg_iter!(tables)
         .map(|table| {
             if table.coeffs.len() != NUM_SHA_RESIDUAL_FAMILIES {
                 return Err(ShaProjectionError::MissingColumn {
@@ -850,9 +851,8 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
-    traces
-        .iter()
-        .zip(publics)
+    cfg_iter!(traces)
+        .zip(cfg_iter!(publics))
         .map(|(trace, public)| {
             validate_trace(trace)?;
             validate_public(public)?;
@@ -3013,34 +3013,49 @@ where
 
     let needs_virtuals = sources_need_virtuals(booleanity_sources);
     let coeff_plans = ternary_coeff_plans(prefix_vars)?;
-    let mut source_values =
-        vec![F::zero_with_cfg(field_cfg); prefix_len * booleanity_sources.len()];
-    for tail in 0..tail_len {
-        for (row, row_weight) in row_weights.iter().enumerate().take(SHA_ROW_COUNT) {
-            fill_booleanity_source_prefix_values(
-                traces,
-                booleanity_sources,
-                prefix_vars,
-                tail,
-                row,
-                needs_virtuals,
-                &mut source_values,
-                field_cfg,
-            )?;
-
-            for (source_idx, booleanity_weight) in booleanity_weights.iter().enumerate() {
-                let source_weight = row_weight.clone() * booleanity_weight;
-                for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
-                    let coeff = booleanity_degree_two_coeff(
-                        &source_values,
-                        booleanity_sources.len(),
-                        source_idx,
-                        plan,
+    let source_count = booleanity_sources.len();
+    let partials = cfg_chunks!(row_weights, 8)
+        .enumerate()
+        .map(|(chunk_idx, row_weight_chunk)| {
+            let row_offset = chunk_idx * 8;
+            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
+            let mut source_values = vec![F::zero_with_cfg(field_cfg); prefix_len * source_count];
+            for tail in 0..tail_len {
+                for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
+                    let row = row_offset + row_in_chunk;
+                    fill_booleanity_source_prefix_values(
+                        traces,
+                        booleanity_sources,
+                        prefix_vars,
+                        tail,
+                        row,
+                        needs_virtuals,
+                        &mut source_values,
                         field_cfg,
-                    );
-                    table[tail * ternary_len + ternary_idx] += source_weight.clone() * coeff;
+                    )?;
+
+                    for (source_idx, booleanity_weight) in booleanity_weights.iter().enumerate() {
+                        let source_weight = row_weight.clone() * booleanity_weight;
+                        for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
+                            let coeff = booleanity_degree_two_coeff(
+                                &source_values,
+                                source_count,
+                                source_idx,
+                                plan,
+                                field_cfg,
+                            );
+                            partial[tail * ternary_len + ternary_idx] +=
+                                source_weight.clone() * coeff;
+                        }
+                    }
                 }
             }
+            Ok(partial)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+    for partial in partials {
+        for (acc, value) in table.iter_mut().zip(partial) {
+            *acc += value;
         }
     }
     Ok(table)
@@ -4368,37 +4383,41 @@ where
     let Some(first) = tables.first() else {
         return Ok(Vec::new());
     };
-    let mut out = first
-        .iter()
-        .map(|column| DenseMultilinearExtension {
-            evaluations: vec![F::zero_with_cfg(field_cfg); column.evaluations.len()],
-            num_vars: column.num_vars,
-        })
-        .collect::<MleTable<F>>();
-    for (table, weight) in tables.iter().zip(theta) {
+    for table in &tables {
         if table.len() != first.len() {
             return Err(ShaProjectionError::InstanceCountMismatch {
                 got: table.len(),
                 expected: first.len(),
             });
         }
-        for (col_idx, col) in table.iter().enumerate() {
-            if col.num_vars != out[col_idx].num_vars
-                || col.evaluations.len() != out[col_idx].evaluations.len()
-            {
-                return Err(ShaProjectionError::ColumnRowCount {
-                    kind,
-                    col: col_idx,
-                    got: col.evaluations.len(),
-                    expected: out[col_idx].evaluations.len(),
-                });
-            }
-            for (out, value) in out[col_idx].evaluations.iter_mut().zip(&col.evaluations) {
-                *out += weight.clone() * value;
-            }
-        }
     }
-    Ok(out)
+    cfg_into_iter!(0..first.len())
+        .map(|col_idx| {
+            let template = &first[col_idx];
+            let mut evaluations =
+                vec![F::zero_with_cfg(field_cfg); template.evaluations.len()];
+            for (table, weight) in tables.iter().zip(theta) {
+                let col = &table[col_idx];
+                if col.num_vars != template.num_vars
+                    || col.evaluations.len() != template.evaluations.len()
+                {
+                    return Err(ShaProjectionError::ColumnRowCount {
+                        kind,
+                        col: col_idx,
+                        got: col.evaluations.len(),
+                        expected: template.evaluations.len(),
+                    });
+                }
+                for (out, value) in evaluations.iter_mut().zip(&col.evaluations) {
+                    *out += weight.clone() * value;
+                }
+            }
+            Ok(DenseMultilinearExtension {
+                evaluations,
+                num_vars: template.num_vars,
+            })
+        })
+        .collect::<Result<MleTable<F>, ShaProjectionError>>()
 }
 
 fn fold_optional_mle_tables<'a, F, I>(

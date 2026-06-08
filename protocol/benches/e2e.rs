@@ -11,6 +11,8 @@ use crypto_primitives::{
     PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use rand::rng;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use std::{borrow::Cow, fmt::Debug, hint::black_box, marker::PhantomData, ops::Neg};
 use zinc_piop::neutron_nova::{
     MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
@@ -58,6 +60,7 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
+    cfg_into_iter, cfg_iter,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -583,10 +586,8 @@ fn projection_sha_project_binary_source(
             expected: SHA_ROW_COUNT,
         });
     }
-    Ok(col
-        .evaluations
-        .iter()
-        .take(SHA_ROW_COUNT)
+    let rows = &col.evaluations[..SHA_ROW_COUNT];
+    Ok(cfg_iter!(rows)
         .map(|poly| {
             poly.iter()
                 .take(SHA_WORD_BITS)
@@ -613,15 +614,13 @@ fn projection_sha_project_int_source(
             expected: SHA_ROW_COUNT,
         });
     }
-    Ok(col
-        .evaluations
-        .iter()
-        .take(SHA_ROW_COUNT)
+    let rows = &col.evaluations[..SHA_ROW_COUNT];
+    Ok(cfg_iter!(rows)
         .map(|value| F::from_with_cfg(value, field_cfg))
         .collect())
 }
 
-fn projection_sha_truncate_row_domain<Eval: Clone>(
+fn projection_sha_truncate_row_domain<Eval: Clone + Send + Sync>(
     col: &DenseMultilinearExtension<Eval>,
     label: &'static str,
 ) -> Result<DenseMultilinearExtension<Eval>, ProductionShaError<F>> {
@@ -633,7 +632,9 @@ fn projection_sha_truncate_row_domain<Eval: Clone>(
         });
     }
     Ok(DenseMultilinearExtension {
-        evaluations: col.evaluations[..SHA_ROW_COUNT].to_vec(),
+        evaluations: cfg_iter!(&col.evaluations[..SHA_ROW_COUNT])
+            .cloned()
+            .collect(),
         num_vars: SHA_ROW_VARS,
     })
 }
@@ -659,31 +660,35 @@ fn projection_sha_mle_table_from_columns<T>(columns: Vec<Vec<T>>) -> MleTable<T>
         .collect()
 }
 
-fn projection_sha_flatten_bit_columns<T>(columns: Vec<Vec<Vec<T>>>) -> MleTable<T> {
-    let mut flattened = (0..columns.len() * SHA_WORD_BITS)
-        .map(|_| Vec::with_capacity(SHA_ROW_COUNT))
+fn projection_sha_flatten_bit_columns<T: Clone + Send + Sync>(
+    columns: Vec<Vec<Vec<T>>>,
+) -> MleTable<T> {
+    let flattened = cfg_into_iter!(0..columns.len() * SHA_WORD_BITS)
+        .map(|flat_idx| {
+            let col_idx = flat_idx / SHA_WORD_BITS;
+            let bit = flat_idx % SHA_WORD_BITS;
+            columns[col_idx]
+                .iter()
+                .map(|row_bits| row_bits[bit].clone())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
-    for (col_idx, rows) in columns.into_iter().enumerate() {
-        for bits in rows {
-            for (bit, value) in bits.into_iter().enumerate() {
-                flattened[bit_slice_index(col_idx, bit, SHA_WORD_BITS)].push(value);
-            }
-        }
-    }
     projection_sha_mle_table_from_columns(flattened)
 }
 
-fn projection_sha_flatten_bit_column_refs<T: Clone>(columns: &[&[Vec<T>]]) -> MleTable<T> {
-    let mut flattened = (0..columns.len() * SHA_WORD_BITS)
-        .map(|_| Vec::with_capacity(SHA_ROW_COUNT))
+fn projection_sha_flatten_bit_column_refs<T: Clone + Send + Sync>(
+    columns: &[&[Vec<T>]],
+) -> MleTable<T> {
+    let flattened = cfg_into_iter!(0..columns.len() * SHA_WORD_BITS)
+        .map(|flat_idx| {
+            let col_idx = flat_idx / SHA_WORD_BITS;
+            let bit = flat_idx % SHA_WORD_BITS;
+            columns[col_idx]
+                .iter()
+                .map(|row_bits| row_bits[bit].clone())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
-    for (col_idx, rows) in columns.iter().enumerate() {
-        for bits in rows.iter() {
-            for (bit, value) in bits.iter().enumerate() {
-                flattened[bit_slice_index(col_idx, bit, SHA_WORD_BITS)].push(value.clone());
-            }
-        }
-    }
     projection_sha_mle_table_from_columns(flattened)
 }
 
@@ -694,26 +699,29 @@ fn projection_sha_scalarize_bit_slices(
 ) -> Result<MleTable<F>, ProductionShaError<F>> {
     let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
     let word_count = bit_slices.len() / SHA_WORD_BITS;
-    let mut words = Vec::with_capacity(word_count);
-    for col_idx in 0..word_count {
-        let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
-        for row in 0..SHA_ROW_COUNT {
-            let mut value = F::zero_with_cfg(field_cfg);
-            for (bit, power) in powers.iter().enumerate() {
-                let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
-                if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
-                    return Err(ProductionShaError::LengthMismatch {
-                        label: "SHA scalarized bit-slice rows",
-                        got: bit_col.evaluations.len(),
-                        expected: SHA_ROW_COUNT,
-                    });
+    let words = cfg_into_iter!(0..word_count)
+        .map(|col_idx| {
+            let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
+            for row in 0..SHA_ROW_COUNT {
+                let mut value = F::zero_with_cfg(field_cfg);
+                for (bit, power) in powers.iter().enumerate() {
+                    let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
+                    if bit_col.num_vars != SHA_ROW_VARS
+                        || bit_col.evaluations.len() != SHA_ROW_COUNT
+                    {
+                        return Err(ProductionShaError::LengthMismatch {
+                            label: "SHA scalarized bit-slice rows",
+                            got: bit_col.evaluations.len(),
+                            expected: SHA_ROW_COUNT,
+                        });
+                    }
+                    value += bit_col.evaluations[row].clone() * power;
                 }
-                value += bit_col.evaluations[row].clone() * power;
+                out_col.push(value);
             }
-            out_col.push(value);
-        }
-        words.push(out_col);
-    }
+            Ok(out_col)
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
     Ok(projection_sha_mle_table_from_columns(words))
 }
 
@@ -862,17 +870,14 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
             sha256_cols::PA_C_FF_E,
         ];
 
-        let word_cols = word_sources
-            .iter()
+        let word_cols = cfg_iter!(&word_sources)
             .map(|&col| projection_sha_binary_col(public_trace, witness_trace, col))
             .collect::<Result<Vec<_>, _>>()?;
-        let int_cols = int_sources
-            .iter()
+        let int_cols = cfg_iter!(&int_sources)
             .map(|&col| projection_sha_int_col(public_trace, witness_trace, col))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let bit_columns = word_cols
-            .iter()
+        let bit_columns = cfg_iter!(&word_cols)
             .map(|&col| projection_sha_project_binary_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let bit_slices = projection_sha_flatten_bit_columns(bit_columns);
@@ -895,8 +900,7 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
         )?;
         let public_columns =
             projection_sha_projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
-        let int_columns = int_cols
-            .iter()
+        let int_columns = cfg_iter!(&int_cols)
             .map(|&col| projection_sha_project_int_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let public_bit_columns = [
@@ -921,8 +925,7 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
             trace,
             public,
             ProductionShaWitnessPolys {
-                binary: word_cols
-                    .iter()
+                binary: cfg_iter!(&word_cols)
                     .map(|&col| {
                         projection_sha_truncate_row_domain(
                             col,
@@ -931,8 +934,7 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 arbitrary: Vec::new(),
-                int: int_cols
-                    .iter()
+                int: cfg_iter!(&int_cols)
                     .map(|&col| {
                         projection_sha_truncate_row_domain(
                             col,

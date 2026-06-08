@@ -17,6 +17,8 @@ use crate::{
 use ark_ec::AffineRepr;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::{ConstZero, Zero};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::Proof as CombinedPolyResolverProof,
@@ -64,8 +66,9 @@ use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
-    UNCHECKED, delayed_reduction::DelayedFieldProductSum, inner_product::FieldFieldInnerProduct,
-    inner_product::InnerProduct, inner_transparent_field::InnerTransparentField,
+    UNCHECKED, cfg_iter, delayed_reduction::DelayedFieldProductSum,
+    inner_product::FieldFieldInnerProduct, inner_product::InnerProduct,
+    inner_transparent_field::InnerTransparentField,
 };
 use zip_plus::{
     ZipError,
@@ -1081,7 +1084,7 @@ pub fn prove_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -1287,7 +1290,7 @@ fn prove_fresh_instances_phase<P, U, Zt, F, const D: usize>(
     field_cfg: &F::Config,
 ) -> Result<ProductionShaFreshArtifacts<P, Zt, F, D>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: PrimeField,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1295,26 +1298,41 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
-    let mut fresh_instances = Vec::with_capacity(witnesses.len());
-    let mut instance_commitments = Vec::with_capacity(witnesses.len());
-    let mut instance_prover_data = Vec::with_capacity(witnesses.len());
-    let mut traces = Vec::with_capacity(witnesses.len());
-    let mut publics = Vec::with_capacity(witnesses.len());
-
     for (instance_idx, witness) in witnesses.iter().enumerate() {
         let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
-        let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &public_trace);
+    }
 
-        let (trace, public, witness_polys) =
-            U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
-        let (data, commitment) =
-            commit_production_sha_instance::<P, Zt, F, D>(pcs_params, &witness_polys)?;
+    let artifacts = cfg_iter!(witnesses)
+        .map(|witness| {
+            let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
+            let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
+            let (trace, public, witness_polys) =
+                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
+            let (data, commitment) =
+                commit_production_sha_instance::<P, Zt, F, D>(pcs_params, &witness_polys)?;
 
-        fresh_instances.push(UairInstance {
-            public_trace: own_uair_trace(&public_trace),
-            commitments: commitment.clone(),
-        });
+            Ok((
+                UairInstance {
+                    public_trace: own_uair_trace(&public_trace),
+                    commitments: commitment.clone(),
+                },
+                commitment,
+                data,
+                trace,
+                public,
+            ))
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+
+    let mut fresh_instances = Vec::with_capacity(artifacts.len());
+    let mut instance_commitments = Vec::with_capacity(artifacts.len());
+    let mut instance_prover_data = Vec::with_capacity(artifacts.len());
+    let mut traces = Vec::with_capacity(artifacts.len());
+    let mut publics = Vec::with_capacity(artifacts.len());
+
+    for (fresh_instance, commitment, data, trace, public) in artifacts {
+        fresh_instances.push(fresh_instance);
         instance_commitments.push(commitment);
         instance_prover_data.push(data);
         traces.push(trace);
