@@ -5170,8 +5170,12 @@ where
         Box::new(move |values: &[F]| {
             let zero = zero.clone();
             let dot = |lhs: &[F], rhs: &[F]| {
-                FieldFieldInnerProduct::inner_product::<UNCHECKED>(lhs, rhs, zero.clone())
-                    .expect("row expression dot product lengths match")
+                debug_assert_eq!(lhs.len(), rhs.len());
+                lhs.iter()
+                    .zip(rhs.iter())
+                    .fold(zero.clone(), |acc, (left, right)| {
+                        acc + left.clone() * right
+                    })
             };
             let word_source_idx = |col: ShaWordCol, shift: usize| {
                 let idx = offsets.word[col.index()][shift];
