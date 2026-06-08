@@ -34,7 +34,10 @@ use zinc_uair::{
 };
 use zinc_utils::{
     UNCHECKED, cfg_into_iter, cfg_iter,
-    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs,
+    },
     inner_product::{FieldFieldInnerProduct, InnerProduct},
     inner_transparent_field::InnerTransparentField,
     powers,
@@ -114,7 +117,7 @@ where
         return Ok(Vec::new());
     }
     let eq_table = build_eq_x_r_vec(point, field_cfg)?;
-    let reduction_params = F::barrett_reduction_params(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
 
     let out: Vec<F> = cfg_iter!(shifted_specs)
         .flat_map(|spec| {
@@ -129,19 +132,13 @@ where
                     let eq_t = &eq_table[t];
                     for (bit_idx, coeff) in bp.iter().enumerate() {
                         if coeff.into_inner() {
-                            <Uint<5> as DelayedModularReduction<F>>::add(&mut accs[bit_idx], eq_t);
+                            reducer.add(&mut accs[bit_idx], eq_t);
                         }
                     }
                 }
             }
             accs.into_iter()
-                .map(|acc| {
-                    <Uint<5> as DelayedModularReduction<F>>::reduce(
-                        acc,
-                        field_cfg,
-                        &reduction_params,
-                    )
-                })
+                .map(|acc| reducer.reduce(acc))
                 .collect::<Vec<_>>()
         })
         .collect();

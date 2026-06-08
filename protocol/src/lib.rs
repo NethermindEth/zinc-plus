@@ -54,7 +54,9 @@ use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribabl
 use zinc_uair::{Uair, ideal::Ideal};
 use zinc_utils::{
     cfg_extend, cfg_into_iter, cfg_iter,
-    delayed_reduction::{DelayedModularReduction, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedModularReductionAlgorithm, MontgomeryLimbs,
+    },
     named::Named,
 };
 use zip_plus::{
@@ -550,7 +552,7 @@ where
 {
     let eq_table = zinc_poly::utils::build_eq_x_r_vec(point, field_cfg)
         .expect("compute_lifted_evals: eq table build failed");
-    let reduction_params = F::barrett_reduction_params(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
 
     let n_bin = trace_bin_poly.len();
     let zero = F::zero_with_cfg(field_cfg);
@@ -574,27 +576,18 @@ where
                     let mut remaining = bits;
                     while remaining != 0 {
                         let l = remaining.trailing_zeros() as usize;
-                        <Uint<5> as DelayedModularReduction<F>>::add(&mut coeffs[l], eq_b);
+                        reducer.add(&mut coeffs[l], eq_b);
                         remaining &= remaining - 1;
                     }
                 } else {
                     for (l, coeff) in entry.iter().enumerate().take(D) {
                         if coeff.into_inner() {
-                            <Uint<5> as DelayedModularReduction<F>>::add(&mut coeffs[l], eq_b);
+                            reducer.add(&mut coeffs[l], eq_b);
                         }
                     }
                 }
             }
-            let coeffs: Vec<F> = coeffs
-                .into_iter()
-                .map(|acc| {
-                    <Uint<5> as DelayedModularReduction<F>>::reduce(
-                        acc,
-                        field_cfg,
-                        &reduction_params,
-                    )
-                })
-                .collect();
+            let coeffs: Vec<F> = coeffs.into_iter().map(|acc| reducer.reduce(acc)).collect();
             DynamicPolynomialF::new_trimmed(coeffs)
         })
         .collect();

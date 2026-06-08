@@ -1,5 +1,7 @@
 use crate::{
-    delayed_reduction::DelayedFieldProductSum, from_ref::FromRef, mul_by_scalar::MulByScalar,
+    delayed_reduction::{DelayedFieldProductSum, DelayedFieldProductSumAlgorithm},
+    from_ref::FromRef,
+    mul_by_scalar::MulByScalar,
 };
 use crypto_primitives::{FromWithConfig, PrimeField, boolean::Boolean};
 use num_traits::CheckedAdd;
@@ -92,6 +94,27 @@ impl MBSInnerProduct {
 #[derive(Clone, Debug)]
 pub struct FieldFieldInnerProduct;
 
+impl FieldFieldInnerProduct {
+    pub fn inner_product_with_algorithm<const CHECK: bool, A>(
+        algorithm: &A,
+        lhs: &[A::Value],
+        rhs: &[A::Value],
+        seed: A::Value,
+    ) -> Result<A::Value, InnerProductError>
+    where
+        A: DelayedFieldProductSumAlgorithm,
+    {
+        if lhs.len() != rhs.len() {
+            return Err(InnerProductError::LengthMismatch {
+                lhs: lhs.len(),
+                rhs: rhs.len(),
+            });
+        }
+
+        Ok(algorithm.sum_of_products_with_seed(lhs, rhs, seed))
+    }
+}
+
 impl<F> InnerProduct<[F], F, F> for FieldFieldInnerProduct
 where
     F: DelayedFieldProductSum,
@@ -179,7 +202,7 @@ impl<Rhs: Clone, Out: FromRef<Rhs> + CheckedAdd> InnerProduct<[Boolean], Rhs, Ou
 
 #[cfg(test)]
 mod test {
-    use crate::{CHECKED, UNCHECKED};
+    use crate::{CHECKED, UNCHECKED, delayed_reduction::MontgomeryProductSum4};
     use crypto_bigint::{U64, U256, const_monty_params};
     use crypto_primitives::{
         FromWithConfig, PrimeField, crypto_bigint_const_monty::ConstMontyField,
@@ -293,6 +316,29 @@ mod test {
         let got =
             FieldFieldInnerProduct::inner_product::<UNCHECKED>(&lhs, &rhs, zero.clone()).unwrap();
         let expected = naive_field_inner_product(&lhs, &rhs, zero);
+
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn field_field_inner_product_with_algorithm_matches_naive() {
+        type F = MontyField<4>;
+        let cfg = dyn_field_cfg();
+        let algorithm = MontgomeryProductSum4::<F>::new(&cfg);
+        let lhs: Vec<F> = (0..24).map(|idx| F::from_with_cfg(idx + 3, &cfg)).collect();
+        let rhs: Vec<F> = (0..24)
+            .map(|idx| F::from_with_cfg(89 - idx, &cfg))
+            .collect();
+        let seed = F::from_with_cfg(99u64, &cfg);
+
+        let got = FieldFieldInnerProduct::inner_product_with_algorithm::<UNCHECKED, _>(
+            &algorithm,
+            &lhs,
+            &rhs,
+            seed.clone(),
+        )
+        .unwrap();
+        let expected = naive_field_inner_product(&lhs, &rhs, seed);
 
         assert_eq!(got, expected);
     }

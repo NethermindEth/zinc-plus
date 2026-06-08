@@ -1,4 +1,4 @@
-use crate::neutron_nova::{RowWeights, accumulator::dmr_flush_adds, sumfold::checked_domain_size};
+use crate::neutron_nova::{RowWeights, sumfold::checked_domain_size};
 use crate::sumcheck::{
     multi_degree::{MultiDegreeSumcheckGroup, PrefixFastPath, PrefixRoundOutput},
     prover::ProverState as SumcheckProverState,
@@ -16,9 +16,10 @@ use zinc_uair::UairTrace;
 use zinc_utils::{
     UNCHECKED,
     delayed_reduction::{
-        BarrettReductionParams, DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs,
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs, MontgomeryProductSum4,
     },
-    inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_product::FieldFieldInnerProduct,
     inner_transparent_field::InnerTransparentField,
 };
 
@@ -275,7 +276,7 @@ where
     )?;
 
     let mut table_values = vec![F::zero_with_cfg(field_cfg); prefix_len];
-    let reduction_params = F::barrett_reduction_params(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
 
     for family in &prepared {
         let family_weight = &scalar_weights.family_weights[family.family_idx];
@@ -297,7 +298,7 @@ where
                 scalar_weights.scalarization_powers,
                 family_weight,
                 field_cfg,
-                &reduction_params,
+                &reducer,
                 &mut table_values,
             )?;
             tile_start += tile_len;
@@ -681,7 +682,7 @@ fn accumulate_family_tile<F, PolyCoeff, Int, const D: usize>(
     scalarization_powers: &[F],
     family_weight: &F,
     field_cfg: &F::Config,
-    reduction_params: &BarrettReductionParams,
+    reducer: &BarrettDelayedReduction<'_, F>,
     table_values: &mut [F],
 ) -> Result<(), LinearCprAccumulatorError>
 where
@@ -697,8 +698,9 @@ where
     let mut lane_accs: Vec<[F; D]> = (0..bucket_count)
         .map(|_| array::from_fn(|_| zero.clone()))
         .collect();
+    let product_sum = MontgomeryProductSum4::<F>::new(field_cfg);
     let mut pending_adds = 0usize;
-    let flush_adds = dmr_flush_adds(reduction_params);
+    let flush_adds = reducer.flush_adds();
 
     for tail in 0..tail_len {
         let tail_weight = &weights.tail_eq_weights[tail];
@@ -722,16 +724,12 @@ where
                     pending_adds = pending_adds.saturating_add(add_poly_bits_to_bucket(
                         poly,
                         &omega,
+                        reducer,
                         &mut buckets[bucket_idx],
                     ));
 
                     if pending_adds >= flush_adds {
-                        flush_buckets_into_lanes(
-                            &mut buckets,
-                            &mut lane_accs,
-                            field_cfg,
-                            reduction_params,
-                        );
+                        flush_buckets_into_lanes(&mut buckets, &mut lane_accs, reducer);
                         pending_adds = 0;
                     }
                 }
@@ -739,14 +737,15 @@ where
         }
     }
 
-    flush_buckets_into_lanes(&mut buckets, &mut lane_accs, field_cfg, reduction_params);
+    flush_buckets_into_lanes(&mut buckets, &mut lane_accs, reducer);
 
     for prefix_offset in 0..tile_len {
         let prefix = tile_start + prefix_offset;
         let mut family_value = zero.clone();
         for (coeff_idx, coeff_value) in family.coeff_values.iter().enumerate() {
             let bucket_idx = prefix_offset * family.coeff_values.len() + coeff_idx;
-            let projected = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            let projected = FieldFieldInnerProduct::inner_product_with_algorithm::<UNCHECKED, _>(
+                &product_sum,
                 &lane_accs[bucket_idx],
                 &scalarization_powers[..D],
                 zero.clone(),
@@ -912,6 +911,7 @@ where
 fn add_poly_bits_to_bucket<F, const D: usize>(
     poly: &BinaryPoly<D>,
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     bucket: &mut [Uint<5>; D],
 ) -> usize
 where
@@ -929,7 +929,7 @@ where
         while bits != 0 {
             let bit_idx =
                 usize::try_from(bits.trailing_zeros()).expect("trailing_zeros fits usize");
-            <Uint<5> as DelayedModularReduction<F>>::add(&mut bucket[bit_idx], weight);
+            reducer.add(&mut bucket[bit_idx], weight);
             bits &= bits - 1;
             adds += 1;
         }
@@ -938,7 +938,7 @@ where
         let mut adds = 0usize;
         for (bit_idx, coeff) in poly.iter().enumerate().take(D) {
             if coeff.into_inner() {
-                <Uint<5> as DelayedModularReduction<F>>::add(&mut bucket[bit_idx], weight);
+                reducer.add(&mut bucket[bit_idx], weight);
                 adds += 1;
             }
         }
@@ -949,8 +949,7 @@ where
 fn flush_buckets_into_lanes<F, const D: usize>(
     buckets: &mut [[Uint<5>; D]],
     lane_accs: &mut [[F; D]],
-    field_cfg: &F::Config,
-    reduction_params: &BarrettReductionParams,
+    reducer: &BarrettDelayedReduction<'_, F>,
 ) where
     F: MontgomeryLimbs + Send + Sync,
 {
@@ -960,11 +959,7 @@ fn flush_buckets_into_lanes<F, const D: usize>(
                 continue;
             }
             let pending = std::mem::replace(bucket, Uint::zero());
-            *acc += <Uint<5> as DelayedModularReduction<F>>::reduce(
-                pending,
-                field_cfg,
-                reduction_params,
-            );
+            *acc += reducer.reduce(pending);
         }
     }
 }

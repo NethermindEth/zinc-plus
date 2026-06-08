@@ -1,4 +1,4 @@
-use crate::neutron_nova::{RowWeights, accumulator::dmr_flush_adds};
+use crate::neutron_nova::RowWeights;
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField, crypto_bigint_uint::Uint};
 use num_traits::Zero;
 use std::array;
@@ -8,9 +8,10 @@ use zinc_uair::UairTrace;
 use zinc_utils::{
     UNCHECKED,
     delayed_reduction::{
-        BarrettReductionParams, DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs,
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs, MontgomeryProductSum4,
     },
-    inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_product::FieldFieldInnerProduct,
 };
 
 const MAX_DMR_BUCKET_ARRAYS: usize = 256;
@@ -235,7 +236,7 @@ where
     let entries_by_support_size = extended_entries_by_support_size(prefix_vars)?;
     let row_count = weights.row_weights.len();
     let omega = precompute_row_tail_weights(weights, field_cfg)?;
-    let reduction_params = F::barrett_reduction_params(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
     let word_count = bit_word_count(D);
     let prefix_word_len = prefix_len
         .checked_mul(word_count)
@@ -269,7 +270,7 @@ where
                     &mut prefix_words,
                     &scalar_weights.rho_powers[col_idx * D..col_idx * D + D],
                     field_cfg,
-                    &reduction_params,
+                    &reducer,
                     &mut table_values,
                 )?;
             }
@@ -299,7 +300,7 @@ fn accumulate_column_tile<F, PolyCoeff, Int, const D: usize>(
     prefix_words: &mut [u64],
     rho_powers: &[F],
     field_cfg: &F::Config,
-    reduction_params: &BarrettReductionParams,
+    reducer: &BarrettDelayedReduction<'_, F>,
     table_values: &mut [F],
 ) -> Result<(), BooleanityAccumulatorError>
 where
@@ -319,8 +320,9 @@ where
     let mut lane_accs: Vec<[F; D]> = (0..bucket_count)
         .map(|_| array::from_fn(|_| zero.clone()))
         .collect();
+    let product_sum = MontgomeryProductSum4::<F>::new(field_cfg);
     let mut pending_adds = 0usize;
-    let flush_adds = dmr_flush_adds(reduction_params);
+    let flush_adds = reducer.flush_adds();
 
     for tail in 0..tail_len {
         let omega_offset = tail * row_count;
@@ -345,28 +347,25 @@ where
                     word_count,
                     prefix_words,
                     weight,
+                    reducer,
                     &mut buckets,
                 ));
 
                 if pending_adds >= flush_adds {
-                    flush_buckets_into_lanes(
-                        &mut buckets,
-                        &mut lane_accs,
-                        field_cfg,
-                        reduction_params,
-                    );
+                    flush_buckets_into_lanes(&mut buckets, &mut lane_accs, reducer);
                     pending_adds = 0;
                 }
             }
         }
     }
 
-    flush_buckets_into_lanes(&mut buckets, &mut lane_accs, field_cfg, reduction_params);
+    flush_buckets_into_lanes(&mut buckets, &mut lane_accs, reducer);
 
     for (entry_offset, entry) in tile.iter().enumerate() {
         for magnitude in 1..=max_magnitude {
             let bucket_idx = entry_offset * bucket_stride + magnitude;
-            let projected = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            let projected = FieldFieldInnerProduct::inner_product_with_algorithm::<UNCHECKED, _>(
+                &product_sum,
                 &lane_accs[bucket_idx],
                 rho_powers,
                 zero.clone(),
@@ -419,6 +418,7 @@ fn accumulate_entry_deltas<F, const D: usize>(
     word_count: usize,
     prefix_words: &[u64],
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     buckets: &mut [[Uint<5>; D]],
 ) -> usize
 where
@@ -432,6 +432,7 @@ where
             word_count,
             prefix_words,
             weight,
+            reducer,
             buckets,
         ),
         2 => accumulate_support_two::<F, D>(
@@ -441,6 +442,7 @@ where
             word_count,
             prefix_words,
             weight,
+            reducer,
             buckets,
         ),
         _ => accumulate_support_general::<F, D>(
@@ -450,6 +452,7 @@ where
             word_count,
             prefix_words,
             weight,
+            reducer,
             buckets,
         ),
     }
@@ -463,6 +466,7 @@ fn accumulate_support_one<F, const D: usize>(
     word_count: usize,
     prefix_words: &[u64],
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     buckets: &mut [[Uint<5>; D]],
 ) -> usize
 where
@@ -477,7 +481,7 @@ where
     for word_idx in 0..word_count {
         let mask = word_at(prefix_words, idx0, word_count, word_idx)
             ^ word_at(prefix_words, idx1, word_count, word_idx);
-        adds += add_mask_word_to_bucket(mask, word_idx, weight, &mut buckets[bucket_idx]);
+        adds += add_mask_word_to_bucket(mask, word_idx, weight, reducer, &mut buckets[bucket_idx]);
     }
     adds
 }
@@ -490,6 +494,7 @@ fn accumulate_support_two<F, const D: usize>(
     word_count: usize,
     prefix_words: &[u64],
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     buckets: &mut [[Uint<5>; D]],
 ) -> usize
 where
@@ -514,8 +519,8 @@ where
         let d11 = word_at(prefix_words, idx11, word_count, word_idx) & valid_mask;
         let mask_1 = ((d11 ^ d00) ^ (d10 ^ d01)) & valid_mask;
         let mask_2 = ((d11 & d00 & !d10 & !d01) | (!d11 & !d00 & d10 & d01)) & valid_mask;
-        adds += add_mask_word_to_bucket(mask_1, word_idx, weight, &mut buckets[bucket_1]);
-        adds += add_mask_word_to_bucket(mask_2, word_idx, weight, &mut buckets[bucket_2]);
+        adds += add_mask_word_to_bucket(mask_1, word_idx, weight, reducer, &mut buckets[bucket_1]);
+        adds += add_mask_word_to_bucket(mask_2, word_idx, weight, reducer, &mut buckets[bucket_2]);
     }
 
     adds
@@ -529,6 +534,7 @@ fn accumulate_support_general<F, const D: usize>(
     word_count: usize,
     prefix_words: &[u64],
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     buckets: &mut [[Uint<5>; D]],
 ) -> usize
 where
@@ -571,7 +577,7 @@ where
             continue;
         }
         let bucket_idx = entry_offset * bucket_stride + magnitude;
-        <Uint<5> as DelayedModularReduction<F>>::add(&mut buckets[bucket_idx][lane], weight);
+        reducer.add(&mut buckets[bucket_idx][lane], weight);
         adds += 1;
     }
     adds
@@ -582,6 +588,7 @@ fn add_mask_word_to_bucket<F, const D: usize>(
     mut mask: u64,
     word_idx: usize,
     weight: &F,
+    reducer: &BarrettDelayedReduction<'_, F>,
     bucket: &mut [Uint<5>; D],
 ) -> usize
 where
@@ -592,7 +599,7 @@ where
         let bit = usize::try_from(mask.trailing_zeros()).expect("trailing_zeros fits usize");
         let lane = word_idx * 64 + bit;
         if lane < D {
-            <Uint<5> as DelayedModularReduction<F>>::add(&mut bucket[lane], weight);
+            reducer.add(&mut bucket[lane], weight);
             adds += 1;
         }
         mask &= mask - 1;
@@ -603,8 +610,7 @@ where
 fn flush_buckets_into_lanes<F, const D: usize>(
     buckets: &mut [[Uint<5>; D]],
     lane_accs: &mut [[F; D]],
-    field_cfg: &F::Config,
-    reduction_params: &BarrettReductionParams,
+    reducer: &BarrettDelayedReduction<'_, F>,
 ) where
     F: MontgomeryLimbs + Send + Sync,
 {
@@ -614,11 +620,7 @@ fn flush_buckets_into_lanes<F, const D: usize>(
                 continue;
             }
             let pending = std::mem::replace(bucket, Uint::zero());
-            *acc += <Uint<5> as DelayedModularReduction<F>>::reduce(
-                pending,
-                field_cfg,
-                reduction_params,
-            );
+            *acc += reducer.reduce(pending);
         }
     }
 }

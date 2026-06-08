@@ -39,7 +39,10 @@ use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{BitOp, TraceRow, Uair, ideal::ImpossibleIdeal};
 use zinc_utils::{
     UNCHECKED, add, cfg_iter,
-    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs, MontgomeryProductSum4,
+    },
     from_ref::FromRef,
     inner_product::{FieldFieldInnerProduct, InnerProduct},
     inner_transparent_field::InnerTransparentField,
@@ -178,7 +181,8 @@ where
     let one = F::one_with_cfg(field_cfg);
     let alpha_powers: Vec<F> = powers(projecting_element_f.clone(), one, 32);
     let eq_table = build_eq_x_r_vec(point, field_cfg)?;
-    let reduction_params = F::barrett_reduction_params(field_cfg);
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
+    let product_sum = MontgomeryProductSum4::<F>::new(field_cfg);
 
     let evals = cfg_iter!(bit_op_specs)
         .map(|spec| {
@@ -200,23 +204,15 @@ where
                         continue;
                     }
                     if let Some(dst_bit) = bit_op_destination(spec.op(), src_bit) {
-                        <Uint<5> as DelayedModularReduction<F>>::add(&mut buckets[dst_bit], eq_b);
+                        reducer.add(&mut buckets[dst_bit], eq_b);
                     }
                 }
             }
 
-            let bucket_evals: Vec<F> = buckets
-                .into_iter()
-                .map(|acc| {
-                    <Uint<5> as DelayedModularReduction<F>>::reduce(
-                        acc,
-                        field_cfg,
-                        &reduction_params,
-                    )
-                })
-                .collect();
+            let bucket_evals: Vec<F> = buckets.into_iter().map(|acc| reducer.reduce(acc)).collect();
 
-            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+            FieldFieldInnerProduct::inner_product_with_algorithm::<UNCHECKED, _>(
+                &product_sum,
                 &bucket_evals,
                 &alpha_powers,
                 zero.clone(),

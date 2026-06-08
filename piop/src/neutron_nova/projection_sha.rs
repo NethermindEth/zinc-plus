@@ -7,7 +7,7 @@
 //! folded row check over the 128-row SHA domain.
 
 use crate::ideal_check::batched_ideal_check;
-use crate::neutron_nova::{SumFoldError, accumulator::dmr_flush_adds};
+use crate::neutron_nova::SumFoldError;
 use crate::{
     CombFn,
     sumcheck::multi_degree::{MultiDegreeSumcheckGroup, PrefixFastPath, PrefixRoundOutput},
@@ -26,7 +26,10 @@ use zinc_uair::{
 };
 use zinc_utils::{
     UNCHECKED,
-    delayed_reduction::{DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs,
+    },
     from_ref::FromRef,
     inner_product::{FieldFieldInnerProduct, InnerProduct},
     inner_transparent_field::InnerTransparentField,
@@ -1058,6 +1061,7 @@ where
         });
     }
     let word_col_count = bit_slices.len() / SHA_WORD_BITS;
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
     let mut words = Vec::with_capacity(word_col_count);
     for col_idx in 0..word_col_count {
         let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
@@ -1073,7 +1077,7 @@ where
                 )?);
             }
             out_col.push(project_binary_bits_conditional_add_dmr(
-                &bits, &powers, field_cfg,
+                &bits, &powers, field_cfg, &reducer,
             )?);
         }
         words.push(out_col);
@@ -4082,6 +4086,7 @@ fn project_binary_bits_conditional_add_dmr<F>(
     bits: &[F],
     powers: &[F],
     field_cfg: &F::Config,
+    reducer: &BarrettDelayedReduction<'_, F>,
 ) -> Result<F, ShaProjectionError>
 where
     F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
@@ -4092,8 +4097,6 @@ where
         ));
     }
     let one = F::one_with_cfg(field_cfg);
-    let reduction_params = F::barrett_reduction_params(field_cfg);
-    let flush_adds = dmr_flush_adds(&reduction_params);
     let mut bucket = Uint::<5>::zero();
     let mut pending_adds = 0usize;
     let mut acc = F::zero_with_cfg(field_cfg);
@@ -4106,22 +4109,17 @@ where
             return project_bits_dmr(bits, powers, field_cfg);
         }
 
-        <Uint<5> as DelayedModularReduction<F>>::add(&mut bucket, power);
+        reducer.add(&mut bucket, power);
         pending_adds = pending_adds.saturating_add(1);
-        if pending_adds >= flush_adds {
+        if pending_adds >= reducer.flush_adds() {
             let pending = std::mem::replace(&mut bucket, Uint::zero());
-            acc += <Uint<5> as DelayedModularReduction<F>>::reduce(
-                pending,
-                field_cfg,
-                &reduction_params,
-            );
+            acc += reducer.reduce(pending);
             pending_adds = 0;
         }
     }
 
     if !bucket.is_zero() {
-        acc +=
-            <Uint<5> as DelayedModularReduction<F>>::reduce(bucket, field_cfg, &reduction_params);
+        acc += reducer.reduce(bucket);
     }
     Ok(acc)
 }
@@ -4430,8 +4428,9 @@ mod tests {
         binary_bits[31] = f(1);
 
         let binary_expected = naive_project_bits(&binary_bits, &powers);
+        let reducer = BarrettDelayedReduction::<F>::new(&cfg);
         assert_eq!(
-            project_binary_bits_conditional_add_dmr(&binary_bits, &powers, &cfg).unwrap(),
+            project_binary_bits_conditional_add_dmr(&binary_bits, &powers, &cfg, &reducer).unwrap(),
             binary_expected
         );
         assert_eq!(
@@ -4444,7 +4443,7 @@ mod tests {
         field_bits[9] = f(11);
         let field_expected = naive_project_bits(&field_bits, &powers);
         assert_eq!(
-            project_binary_bits_conditional_add_dmr(&field_bits, &powers, &cfg).unwrap(),
+            project_binary_bits_conditional_add_dmr(&field_bits, &powers, &cfg, &reducer).unwrap(),
             field_expected
         );
         assert_eq!(

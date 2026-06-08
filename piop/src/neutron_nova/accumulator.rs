@@ -10,21 +10,12 @@ use zinc_poly::{
 use zinc_utils::{
     UNCHECKED,
     delayed_reduction::{
-        BarrettReductionParams, DelayedFieldProductSum, DelayedModularReduction, MontgomeryLimbs,
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs, MontgomeryProductSum4,
     },
-    inner_product::{FieldFieldInnerProduct, InnerProduct},
+    inner_product::FieldFieldInnerProduct,
     powers,
 };
-
-const DMR_FLUSH_ADDS: usize = 1 << 20;
-
-pub(crate) fn dmr_flush_adds(reduction_params: &BarrettReductionParams) -> usize {
-    if reduction_params.modulus[3] == 0 {
-        1
-    } else {
-        DMR_FLUSH_ADDS
-    }
-}
 
 /// Errors produced by NeutronNova row-space accumulation helpers.
 #[derive(Clone, Debug, Error)]
@@ -90,13 +81,12 @@ impl<F: PrimeField> RowWeights<F> {
 
 /// DMR-backed bit buckets for one small-value binary-polynomial column.
 #[derive(Clone, Debug)]
-pub struct SmallValueBitAccumulator<'a, F: PrimeField, const D: usize> {
+pub struct SmallValueBitAccumulator<'a, F: MontgomeryLimbs, const D: usize> {
     buckets: [Uint<5>; D],
     lane_accs: [F; D],
     pending_adds: usize,
-    flush_adds: usize,
     field_cfg: &'a F::Config,
-    reduction_params: BarrettReductionParams,
+    reducer: BarrettDelayedReduction<'a, F>,
 }
 
 impl<'a, F, const D: usize> SmallValueBitAccumulator<'a, F, D>
@@ -104,16 +94,14 @@ where
     F: MontgomeryLimbs + Send + Sync,
 {
     pub fn new(field_cfg: &'a F::Config) -> Self {
-        let reduction_params = F::barrett_reduction_params(field_cfg);
-        let flush_adds = dmr_flush_adds(&reduction_params);
+        let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
         let zero = F::zero_with_cfg(field_cfg);
         Self {
             buckets: [Uint::zero(); D],
             lane_accs: array::from_fn(|_| zero.clone()),
             pending_adds: 0,
-            flush_adds,
             field_cfg,
-            reduction_params,
+            reducer,
         }
     }
 
@@ -129,9 +117,9 @@ where
         let Some(bucket) = self.buckets.get_mut(bit_idx) else {
             return Err(AccumulatorError::BitIndexOutOfRange { bit_idx, degree: D });
         };
-        <Uint<5> as DelayedModularReduction<F>>::add(bucket, weight);
+        self.reducer.add(bucket, weight);
         self.pending_adds = self.pending_adds.saturating_add(1);
-        if self.pending_adds >= self.flush_adds {
+        if self.pending_adds >= self.reducer.flush_adds() {
             self.flush_buckets();
         }
         Ok(())
@@ -178,11 +166,7 @@ where
                 continue;
             }
             let pending = std::mem::replace(bucket, Uint::zero());
-            *acc += <Uint<5> as DelayedModularReduction<F>>::reduce(
-                pending,
-                self.field_cfg,
-                &self.reduction_params,
-            );
+            *acc += self.reducer.reduce(pending);
         }
         self.pending_adds = 0;
     }
@@ -202,12 +186,16 @@ where
 
         self.flush_buckets();
         let zero = F::zero_with_cfg(self.field_cfg);
-        Ok(FieldFieldInnerProduct::inner_product::<UNCHECKED>(
-            &self.lane_accs,
-            &projection_powers[..D],
-            zero,
+        let product_sum = MontgomeryProductSum4::<F>::new(self.field_cfg);
+        Ok(
+            FieldFieldInnerProduct::inner_product_with_algorithm::<UNCHECKED, _>(
+                &product_sum,
+                &self.lane_accs,
+                &projection_powers[..D],
+                zero,
+            )
+            .expect("bucket and projection-power lengths match"),
         )
-        .expect("bucket and projection-power lengths match"))
     }
 }
 
