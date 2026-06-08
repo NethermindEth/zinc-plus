@@ -126,6 +126,16 @@ where
     pub witness_polys: ProductionShaWitnessPolys<Zt, D>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedProductionShaProverInstance<Zt, F, const D: usize>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+{
+    pub public_trace: UairTrace<'static, Zt::Int, Zt::Int, D>,
+    pub instance: ProductionShaProverInstance<Zt, F, D>,
+}
+
 pub trait ProductionShaProjectionAdapter<Zt, F, const D: usize>: Uair
 where
     Zt: ZincTypes<D>,
@@ -1174,6 +1184,21 @@ where
 {
     let field_cfg = &pp.field_cfg;
     ensure_production_sha_word_degree::<F, D>()?;
+    let prepared =
+        prepare_linear_ideal_fold_witnesses::<U, Zt, F, D>(shape, witnesses, field_cfg)?;
+    prove_prepared_linear_ideal_fold::<P, U, Zt, F, D>(pp, shape, &prepared, transcript)
+}
+
+pub fn prepare_linear_ideal_fold_witnesses<U, Zt, F, const D: usize>(
+    shape: &UairShape<U>,
+    witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    field_cfg: &F::Config,
+) -> Result<Vec<PreparedProductionShaProverInstance<Zt, F, D>>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
+    Zt: ZincTypes<D>,
+    F: PrimeField + Send + Sync,
+{
     if witnesses.len() < 2 {
         return Err(ProductionShaError::InstanceCountTooSmall(witnesses.len()));
     }
@@ -1183,15 +1208,77 @@ where
         ));
     }
 
+    cfg_iter!(witnesses)
+        .map(|witness| {
+            let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
+            let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
+            let (trace, public, witness_polys) =
+                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
+            Ok(PreparedProductionShaProverInstance {
+                public_trace: own_uair_trace(&public_trace),
+                instance: ProductionShaProverInstance {
+                    trace,
+                    public,
+                    witness_polys,
+                },
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prove_prepared_linear_ideal_fold<P, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<P, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    transcript: &mut impl Transcript,
+) -> Result<
+    LinearIdealFoldProveOutput<
+        UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
+        FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>,
+        FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
+        ProductionLinearIdealFoldProof<P, Zt, F, D>,
+    >,
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P: ProductionShaFoldedPcsOpen<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
+    let field_cfg = &pp.field_cfg;
+    ensure_production_sha_word_degree::<F, D>()?;
+    let instance_count = prepared_instances.len();
+    if instance_count < 2 {
+        return Err(ProductionShaError::InstanceCountTooSmall(instance_count));
+    }
+    if !instance_count.is_power_of_two() {
+        return Err(ProductionShaError::InstanceCountNotPowerOfTwo(
+            instance_count,
+        ));
+    }
+
     let booleanity_sources = production_sha_booleanity_sources();
     absorb_production_sha_statement_metadata(transcript);
     absorb_uair_shape_metadata(transcript, shape);
 
     let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
-        prove_fresh_instances_phase::<P, U, Zt, F, D>(
+        prove_prepared_fresh_instances_phase::<P, Zt, F, D>(
             &pp.pcs_params,
-            shape,
-            witnesses,
+            prepared_instances,
             transcript,
             field_cfg,
         )?;
@@ -1223,7 +1310,7 @@ where
     let coeff_tables =
         build_residual_coeff_tables_phase(&traces, &publics, &r_ic_eq_weights, field_cfg)?;
 
-    let beta = sample_instance_batch_challenge(transcript, witnesses.len(), field_cfg)?;
+    let beta = sample_instance_batch_challenge(transcript, instance_count, field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(&beta, field_cfg)?;
     let (ideal_check, aggregate_ideal_polys) =
         prove_aggregate_ideal_phase(&coeff_tables, &beta_eq_weights, transcript, field_cfg)?;
@@ -1267,7 +1354,7 @@ where
         &beta,
         sumfold_r_b.clone(),
         sumfold_c_sf,
-        witnesses.len(),
+        instance_count,
         field_cfg,
     )?;
 
@@ -1365,18 +1452,16 @@ where
     target = "zinc_protocol::production_sha",
     level = "info",
     skip_all,
-    fields(side = "prove", phase = "fresh_instances", instances = witnesses.len())
+    fields(side = "prove", phase = "fresh_instances", instances = prepared_instances.len())
 )]
 #[allow(clippy::too_many_arguments)]
-fn prove_fresh_instances_phase<P, U, Zt, F, const D: usize>(
+fn prove_prepared_fresh_instances_phase<P, Zt, F, const D: usize>(
     pcs_params: &PCSParams<P, Zt, F, D>,
-    shape: &UairShape<U>,
-    witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
     transcript: &mut impl Transcript,
-    field_cfg: &F::Config,
+    _field_cfg: &F::Config,
 ) -> Result<ProductionShaFreshArtifacts<P, Zt, F, D>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: PrimeField,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1384,24 +1469,12 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
-    for (instance_idx, witness) in witnesses.iter().enumerate() {
-        let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
-        absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &public_trace);
+    for (instance_idx, prepared) in prepared_instances.iter().enumerate() {
+        absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &prepared.public_trace);
     }
 
-    let artifacts = cfg_iter!(witnesses)
-        .map(|witness| {
-            let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
-            let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
-            let (trace, public, witness_polys) = tracing::info_span!(
-                target: "zinc_protocol::production_sha",
-                "fresh_project_instance",
-                side = "prove",
-                phase = "fresh_project_instance",
-            )
-            .in_scope(|| {
-                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)
-            })?;
+    let artifacts = cfg_iter!(prepared_instances)
+        .map(|prepared| {
             let (data, commitment) = tracing::info_span!(
                 target: "zinc_protocol::production_sha",
                 "fresh_commit_instance",
@@ -1409,18 +1482,21 @@ where
                 phase = "fresh_commit_instance",
             )
             .in_scope(|| {
-                commit_production_sha_instance::<P, Zt, F, D>(pcs_params, &witness_polys)
+                commit_production_sha_instance::<P, Zt, F, D>(
+                    pcs_params,
+                    &prepared.instance.witness_polys,
+                )
             })?;
 
             Ok((
                 UairInstance {
-                    public_trace: own_uair_trace(&public_trace),
+                    public_trace: prepared.public_trace.clone(),
                     commitments: commitment.clone(),
                 },
                 commitment,
                 data,
-                trace,
-                public,
+                prepared.instance.trace.clone(),
+                prepared.instance.public.clone(),
             ))
         })
         .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
