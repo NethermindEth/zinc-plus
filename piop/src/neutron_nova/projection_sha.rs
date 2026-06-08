@@ -891,12 +891,11 @@ where
                 validate_trace(trace)?;
                 validate_public(public)?;
             }
-            let rho_sig0 = sparse_poly::<F>(&[10, 19, 30], field_cfg);
-            let rho_sig1 = sparse_poly::<F>(&[7, 21, 26], field_cfg);
+            let constants = ShaResidualPolyConstants::new(field_cfg);
             let mut coeffs = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
             for (row, row_weight) in row_weights.iter().enumerate().take(SHA_ROW_COUNT) {
-                let residuals = residual_polys_at_row_with_rotation_polys(
-                    trace, public, row, &rho_sig0, &rho_sig1, field_cfg,
+                let residuals = residual_polys_at_row_with_constants(
+                    trace, public, row, &constants, field_cfg,
                 )?;
                 for (family_idx, residual) in residuals.iter().enumerate() {
                     add_scaled_poly_assign(&mut coeffs[family_idx], residual, row_weight);
@@ -3978,9 +3977,52 @@ fn residual_polys_at_row_with_rotation_polys<F>(
 where
     F: PrimeField,
 {
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
-    let two = one.clone() + &one;
+    let constants = ShaResidualPolyConstants {
+        rho_sig0: rho_sig0.clone(),
+        rho_sig1: rho_sig1.clone(),
+        two: F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg),
+        low_mu_coeff: pow_two(32, field_cfg),
+        high_mu_w_coeff: pow_two(34, field_cfg),
+        high_mu_3_bit_coeff: pow_two(35, field_cfg),
+        high_mu_1_bit_coeff: pow_two(33, field_cfg),
+    };
+    residual_polys_at_row_with_constants(trace, public, row, &constants, field_cfg)
+}
+
+struct ShaResidualPolyConstants<F: PrimeField> {
+    rho_sig0: DynamicPolynomialF<F>,
+    rho_sig1: DynamicPolynomialF<F>,
+    two: F,
+    low_mu_coeff: F,
+    high_mu_w_coeff: F,
+    high_mu_3_bit_coeff: F,
+    high_mu_1_bit_coeff: F,
+}
+
+impl<F: PrimeField> ShaResidualPolyConstants<F> {
+    fn new(field_cfg: &F::Config) -> Self {
+        Self {
+            rho_sig0: sparse_poly::<F>(&[10, 19, 30], field_cfg),
+            rho_sig1: sparse_poly::<F>(&[7, 21, 26], field_cfg),
+            two: F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg),
+            low_mu_coeff: pow_two(32, field_cfg),
+            high_mu_w_coeff: pow_two(34, field_cfg),
+            high_mu_3_bit_coeff: pow_two(35, field_cfg),
+            high_mu_1_bit_coeff: pow_two(33, field_cfg),
+        }
+    }
+}
+
+fn residual_polys_at_row_with_constants<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row: usize,
+    constants: &ShaResidualPolyConstants<F>,
+    field_cfg: &F::Config,
+) -> Result<[DynamicPolynomialF<F>; NUM_SHA_RESIDUAL_FAMILIES], ShaProjectionError>
+where
+    F: PrimeField,
+{
     let a = word_poly(trace, ShaWordCol::A, row, field_cfg)?;
     let e = word_poly(trace, ShaWordCol::E, row, field_cfg)?;
     let sigma0 = word_poly(trace, ShaWordCol::Sigma0, row, field_cfg)?;
@@ -4016,11 +4058,14 @@ where
     let comp_ff_a = int_const_poly(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)?;
     let comp_ff_e = int_const_poly(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
 
-    let r0 = (&a * &rho_sig0) - &sigma0 - &scale_poly(&ov_sigma0, &two);
-    let r1 = (&e * &rho_sig1) - &sigma1 - &scale_poly(&ov_sigma1, &two);
-    let r2 = w_rot25 + &w_rot14 + &w_shift3 - &small_sigma0 - &scale_poly(&ov_small_sigma0, &two);
-    let r3 =
-        w_rot15 + &w_rot13 + &w.shift_r_c(10) - &small_sigma1 - &scale_poly(&ov_small_sigma1, &two);
+    let r0 = (&a * &constants.rho_sig0) - &sigma0 - &scale_poly(&ov_sigma0, &constants.two);
+    let r1 = (&e * &constants.rho_sig1) - &sigma1 - &scale_poly(&ov_sigma1, &constants.two);
+    let r2 = w_rot25 + &w_rot14 + &w_shift3
+        - &small_sigma0
+        - &scale_poly(&ov_small_sigma0, &constants.two);
+    let r3 = w_rot15 + &w_rot13 + &w.shift_r_c(10)
+        - &small_sigma1
+        - &scale_poly(&ov_small_sigma1, &constants.two);
 
     let mu_packed = word_poly(trace, ShaWordCol::MuPacked, row, field_cfg)?;
     let mu_shift2 = mu_packed.shift_r_c(2);
@@ -4028,18 +4073,14 @@ where
     let mu_shift8 = mu_packed.shift_r_c(8);
     let mu_shift9 = mu_packed.shift_r_c(9);
     let mu_shift10 = mu_packed.shift_r_c(10);
-    let low_mu_coeff = pow_two(32, field_cfg);
-    let high_mu_w_coeff = pow_two(34, field_cfg);
-    let high_mu_3_bit_coeff = pow_two(35, field_cfg);
-    let high_mu_1_bit_coeff = pow_two(33, field_cfg);
     let mu = |low: &DynamicPolynomialF<F>, high: &DynamicPolynomialF<F>, high_coeff: &F| {
-        scale_poly(low, &low_mu_coeff) - &scale_poly(high, high_coeff)
+        scale_poly(low, &constants.low_mu_coeff) - &scale_poly(high, high_coeff)
     };
-    let mu_w = mu(&mu_packed, &mu_shift2, &high_mu_w_coeff);
-    let mu_a = mu(&mu_shift2, &mu_shift5, &high_mu_3_bit_coeff);
-    let mu_e = mu(&mu_shift5, &mu_shift8, &high_mu_3_bit_coeff);
-    let mu_ff_a = mu(&mu_shift8, &mu_shift9, &high_mu_1_bit_coeff);
-    let mu_ff_e = mu(&mu_shift9, &mu_shift10, &high_mu_1_bit_coeff);
+    let mu_w = mu(&mu_packed, &mu_shift2, &constants.high_mu_w_coeff);
+    let mu_a = mu(&mu_shift2, &mu_shift5, &constants.high_mu_3_bit_coeff);
+    let mu_e = mu(&mu_shift5, &mu_shift8, &constants.high_mu_3_bit_coeff);
+    let mu_ff_a = mu(&mu_shift8, &mu_shift9, &constants.high_mu_1_bit_coeff);
+    let mu_ff_e = mu(&mu_shift9, &mu_shift10, &constants.high_mu_1_bit_coeff);
 
     let r4 = w_shift16 - &w - &small_sigma0_shift1 - &w_shift9 - &small_sigma1_shift14
         + &mu_w
@@ -4113,7 +4154,6 @@ where
     ];
     residuals.iter_mut().for_each(DynamicPolynomialF::trim);
     debug_assert_eq!(residuals.len(), NUM_SHA_RESIDUAL_FAMILIES);
-    let _ = zero;
     Ok(residuals)
 }
 

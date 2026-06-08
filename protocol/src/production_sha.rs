@@ -6574,21 +6574,18 @@ fn sha_multipoint_trace_mles<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<DenseMultilinearExtension<F::Inner>>, ProductionShaError<F>>
 where
-    F: InnerTransparentField,
+    F: InnerTransparentField + Sync,
+    F::Inner: Send + Sync,
 {
     let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
-    layout
-        .sources
-        .iter()
+    cfg_iter!(layout.sources)
         .map(|source| {
-            let values = (0..SHA_ROW_COUNT)
-                .map(|row| {
-                    sha_mp_source_row_value(folded_trace, folded_public, *source, row, field_cfg)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
             Ok(DenseMultilinearExtension::from_evaluations_vec(
                 SHA_ROW_VARS,
-                values.iter().map(|value| value.inner().clone()).collect(),
+                sha_mp_source_column_values(folded_trace, folded_public, *source)?
+                    .iter()
+                    .map(|value| value.inner().clone())
+                    .collect(),
                 zero_inner.clone(),
             ))
         })
@@ -6713,52 +6710,47 @@ where
     Ok((specs, evals))
 }
 
-fn sha_mp_source_row_value<F>(
-    folded_trace: &ProjectedTrace<F>,
-    folded_public: &ProjectedPublic<F>,
+fn sha_mp_source_column_values<'a, F>(
+    folded_trace: &'a ProjectedTrace<F>,
+    folded_public: &'a ProjectedPublic<F>,
     source: ShaMpSource,
-    row: usize,
-    field_cfg: &F::Config,
-) -> Result<F, ProductionShaError<F>>
+) -> Result<&'a [F], ProductionShaError<F>>
 where
     F: PrimeField,
 {
-    match source {
-        ShaMpSource::WordBit { col, bit } => folded_trace
-            .bit_slices
-            .get(bit_slice_index(col.index(), bit, SHA_WORD_BITS))
-            .and_then(|column| column.evaluations.get(row))
-            .cloned()
-            .ok_or(ProductionShaError::LengthMismatch {
-                label: "multipoint word bit source",
-                got: row,
-                expected: SHA_ROW_COUNT,
-            }),
-        ShaMpSource::Int { col } => folded_trace
-            .int_columns
-            .get(col.index())
-            .and_then(|column| column.evaluations.get(row))
-            .cloned()
-            .ok_or(ProductionShaError::LengthMismatch {
-                label: "multipoint int source",
-                got: row,
-                expected: SHA_ROW_COUNT,
-            }),
-        ShaMpSource::Public { col } => folded_public
-            .columns
-            .get(col.index())
-            .and_then(|column| column.evaluations.get(row))
-            .cloned()
-            .ok_or(ProductionShaError::LengthMismatch {
-                label: "multipoint public source",
-                got: row,
-                expected: SHA_ROW_COUNT,
-            }),
+    let values =
+        match source {
+            ShaMpSource::WordBit { col, bit } => folded_trace
+                .bit_slices
+                .get(bit_slice_index(col.index(), bit, SHA_WORD_BITS))
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "multipoint word bit source",
+                    got: bit_slice_index(col.index(), bit, SHA_WORD_BITS),
+                    expected: folded_trace.bit_slices.len(),
+                })?,
+            ShaMpSource::Int { col } => folded_trace.int_columns.get(col.index()).ok_or(
+                ProductionShaError::LengthMismatch {
+                    label: "multipoint int source",
+                    got: col.index(),
+                    expected: folded_trace.int_columns.len(),
+                },
+            )?,
+            ShaMpSource::Public { col } => folded_public.columns.get(col.index()).ok_or(
+                ProductionShaError::LengthMismatch {
+                    label: "multipoint public source",
+                    got: col.index(),
+                    expected: folded_public.columns.len(),
+                },
+            )?,
+        };
+    if values.num_vars != SHA_ROW_VARS || values.evaluations.len() != SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "multipoint source rows",
+            got: values.evaluations.len(),
+            expected: SHA_ROW_COUNT,
+        });
     }
-    .map(|value| {
-        let _ = field_cfg;
-        value
-    })
+    Ok(&values.evaluations)
 }
 
 fn sha_mp_source_endpoint_value_with_row_weights<F>(
