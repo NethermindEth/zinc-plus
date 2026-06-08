@@ -93,6 +93,18 @@ where
         field_cfg: &F::Config,
     ) -> Result<Self::Commitment, ZipError>;
 
+    fn fold_commitment_refs(
+        commitments: &[&Self::Commitment],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::Commitment, ZipError> {
+        let owned = commitments
+            .iter()
+            .map(|commitment| (*commitment).clone())
+            .collect::<Vec<_>>();
+        Self::fold_commitments(&owned, theta, field_cfg)
+    }
+
     fn fold_prover_data(
         prover_data: &[Self::ProverData],
         theta: &[F],

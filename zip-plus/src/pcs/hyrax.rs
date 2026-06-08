@@ -8,7 +8,7 @@ use std::{
 };
 
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{BigInteger, PrimeField as ArkPrimeField, UniformRand, Zero};
+use ark_ff::{AdditiveGroup, BigInteger, PrimeField as ArkPrimeField, UniformRand, Zero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use crypto_bigint::{BoxedUint, modular::BoxedMontyForm};
 use crypto_primitives::{
@@ -23,7 +23,7 @@ use zinc_poly::{
     },
 };
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_utils::{cfg_into_iter, cfg_iter};
+use zinc_utils::{cfg_into_iter, cfg_iter, delayed_reduction::DelayedFieldProductSum};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -152,6 +152,89 @@ where
 
         Ok(())
     }
+
+    /// Open a folded single-row Hyrax commitment from protocol-field lanes.
+    ///
+    /// ProjectionFold folds binary witnesses by protocol-field challenges, so
+    /// folded bit lanes are already field elements rather than booleans.  The
+    /// generic scalar-lane path first converts every lane entry into the curve
+    /// scalar field and then scans the matrix twice.  For the SHA benchmark the
+    /// Hyrax width is the whole row domain (`num_rows == 1`), so we can compute
+    /// the transcript's combined row directly in the protocol field, derive the
+    /// single `b` value from it, and convert only the final row entries that are
+    /// written to the proof stream.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_open_field_lanes_single_row<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        ck: &HyraxCommitmentKey<C>,
+        field_lanes: &[Vec<&[F]>],
+        point: &[F],
+        prover_data: &HyraxProverData<C>,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C> + DelayedFieldProductSum,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+        Lanes: Clone + Debug + Send + Sync,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        if field_lanes.is_empty() {
+            return Ok(());
+        }
+        validate_field_lanes::<C, F>(ck, field_lanes, point.len(), prover_data)?;
+        if prover_data.num_rows != 1 {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax field-lane fast opening requires a single row".to_string(),
+            ));
+        }
+
+        let q1 = eq_tensor_f::<F>(point, field_cfg);
+        let alphas = sample_scalars::<C>(
+            &mut transcript.fs_transcript,
+            field_lanes.len() * prover_data.num_lanes,
+        );
+        let alpha_fields = alphas
+            .iter()
+            .map(|alpha| F::scalar_to_field(alpha, field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut combined_row = vec![F::zero_with_cfg(field_cfg); ck.num_cols];
+        let mut rho_star = C::ScalarField::zero();
+        for (poly_idx, lanes) in field_lanes.iter().enumerate() {
+            for (lane, values) in lanes.iter().enumerate() {
+                let alpha_idx = alpha_index_dynamic(prover_data.num_lanes, poly_idx, lane);
+                let alpha = &alpha_fields[alpha_idx];
+                for (acc, value) in combined_row.iter_mut().zip(values.iter()) {
+                    *acc += value.clone() * alpha.clone();
+                }
+                if ck.blinding_mode.is_blinded() {
+                    let blind_idx = commitment_index_dynamic(
+                        prover_data.num_lanes,
+                        poly_idx,
+                        lane,
+                        0,
+                        prover_data.num_rows,
+                    );
+                    rho_star += alphas[alpha_idx] * prover_data.blinds[blind_idx];
+                }
+            }
+        }
+
+        let b = F::delayed_sum_of_products(&combined_row, &q1, F::zero_with_cfg(field_cfg));
+        transcript.write_field_elements(&[b])?;
+
+        let combined_scalars = combined_row
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        write_scalars::<C>(transcript, &combined_scalars)?;
+        if ck.blinding_mode.is_blinded() {
+            write_scalar::<C>(transcript, &rho_star)?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +284,8 @@ pub struct HyraxCommitment<C: AffineRepr> {
     pub(crate) num_rows: usize,
     pub(crate) blinding_mode: HyraxBlindingMode,
     pub(crate) comm: Vec<C::Group>,
+    pub(crate) comm_affine: Vec<C>,
+    pub(crate) comm_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -676,6 +761,8 @@ where
                     num_rows: 0,
                     blinding_mode: ck.blinding_mode,
                     comm: Vec::new(),
+                    comm_affine: Vec::new(),
+                    comm_bytes: Vec::new(),
                 },
             ));
         }
@@ -702,6 +789,9 @@ where
             all_blinds.extend(blinds);
         }
 
+        let all_affine = C::Group::normalize_batch(&all_comm);
+        let all_bytes = affine_points_bytes::<C>(&all_affine)?;
+
         Ok((
             HyraxProverData {
                 batch_size: polys.len(),
@@ -716,6 +806,8 @@ where
                 num_rows,
                 blinding_mode: ck.blinding_mode,
                 comm: all_comm,
+                comm_affine: all_affine,
+                comm_bytes: all_bytes,
             },
         ))
     }
@@ -726,10 +818,7 @@ where
         transcript.absorb_slice(&(commitment.num_lanes as u64).to_le_bytes());
         transcript.absorb_slice(&(commitment.num_rows as u64).to_le_bytes());
         transcript.absorb_slice(&[commitment.blinding_mode.as_u8()]);
-        for comm in &commitment.comm {
-            let bytes = group_bytes::<C>(comm).unwrap_or_default();
-            transcript.absorb_slice(&bytes);
-        }
+        transcript.absorb_slice(&commitment.comm_bytes);
         transcript.absorb_slice(b"hyrax_commitment_end");
     }
 
@@ -743,10 +832,7 @@ where
         buf.extend_from_slice(&(commitment.num_lanes as u64).to_le_bytes());
         buf.extend_from_slice(&(commitment.num_rows as u64).to_le_bytes());
         buf.push(commitment.blinding_mode.as_u8());
-        for comm in &commitment.comm {
-            let bytes = group_bytes::<C>(comm).expect("Hyrax commitment must serialize");
-            buf.extend_from_slice(&bytes);
-        }
+        buf.extend_from_slice(&commitment.comm_bytes);
     }
 
     fn batch_size(commitment: &Self::Commitment) -> usize {
@@ -1071,9 +1157,8 @@ where
             ));
         }
 
-        let comm_bases = C::Group::normalize_batch(&commitment.comm);
         let comm_lc = if commitment.num_rows == 1 {
-            msm_unchecked::<C>(&comm_bases, &alphas)?
+            msm_unchecked::<C>(&commitment.comm_affine, &alphas)?
         } else {
             let mut comm_lc_scalars = Vec::with_capacity(commitment.comm.len());
             for poly_idx in 0..commitment.batch_size {
@@ -1082,7 +1167,7 @@ where
                     comm_lc_scalars.extend(row_coeffs.iter().map(|row_coeff| alpha * row_coeff));
                 }
             }
-            msm_unchecked::<C>(&comm_bases, &comm_lc_scalars)?
+            msm_unchecked::<C>(&commitment.comm_affine, &comm_lc_scalars)?
         };
 
         let mut expected = msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
@@ -1112,16 +1197,25 @@ where
         theta: &[F],
         field_cfg: &F::Config,
     ) -> Result<Self::Commitment, ZipError> {
+        let refs = commitments.iter().collect::<Vec<_>>();
+        Self::fold_commitment_refs(&refs, theta, field_cfg)
+    }
+
+    fn fold_commitment_refs(
+        commitments: &[&Self::Commitment],
+        theta: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self::Commitment, ZipError> {
         let _ = field_cfg;
         validate_fold_inputs(commitments, theta.len(), "commitments")?;
-        let first = &commitments[0];
+        let first = commitments[0];
         validate_commitment_shape::<C, Lanes, Eval, D>(first)?;
 
         let scalars = theta
             .iter()
             .map(F::field_to_scalar)
             .collect::<Result<Vec<_>, _>>()?;
-        for commitment in commitments {
+        for &commitment in commitments {
             validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
             if !same_commitment_shape(first, commitment) {
                 return Err(ZipError::InvalidPcsParam(
@@ -1129,15 +1223,9 @@ where
                 ));
             }
         }
-        let folded = cfg_into_iter!(0..first.comm.len())
-            .map(|idx| {
-                let mut acc = C::Group::zero();
-                for (commitment, scalar) in commitments.iter().zip(&scalars) {
-                    acc += commitment.comm[idx] * scalar;
-                }
-                acc
-            })
-            .collect();
+        let folded = msm_shared_weight_commitments_unchecked::<C>(&scalars, commitments)?;
+        let folded_affine = C::Group::normalize_batch(&folded);
+        let folded_bytes = affine_points_bytes::<C>(&folded_affine)?;
 
         Ok(HyraxCommitment {
             batch_size: first.batch_size,
@@ -1145,6 +1233,8 @@ where
             num_rows: first.num_rows,
             blinding_mode: first.blinding_mode,
             comm: folded,
+            comm_affine: folded_affine,
+            comm_bytes: folded_bytes,
         })
     }
 
@@ -1255,6 +1345,60 @@ where
     Ok(())
 }
 
+fn validate_field_lanes<'a, C, F>(
+    ck: &HyraxCommitmentKey<C>,
+    field_lanes: &[Vec<&'a [F]>],
+    point_len: usize,
+    prover_data: &HyraxProverData<C>,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+    F: PrimeField + 'a,
+{
+    let expected_n = 1usize
+        .checked_shl(u32::try_from(point_len).map_err(|_| {
+            ZipError::InvalidPcsParam(format!("Hyrax point length {point_len} is too large"))
+        })?)
+        .ok_or_else(|| {
+            ZipError::InvalidPcsParam(format!("Hyrax point length {point_len} is too large"))
+        })?;
+    let expected_rows = num_rows(expected_n, ck.num_cols)?;
+    if prover_data.batch_size != field_lanes.len()
+        || prover_data.num_rows != expected_rows
+        || prover_data.blinding_mode != ck.blinding_mode
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax field-lane prover data shape mismatch".to_string(),
+        ));
+    }
+    let expected_blinds = if ck.blinding_mode.is_blinded() {
+        prover_data.batch_size * prover_data.num_lanes * prover_data.num_rows
+    } else {
+        0
+    };
+    if prover_data.blinds.len() != expected_blinds {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax field-lane blind count mismatch".to_string(),
+        ));
+    }
+    for lanes in field_lanes {
+        if lanes.len() != prover_data.num_lanes {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax field-lane count mismatch".to_string(),
+            ));
+        }
+        for values in lanes {
+            if values.len() != expected_n {
+                return Err(ZipError::InvalidPcsParam(format!(
+                    "Hyrax field-lane length mismatch: got {}, expected {expected_n}",
+                    values.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn same_commitment_shape<C: AffineRepr>(
     lhs: &HyraxCommitment<C>,
     rhs: &HyraxCommitment<C>,
@@ -1264,6 +1408,8 @@ fn same_commitment_shape<C: AffineRepr>(
         && lhs.num_rows == rhs.num_rows
         && lhs.blinding_mode == rhs.blinding_mode
         && lhs.comm.len() == rhs.comm.len()
+        && lhs.comm_affine.len() == rhs.comm_affine.len()
+        && lhs.comm_bytes.len() == rhs.comm_bytes.len()
 }
 
 fn same_prover_data_shape<C: AffineRepr>(
@@ -1374,6 +1520,19 @@ where
         return Err(ZipError::InvalidPcsParam(format!(
             "Hyrax commitment expected {expected} row commitments, got {}",
             commitment.comm.len()
+        )));
+    }
+    if commitment.comm_affine.len() != expected {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax commitment expected {expected} affine row commitments, got {}",
+            commitment.comm_affine.len()
+        )));
+    }
+    let expected_bytes = expected * C::zero().serialized_size(Compress::Yes);
+    if commitment.comm_bytes.len() != expected_bytes {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax commitment expected {expected_bytes} commitment bytes, got {}",
+            commitment.comm_bytes.len()
         )));
     }
     Ok(())
@@ -1624,6 +1783,194 @@ fn msm_unchecked<C: AffineRepr>(
     ))
 }
 
+fn msm_shared_weight_commitments_unchecked<C: AffineRepr>(
+    scalars: &[C::ScalarField],
+    commitments: &[&HyraxCommitment<C>],
+) -> Result<Vec<C::Group>, ZipError> {
+    if commitments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row_count = commitments[0].comm_affine.len();
+    debug_assert!(
+        commitments
+            .iter()
+            .all(|commitment| commitment.comm_affine.len() == row_count)
+    );
+
+    msm_shared_weights_indexed_unchecked::<C, _>(scalars, row_count, |row_idx, scalar_idx| {
+        commitments[scalar_idx].comm_affine[row_idx]
+    })
+}
+
+fn msm_shared_weights_indexed_unchecked<C, BaseAt>(
+    scalars: &[C::ScalarField],
+    row_count: usize,
+    base_at: BaseAt,
+) -> Result<Vec<C::Group>, ZipError>
+where
+    C: AffineRepr,
+    BaseAt: Fn(usize, usize) -> C + Sync,
+{
+    if row_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let one = C::ScalarField::from(1u64);
+    let mut unit_indices = Vec::new();
+    let mut general_indices = Vec::new();
+    let mut general_scalars = Vec::new();
+    for (idx, scalar) in scalars.iter().enumerate() {
+        if scalar.is_zero() {
+            continue;
+        }
+        if *scalar == one {
+            unit_indices.push(idx);
+        } else {
+            general_indices.push(idx);
+            general_scalars.push(scalar.into_bigint());
+        }
+    }
+
+    if general_indices.is_empty() {
+        return Ok(cfg_into_iter!(0..row_count)
+            .map(|row_idx| {
+                let mut acc = C::Group::zero();
+                for &idx in &unit_indices {
+                    acc += base_at(row_idx, idx);
+                }
+                acc
+            })
+            .collect());
+    }
+
+    let window_bits = shared_weight_window_bits(scalars.len());
+    let half_window = 1usize << (window_bits - 1);
+    let full_window = 1usize << window_bits;
+    let bucket_len = half_window;
+    let segments =
+        <usize as Integer>::div_ceil(&(C::ScalarField::MODULUS_BIT_SIZE as usize), &window_bits)
+            + 1;
+    let mut carries = vec![0u8; general_scalars.len()];
+    let mut signed_windows = Vec::with_capacity(segments);
+    for segment in 0..segments {
+        let offset = segment * window_bits;
+        let mut digits = Vec::with_capacity(general_scalars.len());
+        for (idx, scalar) in general_scalars.iter().enumerate() {
+            let raw = window_value_from_limbs(scalar.as_ref(), offset, window_bits)
+                + usize::from(carries[idx]);
+            if raw >= half_window {
+                digits.push(-((full_window - raw) as i16));
+                carries[idx] = 1;
+            } else {
+                digits.push(raw as i16);
+                carries[idx] = 0;
+            }
+        }
+        signed_windows.push(digits);
+    }
+
+    if bucket_len == 4 {
+        return Ok(cfg_into_iter!(0..row_count)
+            .map(|row_idx| {
+                let mut unit_sum = C::Group::zero();
+                for &idx in &unit_indices {
+                    unit_sum += base_at(row_idx, idx);
+                }
+
+                let mut buckets: [C::Group; 4] = std::array::from_fn(|_| C::Group::zero());
+                let mut acc = C::Group::zero();
+                for digits in signed_windows.iter().rev() {
+                    for _ in 0..window_bits {
+                        acc.double_in_place();
+                    }
+                    for bucket in &mut buckets {
+                        *bucket = C::Group::zero();
+                    }
+                    for (general_idx, digit) in digits.iter().enumerate() {
+                        if *digit > 0 {
+                            buckets[*digit as usize - 1] +=
+                                base_at(row_idx, general_indices[general_idx]);
+                        } else if *digit < 0 {
+                            buckets[(-*digit) as usize - 1] -=
+                                base_at(row_idx, general_indices[general_idx]);
+                        }
+                    }
+                    acc += bucket_running_sum(&buckets);
+                }
+
+                unit_sum + acc
+            })
+            .collect());
+    }
+
+    Ok(cfg_into_iter!(0..row_count)
+        .map(|row_idx| {
+            let mut unit_sum = C::Group::zero();
+            for &idx in &unit_indices {
+                unit_sum += base_at(row_idx, idx);
+            }
+
+            let mut buckets = vec![C::Group::zero(); bucket_len];
+            let mut acc = C::Group::zero();
+            for digits in signed_windows.iter().rev() {
+                for _ in 0..window_bits {
+                    acc.double_in_place();
+                }
+                for bucket in &mut buckets {
+                    *bucket = C::Group::zero();
+                }
+                for (general_idx, digit) in digits.iter().enumerate() {
+                    if *digit > 0 {
+                        buckets[*digit as usize - 1] +=
+                            base_at(row_idx, general_indices[general_idx]);
+                    } else if *digit < 0 {
+                        buckets[(-*digit) as usize - 1] -=
+                            base_at(row_idx, general_indices[general_idx]);
+                    }
+                }
+                acc += bucket_running_sum(&buckets);
+            }
+
+            unit_sum + acc
+        })
+        .collect())
+}
+
+fn shared_weight_window_bits(n: usize) -> usize {
+    if n < 32 {
+        3
+    } else {
+        (usize::BITS - n.leading_zeros()) as usize
+    }
+}
+
+fn bucket_running_sum<G: CurveGroup>(buckets: &[G]) -> G {
+    let mut acc = G::zero();
+    let mut running_sum = G::zero();
+    for bucket in buckets.iter().rev() {
+        running_sum += bucket;
+        acc += running_sum;
+    }
+    acc
+}
+
+fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
+    (0..width).fold(0usize, |value, bit_idx| {
+        let absolute_bit = start + bit_idx;
+        let limb_idx = absolute_bit / u64::BITS as usize;
+        let limb_bit = absolute_bit % u64::BITS as usize;
+        if limbs
+            .get(limb_idx)
+            .map(|limb| ((limb >> limb_bit) & 1) == 1)
+            .unwrap_or(false)
+        {
+            value | (1usize << bit_idx)
+        } else {
+            value
+        }
+    })
+}
+
 fn num_rows(n: usize, width: usize) -> Result<usize, ZipError> {
     if width == 0 {
         return Err(ZipError::InvalidPcsParam(
@@ -1746,10 +2093,16 @@ fn scalar_bytes<C: AffineRepr>(scalar: &C::ScalarField) -> Result<Vec<u8>, ZipEr
     Ok(bytes)
 }
 
-fn group_bytes<C: AffineRepr>(group: &C::Group) -> Result<Vec<u8>, ZipError> {
-    let affine = group.into_affine();
-    let mut bytes = Vec::with_capacity(affine.serialized_size(Compress::Yes));
-    affine.serialize_compressed(&mut bytes).map_err(ark_err)?;
+fn affine_bytes_into<C: AffineRepr>(affine: &C, bytes: &mut Vec<u8>) -> Result<(), ZipError> {
+    affine.serialize_compressed(bytes).map_err(ark_err)
+}
+
+fn affine_points_bytes<C: AffineRepr>(points: &[C]) -> Result<Vec<u8>, ZipError> {
+    let point_size = C::zero().serialized_size(Compress::Yes);
+    let mut bytes = Vec::with_capacity(points.len() * point_size);
+    for point in points {
+        affine_bytes_into::<C>(point, &mut bytes)?;
+    }
     Ok(bytes)
 }
 

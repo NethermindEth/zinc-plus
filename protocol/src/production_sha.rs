@@ -20,6 +20,8 @@ use num_traits::{ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use thiserror::Error;
+#[cfg(debug_assertions)]
+use zinc_piop::neutron_nova::validate_projected_trace;
 use zinc_piop::{
     combined_poly_resolver::Proof as CombinedPolyResolverProof,
     ideal_check::Proof as IdealCheckProof,
@@ -31,21 +33,20 @@ use zinc_piop::{
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
         NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic, ProjectedTrace, ProjectionFoldWitness,
-        SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaBooleanitySource, ShaIntCol,
-        ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaWordCol,
-        beta_aggregate_nonzero_ideal_polys_with_weights, bit_slice_index, build_booleanity_weights,
-        build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
+        SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanitySource,
+        ShaIntCol, ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily,
+        ShaWordCol, beta_aggregate_nonzero_ideal_polys_with_weights, bit_slice_index,
+        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
         build_linear_residual_coeff_tables_with_row_weights,
         build_production_sha_sumfold_group_from_prefix_accumulators, build_sha_lambda_powers,
         build_sha_residual_eval_powers, build_sha_sumfold_linear_accumulator,
         build_sha_sumfold_quadratic_prefix_accumulator, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, expression_folded_row_sum_with_vectors,
         fold_projected_traces, folded_row_integrand_sum, production_sha_booleanity_sources,
-        production_sha_nonzero_families, sha_int_at_point_with_weights,
-        sha_int_at_point_with_weights_unchecked, sha_public_at_point,
-        sha_public_at_point_with_weights, sha_word_bits_at_point_with_weights,
-        sha_word_bits_at_point_with_weights_unchecked, validate_projected_trace,
-        verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
+        production_sha_nonzero_families, sha_int_at_point_with_weights_unchecked,
+        sha_public_at_point, sha_public_at_point_with_weights,
+        sha_word_bits_at_point_with_weights_unchecked, verify_folded_row_sumcheck_claim,
+        verify_fresh_sha_ideal_polys,
     },
     sumcheck::{
         SumCheckError,
@@ -53,20 +54,21 @@ use zinc_piop::{
     },
 };
 use zinc_poly::{
-    EvaluationError,
+    EvaluatablePolynomial, EvaluationError,
     mle::DenseMultilinearExtension,
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
         dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
+        nat_evaluation::NatEvaluatedPoly,
     },
     utils::{ArithErrors, build_eq_x_r_vec, eq_eval},
 };
 use zinc_transcript::Blake3Transcript;
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::traits::{GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
-    UNCHECKED, cfg_iter, delayed_reduction::DelayedFieldProductSum,
+    UNCHECKED, cfg_into_iter, cfg_iter, delayed_reduction::DelayedFieldProductSum,
     inner_product::FieldFieldInnerProduct, inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField,
 };
@@ -432,7 +434,7 @@ where
 impl<Zt, F, C, const D: usize> ProductionShaFoldedPcsOpen<Zt, F, D> for AllHyraxPCSTypes<C>
 where
     Zt: ZincTypes<D>,
-    F: HyraxFieldBridge<C>,
+    F: HyraxFieldBridge<C> + DelayedFieldProductSum,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     C: AffineRepr,
@@ -495,6 +497,7 @@ pub struct FoldedRowSumcheckOutput<F> {
     pub r_star: Vec<F>,
     pub r_star_eq_weights: Vec<F>,
     pub terminal_value: F,
+    pub endpoint_evals: Option<ShaEndpointEvals<F>>,
 }
 
 #[derive(Debug, Error)]
@@ -571,29 +574,57 @@ pub fn absorb_projected_sha_publics<F>(
     F::Modulus: Transcribable,
 {
     let mut field_buf = runtime_field_transcript_buf::<F>(field_cfg);
-    transcript.absorb_slice(b"production_sha_publics_begin");
-    transcript.absorb_slice(&(publics.len() as u64).to_le_bytes());
-    for (instance_idx, public) in publics.iter().enumerate() {
-        transcript.absorb_slice(&(instance_idx as u64).to_le_bytes());
-        transcript.absorb_slice(&(public.columns.len() as u64).to_le_bytes());
-        for (col_idx, col) in public.columns.iter().enumerate() {
-            transcript.absorb_slice(&(col_idx as u64).to_le_bytes());
-            transcript.absorb_slice(&(col.evaluations.len() as u64).to_le_bytes());
-            transcript.absorb_random_field_slice(&col.evaluations, &mut field_buf);
-        }
-        match &public.bit_slices {
-            Some(bit_slices) => {
-                transcript.absorb_slice(&[1]);
-                transcript.absorb_slice(&(bit_slices.len() as u64).to_le_bytes());
-                for (col_idx, col) in bit_slices.iter().enumerate() {
-                    transcript.absorb_slice(&(col_idx as u64).to_le_bytes());
-                    transcript.absorb_slice(&(col.evaluations.len() as u64).to_le_bytes());
-                    transcript.absorb_random_field_slice(&col.evaluations, &mut field_buf);
-                }
-            }
-            None => transcript.absorb_slice(&[0]),
+    let mut encoded = Vec::with_capacity(
+        publics.len()
+            * ShaPublicWordCol::COUNT
+            * SHA_ROW_COUNT
+            * F::Inner::get_num_bytes(F::zero_with_cfg(field_cfg).inner()),
+    );
+    let zero = F::zero_with_cfg(field_cfg);
+
+    fn push_u64(buf: &mut Vec<u8>, value: usize) {
+        buf.extend_from_slice(&(value as u64).to_le_bytes());
+    }
+
+    fn push_field_inners<F>(buf: &mut Vec<u8>, values: &[F], scratch: &mut [u8])
+    where
+        F: PrimeField,
+        F::Inner: Transcribable,
+    {
+        for value in values {
+            value.inner().write_transcription_bytes_exact(scratch);
+            buf.extend_from_slice(scratch);
         }
     }
+
+    transcript.absorb_slice(b"production_sha_publics_begin");
+    encoded.extend_from_slice(b"compact_v1");
+    zero.modulus()
+        .write_transcription_bytes_exact(&mut field_buf);
+    encoded.extend_from_slice(&field_buf);
+    push_u64(&mut encoded, publics.len());
+    push_u64(&mut encoded, ShaPublicCol::COUNT);
+    push_u64(&mut encoded, ShaPublicWordCol::COUNT);
+    push_u64(&mut encoded, SHA_ROW_COUNT);
+    for (instance_idx, public) in publics.iter().enumerate() {
+        push_u64(&mut encoded, instance_idx);
+        push_u64(&mut encoded, public.columns.len());
+        match &public.bit_slices {
+            Some(bit_slices) => {
+                encoded.push(1);
+                push_u64(&mut encoded, bit_slices.len());
+            }
+            None => encoded.push(0),
+        }
+        for public_col in production_sha_public_word_column_map() {
+            let col_idx = public_col.index();
+            let col = &public.columns[col_idx];
+            push_u64(&mut encoded, col_idx);
+            push_u64(&mut encoded, col.evaluations.len());
+            push_field_inners::<F>(&mut encoded, &col.evaluations, &mut field_buf);
+        }
+    }
+    transcript.absorb_slice(&encoded);
     transcript.absorb_slice(b"production_sha_publics_end");
 }
 
@@ -637,12 +668,6 @@ fn absorb_uair_column_counts(
     transcript.absorb_slice(&(binary as u64).to_le_bytes());
     transcript.absorb_slice(&(arbitrary as u64).to_le_bytes());
     transcript.absorb_slice(&(int as u64).to_le_bytes());
-}
-
-fn absorb_transcribable<T: Transcribable>(transcript: &mut impl Transcript, value: &T) {
-    let mut buf = vec![0u8; value.get_num_bytes() + T::LENGTH_NUM_BYTES];
-    value.write_transcription_bytes_subset(&mut buf);
-    transcript.absorb_slice(&buf);
 }
 
 fn runtime_field_transcript_buf<F>(field_cfg: &F::Config) -> Vec<u8>
@@ -709,37 +734,53 @@ fn absorb_public_uair_trace<Zt, const D: usize>(
 ) where
     Zt: ZincTypes<D>,
 {
-    transcript.absorb_slice(b"uair_public_trace_begin");
-    transcript.absorb_slice(&(instance_idx as u64).to_le_bytes());
-    transcript.absorb_slice(&(trace.binary_poly.len() as u64).to_le_bytes());
+    fn push_u64(buf: &mut Vec<u8>, value: usize) {
+        buf.extend_from_slice(&(value as u64).to_le_bytes());
+    }
+
+    fn push_transcribable<T: Transcribable>(buf: &mut Vec<u8>, value: &T, scratch: &mut Vec<u8>) {
+        let len = value.get_num_bytes() + T::LENGTH_NUM_BYTES;
+        scratch.resize(len, 0);
+        value.write_transcription_bytes_subset(scratch);
+        buf.extend_from_slice(scratch);
+    }
+
+    let mut encoded = Vec::new();
+    let mut scratch = Vec::new();
+    encoded.extend_from_slice(b"compact_v1");
+    push_u64(&mut encoded, instance_idx);
+    push_u64(&mut encoded, trace.binary_poly.len());
     for (col_idx, col) in trace.binary_poly.iter().enumerate() {
-        transcript.absorb_slice(&(col_idx as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.num_vars as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.evaluations.len() as u64).to_le_bytes());
+        push_u64(&mut encoded, col_idx);
+        push_u64(&mut encoded, col.num_vars);
+        push_u64(&mut encoded, col.evaluations.len());
         for value in &col.evaluations {
-            absorb_transcribable(transcript, value);
+            push_transcribable(&mut encoded, value, &mut scratch);
         }
     }
-    transcript.absorb_slice(&(trace.arbitrary_poly.len() as u64).to_le_bytes());
+    push_u64(&mut encoded, trace.arbitrary_poly.len());
     for (col_idx, col) in trace.arbitrary_poly.iter().enumerate() {
-        transcript.absorb_slice(&(col_idx as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.num_vars as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.evaluations.len() as u64).to_le_bytes());
+        push_u64(&mut encoded, col_idx);
+        push_u64(&mut encoded, col.num_vars);
+        push_u64(&mut encoded, col.evaluations.len());
         for poly in &col.evaluations {
             for coeff in poly.iter() {
-                absorb_transcribable(transcript, coeff);
+                push_transcribable(&mut encoded, coeff, &mut scratch);
             }
         }
     }
-    transcript.absorb_slice(&(trace.int.len() as u64).to_le_bytes());
+    push_u64(&mut encoded, trace.int.len());
     for (col_idx, col) in trace.int.iter().enumerate() {
-        transcript.absorb_slice(&(col_idx as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.num_vars as u64).to_le_bytes());
-        transcript.absorb_slice(&(col.evaluations.len() as u64).to_le_bytes());
+        push_u64(&mut encoded, col_idx);
+        push_u64(&mut encoded, col.num_vars);
+        push_u64(&mut encoded, col.evaluations.len());
         for value in &col.evaluations {
-            absorb_transcribable(transcript, value);
+            push_transcribable(&mut encoded, value, &mut scratch);
         }
     }
+
+    transcript.absorb_slice(b"uair_public_trace_begin");
+    transcript.absorb_slice(&encoded);
     transcript.absorb_slice(b"uair_public_trace_end");
 }
 
@@ -1088,6 +1129,7 @@ where
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
+        + ShaBinaryFoldField
         + FromPrimitiveWithConfig
         + Send
         + Sync
@@ -1125,12 +1167,26 @@ where
         )?;
     validate_production_sha_publics(&publics, field_cfg)?;
 
-    absorb_production_sha_commitments::<P, Zt, F, D>(
-        transcript,
-        b"production_sha_fresh_commitments",
-        &instance_commitments,
-    );
-    absorb_projected_sha_publics(transcript, &publics, field_cfg);
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "absorb_fresh_commitments",
+        side = "prove",
+        phase = "absorb_fresh_commitments",
+    )
+    .in_scope(|| {
+        absorb_production_sha_commitments::<P, Zt, F, D>(
+            transcript,
+            b"production_sha_fresh_commitments",
+            &instance_commitments,
+        )
+    });
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "absorb_projected_publics",
+        side = "prove",
+        phase = "absorb_projected_publics",
+    )
+    .in_scope(|| absorb_projected_sha_publics(transcript, &publics, field_cfg));
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let r_ic_eq_weights = build_eq_x_r_vec(&r_ic, field_cfg)?;
@@ -1307,10 +1363,24 @@ where
         .map(|witness| {
             let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
             let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
-            let (trace, public, witness_polys) =
-                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
-            let (data, commitment) =
-                commit_production_sha_instance::<P, Zt, F, D>(pcs_params, &witness_polys)?;
+            let (trace, public, witness_polys) = tracing::info_span!(
+                target: "zinc_protocol::production_sha",
+                "fresh_project_instance",
+                side = "prove",
+                phase = "fresh_project_instance",
+            )
+            .in_scope(|| {
+                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)
+            })?;
+            let (data, commitment) = tracing::info_span!(
+                target: "zinc_protocol::production_sha",
+                "fresh_commit_instance",
+                side = "prove",
+                phase = "fresh_commit_instance",
+            )
+            .in_scope(|| {
+                commit_production_sha_instance::<P, Zt, F, D>(pcs_params, &witness_polys)
+            })?;
 
             Ok((
                 UairInstance {
@@ -1432,28 +1502,51 @@ where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
 {
-    let linear_accumulator =
-        build_sha_sumfold_linear_accumulator(coeff_tables, a_powers, lambda_powers, field_cfg)?;
-    let quadratic_prefix_accumulator = build_sha_sumfold_quadratic_prefix_accumulator(
-        traces,
-        booleanity_sources,
-        prefix_vars,
-        r_ic_eq_weights,
-        booleanity_weights,
-        field_cfg,
-    )?;
-    let sumfold_group = build_production_sha_sumfold_group_from_prefix_accumulators(
-        traces,
-        beta,
-        beta_eq_weights,
-        r_ic_eq_weights,
-        &linear_accumulator,
-        &quadratic_prefix_accumulator,
-        booleanity_weights,
-        booleanity_sources,
-        prefix_vars,
-        field_cfg,
-    )?;
+    let linear_accumulator = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "sumfold_linear_accumulator",
+        side = "prove",
+        phase = "sumfold_linear_accumulator",
+    )
+    .in_scope(|| {
+        build_sha_sumfold_linear_accumulator(coeff_tables, a_powers, lambda_powers, field_cfg)
+    })?;
+    let quadratic_prefix_accumulator = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "sumfold_quadratic_prefix_accumulator",
+        side = "prove",
+        phase = "sumfold_quadratic_prefix_accumulator",
+    )
+    .in_scope(|| {
+        build_sha_sumfold_quadratic_prefix_accumulator(
+            traces,
+            booleanity_sources,
+            prefix_vars,
+            r_ic_eq_weights,
+            booleanity_weights,
+            field_cfg,
+        )
+    })?;
+    let sumfold_group = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "sumfold_group",
+        side = "prove",
+        phase = "sumfold_group",
+    )
+    .in_scope(|| {
+        build_production_sha_sumfold_group_from_prefix_accumulators(
+            traces,
+            beta,
+            beta_eq_weights,
+            r_ic_eq_weights,
+            &linear_accumulator,
+            &quadratic_prefix_accumulator,
+            booleanity_weights,
+            booleanity_sources,
+            prefix_vars,
+            field_cfg,
+        )
+    })?;
     Ok((
         linear_accumulator,
         quadratic_prefix_accumulator,
@@ -1517,42 +1610,79 @@ fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
 ) -> Result<ProductionShaFoldAfterSumfold<P, Zt, F, D>, ProductionShaError<F>>
 where
     Zt: ZincTypes<D>,
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField + DelayedFieldProductSum + ShaBinaryFoldField + Send + Sync + 'static,
     F::Inner: Zero,
     P: ZincPCSTypes<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
-    let (folded, folded_public) =
-        fold_projected_traces(traces, publics, provisional_sumfold_output, field_cfg)?;
-    let row_claim = expression_folded_row_sum_with_vectors(
-        &folded.trace,
-        &folded_public,
-        r_ic_eq_weights,
-        a_powers,
-        lambda_powers,
-        booleanity_weights,
-        booleanity_sources,
-        field_cfg,
-    )?;
-    let sumfold_output = derive_instance_fold_claim_from_row_claim(
-        beta,
-        sumfold_r_b,
-        &row_claim,
-        traces.len(),
-        field_cfg,
-    )?;
-    let folded_commitments = fold_pcs_commitments::<P, Zt, F, D>(
-        instance_commitments,
-        sumfold_output.eq_instance_weights(),
-        field_cfg,
-    )?;
-    let folded_prover_data = fold_pcs_prover_data::<P, Zt, F, D>(
-        instance_prover_data,
-        sumfold_output.eq_instance_weights(),
-        field_cfg,
-    )?;
+    let (folded, folded_public) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_projected_traces",
+        side = "prove",
+        phase = "fold_projected_traces",
+    )
+    .in_scope(|| fold_projected_traces(traces, publics, provisional_sumfold_output, field_cfg))?;
+    let row_claim = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_row_claim",
+        side = "prove",
+        phase = "fold_row_claim",
+    )
+    .in_scope(|| {
+        production_sha_folded_row_sum_fast(
+            &folded.trace,
+            &folded_public,
+            r_ic_eq_weights,
+            a_powers,
+            lambda_powers,
+            booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        )
+    })?;
+    let sumfold_output = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_claim",
+        side = "prove",
+        phase = "fold_claim",
+    )
+    .in_scope(|| {
+        derive_instance_fold_claim_from_row_claim(
+            beta,
+            sumfold_r_b,
+            &row_claim,
+            traces.len(),
+            field_cfg,
+        )
+    })?;
+    let folded_commitments = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_commitments",
+        side = "prove",
+        phase = "fold_commitments",
+    )
+    .in_scope(|| {
+        fold_pcs_commitments::<P, Zt, F, D>(
+            instance_commitments,
+            sumfold_output.eq_instance_weights(),
+            field_cfg,
+        )
+    })?;
+    let folded_prover_data = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_prover_data",
+        side = "prove",
+        phase = "fold_prover_data",
+    )
+    .in_scope(|| {
+        fold_pcs_prover_data::<P, Zt, F, D>(
+            instance_prover_data,
+            sumfold_output.eq_instance_weights(),
+            field_cfg,
+        )
+    })?;
 
     Ok((
         folded,
@@ -1562,6 +1692,325 @@ where
         folded_commitments,
         folded_prover_data,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn production_sha_folded_row_sum_fast<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    #[cfg(debug_assertions)]
+    validate_projected_trace(trace)?;
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "row weights",
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if a_powers.len() < SHA_IDEAL_EVAL_POWER_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "a powers",
+            got: a_powers.len(),
+            expected: SHA_IDEAL_EVAL_POWER_COUNT,
+        });
+    }
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "lambda powers",
+            got: lambda_powers.len(),
+            expected: NUM_SHA_RESIDUAL_FAMILIES,
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "booleanity weights",
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+
+    let weight_vec = |shift: usize| {
+        (0..SHA_WORD_BITS)
+            .map(|bit| {
+                if bit >= shift {
+                    a_powers[bit - shift].clone()
+                } else {
+                    F::zero_with_cfg(field_cfg)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let rot_vec = |shift: usize| {
+        (0..SHA_WORD_BITS)
+            .map(|bit| a_powers[(bit + shift) % SHA_WORD_BITS].clone())
+            .collect::<Vec<_>>()
+    };
+
+    let word_weights = a_powers[..SHA_WORD_BITS].to_vec();
+    let rot25_weights = rot_vec(25);
+    let rot14_weights = rot_vec(14);
+    let rot15_weights = rot_vec(15);
+    let rot13_weights = rot_vec(13);
+    let shift0_weights = weight_vec(0);
+    let shift2_weights = weight_vec(2);
+    let shift3_weights = weight_vec(3);
+    let shift5_weights = weight_vec(5);
+    let shift8_weights = weight_vec(8);
+    let shift9_weights = weight_vec(9);
+    let shift10_weights = weight_vec(10);
+    let rho_sig0 = a_powers[10].clone() + &a_powers[19] + &a_powers[30];
+    let rho_sig1 = a_powers[7].clone() + &a_powers[21] + &a_powers[26];
+    let low_mu_coeff = production_sha_pow_two(32, field_cfg);
+    let high_mu_w_coeff = production_sha_pow_two(34, field_cfg);
+    let high_mu_3_bit_coeff = production_sha_pow_two(35, field_cfg);
+    let high_mu_1_bit_coeff = production_sha_pow_two(33, field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
+
+    let values = cfg_iter!(row_weights)
+        .enumerate()
+        .map(|(row, row_weight)| {
+            let word_eval_with = |col: ShaWordCol, shift: usize, weights: &[F]| {
+                trace_word_eval_at_row_with_weights(trace, col, row, shift, weights, field_cfg)
+            };
+            let word_eval =
+                |col: ShaWordCol, shift: usize| word_eval_with(col, shift, &word_weights);
+            let public_word_eval = |col: ShaPublicCol| {
+                public_word_or_const_eval_at_row(public, col, row, &word_weights, field_cfg)
+            };
+
+            let a_word = word_eval(ShaWordCol::A, 0)?;
+            let e_word = word_eval(ShaWordCol::E, 0)?;
+            let sigma0 = word_eval(ShaWordCol::Sigma0, 0)?;
+            let sigma1 = word_eval(ShaWordCol::Sigma1, 0)?;
+            let w = word_eval(ShaWordCol::W, 0)?;
+            let small_sigma0 = word_eval(ShaWordCol::SmallSigma0, 0)?;
+            let small_sigma1 = word_eval(ShaWordCol::SmallSigma1, 0)?;
+            let ov_sigma0 = word_eval(ShaWordCol::OvSigma0, 0)?;
+            let ov_sigma1 = word_eval(ShaWordCol::OvSigma1, 0)?;
+            let ov_small_sigma0 = word_eval(ShaWordCol::OvSmallSigma0, 0)?;
+            let ov_small_sigma1 = word_eval(ShaWordCol::OvSmallSigma1, 0)?;
+
+            let mu = |low_weights: &[F], high_weights: &[F], high_coeff: &F| {
+                Ok::<F, ProductionShaError<F>>(
+                    word_eval_with(ShaWordCol::MuPacked, 0, low_weights)? * &low_mu_coeff
+                        - word_eval_with(ShaWordCol::MuPacked, 0, high_weights)? * high_coeff,
+                )
+            };
+            let mu_w = mu(&shift0_weights, &shift2_weights, &high_mu_w_coeff)?;
+            let mu_a = mu(&shift2_weights, &shift5_weights, &high_mu_3_bit_coeff)?;
+            let mu_e = mu(&shift5_weights, &shift8_weights, &high_mu_3_bit_coeff)?;
+            let mu_ff_a = mu(&shift8_weights, &shift9_weights, &high_mu_1_bit_coeff)?;
+            let mu_ff_e = mu(&shift9_weights, &shift10_weights, &high_mu_1_bit_coeff)?;
+
+            let r0 = a_word.clone() * &rho_sig0 - &sigma0 - two.clone() * &ov_sigma0;
+            let r1 = e_word.clone() * &rho_sig1 - &sigma1 - two.clone() * &ov_sigma1;
+            let r2 = word_eval_with(ShaWordCol::W, 0, &rot25_weights)?
+                + word_eval_with(ShaWordCol::W, 0, &rot14_weights)?
+                + word_eval_with(ShaWordCol::W, 0, &shift3_weights)?
+                - &small_sigma0
+                - two.clone() * &ov_small_sigma0;
+            let r3 = word_eval_with(ShaWordCol::W, 0, &rot15_weights)?
+                + word_eval_with(ShaWordCol::W, 0, &rot13_weights)?
+                + word_eval_with(ShaWordCol::W, 0, &shift10_weights)?
+                - &small_sigma1
+                - two.clone() * &ov_small_sigma1;
+            let r4 = word_eval(ShaWordCol::W, 16)?
+                - &w
+                - word_eval(ShaWordCol::SmallSigma0, 1)?
+                - word_eval(ShaWordCol::W, 9)?
+                - word_eval(ShaWordCol::SmallSigma1, 14)?
+                + &mu_w
+                + trace_int_at_row(trace, ShaIntCol::CompSchedule, row, field_cfg)?;
+            let r5 = word_eval(ShaWordCol::A, 4)?
+                - &e_word
+                - word_eval(ShaWordCol::Sigma1, 3)?
+                - word_eval(ShaWordCol::Uef, 3)?
+                - word_eval(ShaWordCol::UNegEg, 3)?
+                - public_scalar_at_row(public, ShaPublicCol::K, row, 3, field_cfg)?
+                - &w
+                - word_eval(ShaWordCol::Sigma0, 3)?
+                - word_eval(ShaWordCol::Maj, 3)?
+                + &mu_a
+                + trace_int_at_row(trace, ShaIntCol::CompUpdateA, row, field_cfg)?;
+            let r6 = word_eval(ShaWordCol::E, 4)?
+                - &a_word
+                - &e_word
+                - word_eval(ShaWordCol::Sigma1, 3)?
+                - word_eval(ShaWordCol::Uef, 3)?
+                - word_eval(ShaWordCol::UNegEg, 3)?
+                - public_scalar_at_row(public, ShaPublicCol::K, row, 3, field_cfg)?
+                - &w
+                + &mu_e
+                + trace_int_at_row(trace, ShaIntCol::CompUpdateE, row, field_cfg)?;
+
+            let s_init = public_scalar_at_row(public, ShaPublicCol::SInit, row, 0, field_cfg)?;
+            let s_msg = public_scalar_at_row(public, ShaPublicCol::SMsg, row, 0, field_cfg)?;
+            let s_sched = public_scalar_at_row(public, ShaPublicCol::SSched, row, 0, field_cfg)?;
+            let s_upd = public_scalar_at_row(public, ShaPublicCol::SUpd, row, 0, field_cfg)?;
+            let s_ff = public_scalar_at_row(public, ShaPublicCol::SFf, row, 0, field_cfg)?;
+            let s_out = public_scalar_at_row(public, ShaPublicCol::SOut, row, 0, field_cfg)?;
+
+            let r7 = (a_word.clone() - public_word_eval(ShaPublicCol::PAIn)?) * &s_init
+                + (a_word.clone() - public_word_eval(ShaPublicCol::PAOut)?) * &s_out;
+            let r8 = (e_word.clone() - public_word_eval(ShaPublicCol::PEIn)?) * &s_init
+                + (e_word.clone() - public_word_eval(ShaPublicCol::PEOut)?) * &s_out;
+            let r9 = word_eval(ShaWordCol::A, 4)?
+                - &a_word
+                - public_scalar_at_row(public, ShaPublicCol::PAIn, row, 0, field_cfg)?
+                + &mu_ff_a
+                + trace_int_at_row(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)?;
+            let r10 = word_eval(ShaWordCol::E, 4)?
+                - &e_word
+                - public_scalar_at_row(public, ShaPublicCol::PEIn, row, 0, field_cfg)?
+                + &mu_ff_e
+                + trace_int_at_row(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
+            let r11 = (w - public_word_eval(ShaPublicCol::Message)?) * &s_msg;
+            let r12 = trace_int_at_row(trace, ShaIntCol::CompSchedule, row, field_cfg)? * &s_sched;
+            let r13 = trace_int_at_row(trace, ShaIntCol::CompUpdateA, row, field_cfg)? * &s_upd;
+            let r14 = trace_int_at_row(trace, ShaIntCol::CompUpdateE, row, field_cfg)? * &s_upd;
+            let r15 = trace_int_at_row(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)? * &s_ff;
+            let r16 = trace_int_at_row(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)? * &s_ff;
+            let r17 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights)?;
+
+            let residuals = [
+                r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
+            ];
+            let linear = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                &residuals,
+                lambda_powers,
+                F::zero_with_cfg(field_cfg),
+            )
+            .map_err(|_| {
+                ProductionShaError::NonCanonicalProofObject(
+                    "production SHA row residual dot product failed",
+                )
+            })?;
+
+            let mut bool_sum = F::zero_with_cfg(field_cfg);
+            for (source, weight) in booleanity_sources.iter().zip(booleanity_weights.iter()) {
+                let d = booleanity_source_value_at_fast(trace, row, source, field_cfg)?;
+                bool_sum += weight.clone() * (d.clone() * (d - one.clone()));
+            }
+
+            Ok(row_weight.clone() * (linear + bool_sum))
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+
+    folded_row_integrand_sum(&values, field_cfg).map_err(ProductionShaError::from)
+}
+
+fn trace_word_eval_at_row_with_weights<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    row: usize,
+    shift: usize,
+    weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    let mut acc = F::zero_with_cfg(field_cfg);
+    for (bit, weight) in weights.iter().enumerate().take(SHA_WORD_BITS) {
+        acc += trace_word_bit_at_row(trace, col, row, shift, bit, field_cfg)? * weight;
+    }
+    Ok(acc)
+}
+
+fn public_word_or_const_eval_at_row<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    let Some(_col_idx) = public_word_col_index(col) else {
+        return public_scalar_at_row(public, col, row, 0, field_cfg);
+    };
+    if public.bit_slices.is_none() {
+        return public_scalar_at_row(public, col, row, 0, field_cfg);
+    }
+    let mut acc = F::zero_with_cfg(field_cfg);
+    for (bit, weight) in weights.iter().enumerate().take(SHA_WORD_BITS) {
+        acc += public_word_bit_at_row(public, col, row, bit, field_cfg)? * weight;
+    }
+    Ok(acc)
+}
+
+fn booleanity_source_value_at_fast<F>(
+    trace: &ProjectedTrace<F>,
+    row: usize,
+    source: &ShaBooleanitySource,
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
+    match *source {
+        ShaBooleanitySource::WordBit { col, bit } => {
+            trace_word_bit_at_row(trace, col, row, 0, bit, field_cfg)
+        }
+        ShaBooleanitySource::VirtualCh1 { bit } => {
+            Ok(
+                trace_word_bit_at_row(trace, ShaWordCol::E, row, 2, bit, field_cfg)?
+                    + &trace_word_bit_at_row(trace, ShaWordCol::E, row, 1, bit, field_cfg)?
+                    - two.clone()
+                        * trace_word_bit_at_row(trace, ShaWordCol::Uef, row, 2, bit, field_cfg)?,
+            )
+        }
+        ShaBooleanitySource::VirtualCh2 { bit } => {
+            Ok(
+                trace_word_bit_at_row(trace, ShaWordCol::E, row, 2, bit, field_cfg)?
+                    - &trace_word_bit_at_row(trace, ShaWordCol::E, row, 0, bit, field_cfg)?
+                    + two.clone()
+                        * trace_word_bit_at_row(trace, ShaWordCol::UNegEg, row, 2, bit, field_cfg)?
+                    + two.clone()
+                        * trace_word_bit_at_row(
+                            trace,
+                            ShaWordCol::Ch2Comp,
+                            row,
+                            0,
+                            bit,
+                            field_cfg,
+                        )?,
+            )
+        }
+        ShaBooleanitySource::VirtualMaj { bit } => {
+            Ok(
+                trace_word_bit_at_row(trace, ShaWordCol::A, row, 0, bit, field_cfg)?
+                    + &trace_word_bit_at_row(trace, ShaWordCol::A, row, 1, bit, field_cfg)?
+                    + &trace_word_bit_at_row(trace, ShaWordCol::A, row, 2, bit, field_cfg)?
+                    - two.clone()
+                        * trace_word_bit_at_row(trace, ShaWordCol::Maj, row, 2, bit, field_cfg)?
+                    - two.clone()
+                        * trace_word_bit_at_row(
+                            trace,
+                            ShaWordCol::MajComp,
+                            row,
+                            0,
+                            bit,
+                            field_cfg,
+                        )?,
+            )
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -1641,39 +2090,90 @@ where
     F::Inner: Transcribable + Zero + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
-    let endpoint_evals = build_sha_endpoint_evals_from_trace_with_row_weights(
-        trace,
-        &row_output.r_star_eq_weights,
-        a,
-        field_cfg,
-    )?;
-    let resolver = sha_resolver_from_endpoint_evals(&endpoint_evals)?;
-    absorb_sha_resolver_proof(transcript, &resolver, field_cfg);
-    let resolver_endpoint_evals = sha_endpoint_evals_from_resolver(&resolver, a, field_cfg)?;
-    let terminal = reconstruct_folded_row_terminal_from_endpoints_with_vectors(
-        &resolver_endpoint_evals,
-        folded_public,
+    #[cfg(not(debug_assertions))]
+    let _ = (
         r_ic,
-        &row_output.r_star,
-        &row_output.r_star_eq_weights,
+        a,
         a_powers,
         lambda_powers,
         booleanity_weights,
         booleanity_sources,
-        field_cfg,
-    )?;
-    verify_folded_row_terminal_value(row_output, &terminal)?;
+    );
 
-    let (multipoint_eval, r_0) = prove_sha_endpoint_multipoint_with_row_weights(
-        transcript,
-        trace,
-        folded_public,
-        &resolver_endpoint_evals,
-        &row_output.r_star,
-        &row_output.r_star_eq_weights,
-        field_cfg,
-    )?;
-    Ok((resolver, resolver_endpoint_evals, multipoint_eval, r_0))
+    let endpoint_evals = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "endpoint_build_evals",
+        side = "prove",
+        phase = "endpoint_build_evals",
+    )
+    .in_scope(|| {
+        row_output.endpoint_evals.clone().map_or_else(
+            || {
+                build_sha_endpoint_evals_from_trace_with_row_weights(
+                    trace,
+                    &row_output.r_star_eq_weights,
+                    a,
+                    field_cfg,
+                )
+            },
+            Ok,
+        )
+    })?;
+    let resolver = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "endpoint_resolver",
+        side = "prove",
+        phase = "endpoint_resolver",
+    )
+    .in_scope(|| {
+        let resolver = sha_resolver_from_endpoint_evals(&endpoint_evals)?;
+        absorb_sha_resolver_proof(transcript, &resolver, field_cfg);
+        Ok::<_, ProductionShaError<F>>(resolver)
+    })?;
+    #[cfg(debug_assertions)]
+    {
+        let resolver_endpoint_evals = sha_endpoint_evals_from_resolver(&resolver, a, field_cfg)?;
+        let terminal = tracing::info_span!(
+            target: "zinc_protocol::production_sha",
+            "endpoint_terminal",
+            side = "prove",
+            phase = "endpoint_terminal",
+        )
+        .in_scope(|| {
+            reconstruct_folded_row_terminal_from_endpoints_with_vectors(
+                &resolver_endpoint_evals,
+                folded_public,
+                r_ic,
+                &row_output.r_star,
+                &row_output.r_star_eq_weights,
+                a_powers,
+                lambda_powers,
+                booleanity_weights,
+                booleanity_sources,
+                field_cfg,
+            )
+        })?;
+        verify_folded_row_terminal_value(row_output, &terminal)?;
+    }
+
+    let (multipoint_eval, r_0) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "endpoint_reduce",
+        side = "prove",
+        phase = "endpoint_reduce",
+    )
+    .in_scope(|| {
+        prove_sha_endpoint_multipoint_with_row_weights(
+            transcript,
+            trace,
+            folded_public,
+            &endpoint_evals,
+            &row_output.r_star,
+            &row_output.r_star_eq_weights,
+            field_cfg,
+        )
+    })?;
+    Ok((resolver, endpoint_evals, multipoint_eval, r_0))
 }
 
 #[tracing::instrument(
@@ -1704,21 +2204,39 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
-    let witness_lifted_evals = build_folded_sha_pcs_lifted_evals_with_row_weights(
-        folded_trace,
-        r_0_eq_weights,
-        field_cfg,
-    )?;
-    absorb_folded_lifted_evals(transcript, &witness_lifted_evals, field_cfg);
-    let opening_proof = P::prove_folded_pcs_opening(
-        pcs_params,
-        folded_commitments,
-        folded_trace,
-        folded_prover_data,
-        r_0,
-        &witness_lifted_evals,
-        field_cfg,
-    )?;
+    let witness_lifted_evals = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "pcs_lifted_evals",
+        side = "prove",
+        phase = "pcs_lifted_evals",
+    )
+    .in_scope(|| {
+        build_folded_sha_pcs_lifted_evals_with_row_weights(folded_trace, r_0_eq_weights, field_cfg)
+    })?;
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "pcs_absorb_lifted_evals",
+        side = "prove",
+        phase = "pcs_absorb_lifted_evals",
+    )
+    .in_scope(|| absorb_folded_lifted_evals(transcript, &witness_lifted_evals, field_cfg));
+    let opening_proof = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "pcs_open_core",
+        side = "prove",
+        phase = "pcs_open_core",
+    )
+    .in_scope(|| {
+        P::prove_folded_pcs_opening(
+            pcs_params,
+            folded_commitments,
+            folded_trace,
+            folded_prover_data,
+            r_0,
+            &witness_lifted_evals,
+            field_cfg,
+        )
+    })?;
     Ok((witness_lifted_evals, opening_proof))
 }
 
@@ -2391,7 +2909,7 @@ fn sha_endpoint_evals_from_resolver<F>(
     field_cfg: &F::Config,
 ) -> Result<ShaEndpointEvals<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     if !resolver.down_evals.is_empty() {
         return Err(ProductionShaError::LengthMismatch {
@@ -2601,7 +3119,7 @@ fn prove_production_sha_hyrax_pcs_opening<C, Zt, F, const D: usize>(
 ) -> Result<PCSOpeningProof<AllHyraxPCSTypes<C>, Zt, F, D>, ProductionShaError<F>>
 where
     Zt: ZincTypes<D>,
-    F: HyraxFieldBridge<C>,
+    F: HyraxFieldBridge<C> + DelayedFieldProductSum,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     C: AffineRepr,
@@ -2639,9 +3157,9 @@ where
     let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
     let arbitrary_lifted: &[DynamicPolynomialF<F>] = &[];
 
-    let binary_scalar_lanes = folded_sha_binary_scalar_lanes::<C, F>(folded_trace)?;
     let arbitrary_scalar_lanes: Vec<Vec<Vec<C::ScalarField>>> = Vec::new();
-    let int_scalar_lanes = folded_sha_int_scalar_lanes::<C, F>(folded_trace)?;
+    let binary_field_lanes = folded_sha_binary_field_lanes(folded_trace);
+    let int_field_lanes = folded_sha_int_field_lanes(folded_trace);
 
     let mut transcript = PcsProverTranscript {
         fs_transcript: Blake3Transcript::default(),
@@ -2659,10 +3177,10 @@ where
         &mut transcription_buf,
     );
     let binary_start = transcript.stream.position() as usize;
-    HyraxPCS::<C, BinaryLanes>::prove_open_scalar_lanes::<F, true>(
+    HyraxPCS::<C, BinaryLanes>::prove_open_field_lanes_single_row::<F, true>(
         &mut transcript,
         &pcs_params.binary,
-        &binary_scalar_lanes,
+        &binary_field_lanes,
         r_0,
         &folded_prover_data.binary,
         field_cfg,
@@ -2701,10 +3219,10 @@ where
         &mut transcription_buf,
     );
     let int_start = transcript.stream.position() as usize;
-    HyraxPCS::<C, IntScalarLane>::prove_open_scalar_lanes::<F, true>(
+    HyraxPCS::<C, IntScalarLane>::prove_open_field_lanes_single_row::<F, true>(
         &mut transcript,
         &pcs_params.int,
-        &int_scalar_lanes,
+        &int_field_lanes,
         r_0,
         &folded_prover_data.int,
         field_cfg,
@@ -3377,25 +3895,29 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    #[cfg(debug_assertions)]
     validate_projected_trace(folded_trace)?;
-    let mut lifted = Vec::with_capacity(ShaWordCol::COUNT + ShaIntCol::COUNT);
-    for col in ShaWordCol::ALL {
-        let coeffs = sha_word_bits_at_point_with_weights_unchecked(
-            folded_trace,
-            col,
-            0,
-            row_weights,
-            field_cfg,
-        )?
-        .to_vec();
-        lifted.push(DynamicPolynomialF::new_trimmed(coeffs));
-    }
-    for col in ShaIntCol::ALL {
-        lifted.push(DynamicPolynomialF::new_trimmed([
-            sha_int_at_point_with_weights_unchecked(folded_trace, col, row_weights, field_cfg)?,
-        ]));
-    }
-    Ok(lifted)
+    let word_lifted = cfg_iter!(&ShaWordCol::ALL)
+        .map(|&col| {
+            let coeffs = sha_word_bits_at_point_with_weights_unchecked(
+                folded_trace,
+                col,
+                0,
+                row_weights,
+                field_cfg,
+            )?
+            .to_vec();
+            Ok(DynamicPolynomialF::new_trimmed(coeffs))
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+    let int_lifted = cfg_iter!(&ShaIntCol::ALL)
+        .map(|&col| {
+            Ok(DynamicPolynomialF::new_trimmed([
+                sha_int_at_point_with_weights_unchecked(folded_trace, col, row_weights, field_cfg)?,
+            ]))
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+    Ok(word_lifted.into_iter().chain(int_lifted).collect())
 }
 
 fn split_folded_sha_pcs_lifted_evals<F>(
@@ -3450,20 +3972,33 @@ where
     C: AffineRepr,
     F: HyraxFieldBridge<C>,
 {
-    ShaWordCol::ALL
-        .iter()
-        .map(|col| {
-            (0..32)
-                .map(|bit| {
-                    let column =
-                        &folded_trace.bit_slices[bit_slice_index(col.index(), bit, SHA_WORD_BITS)];
-                    (0..SHA_ROW_COUNT)
-                        .map(|row| F::field_to_scalar(&column.evaluations[row]))
-                        .collect::<Result<Vec<_>, _>>()
-                })
+    let lanes = cfg_into_iter!(0..ShaWordCol::COUNT * SHA_WORD_BITS)
+        .map(|flat_idx| {
+            let col_idx = flat_idx / SHA_WORD_BITS;
+            let bit = flat_idx % SHA_WORD_BITS;
+            let column = &folded_trace.bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
+            column
+                .evaluations
+                .iter()
+                .map(F::field_to_scalar)
                 .collect::<Result<Vec<_>, _>>()
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out = Vec::with_capacity(ShaWordCol::COUNT);
+    let mut lanes = lanes.into_iter();
+    for _ in 0..ShaWordCol::COUNT {
+        let mut col_lanes = Vec::with_capacity(SHA_WORD_BITS);
+        for _ in 0..SHA_WORD_BITS {
+            col_lanes.push(
+                lanes
+                    .next()
+                    .expect("flat binary scalar lane count is exact"),
+            );
+        }
+        out.push(col_lanes);
+    }
+    Ok(out)
 }
 
 #[allow(dead_code)]
@@ -3474,15 +4009,44 @@ where
     C: AffineRepr,
     F: HyraxFieldBridge<C>,
 {
-    ShaIntCol::ALL
-        .iter()
+    cfg_iter!(&ShaIntCol::ALL)
         .map(|col| {
             let column = &folded_trace.int_columns[col.index()];
-            let lane = (0..SHA_ROW_COUNT)
-                .map(|row| F::field_to_scalar(&column.evaluations[row]))
+            let lane = column
+                .evaluations
+                .iter()
+                .map(F::field_to_scalar)
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(vec![lane])
         })
+        .collect()
+}
+
+fn folded_sha_binary_field_lanes<F>(folded_trace: &ProjectedTrace<F>) -> Vec<Vec<&[F]>>
+where
+    F: PrimeField,
+{
+    ShaWordCol::ALL
+        .iter()
+        .map(|col| {
+            (0..SHA_WORD_BITS)
+                .map(|bit| {
+                    folded_trace.bit_slices[bit_slice_index(col.index(), bit, SHA_WORD_BITS)]
+                        .evaluations
+                        .as_slice()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn folded_sha_int_field_lanes<F>(folded_trace: &ProjectedTrace<F>) -> Vec<Vec<&[F]>>
+where
+    F: PrimeField,
+{
+    ShaIntCol::ALL
+        .iter()
+        .map(|col| vec![folded_trace.int_columns[col.index()].evaluations.as_slice()])
         .collect()
 }
 
@@ -3626,6 +4190,7 @@ pub fn prove_full_sha_sumfold<F>(
 where
     F: InnerTransparentField
         + DelayedFieldProductSum
+        + ShaBinaryFoldField
         + FromPrimitiveWithConfig
         + Send
         + Sync
@@ -3710,6 +4275,7 @@ pub fn prove_optimized_sha_sumfold<F>(
 where
     F: InnerTransparentField
         + DelayedFieldProductSum
+        + ShaBinaryFoldField
         + FromPrimitiveWithConfig
         + Send
         + Sync
@@ -3897,20 +4463,20 @@ where
     }
     let binary = commitments
         .iter()
-        .map(|commitment| commitment.binary.clone())
+        .map(|commitment| &commitment.binary)
         .collect::<Vec<_>>();
     let arbitrary = commitments
         .iter()
-        .map(|commitment| commitment.arbitrary.clone())
+        .map(|commitment| &commitment.arbitrary)
         .collect::<Vec<_>>();
     let int = commitments
         .iter()
-        .map(|commitment| commitment.int.clone())
+        .map(|commitment| &commitment.int)
         .collect::<Vec<_>>();
     Ok(PCSCommitments {
-        binary: P::BinaryPCS::fold_commitments(&binary, theta, field_cfg)?,
-        arbitrary: P::ArbitraryPCS::fold_commitments(&arbitrary, theta, field_cfg)?,
-        int: P::IntPCS::fold_commitments(&int, theta, field_cfg)?,
+        binary: P::BinaryPCS::fold_commitment_refs(&binary, theta, field_cfg)?,
+        arbitrary: P::ArbitraryPCS::fold_commitment_refs(&arbitrary, theta, field_cfg)?,
+        int: P::IntPCS::fold_commitment_refs(&int, theta, field_cfg)?,
     })
 }
 
@@ -3978,6 +4544,18 @@ where
 }
 
 #[derive(Clone)]
+struct RowExpressionOffsets {
+    word: [[usize; ROW_EXPR_WORD_SHIFT_SLOTS]; ShaWordCol::COUNT],
+    int: [usize; ShaIntCol::COUNT],
+    public_scalar: [[usize; ROW_EXPR_PUBLIC_SHIFT_SLOTS]; ShaPublicCol::COUNT],
+    public_word: [usize; ShaPublicCol::COUNT],
+}
+
+const ROW_EXPR_MISSING_SOURCE: usize = usize::MAX;
+const ROW_EXPR_WORD_SHIFT_SLOTS: usize = 17;
+const ROW_EXPR_PUBLIC_SHIFT_SLOTS: usize = 4;
+
+#[derive(Clone)]
 struct RowExpressionLayout {
     word_sources: Vec<(ShaWordCol, usize)>,
     int_sources: Vec<ShaIntCol>,
@@ -4022,10 +4600,34 @@ impl RowExpressionLayout {
         }
     }
 
-    fn public_word_index(&self, col: ShaPublicCol) -> Option<usize> {
-        self.public_word_sources
-            .iter()
-            .position(|candidate| *candidate == col)
+    fn offsets(&self) -> RowExpressionOffsets {
+        let mut word = [[ROW_EXPR_MISSING_SOURCE; ROW_EXPR_WORD_SHIFT_SLOTS]; ShaWordCol::COUNT];
+        for (idx, &(col, shift)) in self.word_sources.iter().enumerate() {
+            word[col.index()][shift] = idx;
+        }
+
+        let mut int = [ROW_EXPR_MISSING_SOURCE; ShaIntCol::COUNT];
+        for (idx, &col) in self.int_sources.iter().enumerate() {
+            int[col.index()] = idx;
+        }
+
+        let mut public_scalar =
+            [[ROW_EXPR_MISSING_SOURCE; ROW_EXPR_PUBLIC_SHIFT_SLOTS]; ShaPublicCol::COUNT];
+        for (idx, &(col, shift)) in self.public_scalar_sources.iter().enumerate() {
+            public_scalar[col.index()][shift] = idx;
+        }
+
+        let mut public_word = [ROW_EXPR_MISSING_SOURCE; ShaPublicCol::COUNT];
+        for (idx, &col) in self.public_word_sources.iter().enumerate() {
+            public_word[col.index()] = idx;
+        }
+
+        RowExpressionOffsets {
+            word,
+            int,
+            public_scalar,
+            public_word,
+        }
     }
 }
 
@@ -4182,6 +4784,50 @@ where
     out
 }
 
+fn row_expr_mle_from_table_shift<F>(
+    label: &'static str,
+    table: &MleTable<F>,
+    col_idx: usize,
+    shift: usize,
+    zero: &F,
+    zero_inner: &F::Inner,
+) -> Result<DenseMultilinearExtension<F::Inner>, ProductionShaError<F>>
+where
+    F: InnerTransparentField,
+{
+    let column = table
+        .get(col_idx)
+        .ok_or(ProductionShaError::LengthMismatch {
+            label,
+            got: col_idx,
+            expected: table.len(),
+        })?;
+    if column.num_vars != SHA_ROW_VARS || column.evaluations.len() != SHA_ROW_COUNT {
+        return Err(ProductionShaError::LengthMismatch {
+            label,
+            got: column.evaluations.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+
+    let mut evaluations = Vec::with_capacity(SHA_ROW_COUNT);
+    if shift < SHA_ROW_COUNT {
+        evaluations.extend(
+            column.evaluations[shift..]
+                .iter()
+                .map(|value| value.inner().clone()),
+        );
+    }
+    evaluations.resize(SHA_ROW_COUNT, zero_inner.clone());
+    debug_assert_eq!(evaluations.len(), SHA_ROW_COUNT);
+    let _ = zero;
+    Ok(DenseMultilinearExtension::from_evaluations_vec(
+        SHA_ROW_VARS,
+        evaluations,
+        zero_inner.clone(),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_production_sha_row_expression_sumcheck_group<F>(
     trace: &ProjectedTrace<F>,
@@ -4307,60 +4953,98 @@ where
 
     for &(col, shift) in &layout.word_sources {
         for bit in 0..SHA_WORD_BITS {
-            let values = (0..SHA_ROW_COUNT)
-                .map(|row| trace_word_bit_at_row(trace, col, row, shift, bit, field_cfg))
-                .collect::<Result<Vec<_>, _>>()?;
-            mles.push(DenseMultilinearExtension::from_evaluations_vec(
-                SHA_ROW_VARS,
-                values.iter().map(|value| value.inner().clone()).collect(),
-                zero_inner.clone(),
-            ));
+            mles.push(row_expr_mle_from_table_shift(
+                "SHA trace word bit",
+                &trace.bit_slices,
+                bit_slice_index(col.index(), bit, SHA_WORD_BITS),
+                shift,
+                &zero,
+                &zero_inner,
+            )?);
         }
     }
 
     for &col in &layout.int_sources {
-        let values = (0..SHA_ROW_COUNT)
-            .map(|row| trace_int_at_row(trace, col, row, field_cfg))
-            .collect::<Result<Vec<_>, _>>()?;
-        mles.push(DenseMultilinearExtension::from_evaluations_vec(
-            SHA_ROW_VARS,
-            values.iter().map(|value| value.inner().clone()).collect(),
-            zero_inner.clone(),
-        ));
+        mles.push(row_expr_mle_from_table_shift(
+            "SHA trace int",
+            &trace.int_columns,
+            col.index(),
+            0,
+            &zero,
+            &zero_inner,
+        )?);
     }
 
     for &(col, shift) in &layout.public_scalar_sources {
-        let values = (0..SHA_ROW_COUNT)
-            .map(|row| public_scalar_at_row(public, col, row, shift, field_cfg))
-            .collect::<Result<Vec<_>, _>>()?;
-        mles.push(DenseMultilinearExtension::from_evaluations_vec(
-            SHA_ROW_VARS,
-            values.iter().map(|value| value.inner().clone()).collect(),
-            zero_inner.clone(),
-        ));
+        mles.push(row_expr_mle_from_table_shift(
+            "SHA public scalar",
+            &public.columns,
+            col.index(),
+            shift,
+            &zero,
+            &zero_inner,
+        )?);
     }
 
     for &col in &layout.public_word_sources {
+        let bit_slices =
+            public
+                .bit_slices
+                .as_ref()
+                .ok_or(ProductionShaError::NonCanonicalProofObject(
+                    "production SHA public word columns are required",
+                ))?;
+        let col_idx = public_word_col_index(col).ok_or(
+            ProductionShaError::NonCanonicalProofObject("SHA public column is not a public word"),
+        )?;
         for bit in 0..SHA_WORD_BITS {
-            let values = (0..SHA_ROW_COUNT)
-                .map(|row| public_word_bit_at_row(public, col, row, bit, field_cfg))
-                .collect::<Result<Vec<_>, _>>()?;
-            mles.push(DenseMultilinearExtension::from_evaluations_vec(
-                SHA_ROW_VARS,
-                values.iter().map(|value| value.inner().clone()).collect(),
-                zero_inner.clone(),
-            ));
+            mles.push(row_expr_mle_from_table_shift(
+                "SHA public word bit",
+                bit_slices,
+                bit_slice_index(col_idx, bit, SHA_WORD_BITS),
+                0,
+                &zero,
+                &zero_inner,
+            )?);
         }
     }
 
-    let a_powers = a_powers.to_vec();
+    let offsets = layout.offsets();
+    let word_weights = a_powers[..SHA_WORD_BITS].to_vec();
+    let rot_weights = |shift: usize| {
+        (0..SHA_WORD_BITS)
+            .map(|bit| a_powers[(bit + shift) % SHA_WORD_BITS].clone())
+            .collect::<Vec<_>>()
+    };
+    let shift_weights = |shift: usize| {
+        (0..SHA_WORD_BITS)
+            .map(|bit| {
+                if bit >= shift {
+                    a_powers[bit - shift].clone()
+                } else {
+                    F::zero_with_cfg(field_cfg)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let rot25_weights = rot_weights(25);
+    let rot14_weights = rot_weights(14);
+    let rot15_weights = rot_weights(15);
+    let rot13_weights = rot_weights(13);
+    let shift3_weights = shift_weights(3);
+    let shift10_weights = shift_weights(10);
+    let shift0_weights = shift_weights(0);
+    let shift2_weights = shift_weights(2);
+    let shift5_weights = shift_weights(5);
+    let shift8_weights = shift_weights(8);
+    let shift9_weights = shift_weights(9);
     let lambda_powers = lambda_powers.to_vec();
     let booleanity_weights = booleanity_weights.to_vec();
     let booleanity_sources = booleanity_sources.to_vec();
     let one = F::one_with_cfg(field_cfg);
     let two = one.clone() + &one;
-    let rho_sig0 = sparse_endpoint_poly::<F>(&[10, 19, 30], field_cfg);
-    let rho_sig1 = sparse_endpoint_poly::<F>(&[7, 21, 26], field_cfg);
+    let rho_sig0 = a_powers[10].clone() + &a_powers[19] + &a_powers[30];
+    let rho_sig1 = a_powers[7].clone() + &a_powers[21] + &a_powers[26];
     let low_mu_coeff = production_sha_pow_two(32, field_cfg);
     let high_mu_w_coeff = production_sha_pow_two(34, field_cfg);
     let high_mu_3_bit_coeff = production_sha_pow_two(35, field_cfg);
@@ -4371,142 +5055,108 @@ where
         mles,
         Box::new(move |values: &[F]| {
             let zero = zero.clone();
-            let const_poly = |value: F| {
-                if F::is_zero(&value) {
-                    DynamicPolynomialF::ZERO
-                } else {
-                    DynamicPolynomialF::new_trimmed([value])
-                }
+            let dot = |lhs: &[F], rhs: &[F]| {
+                FieldFieldInnerProduct::inner_product::<UNCHECKED>(lhs, rhs, zero.clone())
+                    .expect("row expression dot product lengths match")
             };
-            let eval_poly = |poly: &DynamicPolynomialF<F>| {
-                if poly.coeffs.is_empty() {
-                    return zero.clone();
-                }
-                DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
-                    &poly.coeffs,
-                    &a_powers[..poly.coeffs.len()],
-                    zero.clone(),
-                )
-                .expect("row expression polynomial degree is bounded")
-            };
-
-            let word_bits_by_source = (0..layout.word_sources.len())
-                .map(|source_idx| {
-                    std::array::from_fn(|bit| {
-                        values[layout.word_offset + source_idx * SHA_WORD_BITS + bit].clone()
-                    })
-                })
-                .collect::<Vec<[F; SHA_WORD_BITS]>>();
-            let public_word_bits_by_source = (0..layout.public_word_sources.len())
-                .map(|source_idx| {
-                    std::array::from_fn(|bit| {
-                        values[layout.public_word_offset + source_idx * SHA_WORD_BITS + bit].clone()
-                    })
-                })
-                .collect::<Vec<[F; SHA_WORD_BITS]>>();
-
             let word_source_idx = |col: ShaWordCol, shift: usize| {
-                layout
-                    .word_sources
-                    .iter()
-                    .position(|source| *source == (col, shift))
-                    .expect("row expression word source is present")
+                let idx = offsets.word[col.index()][shift];
+                debug_assert_ne!(idx, ROW_EXPR_MISSING_SOURCE);
+                idx
             };
-            let word_bits = |col: ShaWordCol, shift: usize| -> &[F; SHA_WORD_BITS] {
-                &word_bits_by_source[word_source_idx(col, shift)]
+            let word_bits = |col: ShaWordCol, shift: usize| {
+                let source_idx = word_source_idx(col, shift);
+                let base = layout.word_offset + source_idx * SHA_WORD_BITS;
+                &values[base..base + SHA_WORD_BITS]
             };
-            let word_poly = |col: ShaWordCol, shift: usize| {
-                DynamicPolynomialF::new_trimmed(word_bits(col, shift).to_vec())
-            };
+            let word_eval =
+                |col: ShaWordCol, shift: usize| dot(word_bits(col, shift), &word_weights);
+            let word_eval_with =
+                |col: ShaWordCol, shift: usize, weights: &[F]| dot(word_bits(col, shift), weights);
+            let word_bit =
+                |col: ShaWordCol, shift: usize, bit: usize| word_bits(col, shift)[bit].clone();
             let int_value = |col: ShaIntCol| {
-                let idx = layout
-                    .int_sources
-                    .iter()
-                    .position(|candidate| *candidate == col)
-                    .expect("row expression int source is present");
+                let idx = offsets.int[col.index()];
+                debug_assert_ne!(idx, ROW_EXPR_MISSING_SOURCE);
                 values[layout.int_offset + idx].clone()
             };
-            let int_poly = |col: ShaIntCol| const_poly(int_value(col));
             let public_scalar = |col: ShaPublicCol, shift: usize| {
-                let idx = layout
-                    .public_scalar_sources
-                    .iter()
-                    .position(|source| *source == (col, shift))
-                    .expect("row expression public scalar source is present");
+                let idx = offsets.public_scalar[col.index()][shift];
+                debug_assert_ne!(idx, ROW_EXPR_MISSING_SOURCE);
                 values[layout.public_scalar_offset + idx].clone()
             };
-            let public_word_or_const_poly = |col: ShaPublicCol| {
-                if let Some(idx) = layout.public_word_index(col) {
-                    DynamicPolynomialF::new_trimmed(public_word_bits_by_source[idx].to_vec())
+            let public_word_or_const_eval = |col: ShaPublicCol| {
+                let idx = offsets.public_word[col.index()];
+                if idx == ROW_EXPR_MISSING_SOURCE {
+                    public_scalar(col, 0)
                 } else {
-                    const_poly(public_scalar(col, 0))
+                    let base = layout.public_word_offset + idx * SHA_WORD_BITS;
+                    dot(&values[base..base + SHA_WORD_BITS], &word_weights)
                 }
             };
 
-            let a_word = word_poly(ShaWordCol::A, 0);
-            let e_word = word_poly(ShaWordCol::E, 0);
-            let sigma0 = word_poly(ShaWordCol::Sigma0, 0);
-            let sigma1 = word_poly(ShaWordCol::Sigma1, 0);
-            let w = word_poly(ShaWordCol::W, 0);
-            let small_sigma0 = word_poly(ShaWordCol::SmallSigma0, 0);
-            let small_sigma1 = word_poly(ShaWordCol::SmallSigma1, 0);
-            let ov_sigma0 = word_poly(ShaWordCol::OvSigma0, 0);
-            let ov_sigma1 = word_poly(ShaWordCol::OvSigma1, 0);
-            let ov_small_sigma0 = word_poly(ShaWordCol::OvSmallSigma0, 0);
-            let ov_small_sigma1 = word_poly(ShaWordCol::OvSmallSigma1, 0);
+            let a_word = word_eval(ShaWordCol::A, 0);
+            let e_word = word_eval(ShaWordCol::E, 0);
+            let sigma0 = word_eval(ShaWordCol::Sigma0, 0);
+            let sigma1 = word_eval(ShaWordCol::Sigma1, 0);
+            let w = word_eval(ShaWordCol::W, 0);
+            let small_sigma0 = word_eval(ShaWordCol::SmallSigma0, 0);
+            let small_sigma1 = word_eval(ShaWordCol::SmallSigma1, 0);
+            let ov_sigma0 = word_eval(ShaWordCol::OvSigma0, 0);
+            let ov_sigma1 = word_eval(ShaWordCol::OvSigma1, 0);
+            let ov_small_sigma0 = word_eval(ShaWordCol::OvSmallSigma0, 0);
+            let ov_small_sigma1 = word_eval(ShaWordCol::OvSmallSigma1, 0);
 
-            let mu = |low: u32, high: u32, high_coeff: &F| {
-                let packed = word_poly(ShaWordCol::MuPacked, 0).shift_r_c(low);
-                let tail = word_poly(ShaWordCol::MuPacked, 0).shift_r_c(high);
-                scale_endpoint_poly(&packed, &low_mu_coeff)
-                    - &scale_endpoint_poly(&tail, high_coeff)
+            let mu = |low_weights: &[F], high_weights: &[F], high_coeff: &F| {
+                word_eval_with(ShaWordCol::MuPacked, 0, low_weights) * &low_mu_coeff
+                    - word_eval_with(ShaWordCol::MuPacked, 0, high_weights) * high_coeff
             };
-            let mu_w = mu(0, 2, &high_mu_w_coeff);
-            let mu_a = mu(2, 5, &high_mu_3_bit_coeff);
-            let mu_e = mu(5, 8, &high_mu_3_bit_coeff);
-            let mu_ff_a = mu(8, 9, &high_mu_1_bit_coeff);
-            let mu_ff_e = mu(9, 10, &high_mu_1_bit_coeff);
+            let mu_w = mu(&shift0_weights, &shift2_weights, &high_mu_w_coeff);
+            let mu_a = mu(&shift2_weights, &shift5_weights, &high_mu_3_bit_coeff);
+            let mu_e = mu(&shift5_weights, &shift8_weights, &high_mu_3_bit_coeff);
+            let mu_ff_a = mu(&shift8_weights, &shift9_weights, &high_mu_1_bit_coeff);
+            let mu_ff_e = mu(&shift9_weights, &shift10_weights, &high_mu_1_bit_coeff);
 
-            let r0 = (&a_word * &rho_sig0) - &sigma0 - &scale_endpoint_poly(&ov_sigma0, &two);
-            let r1 = (&e_word * &rho_sig1) - &sigma1 - &scale_endpoint_poly(&ov_sigma1, &two);
-            let r2 = word_poly(ShaWordCol::W, 0).rot_c(25)
-                + &word_poly(ShaWordCol::W, 0).rot_c(14)
-                + &word_poly(ShaWordCol::W, 0).shift_r_c(3)
+            let r0 = a_word.clone() * &rho_sig0 - &sigma0 - two.clone() * &ov_sigma0;
+            let r1 = e_word.clone() * &rho_sig1 - &sigma1 - two.clone() * &ov_sigma1;
+            let r2 = word_eval_with(ShaWordCol::W, 0, &rot25_weights)
+                + word_eval_with(ShaWordCol::W, 0, &rot14_weights)
+                + word_eval_with(ShaWordCol::W, 0, &shift3_weights)
                 - &small_sigma0
-                - &scale_endpoint_poly(&ov_small_sigma0, &two);
-            let r3 = word_poly(ShaWordCol::W, 0).rot_c(15)
-                + &word_poly(ShaWordCol::W, 0).rot_c(13)
-                + &word_poly(ShaWordCol::W, 0).shift_r_c(10)
+                - two.clone() * &ov_small_sigma0;
+            let r3 = word_eval_with(ShaWordCol::W, 0, &rot15_weights)
+                + word_eval_with(ShaWordCol::W, 0, &rot13_weights)
+                + word_eval_with(ShaWordCol::W, 0, &shift10_weights)
                 - &small_sigma1
-                - &scale_endpoint_poly(&ov_small_sigma1, &two);
-            let r4 = word_poly(ShaWordCol::W, 16)
+                - two.clone() * &ov_small_sigma1;
+            let r4 = word_eval(ShaWordCol::W, 16)
                 - &w
-                - &word_poly(ShaWordCol::SmallSigma0, 1)
-                - &word_poly(ShaWordCol::W, 9)
-                - &word_poly(ShaWordCol::SmallSigma1, 14)
+                - word_eval(ShaWordCol::SmallSigma0, 1)
+                - word_eval(ShaWordCol::W, 9)
+                - word_eval(ShaWordCol::SmallSigma1, 14)
                 + &mu_w
-                + &int_poly(ShaIntCol::CompSchedule);
-            let r5 = word_poly(ShaWordCol::A, 4)
+                + int_value(ShaIntCol::CompSchedule);
+            let r5 = word_eval(ShaWordCol::A, 4)
                 - &e_word
-                - &word_poly(ShaWordCol::Sigma1, 3)
-                - &word_poly(ShaWordCol::Uef, 3)
-                - &word_poly(ShaWordCol::UNegEg, 3)
-                - &const_poly(public_scalar(ShaPublicCol::K, 3))
+                - word_eval(ShaWordCol::Sigma1, 3)
+                - word_eval(ShaWordCol::Uef, 3)
+                - word_eval(ShaWordCol::UNegEg, 3)
+                - public_scalar(ShaPublicCol::K, 3)
                 - &w
-                - &word_poly(ShaWordCol::Sigma0, 3)
-                - &word_poly(ShaWordCol::Maj, 3)
+                - word_eval(ShaWordCol::Sigma0, 3)
+                - word_eval(ShaWordCol::Maj, 3)
                 + &mu_a
-                + &int_poly(ShaIntCol::CompUpdateA);
-            let r6 = word_poly(ShaWordCol::E, 4)
+                + int_value(ShaIntCol::CompUpdateA);
+            let r6 = word_eval(ShaWordCol::E, 4)
                 - &a_word
                 - &e_word
-                - &word_poly(ShaWordCol::Sigma1, 3)
-                - &word_poly(ShaWordCol::Uef, 3)
-                - &word_poly(ShaWordCol::UNegEg, 3)
-                - &const_poly(public_scalar(ShaPublicCol::K, 3))
+                - word_eval(ShaWordCol::Sigma1, 3)
+                - word_eval(ShaWordCol::Uef, 3)
+                - word_eval(ShaWordCol::UNegEg, 3)
+                - public_scalar(ShaPublicCol::K, 3)
                 - &w
                 + &mu_e
-                + &int_poly(ShaIntCol::CompUpdateE);
+                + int_value(ShaIntCol::CompUpdateE);
 
             let s_init = public_scalar(ShaPublicCol::SInit, 0);
             let s_msg = public_scalar(ShaPublicCol::SMsg, 0);
@@ -4515,85 +5165,56 @@ where
             let s_ff = public_scalar(ShaPublicCol::SFf, 0);
             let s_out = public_scalar(ShaPublicCol::SOut, 0);
 
-            let r7 = scale_endpoint_poly(
-                &(a_word.clone() - &public_word_or_const_poly(ShaPublicCol::PAIn)),
-                &s_init,
-            ) + &scale_endpoint_poly(
-                &(a_word.clone() - &public_word_or_const_poly(ShaPublicCol::PAOut)),
-                &s_out,
-            );
-            let r8 = scale_endpoint_poly(
-                &(e_word.clone() - &public_word_or_const_poly(ShaPublicCol::PEIn)),
-                &s_init,
-            ) + &scale_endpoint_poly(
-                &(e_word.clone() - &public_word_or_const_poly(ShaPublicCol::PEOut)),
-                &s_out,
-            );
-            let r9 = word_poly(ShaWordCol::A, 4)
-                - &a_word
-                - &const_poly(public_scalar(ShaPublicCol::PAIn, 0))
+            let r7 = (a_word.clone() - public_word_or_const_eval(ShaPublicCol::PAIn)) * &s_init
+                + (a_word.clone() - public_word_or_const_eval(ShaPublicCol::PAOut)) * &s_out;
+            let r8 = (e_word.clone() - public_word_or_const_eval(ShaPublicCol::PEIn)) * &s_init
+                + (e_word.clone() - public_word_or_const_eval(ShaPublicCol::PEOut)) * &s_out;
+            let r9 = word_eval(ShaWordCol::A, 4) - &a_word - public_scalar(ShaPublicCol::PAIn, 0)
                 + &mu_ff_a
-                + &int_poly(ShaIntCol::CompFeedForwardA);
-            let r10 = word_poly(ShaWordCol::E, 4)
-                - &e_word
-                - &const_poly(public_scalar(ShaPublicCol::PEIn, 0))
+                + int_value(ShaIntCol::CompFeedForwardA);
+            let r10 = word_eval(ShaWordCol::E, 4) - &e_word - public_scalar(ShaPublicCol::PEIn, 0)
                 + &mu_ff_e
-                + &int_poly(ShaIntCol::CompFeedForwardE);
-            let r11 = scale_endpoint_poly(
-                &(w - &public_word_or_const_poly(ShaPublicCol::Message)),
-                &s_msg,
-            );
-            let r12 = scale_endpoint_poly(&int_poly(ShaIntCol::CompSchedule), &s_sched);
-            let r13 = scale_endpoint_poly(&int_poly(ShaIntCol::CompUpdateA), &s_upd);
-            let r14 = scale_endpoint_poly(&int_poly(ShaIntCol::CompUpdateE), &s_upd);
-            let r15 = scale_endpoint_poly(&int_poly(ShaIntCol::CompFeedForwardA), &s_ff);
-            let r16 = scale_endpoint_poly(&int_poly(ShaIntCol::CompFeedForwardE), &s_ff);
-            let r17 = word_poly(ShaWordCol::MuPacked, 0).shift_r_c(10);
+                + int_value(ShaIntCol::CompFeedForwardE);
+            let r11 = (w - public_word_or_const_eval(ShaPublicCol::Message)) * &s_msg;
+            let r12 = int_value(ShaIntCol::CompSchedule) * &s_sched;
+            let r13 = int_value(ShaIntCol::CompUpdateA) * &s_upd;
+            let r14 = int_value(ShaIntCol::CompUpdateE) * &s_upd;
+            let r15 = int_value(ShaIntCol::CompFeedForwardA) * &s_ff;
+            let r16 = int_value(ShaIntCol::CompFeedForwardE) * &s_ff;
+            let r17 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights);
             let residuals = [
                 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
             ];
-            let residual_evals: [F; NUM_SHA_RESIDUAL_FAMILIES] =
-                std::array::from_fn(|idx| eval_poly(&residuals[idx]));
             let linear = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
-                &residual_evals,
+                &residuals,
                 &lambda_powers,
                 zero.clone(),
             )
             .expect("row expression residual dot product lengths match");
 
-            let source_bit =
-                |col: ShaWordCol, shift: usize, bit: usize| word_bits(col, shift)[bit].clone();
-            let mut bool_terms = Vec::with_capacity(booleanity_sources.len());
-            for source in &booleanity_sources {
+            let mut bool_sum = zero.clone();
+            for (source, weight) in booleanity_sources.iter().zip(booleanity_weights.iter()) {
                 let d = match *source {
-                    ShaBooleanitySource::WordBit { col, bit } => source_bit(col, 0, bit),
+                    ShaBooleanitySource::WordBit { col, bit } => word_bit(col, 0, bit),
                     ShaBooleanitySource::VirtualCh1 { bit: bit_idx } => {
-                        source_bit(ShaWordCol::E, 2, bit_idx)
-                            + &source_bit(ShaWordCol::E, 1, bit_idx)
-                            - two.clone() * source_bit(ShaWordCol::Uef, 2, bit_idx)
+                        word_bit(ShaWordCol::E, 2, bit_idx) + &word_bit(ShaWordCol::E, 1, bit_idx)
+                            - two.clone() * word_bit(ShaWordCol::Uef, 2, bit_idx)
                     }
                     ShaBooleanitySource::VirtualCh2 { bit: bit_idx } => {
-                        source_bit(ShaWordCol::E, 2, bit_idx)
-                            - &source_bit(ShaWordCol::E, 0, bit_idx)
-                            + two.clone() * source_bit(ShaWordCol::UNegEg, 2, bit_idx)
-                            + two.clone() * source_bit(ShaWordCol::Ch2Comp, 0, bit_idx)
+                        word_bit(ShaWordCol::E, 2, bit_idx) - &word_bit(ShaWordCol::E, 0, bit_idx)
+                            + two.clone() * word_bit(ShaWordCol::UNegEg, 2, bit_idx)
+                            + two.clone() * word_bit(ShaWordCol::Ch2Comp, 0, bit_idx)
                     }
                     ShaBooleanitySource::VirtualMaj { bit: bit_idx } => {
-                        source_bit(ShaWordCol::A, 0, bit_idx)
-                            + &source_bit(ShaWordCol::A, 1, bit_idx)
-                            + &source_bit(ShaWordCol::A, 2, bit_idx)
-                            - two.clone() * source_bit(ShaWordCol::Maj, 2, bit_idx)
-                            - two.clone() * source_bit(ShaWordCol::MajComp, 0, bit_idx)
+                        word_bit(ShaWordCol::A, 0, bit_idx)
+                            + &word_bit(ShaWordCol::A, 1, bit_idx)
+                            + &word_bit(ShaWordCol::A, 2, bit_idx)
+                            - two.clone() * word_bit(ShaWordCol::Maj, 2, bit_idx)
+                            - two.clone() * word_bit(ShaWordCol::MajComp, 0, bit_idx)
                     }
                 };
-                bool_terms.push(d.clone() * (d - one.clone()));
+                bool_sum += weight.clone() * (d.clone() * (d - one.clone()));
             }
-            let bool_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
-                &booleanity_weights,
-                &bool_terms,
-                zero.clone(),
-            )
-            .expect("row expression booleanity dot product lengths match");
 
             values[0].clone() * (linear + bool_sum)
         }),
@@ -4747,6 +5368,68 @@ where
     )
 }
 
+fn row_sumcheck_terminal_from_proof<F>(
+    proof: &MultiDegreeSumcheckProof<F>,
+    challenges: &[F],
+) -> Result<F, ProductionShaError<F>>
+where
+    F: FromPrimitiveWithConfig,
+{
+    if proof.group_messages().len() != 1 {
+        return Err(ProductionShaError::UnexpectedSumcheckGroupCount {
+            label: "row sumcheck terminal",
+            got: proof.group_messages().len(),
+        });
+    }
+    if proof.claimed_sums().len() != 1 {
+        return Err(ProductionShaError::UnexpectedSumcheckGroupCount {
+            label: "row sumcheck terminal claimed sums",
+            got: proof.claimed_sums().len(),
+        });
+    }
+    let degree = proof
+        .degrees()
+        .first()
+        .ok_or(ProductionShaError::LengthMismatch {
+            label: "row sumcheck terminal degrees",
+            got: 0,
+            expected: 1,
+        })?;
+    let messages = proof
+        .group_messages()
+        .first()
+        .expect("checked row sumcheck group count");
+    if messages.len() != challenges.len() {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "row sumcheck terminal rounds",
+            got: messages.len(),
+            expected: challenges.len(),
+        });
+    }
+
+    let mut expected = proof.claimed_sums()[0].clone();
+    for (message, challenge) in messages.iter().zip(challenges) {
+        let tail = &message.0.tail_evaluations;
+        if tail.len() != *degree {
+            return Err(ProductionShaError::LengthMismatch {
+                label: "row sumcheck terminal degree",
+                got: tail.len(),
+                expected: *degree,
+            });
+        }
+        let constant = match tail.first() {
+            Some(p1) => expected.clone() - p1,
+            None => expected.clone(),
+        };
+        let mut evaluations = Vec::with_capacity(tail.len() + 1);
+        evaluations.push(constant);
+        evaluations.extend_from_slice(tail);
+        expected = NatEvaluatedPoly::new(evaluations).evaluate_at_point(challenge)?;
+    }
+
+    Ok(expected)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn prove_expression_folded_row_sumcheck_with_output_and_vectors<F>(
     transcript: &mut impl Transcript,
@@ -4770,18 +5453,36 @@ where
     F::Inner: Transcribable + Zero,
     F::Modulus: Transcribable,
 {
-    let group = build_production_sha_row_expression_sumcheck_group_with_vectors(
-        trace,
-        public,
-        r_ic_eq_weights,
-        a_powers,
-        lambda_powers,
-        booleanity_weights,
-        booleanity_sources,
-        field_cfg,
-    )?;
-    let (proof, states) =
-        MultiDegreeSumcheck::prove_as_subprotocol(transcript, vec![group], SHA_ROW_VARS, field_cfg);
+    #[cfg(not(debug_assertions))]
+    let _ = r_ic;
+
+    let group = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "row_sumcheck_build_group",
+        side = "prove",
+        phase = "row_sumcheck_build_group",
+    )
+    .in_scope(|| {
+        build_production_sha_row_expression_sumcheck_group_with_vectors(
+            trace,
+            public,
+            r_ic_eq_weights,
+            a_powers,
+            lambda_powers,
+            booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        )
+    })?;
+    let (proof, states) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "row_sumcheck_prove_core",
+        side = "prove",
+        phase = "row_sumcheck_prove_core",
+    )
+    .in_scope(|| {
+        MultiDegreeSumcheck::prove_as_subprotocol(transcript, vec![group], SHA_ROW_VARS, field_cfg)
+    });
     let r_star = states
         .first()
         .ok_or(ProductionShaError::LengthMismatch {
@@ -4797,30 +5498,60 @@ where
         got: a_powers.len(),
         expected: 2,
     })?;
-    let endpoint_evals = build_sha_endpoint_evals_from_trace_with_row_weights(
-        trace,
-        &r_star_eq_weights,
-        a,
-        field_cfg,
-    )?;
-    let terminal_value = reconstruct_folded_row_terminal_from_endpoints_with_vectors(
-        &endpoint_evals,
-        public,
-        r_ic,
-        &r_star,
-        &r_star_eq_weights,
-        a_powers,
-        lambda_powers,
-        booleanity_weights,
-        booleanity_sources,
-        field_cfg,
-    )?;
+    let endpoint_evals = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "row_sumcheck_endpoint_evals",
+        side = "prove",
+        phase = "row_sumcheck_endpoint_evals",
+    )
+    .in_scope(|| {
+        build_sha_endpoint_evals_from_trace_with_row_weights(
+            trace,
+            &r_star_eq_weights,
+            a,
+            field_cfg,
+        )
+    })?;
+    let terminal_value = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "row_sumcheck_terminal",
+        side = "prove",
+        phase = "row_sumcheck_terminal",
+    )
+    .in_scope(|| row_sumcheck_terminal_from_proof(&proof, &r_star))?;
+    #[cfg(debug_assertions)]
+    {
+        let reconstructed_terminal = tracing::info_span!(
+            target: "zinc_protocol::production_sha",
+            "row_sumcheck_terminal_debug",
+            side = "prove",
+            phase = "row_sumcheck_terminal_debug",
+        )
+        .in_scope(|| {
+            reconstruct_folded_row_terminal_from_endpoints_with_vectors(
+                &endpoint_evals,
+                public,
+                r_ic,
+                &r_star,
+                &r_star_eq_weights,
+                a_powers,
+                lambda_powers,
+                booleanity_weights,
+                booleanity_sources,
+                field_cfg,
+            )
+        })?;
+        if terminal_value != reconstructed_terminal {
+            return Err(ProductionShaError::RowSumcheckTerminalMismatch);
+        }
+    }
     Ok((
         proof,
         FoldedRowSumcheckOutput {
             r_star,
             r_star_eq_weights,
             terminal_value,
+            endpoint_evals: Some(endpoint_evals),
         },
     ))
 }
@@ -4863,6 +5594,7 @@ where
         r_star,
         r_star_eq_weights,
         terminal_value: subclaims.expected_evaluations()[0].clone(),
+        endpoint_evals: None,
     })
 }
 
@@ -4962,7 +5694,7 @@ pub fn build_sha_endpoint_evals_from_trace<F>(
     field_cfg: &F::Config,
 ) -> Result<ShaEndpointEvals<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     let row_weights = build_eq_x_r_vec(r_star, field_cfg)?;
     build_sha_endpoint_evals_from_trace_with_row_weights(trace, &row_weights, a, field_cfg)
@@ -4975,7 +5707,7 @@ pub fn build_sha_endpoint_evals_from_trace_with_row_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<ShaEndpointEvals<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: DelayedFieldProductSum,
 {
     if row_weights.len() != SHA_ROW_COUNT {
         return Err(ProductionShaError::LengthMismatch {
@@ -4984,9 +5716,12 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    #[cfg(debug_assertions)]
+    validate_projected_trace(trace)?;
     let mut sources = Vec::new();
     for (col, shift) in production_sha_endpoint_word_sources() {
-        let bits = sha_word_bits_at_point_with_weights(trace, col, shift, row_weights, field_cfg)?;
+        let bits =
+            sha_endpoint_word_bits_with_row_weights(trace, col, shift, row_weights, field_cfg)?;
         sources.push(ShaSourceEndpointEval {
             col,
             shift,
@@ -4998,12 +5733,90 @@ where
     for col in production_sha_endpoint_int_sources() {
         int_sources.push(ShaIntEndpointEval {
             col,
-            scalar: sha_int_at_point_with_weights(trace, col, row_weights, field_cfg)?,
+            scalar: sha_endpoint_int_with_row_weights(trace, col, row_weights, field_cfg)?,
         });
     }
     Ok(ShaEndpointEvals {
         sources,
         int_sources,
+    })
+}
+
+fn sha_endpoint_word_bits_with_row_weights<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    shift: usize,
+    row_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<[F; SHA_WORD_BITS], ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    let active_len = SHA_ROW_COUNT.saturating_sub(shift);
+    if active_len == 0 {
+        return Ok(std::array::from_fn(|_| F::zero_with_cfg(field_cfg)));
+    }
+    let weights = &row_weights[..active_len];
+    let values_start = shift;
+    let values_end = shift + active_len;
+    let bits = cfg_into_iter!(0..SHA_WORD_BITS)
+        .map(|bit| {
+            let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+            let column =
+                trace
+                    .bit_slices
+                    .get(table_idx)
+                    .ok_or(ProductionShaError::LengthMismatch {
+                        label: "SHA endpoint bit column",
+                        got: table_idx,
+                        expected: trace.bit_slices.len(),
+                    })?;
+            FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+                weights,
+                &column.evaluations[values_start..values_end],
+                F::zero_with_cfg(field_cfg),
+            )
+            .map_err(|_| {
+                ProductionShaError::NonCanonicalProofObject(
+                    "SHA endpoint bit row-weight dot product failed",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    bits.try_into()
+        .map_err(|bits: Vec<F>| ProductionShaError::LengthMismatch {
+            label: "SHA endpoint word bits",
+            got: bits.len(),
+            expected: SHA_WORD_BITS,
+        })
+}
+
+fn sha_endpoint_int_with_row_weights<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaIntCol,
+    row_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum,
+{
+    let column = trace
+        .int_columns
+        .get(col.index())
+        .ok_or(ProductionShaError::LengthMismatch {
+            label: "SHA endpoint int column",
+            got: col.index(),
+            expected: trace.int_columns.len(),
+        })?;
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        row_weights,
+        &column.evaluations,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(|_| {
+        ProductionShaError::NonCanonicalProofObject(
+            "SHA endpoint int row-weight dot product failed",
+        )
     })
 }
 
@@ -5104,32 +5917,73 @@ where
         });
     }
     validate_sha_endpoint_layout(endpoint_evals)?;
-    let layout = production_sha_multipoint_layout();
-    let trace_mles = sha_multipoint_trace_mles(folded_trace, folded_public, &layout, field_cfg)?;
-    let up_evals = sha_multipoint_up_evals_with_row_weights(
-        endpoint_evals,
-        folded_public,
-        row_weights,
-        &layout,
-        field_cfg,
-    )?;
-    let (shift_specs, down_evals) = sha_multipoint_shift_specs_and_down_evals_with_row_weights(
-        endpoint_evals,
-        folded_public,
-        row_weights,
-        &layout,
-        field_cfg,
-    )?;
-    prove_multipoint_reduction(
-        transcript,
-        &trace_mles,
-        r_star,
-        &up_evals,
-        &down_evals,
-        &shift_specs,
-        field_cfg,
+    let layout = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "multipoint_layout",
+        side = "prove",
+        phase = "multipoint_layout",
     )
-    .map_err(ProductionShaError::from)
+    .in_scope(production_sha_multipoint_layout);
+    let trace_mles = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "multipoint_trace_mles",
+        side = "prove",
+        phase = "multipoint_trace_mles",
+        sources = layout.sources.len(),
+    )
+    .in_scope(|| sha_multipoint_trace_mles(folded_trace, folded_public, &layout, field_cfg))?;
+    let up_evals = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "multipoint_up_evals",
+        side = "prove",
+        phase = "multipoint_up_evals",
+        sources = layout.sources.len(),
+    )
+    .in_scope(|| {
+        sha_multipoint_up_evals_with_row_weights(
+            endpoint_evals,
+            folded_public,
+            row_weights,
+            &layout,
+            field_cfg,
+        )
+    })?;
+    let (shift_specs, down_evals) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "multipoint_down_evals",
+        side = "prove",
+        phase = "multipoint_down_evals",
+        shifts = layout.shifts.len(),
+    )
+    .in_scope(|| {
+        sha_multipoint_shift_specs_and_down_evals_with_row_weights(
+            endpoint_evals,
+            folded_public,
+            row_weights,
+            &layout,
+            field_cfg,
+        )
+    })?;
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "multipoint_sumcheck",
+        side = "prove",
+        phase = "multipoint_sumcheck",
+        sources = trace_mles.len(),
+        shifts = shift_specs.len(),
+    )
+    .in_scope(|| {
+        prove_multipoint_reduction(
+            transcript,
+            &trace_mles,
+            r_star,
+            &up_evals,
+            &down_evals,
+            &shift_specs,
+            field_cfg,
+        )
+        .map_err(ProductionShaError::from)
+    })
 }
 
 pub fn verify_sha_endpoint_multipoint<F>(

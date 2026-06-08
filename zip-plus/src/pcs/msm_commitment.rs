@@ -661,11 +661,7 @@ fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
     })
 }
 
-fn window_value_from_words(
-    words: &[crypto_bigint::Word],
-    start: usize,
-    width: usize,
-) -> usize {
+fn window_value_from_words(words: &[crypto_bigint::Word], start: usize, width: usize) -> usize {
     let word_bits = core::mem::size_of::<crypto_bigint::Word>() * 8;
     (0..width).fold(0usize, |value, bit_idx| {
         let absolute_bit = start + bit_idx;
@@ -915,11 +911,11 @@ mod tests {
             let scalars = scalars_from_int(&values);
             let blind = blind(width, n);
 
-            let int_comm =
-                MsmCommitmentEngine::<TestCurve>::commit_with::<Int<1>, SignedIntPippengerMsm>(
-                    &ck, &values, &blind,
-                )
-                .expect("signed int commit must succeed");
+            let int_comm = MsmCommitmentEngine::<TestCurve>::commit_with::<
+                Int<1>,
+                SignedIntPippengerMsm,
+            >(&ck, &values, &blind)
+            .expect("signed int commit must succeed");
             let scalar_comm = MsmCommitmentEngine::<TestCurve>::commit(&ck, &scalars, &blind)
                 .expect("scalar commit must succeed");
 

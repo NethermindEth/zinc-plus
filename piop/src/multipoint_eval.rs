@@ -151,16 +151,22 @@ where
         //   eq_r(b)   = eq(b, r')
         //   next_c_r_mle(b) = next_c_mle(r', b)
         let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
-        let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
+        let mut shift_groups: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+        for (alpha_idx, spec) in shifts.iter().enumerate() {
+            let amount = spec.shift_amount();
+            if let Some((_, group)) = shift_groups
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == amount)
+            {
+                group.push((alpha_idx, spec.source_col()));
+            } else {
+                shift_groups.push((amount, vec![(alpha_idx, spec.source_col())]));
+            }
+        }
+        let next_mles = shift_groups
             .iter()
-            .map(|spec| {
-                let next = build_next_c_r_mle(eval_point, spec.shift_amount(), field_cfg)?;
-                let col = trace_mles[spec.source_col()].clone();
-                Ok((next, col))
-            })
-            .collect::<Result<Vec<_>, ArithErrors>>()?
-            .into_iter()
-            .unzip();
+            .map(|(amount, _)| build_next_c_r_mle(eval_point, *amount, field_cfg))
+            .collect::<Result<Vec<_>, ArithErrors>>()?;
 
         // Precombine up cols with gammas, precombined[b] = Σ_j γ_j trace[j][b].
         // Multiplying eval_f by &gamma uses `Mul<&Self, Output=Self>` from
@@ -190,12 +196,38 @@ where
             )
         };
 
+        let grouped_down_cols = shift_groups
+            .iter()
+            .map(|(_, group)| {
+                let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
+                    .map(|b| {
+                        group
+                            .iter()
+                            .fold(zero.clone(), |acc, (alpha_idx, source_col)| {
+                                let eval_f = F::new_unchecked_with_cfg(
+                                    trace_mles[*source_col].evaluations[b].clone(),
+                                    field_cfg,
+                                );
+                                acc + eval_f * &alphas[*alpha_idx]
+                            })
+                            .into_inner()
+                    })
+                    .collect();
+                DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    evaluations,
+                    zero_inner.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
         // Step 3: Pack MLEs: [eq_r, next_mles[..], precombined, down_cols[..]]
-        let mut mles = Vec::with_capacity(2 + 2 * num_down_cols);
+        let grouped_down_cols_len = grouped_down_cols.len();
+        let mut mles = Vec::with_capacity(2 + 2 * grouped_down_cols_len);
         mles.push(eq_r);
         mles.extend(next_mles);
         mles.push(precombined);
-        mles.extend(down_cols);
+        mles.extend(grouped_down_cols);
 
         // Step 4: Run sumcheck with degree=2.
 
@@ -208,15 +240,12 @@ where
             2,
             |mle_values: &[F]| {
                 let eq_val = &mle_values[0];
-                let precombined = &mle_values[num_down_cols + 1];
-                alphas
-                    .iter()
-                    .enumerate()
-                    .fold(eq_val.clone() * precombined, |acc, (i, alpha)| {
-                        let next = &mle_values[1 + i];
-                        let down_col = &mle_values[num_down_cols + 2 + i];
-                        acc + alpha.clone() * next * down_col
-                    })
+                let precombined = &mle_values[grouped_down_cols_len + 1];
+                (0..grouped_down_cols_len).fold(eq_val.clone() * precombined, |acc, i| {
+                    let next = &mle_values[1 + i];
+                    let down_col = &mle_values[grouped_down_cols_len + 2 + i];
+                    acc + next.clone() * down_col
+                })
             },
             field_cfg,
         );

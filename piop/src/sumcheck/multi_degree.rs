@@ -221,6 +221,10 @@ impl<F> MultiDegreeSumcheckProof<F> {
         &self.degrees
     }
 
+    pub fn group_messages(&self) -> &[Vec<SumcheckProverMsg<F>>] {
+        &self.group_messages
+    }
+
     #[cfg(test)]
     pub(crate) fn group_messages_mut_for_testing(&mut self) -> &mut [Vec<SumcheckProverMsg<F>>] {
         &mut self.group_messages
