@@ -378,7 +378,6 @@ type ProductionShaFoldAfterSumfold<P, Zt, F, const D: usize> = (
     ProjectedPublic<F>,
     F,
     InstanceFoldClaim<F>,
-    PCSCommitments<P, Zt, F, D>,
     PCSProverData<P, Zt, F, D>,
 );
 
@@ -420,7 +419,8 @@ where
     #[allow(clippy::too_many_arguments)]
     fn prove_folded_pcs_opening(
         pcs_params: &PCSParams<Self, Zt, F, D>,
-        folded_commitments: &PCSCommitments<Self, Zt, F, D>,
+        instance_commitments: &[PCSCommitments<Self, Zt, F, D>],
+        fold_weights: &[F],
         folded_trace: &ProjectedTrace<F>,
         folded_prover_data: &PCSProverData<Self, Zt, F, D>,
         r_0: &[F],
@@ -465,7 +465,8 @@ where
 {
     fn prove_folded_pcs_opening(
         pcs_params: &PCSParams<Self, Zt, F, D>,
-        folded_commitments: &PCSCommitments<Self, Zt, F, D>,
+        instance_commitments: &[PCSCommitments<Self, Zt, F, D>],
+        fold_weights: &[F],
         folded_trace: &ProjectedTrace<F>,
         folded_prover_data: &PCSProverData<Self, Zt, F, D>,
         r_0: &[F],
@@ -474,7 +475,8 @@ where
     ) -> Result<PCSOpeningProof<Self, Zt, F, D>, ProductionShaError<F>> {
         prove_production_sha_hyrax_pcs_opening::<C, Zt, F, D>(
             pcs_params,
-            folded_commitments,
+            instance_commitments,
+            fold_weights,
             folded_trace,
             folded_prover_data,
             r_0,
@@ -855,6 +857,32 @@ pub fn absorb_production_sha_commitments<P, Zt, F, const D: usize>(
     }
 }
 
+pub fn absorb_derived_production_sha_commitments<P, Zt, F, const D: usize>(
+    transcript: &mut impl Transcript,
+    label: &'static [u8],
+    commitments: &[PCSCommitments<P, Zt, F, D>],
+    weights: &[F],
+    field_cfg: &F::Config,
+) where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+{
+    let mut field_buf = runtime_field_transcript_buf::<F>(field_cfg);
+    transcript.absorb_slice(label);
+    transcript.absorb_slice(b"derived_from_fresh_v1");
+    transcript.absorb_slice(&(commitments.len() as u64).to_le_bytes());
+    transcript.absorb_slice(&(weights.len() as u64).to_le_bytes());
+    transcript.absorb_random_field_slice(weights, &mut field_buf);
+    absorb_production_sha_commitments::<P, Zt, F, D>(
+        transcript,
+        b"production_sha_derived_folded_commitment_sources",
+        commitments,
+    );
+}
+
 pub fn absorb_fresh_sha_ideal_polys<F>(
     transcript: &mut impl Transcript,
     ideal_polys: &[[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]],
@@ -1118,7 +1146,7 @@ pub fn prove_linear_ideal_fold<P, U, Zt, F, const D: usize>(
 ) -> Result<
     LinearIdealFoldProveOutput<
         UairInstance<'static, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>,
-        FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
+        FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>,
         FoldedLinearIdealWitness<ProductionShaFoldedWitness<P, Zt, F, D>>,
         ProductionLinearIdealFoldProof<P, Zt, F, D>,
     >,
@@ -1241,7 +1269,7 @@ where
         field_cfg,
     )?;
 
-    let (folded, folded_public, row_claim, sumfold_output, folded_commitments, folded_prover_data) =
+    let (folded, folded_public, row_claim, sumfold_output, folded_prover_data) =
         prove_fold_after_sumfold_phase::<P, Zt, F, D>(
             &traces,
             &publics,
@@ -1253,14 +1281,15 @@ where
             &lambda_powers,
             &booleanity_weights,
             &booleanity_sources,
-            &instance_commitments,
             &instance_prover_data,
             field_cfg,
         )?;
-    absorb_production_sha_commitments::<P, Zt, F, D>(
+    absorb_derived_production_sha_commitments::<P, Zt, F, D>(
         transcript,
         b"production_sha_derived_folded_commitments",
-        std::slice::from_ref(&folded_commitments),
+        &instance_commitments,
+        sumfold_output.eq_instance_weights(),
+        field_cfg,
     );
 
     verify_folded_row_sumcheck_claim(&row_claim, sumfold_output.final_round_sumcheck_claim())?;
@@ -1297,7 +1326,8 @@ where
     let (witness_lifted_evals, opening_proof) = prove_pcs_opening_phase::<P, Zt, F, D>(
         transcript,
         &folded.trace,
-        &folded_commitments,
+        &instance_commitments,
+        sumfold_output.eq_instance_weights(),
         &folded_prover_data,
         &r_0,
         &r_0_eq_weights,
@@ -1309,7 +1339,7 @@ where
         fresh_instances,
         folded_instance: FoldedLinearIdealInstance {
             target: sumfold_output.final_round_sumcheck_claim().clone(),
-            commitments: folded_commitments,
+            commitments: (),
             public: folded_public,
         },
         folded_witness: FoldedLinearIdealWitness {
@@ -1604,7 +1634,6 @@ fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
     lambda_powers: &[F],
     booleanity_weights: &[F],
     booleanity_sources: &[ShaBooleanitySource],
-    instance_commitments: &[PCSCommitments<P, Zt, F, D>],
     instance_prover_data: &[PCSProverData<P, Zt, F, D>],
     field_cfg: &F::Config,
 ) -> Result<ProductionShaFoldAfterSumfold<P, Zt, F, D>, ProductionShaError<F>>
@@ -1657,19 +1686,6 @@ where
             field_cfg,
         )
     })?;
-    let folded_commitments = tracing::info_span!(
-        target: "zinc_protocol::production_sha",
-        "fold_commitments",
-        side = "prove",
-        phase = "fold_commitments",
-    )
-    .in_scope(|| {
-        fold_pcs_commitments::<P, Zt, F, D>(
-            instance_commitments,
-            sumfold_output.eq_instance_weights(),
-            field_cfg,
-        )
-    })?;
     let folded_prover_data = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "fold_prover_data",
@@ -1689,7 +1705,6 @@ where
         folded_public,
         row_claim,
         sumfold_output,
-        folded_commitments,
         folded_prover_data,
     ))
 }
@@ -2186,7 +2201,8 @@ where
 fn prove_pcs_opening_phase<P, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
     folded_trace: &ProjectedTrace<F>,
-    folded_commitments: &PCSCommitments<P, Zt, F, D>,
+    instance_commitments: &[PCSCommitments<P, Zt, F, D>],
+    fold_weights: &[F],
     folded_prover_data: &PCSProverData<P, Zt, F, D>,
     r_0: &[F],
     r_0_eq_weights: &[F],
@@ -2229,7 +2245,8 @@ where
     .in_scope(|| {
         P::prove_folded_pcs_opening(
             pcs_params,
-            folded_commitments,
+            instance_commitments,
+            fold_weights,
             folded_trace,
             folded_prover_data,
             r_0,
@@ -2477,15 +2494,12 @@ where
         field_cfg,
     )?;
 
-    let folded_commitments = verify_fold_commitments_phase::<P, Zt, F, D>(
+    absorb_derived_production_sha_commitments::<P, Zt, F, D>(
+        transcript,
+        b"production_sha_derived_folded_commitments",
         &proof.instance_commitments,
         sumfold_output.eq_instance_weights(),
         field_cfg,
-    )?;
-    absorb_production_sha_commitments::<P, Zt, F, D>(
-        transcript,
-        b"production_sha_derived_folded_commitments",
-        std::slice::from_ref(&folded_commitments),
     );
 
     let row_output = verify_row_sumcheck_phase(
@@ -2512,9 +2526,16 @@ where
         field_cfg,
     )?;
 
+    let folded_commitments = verify_fold_commitments_phase::<P, Zt, F, D>(
+        &proof.instance_commitments,
+        sumfold_output.eq_instance_weights(),
+        field_cfg,
+    )?;
     verify_pcs_phase::<P, Zt, F, D>(
         transcript,
         &vs.pcs_params,
+        &proof.instance_commitments,
+        sumfold_output.eq_instance_weights(),
         &folded_commitments,
         &subclaim.sumcheck_subclaim.point,
         &proof.witness_lifted_evals,
@@ -2786,6 +2807,8 @@ where
 fn verify_pcs_phase<P, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
     pcs_params: &PCSVerifierParams<P, Zt, F, D>,
+    instance_commitments: &[PCSCommitments<P, Zt, F, D>],
+    fold_weights: &[F],
     folded_commitments: &PCSCommitments<P, Zt, F, D>,
     point: &[F],
     witness_lifted_evals: &[DynamicPolynomialF<F>],
@@ -2805,6 +2828,8 @@ where
     absorb_folded_lifted_evals(transcript, witness_lifted_evals, field_cfg);
     verify_production_sha_pcs_opening::<P, Zt, F, D>(
         pcs_params,
+        instance_commitments,
+        fold_weights,
         folded_commitments,
         point,
         witness_lifted_evals,
@@ -3023,8 +3048,36 @@ where
     })
 }
 
+fn absorb_derived_pcs_commitment<Pcs, F, Eval, const D: usize>(
+    transcript: &mut impl Transcript,
+    label: &'static [u8],
+    commitments: &[&Pcs::Commitment],
+    weights: &[F],
+    field_cfg: &F::Config,
+) where
+    Pcs: PCS<F, Eval, D>,
+    F: PrimeField,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    Eval: Clone + std::fmt::Debug + Send + Sync,
+{
+    let mut field_buf = runtime_field_transcript_buf::<F>(field_cfg);
+    transcript.absorb_slice(label);
+    transcript.absorb_slice(b"derived_pcs_commitment_v1");
+    transcript.absorb_slice(&(commitments.len() as u64).to_le_bytes());
+    transcript.absorb_slice(&(weights.len() as u64).to_le_bytes());
+    transcript.absorb_random_field_slice(weights, &mut field_buf);
+    for (idx, commitment) in commitments.iter().enumerate() {
+        transcript.absorb_slice(&(idx as u64).to_le_bytes());
+        Pcs::absorb_commitment(transcript, commitment);
+    }
+    transcript.absorb_slice(b"derived_pcs_commitment_end");
+}
+
 fn verify_production_sha_pcs_opening<P, Zt, F, const D: usize>(
     pcs_params: &PCSVerifierParams<P, Zt, F, D>,
+    instance_commitments: &[PCSCommitments<P, Zt, F, D>],
+    fold_weights: &[F],
     folded_commitments: &PCSCommitments<P, Zt, F, D>,
     r_0: &[F],
     folded_lifted_evals: &[DynamicPolynomialF<F>],
@@ -3053,7 +3106,17 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    P::BinaryPCS::absorb_commitment(&mut transcript.fs_transcript, &folded_commitments.binary);
+    let binary_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.binary)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<P::BinaryPCS, F, BinaryPoly<D>, D>(
+        &mut transcript.fs_transcript,
+        b"production_sha_pcs_binary",
+        &binary_commitments,
+        fold_weights,
+        field_cfg,
+    );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
         binary_lifted,
@@ -3069,9 +3132,16 @@ where
         field_cfg,
     )?;
 
-    P::ArbitraryPCS::absorb_commitment(
+    let arbitrary_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.arbitrary)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<P::ArbitraryPCS, F, DensePolynomial<Zt::Int, D>, D>(
         &mut transcript.fs_transcript,
-        &folded_commitments.arbitrary,
+        b"production_sha_pcs_arbitrary",
+        &arbitrary_commitments,
+        fold_weights,
+        field_cfg,
     );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
@@ -3088,7 +3158,17 @@ where
         field_cfg,
     )?;
 
-    P::IntPCS::absorb_commitment(&mut transcript.fs_transcript, &folded_commitments.int);
+    let int_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.int)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<P::IntPCS, F, Zt::Int, D>(
+        &mut transcript.fs_transcript,
+        b"production_sha_pcs_int",
+        &int_commitments,
+        fold_weights,
+        field_cfg,
+    );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
         int_lifted,
@@ -3110,7 +3190,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn prove_production_sha_hyrax_pcs_opening<C, Zt, F, const D: usize>(
     pcs_params: &PCSParams<AllHyraxPCSTypes<C>, Zt, F, D>,
-    folded_commitments: &PCSCommitments<AllHyraxPCSTypes<C>, Zt, F, D>,
+    instance_commitments: &[PCSCommitments<AllHyraxPCSTypes<C>, Zt, F, D>],
+    fold_weights: &[F],
     folded_trace: &ProjectedTrace<F>,
     folded_prover_data: &PCSProverData<AllHyraxPCSTypes<C>, Zt, F, D>,
     r_0: &[F],
@@ -3149,11 +3230,7 @@ where
         >,
 {
     ensure_production_sha_word_degree::<F, D>()?;
-    validate_production_sha_batch_sizes::<F>(
-        HyraxPCS::<C, BinaryLanes>::batch_size(&folded_commitments.binary),
-        HyraxPCS::<C, DensePolyScalarLanes>::batch_size(&folded_commitments.arbitrary),
-        HyraxPCS::<C, IntScalarLane>::batch_size(&folded_commitments.int),
-    )?;
+    validate_production_sha_batch_sizes::<F>(ShaWordCol::COUNT, 0, ShaIntCol::COUNT)?;
     let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
     let arbitrary_lifted: &[DynamicPolynomialF<F>] = &[];
 
@@ -3167,9 +3244,16 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    HyraxPCS::<C, BinaryLanes>::absorb_commitment(
+    let binary_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.binary)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<HyraxPCS<C, BinaryLanes>, F, BinaryPoly<D>, D>(
         &mut transcript.fs_transcript,
-        &folded_commitments.binary,
+        b"production_sha_pcs_binary",
+        &binary_commitments,
+        fold_weights,
+        field_cfg,
     );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
@@ -3188,9 +3272,21 @@ where
     let binary_end = transcript.stream.position() as usize;
     let binary = transcript.stream.get_ref()[binary_start..binary_end].to_vec();
 
-    HyraxPCS::<C, DensePolyScalarLanes>::absorb_commitment(
+    let arbitrary_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.arbitrary)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<
+        HyraxPCS<C, DensePolyScalarLanes>,
+        F,
+        DensePolynomial<Zt::Int, D>,
+        D,
+    >(
         &mut transcript.fs_transcript,
-        &folded_commitments.arbitrary,
+        b"production_sha_pcs_arbitrary",
+        &arbitrary_commitments,
+        fold_weights,
+        field_cfg,
     );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
@@ -3209,9 +3305,16 @@ where
     let arbitrary_end = transcript.stream.position() as usize;
     let arbitrary = transcript.stream.get_ref()[arbitrary_start..arbitrary_end].to_vec();
 
-    HyraxPCS::<C, IntScalarLane>::absorb_commitment(
+    let int_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.int)
+        .collect::<Vec<_>>();
+    absorb_derived_pcs_commitment::<HyraxPCS<C, IntScalarLane>, F, Zt::Int, D>(
         &mut transcript.fs_transcript,
-        &folded_commitments.int,
+        b"production_sha_pcs_int",
+        &int_commitments,
+        fold_weights,
+        field_cfg,
     );
     absorb_pcs_lifted_evals(
         &mut transcript.fs_transcript,
@@ -7838,14 +7941,6 @@ mod tests {
 
         assert_eq!(verified.target, output.folded_instance.target);
         assert_eq!(verified.public, output.folded_instance.public);
-        assert!(pcs_commitments_match::<
-            P,
-            TestShaZincTypes,
-            F,
-            TEST_DEGREE_PLUS_ONE,
-        >(
-            &verified.commitments, &output.folded_instance.commitments
-        ));
     }
 
     #[test]
