@@ -2547,6 +2547,29 @@ fn do_bench_e2e_folded_4x<ZtF, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
+    eprintln!("    Folded 4× tracing ({params}):");
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let (_traced_proof, _traced_timings) =
+            zinc_protocol::prover::prove_folded_4x_with_timings::<
+                ZtF,
+                U,
+                F,
+                DEGREE_PLUS_ONE,
+                HALF_DEGREE_PLUS_ONE,
+                QUARTER_DEGREE_PLUS_ONE,
+                EC_FP_INT_LIMBS,
+                INT_QUARTER_LIMBS_BENCH,
+                false,
+                PERFORM_CHECKS,
+            >(pp, trace, num_vars, project_scalar)
+            .expect("Folded 4× traced prover failed");
+    });
+
     group.bench_function(BenchmarkId::new("Verify (folded 4×)", &params), |bench| {
         bench.iter_batched(
             || proof.clone(),
