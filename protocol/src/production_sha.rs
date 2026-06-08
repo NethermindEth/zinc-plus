@@ -1627,11 +1627,11 @@ fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
     traces: &[ProjectedTrace<F>],
     publics: &[ProjectedPublic<F>],
     sumfold_output: InstanceFoldClaim<F>,
-    r_ic_eq_weights: &[F],
-    a_powers: &[F],
-    lambda_powers: &[F],
-    booleanity_weights: &[F],
-    booleanity_sources: &[ShaBooleanitySource],
+    _r_ic_eq_weights: &[F],
+    _a_powers: &[F],
+    _lambda_powers: &[F],
+    _booleanity_weights: &[F],
+    _booleanity_sources: &[ShaBooleanitySource],
     instance_prover_data: &[PCSProverData<P, Zt, F, D>],
     field_cfg: &F::Config,
 ) -> Result<ProductionShaFoldAfterSumfold<P, Zt, F, D>, ProductionShaError<F>>
@@ -1664,11 +1664,11 @@ where
             let recomputed = production_sha_folded_row_sum_fast(
                 &folded.trace,
                 &folded_public,
-                r_ic_eq_weights,
-                a_powers,
-                lambda_powers,
-                booleanity_weights,
-                booleanity_sources,
+                _r_ic_eq_weights,
+                _a_powers,
+                _lambda_powers,
+                _booleanity_weights,
+                _booleanity_sources,
                 field_cfg,
             )?;
             if recomputed != row_claim {
@@ -4357,7 +4357,7 @@ where
 pub fn prove_optimized_sha_sumfold<F>(
     transcript: &mut impl Transcript,
     traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    _publics: &[ProjectedPublic<F>],
     initial_claim: &F,
     beta: &[F],
     r_ic: &[F; SHA_ROW_VARS],
@@ -4421,7 +4421,7 @@ where
             derive_instance_fold_claim(beta, r_b.clone(), c_sf.clone(), traces.len(), field_cfg)?;
         let (folded, folded_public) = zinc_piop::neutron_nova::fold_projected_traces(
             traces,
-            publics,
+            _publics,
             &provisional,
             field_cfg,
         )?;
@@ -4832,7 +4832,6 @@ where
         })
 }
 
-#[cfg(debug_assertions)]
 fn public_word_col_index(col: ShaPublicCol) -> Option<usize> {
     match col {
         ShaPublicCol::PAIn => Some(0),
