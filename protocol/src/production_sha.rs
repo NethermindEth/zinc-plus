@@ -5231,43 +5231,52 @@ where
             let mu_ff_a = mu(&shift8_weights, &shift9_weights, &high_mu_1_bit_coeff);
             let mu_ff_e = mu(&shift9_weights, &shift10_weights, &high_mu_1_bit_coeff);
 
+            let w_rot25 = word_eval_with(ShaWordCol::W, 0, &rot25_weights);
+            let w_rot14 = word_eval_with(ShaWordCol::W, 0, &rot14_weights);
+            let w_shift3 = word_eval_with(ShaWordCol::W, 0, &shift3_weights);
+            let w_rot15 = word_eval_with(ShaWordCol::W, 0, &rot15_weights);
+            let w_rot13 = word_eval_with(ShaWordCol::W, 0, &rot13_weights);
+            let w_shift10 = word_eval_with(ShaWordCol::W, 0, &shift10_weights);
+            let w_shift16 = word_eval(ShaWordCol::W, 16);
+            let w_shift9 = word_eval(ShaWordCol::W, 9);
+            let small_sigma0_shift1 = word_eval(ShaWordCol::SmallSigma0, 1);
+            let small_sigma1_shift14 = word_eval(ShaWordCol::SmallSigma1, 14);
+            let a_shift4 = word_eval(ShaWordCol::A, 4);
+            let e_shift4 = word_eval(ShaWordCol::E, 4);
+            let sigma0_shift3 = word_eval(ShaWordCol::Sigma0, 3);
+            let sigma1_shift3 = word_eval(ShaWordCol::Sigma1, 3);
+            let uef_shift3 = word_eval(ShaWordCol::Uef, 3);
+            let uneg_eg_shift3 = word_eval(ShaWordCol::UNegEg, 3);
+            let maj_shift3 = word_eval(ShaWordCol::Maj, 3);
+            let public_k_shift3 = public_scalar(ShaPublicCol::K, 3);
+
             let r0 = a_word.clone() * &rho_sig0 - &sigma0 - two.clone() * &ov_sigma0;
             let r1 = e_word.clone() * &rho_sig1 - &sigma1 - two.clone() * &ov_sigma1;
-            let r2 = word_eval_with(ShaWordCol::W, 0, &rot25_weights)
-                + word_eval_with(ShaWordCol::W, 0, &rot14_weights)
-                + word_eval_with(ShaWordCol::W, 0, &shift3_weights)
-                - &small_sigma0
+            let r2 = w_rot25 + w_rot14 + w_shift3 - &small_sigma0
                 - two.clone() * &ov_small_sigma0;
-            let r3 = word_eval_with(ShaWordCol::W, 0, &rot15_weights)
-                + word_eval_with(ShaWordCol::W, 0, &rot13_weights)
-                + word_eval_with(ShaWordCol::W, 0, &shift10_weights)
-                - &small_sigma1
+            let r3 = w_rot15 + w_rot13 + w_shift10 - &small_sigma1
                 - two.clone() * &ov_small_sigma1;
-            let r4 = word_eval(ShaWordCol::W, 16)
-                - &w
-                - word_eval(ShaWordCol::SmallSigma0, 1)
-                - word_eval(ShaWordCol::W, 9)
-                - word_eval(ShaWordCol::SmallSigma1, 14)
+            let r4 = w_shift16 - &w - small_sigma0_shift1 - w_shift9 - small_sigma1_shift14
                 + &mu_w
                 + int_value(ShaIntCol::CompSchedule);
-            let r5 = word_eval(ShaWordCol::A, 4)
+            let r5 = a_shift4.clone()
                 - &e_word
-                - word_eval(ShaWordCol::Sigma1, 3)
-                - word_eval(ShaWordCol::Uef, 3)
-                - word_eval(ShaWordCol::UNegEg, 3)
-                - public_scalar(ShaPublicCol::K, 3)
+                - &sigma1_shift3
+                - &uef_shift3
+                - &uneg_eg_shift3
+                - &public_k_shift3
                 - &w
-                - word_eval(ShaWordCol::Sigma0, 3)
-                - word_eval(ShaWordCol::Maj, 3)
+                - &sigma0_shift3
+                - &maj_shift3
                 + &mu_a
                 + int_value(ShaIntCol::CompUpdateA);
-            let r6 = word_eval(ShaWordCol::E, 4)
+            let r6 = e_shift4.clone()
                 - &a_word
                 - &e_word
-                - word_eval(ShaWordCol::Sigma1, 3)
-                - word_eval(ShaWordCol::Uef, 3)
-                - word_eval(ShaWordCol::UNegEg, 3)
-                - public_scalar(ShaPublicCol::K, 3)
+                - &sigma1_shift3
+                - &uef_shift3
+                - &uneg_eg_shift3
+                - &public_k_shift3
                 - &w
                 + &mu_e
                 + int_value(ShaIntCol::CompUpdateE);
@@ -5283,10 +5292,10 @@ where
                 + (a_word.clone() - public_word_or_const_eval(ShaPublicCol::PAOut)) * &s_out;
             let r8 = (e_word.clone() - public_word_or_const_eval(ShaPublicCol::PEIn)) * &s_init
                 + (e_word.clone() - public_word_or_const_eval(ShaPublicCol::PEOut)) * &s_out;
-            let r9 = word_eval(ShaWordCol::A, 4) - &a_word - public_scalar(ShaPublicCol::PAIn, 0)
+            let r9 = a_shift4 - &a_word - public_scalar(ShaPublicCol::PAIn, 0)
                 + &mu_ff_a
                 + int_value(ShaIntCol::CompFeedForwardA);
-            let r10 = word_eval(ShaWordCol::E, 4) - &e_word - public_scalar(ShaPublicCol::PEIn, 0)
+            let r10 = e_shift4 - &e_word - public_scalar(ShaPublicCol::PEIn, 0)
                 + &mu_ff_e
                 + int_value(ShaIntCol::CompFeedForwardE);
             let r11 = (w - public_word_or_const_eval(ShaPublicCol::Message)) * &s_msg;
