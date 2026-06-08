@@ -996,6 +996,12 @@ where
         validate_public(public)?;
     }
 
+    let folded_public_columns = fold_mle_tables(
+        "public.columns",
+        publics.iter().map(|public| &public.columns),
+        &sumfold.eq_instance_weights,
+        field_cfg,
+    )?;
     let folded_trace = ProjectedTrace {
         bit_slices: fold_mle_tables(
             "bit_slices",
@@ -1015,20 +1021,10 @@ where
             &sumfold.eq_instance_weights,
             field_cfg,
         )?,
-        public_columns: fold_mle_tables(
-            "public_columns",
-            traces.iter().map(|trace| &trace.public_columns),
-            &sumfold.eq_instance_weights,
-            field_cfg,
-        )?,
+        public_columns: folded_public_columns.clone(),
     };
     let folded_public = ProjectedPublic {
-        columns: fold_mle_tables(
-            "public.columns",
-            publics.iter().map(|public| &public.columns),
-            &sumfold.eq_instance_weights,
-            field_cfg,
-        )?,
+        columns: folded_public_columns,
         bit_slices: fold_optional_mle_tables(
             "public.bit_slices",
             publics.iter().map(|public| public.bit_slices.as_ref()),
@@ -1701,7 +1697,7 @@ where
 }
 
 struct RelationSumFoldPrefixFastPath<F: PrimeField> {
-    traces: Box<[ProjectedTrace<F>]>,
+    tail_traces: Option<Box<[ProjectedTrace<F>]>>,
     beta: Vec<F>,
     booleanity_sources: Vec<ShaBooleanitySource>,
     linear: BinaryPrefixTailTable<F>,
@@ -1739,17 +1735,21 @@ where
         prefix_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<Self, ShaProjectionError> {
-        Self::new_owned(
-            traces.to_vec().into_boxed_slice(),
+        let coeff_tables = build_linear_residual_coeff_tables(traces, publics, r_ic, field_cfg)?;
+        let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
+        Self::new_with_linear_cache(
+            traces,
             publics,
             beta,
             r_ic,
+            &row_weights,
             a,
             lambda,
             rho,
             xi,
             booleanity_sources,
             prefix_vars,
+            &coeff_tables,
             field_cfg,
         )
     }
@@ -1783,6 +1783,77 @@ where
             booleanity_sources,
             prefix_vars,
             &coeff_tables,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_linear_cache(
+        traces: &[ProjectedTrace<F>],
+        publics: &[ProjectedPublic<F>],
+        beta: &[F],
+        _r_ic: &[F; SHA_ROW_VARS],
+        row_weights: &[F],
+        a: &F,
+        lambda: &F,
+        rho: &F,
+        xi: &F,
+        booleanity_sources: &[ShaBooleanitySource],
+        prefix_vars: usize,
+        coeff_tables: &[LinearResidualCoeffTable<F>],
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
+        if prefix_vars == 0 || prefix_vars > ell {
+            return Err(SumFoldError::Ell0TooLarge {
+                ell0: prefix_vars,
+                ell,
+            }
+            .into());
+        }
+        if coeff_tables.len() != traces.len() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: coeff_tables.len(),
+                expected: traces.len(),
+            });
+        }
+        if row_weights.len() != SHA_ROW_COUNT {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "row_weights",
+                col: 0,
+                got: row_weights.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+
+        let tail_vars = ell - prefix_vars;
+        let tail_len = binary_len(tail_vars);
+        let a_powers = build_sha_residual_eval_powers(a, field_cfg);
+        let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
+        let booleanity_weights =
+            build_booleanity_weights(rho, xi, booleanity_sources.len(), field_cfg);
+        let linear_values = build_sha_sumfold_linear_accumulator(
+            coeff_tables,
+            &a_powers,
+            &lambda_powers,
+            field_cfg,
+        )?;
+        let quadratic_values = build_sha_booleanity_prefix_tail_table(
+            traces,
+            booleanity_sources,
+            prefix_vars,
+            tail_len,
+            row_weights,
+            &booleanity_weights,
+            field_cfg,
+        );
+        Self::new_with_accumulators(
+            traces,
+            beta,
+            &linear_values,
+            &quadratic_values?,
+            booleanity_sources,
+            prefix_vars,
             field_cfg,
         )
     }
@@ -1858,8 +1929,8 @@ where
         )
     }
 
-    fn new_owned_with_accumulators(
-        traces: Box<[ProjectedTrace<F>]>,
+    fn new_with_accumulators(
+        traces: &[ProjectedTrace<F>],
         beta: &[F],
         linear_values: &[F],
         quadratic_values: &[F],
@@ -1867,7 +1938,7 @@ where
         prefix_vars: usize,
         field_cfg: &F::Config,
     ) -> Result<Self, ShaProjectionError> {
-        let ell = validate_sha_sumfold_traces(&traces, beta)?;
+        let ell = validate_sha_sumfold_traces(traces, beta)?;
         if prefix_vars == 0 || prefix_vars > ell {
             return Err(SumFoldError::Ell0TooLarge {
                 ell0: prefix_vars,
@@ -1904,8 +1975,14 @@ where
                 .push(eq_weights_or_one(&beta[round + 1..prefix_vars], field_cfg)?);
         }
 
+        let tail_traces = if tail_vars == 0 {
+            None
+        } else {
+            Some(traces.to_vec().into_boxed_slice())
+        };
+
         Ok(Self {
-            traces,
+            tail_traces,
             beta: beta.to_vec(),
             booleanity_sources: booleanity_sources.to_vec(),
             linear,
@@ -1916,6 +1993,30 @@ where
             round: 0,
             eq_bound: F::one_with_cfg(field_cfg),
         })
+    }
+
+    fn new_owned_with_accumulators(
+        traces: Box<[ProjectedTrace<F>]>,
+        beta: &[F],
+        linear_values: &[F],
+        quadratic_values: &[F],
+        booleanity_sources: &[ShaBooleanitySource],
+        prefix_vars: usize,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        let mut fast_path = Self::new_with_accumulators(
+            &traces,
+            beta,
+            linear_values,
+            quadratic_values,
+            booleanity_sources,
+            prefix_vars,
+            field_cfg,
+        )?;
+        if fast_path.beta.len() > fast_path.total_prefix_vars {
+            fast_path.tail_traces = Some(traces);
+        }
+        Ok(fast_path)
     }
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -1998,8 +2099,12 @@ where
             zero_inner.clone(),
         ));
 
+        let traces = self
+            .tail_traces
+            .as_deref()
+            .expect("tail traces must be present when tail variables remain");
         let source_tail_values = bind_sha_booleanity_sources_to_prefix(
-            &self.traces,
+            traces,
             &self.booleanity_sources,
             self.total_prefix_vars,
             tail_len,
@@ -2343,8 +2448,8 @@ where
         );
     }
 
-    let fast_path = RelationSumFoldPrefixFastPath::new_owned_with_accumulators(
-        traces.to_vec().into_boxed_slice(),
+    let fast_path = RelationSumFoldPrefixFastPath::new_with_accumulators(
+        traces,
         beta,
         linear_accumulator,
         quadratic_prefix_accumulator,
@@ -2537,8 +2642,8 @@ where
         );
     }
 
-    let fast_path = RelationSumFoldPrefixFastPath::new_owned_with_linear_cache(
-        traces.to_vec().into_boxed_slice(),
+    let fast_path = RelationSumFoldPrefixFastPath::new_with_linear_cache(
+        traces,
         publics,
         beta,
         r_ic,
@@ -3425,6 +3530,19 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    sha_word_bits_at_point_with_weights_unchecked(trace, col, shift, row_weights, field_cfg)
+}
+
+pub fn sha_word_bits_at_point_with_weights_unchecked<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    shift: usize,
+    row_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<[F; SHA_WORD_BITS], ShaProjectionError>
+where
+    F: PrimeField,
+{
     let mut bits: [F; SHA_WORD_BITS] = std::array::from_fn(|_| F::zero_with_cfg(field_cfg));
     for (row, row_weight) in row_weights.iter().enumerate() {
         for (bit, out) in bits.iter_mut().enumerate() {
@@ -3515,6 +3633,18 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    sha_int_at_point_with_weights_unchecked(trace, col, row_weights, field_cfg)
+}
+
+pub fn sha_int_at_point_with_weights_unchecked<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaIntCol,
+    row_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: PrimeField,
+{
     let mut value = F::zero_with_cfg(field_cfg);
     for (row, row_weight) in row_weights.iter().enumerate() {
         value += row_weight.clone() * int_scalar(trace, col, row, field_cfg)?;
@@ -3744,6 +3874,10 @@ fn validate_trace<F>(trace: &ProjectedTrace<F>) -> Result<(), ShaProjectionError
     validate_table("scalarized", &trace.scalarized, ShaWordCol::COUNT)?;
     validate_table("int_columns", &trace.int_columns, ShaIntCol::COUNT)?;
     validate_table("public_columns", &trace.public_columns, ShaPublicCol::COUNT)
+}
+
+pub fn validate_projected_trace<F>(trace: &ProjectedTrace<F>) -> Result<(), ShaProjectionError> {
+    validate_trace(trace)
 }
 
 fn validate_public<F>(public: &ProjectedPublic<F>) -> Result<(), ShaProjectionError> {

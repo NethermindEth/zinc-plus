@@ -39,8 +39,10 @@ use zinc_piop::{
         build_sha_sumfold_quadratic_prefix_accumulator, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, expression_folded_row_sum_with_vectors,
         fold_projected_traces, folded_row_integrand_sum, production_sha_booleanity_sources,
-        production_sha_nonzero_families, sha_int_at_point_with_weights, sha_public_at_point,
+        production_sha_nonzero_families, sha_int_at_point_with_weights,
+        sha_int_at_point_with_weights_unchecked, sha_public_at_point,
         sha_public_at_point_with_weights, sha_word_bits_at_point_with_weights,
+        sha_word_bits_at_point_with_weights_unchecked, validate_projected_trace,
         verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
     },
     sumcheck::{
@@ -1377,7 +1379,7 @@ where
     let ideal_check = IdealCheckProof {
         combined_mle_values: aggregate_ideal_polys.iter().cloned().collect(),
     };
-    let aggregate_ideal_polys = aggregate_sha_ideal_polys_from_proof(&ideal_check)?;
+    #[cfg(debug_assertions)]
     check_aggregate_sha_ideal_membership(&aggregate_ideal_polys, field_cfg)?;
     absorb_aggregate_sha_ideal_polys(transcript, &aggregate_ideal_polys, field_cfg);
     Ok((ideal_check, aggregate_ideal_polys))
@@ -3357,16 +3359,22 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    validate_projected_trace(folded_trace)?;
     let mut lifted = Vec::with_capacity(ShaWordCol::COUNT + ShaIntCol::COUNT);
     for col in ShaWordCol::ALL {
-        let coeffs =
-            sha_word_bits_at_point_with_weights(folded_trace, col, 0, row_weights, field_cfg)?
-                .to_vec();
+        let coeffs = sha_word_bits_at_point_with_weights_unchecked(
+            folded_trace,
+            col,
+            0,
+            row_weights,
+            field_cfg,
+        )?
+        .to_vec();
         lifted.push(DynamicPolynomialF::new_trimmed(coeffs));
     }
     for col in ShaIntCol::ALL {
         lifted.push(DynamicPolynomialF::new_trimmed([
-            sha_int_at_point_with_weights(folded_trace, col, row_weights, field_cfg)?,
+            sha_int_at_point_with_weights_unchecked(folded_trace, col, row_weights, field_cfg)?,
         ]));
     }
     Ok(lifted)

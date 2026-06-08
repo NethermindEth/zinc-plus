@@ -673,6 +673,20 @@ fn projection_sha_flatten_bit_columns<T>(columns: Vec<Vec<Vec<T>>>) -> MleTable<
     projection_sha_mle_table_from_columns(flattened)
 }
 
+fn projection_sha_flatten_bit_column_refs<T: Clone>(columns: &[&[Vec<T>]]) -> MleTable<T> {
+    let mut flattened = (0..columns.len() * SHA_WORD_BITS)
+        .map(|_| Vec::with_capacity(SHA_ROW_COUNT))
+        .collect::<Vec<_>>();
+    for (col_idx, rows) in columns.iter().enumerate() {
+        for bits in rows.iter() {
+            for (bit, value) in bits.iter().enumerate() {
+                flattened[bit_slice_index(col_idx, bit, SHA_WORD_BITS)].push(value.clone());
+            }
+        }
+    }
+    projection_sha_mle_table_from_columns(flattened)
+}
+
 fn projection_sha_scalarize_bit_slices(
     bit_slices: &MleTable<F>,
     a: &F,
@@ -795,15 +809,16 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
         )?;
         let public_columns =
             projection_sha_projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
+        let public_bit_columns = [
+            pa_a.as_slice(),
+            pa_e.as_slice(),
+            pa_a.as_slice(),
+            pa_e.as_slice(),
+            message.as_slice(),
+        ];
         Ok(ProjectedPublic {
             columns: public_columns,
-            bit_slices: Some(projection_sha_flatten_bit_columns(vec![
-                pa_a.clone(),
-                pa_e.clone(),
-                pa_a,
-                pa_e,
-                message,
-            ])),
+            bit_slices: Some(projection_sha_flatten_bit_column_refs(&public_bit_columns)),
         })
     }
 
@@ -847,14 +862,18 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
             sha256_cols::PA_C_FF_E,
         ];
 
-        let bit_columns = word_sources
+        let word_cols = word_sources
             .iter()
-            .map(|&col| {
-                projection_sha_project_binary_source(
-                    projection_sha_binary_col(public_trace, witness_trace, col)?,
-                    field_cfg,
-                )
-            })
+            .map(|&col| projection_sha_binary_col(public_trace, witness_trace, col))
+            .collect::<Result<Vec<_>, _>>()?;
+        let int_cols = int_sources
+            .iter()
+            .map(|&col| projection_sha_int_col(public_trace, witness_trace, col))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let bit_columns = word_cols
+            .iter()
+            .map(|&col| projection_sha_project_binary_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let bit_slices = projection_sha_flatten_bit_columns(bit_columns);
         let scalarized = projection_sha_scalarize_bit_slices(
@@ -876,15 +895,17 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
         )?;
         let public_columns =
             projection_sha_projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
-        let int_columns = int_sources
+        let int_columns = int_cols
             .iter()
-            .map(|&col| {
-                projection_sha_project_int_source(
-                    projection_sha_int_col(public_trace, witness_trace, col)?,
-                    field_cfg,
-                )
-            })
+            .map(|&col| projection_sha_project_int_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
+        let public_bit_columns = [
+            pa_a.as_slice(),
+            pa_e.as_slice(),
+            pa_a.as_slice(),
+            pa_e.as_slice(),
+            message.as_slice(),
+        ];
 
         let trace = ProjectedTrace {
             bit_slices,
@@ -894,33 +915,27 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
         };
         let public = ProjectedPublic {
             columns: public_columns,
-            bit_slices: Some(projection_sha_flatten_bit_columns(vec![
-                pa_a.clone(),
-                pa_e.clone(),
-                pa_a,
-                pa_e,
-                message,
-            ])),
+            bit_slices: Some(projection_sha_flatten_bit_column_refs(&public_bit_columns)),
         };
         Ok((
             trace,
             public,
             ProductionShaWitnessPolys {
-                binary: word_sources
+                binary: word_cols
                     .iter()
                     .map(|&col| {
                         projection_sha_truncate_row_domain(
-                            projection_sha_binary_col(public_trace, witness_trace, col)?,
+                            col,
                             "SHA binary witness row-domain projection",
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 arbitrary: Vec::new(),
-                int: int_sources
+                int: int_cols
                     .iter()
                     .map(|&col| {
                         projection_sha_truncate_row_domain(
-                            projection_sha_int_col(public_trace, witness_trace, col)?,
+                            col,
                             "SHA int witness row-domain projection",
                         )
                     })
