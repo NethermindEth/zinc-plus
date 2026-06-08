@@ -235,6 +235,268 @@ where
 
         Ok(())
     }
+
+    /// Open two folded Hyrax commitments that share the same row bases as one
+    /// mixed single-row proof.
+    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_open_two_field_lane_groups_single_row<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        ck_a: &HyraxCommitmentKey<C>,
+        field_lanes_a: &[Vec<&[F]>],
+        prover_data_a: &HyraxProverData<C>,
+        ck_b: &HyraxCommitmentKey<C>,
+        field_lanes_b: &[Vec<&[F]>],
+        prover_data_b: &HyraxProverData<C>,
+        point: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C> + DelayedFieldProductSum,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        if field_lanes_a.is_empty() || field_lanes_b.is_empty() {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax mixed field-lane opening expects two non-empty groups".to_string(),
+            ));
+        }
+        validate_field_lanes::<C, F>(ck_a, field_lanes_a, point.len(), prover_data_a)?;
+        validate_field_lanes::<C, F>(ck_b, field_lanes_b, point.len(), prover_data_b)?;
+        validate_shared_commitment_keys(ck_a, ck_b)?;
+        if prover_data_a.num_rows != 1 || prover_data_b.num_rows != 1 {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax mixed field-lane opening requires a single row".to_string(),
+            ));
+        }
+
+        let q1 = eq_tensor_f::<F>(point, field_cfg);
+        let alpha_count_a = field_lanes_a.len() * prover_data_a.num_lanes;
+        let alpha_count_b = field_lanes_b.len() * prover_data_b.num_lanes;
+        let alphas =
+            sample_scalars::<C>(&mut transcript.fs_transcript, alpha_count_a + alpha_count_b);
+        let alpha_fields = alphas
+            .iter()
+            .map(|alpha| F::scalar_to_field(alpha, field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut combined_row = vec![F::zero_with_cfg(field_cfg); ck_a.num_cols];
+        let mut rho_star = C::ScalarField::zero();
+        for (poly_idx, lanes) in field_lanes_a.iter().enumerate() {
+            for (lane, values) in lanes.iter().enumerate() {
+                let alpha_idx = alpha_index_dynamic(prover_data_a.num_lanes, poly_idx, lane);
+                let alpha = &alpha_fields[alpha_idx];
+                for (acc, value) in combined_row.iter_mut().zip(values.iter()) {
+                    *acc += value.clone() * alpha.clone();
+                }
+                if ck_a.blinding_mode.is_blinded() {
+                    let blind_idx = commitment_index_dynamic(
+                        prover_data_a.num_lanes,
+                        poly_idx,
+                        lane,
+                        0,
+                        prover_data_a.num_rows,
+                    );
+                    rho_star += alphas[alpha_idx] * prover_data_a.blinds[blind_idx];
+                }
+            }
+        }
+        for (poly_idx, lanes) in field_lanes_b.iter().enumerate() {
+            for (lane, values) in lanes.iter().enumerate() {
+                let local_alpha_idx = alpha_index_dynamic(prover_data_b.num_lanes, poly_idx, lane);
+                let alpha_idx = alpha_count_a + local_alpha_idx;
+                let alpha = &alpha_fields[alpha_idx];
+                for (acc, value) in combined_row.iter_mut().zip(values.iter()) {
+                    *acc += value.clone() * alpha.clone();
+                }
+                if ck_b.blinding_mode.is_blinded() {
+                    let blind_idx = commitment_index_dynamic(
+                        prover_data_b.num_lanes,
+                        poly_idx,
+                        lane,
+                        0,
+                        prover_data_b.num_rows,
+                    );
+                    rho_star += alphas[alpha_idx] * prover_data_b.blinds[blind_idx];
+                }
+            }
+        }
+
+        let b = F::delayed_sum_of_products(&combined_row, &q1, F::zero_with_cfg(field_cfg));
+        transcript.write_field_elements(&[b])?;
+
+        let combined_scalars = combined_row
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        write_scalars::<C>(transcript, &combined_scalars)?;
+        if ck_a.blinding_mode.is_blinded() {
+            write_scalar::<C>(transcript, &rho_star)?;
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_open_two_field_lane_groups_single_row<
+        F,
+        EvalA,
+        LanesA,
+        EvalB,
+        LanesB,
+        const CHECK_FOR_OVERFLOW: bool,
+        const D: usize,
+    >(
+        transcript: &mut PcsVerifierTranscript,
+        vk_a: &HyraxVerifierKey<C>,
+        commitment_a: &HyraxCommitment<C>,
+        lifted_evals_a: &[DynamicPolynomialF<F>],
+        vk_b: &HyraxVerifierKey<C>,
+        commitment_b: &HyraxCommitment<C>,
+        lifted_evals_b: &[DynamicPolynomialF<F>],
+        point: &[F],
+        opening_proof: &[u8],
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+        EvalA: Clone + Debug + Send + Sync,
+        EvalB: Clone + Debug + Send + Sync,
+        LanesA: HyraxLanes<C, EvalA, D>,
+        LanesB: HyraxLanes<C, EvalB, D>,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        let original_stream =
+            std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
+        let result = (|| {
+            if commitment_a.blinding_mode != vk_a.blinding_mode
+                || commitment_b.blinding_mode != vk_b.blinding_mode
+            {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax commitment blinding mode mismatch".to_string(),
+                ));
+            }
+            validate_commitment_shape::<C, LanesA, EvalA, D>(commitment_a)?;
+            validate_commitment_shape::<C, LanesB, EvalB, D>(commitment_b)?;
+            validate_shared_verifier_keys(vk_a, vk_b)?;
+            if lifted_evals_a.len() != commitment_a.batch_size {
+                return Err(ZipError::InvalidPcsParam(format!(
+                    "Hyrax verifier expected {} left lifted evals, got {}",
+                    commitment_a.batch_size,
+                    lifted_evals_a.len()
+                )));
+            }
+            if lifted_evals_b.len() != commitment_b.batch_size {
+                return Err(ZipError::InvalidPcsParam(format!(
+                    "Hyrax verifier expected {} right lifted evals, got {}",
+                    commitment_b.batch_size,
+                    lifted_evals_b.len()
+                )));
+            }
+            if commitment_a.batch_size == 0 || commitment_b.batch_size == 0 {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax mixed opening expects two non-empty commitment groups".to_string(),
+                ));
+            }
+
+            let n = 1usize << point.len();
+            let expected_rows = num_rows(n, vk_a.num_cols)?;
+            if expected_rows != 1 || commitment_a.num_rows != 1 || commitment_b.num_rows != 1 {
+                return Err(ZipError::InvalidPcsParam(
+                    "Hyrax mixed opening verifier requires a single row".to_string(),
+                ));
+            }
+
+            let point_scalar = point
+                .iter()
+                .map(F::field_to_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
+            let q1_scalar = eq_tensor_scalar::<C>(&point_scalar);
+            let alpha_count_a = commitment_a.batch_size * commitment_a.num_lanes;
+            let alpha_count_b = commitment_b.batch_size * commitment_b.num_lanes;
+            let alphas =
+                sample_scalars::<C>(&mut transcript.fs_transcript, alpha_count_a + alpha_count_b);
+
+            let b_f = transcript.read_field_elements::<F>(1)?;
+            let mut expected_eval = F::zero_with_cfg(field_cfg);
+            for (poly_idx, lifted_eval) in lifted_evals_a.iter().enumerate() {
+                for lane in 0..commitment_a.num_lanes {
+                    let alpha_idx = alpha_index_dynamic(commitment_a.num_lanes, poly_idx, lane);
+                    let alpha = F::scalar_to_field(&alphas[alpha_idx], field_cfg)?;
+                    let mut term = LanesA::lifted_eval::<F>(lifted_eval, lane, field_cfg)?;
+                    term *= &alpha;
+                    expected_eval += &term;
+                }
+            }
+            for (poly_idx, lifted_eval) in lifted_evals_b.iter().enumerate() {
+                for lane in 0..commitment_b.num_lanes {
+                    let local_alpha_idx =
+                        alpha_index_dynamic(commitment_b.num_lanes, poly_idx, lane);
+                    let alpha_idx = alpha_count_a + local_alpha_idx;
+                    let alpha = F::scalar_to_field(&alphas[alpha_idx], field_cfg)?;
+                    let mut term = LanesB::lifted_eval::<F>(lifted_eval, lane, field_cfg)?;
+                    term *= &alpha;
+                    expected_eval += &term;
+                }
+            }
+            if b_f[0] != expected_eval {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax mixed evaluation consistency failure".to_string(),
+                ));
+            }
+
+            let b_scalar = F::field_to_scalar(&b_f[0])?;
+            let combined_row = read_scalars::<C>(transcript, vk_a.num_cols)?;
+            let rho_star = if vk_a.blinding_mode.is_blinded() {
+                Some(read_scalar::<C>(transcript)?)
+            } else {
+                None
+            };
+
+            let mut lhs = C::ScalarField::zero();
+            for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
+                lhs += *value * weight;
+            }
+            if lhs != b_scalar {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax mixed row coherence failure".to_string(),
+                ));
+            }
+
+            let mut comm_bases =
+                Vec::with_capacity(commitment_a.comm_affine.len() + commitment_b.comm_affine.len());
+            comm_bases.extend_from_slice(&commitment_a.comm_affine);
+            comm_bases.extend_from_slice(&commitment_b.comm_affine);
+            let comm_lc = msm_unchecked::<C>(&comm_bases, &alphas)?;
+
+            let mut expected =
+                msm_unchecked::<C>(&vk_a.bases[..combined_row.len()], &combined_row)?;
+            if let Some(rho_star) = rho_star {
+                expected += vk_a.h * rho_star;
+            }
+
+            if comm_lc != expected {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax mixed commitment opening failure".to_string(),
+                ));
+            }
+
+            Ok(())
+        })();
+        let consumed = transcript.stream.position() == opening_proof.len() as u64;
+        transcript.stream = original_stream;
+        result?;
+        if !consumed {
+            return Err(ZipError::InvalidPcsOpen(
+                "PCS mixed opening proof has trailing bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -497,28 +759,25 @@ impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLa
                     let lower = row_idx * ck.num_cols;
                     let upper = (lower + ck.num_cols).min(poly.evaluations.len());
                     let row_len = upper - lower;
-                    let mut row_comms = BoolSubsetMsm::<6>::msm_bool_rows_from_window_masks::<
-                        C,
-                        D,
-                        _,
-                    >(
-                        &ck.msm_ck,
-                        row_len,
-                        use_inner_parallelism,
-                        |offset, len| {
-                            let mut masks = [0usize; D];
-                            for bit_idx in 0..len {
-                                let eval = &poly.evaluations[lower + offset + bit_idx];
-                                for (lane, mask) in masks.iter_mut().enumerate() {
-                                    if eval.coeff(lane) {
-                                        *mask |= 1usize << bit_idx;
+                    let mut row_comms =
+                        BoolSubsetMsm::<6>::msm_bool_rows_from_window_masks::<C, D, _>(
+                            &ck.msm_ck,
+                            row_len,
+                            use_inner_parallelism,
+                            |offset, len| {
+                                let mut masks = [0usize; D];
+                                for bit_idx in 0..len {
+                                    let eval = &poly.evaluations[lower + offset + bit_idx];
+                                    for (lane, mask) in masks.iter_mut().enumerate() {
+                                        if eval.coeff(lane) {
+                                            *mask |= 1usize << bit_idx;
+                                        }
                                     }
                                 }
-                            }
-                            masks
-                        },
-                    )
-                    .map_err(msm_err)?;
+                                masks
+                            },
+                        )
+                        .map_err(msm_err)?;
 
                     if ck.blinding_mode.is_blinded() {
                         for (lane, row_comm) in row_comms.iter_mut().enumerate() {
@@ -1438,6 +1697,39 @@ fn same_prover_data_shape<C: AffineRepr>(
         && lhs.num_rows == rhs.num_rows
         && lhs.blinding_mode == rhs.blinding_mode
         && lhs.blinds.len() == rhs.blinds.len()
+}
+
+fn validate_shared_commitment_keys<C: AffineRepr>(
+    lhs: &HyraxCommitmentKey<C>,
+    rhs: &HyraxCommitmentKey<C>,
+) -> Result<(), ZipError> {
+    if lhs.num_cols != rhs.num_cols
+        || lhs.blinding_mode != rhs.blinding_mode
+        || lhs.msm_ck.num_cols != rhs.msm_ck.num_cols
+        || lhs.msm_ck.bases != rhs.msm_ck.bases
+        || lhs.msm_ck.h != rhs.msm_ck.h
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax mixed opening requires shared commitment bases".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_shared_verifier_keys<C: AffineRepr>(
+    lhs: &HyraxVerifierKey<C>,
+    rhs: &HyraxVerifierKey<C>,
+) -> Result<(), ZipError> {
+    if lhs.num_cols != rhs.num_cols
+        || lhs.blinding_mode != rhs.blinding_mode
+        || lhs.bases != rhs.bases
+        || lhs.h != rhs.h
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax mixed opening requires shared verifier bases".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_trusted_bases<C: AffineRepr>(

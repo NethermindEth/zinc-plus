@@ -892,40 +892,39 @@ where
                 validate_public(public)?;
             }
             let constants = ShaResidualPolyConstants::new(field_cfg);
-            let mut coeffs = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
-            let partials = cfg_chunks!(row_weights, 8)
+            let partials = cfg_chunks!(row_weights, 64)
                 .enumerate()
                 .map(|(chunk_idx, row_weight_chunk)| {
-                    let mut partial = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
-                    let row_offset = chunk_idx * 8;
+                    let mut partial = FixedResidualCoeffAccumulator::new(
+                        NUM_SHA_RESIDUAL_FAMILIES,
+                        SHA_RESIDUAL_EVAL_POWER_COUNT,
+                        field_cfg,
+                    );
+                    let row_offset = chunk_idx * 64;
                     for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
                         let row = row_offset + row_in_chunk;
-                        let residuals = residual_polys_at_row_with_constants(
-                            trace, public, row, &constants, field_cfg,
+                        accumulate_residual_row_fixed(
+                            &mut partial,
+                            trace,
+                            public,
+                            row,
+                            row_weight,
+                            &constants,
+                            field_cfg,
                         )?;
-                        for (family_idx, residual) in residuals.iter().enumerate() {
-                            add_scaled_poly_assign(&mut partial[family_idx], residual, row_weight);
-                        }
                     }
                     Ok(partial)
                 })
                 .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+            let mut coeffs = FixedResidualCoeffAccumulator::new(
+                NUM_SHA_RESIDUAL_FAMILIES,
+                SHA_RESIDUAL_EVAL_POWER_COUNT,
+                field_cfg,
+            );
             for partial in partials {
-                for (dst, residual) in coeffs.iter_mut().zip(partial) {
-                    if residual.is_zero() {
-                        continue;
-                    }
-                    if dst.coeffs.len() < residual.coeffs.len() {
-                        dst.coeffs
-                            .resize_with(residual.coeffs.len(), || F::zero_with_cfg(field_cfg));
-                    }
-                    for (dst_coeff, coeff) in dst.coeffs.iter_mut().zip(residual.coeffs) {
-                        *dst_coeff += coeff;
-                    }
-                }
+                coeffs.add_assign(partial);
             }
-            coeffs.iter_mut().for_each(DynamicPolynomialF::trim);
-            Ok(LinearResidualCoeffTable { coeffs })
+            Ok(coeffs.into_table())
         })
         .collect::<Result<Vec<_>, _>>()
 }
@@ -3110,42 +3109,31 @@ where
     let suffix_count = suffix_sources.len();
     let suffix_needs_virtuals = sources_need_virtuals(suffix_sources);
     let small_square_fields: Vec<F> = small_square_field_table(field_cfg);
-    let word_bit_coeff_table: Vec<F> = if word_bit_source_count == 0 {
-        Vec::new()
-    } else {
-        let mask_count = 1usize << prefix_len;
-        let mut table = Vec::with_capacity(mask_count * ternary_len);
-        for mask in 0..mask_count {
-            let source_mask = u8::try_from(mask).map_err(|_| {
-                ShaProjectionError::NonCanonicalProofObject(
-                    "booleanity prefix masks require at most eight prefix entries",
-                )
-            })?;
-            for plan in &coeff_plans {
-                table.push(booleanity_word_bit_mask_degree_two_coeff(
-                    source_mask,
-                    plan,
-                    &small_square_fields,
-                    field_cfg,
-                ));
-            }
+    let mask_count = 1usize << prefix_len;
+    let mut mask_coeff_table = Vec::with_capacity(mask_count * ternary_len);
+    for mask in 0..mask_count {
+        let source_mask = u8::try_from(mask).map_err(|_| {
+            ShaProjectionError::NonCanonicalProofObject(
+                "booleanity prefix masks require at most eight prefix entries",
+            )
+        })?;
+        for plan in &coeff_plans {
+            mask_coeff_table.push(booleanity_word_bit_mask_degree_two_coeff(
+                source_mask,
+                plan,
+                &small_square_fields,
+                field_cfg,
+            ));
         }
-        table
-    };
+    }
+    let one = F::one_with_cfg(field_cfg);
     let partials = cfg_chunks!(row_weights, 8)
         .enumerate()
         .map(|(chunk_idx, row_weight_chunk)| {
             let row_offset = chunk_idx * 8;
             let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
             let mut suffix_values = vec![F::zero_with_cfg(field_cfg); prefix_len * suffix_count];
-            let mut mask_weights = vec![
-                F::zero_with_cfg(field_cfg);
-                if word_bit_source_count == 0 {
-                    0
-                } else {
-                    1usize << prefix_len
-                }
-            ];
+            let mut mask_weights = vec![F::zero_with_cfg(field_cfg); mask_count];
             let mut touched_masks = Vec::new();
             for tail in 0..tail_len {
                 for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
@@ -3177,7 +3165,7 @@ where
                         let source_weight = row_weight.clone() * &mask_weights[mask_idx];
                         let coeff_offset = mask_idx * ternary_len;
                         for ternary_idx in 0..ternary_len {
-                            let coeff = &word_bit_coeff_table[coeff_offset + ternary_idx];
+                            let coeff = &mask_coeff_table[coeff_offset + ternary_idx];
                             if F::is_zero(&coeff) {
                                 continue;
                             }
@@ -3201,7 +3189,41 @@ where
                         )?;
                     }
 
+                    let mut generic_suffixes = Vec::new();
                     for suffix_idx in 0..suffix_count {
+                        let source_idx = word_bit_source_count + suffix_idx;
+                        let booleanity_weight = &booleanity_weights[source_idx];
+                        if let Some(mask_idx) = booleanity_prefix_values_binary_mask(
+                            &suffix_values,
+                            suffix_count,
+                            suffix_idx,
+                            &one,
+                        ) {
+                            if F::is_zero(&mask_weights[mask_idx]) {
+                                touched_masks.push(mask_idx);
+                            }
+                            mask_weights[mask_idx] += booleanity_weight.clone();
+                        } else {
+                            generic_suffixes.push(suffix_idx);
+                        }
+                    }
+
+                    for &mask_idx in &touched_masks {
+                        let source_weight = row_weight.clone() * &mask_weights[mask_idx];
+                        let coeff_offset = mask_idx * ternary_len;
+                        for ternary_idx in 0..ternary_len {
+                            let coeff = &mask_coeff_table[coeff_offset + ternary_idx];
+                            if F::is_zero(&coeff) {
+                                continue;
+                            }
+                            partial[tail * ternary_len + ternary_idx] +=
+                                source_weight.clone() * coeff;
+                        }
+                        mask_weights[mask_idx] = F::zero_with_cfg(field_cfg);
+                    }
+                    touched_masks.clear();
+
+                    for suffix_idx in generic_suffixes {
                         let source_idx = word_bit_source_count + suffix_idx;
                         let booleanity_weight = &booleanity_weights[source_idx];
                         let source_weight = row_weight.clone() * booleanity_weight;
@@ -3390,6 +3412,37 @@ where
     }
 
     delta.clone() * delta
+}
+
+fn booleanity_prefix_values_binary_mask<F>(
+    source_values: &[F],
+    source_count: usize,
+    source_idx: usize,
+    one: &F,
+) -> Option<usize>
+where
+    F: PrimeField,
+{
+    if source_count == 0 {
+        return Some(0);
+    }
+    let prefix_len = source_values.len() / source_count;
+    if prefix_len > usize::BITS as usize {
+        return None;
+    }
+    let mut mask = 0usize;
+    for prefix in 0..prefix_len {
+        let value = &source_values[prefix * source_count + source_idx];
+        if F::is_zero(value) {
+            continue;
+        }
+        if value == one {
+            mask |= 1usize << prefix;
+        } else {
+            return None;
+        }
+    }
+    Some(mask)
 }
 
 fn booleanity_word_bit_mask_degree_two_coeff<F>(
@@ -4034,6 +4087,834 @@ impl<F: PrimeField> ShaResidualPolyConstants<F> {
             high_mu_1_bit_coeff: pow_two(33, field_cfg),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct FixedResidualCoeffAccumulator<F: PrimeField> {
+    coeffs: Vec<Vec<F>>,
+}
+
+impl<F> FixedResidualCoeffAccumulator<F>
+where
+    F: PrimeField,
+{
+    fn new(family_count: usize, coeff_count: usize, field_cfg: &F::Config) -> Self {
+        Self {
+            coeffs: (0..family_count)
+                .map(|_| vec![F::zero_with_cfg(field_cfg); coeff_count])
+                .collect(),
+        }
+    }
+
+    fn add_assign(&mut self, rhs: Self) {
+        for (dst_family, rhs_family) in self.coeffs.iter_mut().zip(rhs.coeffs) {
+            for (dst, rhs) in dst_family.iter_mut().zip(rhs_family) {
+                *dst += rhs;
+            }
+        }
+    }
+
+    fn into_table(mut self) -> LinearResidualCoeffTable<F> {
+        let coeffs = self
+            .coeffs
+            .drain(..)
+            .map(|mut coeffs| {
+                while coeffs.last().is_some_and(F::is_zero) {
+                    coeffs.pop();
+                }
+                DynamicPolynomialF { coeffs }
+            })
+            .collect();
+        LinearResidualCoeffTable { coeffs }
+    }
+
+    #[inline(always)]
+    fn add_scaled_to_family_idx(
+        &mut self,
+        family_idx: usize,
+        coeff_idx: usize,
+        value: &F,
+        scale: &F,
+    ) {
+        if F::is_zero(value) || F::is_zero(scale) {
+            return;
+        }
+        debug_assert!(family_idx < self.coeffs.len());
+        debug_assert!(coeff_idx < self.coeffs[family_idx].len());
+        self.coeffs[family_idx][coeff_idx] += value.clone() * scale;
+    }
+
+    #[inline(always)]
+    fn add_scaled(&mut self, family: ShaResidualFamily, coeff_idx: usize, value: &F, scale: &F) {
+        self.add_scaled_to_family_idx(family.index(), coeff_idx, value, scale);
+    }
+
+    #[inline(always)]
+    fn add_const_scaled(&mut self, family: ShaResidualFamily, value: &F, scale: &F) {
+        self.add_scaled(family, 0, value, scale);
+    }
+
+    fn add_trace_word_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        row_shift: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for bit in 0..SHA_WORD_BITS {
+            let value = bit_at_shifted_or_zero(trace, col, row, row_shift, bit, field_cfg)?;
+            self.add_scaled(family, bit, &value, scale);
+        }
+        Ok(())
+    }
+
+    fn add_trace_word_rot_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        rot: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        debug_assert!(rot < SHA_WORD_BITS);
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for bit in 0..SHA_WORD_BITS {
+            let value = bit_at_shifted_or_zero(trace, col, row, 0, bit, field_cfg)?;
+            self.add_scaled(family, (bit + rot) % SHA_WORD_BITS, &value, scale);
+        }
+        Ok(())
+    }
+
+    fn add_trace_word_shift_r_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        shift: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        debug_assert!(shift < SHA_WORD_BITS);
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for out_bit in 0..(SHA_WORD_BITS - shift) {
+            let value = bit_at_shifted_or_zero(trace, col, row, 0, out_bit + shift, field_cfg)?;
+            self.add_scaled(family, out_bit, &value, scale);
+        }
+        Ok(())
+    }
+
+    fn add_trace_word_sparse_product_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        shifts: &[usize],
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for bit in 0..SHA_WORD_BITS {
+            let value = bit_at_shifted_or_zero(trace, col, row, 0, bit, field_cfg)?;
+            for &shift in shifts {
+                self.add_scaled(family, bit + shift, &value, scale);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_trace_int_const_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        trace: &ProjectedTrace<F>,
+        col: ShaIntCol,
+        row: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        let value = int_scalar(trace, col, row, field_cfg)?;
+        self.add_const_scaled(family, &value, scale);
+        Ok(())
+    }
+
+    fn add_public_scalar_const_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        public: &ProjectedPublic<F>,
+        col: ShaPublicCol,
+        row: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        let value = public_scalar(public, col, row, field_cfg)?;
+        self.add_const_scaled(family, &value, scale);
+        Ok(())
+    }
+
+    fn add_public_word_or_const_scaled(
+        &mut self,
+        family: ShaResidualFamily,
+        public: &ProjectedPublic<F>,
+        col: ShaPublicCol,
+        row: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        let Some(word_col) = col.public_word_col() else {
+            return self.add_public_scalar_const_scaled(family, public, col, row, scale, field_cfg);
+        };
+        let Some(bit_slices) = &public.bit_slices else {
+            return self.add_public_scalar_const_scaled(family, public, col, row, scale, field_cfg);
+        };
+        if row >= SHA_ROW_COUNT {
+            return Ok(());
+        }
+        let col_idx = word_col.index();
+        for bit in 0..SHA_WORD_BITS {
+            let value = scalar_from_table(
+                "public.bit_slices",
+                bit_slices,
+                bit_slice_index(col_idx, bit, SHA_WORD_BITS),
+                row,
+                field_cfg,
+            )?;
+            self.add_scaled(family, bit, &value, scale);
+        }
+        Ok(())
+    }
+}
+
+#[inline(always)]
+fn neg<F: PrimeField>(value: &F) -> F {
+    -value.clone()
+}
+
+#[inline(always)]
+fn scaled<F: PrimeField>(lhs: &F, rhs: &F) -> F {
+    lhs.clone() * rhs
+}
+
+fn add_mu_contribution<F>(
+    acc: &mut FixedResidualCoeffAccumulator<F>,
+    family: ShaResidualFamily,
+    trace: &ProjectedTrace<F>,
+    row: usize,
+    low_shift: usize,
+    high_shift: usize,
+    high_coeff: &F,
+    row_weight: &F,
+    constants: &ShaResidualPolyConstants<F>,
+    field_cfg: &F::Config,
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let low_scale = scaled(row_weight, &constants.low_mu_coeff);
+    let high_scale = neg(&scaled(row_weight, high_coeff));
+    acc.add_trace_word_shift_r_scaled(
+        family,
+        trace,
+        ShaWordCol::MuPacked,
+        row,
+        low_shift,
+        &low_scale,
+        field_cfg,
+    )?;
+    acc.add_trace_word_shift_r_scaled(
+        family,
+        trace,
+        ShaWordCol::MuPacked,
+        row,
+        high_shift,
+        &high_scale,
+        field_cfg,
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_residual_row_fixed<F>(
+    acc: &mut FixedResidualCoeffAccumulator<F>,
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row: usize,
+    row_weight: &F,
+    constants: &ShaResidualPolyConstants<F>,
+    field_cfg: &F::Config,
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if F::is_zero(row_weight) {
+        return Ok(());
+    }
+
+    let minus_row = neg(row_weight);
+    let minus_two_row = neg(&scaled(row_weight, &constants.two));
+
+    // R0/R1: big-sigma residuals. Multiplication by the sparse rotation
+    // polynomial is just three coefficient shifts.
+    acc.add_trace_word_sparse_product_scaled(
+        ShaResidualFamily::R0BigSigmaA,
+        trace,
+        ShaWordCol::A,
+        row,
+        &[10, 19, 30],
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R0BigSigmaA,
+        trace,
+        ShaWordCol::Sigma0,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R0BigSigmaA,
+        trace,
+        ShaWordCol::OvSigma0,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_sparse_product_scaled(
+        ShaResidualFamily::R1BigSigmaE,
+        trace,
+        ShaWordCol::E,
+        row,
+        &[7, 21, 26],
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R1BigSigmaE,
+        trace,
+        ShaWordCol::Sigma1,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R1BigSigmaE,
+        trace,
+        ShaWordCol::OvSigma1,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    // R2/R3: small-sigma residuals over the message schedule word.
+    for rot in [25usize, 14] {
+        acc.add_trace_word_rot_scaled(
+            ShaResidualFamily::R2SmallSigma0,
+            trace,
+            ShaWordCol::W,
+            row,
+            rot,
+            row_weight,
+            field_cfg,
+        )?;
+    }
+    acc.add_trace_word_shift_r_scaled(
+        ShaResidualFamily::R2SmallSigma0,
+        trace,
+        ShaWordCol::W,
+        row,
+        3,
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R2SmallSigma0,
+        trace,
+        ShaWordCol::SmallSigma0,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R2SmallSigma0,
+        trace,
+        ShaWordCol::OvSmallSigma0,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    for rot in [15usize, 13] {
+        acc.add_trace_word_rot_scaled(
+            ShaResidualFamily::R3SmallSigma1,
+            trace,
+            ShaWordCol::W,
+            row,
+            rot,
+            row_weight,
+            field_cfg,
+        )?;
+    }
+    acc.add_trace_word_shift_r_scaled(
+        ShaResidualFamily::R3SmallSigma1,
+        trace,
+        ShaWordCol::W,
+        row,
+        10,
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R3SmallSigma1,
+        trace,
+        ShaWordCol::SmallSigma1,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R3SmallSigma1,
+        trace,
+        ShaWordCol::OvSmallSigma1,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    // R4: schedule transition.
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R4Schedule,
+        trace,
+        ShaWordCol::W,
+        row,
+        16,
+        row_weight,
+        field_cfg,
+    )?;
+    for (col, shift) in [
+        (ShaWordCol::W, 0usize),
+        (ShaWordCol::SmallSigma0, 1),
+        (ShaWordCol::W, 9),
+        (ShaWordCol::SmallSigma1, 14),
+    ] {
+        acc.add_trace_word_scaled(
+            ShaResidualFamily::R4Schedule,
+            trace,
+            col,
+            row,
+            shift,
+            &minus_row,
+            field_cfg,
+        )?;
+    }
+    add_mu_contribution(
+        acc,
+        ShaResidualFamily::R4Schedule,
+        trace,
+        row,
+        0,
+        2,
+        &constants.high_mu_w_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R4Schedule,
+        trace,
+        ShaIntCol::CompSchedule,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    // R5/R6: compression round updates.
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R5UpdateA,
+        trace,
+        ShaWordCol::A,
+        row,
+        4,
+        row_weight,
+        field_cfg,
+    )?;
+    for (col, shift) in [
+        (ShaWordCol::E, 0usize),
+        (ShaWordCol::Sigma1, 3),
+        (ShaWordCol::Uef, 3),
+        (ShaWordCol::UNegEg, 3),
+        (ShaWordCol::W, 0),
+        (ShaWordCol::Sigma0, 3),
+        (ShaWordCol::Maj, 3),
+    ] {
+        acc.add_trace_word_scaled(
+            ShaResidualFamily::R5UpdateA,
+            trace,
+            col,
+            row,
+            shift,
+            &minus_row,
+            field_cfg,
+        )?;
+    }
+    acc.add_public_scalar_const_scaled(
+        ShaResidualFamily::R5UpdateA,
+        public,
+        ShaPublicCol::K,
+        row + 3,
+        &minus_row,
+        field_cfg,
+    )?;
+    add_mu_contribution(
+        acc,
+        ShaResidualFamily::R5UpdateA,
+        trace,
+        row,
+        2,
+        5,
+        &constants.high_mu_3_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R5UpdateA,
+        trace,
+        ShaIntCol::CompUpdateA,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R6UpdateE,
+        trace,
+        ShaWordCol::E,
+        row,
+        4,
+        row_weight,
+        field_cfg,
+    )?;
+    for (col, shift) in [
+        (ShaWordCol::A, 0usize),
+        (ShaWordCol::E, 0),
+        (ShaWordCol::Sigma1, 3),
+        (ShaWordCol::Uef, 3),
+        (ShaWordCol::UNegEg, 3),
+        (ShaWordCol::W, 0),
+    ] {
+        acc.add_trace_word_scaled(
+            ShaResidualFamily::R6UpdateE,
+            trace,
+            col,
+            row,
+            shift,
+            &minus_row,
+            field_cfg,
+        )?;
+    }
+    acc.add_public_scalar_const_scaled(
+        ShaResidualFamily::R6UpdateE,
+        public,
+        ShaPublicCol::K,
+        row + 3,
+        &minus_row,
+        field_cfg,
+    )?;
+    add_mu_contribution(
+        acc,
+        ShaResidualFamily::R6UpdateE,
+        trace,
+        row,
+        5,
+        8,
+        &constants.high_mu_3_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R6UpdateE,
+        trace,
+        ShaIntCol::CompUpdateE,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    // R7/R8: pin input/output public words at active selector rows.
+    let s_init = public_scalar(public, ShaPublicCol::SInit, row, field_cfg)?;
+    let s_out = public_scalar(public, ShaPublicCol::SOut, row, field_cfg)?;
+    let init_scale = scaled(row_weight, &s_init);
+    let out_scale = scaled(row_weight, &s_out);
+    let neg_init_scale = neg(&init_scale);
+    let neg_out_scale = neg(&out_scale);
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R7PinA,
+        trace,
+        ShaWordCol::A,
+        row,
+        0,
+        &init_scale,
+        field_cfg,
+    )?;
+    acc.add_public_word_or_const_scaled(
+        ShaResidualFamily::R7PinA,
+        public,
+        ShaPublicCol::PAIn,
+        row,
+        &neg_init_scale,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R7PinA,
+        trace,
+        ShaWordCol::A,
+        row,
+        0,
+        &out_scale,
+        field_cfg,
+    )?;
+    acc.add_public_word_or_const_scaled(
+        ShaResidualFamily::R7PinA,
+        public,
+        ShaPublicCol::PAOut,
+        row,
+        &neg_out_scale,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R8PinE,
+        trace,
+        ShaWordCol::E,
+        row,
+        0,
+        &init_scale,
+        field_cfg,
+    )?;
+    acc.add_public_word_or_const_scaled(
+        ShaResidualFamily::R8PinE,
+        public,
+        ShaPublicCol::PEIn,
+        row,
+        &neg_init_scale,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R8PinE,
+        trace,
+        ShaWordCol::E,
+        row,
+        0,
+        &out_scale,
+        field_cfg,
+    )?;
+    acc.add_public_word_or_const_scaled(
+        ShaResidualFamily::R8PinE,
+        public,
+        ShaPublicCol::PEOut,
+        row,
+        &neg_out_scale,
+        field_cfg,
+    )?;
+
+    // R9/R10: feed-forward rows.
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R9FeedForwardA,
+        trace,
+        ShaWordCol::A,
+        row,
+        4,
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R9FeedForwardA,
+        trace,
+        ShaWordCol::A,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_public_scalar_const_scaled(
+        ShaResidualFamily::R9FeedForwardA,
+        public,
+        ShaPublicCol::PAIn,
+        row,
+        &minus_row,
+        field_cfg,
+    )?;
+    add_mu_contribution(
+        acc,
+        ShaResidualFamily::R9FeedForwardA,
+        trace,
+        row,
+        8,
+        9,
+        &constants.high_mu_1_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R9FeedForwardA,
+        trace,
+        ShaIntCol::CompFeedForwardA,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R10FeedForwardE,
+        trace,
+        ShaWordCol::E,
+        row,
+        4,
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R10FeedForwardE,
+        trace,
+        ShaWordCol::E,
+        row,
+        0,
+        &minus_row,
+        field_cfg,
+    )?;
+    acc.add_public_scalar_const_scaled(
+        ShaResidualFamily::R10FeedForwardE,
+        public,
+        ShaPublicCol::PEIn,
+        row,
+        &minus_row,
+        field_cfg,
+    )?;
+    add_mu_contribution(
+        acc,
+        ShaResidualFamily::R10FeedForwardE,
+        trace,
+        row,
+        9,
+        10,
+        &constants.high_mu_1_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R10FeedForwardE,
+        trace,
+        ShaIntCol::CompFeedForwardE,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    // R11-R17: selector and high-bit/carry residuals.
+    let s_msg = public_scalar(public, ShaPublicCol::SMsg, row, field_cfg)?;
+    let msg_scale = scaled(row_weight, &s_msg);
+    let neg_msg_scale = neg(&msg_scale);
+    acc.add_trace_word_scaled(
+        ShaResidualFamily::R11MessagePin,
+        trace,
+        ShaWordCol::W,
+        row,
+        0,
+        &msg_scale,
+        field_cfg,
+    )?;
+    acc.add_public_word_or_const_scaled(
+        ShaResidualFamily::R11MessagePin,
+        public,
+        ShaPublicCol::Message,
+        row,
+        &neg_msg_scale,
+        field_cfg,
+    )?;
+
+    let s_sched = public_scalar(public, ShaPublicCol::SSched, row, field_cfg)?;
+    let s_upd = public_scalar(public, ShaPublicCol::SUpd, row, field_cfg)?;
+    let s_ff = public_scalar(public, ShaPublicCol::SFf, row, field_cfg)?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R12CompSchedule,
+        trace,
+        ShaIntCol::CompSchedule,
+        row,
+        &scaled(row_weight, &s_sched),
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R13CompUpdateA,
+        trace,
+        ShaIntCol::CompUpdateA,
+        row,
+        &scaled(row_weight, &s_upd),
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R14CompUpdateE,
+        trace,
+        ShaIntCol::CompUpdateE,
+        row,
+        &scaled(row_weight, &s_upd),
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R15CompFeedForwardA,
+        trace,
+        ShaIntCol::CompFeedForwardA,
+        row,
+        &scaled(row_weight, &s_ff),
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        ShaResidualFamily::R16CompFeedForwardE,
+        trace,
+        ShaIntCol::CompFeedForwardE,
+        row,
+        &scaled(row_weight, &s_ff),
+        field_cfg,
+    )?;
+    acc.add_trace_word_shift_r_scaled(
+        ShaResidualFamily::R17CarryHighBits,
+        trace,
+        ShaWordCol::MuPacked,
+        row,
+        10,
+        row_weight,
+        field_cfg,
+    )?;
+
+    Ok(())
 }
 
 fn residual_polys_at_row_with_constants<F>(
@@ -5107,6 +5988,65 @@ mod tests {
         for (value, poly) in residuals.iter().zip(polies.iter()) {
             assert_eq!(value, &poly.evaluate_at_point(&a).unwrap());
         }
+    }
+
+    #[test]
+    fn fixed_residual_coeff_table_matches_dynamic_reference() {
+        let cfg = test_config();
+        let a = f(5);
+        let mut trace = synthetic_boolean_trace(11, &a);
+        for (col_idx, column) in trace.int_columns.iter_mut().enumerate() {
+            for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                *value = f(u64::try_from((col_idx + 3) * (row_idx % 17 + 1)).unwrap());
+            }
+        }
+
+        let mut public = zero_public();
+        for (col_idx, column) in public.columns.iter_mut().enumerate() {
+            for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                *value = f(u64::try_from((col_idx + 5) * (row_idx % 19 + 1)).unwrap());
+            }
+        }
+
+        let zero = F::zero_with_cfg(&cfg);
+        let mut public_bits =
+            vec![vec![vec![zero; SHA_WORD_BITS]; SHA_ROW_COUNT]; ShaPublicWordCol::COUNT];
+        for (col_idx, col) in public_bits.iter_mut().enumerate() {
+            for (row_idx, row) in col.iter_mut().enumerate() {
+                for (bit_idx, bit) in row.iter_mut().enumerate() {
+                    if (col_idx + row_idx + bit_idx) % 3 == 0 {
+                        *bit = f(1);
+                    }
+                }
+            }
+        }
+        public.bit_slices =
+            Some(flatten_bit_columns(public_bits, SHA_WORD_BITS, SHA_ROW_VARS, "public").unwrap());
+
+        let row_weights = (0..SHA_ROW_COUNT)
+            .map(|row| f(u64::try_from(row % 23 + 1).unwrap()))
+            .collect::<Vec<_>>();
+        let fixed = build_linear_residual_coeff_tables_with_row_weights(
+            &[trace.clone()],
+            &[public.clone()],
+            &row_weights,
+            &cfg,
+        )
+        .unwrap();
+
+        let constants = ShaResidualPolyConstants::new(&cfg);
+        let mut expected = vec![DynamicPolynomialF::ZERO; NUM_SHA_RESIDUAL_FAMILIES];
+        for (row, row_weight) in row_weights.iter().enumerate() {
+            let residuals =
+                residual_polys_at_row_with_constants(&trace, &public, row, &constants, &cfg)
+                    .unwrap();
+            for (family_idx, residual) in residuals.iter().enumerate() {
+                add_scaled_poly_assign(&mut expected[family_idx], residual, row_weight);
+            }
+        }
+        expected.iter_mut().for_each(DynamicPolynomialF::trim);
+
+        assert_eq!(fixed[0].coeffs, expected);
     }
 
     #[test]
