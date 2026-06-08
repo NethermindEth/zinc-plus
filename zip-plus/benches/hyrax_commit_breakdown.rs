@@ -34,11 +34,9 @@ fn msm_ck<C: AffineRepr>(width: usize) -> MsmCommitmentKey<C> {
 }
 
 fn hyrax_ck<C: AffineRepr>(width: usize) -> HyraxCommitmentKey<C> {
-    let (bases, h) = bases_and_h::<C>(width);
-    HyraxPCS::<C, BinaryLanes>::setup_from_bases_with_blinding(
+    HyraxPCS::<C, BinaryLanes>::setup(
         width,
-        bases,
-        h,
+        b"zinc-plus-hyrax-commit-breakdown-bench",
         HyraxBlindingMode::Unblinded,
     )
     .expect("benchmark setup must be valid")

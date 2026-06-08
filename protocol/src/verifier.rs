@@ -74,6 +74,17 @@ fn filter_skipped_parent_evals<F: Clone>(
         .collect()
 }
 
+fn ensure_pcs_stream_consumed<F: PrimeField, IdealOverF: Ideal>(
+    pcs_transcript: &PcsVerifierTranscript,
+) -> Result<(), ProtocolError<F, IdealOverF>> {
+    let consumed = usize::try_from(pcs_transcript.stream.position()).unwrap_or(usize::MAX);
+    let total = pcs_transcript.stream.get_ref().len();
+    if consumed != total {
+        return Err(ProtocolError::PcsProofTrailingBytes { consumed, total });
+    }
+    Ok(())
+}
+
 //
 // Shared base
 //
@@ -1068,6 +1079,8 @@ where
         )
         .map_err(|e| ProtocolError::PcsVerification(2, e))?;
 
+        ensure_pcs_stream_consumed::<F, IdealOverF>(pcs_transcript)?;
+
         Ok(VerifierPcsVerified {
             _phantom: PhantomData,
         })
@@ -1718,6 +1731,7 @@ where
         }
     }
 
+    ensure_pcs_stream_consumed::<F, IdealOverF>(&pcs_transcript)?;
     Ok(())
 }
 
@@ -2726,5 +2740,6 @@ where
         t.step7_pcs_verify = _t_step7.elapsed();
     }
 
+    ensure_pcs_stream_consumed::<F, IdealOverF>(&pcs_transcript)?;
     Ok(())
 }

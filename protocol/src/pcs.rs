@@ -78,6 +78,23 @@ where
 }
 
 #[derive(Clone, Debug)]
+pub struct BinaryIntHyraxZipArbitrary<C: AffineRepr>(PhantomData<C>);
+
+impl<Zt, F, C, const D: usize> ZincPCSTypes<Zt, F, D> for BinaryIntHyraxZipArbitrary<C>
+where
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    C: AffineRepr,
+    HyraxPCS<C, BinaryLanes>: PCS<F, BinaryPoly<D>, D>,
+    ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>: PCS<F, DensePolynomial<Zt::Int, D>, D>,
+    HyraxPCS<C, IntScalarLane>: PCS<F, Zt::Int, D>,
+{
+    type BinaryPCS = HyraxPCS<C, BinaryLanes>;
+    type ArbitraryPCS = ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>;
+    type IntPCS = HyraxPCS<C, IntScalarLane>;
+}
+
+#[derive(Clone, Debug)]
 pub struct PCSParams<P, Zt, F, const D: usize>
 where
     Zt: ZincTypes<D>,

@@ -2619,9 +2619,9 @@ where
     let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
     let arbitrary_lifted: &[DynamicPolynomialF<F>] = &[];
 
-    let binary_scalar_lanes = folded_sha_binary_scalar_lanes::<C, F>(folded_trace);
+    let binary_scalar_lanes = folded_sha_binary_scalar_lanes::<C, F>(folded_trace)?;
     let arbitrary_scalar_lanes: Vec<Vec<Vec<C::ScalarField>>> = Vec::new();
-    let int_scalar_lanes = folded_sha_int_scalar_lanes::<C, F>(folded_trace);
+    let int_scalar_lanes = folded_sha_int_scalar_lanes::<C, F>(folded_trace)?;
 
     let mut transcript = PcsProverTranscript {
         fs_transcript: Blake3Transcript::default(),
@@ -3419,7 +3419,7 @@ where
 #[allow(dead_code)]
 fn folded_sha_binary_scalar_lanes<C, F>(
     folded_trace: &ProjectedTrace<F>,
-) -> Vec<Vec<Vec<C::ScalarField>>>
+) -> Result<Vec<Vec<Vec<C::ScalarField>>>, ZipError>
 where
     C: AffineRepr,
     F: HyraxFieldBridge<C>,
@@ -3433,9 +3433,9 @@ where
                         &folded_trace.bit_slices[bit_slice_index(col.index(), bit, SHA_WORD_BITS)];
                     (0..SHA_ROW_COUNT)
                         .map(|row| F::field_to_scalar(&column.evaluations[row]))
-                        .collect::<Vec<_>>()
+                        .collect::<Result<Vec<_>, _>>()
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()
         })
         .collect()
 }
@@ -3443,7 +3443,7 @@ where
 #[allow(dead_code)]
 fn folded_sha_int_scalar_lanes<C, F>(
     folded_trace: &ProjectedTrace<F>,
-) -> Vec<Vec<Vec<C::ScalarField>>>
+) -> Result<Vec<Vec<Vec<C::ScalarField>>>, ZipError>
 where
     C: AffineRepr,
     F: HyraxFieldBridge<C>,
@@ -3452,11 +3452,10 @@ where
         .iter()
         .map(|col| {
             let column = &folded_trace.int_columns[col.index()];
-            vec![
-                (0..SHA_ROW_COUNT)
-                    .map(|row| F::field_to_scalar(&column.evaluations[row]))
-                    .collect::<Vec<_>>(),
-            ]
+            let lane = (0..SHA_ROW_COUNT)
+                .map(|row| F::field_to_scalar(&column.evaluations[row]))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(vec![lane])
         })
         .collect()
 }

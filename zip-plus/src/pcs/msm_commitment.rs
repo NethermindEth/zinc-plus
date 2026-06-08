@@ -9,9 +9,15 @@ use std::{
 };
 
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{AdditiveGroup, BigInteger, One, PrimeField, UniformRand, Zero};
+use ark_ff::{AdditiveGroup, One, PrimeField, UniformRand, Zero};
+use crypto_primitives::{IntRing, crypto_bigint_int::Int};
 use num_integer::Integer;
+use num_traits::Zero as NumZero;
 use thiserror::Error;
+use zinc_utils::{cfg_chunks, cfg_iter};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 const DEFAULT_BOOL_WINDOW_BITS: usize = 6;
 
@@ -58,6 +64,8 @@ pub enum MsmError {
     CommitmentShapeMismatch { expected: usize, actual: usize },
     #[error("MSM window size must be in 1..usize::BITS, got {0}")]
     InvalidWindowBits(usize),
+    #[error("cannot commit minimum signed integer value")]
+    SignedIntegerMinimum,
 }
 
 pub trait RowMsmStrategy<C, V>
@@ -77,6 +85,7 @@ where
 pub struct BoolSubsetMsm<const WINDOW_BITS: usize = 6>;
 pub struct U8BucketMsm;
 pub struct ScalarPippengerMsm;
+pub struct SignedIntPippengerMsm;
 
 #[derive(Clone, Debug)]
 struct BoolWindowTable<C: AffineRepr> {
@@ -86,8 +95,7 @@ struct BoolWindowTable<C: AffineRepr> {
 
 impl<C: AffineRepr> BoolWindowTable<C> {
     fn new(bases: &[C], window_bits: usize) -> Self {
-        let built = bases
-            .chunks(window_bits)
+        let built = cfg_chunks!(bases, window_bits)
             .map(|window| {
                 let len = window.len();
                 let table_len = 1usize << len;
@@ -105,7 +113,30 @@ impl<C: AffineRepr> BoolWindowTable<C> {
         Self { tables, lens }
     }
 
-    fn msm_row(&self, values: &[bool], window_bits: usize) -> C::Group {
+    fn msm_row(
+        &self,
+        values: &[bool],
+        window_bits: usize,
+        _use_parallelism_internally: bool,
+    ) -> C::Group {
+        #[cfg(feature = "parallel")]
+        if _use_parallelism_internally && self.lens.len() > 1 {
+            return self
+                .lens
+                .par_iter()
+                .copied()
+                .enumerate()
+                .map(|(window_idx, len)| {
+                    let offset = window_idx * window_bits;
+                    if offset >= values.len() {
+                        return C::Group::zero();
+                    }
+                    let end = (offset + len).min(values.len());
+                    self.tables[window_idx][bit_mask(&values[offset..end])]
+                })
+                .reduce(C::Group::zero, |acc, point| acc + point);
+        }
+
         let mut acc = C::Group::zero();
         for (window_idx, len) in self.lens.iter().copied().enumerate() {
             let offset = window_idx * window_bits;
@@ -181,16 +212,15 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
             });
         }
 
-        let mut comm = Vec::with_capacity(expected_rows);
-        for (row_idx, row) in values.chunks(ck.num_cols).enumerate() {
-            let mut row_comm = if row.iter().copied().all(S::is_zero) {
-                C::Group::zero()
-            } else {
-                S::msm_row(ck, row)?
-            };
-            row_comm += ck.h * blind.blind[row_idx];
-            comm.push(row_comm);
-        }
+        S::precompute_ck(ck);
+        let comm = cfg_chunks!(values, ck.num_cols)
+            .enumerate()
+            .map(|(row_idx, row)| {
+                let mut row_comm = commit_row::<C, V, S>(ck, row)?;
+                row_comm += ck.h * blind.blind[row_idx];
+                Ok(row_comm)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(MsmCommitment { comm })
     }
@@ -204,15 +234,11 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
         S: RowMsmStrategy<C, V>,
     {
         let expected_rows = num_rows(values.len(), ck.num_cols)?;
-        let mut comm = Vec::with_capacity(expected_rows);
-        for row in values.chunks(ck.num_cols) {
-            let row_comm = if row.iter().copied().all(S::is_zero) {
-                C::Group::zero()
-            } else {
-                S::msm_row(ck, row)?
-            };
-            comm.push(row_comm);
-        }
+        S::precompute_ck(ck);
+        let comm = cfg_chunks!(values, ck.num_cols)
+            .map(|row| commit_row::<C, V, S>(ck, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        debug_assert_eq!(comm.len(), expected_rows);
 
         Ok(MsmCommitment { comm })
     }
@@ -245,7 +271,7 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
             });
         }
 
-        let comm = blind.blind.iter().map(|r| ck.h * r).collect();
+        let comm = cfg_iter!(blind.blind).map(|r| ck.h * r).collect();
         Ok(MsmCommitment { comm })
     }
 
@@ -276,24 +302,7 @@ impl<C: AffineRepr, const WINDOW_BITS: usize> RowMsmStrategy<C, bool>
     }
 
     fn msm_row(ck: &MsmCommitmentKey<C>, values: &[bool]) -> Result<C::Group, MsmError> {
-        validate_row_len(ck, values.len())?;
-        validate_window_bits(WINDOW_BITS)?;
-
-        if WINDOW_BITS == DEFAULT_BOOL_WINDOW_BITS {
-            return Ok(ck
-                .bool_tables_6
-                .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS))
-                .msm_row(values, DEFAULT_BOOL_WINDOW_BITS));
-        }
-
-        let mut acc = C::Group::zero();
-        for (window_idx, bits) in values.chunks(WINDOW_BITS).enumerate() {
-            let start = window_idx * WINDOW_BITS;
-            let end = start + bits.len();
-            let table = subset_table::<C>(&ck.bases[start..end])?;
-            acc += table[bit_mask(bits)];
-        }
-        Ok(acc)
+        Self::msm_bool_row(ck, values, false)
     }
 
     fn is_zero(value: bool) -> bool {
@@ -306,6 +315,33 @@ impl<C: AffineRepr, const WINDOW_BITS: usize> RowMsmStrategy<C, bool>
         } else {
             C::ScalarField::zero()
         }
+    }
+}
+
+impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
+    pub(crate) fn msm_bool_row<C: AffineRepr>(
+        ck: &MsmCommitmentKey<C>,
+        values: &[bool],
+        use_parallelism_internally: bool,
+    ) -> Result<C::Group, MsmError> {
+        validate_row_len(ck, values.len())?;
+        validate_window_bits(WINDOW_BITS)?;
+
+        if WINDOW_BITS == DEFAULT_BOOL_WINDOW_BITS {
+            return Ok(ck
+                .bool_tables_6
+                .get_or_init(|| BoolWindowTable::new(&ck.bases, DEFAULT_BOOL_WINDOW_BITS))
+                .msm_row(values, DEFAULT_BOOL_WINDOW_BITS, use_parallelism_internally));
+        }
+
+        let mut acc = C::Group::zero();
+        for (window_idx, bits) in values.chunks(WINDOW_BITS).enumerate() {
+            let start = window_idx * WINDOW_BITS;
+            let end = start + bits.len();
+            let table = subset_table::<C>(&ck.bases[start..end])?;
+            acc += table[bit_mask(bits)];
+        }
+        Ok(acc)
     }
 }
 
@@ -356,6 +392,24 @@ impl<C: AffineRepr> RowMsmStrategy<C, C::ScalarField> for ScalarPippengerMsm {
     }
 }
 
+impl<C: AffineRepr, const LIMBS: usize> RowMsmStrategy<C, Int<LIMBS>> for SignedIntPippengerMsm {
+    fn precompute_ck(_ck: &MsmCommitmentKey<C>) {}
+
+    fn msm_row(ck: &MsmCommitmentKey<C>, values: &[Int<LIMBS>]) -> Result<C::Group, MsmError> {
+        validate_row_len(ck, values.len())?;
+        signed_int_window_pippenger::<C, LIMBS>(values, &ck.bases[..values.len()])
+    }
+
+    fn is_zero(value: Int<LIMBS>) -> bool {
+        NumZero::is_zero(&value)
+    }
+
+    fn to_scalar(value: Int<LIMBS>) -> C::ScalarField {
+        signed_int_to_scalar::<C, LIMBS>(&value)
+            .expect("signed integer lane value must fit scalar conversion")
+    }
+}
+
 fn num_rows(n: usize, width: usize) -> Result<usize, MsmError> {
     if width == 0 {
         return Err(MsmError::InvalidWidth);
@@ -381,6 +435,23 @@ fn validate_window_bits(window_bits: usize) -> Result<(), MsmError> {
         return Err(MsmError::InvalidWindowBits(window_bits));
     }
     Ok(())
+}
+
+fn commit_row<C, V, S>(ck: &MsmCommitmentKey<C>, row: &[V]) -> Result<C::Group, MsmError>
+where
+    C: AffineRepr,
+    V: Copy + Send + Sync,
+    S: RowMsmStrategy<C, V>,
+{
+    let effective_len = row
+        .iter()
+        .rposition(|value| !S::is_zero(*value))
+        .map_or(0, |pos| pos + 1);
+    if effective_len == 0 {
+        Ok(C::Group::zero())
+    } else {
+        S::msm_row(ck, &row[..effective_len])
+    }
 }
 
 fn bit_mask(bits: &[bool]) -> usize {
@@ -435,54 +506,27 @@ fn signed_window_pippenger<C: AffineRepr>(
 
     let num_bits = C::ScalarField::MODULUS_BIT_SIZE as usize;
     let segments = <usize as Integer>::div_ceil(&num_bits, &window_bits);
-    let total_segments = segments + 1;
-    let n = scalars.len();
-    let half = 1usize << (window_bits - 1);
-    let full = 1usize << window_bits;
-    let mut signed_digits = vec![0isize; total_segments * n];
-    let mut carries = vec![0usize; n];
-
-    for (j, scalar) in scalars.iter().enumerate() {
-        let bits = scalar.into_bigint().to_bits_le();
-        for segment in 0..segments {
-            let offset = segment * n;
-            let raw = window_value(&bits, segment * window_bits, window_bits) + carries[j];
-            carries[j] = 0;
-            if raw >= half {
-                signed_digits[offset + j] = -isize::try_from(full - raw)
-                    .map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-                carries[j] = 1;
-            } else {
-                signed_digits[offset + j] =
-                    isize::try_from(raw).map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-            }
-        }
-    }
-
-    let mut highest_segment = segments;
-    let carry_offset = segments * n;
-    for (j, carry) in carries.iter().copied().enumerate() {
-        if carry != 0 {
-            signed_digits[carry_offset + j] =
-                isize::try_from(carry).map_err(|_| MsmError::InvalidWindowBits(window_bits))?;
-            highest_segment = segments + 1;
-        }
-    }
+    let bucket_len = (1usize << window_bits) - 1;
+    let bigints = scalars
+        .iter()
+        .map(|scalar| scalar.into_bigint())
+        .collect::<Vec<_>>();
+    let mut buckets = vec![C::Group::zero(); bucket_len];
 
     let mut acc = C::Group::zero();
-    for segment in (0..highest_segment).rev() {
+    for segment in (0..segments).rev() {
         for _ in 0..window_bits {
             acc.double_in_place();
         }
 
-        let mut buckets = vec![C::Group::zero(); half];
-        let offset = segment * n;
-        for j in 0..n {
-            let digit = signed_digits[offset + j];
-            if digit > 0 {
-                buckets[digit as usize - 1] += bases[j];
-            } else if digit < 0 {
-                buckets[(-digit) as usize - 1] -= bases[j];
+        let offset = segment * window_bits;
+        for bucket in &mut buckets {
+            *bucket = C::Group::zero();
+        }
+        for (j, scalar) in bigints.iter().enumerate() {
+            let digit = window_value_from_limbs(scalar.as_ref(), offset, window_bits);
+            if digit != 0 {
+                buckets[digit - 1] += bases[j];
             }
         }
 
@@ -490,6 +534,94 @@ fn signed_window_pippenger<C: AffineRepr>(
     }
 
     Ok(acc)
+}
+
+fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
+    values: &[Int<LIMBS>],
+    bases: &[C],
+) -> Result<C::Group, MsmError> {
+    if values.len() != bases.len() {
+        return Err(MsmError::BaseCountMismatch {
+            expected: values.len(),
+            actual: bases.len(),
+        });
+    }
+    if values.is_empty() {
+        return Ok(C::Group::zero());
+    }
+
+    let mut max_bits = 0usize;
+    for value in values {
+        let (abs, _) = signed_int_abs(value)?;
+        max_bits = max_bits.max(bit_len_from_words(abs.as_uint().as_words()));
+    }
+    if max_bits == 0 {
+        return Ok(C::Group::zero());
+    }
+
+    let window_bits = scalar_window_bits(values.len()).min(max_bits).max(1);
+    validate_window_bits(window_bits)?;
+
+    let segments = <usize as Integer>::div_ceil(&max_bits, &window_bits);
+    let bucket_len = (1usize << window_bits) - 1;
+    let mut positive_buckets = vec![C::Group::zero(); bucket_len];
+    let mut negative_buckets = vec![C::Group::zero(); bucket_len];
+
+    let mut acc = C::Group::zero();
+    for segment in (0..segments).rev() {
+        for _ in 0..window_bits {
+            acc.double_in_place();
+        }
+
+        for bucket in &mut positive_buckets {
+            *bucket = C::Group::zero();
+        }
+        for bucket in &mut negative_buckets {
+            *bucket = C::Group::zero();
+        }
+
+        let offset = segment * window_bits;
+        for (value, base) in values.iter().zip(bases.iter()) {
+            let (abs, is_negative) = signed_int_abs(value)?;
+            let digit = window_value_from_words(abs.as_uint().as_words(), offset, window_bits);
+            if digit != 0 {
+                if is_negative {
+                    negative_buckets[digit - 1] += base;
+                } else {
+                    positive_buckets[digit - 1] += base;
+                }
+            }
+        }
+
+        acc += bucket_running_sum(&positive_buckets);
+        acc -= bucket_running_sum(&negative_buckets);
+    }
+
+    Ok(acc)
+}
+
+fn signed_int_abs<const LIMBS: usize>(value: &Int<LIMBS>) -> Result<(Int<LIMBS>, bool), MsmError> {
+    if value.is_negative() {
+        let abs = value.checked_abs().ok_or(MsmError::SignedIntegerMinimum)?;
+        Ok((abs, true))
+    } else {
+        Ok((*value, false))
+    }
+}
+
+fn signed_int_to_scalar<C: AffineRepr, const LIMBS: usize>(
+    value: &Int<LIMBS>,
+) -> Result<C::ScalarField, MsmError> {
+    let (abs, is_negative) = signed_int_abs(value)?;
+    let mut bytes = Vec::with_capacity(LIMBS * core::mem::size_of::<crypto_bigint::Word>());
+    for word in abs.as_uint().as_words() {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    let mut scalar = C::ScalarField::from_le_bytes_mod_order(&bytes);
+    if is_negative && !scalar.is_zero() {
+        scalar = -scalar;
+    }
+    Ok(scalar)
 }
 
 fn scalar_window_bits(n: usize) -> usize {
@@ -502,9 +634,48 @@ fn scalar_window_bits(n: usize) -> usize {
     }
 }
 
-fn window_value(bits: &[bool], start: usize, width: usize) -> usize {
+fn bit_len_from_words(words: &[crypto_bigint::Word]) -> usize {
+    let word_bits = core::mem::size_of::<crypto_bigint::Word>() * 8;
+    for (idx, word) in words.iter().copied().enumerate().rev() {
+        if word != 0 {
+            return idx * word_bits + word_bits - word.leading_zeros() as usize;
+        }
+    }
+    0
+}
+
+fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
     (0..width).fold(0usize, |value, bit_idx| {
-        if bits.get(start + bit_idx).copied().unwrap_or(false) {
+        let absolute_bit = start + bit_idx;
+        let limb_idx = absolute_bit / u64::BITS as usize;
+        let limb_bit = absolute_bit % u64::BITS as usize;
+        if limbs
+            .get(limb_idx)
+            .map(|limb| ((limb >> limb_bit) & 1) == 1)
+            .unwrap_or(false)
+        {
+            value | (1usize << bit_idx)
+        } else {
+            value
+        }
+    })
+}
+
+fn window_value_from_words(
+    words: &[crypto_bigint::Word],
+    start: usize,
+    width: usize,
+) -> usize {
+    let word_bits = core::mem::size_of::<crypto_bigint::Word>() * 8;
+    (0..width).fold(0usize, |value, bit_idx| {
+        let absolute_bit = start + bit_idx;
+        let word_idx = absolute_bit / word_bits;
+        let word_bit = absolute_bit % word_bits;
+        if words
+            .get(word_idx)
+            .map(|word| ((word >> word_bit) & 1) == 1)
+            .unwrap_or(false)
+        {
             value | (1usize << bit_idx)
         } else {
             value
@@ -567,6 +738,13 @@ mod tests {
         values
             .iter()
             .map(|value| Fr::from(u64::from(*value)))
+            .collect()
+    }
+
+    fn scalars_from_int<const LIMBS: usize>(values: &[Int<LIMBS>]) -> Vec<Fr> {
+        values
+            .iter()
+            .map(|value| signed_int_to_scalar::<TestCurve, LIMBS>(value).expect("valid test int"))
             .collect()
     }
 
@@ -723,6 +901,29 @@ mod tests {
             let naive_comm = naive_scalar_commit(&ck, &values, &blind);
 
             assert_eq!(scalar_comm, naive_comm);
+        }
+    }
+
+    #[test]
+    fn signed_int_commit_matches_scalar_commit_for_small_values() {
+        for width in [8, 32, 64] {
+            let (ck, _) = setup(width);
+            let n = width * 2 + 5;
+            let values = (0..n)
+                .map(|idx| Int::<1>::from((idx as i64 % 31) - 15))
+                .collect::<Vec<_>>();
+            let scalars = scalars_from_int(&values);
+            let blind = blind(width, n);
+
+            let int_comm =
+                MsmCommitmentEngine::<TestCurve>::commit_with::<Int<1>, SignedIntPippengerMsm>(
+                    &ck, &values, &blind,
+                )
+                .expect("signed int commit must succeed");
+            let scalar_comm = MsmCommitmentEngine::<TestCurve>::commit(&ck, &scalars, &blind)
+                .expect("scalar commit must succeed");
+
+            assert_eq!(int_comm, scalar_comm);
         }
     }
 

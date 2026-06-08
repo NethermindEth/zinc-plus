@@ -51,6 +51,12 @@ impl<const DEGREE_PLUS_ONE: usize> BinaryRefPoly<DEGREE_PLUS_ONE> {
     pub const fn inner(&self) -> &DensePolynomial<Boolean, DEGREE_PLUS_ONE> {
         &self.0
     }
+
+    #[inline(always)]
+    pub fn coeff(&self, idx: usize) -> bool {
+        assert!(idx < DEGREE_PLUS_ONE);
+        self.0.coeffs[idx].inner()
+    }
 }
 
 impl<const DEGREE_PLUS_ONE: usize> From<BinaryRefPoly<DEGREE_PLUS_ONE>>
