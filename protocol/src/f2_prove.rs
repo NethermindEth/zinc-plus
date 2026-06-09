@@ -3737,6 +3737,114 @@ where
         )
     }
 
+    /// Extract every byte-limb lookup tuple from the real adds described by
+    /// `adder_specs` (32-bit words). Handles the `y2` Ch term, per-operand row
+    /// shifts, and per-relation active-row masks. Used by the lookup adder.
+    fn sha_add_limb_tuples(
+        cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        limb_bits: usize,
+    ) -> Vec<zinc_piop::lookup::add_lookup::LimbTuple> {
+        let n = 1usize << num_vars;
+        let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
+            match r.checked_add(term.row_shift).filter(|&i| i < n) {
+                Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[term.col].evaluations[i]) as u32,
+                None => 0,
+            }
+        };
+        let mut tuples = Vec::new();
+        for spec in adder_specs {
+            let masked = !spec.active_rows.is_empty();
+            for r in 0..n {
+                if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                    continue;
+                }
+                let xv = cell(&spec.x, r);
+                let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                let tv = cell(&spec.t, r);
+                let (tup, _carries) =
+                    zinc_piop::lookup::add_lookup::decompose_add(xv, yv, tv, 0, limb_bits);
+                tuples.extend(tup);
+            }
+        }
+        tuples
+    }
+
+    /// The grand-product lookup phase, on the shared transcript: extract the
+    /// limb tuples from the real adds, sample γ (fingerprint compression) then
+    /// δ (grand-product point), and prove `∏(δ−a_i)=∏_t(δ−fp_t)^{m_t}` against
+    /// the public add table. Honest-prover-first: the witness fingerprints are
+    /// not yet bound to the commitment (that binding closes Issue-1).
+    fn prove_lookup_adder_phase(
+        transcript: &mut impl Transcript,
+        cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        limb_bits: usize,
+        k_bits: usize,
+    ) -> zinc_piop::lookup::gkr_lookup::GrandProductLookupProof<BinaryFieldGF128> {
+        use zinc_piop::lookup::{add_lookup, gkr_lookup};
+        let tuples = Self::sha_add_limb_tuples(cols, adder_specs, num_vars, limb_bits);
+        let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let table = add_lookup::add_table_fingerprints::<BinaryFieldGF128>(&gamma, limb_bits, &());
+        let wfps = add_lookup::tuple_fingerprints(&tuples, &gamma, &());
+        let mults = add_lookup::multiplicities(&tuples, limb_bits, k_bits);
+        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let wl = gkr_lookup::witness_leaves(&wfps, &delta);
+        let tl = gkr_lookup::table_leaves(&table, &mults, &delta, &());
+        let (proof, _bind) = gkr_lookup::prove_lookup(transcript, wl, tl, &());
+        proof
+    }
+
+    /// **Lookup-adder prove path (honest-prover-first).** SHA-256 F_2 with the
+    /// 12 adder Hadamards REPLACED by the grand-product lookup: the base proof
+    /// runs with `&[]` adders (only the 2 ANDs discharged), then the lookup
+    /// phase runs on the same transcript. Returns `(base_proof, lookup_proof)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full_with_lookup_adder(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+        limb_bits: usize,
+        k_bits: usize,
+    ) -> Result<
+        (
+            F2FullProof<D>,
+            zinc_piop::lookup::gkr_lookup::GrandProductLookupProof<BinaryFieldGF128>,
+        ),
+        F2ProveError<U>,
+    > {
+        let base = Self::prove_f2_full_with_hadamard(
+            transcript,
+            pp,
+            trace,
+            virtual_specs,
+            bit_op_specs,
+            hadamard_specs,
+            /* adders replaced by the lookup */ &[],
+            num_vars,
+            project_scalar,
+            num_column_openings,
+        )?;
+        let lookup = Self::prove_lookup_adder_phase(
+            transcript,
+            &trace.binary_poly,
+            adder_specs,
+            num_vars,
+            limb_bits,
+            k_bits,
+        );
+        Ok((base, lookup))
+    }
+
     /// Shared post-commit body for the `prove_f2_full*` entry points:
     /// IC + α + (optional Hadamard zerocheck) + sumcheck, then the single
     /// multipoint-eval + open at `r*`/`r_0`. When `hadamard_specs` is
@@ -6850,6 +6958,85 @@ mod tests {
             verify_lookup(&mut vt2, &bad_proof, &()).is_err(),
             "a corrupted SHA add limb must be rejected"
         );
+    }
+
+    /// **Task 4b (step 3): the lookup adder runs IN the real prover.** Proves
+    /// SHA-256 F_2 via `prove_f2_full_with_lookup_adder` (the base proof with
+    /// the 12 adder Hadamards dropped + the grand-product lookup phase on the
+    /// SAME transcript), then verifies the base proof and the lookup, replaying
+    /// the γ/δ challenges to stay in sync. Honest-prover-first: the witness
+    /// fingerprints are not yet bound to the commitment (Issue-1 binding next).
+    #[test]
+    fn sha256_f2_lookup_adder_in_prover_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4;
+        const KBITS: usize = 16;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        assert_eq!(adder_specs.len(), 12);
+
+        let mut pt = Blake3Transcript::new();
+        let (base, lookup) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_lookup_adder(
+                &mut pt,
+                &pp,
+                &trace,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                /* num_column_openings */ 4,
+                LB,
+                KBITS,
+            )
+            .expect("lookup-adder prove should succeed");
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &base,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            /* adders dropped */ &[],
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("base SHA proof (adders dropped) must verify");
+
+        // Replay γ/δ to keep the transcript in sync, then verify the lookup.
+        let _gamma: BinaryFieldGF128 = vt.get_field_challenge(&());
+        let _delta: BinaryFieldGF128 = vt.get_field_challenge(&());
+        zinc_piop::lookup::gkr_lookup::verify_lookup(&mut vt, &lookup, &())
+            .expect("the in-prover lookup over the real SHA adds must verify");
     }
 
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
