@@ -6584,15 +6584,23 @@ where
             let ov_small_sigma0 = word_eval(ShaWordCol::OvSmallSigma0, 0);
             let ov_small_sigma1 = word_eval(ShaWordCol::OvSmallSigma1, 0);
 
-            let mu = |low_weights: &[F], high_weights: &[F], high_coeff: &F| {
-                word_eval_with(ShaWordCol::MuPacked, 0, low_weights) * &low_mu_coeff
-                    - word_eval_with(ShaWordCol::MuPacked, 0, high_weights) * high_coeff
-            };
-            let mu_w = mu(&shift0_weights, &shift2_weights, &high_mu_w_coeff);
-            let mu_a = mu(&shift2_weights, &shift5_weights, &high_mu_3_bit_coeff);
-            let mu_e = mu(&shift5_weights, &shift8_weights, &high_mu_3_bit_coeff);
-            let mu_ff_a = mu(&shift8_weights, &shift9_weights, &high_mu_1_bit_coeff);
-            let mu_ff_e = mu(&shift9_weights, &shift10_weights, &high_mu_1_bit_coeff);
+            let mu_packed_shift0 = word_eval_with(ShaWordCol::MuPacked, 0, &shift0_weights);
+            let mu_packed_shift2 = word_eval_with(ShaWordCol::MuPacked, 0, &shift2_weights);
+            let mu_packed_shift5 = word_eval_with(ShaWordCol::MuPacked, 0, &shift5_weights);
+            let mu_packed_shift8 = word_eval_with(ShaWordCol::MuPacked, 0, &shift8_weights);
+            let mu_packed_shift9 = word_eval_with(ShaWordCol::MuPacked, 0, &shift9_weights);
+            let mu_packed_shift10 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights);
+
+            let mu_w =
+                mu_packed_shift0 * &low_mu_coeff - mu_packed_shift2.clone() * &high_mu_w_coeff;
+            let mu_a =
+                mu_packed_shift2 * &low_mu_coeff - mu_packed_shift5.clone() * &high_mu_3_bit_coeff;
+            let mu_e =
+                mu_packed_shift5 * &low_mu_coeff - mu_packed_shift8.clone() * &high_mu_3_bit_coeff;
+            let mu_ff_a =
+                mu_packed_shift8 * &low_mu_coeff - mu_packed_shift9.clone() * &high_mu_1_bit_coeff;
+            let mu_ff_e =
+                mu_packed_shift9 * &low_mu_coeff - mu_packed_shift10.clone() * &high_mu_1_bit_coeff;
 
             let w_rot25 = word_eval_with(ShaWordCol::W, 0, &rot25_weights);
             let w_rot14 = word_eval_with(ShaWordCol::W, 0, &rot14_weights);
@@ -6665,7 +6673,7 @@ where
             let r14 = int_value(ShaIntCol::CompUpdateE) * &s_upd;
             let r15 = int_value(ShaIntCol::CompFeedForwardA) * &s_ff;
             let r16 = int_value(ShaIntCol::CompFeedForwardE) * &s_ff;
-            let r17 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights);
+            let r17 = mu_packed_shift10;
             let residuals = [
                 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
             ];
