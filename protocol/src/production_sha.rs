@@ -1274,6 +1274,7 @@ where
             transcript,
             field_cfg,
         )?;
+    #[cfg(debug_assertions)]
     validate_production_sha_publics(&publics, field_cfg)?;
 
     tracing::info_span!(
