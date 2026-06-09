@@ -175,6 +175,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             commit_hint,
             field_cfg,
             None,
+            None,
         )
     }
 
@@ -208,6 +209,44 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
             commit_hint,
             field_cfg,
             Some(breakdown),
+            None,
+        )
+    }
+
+    /// Open-at-tensor opening: prove the value `⟨poly, q_0 ⊗ q_1⟩` for a
+    /// caller-supplied row tensor `q_0` (length `num_rows`) and column tensor
+    /// `q_1` (length `row_len`), bypassing the `eq(point)` expansion. The
+    /// Euclidean-norm JL pass uses this to bind a ±1 random projection
+    /// `Π = q_0 ⊗ q_1` of the committed witness (one JL coordinate) to the
+    /// commitment via the same machinery as a normal opening. Verified with
+    /// `verify_with_tensors`.
+    #[inline(always)]
+    pub fn prove_with_tensors_f<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsProverTranscript,
+        pp: &ZipPlusParams<Zt, Lc>,
+        polys: &[DenseMultilinearExtension<Zt::Eval>],
+        q_0: Vec<F>,
+        q_1: Vec<F>,
+        commit_hint: &ZipPlusHint<Zt::Cw>,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> MulByScalar<&'a F>
+            + FromRef<F>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        Self::prove_f_inner::<F, CHECK_FOR_OVERFLOW>(
+            transcript,
+            pp,
+            polys,
+            &[],
+            commit_hint,
+            field_cfg,
+            None,
+            Some((q_0, q_1)),
         )
     }
 
@@ -220,6 +259,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         commit_hint: &ZipPlusHint<Zt::Cw>,
         field_cfg: &F::Config,
         mut breakdown: Option<&mut ZipPlusProveByteBreakdown>,
+        q_override: Option<(Vec<F>, Vec<F>)>,
     ) -> Result<F, ZipError>
     where
         F: PrimeField
@@ -230,22 +270,42 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         F::Modulus: Transcribable,
     {
         let batch_size = polys.len();
-        validate_input::<Zt, Lc, _>(
-            "prove",
-            pp.num_vars,
-            pp.linear_code.row_len(),
-            batch_size,
-            polys,
-            &[point],
-        )?;
-
         let num_rows = pp.num_rows;
         let row_len = pp.linear_code.row_len();
 
-        // TODO Lift q0, q1 back to int and take following dot products on ints instead
-        // of MBSInnerProduct in field (see comboned row) We prove evaluations
-        // over the field, so integers need to be mapped to field elements first
-        let (q_0, q_1) = point_to_tensor(num_rows, point, field_cfg)?;
+        // `q_override` (open-at-tensor): the Euclidean-norm JL pass injects a ±1
+        // random projection Π = q_0 ⊗ q_1 directly, bypassing the eq(point)
+        // expansion. In that mode point-length validation is skipped (the point
+        // is unused) but the bit-width / poly-variate checks still run. The rest
+        // of the protocol is identical, so a normal opening and a tensor opening
+        // share the same b / combined-row / column-opening machinery.
+        let (q_0, q_1) = match q_override {
+            Some((q0, q1)) => {
+                let no_points: &[&[F]] = &[];
+                validate_input::<Zt, Lc, _>(
+                    "prove",
+                    pp.num_vars,
+                    row_len,
+                    batch_size,
+                    polys,
+                    no_points,
+                )?;
+                assert_eq!(q0.len(), num_rows, "q_0 must have num_rows entries");
+                assert_eq!(q1.len(), row_len, "q_1 must have row_len entries");
+                (q0, q1)
+            }
+            None => {
+                validate_input::<Zt, Lc, _>(
+                    "prove",
+                    pp.num_vars,
+                    row_len,
+                    batch_size,
+                    polys,
+                    &[point],
+                )?;
+                point_to_tensor(num_rows, point, field_cfg)?
+            }
+        };
 
         let degree_bound = Zt::Comb::DEGREE_BOUND;
         let polys_as_comb_r: Vec<Vec<Zt::CombR>> = polys

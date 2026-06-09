@@ -44,8 +44,8 @@ use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
 use zinc_poly::univariate::binary_subspace::BinarySubspace;
 use zinc_poly::univariate::oblong_and::{
     AdditiveNtt, AndCheckOutput, MonomialScheme, OblongAndProof, OblongChannel, OblongError,
-    OblongScheme, SKIPPED_VARS, WORD_BITS, base_lagrange_at, eq_indicator, prove_oblong_and_channel,
-    verify_oblong_and_channel,
+    OblongScheme, WORD_BITS, base_lagrange_at, eq_indicator, prove_oblong_and_channel,
+    skipped_vars, verify_oblong_and_channel,
 };
 use zinc_poly::univariate::oblong_and_gf8::Gf8Scheme;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
@@ -89,8 +89,10 @@ impl<'a, T: Transcript> OblongChannel for TranscriptChannel<'a, T> {
     }
 }
 
-/// SHA-256 word width — the oblong "Z" (bit-index) dimension. The oblong port
-/// is specialised to `D = 32` (`WORD_BITS`).
+/// SHA-256 word width — the default oblong "Z" (bit-index) dimension. The
+/// production functions are now const-generic over `D` (SHA `D = 32`, Keccak
+/// `D = 64`); this default is used only by the in-module unit tests.
+#[allow(dead_code)]
 const D: usize = WORD_BITS;
 
 /// Errors from [`verify_oblong_and_relation`].
@@ -105,30 +107,30 @@ pub enum OblongVerifyError {
 /// Pack a built operand column into `u32` words (one per row), the oblong
 /// prover's input. Reuses [`build_operand_column`] so the operand semantics
 /// (XOR of `↓Δ`-shifted columns, optional complement) match the `ψ_z` tie.
-fn operand_words(
+fn operand_words<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     operand: &F2Operand,
     num_vars: usize,
-) -> Vec<u32> {
+) -> Vec<u64> {
     let col = build_operand_column::<D>(columns, operand, num_vars);
     col.evaluations
         .iter()
-        .map(|c| cell_mask::<D>(c) as u32)
+        .map(|c| cell_mask::<D>(c) as u64)
         .collect()
 }
 
 /// Prover: run the oblong AND zerocheck for one relation `U ⊙ V = W` over the
 /// committed columns, with Fiat–Shamir challenges drawn from `transcript`.
-pub fn prove_oblong_and_relation<T: Transcript>(
+pub fn prove_oblong_and_relation<const D: usize, T: Transcript>(
     transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     spec: &F2HadamardSpec,
     num_vars: usize,
-) -> OblongAndProof {
+) -> OblongAndProof<D> {
     let u = operand_words(columns, &spec.u, num_vars);
     let v = operand_words(columns, &spec.v, num_vars);
     let w = operand_words(columns, &spec.w, num_vars);
-    let ntt = AdditiveNtt::new();
+    let ntt = AdditiveNtt::<D>::new();
     let scheme = MonomialScheme::new(&ntt);
     let mut ch = TranscriptChannel::new(transcript);
     prove_oblong_and_channel(&mut ch, &u, &v, &w, &scheme).0
@@ -138,14 +140,14 @@ pub fn prove_oblong_and_relation<T: Transcript>(
 /// zerocheck, then tie its operand evals to the committed columns via the
 /// `ψ_z` recombination (the existing `ψ_α` machinery with `base_lagrange_at(z)`
 /// weights and the row-point `γ`, from the verified `eval_point = [z, γ…]`).
-pub fn verify_oblong_and_relation<T: Transcript>(
+pub fn verify_oblong_and_relation<const D: usize, T: Transcript>(
     transcript: &mut T,
-    proof: &OblongAndProof,
+    proof: &OblongAndProof<D>,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     spec: &F2HadamardSpec,
     num_vars: usize,
 ) -> Result<(), OblongVerifyError> {
-    let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
+    let full = BinarySubspace::with_dim(skipped_vars(D) + 1);
     let out: AndCheckOutput = {
         let mut ch = TranscriptChannel::new(transcript);
         verify_oblong_and_channel(&mut ch, proof, num_vars, &full, &[])
@@ -156,7 +158,7 @@ pub fn verify_oblong_and_relation<T: Transcript>(
     // the row-point γ. Feed the Lagrange weights L_i(z) where ψ_α uses α^b.
     let z = out.eval_point[0];
     let gamma = &out.eval_point[1..];
-    let lagrange_z = base_lagrange_at(z).to_vec();
+    let lagrange_z = base_lagrange_at::<D>(z).to_vec();
     let specs = std::slice::from_ref(spec);
     let pairs = distinct_pairs(specs);
     let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, gamma);
@@ -180,8 +182,8 @@ pub fn verify_oblong_and_relation<T: Transcript>(
 /// round + one Phase-2 sumcheck cover all relations (Binius's stacking — vs the
 /// current discharge's `γ`-batch).
 /// Convert a built `BinaryPoly<D>` operand column to `u32` words.
-fn words_of(col: &DenseMultilinearExtension<BinaryPoly<D>>) -> Vec<u32> {
-    col.evaluations.iter().map(|c| cell_mask::<D>(c) as u32).collect()
+fn words_of<const D: usize>(col: &DenseMultilinearExtension<BinaryPoly<D>>) -> Vec<u64> {
+    col.evaluations.iter().map(|c| cell_mask::<D>(c) as u64).collect()
 }
 
 /// Build the stacked `(a, b, c)` operand-word columns for all relations (ANDs
@@ -189,12 +191,12 @@ fn words_of(col: &DenseMultilinearExtension<BinaryPoly<D>>) -> Vec<u32> {
 /// relation count with zero-operand rows. The stack order is the relation index;
 /// the ψ_z tie derives evals in the same order.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_stacked_operands(
+fn build_stacked_operands<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
-) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
     let n = 1usize << num_vars;
     let k = and_specs.len() + adder_specs.len();
     let k_pad = k.next_power_of_two().max(1);
@@ -230,7 +232,7 @@ fn stacked_nvars(k: usize, num_vars: usize) -> usize {
 /// `embed(H₈)`), matching how the prover folded the operands. ANDs derive from
 /// the committed columns via the pair evals; adders recompute the carry operands.
 #[allow(clippy::arithmetic_side_effects)]
-fn batched_tie_check(
+fn batched_tie_check<const D: usize>(
     out: &AndCheckOutput,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
@@ -285,7 +287,7 @@ pub struct OblongBindingData {
 /// its eval-point `[z, γ]`. `pair_evals` come from the committed columns (the
 /// prover's source of truth; the verifier instead takes the multipoint-bound
 /// values and only uses `pairs`/`lagrange_z`/`gamma_word` from here).
-pub fn oblong_binding_data_gf8(
+pub fn oblong_binding_data_gf8<const D: usize>(
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
@@ -293,7 +295,7 @@ pub fn oblong_binding_data_gf8(
     eval_point: &[Gf],
 ) -> OblongBindingData {
     let (lagrange_z, gamma_word, pairs) =
-        oblong_verifier_binding_gf8(and_specs, num_vars, eval_point);
+        oblong_verifier_binding_gf8::<D>(and_specs, num_vars, eval_point);
     let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, &gamma_word);
     // Per-adder parents are independent — build + project each adder's operand
     // columns in parallel (the loop was the dominant binding cost; like the
@@ -320,14 +322,14 @@ pub fn oblong_binding_data_gf8(
 /// `(col,Δ)` pairs — all derivable from the discharge eval-point `[z, γ]` alone
 /// (the `pair_evals`/`adder_parents` come from the proof, bound/trusted).
 #[allow(clippy::arithmetic_side_effects)]
-pub fn oblong_verifier_binding_gf8(
+pub fn oblong_verifier_binding_gf8<const D: usize>(
     and_specs: &[F2HadamardSpec],
     num_vars: usize,
     eval_point: &[Gf],
 ) -> (Vec<Gf>, Vec<Gf>, Vec<(usize, usize)>) {
     let z = eval_point[0];
     let gamma_word = eval_point[1..1 + num_vars].to_vec();
-    let lagrange_z = Gf8Scheme::new().base_lagrange(z).to_vec();
+    let lagrange_z = Gf8Scheme::<D>::new().base_lagrange(z).to_vec();
     let pairs = distinct_pairs(and_specs);
     (lagrange_z, gamma_word, pairs)
 }
@@ -372,13 +374,13 @@ pub fn oblong_tie_from_bound(
 /// verifier ([`ZincPlusPiopF2::verify_f2_full_with_oblong_hadamard`]) calls this,
 /// then ties via the multipoint-bound pair-evals ([`oblong_tie_from_bound`]) —
 /// unlike [`verify_oblong_and_batch_gf8`], which ties against in-memory columns.
-pub fn verify_oblong_zerocheck_gf8<T: Transcript>(
+pub fn verify_oblong_zerocheck_gf8<const D: usize, T: Transcript>(
     transcript: &mut T,
-    proof: &OblongAndProof,
+    proof: &OblongAndProof<D>,
     k: usize,
     num_vars: usize,
 ) -> Result<AndCheckOutput, OblongVerifyError> {
-    let scheme = Gf8Scheme::new();
+    let scheme = Gf8Scheme::<D>::new();
     let mut ch = TranscriptChannel::new(transcript);
     verify_oblong_and_channel(
         &mut ch,
@@ -390,16 +392,109 @@ pub fn verify_oblong_zerocheck_gf8<T: Transcript>(
     .map_err(OblongVerifyError::Oblong)
 }
 
-/// Batched oblong discharge prover, **naive `GF(2^128)`** (monomial scheme).
-pub fn prove_oblong_and_batch<T: Transcript>(
+// ---------------------------------------------------------------------------
+// Naive (monomial-K) twins of the GF(2^8) sound-binding helpers, generic over
+// the cell width `D`. Used by the D-generic sound oblong discharge
+// (`ZincPlusPiopF2::prove/verify_f2_full_with_oblong_hadamard_naive`), e.g.
+// Keccak at D=64 where the GF(2^8) scheme is unavailable. They differ from the
+// `*_gf8` versions only in the base-Lagrange weights (the monomial subspace
+// `base_lagrange_at::<D>` instead of `embed(H₈)`), the verifier's R₀
+// reconstruction subspace (monomial dim-`(log₂D+1)` instead of `embed(H₈)`),
+// and the empty small-challenge set (no eq-split). `oblong_tie_from_bound` is
+// scheme-agnostic and reused as-is.
+// ---------------------------------------------------------------------------
+
+/// Naive (monomial scheme) batched oblong discharge prover that **returns the
+/// eval-point** `[z, γ]` (the sound binding needs `z`/`γ_word`). Generic over
+/// `D`; the monomial-`K` additive NTT works at any width (unlike GF(2^8)).
+pub fn prove_oblong_and_batch_with_point<const D: usize, T: Transcript>(
     transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
-) -> OblongAndProof {
+) -> (OblongAndProof<D>, Vec<Gf>) {
     let (a, b, c) = build_stacked_operands(columns, and_specs, adder_specs, num_vars);
-    let ntt = AdditiveNtt::new();
+    let ntt = AdditiveNtt::<D>::new();
+    let scheme = MonomialScheme::new(&ntt);
+    let mut ch = TranscriptChannel::new(transcript);
+    prove_oblong_and_channel(&mut ch, &a, &b, &c, &scheme)
+}
+
+/// Verify **only** the naive (monomial) batched oblong zerocheck, returning the
+/// [`AndCheckOutput`]. Monomial dim-`(log₂D+1)` reconstruction subspace, no
+/// small challenges. The D=64 analogue of [`verify_oblong_zerocheck_gf8`].
+pub fn verify_oblong_zerocheck_naive<const D: usize, T: Transcript>(
+    transcript: &mut T,
+    proof: &OblongAndProof<D>,
+    k: usize,
+    num_vars: usize,
+) -> Result<AndCheckOutput, OblongVerifyError> {
+    let full = BinarySubspace::with_dim(skipped_vars(D) + 1);
+    let mut ch = TranscriptChannel::new(transcript);
+    verify_oblong_and_channel(&mut ch, proof, stacked_nvars(k, num_vars), &full, &[])
+        .map_err(OblongVerifyError::Oblong)
+}
+
+/// Columns-free verifier binding for the **naive** scheme: the monomial
+/// base-Lagrange weights `L_b(z)`, `γ_word`, and the distinct AND pairs. The
+/// monomial analogue of [`oblong_verifier_binding_gf8`].
+#[allow(clippy::arithmetic_side_effects)]
+pub fn oblong_verifier_binding_naive<const D: usize>(
+    and_specs: &[F2HadamardSpec],
+    num_vars: usize,
+    eval_point: &[Gf],
+) -> (Vec<Gf>, Vec<Gf>, Vec<(usize, usize)>) {
+    let z = eval_point[0];
+    let gamma_word = eval_point[1..1 + num_vars].to_vec();
+    let lagrange_z = base_lagrange_at::<D>(z).to_vec();
+    let pairs = distinct_pairs(and_specs);
+    (lagrange_z, gamma_word, pairs)
+}
+
+/// Full [`OblongBindingData`] for the **naive** scheme (prover side). The
+/// monomial analogue of [`oblong_binding_data_gf8`].
+pub fn oblong_binding_data_naive<const D: usize>(
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
+    num_vars: usize,
+    eval_point: &[Gf],
+) -> OblongBindingData {
+    let (lagrange_z, gamma_word, pairs) =
+        oblong_verifier_binding_naive::<D>(and_specs, num_vars, eval_point);
+    let pair_evals = pair_alpha_evals::<D>(columns, &pairs, &lagrange_z, &gamma_word);
+    let adder_parents: Vec<Gf> = cfg_iter!(adder_specs)
+        .map(|adder| {
+            let uvw = build_adder_operand_columns::<D>(columns, adder, num_vars);
+            adder_operand_alpha_evals::<D>(&uvw, &lagrange_z, &gamma_word)
+        })
+        .collect::<Vec<Vec<Gf>>>()
+        .concat();
+    OblongBindingData {
+        lagrange_z,
+        gamma_word,
+        pairs,
+        pair_evals,
+        adder_parents,
+    }
+}
+
+/// Batched oblong discharge prover, **naive `GF(2^128)`** (monomial scheme).
+/// Generic over the cell width `D`; `D = 32` for SHA-256, `D = 64` for Keccak
+/// (the monomial scheme works at any width, unlike the `GF(2^8)` accel).
+pub fn prove_oblong_and_batch<const D: usize, T: Transcript>(
+    transcript: &mut T,
+    columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    and_specs: &[F2HadamardSpec],
+    adder_specs: &[F2AdderSpec],
+    num_vars: usize,
+) -> OblongAndProof<D> {
+    let (a, b, c) = {
+        let _g = zinc_utils::prof::scope("operands");
+        build_stacked_operands(columns, and_specs, adder_specs, num_vars)
+    };
+    let ntt = AdditiveNtt::<D>::new();
     let scheme = MonomialScheme::new(&ntt);
     let mut ch = TranscriptChannel::new(transcript);
     prove_oblong_and_channel(&mut ch, &a, &b, &c, &scheme).0
@@ -414,15 +509,18 @@ pub fn prove_oblong_and_batch<T: Transcript>(
 /// relation variables). The sound binding folds the `ψ_z(col↓Δ)(γ_word)`
 /// pair-evals into the main multipoint-eval, so it needs `z`/`γ_word`; the
 /// standalone discharge bench drops the point.
-pub fn prove_oblong_and_batch_gf8<T: Transcript>(
+pub fn prove_oblong_and_batch_gf8<const D: usize, T: Transcript>(
     transcript: &mut T,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
-) -> (OblongAndProof, Vec<Gf>) {
-    let (a, b, c) = build_stacked_operands(columns, and_specs, adder_specs, num_vars);
-    let scheme = Gf8Scheme::new();
+) -> (OblongAndProof<D>, Vec<Gf>) {
+    let (a, b, c) = {
+        let _g = zinc_utils::prof::scope("operands");
+        build_stacked_operands(columns, and_specs, adder_specs, num_vars)
+    };
+    let scheme = Gf8Scheme::<D>::new();
     let mut ch = TranscriptChannel::new(transcript);
     prove_oblong_and_channel(&mut ch, &a, &b, &c, &scheme)
 }
@@ -435,38 +533,38 @@ pub fn prove_oblong_and_batch_gf8<T: Transcript>(
 /// Verify the batched oblong discharge, **naive `GF(2^128)`** (monomial scheme):
 /// `R₀` reconstructed over the monomial dim-`(SKIPPED_VARS+1)` subspace, tie
 /// weights `L_b(z)` over the monomial base subspace.
-pub fn verify_oblong_and_batch<T: Transcript>(
+pub fn verify_oblong_and_batch<const D: usize, T: Transcript>(
     transcript: &mut T,
-    proof: &OblongAndProof,
+    proof: &OblongAndProof<D>,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
 ) -> Result<(), OblongVerifyError> {
     let k = and_specs.len() + adder_specs.len();
-    let full = BinarySubspace::with_dim(SKIPPED_VARS + 1);
+    let full = BinarySubspace::with_dim(skipped_vars(D) + 1);
     let out = {
         let mut ch = TranscriptChannel::new(transcript);
         verify_oblong_and_channel(&mut ch, proof, stacked_nvars(k, num_vars), &full, &[])
             .map_err(OblongVerifyError::Oblong)?
     };
-    let lagrange_z = base_lagrange_at(out.eval_point[0]).to_vec();
+    let lagrange_z = base_lagrange_at::<D>(out.eval_point[0]).to_vec();
     batched_tie_check(&out, columns, and_specs, adder_specs, num_vars, &lagrange_z)
 }
 
 /// Verify the **`GF(2^8)`-accelerated** batched oblong discharge: `R₀`
 /// reconstructed over `embed(H₈)`, tie weights `L_b(z)` over the `embed(H₈)`
 /// base subspace (matching [`prove_oblong_and_batch_gf8`]).
-pub fn verify_oblong_and_batch_gf8<T: Transcript>(
+pub fn verify_oblong_and_batch_gf8<const D: usize, T: Transcript>(
     transcript: &mut T,
-    proof: &OblongAndProof,
+    proof: &OblongAndProof<D>,
     columns: &[DenseMultilinearExtension<BinaryPoly<D>>],
     and_specs: &[F2HadamardSpec],
     adder_specs: &[F2AdderSpec],
     num_vars: usize,
 ) -> Result<(), OblongVerifyError> {
     let k = and_specs.len() + adder_specs.len();
-    let scheme = Gf8Scheme::new();
+    let scheme = Gf8Scheme::<D>::new();
     let out = {
         let mut ch = TranscriptChannel::new(transcript);
         verify_oblong_and_channel(

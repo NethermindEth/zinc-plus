@@ -11,9 +11,9 @@
 //! Each relation `W = U ⊙ V` is between three **operands**. An operand is
 //! a bitwise expression over committed columns: the XOR of one or more
 //! `(column, ↓Δ row-shift)` terms, optionally bitwise-complemented (`1 −`,
-//! i.e. NOT). This covers the SHA AND relations C12–C14 (Appendix A of the
-//! plan): `W_E ⊙ W_E^↓1`, `(1−W_E) ⊙ W_E^↓2`, and the Maj combo
-//! `(W_A + W_A^↓2) ⊙ (W_A^↓1 + W_A^↓2) = (W_MAJ + W_A^↓2)`.
+//! i.e. NOT). This covers the SHA AND relations C12 (Ch) and C14 (Maj): the
+//! Binius64-style 1-AND Ch `W_E^↓2 ⊙ (W_E^↓1 + W_E) = W_U_CH^↓2`, and the
+//! Maj combo `(W_A + W_A^↓2) ⊙ (W_A^↓1 + W_A^↓2) = (W_MAJ + W_A^↓2)`.
 //!
 //! **`+`/`1−` are F_2[X] addition (bitwise XOR), not F-linear sums** — so
 //! the operand bit-slices are built by XOR-ing the source bits at the bit
@@ -117,7 +117,9 @@ impl F2HadamardSpec {
     }
 }
 
-/// A SHA-256 **adder** relation, verifying `t = x + y (mod 2^D)` via the
+/// A SHA-256 **adder** relation, verifying `t = x + y (mod 2^D)` (or
+/// `t = x + (y ⊕ y2)` when the optional second addend term [`Self::y2`] is
+/// set) via the
 /// Binius carry identity `(x + X·c) ⊙ (y + X·c) = c + X·c`, where `c` is
 /// the carry word of the addition. `t`, `x`, `y` are committed columns
 /// (each optionally row-shifted). The carry is *defined* from them:
@@ -138,6 +140,12 @@ pub struct F2AdderSpec {
     pub t: F2OperandTerm,
     pub x: F2OperandTerm,
     pub y: F2OperandTerm,
+    /// Optional second addend term, XORed into `y` to form the addend
+    /// `y ⊕ y2` (still `F_2[X]` addition / a single modular-add input). Used
+    /// by the SHA T_1 chain's Binius64-style 1-AND Ch step, whose addend is
+    /// the free XOR `Ch = e[t−2] ⊕ u_ch[t]` (`u_ch` the single Ch product).
+    /// `None` ⇒ the plain single-term addend `y`.
+    pub y2: Option<F2OperandTerm>,
     /// Per-row **active** mask: `active_rows[r] = false` zeroes the operands
     /// `U,V,W` at row `r`, so the zerocheck's per-row term is `0⊙0−0 = 0`
     /// there. Empty ⇒ all rows active. This handles SHA's **row-selective**
@@ -157,14 +165,16 @@ impl F2AdderSpec {
             t,
             x,
             y,
+            y2: None,
             active_rows: Vec::new(),
         }
     }
 }
 
 /// Column indices + row-layout constants of the SHA-256 `F_2[X]`
-/// arithmetization, parameterising the production builder for its **16
-/// Hadamard relations** (3 ANDs C12–C14 + 13 adders C5–C11). The caller
+/// arithmetization, parameterising the production builder for its **14
+/// Hadamard relations** (2 ANDs — C12 Ch, C14 Maj — + 12 adders C5–C11).
+/// The caller
 /// fills the column indices from the SHA UAIR's `cols` so the relation
 /// *topology* — the `↓Δ = i+Δ` re-expression, the operand wirings, and the
 /// active-row masks — lives here once (in the SHA-specific
@@ -194,8 +204,7 @@ pub struct Sha256F2HadamardLayout {
     pub w_sigma1: usize,
     pub w_sig0: usize,
     pub w_sig1: usize,
-    pub w_uef: usize,
-    pub w_uneg_e_g: usize,
+    pub w_u_ch: usize,
     pub w_maj: usize,
     pub w_t1: usize,
     pub w_t2: usize,
@@ -204,32 +213,29 @@ pub struct Sha256F2HadamardLayout {
     pub w_t1_s1: usize,
     pub w_t1_s2: usize,
     pub w_t1_s3: usize,
-    pub w_t1_s4: usize,
 }
 
 impl Sha256F2HadamardLayout {
-    /// All 16 SHA Hadamard relations: `(and_specs, adder_specs)`.
+    /// All 14 SHA Hadamard relations: `(and_specs, adder_specs)`.
     pub fn relations(&self) -> (Vec<F2HadamardSpec>, Vec<F2AdderSpec>) {
         (self.and_specs(), self.adder_specs())
     }
 
-    /// The 3 AND relations C12–C14, in the `↓Δ = i+Δ` convention (the SHA
-    /// fills are written `i−Δ`, so the result column is shifted up too).
+    /// The 2 AND relations C12 (Ch) and C14 (Maj), in the `↓Δ = i+Δ`
+    /// convention (the SHA fills are written `i−Δ`, so the result column is
+    /// shifted up too). The former C13 (the second Ch product `¬e∧g`) is gone:
+    /// the Binius64-style 1-AND Ch `e ⊙ (f⊕g)` replaces the two-product form.
     pub fn and_specs(&self) -> Vec<F2HadamardSpec> {
         let tm = |col, row_shift| F2OperandTerm { col, row_shift };
         vec![
-            // C12: W_UEF[t]=W_E[t]&W_E[t−1] ⇒ W_E^↓1 ⊙ W_E = W_UEF^↓1.
+            // C12: the single Ch product u_ch[t] = W_E[t] & (W_E[t−1] ⊕ W_E[t−2]).
+            //   Anchored at i = t−2 (lowest operand unshifted, so the bound
+            //   Δ=0 term is W_E[t−2]):
+            //     W_E^↓2 ⊙ (W_E^↓1 ⊕ W_E) = W_U_CH^↓2.
             F2HadamardSpec {
-                u: F2Operand::shifted(self.w_e, 1),
-                v: F2Operand::col(self.w_e),
-                w: F2Operand::shifted(self.w_uef, 1),
-            },
-            // C13: W_UNEG_E_G[t]=(¬W_E[t])&W_E[t−2]
-            //   ⇒ ¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2.
-            F2HadamardSpec {
-                u: F2Operand::shifted(self.w_e, 2).complemented(),
-                v: F2Operand::col(self.w_e),
-                w: F2Operand::shifted(self.w_uneg_e_g, 2),
+                u: F2Operand::shifted(self.w_e, 2),
+                v: F2Operand::xor(vec![tm(self.w_e, 1), tm(self.w_e, 0)]),
+                w: F2Operand::shifted(self.w_u_ch, 2),
             },
             // C14: Maj via (x⊕z)(y⊕z)=Maj(x,y,z)⊕z ⇒
             //   (W_A^↓2⊕W_A) ⊙ (W_A^↓1⊕W_A) = (W_MAJ^↓2⊕W_A).
@@ -241,7 +247,7 @@ impl Sha256F2HadamardLayout {
         ]
     }
 
-    /// The 13 adder relations C5–C11 (`target = x + y`), each with a
+    /// The 12 adder relations C5–C11 (`target = x + y`), each with a
     /// per-relation active-row mask anchored at the row where its
     /// *unshifted* S-column operand is materialised (per `rows_per_comp`
     /// block).
@@ -253,9 +259,26 @@ impl Sha256F2HadamardLayout {
                     t,
                     x,
                     y,
+                    y2: None,
                     active_rows: self.active_mask(lo, hi),
                 }
             };
+        // Variant with a second (free-XOR) addend term: the addend is
+        // `y ⊕ y2`. Used only by the 1-AND Ch step (`Ch = u_ch ⊕ e[t−2]`).
+        let adder_y2 = |t: F2OperandTerm,
+                        x: F2OperandTerm,
+                        y: F2OperandTerm,
+                        y2: F2OperandTerm,
+                        lo: usize,
+                        hi: usize| {
+            F2AdderSpec {
+                t,
+                x,
+                y,
+                y2: Some(y2),
+                active_rows: self.active_mask(lo, hi),
+            }
+        };
         let rnd = self.rounds_per_comp; // 64
         let rpc = self.rows_per_comp; // 68
         // SHA structural offsets: 16 = message-schedule seed window
@@ -276,12 +299,12 @@ impl Sha256F2HadamardLayout {
             adder(tm(self.w_w_s1, 0), tm(self.w_w, 0), tm(self.w_sig0, 1), c5.0, c5.1), // C5a
             adder(tm(self.w_w_s2, 0), tm(self.w_w_s1, 0), tm(self.w_w, 9), c5.0, c5.1), // C5b
             adder(tm(self.w_w, 16), tm(self.w_w_s2, 0), tm(self.w_sig1, 14), c5.0, c5.1), // C5c
-            // C6 — T_1 chain.
-            adder(tm(self.w_t1_s1, 0), tm(self.w_e, 0), tm(self.w_sigma1, 3), cround.0, cround.1), // C6a
-            adder(tm(self.w_t1_s2, 0), tm(self.w_t1_s1, 0), tm(self.w_uef, 3), cround.0, cround.1), // C6b
-            adder(tm(self.w_t1_s3, 0), tm(self.w_t1_s2, 0), tm(self.w_uneg_e_g, 3), cround.0, cround.1), // C6c
-            adder(tm(self.w_t1_s4, 0), tm(self.w_t1_s3, 0), tm(self.pa_k, 3), cround.0, cround.1), // C6d
-            adder(tm(self.w_t1, 3), tm(self.w_t1_s4, 0), tm(self.w_w, 3), cround.0, cround.1), // C6e
+            // C6 — T_1 chain (4 steps). The 1-AND Ch enters as one addend
+            // `Ch = u_ch ⊕ e[t−2]` via the adder's optional `y2` term.
+            adder(tm(self.w_t1_s1, 0), tm(self.w_e, 0), tm(self.w_sigma1, 3), cround.0, cround.1), // C6a: s2 = h + Σ_1
+            adder_y2(tm(self.w_t1_s2, 0), tm(self.w_t1_s1, 0), tm(self.w_u_ch, 3), tm(self.w_e, 1), cround.0, cround.1), // C6b: s3 = s2 + Ch
+            adder(tm(self.w_t1_s3, 0), tm(self.w_t1_s2, 0), tm(self.pa_k, 3), cround.0, cround.1), // C6c: s4 = s3 + K
+            adder(tm(self.w_t1, 3), tm(self.w_t1_s3, 0), tm(self.w_w, 3), cround.0, cround.1), // C6d: t1 = s4 + W
             // C7 — T_2 (row-local).
             adder(tm(self.w_t2, 0), tm(self.w_sigma0, 0), tm(self.w_maj, 0), c7.0, c7.1), // C7
             // C8/C9 — a'/e' round update.
@@ -361,7 +384,10 @@ pub(crate) fn build_adder_operand_columns<const D: usize>(
         }
         let tv = shifted_cell::<D>(columns, spec.t, r, n);
         let xv = shifted_cell::<D>(columns, spec.x, r, n);
-        let yv = shifted_cell::<D>(columns, spec.y, r, n);
+        // Addend = y ⊕ y2 (single F_2[X] modular-add input); y2 is the free
+        // second Ch term for the 1-AND T_1 step, None elsewhere.
+        let yv = shifted_cell::<D>(columns, spec.y, r, n)
+            ^ spec.y2.map_or(0, |y2| shifted_cell::<D>(columns, y2, r, n));
         let z = (tv ^ xv ^ yv) & mask;
         // β = Maj of the three top bits (the overflow carry).
         let xb = (xv >> top) & 1;
@@ -976,6 +1002,7 @@ mod tests {
             t: F2OperandTerm { col: 0, row_shift: 0 },
             x: F2OperandTerm { col: 1, row_shift: 0 },
             y: F2OperandTerm { col: 2, row_shift: 0 },
+            y2: None,
             active_rows: active,
         };
         round_trip::<D>(&columns, &[], &[adder], num_vars);

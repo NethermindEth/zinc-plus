@@ -901,6 +901,29 @@ pub fn eval_f2_poly_d_at_with_powers<const D: usize>(
     BinaryFieldGF128::from_words(acc)
 }
 
+/// Evaluate the `F_2[X]`-cell given by the set bits of `bits` (a raw
+/// bit-pattern, e.g. an opened paired-storage cell or a `BitOp`-mapped
+/// cell) at the field point with precomputed `powers[i] = β^i`: returns
+/// `Σ_{b: bit b set} β^b`. XOR-only over the set bits (same hot loop as
+/// [`eval_f2_poly_d_at_with_powers`], without materialising a
+/// `BinaryPoly`). The caller must ensure `powers.len()` exceeds every set
+/// bit index of `bits` (i.e. `≥ D` for a `D`-bit cell). This is the
+/// scalar `ψ_β` read-off the `β`-collapsed combined row uses in the open's
+/// proximity checks.
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+pub fn eval_f2_bits_at_with_powers(mut bits: u64, powers: &[BinaryFieldGF128]) -> BinaryFieldGF128 {
+    let mut acc = [0u64; 2];
+    while bits != 0 {
+        let i = bits.trailing_zeros() as usize;
+        let pw = powers[i].words();
+        acc[0] ^= pw[0];
+        acc[1] ^= pw[1];
+        bits &= bits - 1;
+    }
+    BinaryFieldGF128::from_words(acc)
+}
+
 /// Branchless variant of [`eval_f2_poly_d_at_with_powers`]: instead of
 /// the `if bit_set` branch, mask each `alpha_powers[i]` by
 /// `-(bit) as u64` and unconditionally XOR into the accumulator.

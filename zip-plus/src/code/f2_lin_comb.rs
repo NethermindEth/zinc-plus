@@ -12,10 +12,11 @@
 //! out[col] = Σ_j coeffs[j] · cells[j][col]     (over F_2[X])
 //! ```
 //!
-//! where the product `F_2[X]<32> · F_2[X]<128>` lives in `F_2[X]<160>`
-//! (degrees add: 31 + 127 = 158, so `< 160` holds with margin) and
-//! XOR-summing many such products stays within `F_2[X]<160>`. The
-//! result type therefore takes 3 × `u64` words.
+//! where the product `F_2[X]<D> · F_2[X]<128>` (cell width `D ≤ 64`) lives in
+//! `F_2[X]<D+128>`: for SHA `D = 32` the degree is `31 + 127 = 158 < 160`; for
+//! Keccak `D = 64` it is `63 + 127 = 190 < 192`. Either way the result fits in
+//! `3 × u64` words (`F_2[X]<160>` = [`BinaryF2Poly<3>`], 192 bits), so the
+//! output type is the same for both widths.
 //!
 //! This is the new linear-combination primitive for the F_2-RAA
 //! commit lane. It replaces the integer-arithmetic combined-row
@@ -44,15 +45,21 @@ pub type F2X160 = BinaryF2Poly<3>;
 ///
 /// `out.len() == row_len`. Each entry is in `F_2[X]<160>`.
 ///
+/// Generic over the cell width `D` (`D ≤ 64`); SHA instantiates `D = 32`,
+/// Keccak `D = 64`. The output type is `F2X160` ([`BinaryF2Poly<3>`]) for both
+/// (192 bits covers `D + 128 ≤ 192`).
+///
 /// Implementation notes:
-/// - Cells are bit-packed to `u32` once up front (one Boolean walk
+/// - Cells are bit-packed to `u64` once up front (one Boolean walk
 ///   per cell amortized across all the row's multiplies), avoiding
-///   per-`BinaryPoly` Boolean-array iteration in the inner loop.
+///   per-`BinaryPoly` Boolean-array iteration in the inner loop. For
+///   `D < 64` the high `64 − D` bits are zero, so the bit walk is
+///   identical to packing into a narrower integer.
 /// - The output accumulator is kept as `Vec<[u64; 3]>` raw words for
 ///   the duration; it's converted back to `F2X160` at the very end.
-/// - The 32×128 carryless multiplication is inlined via
-///   [`xor_clmul_32x128`], which walks set bits of the 32-bit cell
-///   with `trailing_zeros` — `O(popcount(cell))` shifted XORs per
+/// - The `D`×128 carryless multiplication is inlined via
+///   [`xor_clmul_wide`], which walks set bits of the cell with
+///   `trailing_zeros` — `O(popcount(cell))` shifted XORs per
 ///   multiplication. Zero cells short-circuit before the bit walk.
 /// - Loop order is `j` (row) outer, `col` inner. Each pass reads a
 ///   contiguous slice of `cells_packed` and writes to a contiguous
@@ -60,7 +67,12 @@ pub type F2X160 = BinaryF2Poly<3>;
 ///   to parallelise per-column gave a strided-read pattern on the
 ///   `cells_packed` array and ~50% slowdown in practice.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2X160> {
+pub fn f2_lin_comb<const D: usize>(
+    cells: &[BinaryPoly<D>],
+    coeffs: &[F2X128],
+    row_len: usize,
+) -> Vec<F2X160> {
+    const { assert!(D <= 64, "f2_lin_comb: cell width D must be ≤ 64") };
     assert!(row_len > 0, "f2_lin_comb: row_len must be > 0");
     assert_eq!(
         cells.len(),
@@ -72,10 +84,11 @@ pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2
         coeffs.len() * row_len,
     );
 
-    // Pack each cell to its 32-bit pattern once. The `F2PackU64` impls
-    // for `BinaryRefPoly<D ≤ 64>` walk Booleans here; this is the only
-    // place that cost is paid.
-    let cells_packed: Vec<u32> = cells.iter().map(|c| c.pack_u64() as u32).collect();
+    // Pack each cell to its `D`-bit pattern (in a u64) once. The
+    // `F2PackU64` impls for `BinaryRefPoly<D ≤ 64>` walk Booleans here;
+    // this is the only place that cost is paid. For `D < 64` the high
+    // bits are zero.
+    let cells_packed: Vec<u64> = cells.iter().map(|c| c.pack_u64()).collect();
 
     // Accumulator in raw words: 3 × u64 per column, contiguous.
     let mut acc: Vec<[u64; 3]> = vec![[0u64; 3]; row_len];
@@ -89,7 +102,7 @@ pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2
             if cell == 0 {
                 continue;
             }
-            xor_clmul_32x128(&mut acc[col], cell, lo, hi);
+            xor_clmul_wide(&mut acc[col], cell, lo, hi);
         }
     }
 
@@ -97,31 +110,33 @@ pub fn f2_lin_comb(cells: &[F2X32], coeffs: &[F2X128], row_len: usize) -> Vec<F2
 }
 
 /// XOR `cell * (hi:lo)` into the 3-word accumulator `acc`, where:
-/// - `cell` is an `F_2[X]<32>` value bit-packed in a `u32` (bit `i`
-///   = coefficient of `X^i`),
+/// - `cell` is an `F_2[X]<D>` value (`D ≤ 64`) bit-packed in a `u64`
+///   (bit `i` = coefficient of `X^i`),
 /// - `(lo, hi)` is an `F_2[X]<128>` value bit-packed in two `u64`s
 ///   (bit `i` of `lo` = coefficient of `X^i`; bit `i` of `hi` =
 ///   coefficient of `X^{64+i}`).
 ///
-/// The product has degree ≤ 31 + 127 = 158, so it fits in `acc`
-/// (the high 2 bits of `acc[2]` are always zero — bits 159..192).
+/// The product has degree ≤ `(D−1) + 127 ≤ 190`, so it fits in `acc`
+/// (3 × u64 = 192 bits; the high bits of `acc[2]` are zero).
 ///
 /// Inner loop: O(popcount(cell)) shifted XORs. Each shifted XOR
-/// touches all 3 words of `acc`.
+/// touches all 3 words of `acc`. The set-bit index `i` is in `[0, 63]`,
+/// so `64 − i ≥ 1` and there are no shift-by-64 edge cases — the same
+/// formula serves both `D = 32` and `D = 64`.
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
-fn xor_clmul_32x128(acc: &mut [u64; 3], cell: u32, lo: u64, hi: u64) {
+fn xor_clmul_wide(acc: &mut [u64; 3], cell: u64, lo: u64, hi: u64) {
     let mut bits = cell;
     while bits != 0 {
-        let i = bits.trailing_zeros() as usize; // 0..=31
+        let i = bits.trailing_zeros() as usize; // 0..=63
         // XOR (lo, hi, 0) << i into acc.
         if i == 0 {
             acc[0] ^= lo;
             acc[1] ^= hi;
         } else {
-            // Bit i in [1, 31]: shift the 128-bit coefficient left by
-            // i bits and XOR into acc[0..3]. For 32-bit `cell`, `i`
-            // never reaches 64 so there are no zero-shift edge cases.
+            // Bit i in [1, 63]: shift the 128-bit coefficient left by
+            // i bits and XOR into acc[0..3]. `i < 64` so `64 − i ≥ 1`,
+            // no zero-shift edge cases.
             acc[0] ^= lo << i;
             acc[1] ^= (lo >> (64 - i)) ^ (hi << i);
             acc[2] ^= hi >> (64 - i);
@@ -201,6 +216,36 @@ mod tests {
             }
         }
 
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn matches_reference_generic_mul_d64() {
+        // The Keccak cell width: D = 64. Compare the inlined 64×128 clmul
+        // against the generic schoolbook multiplier (degree ≤ 63+127 = 190).
+        let row_len = 5;
+        let num_rows = 7;
+        let cells: Vec<BinaryPoly<64>> = (0..(row_len * num_rows) as u64)
+            .map(|i| {
+                BinaryPoly::<64>::from(
+                    i.wrapping_mul(0xA5A5_A5A5_DEAD_BEEF).wrapping_add(0x1234_5678_9ABC),
+                )
+            })
+            .collect();
+        let coeffs: Vec<F2X128> = (0..num_rows as u64)
+            .map(|j| bp128(j.wrapping_mul(0x9E37_79B1_F4A7_C15D), j.wrapping_mul(0xDEAD_BEEF_CAFE_F00D)))
+            .collect();
+
+        let got = f2_lin_comb::<64>(&cells, &coeffs, row_len);
+
+        let mut expected = vec![F2X160::zero(); row_len];
+        for (j, &coeff) in coeffs.iter().enumerate() {
+            for (col, cell) in cells[j * row_len..(j + 1) * row_len].iter().enumerate() {
+                let cell_wide: BinaryF2Poly<1> = BinaryF2Poly::from_words([cell.pack_u64()]);
+                let prod: F2X160 = f2_poly_mul(&cell_wide, &coeff);
+                expected[col] += &prod;
+            }
+        }
         assert_eq!(got, expected);
     }
 

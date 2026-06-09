@@ -255,10 +255,14 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         serialize_gf128poly(&mut b_vector, v);
     }
 
-    // -- open.combined_row (Vec<GF128Poly<D>>) --
-    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * D * ALPHA_BYTES);
-    for v in &proof.open.combined_row {
-        serialize_gf128poly(&mut combined_row, v);
+    // -- open.combined_row (β-collapsed: Vec<GF128Poly<1>>, one GF(2^128) scalar each) --
+    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * ALPHA_BYTES);
+    {
+        let mut buf = vec![0u8; ALPHA_BYTES];
+        for v in &proof.open.combined_row {
+            v.coeffs[0].inner().write_transcription_bytes_exact(&mut buf);
+            combined_row.extend_from_slice(&buf);
+        }
     }
 
     // -- open.opened_columns, split into three sub-regions --
@@ -377,9 +381,56 @@ struct ProverFixture {
     >,
 }
 
+/// Proof-size-optimal commit `num_rows` (a power of two) for a given
+/// `num_vars`, post-`β`-collapse. The `β`-collapsed `combined_row` costs
+/// `(N/num_rows)·16 B` (one `GF(2^128)` scalar per message column), which
+/// shrinks as `num_rows` grows, while the `t` column openings and the
+/// `D`-wide `b'` vector cost `∝ num_rows`; this picks the power-of-two
+/// `num_rows | N` that minimises their sum. **Soundness-neutral:** the
+/// `BENCH_NUM_OPENINGS` count is fixed by the code rate, not the matrix
+/// aspect ratio. Clamped to `≥ 8` so small/medium traces keep the
+/// well-exercised commit shape (where the optimum is `≤ 8` and the gain is
+/// marginal); only large traces (e.g. `num_vars=22 → 32`) move up. See
+/// `documentation/f2x-sha-todo.md` (Lever A).
+#[allow(clippy::arithmetic_side_effects)]
+fn optimal_num_rows(num_vars: usize) -> usize {
+    // `F2_NUM_ROWS=<k>` overrides the model (A/B the commit shape; must be a
+    // power of two dividing `2^num_vars`). Mirrors the `HAD_NVARS` knob.
+    if let Ok(v) = std::env::var("F2_NUM_ROWS") {
+        if let Ok(k) = v.parse::<usize>() {
+            assert!(k.is_power_of_two() && k <= (1usize << num_vars), "F2_NUM_ROWS");
+            return k;
+        }
+    }
+    let n: u64 = 1u64 << num_vars;
+    // Committed primary witness cols are paired two-per-storage-cell; bit-op
+    // virtual columns are reconstructed by the verifier and not committed.
+    let num_committed =
+        zinc_test_uair::sha256_f2::cols::NUM_BIN_WIT - sha_f2_bit_op_virtuals().len();
+    let paired_batch = num_committed.div_ceil(2) as u64;
+    let bytes_per_cell = (2 * D.div_ceil(8)) as u64;
+    // Bytes growing ∝ num_rows: column openings + the D-wide b' vector.
+    let grow_per_nr =
+        BENCH_NUM_OPENINGS as u64 * paired_batch * bytes_per_cell + (D as u64) * 16;
+    // Bytes shrinking ∝ 1/num_rows: the β-collapsed combined row.
+    let cr_times_nr = n.saturating_mul(16);
+    let mut best = 8usize;
+    let mut best_cost = u64::MAX;
+    let mut nr = 1usize;
+    while (nr as u64) <= n {
+        let cost = cr_times_nr / nr as u64 + grow_per_nr.saturating_mul(nr as u64);
+        if cost < best_cost {
+            best_cost = cost;
+            best = nr;
+        }
+        nr <<= 1;
+    }
+    best.max(8)
+}
+
 fn setup_prover(num_vars: usize) -> ProverFixture {
     let mut rng_local = rng();
-    let num_rows: usize = 8;
+    let num_rows: usize = optimal_num_rows(num_vars);
     let poly_size = 1usize << num_vars;
     let row_len = poly_size / num_rows;
     assert_eq!(num_rows * row_len, poly_size);
@@ -2035,7 +2086,21 @@ fn e2e_benches(c: &mut Criterion) {
     // the wall-clock budget.
     group.sample_size(10);
 
+    // `E2E_NVARS=9` (comma-separated) restricts the sweep to the listed sizes —
+    // each point pays a full `setup_prover` (the 2^22 fixture alone is multi-GB),
+    // so scope it when you only want a single point (e.g. the `OBLONG_PROFILE`
+    // per-region tree at one nvars). Mirrors `HAD_NVARS` for the Hadamard group.
+    let only: Option<Vec<usize>> = std::env::var("E2E_NVARS").ok().map(|s| {
+        s.split(',')
+            .filter_map(|x| x.trim().parse::<usize>().ok())
+            .collect()
+    });
     for &num_vars in NVARS_SWEEP {
+        if let Some(only) = &only {
+            if !only.contains(&num_vars) {
+                continue;
+            }
+        }
         let fx = setup_prover(num_vars);
         let id = format!("nvars={num_vars}");
 
@@ -2065,6 +2130,11 @@ fn e2e_benches(c: &mut Criterion) {
                     .expect("prove_f2_full should succeed");
                 black_box(proof);
             });
+            // Whole-prover per-region tree (commit / uair{ic,alpha_project,
+            // sumcheck,col_evals} / multipoint_eval / open_evals_r0 /
+            // open{eq_tensor,b_a_build,combined_row,merkle}), printed once per
+            // criterion sample when `OBLONG_PROFILE` is set.
+            zinc_utils::prof::dump_and_reset(&format!("Prove {id}"));
         });
 
         let proof = {
@@ -2139,7 +2209,7 @@ fn micro_benches(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Hadamard discharge A/B: cost of registering the 16 SHA-256 Hadamard
+// Hadamard discharge A/B: cost of registering the 14 SHA-256 Hadamard
 // relations (the Approach-B discharge) vs the `&[]`-spec path the rest of
 // the bench measures.
 // ---------------------------------------------------------------------------
@@ -2166,8 +2236,7 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
         w_sigma1: cols::W_SIGMA1,
         w_sig0: cols::W_SIG0,
         w_sig1: cols::W_SIG1,
-        w_uef: cols::W_UEF,
-        w_uneg_e_g: cols::W_UNEG_E_G,
+        w_u_ch: cols::W_U_CH,
         w_maj: cols::W_MAJ,
         w_t1: cols::W_T1,
         w_t2: cols::W_T2,
@@ -2176,13 +2245,12 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
         w_t1_s1: cols::W_T1_S1,
         w_t1_s2: cols::W_T1_S2,
         w_t1_s3: cols::W_T1_S3,
-        w_t1_s4: cols::W_T1_S4,
     }
 }
 
 /// A/B the Approach-B Hadamard discharge cost: the same `prove_f2_full*`
-/// / `verify_f2_full*` family run **with** the 16 SHA-256 Hadamard
-/// relations (3 ANDs + 13 adders, from `Sha256F2HadamardLayout`) vs
+/// / `verify_f2_full*` family run **with** the 14 SHA-256 Hadamard
+/// relations (2 ANDs + 12 adders, from `Sha256F2HadamardLayout`) vs
 /// **without** (the `&[]` specs the rest of the bench uses). The delta
 /// between the `*-Hadamard` and `*-NoHadamard` cases is the discharge
 /// overhead — on the prover: the per-relation Hadamard zerocheck plus the
@@ -2194,10 +2262,73 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
 /// the pre-paired e2e entry), so each includes the witness pairing and the
 /// A/B delta isolates the discharge. Absolute numbers therefore run a
 /// touch higher than the e2e `Prove` headline (which amortises pairing).
+/// Cost probe — "the sumcheck after projection" for the longfellow-style
+/// exponent adder. Proves the projected per-operand encoding
+/// `v̂(α) = ∏_{i<D}(1 + v_i(x)·γ_i)` over the `nv`-variable row hypercube via a
+/// degree-`D` product-of-multilinears sumcheck, doing the full prover work
+/// (round polynomials at `D+1` points + fold each round). This is the NAIVE
+/// inline realization (`O(D²·2^nv)`); a GKR product tree would instead cost
+/// ≈2–3× the `EncodeFloor` arm. Returns a running value so nothing is elided.
+fn exp_adder_product_sumcheck_cost(
+    mut tables: Vec<Vec<zinc_poly::univariate::binary_gf128::BinaryFieldGF128>>,
+    nv: usize,
+) -> zinc_poly::univariate::binary_gf128::BinaryFieldGF128 {
+    use rayon::prelude::*;
+    use zinc_poly::univariate::binary_gf128::BinaryFieldGF128 as F;
+    const D: usize = 32;
+    const E: usize = D + 1; // eval points 0..=D (as distinct field elements)
+    let cpts: [F; E] = core::array::from_fn(|c| F::from(c as u64));
+    let mut last = F::zero();
+    for round in 0..nv {
+        let half = tables[0].len() / 2;
+        let tref = &tables;
+        // Round polynomial g(c) = Σ_x ∏_j (a_j + c·(a_j+b_j)) at c = 0..D.
+        let gvals: [F; E] = (0..half)
+            .into_par_iter()
+            .fold(
+                || [F::zero(); E],
+                |mut acc, x| {
+                    for c in 0..E {
+                        let cc = cpts[c];
+                        let mut prod = F::one();
+                        for j in 0..D {
+                            let a = tref[j][x];
+                            let b = tref[j][x + half];
+                            prod = prod * (a + cc * (a + b));
+                        }
+                        acc[c] = acc[c] + prod;
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || [F::zero(); E],
+                |mut a, b| {
+                    for k in 0..E {
+                        a[k] = a[k] + b[k];
+                    }
+                    a
+                },
+            );
+        // Fold every factor table at a deterministic challenge.
+        let rr = F::from(0x9E37_79B9u64.wrapping_mul(round as u64 + 1));
+        tables.par_iter_mut().for_each(|tab| {
+            for x in 0..half {
+                let a = tab[x];
+                let b = tab[x + half];
+                tab[x] = a + rr * (a + b);
+            }
+            tab.truncate(half);
+        });
+        last = gvals[0] + gvals[1];
+    }
+    last
+}
+
 fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &ProverFixture) {
     let (and_specs, adder_specs) = sha256_f2_hadamard_layout(fx.num_vars).relations();
-    assert_eq!(and_specs.len(), 3, "expected 3 AND relations (C12–C14)");
-    assert_eq!(adder_specs.len(), 13, "expected 13 adder relations (C5–C11)");
+    assert_eq!(and_specs.len(), 2, "expected 2 AND relations (C12 Ch, C14 Maj)");
+    assert_eq!(adder_specs.len(), 12, "expected 12 adder relations (C5–C11)");
 
     let bit_ops = sha_f2_bit_op_virtuals();
     let public_cols = &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB];
@@ -2264,12 +2395,17 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
             .expect("prove (oblong hadamard) should succeed");
             black_box(proof);
         });
+        // Whole-prover per-region tree for the oblong-Hadamard path, with the
+        // discharge regions (discharge{,:binding} → operands / round_message /
+        // fold_at_z / phase2_mlecheck) nested in. Printed once per criterion
+        // sample when `OBLONG_PROFILE` is set.
+        zinc_utils::prof::dump_and_reset(&format!("Prove-Hadamard-Oblong {id}"));
     });
 
     // -- Discharge-only A/B: the current fused bit-slice discharge
     // (`prove_f2_hadamard_phase`, ψ_α over 1536 GF128 slices) vs the word-packed
     // **oblong** zerocheck (`prove_oblong_and_batch`, ψ_z, ~48 packed columns)
-    // over the same 16 SHA relations + the same committed columns. Isolates the
+    // over the same 14 SHA relations + the same committed columns. Isolates the
     // discharge prover cost (no commit/open). Oblong is still the naive GF128 NTT
     // (no GF(2⁸)/eq-split yet) and does not yet bind via the multipoint-eval.
     {
@@ -2290,6 +2426,9 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
                 );
                 black_box(phase);
             });
+            // Fused (ψ_α) path is not instrumented with per-region scopes; this
+            // is a no-op unless that path gains `prof::scope` calls later.
+            zinc_utils::prof::dump_and_reset(&format!("Discharge-Fused {id}"));
         });
         group.bench_function(BenchmarkId::new("Discharge-Oblong", id), |bench| {
             bench.iter(|| {
@@ -2303,6 +2442,9 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
                 );
                 black_box(proof);
             });
+            // Per-region breakdown (operands / round_message / fold_at_z /
+            // phase2_mlecheck), printed once when `OBLONG_PROFILE` is set.
+            zinc_utils::prof::dump_and_reset(&format!("Discharge-Oblong {id}"));
         });
         group.bench_function(BenchmarkId::new("Discharge-Oblong-GF8", id), |bench| {
             bench.iter(|| {
@@ -2316,7 +2458,70 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
                 );
                 black_box(out);
             });
+            zinc_utils::prof::dump_and_reset(&format!("Discharge-Oblong-GF8 {id}"));
         });
+
+        // === Exponent-adder ("longfellow" char-2 monomial encoding) cost probe ===
+        // The exp-adder replaces the 12 adder relations above with: form one
+        // monomial encoding v̂(α)=∏_{i<32}(1+v_iγ_i) per operand, then a cheap
+        // t-fold product check. The dominant cost is FORMING the encodings, which
+        // we measure here on the same fixture/nvars/field as the discharge arms.
+        // C_ENC=12 matches the 12 adder relations the exp-adder would replace.
+        {
+            use rayon::prelude::*;
+            const C_ENC: usize = 12;
+            let nrows = 1usize << fx.num_vars;
+            // 32 factor columns of generic GF(2¹²⁸): the projected, partially
+            // folded factors (1+v_iγ_i). Mid-sumcheck these are generic K (not
+            // 1 / α^{2^i}), so every factor is a real multiply (no skip).
+            let factors: Vec<Vec<DGf>> = (0..32)
+                .map(|i| {
+                    (0..nrows)
+                        .map(|x| {
+                            let a = 0x9E37_79B9_7F4A_7C15u64
+                                .wrapping_mul((i as u64).wrapping_add(1).wrapping_mul(0x1_0000_0001))
+                                .wrapping_add((x as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+                            let b = a.rotate_left(29).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+                            DGf::from_words([a | 1, b])
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // (1) EncodeFloor — irreducible cost to FORM the C_ENC encodings:
+            // 31 mults/row each, parallel over rows. ≈ a GKR product tree's
+            // circuit-eval (realistic-realization lower bound; full GKR ≈ 2–3×).
+            group.bench_function(BenchmarkId::new("ExpAdder-EncodeFloor", id), |bench| {
+                bench.iter(|| {
+                    let mut acc = DGf::zero();
+                    for _ in 0..C_ENC {
+                        let s = (0..nrows)
+                            .into_par_iter()
+                            .map(|x| {
+                                let mut p = factors[0][x];
+                                for i in 1..32 {
+                                    p = p * factors[i][x];
+                                }
+                                p
+                            })
+                            .reduce(|| DGf::zero(), |u, v| u + v);
+                        acc = acc + s;
+                    }
+                    black_box(acc);
+                });
+            });
+
+            // (2) NaiveSumcheck-1enc — the literal "sumcheck after projection" for
+            // ONE encoding (degree-32 product-of-multilinears). NAIVE inline
+            // realization, O(D²·2^nv); the full 2-ary add zerocheck is ~2× this and
+            // there are ~C_ENC encodings. (Includes a ~33 MB table clone/iter.)
+            group.bench_function(BenchmarkId::new("ExpAdder-NaiveSumcheck-1enc", id), |bench| {
+                bench.iter(|| {
+                    let out = exp_adder_product_sumcheck_cost(factors.clone(), fx.num_vars);
+                    black_box(out);
+                });
+            });
+        }
     }
 
     // Build both proofs once for the verify benches + size report.

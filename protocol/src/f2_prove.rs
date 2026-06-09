@@ -249,7 +249,7 @@ pub struct F2VirtualBpSpec {
 /// the encoding-consistency check at some sampled position.
 ///
 /// **What `BitOp` does NOT cover**: AND-style nonlinear ops
-/// (`W_UEF`, `W_UNEG_E_G`, `W_MAJ`) do not commute with the F_2-
+/// (`W_U_CH`, `W_MAJ`) do not commute with the F_2-
 /// linear encoder; virtualising them needs a Hadamard-style
 /// product check on top, which is out of scope here.
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -764,42 +764,34 @@ impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
     }
 }
 
-/// Oblong-discharge prove entry point, specialised to the SHA-256 word width
-/// `D = 32` (`WORD_BITS`). The oblong AND zerocheck
-/// ([`crate::f2_oblong_hadamard`]) is hardwired to 32-bit words, so this lives on
-/// the `D = 32` instantiation rather than the generic `impl<.., const D>` below.
-impl<Zt, U> ZincPlusPiopF2<Zt, U, 32>
+/// The **GF(2⁸)-accelerated** sound oblong-discharge entry points, generic over
+/// the cell width `D`. The GF(2⁸) byte-lookup NTT
+/// ([`crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8`]) now runs at any
+/// `D` with `2·D ≤ 256` — SHA-256 `D = 32`, Keccak `D = 64` — so both use this
+/// fast lane; the monomial-`K` reference twins are the `*_naive` methods in the
+/// `impl` block below. (Originally `D = 32`-only, when the GF(2⁸) scheme was
+/// hardwired to the 32-bit word.)
+impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
 where
-    Zt: F2ZincTypes<32>,
+    Zt: F2ZincTypes<D>,
     U: Uair + 'static,
 {
-    /// **Measurement-first** oblong-discharge variant of
-    /// [`Self::prove_f2_full_with_hadamard`]: runs the standard *no-Hadamard*
-    /// pipeline (commit + IC + α + sumcheck + multipoint-eval + the single
-    /// α-open) AND, on the same transcript, the word-packed **oblong AND
-    /// zerocheck** discharge ([`crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8`],
-    /// the GF(2⁸) byte-lookup NTT over `ψ_z`) for the 16 SHA relations.
-    ///
-    /// Purpose: measure the **e2e prove cost** of the oblong discharge — the
-    /// handoff Gate, `Prove-NoHadamard + ~oblong-cost` vs the fused
-    /// `Prove-Hadamard`'s `+ ~390 ms`. Because the main pipeline here is the
-    /// no-Hadamard one (identical to [`Self::prove_f2_full_with_bit_ops`]), the
-    /// delta to `Prove-NoHadamard` is exactly the oblong discharge.
-    ///
-    /// **NOT yet sound.** The oblong discharge's `ψ_z` operand evals are produced
-    /// but **not bound to the commitment**: `ψ_z` is the subspace-Lagrange
-    /// projection at the univariate-skip challenge `z`, a *different* projection
-    /// than the monomial-`α` open, so it cannot ride the existing α-open and
-    /// needs its own z-projection multipoint-eval + open. That sound binding is
-    /// the immediate follow-up (handoff §4-(i) / NEXT STEP #1). Until it lands
-    /// the returned [`zinc_poly::univariate::oblong_and::OblongAndProof`] is a
-    /// standalone proof, not tied into [`F2FullProof`]'s verified path — hence
-    /// the tuple return rather than a new `F2FullProof` field.
+    /// **Sound** GF(2⁸)-accelerated oblong-discharge variant of
+    /// [`Self::prove_f2_full_with_hadamard`]: runs the no-Hadamard pipeline
+    /// (commit + IC + α + sumcheck + multipoint-eval) AND, on the same transcript,
+    /// the word-packed **oblong AND zerocheck** discharge
+    /// ([`crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8`], the GF(2⁸)
+    /// byte-lookup NTT over `ψ_z`); the discharge's `ψ_z(col↓Δ)(γ_word)` pair-evals
+    /// are folded into the committed multipoint open by the shared
+    /// [`Self::prove_f2_full_with_oblong_hadamard_impl`] (the sound binding,
+    /// §`had-binding`). Identical in structure to
+    /// [`Self::prove_f2_full_with_oblong_hadamard_naive`] but for the faster
+    /// GF(2⁸) scheme. SHA runs `D = 32`, Keccak `D = 64`.
     #[allow(clippy::too_many_arguments)]
     pub fn prove_f2_full_with_oblong_hadamard(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-        trace: &UairTrace<'static, BinaryPoly<32>, BinaryPoly<32>, 32>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
@@ -807,46 +799,182 @@ where
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
         num_column_openings: usize,
-    ) -> Result<F2OblongHadamardProof<32>, F2ProveError<U>> {
+    ) -> Result<F2OblongHadamardProof<D>, F2ProveError<U>> {
+        let (hint, commitment) = {
+            let _g = zinc_utils::prof::scope("commit");
+            Self::commit_and_absorb_f2_trace_with_virtuals(
+                transcript,
+                pp,
+                &trace.binary_poly,
+                bit_op_specs,
+            )
+            .expect("F_2 commit should succeed for a well-shaped trace")
+        };
+
+        // -- Oblong AND-zerocheck discharge (GF(2⁸) accel); capture its eval-point
+        //    [z, γ]. `discharge` nests the zerocheck's own scopes (operands /
+        //    round_message / fold_at_z / phase2_mlecheck, inside
+        //    `prove_oblong_and_batch_gf8`) plus `discharge:binding` for the
+        //    recombination-data build. --
+        let (oblong_proof, binding) = {
+            let _g = zinc_utils::prof::scope("discharge");
+            let (oblong_proof, oblong_point) =
+                crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8::<D, _>(
+                    transcript,
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    adder_specs,
+                    num_vars,
+                );
+            // Recombination data: L_b(z), γ_word, the distinct (col,Δ) pairs, the
+            // ψ_z(col↓Δ)(γ_word) pair-evals, and the trusted adder operand parents.
+            let binding = {
+                let _gb = zinc_utils::prof::scope("discharge:binding");
+                crate::f2_oblong_hadamard::oblong_binding_data_gf8::<D>(
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    adder_specs,
+                    num_vars,
+                    &oblong_point,
+                )
+            };
+            (oblong_proof, binding)
+        };
+
+        // The scheme-agnostic remainder (α-UAIR, ψ_z z-block, combined multipoint,
+        // γ-batched open) is shared with the monomial-K path at any `D`.
+        Self::prove_f2_full_with_oblong_hadamard_impl(
+            transcript,
+            pp,
+            trace,
+            virtual_specs,
+            num_vars,
+            project_scalar,
+            num_column_openings,
+            hint,
+            commitment,
+            oblong_proof,
+            binding,
+        )
+    }
+
+    /// Verify a [`F2OblongHadamardProof`]: the standard F_2 pipeline checks PLUS
+    /// the **sound oblong discharge**. Mirrors [`Self::verify_f2_full_with_bit_ops`]
+    /// (commitment/public absorb → UAIR → multipoint → open), with these additions:
+    /// the oblong zerocheck is verified up front; the discharge's `ψ_z(col↓Δ)(γ_word)`
+    /// AND-pair claims are folded into the **same** multipoint (as pointed-shifts over
+    /// the appended z-cols) and reduced to `r_0`; the open exposes its batch `γ`; the
+    /// **`ψ_z` binding check** `ψ_z(a') == Σ_g γ_g·z_r0_evals[g]` ties the z-evals to
+    /// the committed bit-slice claim; and [`oblong_tie_from_bound`] closes the tie
+    /// from the now-bound AND pair-evals + the trusted adder parents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_f2_full_with_oblong_hadamard<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2OblongHadamardProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        num_vars: usize,
+        num_primary_columns: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
+    {
+        // Step 0: absorb commitment + public cols (mirror the prover).
+        Self::absorb_commitment(transcript, &proof.commitment);
+        crate::absorb_public_columns(transcript, public_binary_trace);
+
+        // -- Oblong zerocheck verify (GF(2⁸) accel; channel draws z, γ) → out
+        //    (operand evals + eval-point [z, γ]); then the columns-free binding
+        //    (L_b(z), γ_word, pairs). --
+        let k = hadamard_specs.len() + adder_specs.len();
+        let out = crate::f2_oblong_hadamard::verify_oblong_zerocheck_gf8::<D, _>(
+            transcript,
+            &proof.oblong,
+            k,
+            num_vars,
+        )
+        .map_err(F2FullVerifyError::Oblong)?;
+        let (lagrange_z, gamma_word, pairs) =
+            crate::f2_oblong_hadamard::oblong_verifier_binding_gf8::<D>(
+                hadamard_specs,
+                num_vars,
+                &out.eval_point,
+            );
+
+        // The scheme-agnostic remainder (UAIR verify, combined multipoint check,
+        // γ-batched open, ψ_z binding + tie) is shared with the monomial-K path.
+        Self::verify_f2_full_with_oblong_hadamard_impl(
+            transcript,
+            pp,
+            proof,
+            virtual_specs,
+            bit_op_specs,
+            hadamard_specs,
+            adder_specs,
+            public_binary_trace,
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+            out,
+            lagrange_z,
+            gamma_word,
+            pairs,
+        )
+    }
+}
+
+impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
+where
+    Zt: F2ZincTypes<D>,
+    U: Uair + 'static,
+{
+    /// Shared body of the **sound oblong-discharge** full prove, generic over the
+    /// cell width `D`. Takes the already-committed trace (`hint`, `commitment`)
+    /// and the already-run oblong discharge (`oblong_proof`, `binding`) — the only
+    /// scheme-specific parts (the GF(2⁸) accel at `D = 32` vs the monomial-`K`
+    /// scheme at any `D`) — and runs the scheme-agnostic remainder: the α-only
+    /// UAIR, the `ψ_z` z-block read-off, the combined multipoint-eval folding the
+    /// AND-pair claims as pointed-shifts, and the single γ-batched open. The two
+    /// public entry points
+    /// ([`ZincPlusPiopF2::<_, _, 32>::prove_f2_full_with_oblong_hadamard`], GF(2⁸);
+    /// [`Self::prove_f2_full_with_oblong_hadamard_naive`], monomial-`K`) differ
+    /// only in how they produce `(oblong_proof, binding)`.
+    #[allow(clippy::too_many_arguments)]
+    fn prove_f2_full_with_oblong_hadamard_impl(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+        hint: ZipPlusHint<<Zt::BinaryZt as zip_plus::pcs::structs::ZipTypes>::Cw>,
+        commitment: ZipPlusCommitment,
+        oblong_proof: zinc_poly::univariate::oblong_and::OblongAndProof<D>,
+        binding: crate::f2_oblong_hadamard::OblongBindingData,
+    ) -> Result<F2OblongHadamardProof<D>, F2ProveError<U>> {
         use zinc_poly::univariate::binary_gf128::project_column_with_powers;
         use zinc_transcript::traits::ConstTranscribable;
 
-        let (hint, commitment) = Self::commit_and_absorb_f2_trace_with_virtuals(
-            transcript,
-            pp,
-            &trace.binary_poly,
-            bit_op_specs,
-        )
-        .expect("F_2 commit should succeed for a well-shaped trace");
-
-        // -- Oblong AND-zerocheck discharge; capture its eval-point [z, γ]. --
-        let (oblong_proof, oblong_point) = crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8(
-            transcript,
-            &trace.binary_poly,
-            hadamard_specs,
-            adder_specs,
-            num_vars,
-        );
-        // Recombination data: L_b(z), γ_word, the distinct (col,Δ) pairs, the
-        // ψ_z(col↓Δ)(γ_word) pair-evals, and the trusted adder operand parents.
-        let binding = crate::f2_oblong_hadamard::oblong_binding_data_gf8(
-            &trace.binary_poly,
-            hadamard_specs,
-            adder_specs,
-            num_vars,
-            &oblong_point,
-        );
-
         // -- Main UAIR (α-only: empty fused-Hadamard specs). --
-        let (uair_proof, subclaim, projected_trace) = Self::prove_f2_uair_with_groups(
-            transcript,
-            trace,
-            virtual_specs,
-            &[],
-            &[],
-            num_vars,
-            project_scalar,
-        )?;
+        let (uair_proof, subclaim, projected_trace) = {
+            let _g = zinc_utils::prof::scope("uair");
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                &[],
+                &[],
+                num_vars,
+                project_scalar,
+            )?
+        };
 
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -857,10 +985,13 @@ where
         //    The ψ_z binding rides the open's full-batch a', so ALL witness cols
         //    are needed — not just the AND-referenced ones. --
         let witness_cols = &trace.binary_poly[num_pub_bin..];
+        // ψ_z binding read-off (post-UAIR, so it can't nest under `discharge`): the
+        // z-projection of every witness col + their up-evals at r*.
+        let z_block_guard = zinc_utils::prof::scope("z_block");
         let z_block: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
             cfg_iter!(witness_cols)
                 .map(|col| {
-                    let proj = project_column_with_powers::<32>(&col.evaluations, &binding.lagrange_z);
+                    let proj = project_column_with_powers::<D>(&col.evaluations, &binding.lagrange_z);
                     DenseMultilinearExtension::from_evaluations_vec(
                         num_vars,
                         proj.iter().map(|x| *x.inner()).collect(),
@@ -879,6 +1010,7 @@ where
                 .expect("z up-eval at r* should succeed")
             })
             .collect();
+        drop(z_block_guard);
 
         // Absorb (z_up_evals, pair_evals, adder_parents) before the multipoint
         // challenges — mirrors the fused path's absorb of its pair-evals/parents
@@ -917,7 +1049,8 @@ where
             })
             .collect();
 
-        let (mp_proof, mp_prover_state) =
+        let (mp_proof, mp_prover_state) = {
+            let _g = zinc_utils::prof::scope("multipoint_eval");
             MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol_with_pointed_shifts(
                 transcript,
                 &trace_mles,
@@ -927,10 +1060,12 @@ where
                 &binding.pair_evals,
                 &(),
             )
-            .map_err(F2ProveError::MultipointEval)?;
+            .map_err(F2ProveError::MultipointEval)?
+        };
         let r_0 = mp_prover_state.eval_point;
 
         // r_0 evals for the whole combined trace; split into α (first `c`) + z.
+        let open_evals_guard = zinc_utils::prof::scope("open_evals_r0");
         let all_r0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(trace_mles)
             .map(|col| {
                 <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
@@ -939,6 +1074,7 @@ where
                 .expect("MLE evaluation at r_0 should succeed")
             })
             .collect();
+        drop(open_evals_guard);
         let (alpha_r0_evals, z_r0_evals) = all_r0.split_at(c);
         let alpha_r0_evals = alpha_r0_evals.to_vec();
         let z_r0_evals = z_r0_evals.to_vec();
@@ -952,15 +1088,18 @@ where
         }
 
         // -- γ-batched open over the witness primary slice at r_0. --
-        let open_proof = Self::prove_f2_open(
-            transcript,
-            pp,
-            &hint,
-            &trace.binary_poly[num_pub_bin..],
-            &r_0,
-            &subclaim.alpha,
-            num_column_openings,
-        );
+        let open_proof = {
+            let _g = zinc_utils::prof::scope("open");
+            Self::prove_f2_open(
+                transcript,
+                pp,
+                &hint,
+                &trace.binary_poly[num_pub_bin..],
+                &r_0,
+                &subclaim.alpha,
+                num_column_openings,
+            )
+        };
 
         Ok(F2OblongHadamardProof {
             commitment,
@@ -976,28 +1115,100 @@ where
         })
     }
 
-    /// Verify a [`F2OblongHadamardProof`]: the standard F_2 pipeline checks PLUS
-    /// the **sound oblong discharge**. Mirrors [`Self::verify_f2_full_with_bit_ops`]
-    /// (commitment/public absorb → UAIR → multipoint → open), with these additions:
-    /// the oblong zerocheck is verified up front; the discharge's `ψ_z(col↓Δ)(γ_word)`
-    /// AND-pair claims are folded into the **same** multipoint (as pointed-shifts over
-    /// the appended z-cols) and reduced to `r_0`; the open exposes its batch `γ`; the
-    /// **`ψ_z` binding check** `ψ_z(a') == Σ_g γ_g·z_r0_evals[g]` ties the z-evals to
-    /// the committed bit-slice claim; and [`oblong_tie_from_bound`] closes the tie
-    /// from the now-bound AND pair-evals + the trusted adder parents.
+    /// Monomial-`K` (naive) sound oblong-discharge full prove, generic over `D`.
+    /// The GF(2⁸) accel of
+    /// [`ZincPlusPiopF2::<_, _, 32>::prove_f2_full_with_oblong_hadamard`] is
+    /// 32-bit-only; this runs at any width — in particular Keccak's `D = 64`.
+    /// Commits, runs the monomial-`K` oblong AND batch discharge + its binding,
+    /// then the shared [`Self::prove_f2_full_with_oblong_hadamard_impl`].
     #[allow(clippy::too_many_arguments)]
-    pub fn verify_f2_full_with_oblong_hadamard<IdealOverF>(
+    pub fn prove_f2_full_with_oblong_hadamard_naive(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-        proof: &F2OblongHadamardProof<32>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
         virtual_specs: &[F2VirtualBpSpec],
         bit_op_specs: &[F2BitOpVirtualSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
         adder_specs: &[crate::f2_hadamard::F2AdderSpec],
-        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<32>>],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+    ) -> Result<F2OblongHadamardProof<D>, F2ProveError<U>> {
+        let (hint, commitment) = {
+            let _g = zinc_utils::prof::scope("commit");
+            Self::commit_and_absorb_f2_trace_with_virtuals(
+                transcript,
+                pp,
+                &trace.binary_poly,
+                bit_op_specs,
+            )
+            .expect("F_2 commit should succeed for a well-shaped trace")
+        };
+
+        // -- Oblong AND-zerocheck discharge (monomial-K), capture its point [z, γ]. --
+        let (oblong_proof, binding) = {
+            let _g = zinc_utils::prof::scope("discharge");
+            let (oblong_proof, oblong_point) =
+                crate::f2_oblong_hadamard::prove_oblong_and_batch_with_point::<D, _>(
+                    transcript,
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    adder_specs,
+                    num_vars,
+                );
+            let binding = {
+                let _gb = zinc_utils::prof::scope("discharge:binding");
+                crate::f2_oblong_hadamard::oblong_binding_data_naive::<D>(
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    adder_specs,
+                    num_vars,
+                    &oblong_point,
+                )
+            };
+            (oblong_proof, binding)
+        };
+
+        Self::prove_f2_full_with_oblong_hadamard_impl(
+            transcript,
+            pp,
+            trace,
+            virtual_specs,
+            num_vars,
+            project_scalar,
+            num_column_openings,
+            hint,
+            commitment,
+            oblong_proof,
+            binding,
+        )
+    }
+
+    /// Shared body of the **sound oblong-discharge** full verify, generic over the
+    /// cell width `D`. The caller has already absorbed the commitment + public
+    /// columns, run the scheme-specific oblong zerocheck verify (yielding `out`),
+    /// and derived the columns-free binding (`lagrange_z`, `gamma_word`, `pairs`);
+    /// this runs the scheme-agnostic remainder — UAIR verify, the combined
+    /// multipoint check folding the AND pairs as pointed-shifts, the γ-batched
+    /// open, the `ψ_z` binding `ψ_z(a') == Σ_g γ_g·z_r0_evals[g]`, and the
+    /// [`crate::f2_oblong_hadamard::oblong_tie_from_bound`] tie.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_f2_full_with_oblong_hadamard_impl<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2OblongHadamardProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+        out: zinc_poly::univariate::oblong_and::AndCheckOutput,
+        lagrange_z: Vec<BinaryFieldGF128>,
+        gamma_word: Vec<BinaryFieldGF128>,
+        pairs: Vec<(usize, usize)>,
     ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
     where
         IdealOverF: zinc_uair::ideal::Ideal
@@ -1005,27 +1216,6 @@ where
     {
         use zinc_poly::univariate::binary_gf128::gf128poly_project;
         use zinc_transcript::traits::ConstTranscribable;
-
-        // Step 0: absorb commitment + public cols (mirror the prover).
-        Self::absorb_commitment(transcript, &proof.commitment);
-        crate::absorb_public_columns(transcript, public_binary_trace);
-
-        // -- Oblong zerocheck verify (channel draws z, γ) → out (operand evals +
-        //    eval-point [z, γ]); then the columns-free binding (L_b(z), γ_word, pairs). --
-        let k = hadamard_specs.len() + adder_specs.len();
-        let out = crate::f2_oblong_hadamard::verify_oblong_zerocheck_gf8(
-            transcript,
-            &proof.oblong,
-            k,
-            num_vars,
-        )
-        .map_err(F2FullVerifyError::Oblong)?;
-        let (lagrange_z, gamma_word, pairs) =
-            crate::f2_oblong_hadamard::oblong_verifier_binding_gf8(
-                hadamard_specs,
-                num_vars,
-                &out.eval_point,
-            );
 
         // -- Main UAIR verify (α-only: empty fused specs). --
         let subclaim = Self::verify_f2_uair_with_groups(
@@ -1045,7 +1235,7 @@ where
 
         // Public column MLE evals at r* — bind to the actual public input.
         if num_pub_bin > 0 {
-            let computed = recompute_public_col_evals_at::<32>(
+            let computed = recompute_public_col_evals_at::<D>(
                 public_binary_trace,
                 &subclaim.alpha,
                 &subclaim.sumcheck_point,
@@ -1123,7 +1313,7 @@ where
 
         // Public col MLE evals at r_0.
         if num_pub_bin > 0 {
-            let computed = recompute_public_col_evals_at::<32>(
+            let computed = recompute_public_col_evals_at::<D>(
                 public_binary_trace,
                 &subclaim.alpha,
                 &r_0,
@@ -1194,7 +1384,7 @@ where
         // -- ψ_z binding: ψ_z(a') == Σ_g γ_g·z_r0_evals[g] over the witness cols
         //    (same γ-batch + same cols as the open's ψ_α Check 2). This is what
         //    binds the discharge's z-evals to the committed bit-slice claim. --
-        let psi_z = gf128poly_project::<32>(&proof.open.lifted_claim, &lagrange_z);
+        let psi_z = gf128poly_project::<D>(&proof.open.lifted_claim, &lagrange_z);
         let mut expected_z = BinaryFieldGF128::zero();
         for (g, gamma_g) in gamma.iter().enumerate() {
             let mut term = *gamma_g;
@@ -1224,13 +1414,71 @@ where
 
         Ok(())
     }
-}
 
-impl<Zt, U, const D: usize> ZincPlusPiopF2<Zt, U, D>
-where
-    Zt: F2ZincTypes<D>,
-    U: Uair + 'static,
-{
+    /// Verify a [`F2OblongHadamardProof`] produced by the monomial-`K`
+    /// [`Self::prove_f2_full_with_oblong_hadamard_naive`], generic over `D`
+    /// (Keccak's `D = 64` runs here). Absorbs the commitment + public columns,
+    /// verifies the monomial-`K` oblong zerocheck, derives the columns-free
+    /// binding, then the shared
+    /// [`Self::verify_f2_full_with_oblong_hadamard_impl`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_f2_full_with_oblong_hadamard_naive<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2OblongHadamardProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        num_vars: usize,
+        num_primary_columns: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
+    {
+        // Step 0: absorb commitment + public cols (mirror the prover).
+        Self::absorb_commitment(transcript, &proof.commitment);
+        crate::absorb_public_columns(transcript, public_binary_trace);
+
+        // -- Oblong zerocheck verify (channel draws z, γ) → out; then the
+        //    columns-free binding (L_b(z), γ_word, pairs). --
+        let k = hadamard_specs.len() + adder_specs.len();
+        let out = crate::f2_oblong_hadamard::verify_oblong_zerocheck_naive::<D, _>(
+            transcript,
+            &proof.oblong,
+            k,
+            num_vars,
+        )
+        .map_err(F2FullVerifyError::Oblong)?;
+        let (lagrange_z, gamma_word, pairs) =
+            crate::f2_oblong_hadamard::oblong_verifier_binding_naive::<D>(
+                hadamard_specs,
+                num_vars,
+                &out.eval_point,
+            );
+
+        Self::verify_f2_full_with_oblong_hadamard_impl(
+            transcript,
+            pp,
+            proof,
+            virtual_specs,
+            bit_op_specs,
+            hadamard_specs,
+            adder_specs,
+            public_binary_trace,
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+            out,
+            lagrange_z,
+            gamma_word,
+            pairs,
+        )
+    }
+
     /// Run the F_2 prove pipeline up to (but not including) the MLE
     /// evaluation claims.
     ///
@@ -1382,27 +1630,30 @@ where
         // SHA-256 F_2 is degree-1 and takes the MLE-first lane; the
         // TinyF2Uair test fixtures may not be, hence the gate.
         let effective_degree = zinc_uair::degree_counter::count_effective_max_degree::<U>();
-        let (ic_proof, ic_state) = if effective_degree <= 1 {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
-                transcript,
-                &extended_binary_poly,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-                |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF128> {
-                    let _ = cfg;
-                    project_scalar(s)
-                },
-            )
-        } else {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
-                transcript,
-                &extended_binary_poly,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-                project_scalar_to_bits,
-            )
+        let (ic_proof, ic_state) = {
+            let _g = zinc_utils::prof::scope("uair:ic");
+            if effective_degree <= 1 {
+                crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
+                    transcript,
+                    &extended_binary_poly,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                    |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF128> {
+                        let _ = cfg;
+                        project_scalar(s)
+                    },
+                )
+            } else {
+                crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
+                    transcript,
+                    &extended_binary_poly,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                    project_scalar_to_bits,
+                )
+            }
         };
 
         // -- Step 2.5: Hadamard zerocheck (Wiring R) ---------------
@@ -1516,6 +1767,7 @@ where
         // kernel time. The batched-dispatch variant collapses those
         // 50 round-trips into one.
         let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = {
+            let _g = zinc_utils::prof::scope("uair:alpha_project");
             #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
             {
                 let column_inputs: Vec<&[BinaryPoly<D>]> = extended_binary_poly
@@ -1573,6 +1825,11 @@ where
         // weighted_col is `num_total · 2^num_vars` field mults,
         // dominated by the per-round savings as soon as num_total
         // exceeds a small constant.
+        // Step 4a..4: γ-batching challenge, eq/weighted-col build, and the
+        // single degree-2 sumcheck. Timed as one region (`uair:sumcheck`) via a
+        // named guard dropped right after the prove call — no early-returns in
+        // between, so the drop always runs.
+        let uair_sumcheck_guard = zinc_utils::prof::scope("uair:sumcheck");
         let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
 
         let eq_r =
@@ -1613,6 +1870,7 @@ where
                 num_vars,
                 &field_cfg,
             );
+        drop(uair_sumcheck_guard);
 
         // -- Derive the prover-side subclaim --------------------
         let sumcheck_point = prover_states[0].randomness.clone();
@@ -1634,6 +1892,7 @@ where
         // F-adds per col) in `prove_f2_full_with_bit_ops`'s
         // multipoint-eval phase.
         let zero_inner = *BinaryFieldGF128::zero().inner();
+        let uair_col_evals_guard = zinc_utils::prof::scope("uair:col_evals");
         let all_col_evals: Vec<BinaryFieldGF128> = cfg_iter!(&projected_trace)
             .map(|col| {
                 let num_vars = col.num_vars;
@@ -1671,6 +1930,7 @@ where
                 .expect("MLE evaluation on r* should succeed")
             })
             .collect();
+        drop(uair_col_evals_guard);
 
         // Absorb the per-column evals so any downstream PCS-open
         // challenges depend on them — guards against a malicious
@@ -2275,29 +2535,29 @@ where
 /// `(a', b', combined_row')` bundle:
 ///
 /// ```text
-/// a'             := Σ_g γ_g · a_g'              ∈ F_2[X]<≈608>
-/// b'[i]          := Σ_g γ_g · b_g[i]            ∈ F_2[X]<≈416>
-/// combined_row'  := Σ_g γ_g · combined_row_g    ∈ F_2[X]<≈416>
+/// a'             := Σ_g γ_g · a_g'                  ∈ GF(2^128)[X]<D>   (D bit-slice coeffs)
+/// b'[i]          := Σ_g γ_g · b_g[i]                ∈ GF(2^128)[X]<D>
+/// combined_row'  := ψ_β( Σ_g γ_g · combined_row_g ) ∈ GF(2^128)         (β-collapsed scalar)
 /// ```
 ///
-/// The verifier reconstructs the same `γ_g` from the transcript,
-/// checks `Σ_i q_0'[i] · b'[i] = a'` (eval consistency),
-/// `ψ_α(a') = Σ_g γ_g · a_g` (lift discharge, where each `a_g` is
-/// the per-column MLE claim from the sumcheck subclaim),
-/// `<combined_row', q_1'> = <coeffs, b'>` (coherence), and the
-/// γ-weighted encoding consistency at each opened column. Soundness
-/// against per-column tampering follows from Schwartz-Zippel over
-/// the random γ_g.
+/// The verifier reconstructs the same `γ_g` from the transcript and
+/// checks `Σ_i q_0[i] · b'[i] = a'` (eval consistency, D-wide) and
+/// `ψ_α(a') = Σ_g γ_g · a_g` (α-discharge, each `a_g` the per-column
+/// MLE claim from the sumcheck subclaim). Then, at a transcript-fresh
+/// proximity point `β` drawn **after** `a'`,`b'` are absorbed, it
+/// checks `Σ_j q_1[j]·cr'_β[j] = Σ_i coeffs[i]·ψ_β(b'[i])` (coherence)
+/// and the γ-weighted, β-projected encoding consistency at each opened
+/// column. Soundness against per-column tampering follows from
+/// Schwartz–Zippel over γ_g; the X-collapse adds an `n_rows(D−1)/2^128`
+/// term (a wrong full-width `b'`, absorbed before `β`, is pinned by its
+/// single `β`-evaluation). See the PCS note
+/// `documentation/zip-plus-f2x-pcs-doc/` (§5.2–5.3 + soundness step ii).
 ///
-/// Widths: `a' ∈ BinaryF2Poly<7>` (≥ D + 2·192 - 1 + 192 - 1 =
-/// 606 bits for D=32); `b'` and `combined_row'` entries in
-/// `BinaryF2Poly<5>` (≥ D + 2·192 - 1 = 414 bits).
-//
-// TODO: when `feature(generic_const_exprs)` stabilises, parameterise
-// these widths over `D` and `μ_eq` so the BinaryF2Poly<W> sizes
-// shrink to the true bit bounds. Until then the slight
-// over-allocation costs ~10% extra transcription bytes per opening;
-// not on a hot path for any current workload.
+/// **Widths.** `a'` and `b'` keep all `D` GF(2^128) coefficients — they
+/// carry the `ψ_α`/`ψ_z` read-offs of the un-lifted open. `combined_row'`
+/// is one GF(2^128) scalar per entry (carried as `GF128Poly<1>`), the
+/// `β`-collapsed proximity row — a `D`× shrink on the proof's dominant
+/// region (the only object whose length scales with `n_cols = N/n_rows`).
 #[derive(Clone, Debug)]
 pub struct F2OpenProof<const D: usize> {
     /// `a' = Σ_g γ_g · a_g' ∈ GF(2^128)[X]<D>`, the γ-batched bit-slice
@@ -2308,8 +2568,16 @@ pub struct F2OpenProof<const D: usize> {
     pub lifted_claim: zinc_poly::univariate::binary_gf128::GF128Poly<D>,
     /// `b'[i] = Σ_g γ_g · b_g[i] ∈ GF(2^128)[X]<D>`. `num_rows` entries.
     pub b_vector: Vec<zinc_poly::univariate::binary_gf128::GF128Poly<D>>,
-    /// `combined_row'[j] = Σ_g γ_g · combined_row_g[j] ∈ GF(2^128)[X]<D>`. `row_len` entries.
-    pub combined_row: Vec<zinc_poly::univariate::binary_gf128::GF128Poly<D>>,
+    /// `combined_row'[j] = Σ_g γ_g Σ_i coeffs[i]·ψ_β(M_w_g[i,j]) ∈ GF(2^128)`,
+    /// `row_len` entries. **β-collapsed:** the bit-slice (X) axis of the proximity
+    /// row is projected at a fresh challenge `β` (drawn after `a'`,`b'` are absorbed),
+    /// so each entry is a single `GF(2^128)` scalar (carried as `GF128Poly<1>`) rather
+    /// than the `D`-wide `GF128Poly<D>` of `a'`/`b'` — a `D`× shrink on the proof's
+    /// dominant region. `a'` (`lifted_claim`) and `b'` stay full-width: they carry the
+    /// `ψ_α`/`ψ_z` read-offs, and a wrong `b'` (absorbed before `β`) is pinned at full
+    /// width by the single `β`-evaluation (Schwartz–Zippel). See the PCS note
+    /// (`documentation/zip-plus-f2x-pcs-doc/`, §5.2–5.3 + soundness step (ii)).
+    pub combined_row: Vec<zinc_poly::univariate::binary_gf128::GF128Poly<1>>,
     /// One entry per opened codeword column. Each entry holds the
     /// column's `batch_size · num_rows` codeword cells (concatenated
     /// per-poly in commit order) plus a Merkle proof.
@@ -2468,24 +2736,40 @@ fn pair_trace_polys<const D: usize>(
     trace_binary_cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
 ) -> Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> {
     use zinc_poly::univariate::F2PackU64;
+    // Cells per storage slot, `CPS = PACKED_STORAGE_WIDTH / D`. D=32 packs two
+    // cells (low/high u32) into one 64-bit storage cell (the 2× throughput
+    // trick); D=64 packs one cell 1:1 (no pairing). Both keep
+    // PACKED_STORAGE_WIDTH=64 storage. The pack is bit-parallel (cell `k` goes
+    // to bits `k·D..(k+1)·D`), so the F_2-linear encoder produces
+    // `(encode(cell_0), …)` packed identically — `enc` commutes with the lane
+    // split, which is what makes the unpack in `verify_f2_open` sound.
+    assert!(
+        D <= PACKED_STORAGE_WIDTH && PACKED_STORAGE_WIDTH % D == 0,
+        "pair_trace_polys: trace D ({D}) must divide PACKED_STORAGE_WIDTH ({PACKED_STORAGE_WIDTH})",
+    );
+    let cps = PACKED_STORAGE_WIDTH / D;
+    let mask = if D >= 64 { u64::MAX } else { (1u64 << D) - 1 };
     let n = trace_binary_cols.len();
-    let pairs = n.div_ceil(2);
+    let groups = n.div_ceil(cps);
     let mut paired: Vec<DenseMultilinearExtension<BinaryPoly<PACKED_STORAGE_WIDTH>>> =
-        Vec::with_capacity(pairs);
-    for k in 0..pairs {
-        let lo_idx = 2 * k;
-        let hi_idx = 2 * k + 1;
-        let lo_poly = &trace_binary_cols[lo_idx];
-        let hi_poly_opt = trace_binary_cols.get(hi_idx);
-        let evals: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> = (0..lo_poly.evaluations.len())
+        Vec::with_capacity(groups);
+    for grp in 0..groups {
+        let anchor = &trace_binary_cols[cps * grp];
+        let len = anchor.evaluations.len();
+        let evals: Vec<BinaryPoly<PACKED_STORAGE_WIDTH>> = (0..len)
             .map(|i| {
-                let lo = &lo_poly.evaluations[i];
-                let hi = hi_poly_opt.map(|h| &h.evaluations[i]);
-                pair_cells::<D>(lo, hi)
+                let mut packed = 0u64;
+                for k in 0..cps {
+                    if let Some(col) = trace_binary_cols.get(cps * grp + k) {
+                        let cell = col.evaluations[i].pack_u64() & mask;
+                        packed |= cell << (k * D);
+                    }
+                }
+                BinaryPoly::<PACKED_STORAGE_WIDTH>::unpack_u64(packed)
             })
             .collect();
         paired.push(DenseMultilinearExtension::from_evaluations_vec(
-            lo_poly.num_vars,
+            anchor.num_vars,
             evals,
             BinaryPoly::<PACKED_STORAGE_WIDTH>::unpack_u64(0),
         ));
@@ -2510,7 +2794,7 @@ pub enum F2OpenError {
     #[error("F2OpenProof.b_vector has length {got}, expected {expected}")]
     BvecLenMismatch { expected: usize, got: usize },
     #[error(
-        "coherence check failed: <combined_row', q_1'> ≠ <coeffs, b'> in F_2[X]"
+        "coherence check failed (at β): Σ_j q_1[j]·cr'_β[j] ≠ Σ_i coeffs[i]·ψ_β(b'[i]) in GF(2^128)"
     )]
     Coherence,
     #[error("F2OpenProof.combined_row has length {got}, expected {expected}")]
@@ -2519,7 +2803,7 @@ pub enum F2OpenError {
     MerkleVerify { column_idx: usize, reason: String },
     #[error(
         "encoding consistency check failed at opened col idx j={column_idx}: \
-         encode(combined_row')[j] ≠ Σ_i coeffs[i] · Σ_g γ_g · cw_M^g[i, j]"
+         encode(cr'_β)[j] ≠ Σ_i coeffs[i] · Σ_g γ_g · ψ_β(cw_M^g[i, j])"
     )]
     EncodingConsistency { column_idx: usize },
     #[error("F2OpenedColumn has {got} entries, expected {expected}")]
@@ -2733,10 +3017,14 @@ where
         use num_traits::Zero;
         use zinc_poly::univariate::F2AddAssign;
         use zinc_poly::univariate::binary_gf128::{
-            GF128Poly, gf128poly_accumulate_cell, gf128poly_accumulate_scaled,
+            GF128Poly, alpha_powers, eval_f2_poly_d_at_with_powers, gf128poly_accumulate_cell,
+            gf128poly_accumulate_scaled,
         };
         let _ = alpha;
-        let (q0, q1) = build_eq_tensor_gf128(num_rows, sumcheck_point);
+        let (q0, q1) = {
+            let _g = zinc_utils::prof::scope("open:eq_tensor");
+            build_eq_tensor_gf128(num_rows, sumcheck_point)
+        };
         debug_assert_eq!(q1.len(), row_len);
         debug_assert_eq!(q0.len(), num_rows);
 
@@ -2760,6 +3048,7 @@ where
         // partial `(b_g, a_g_scaled)` results, then merge serially.
         // The per-row work within a column stays sequential (row_len
         // is small in the deployed shape).
+        let open_ba_guard = zinc_utils::prof::scope("open:b_a_build");
         let per_col_results: Vec<(Vec<GF128Poly<D>>, GF128Poly<D>)> =
             cfg_iter!(trace_binary_cols)
                 .enumerate()
@@ -2808,42 +3097,47 @@ where
             }
             a_prime.f2_add_assign(&a_scaled);
         }
+        drop(open_ba_guard);
 
         // Absorb (b', a') into the transcript so subsequent challenges
         // depend on them.
         absorb_gf128_poly_slice::<D, _>(transcript, b_prime.iter());
         absorb_gf128_poly_slice::<D, _>(transcript, core::iter::once(&a_prime));
 
-        // -- Step 7.3: proximity coefficients ----------------------
+        // -- Step 7.3a: fresh proximity projection β (the X-axis collapse). --
+        // Drawn AFTER a', b' are absorbed: the combined row is transmitted only as
+        // its β-evaluation (one GF(2^128) scalar per entry, not D-wide). A wrong but
+        // already-committed b' misses the random β, so the single β-evaluation pins
+        // the full degree-<D b' (hence a') by Schwartz–Zippel — while a'/b' themselves
+        // are NOT projected (they carry the ψ_α/ψ_z read-offs). See the PCS note
+        // (`documentation/zip-plus-f2x-pcs-doc/`) §5.2–5.3 + soundness step (ii).
+        let beta: BinaryFieldGF128 = transcript.get_field_challenges(1, &())[0];
+        let beta_powers = alpha_powers(&beta, D);
+
+        // -- Step 7.3b: proximity coefficients ----------------------
         // GF(2^128) (no lift) — they weight the per-row bit-slice contributions.
         let coeffs: Vec<BinaryFieldGF128> =
             transcript.get_field_challenges(num_rows, &());
 
-        // -- Step 7.4: combined_row' = Σ_g γ_g · (Σ_i coeffs[i] · M_w_g[i, *])
+        // -- Step 7.4: combined_row'[j] = Σ_g γ_g Σ_i coeffs[i]·ψ_β(M_w_g[i,j])
         //
-        // Parallelise across the outer (g) loop: each column produces
-        // an independent length-`row_len` contribution to
-        // `combined_row`. Merge serially.
-        let per_col_combined: Vec<Vec<GF128Poly<D>>> = cfg_iter!(trace_binary_cols)
+        // β-collapsed: each entry is the single GF(2^128) scalar ψ_β of the
+        // γ/coeffs-folded message column (carried as GF128Poly<1>), not the D-wide
+        // bit-slice vector. Parallelise across the outer (g) loop; merge serially.
+        let open_combined_guard = zinc_utils::prof::scope("open:combined_row");
+        let per_col_combined: Vec<Vec<GF128Poly<1>>> = cfg_iter!(trace_binary_cols)
             .enumerate()
             .map(|(g, col)| {
-                // Loop-reorder (outer `i` rows, inner `j` codeword positions) for
-                // sequential reads + the per-row weight in registers — as in the
-                // lifted path, but accumulating GF(2^128)[X]<D> bit-slice partials.
-                //
-                // **γ folded into the scatter weight.** Since
-                //   combined_row[j] = Σ_g γ_g·Σ_i coeffs[i]·cell[i,j]
-                //                   = Σ_{g,i} (γ_g·coeffs[i])·cell[i,j],
-                // scatter `w_gi = γ_g·coeffs[i]` directly instead of scattering
-                // `coeffs[i]` and then applying γ_g in a separate `row_len`-long
-                // `gf128poly_accumulate_scaled` pass (D=32 GF128 muls per entry —
-                // the open's dominant cost; profiled at ~13.5 ms / 77% of the open
-                // at nvars=16). The fused form costs one GF128 mul per (col, row)
-                // and is **bit-identical**, so the proof + every verifier check are
-                // unchanged.
-                let mut col_partial: Vec<GF128Poly<D>> =
-                    vec![GF128Poly::<D>::zero(); row_len];
-                // Per-row scatter weights `w[i] = γ_g·coeffs[i]` (one GF128 mul/row).
+                // **γ folded into the fold weight.** Since
+                //   combined_row[j] = Σ_g γ_g·Σ_i coeffs[i]·ψ_β(cell[i,j])
+                //                   = Σ_{g,i} (γ_g·coeffs[i])·ψ_β(cell[i,j]),
+                // scale each cell's β-evaluation by the fused `w_gi = γ_g·coeffs[i]`.
+                // Each cell is evaluated at β once (`eval_f2_poly_d_at_with_powers`,
+                // XOR over its set bits) into a SCALAR accumulator — 16 B/entry, 1/D
+                // the write traffic of the old D-wide scatter.
+                let mut col_partial: Vec<GF128Poly<1>> =
+                    vec![GF128Poly::<1>::zero(); row_len];
+                // Per-row fold weights `w[i] = γ_g·coeffs[i]` (one GF128 mul/row).
                 let w: Vec<BinaryFieldGF128> = (0..num_rows)
                     .map(|i| {
                         let mut x = gamma[g];
@@ -2851,15 +3145,10 @@ where
                         x
                     })
                     .collect();
-                // **Cache-blocked over `j`.** The scatter target is the whole
-                // `row_len × 512 B` `col_partial`; writing across all of it per row
-                // thrashes cache (profiled: this loop is ~12 ms / the open's bottleneck,
-                // vs 2.5 ms for `b_vector`'s same-count scatter into one hot
-                // accumulator). Tiling `j` so `col_partial[j0..j1]` (J_BLOCK·512 B ≈
-                // L1) stays hot across the `i` sweep keeps the heavy GF128Poly<D>
-                // writes resident; reads window each row's `[j0..j1]` slice. Pure
-                // reorder of associative adds ⇒ bit-identical `combined_row`.
-                const J_BLOCK: usize = 64;
+                // Cache-blocked over `j` so `col_partial[j0..j1]` stays L1-hot across
+                // the `i` sweep (J_BLOCK·16 B); reads window each row's `[j0..j1]`.
+                // Pure reorder of associative adds ⇒ identical `combined_row`.
+                const J_BLOCK: usize = 256;
                 let mut j0 = 0;
                 while j0 < row_len {
                     let j1 = (j0 + J_BLOCK).min(row_len);
@@ -2867,7 +3156,10 @@ where
                         let row_slice = &col.evaluations[i * row_len..(i + 1) * row_len];
                         let w_i = w[i];
                         for j in j0..j1 {
-                            gf128poly_accumulate_cell::<D>(&mut col_partial[j], &row_slice[j], w_i);
+                            // w_i · ψ_β(cell[i,j]) accumulated into the scalar coeff.
+                            let mut t = eval_f2_poly_d_at_with_powers::<D>(&row_slice[j], &beta_powers);
+                            t *= &w_i;
+                            col_partial[j].coeffs[0] += &t;
                         }
                     }
                     j0 = j1;
@@ -2876,14 +3168,15 @@ where
             })
             .collect();
 
-        let mut combined_row: Vec<GF128Poly<D>> = vec![GF128Poly::<D>::zero(); row_len];
+        let mut combined_row: Vec<GF128Poly<1>> = vec![GF128Poly::<1>::zero(); row_len];
         for col_contrib in per_col_combined {
             for j in 0..row_len {
                 combined_row[j].f2_add_assign(&col_contrib[j]);
             }
         }
+        drop(open_combined_guard);
 
-        absorb_gf128_poly_slice::<D, _>(transcript, combined_row.iter());
+        absorb_gf128_poly_slice::<1, _>(transcript, combined_row.iter());
 
         // -- Step 7.5: sample column indices + Merkle opens --------
         //
@@ -2893,6 +3186,7 @@ where
         // cell extraction + Merkle prove are independent of each
         // other, so once indices are pinned we `cfg_iter!` the
         // heavy work. Mirrors `verify_f2_open`'s structure.
+        let open_merkle_guard = zinc_utils::prof::scope("open:merkle");
         let column_indices: Vec<usize> = (0..num_column_openings)
             .map(|_| sample_column_idx(transcript, codeword_len))
             .collect();
@@ -2960,6 +3254,7 @@ where
                 }
             })
             .collect();
+        drop(open_merkle_guard);
 
         F2OpenProof {
             lifted_claim: a_prime,
@@ -3042,9 +3337,10 @@ where
         // is the bit-slice coefficient vector, ψ_α read off it (Check 2 below).
         use num_traits::Zero;
         use zinc_poly::univariate::binary_gf128::{
-            GF128Poly, gf128poly_accumulate_bits, gf128poly_accumulate_scaled, gf128poly_project,
+            GF128Poly, alpha_powers, eval_f2_bits_at_with_powers, gf128poly_accumulate_scaled,
+            gf128poly_project,
         };
-        let alpha_pows = zinc_poly::univariate::binary_gf128::alpha_powers(&subclaim.alpha, D);
+        let alpha_pows = alpha_powers(&subclaim.alpha, D);
         let (q0, q1) = build_eq_tensor_gf128(num_rows, &subclaim.sumcheck_point);
         let gamma: Vec<BinaryFieldGF128> = transcript.get_field_challenges(num_cols, &());
 
@@ -3081,23 +3377,34 @@ where
             });
         }
 
-        // -- Re-derive coeffs + absorb combined_row ---------------
+        // -- Re-derive β (X-collapse), then coeffs; absorb combined_row -----
+        // β is drawn AFTER (b', a') are absorbed (mirrors the prover): the single
+        // β-evaluation then pins the full-width b'/a' (Schwartz–Zippel).
+        let beta: BinaryFieldGF128 = transcript.get_field_challenges(1, &())[0];
+        let beta_powers = alpha_powers(&beta, D);
         let coeffs: Vec<BinaryFieldGF128> = transcript.get_field_challenges(num_rows, &());
-        absorb_gf128_poly_slice::<D, _>(transcript, proof.combined_row.iter());
+        absorb_gf128_poly_slice::<1, _>(transcript, proof.combined_row.iter());
 
-        // -- Check 3: coherence ------------------------------------
-        //    <combined_row', q_1>  =  <coeffs, b'>   (in GF(2^128)[X]<D>).
-        let lhs: GF128Poly<D> = {
-            let mut acc = GF128Poly::<D>::zero();
+        // -- Check 3: coherence at β -------------------------------
+        //    Σ_j q_1[j]·cr'_β[j]  =  Σ_i coeffs[i]·ψ_β(b'[i])   (in GF(2^128)).
+        // cr'_β is the β-collapsed combined row (scalar `coeffs[0]`); the RHS
+        // projects the full-width b' to β (ψ_β = Σ_b ·β^b). This is the
+        // β-evaluation of the full-width identity <cr'_full, q1> = <coeffs, b'>.
+        let lhs: BinaryFieldGF128 = {
+            let mut acc = BinaryFieldGF128::zero();
             for j in 0..row_len {
-                gf128poly_accumulate_scaled::<D>(&mut acc, &proof.combined_row[j], q1[j]);
+                let mut t = proof.combined_row[j].coeffs[0];
+                t *= &q1[j];
+                acc += &t;
             }
             acc
         };
-        let rhs: GF128Poly<D> = {
-            let mut acc = GF128Poly::<D>::zero();
+        let rhs: BinaryFieldGF128 = {
+            let mut acc = BinaryFieldGF128::zero();
             for i in 0..num_rows {
-                gf128poly_accumulate_scaled::<D>(&mut acc, &proof.b_vector[i], coeffs[i]);
+                let mut t = gf128poly_project::<D>(&proof.b_vector[i], &beta_powers);
+                t *= &coeffs[i];
+                acc += &t;
             }
             acc
         };
@@ -3105,17 +3412,18 @@ where
             return Err(F2OpenError::Coherence);
         }
 
-        // -- Check 4: per-column-opening encoding + Merkle ---------
+        // -- Check 4: per-column-opening encoding + Merkle (at β) ---------
         //
-        // Witness-only encoding consistency:
-        //   encode(combined_row)[j] = Σ_i coeffs[i] · Σ_{g witness} γ_g · cw_M^g[i, j]
-        // where `combined_row` is the prover-sent witness-only batch.
-        // Public columns are not part of this equation — the verifier
-        // validates their MLE evals at r* upstream from `public_trace`
-        // (in `verify_f2_full_with_bit_ops`), not via this open.
-        let encoded: Vec<GF128Poly<D>> = pp
+        // Witness-only encoding consistency, β-projected:
+        //   encode(cr'_β)[j] = Σ_i coeffs[i] · Σ_{g witness} γ_g · ψ_β(cw_M^g[i, j])
+        // where `cr'_β` is the prover-sent β-collapsed witness-only batch and the
+        // committed cells are evaluated at β before the fold. `enc` commutes with
+        // ψ_β (F_2-linear), so this is the β-evaluation of the full-width identity.
+        // Public columns are not part of this equation — the verifier validates
+        // their MLE evals at r* upstream from `public_trace`, not via this open.
+        let encoded: Vec<GF128Poly<1>> = pp
             .linear_code
-            .encode_gf128_lin_open::<D>(&proof.combined_row);
+            .encode_gf128_lin_open::<1>(&proof.combined_row);
         debug_assert_eq!(encoded.len(), codeword_len);
 
         // γ is witness-local: gamma[g] corresponds to the g-th
@@ -3138,7 +3446,10 @@ where
         let primary_witness_indices =
             primary_col_indices_from_virtuals(num_wit_bin_total, &witness_bit_op_specs);
         let num_primary_witness = primary_witness_indices.len();
-        let paired_primary_count = num_primary_witness.div_ceil(2);
+        // Cells per storage slot (see `pair_trace_polys`): 2 for D=32 (low/high
+        // u32 lanes), 1 for D=64 (no pairing). Keeps PACKED_STORAGE_WIDTH=64.
+        let cps = PACKED_STORAGE_WIDTH / D;
+        let paired_primary_count = num_primary_witness.div_ceil(cps);
         if batch_size != paired_primary_count {
             return Err(F2OpenError::ColumnValuesLenMismatch {
                 expected: paired_primary_count,
@@ -3205,70 +3516,73 @@ where
                         reason: format!("{e}"),
                     })?;
 
-                // (b) γ-weighted encoding consistency on the queried
-                //     column within the group (the verifier only needs
-                //     to check the codeword cell at `column_idx`, not
-                //     the other group members).
+                // (b) γ-weighted, β-projected encoding consistency on the
+                //     queried column within the group (the verifier only needs
+                //     to check the codeword cell at `column_idx`, not the other
+                //     group members).
                 //
-                //  weighted_col[i] = Σ_g γ_g · cw_M^g[i, j]  ∈ F_2[X]<4>
-                //  actual_at_j     = Σ_i coeffs[i] · weighted_col[i]  ∈ F_2[X]<7>
-                //  expected_at_j   = encoded[j]  ∈ F_2[X]<7>
+                //  weighted_col[i] = Σ_g γ_g · ψ_β(cw_M^g[i, j])     ∈ GF(2^128)
+                //  actual_at_j     = Σ_i coeffs[i] · weighted_col[i] ∈ GF(2^128)
+                //  expected_at_j   = encoded[j].coeffs[0]            ∈ GF(2^128)
                 //
-                // Lift each packed cell straight from its raw u64 into
-                // two `BinaryF2Poly<1>` halves (lo = col 2p, hi = col 2p+1)
-                // without materialising an intermediate `BinaryPoly<D>` —
-                // the canonical bit-pattern lift on `BinaryU64Poly` is
-                // just a u64 copy.
+                // Each opened cell is read straight from its raw u64 bit-pattern
+                // (lo = col 2p, hi = col 2p+1) and evaluated at β (`ψ_β`, XOR over
+                // set bits) — the β-collapsed form binds the same cells as the old
+                // D-wide bit scatter, at one scalar per cell instead of D.
                 use zinc_poly::univariate::F2PackU64;
-                let lo_mask: u64 = 0xFFFF_FFFFu64;
+                // Per-lane mask: low D bits of each storage cell. D=32 ⇒ two
+                // lanes (lo/hi u32); D=64 ⇒ one lane (the whole cell).
+                let lane_mask: u64 = if D >= 64 { u64::MAX } else { (1u64 << D) - 1 };
                 let local_idx = opened.column_idx % LEAF_GROUP_SIZE;
                 let local_col = &opened.column_values
                     [local_idx * single_col_len..(local_idx + 1) * single_col_len];
-                let mut weighted_col: Vec<GF128Poly<D>> =
-                    vec![GF128Poly::<D>::zero(); num_rows];
+                // β-collapsed: weighted_col[i] is a GF(2^128) scalar.
+                let mut weighted_col: Vec<BinaryFieldGF128> =
+                    vec![BinaryFieldGF128::zero(); num_rows];
+
+                // `acc += γ · ψ_β(cell)` for one opened (or BitOp-virtual) cell.
+                let add_cell = |acc: &mut BinaryFieldGF128, cell: u64, g: BinaryFieldGF128| {
+                    let mut t = eval_f2_bits_at_with_powers(cell, &beta_powers);
+                    t *= &g;
+                    *acc += &t;
+                };
 
                 // Witness primary + bit-op virtual contributions: cells from the
                 // opened paired storage. γ is witness-local (gamma[wit_local_*] /
-                // gamma[spec.col_idx]). Public columns aren't in this batch. The
-                // un-lifted form scatters each GF(2^128) γ into the cell's set bits.
+                // gamma[spec.col_idx]). Public columns aren't in this batch.
                 for p in 0..paired_primary_count {
-                    let wit_local_lo = primary_witness_indices[2 * p];
-                    let wit_local_hi_opt: Option<usize> =
-                        primary_witness_indices.get(2 * p + 1).copied();
                     for i in 0..num_rows {
                         let packed_bits = local_col[p * num_rows + i].pack_u64();
-                        let lo_cell = packed_bits & lo_mask;
+                        // Each storage cell holds `cps` lanes (k·D..(k+1)·D);
+                        // lane k is original primary witness col `cps·p + k`.
+                        for k in 0..cps {
+                            let Some(&wit_local) = primary_witness_indices.get(cps * p + k)
+                            else {
+                                break; // odd tail: last slot has fewer than cps cols
+                            };
+                            let cell = (packed_bits >> (k * D)) & lane_mask;
 
-                        // Primary lo contribution: weighted_col[i] += γ·lo_cell.
-                        gf128poly_accumulate_bits::<D>(&mut weighted_col[i], lo_cell, gamma[wit_local_lo]);
+                            // Primary contribution: weighted_col[i] += γ·ψ_β(cell).
+                            add_cell(&mut weighted_col[i], cell, gamma[wit_local]);
 
-                        // Virtual contributions sourced from this lo primary cell.
-                        for spec in &virtuals_by_source[wit_local_lo] {
-                            let v_cell = apply_bit_op_u32(lo_cell, spec.op);
-                            gf128poly_accumulate_bits::<D>(&mut weighted_col[i], v_cell, gamma[spec.col_idx]);
-                        }
-
-                        if let Some(wit_local_hi) = wit_local_hi_opt {
-                            let hi_cell = packed_bits >> 32;
-                            // Primary hi contribution.
-                            gf128poly_accumulate_bits::<D>(&mut weighted_col[i], hi_cell, gamma[wit_local_hi]);
-
-                            // Virtual contributions sourced from this hi primary cell.
-                            for spec in &virtuals_by_source[wit_local_hi] {
-                                let v_cell = apply_bit_op_u32(hi_cell, spec.op);
-                                gf128poly_accumulate_bits::<D>(&mut weighted_col[i], v_cell, gamma[spec.col_idx]);
+                            // Virtual (bit-op) contributions sourced from this cell.
+                            for spec in &virtuals_by_source[wit_local] {
+                                let v_cell = apply_bit_op_u32(cell, spec.op);
+                                add_cell(&mut weighted_col[i], v_cell, gamma[spec.col_idx]);
                             }
                         }
                     }
                 }
-                let actual_at_j: GF128Poly<D> = {
-                    let mut acc = GF128Poly::<D>::zero();
+                let actual_at_j: BinaryFieldGF128 = {
+                    let mut acc = BinaryFieldGF128::zero();
                     for i in 0..num_rows {
-                        gf128poly_accumulate_scaled::<D>(&mut acc, &weighted_col[i], coeffs[i]);
+                        let mut t = weighted_col[i];
+                        t *= &coeffs[i];
+                        acc += &t;
                     }
                     acc
                 };
-                if actual_at_j != encoded[opened.column_idx] {
+                if actual_at_j != encoded[opened.column_idx].coeffs[0] {
                     return Err(F2OpenError::EncodingConsistency {
                         column_idx: opened.column_idx,
                     });
@@ -3446,7 +3760,8 @@ where
     ) -> Result<F2FullProof<D>, F2ProveError<U>> {
         // Steps 2-4: IC + α + (Hadamard zerocheck, Wiring R) + sumcheck
         // on the primary+virtual extended trace.
-        let (uair_proof, subclaim, projected_trace_for_mp) =
+        let (uair_proof, subclaim, projected_trace_for_mp) = {
+            let _g = zinc_utils::prof::scope("uair");
             Self::prove_f2_uair_with_groups(
                 transcript,
                 trace,
@@ -3455,7 +3770,8 @@ where
                 adder_specs,
                 num_vars,
                 project_scalar,
-            )?;
+            )?
+        };
 
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -3484,7 +3800,8 @@ where
             })
             .collect();
 
-        let (mp_proof, mp_prover_state) =
+        let (mp_proof, mp_prover_state) = {
+            let _g = zinc_utils::prof::scope("multipoint_eval");
             MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol_with_pointed_shifts(
                 transcript,
                 &projected_trace_for_mp,
@@ -3494,7 +3811,8 @@ where
                 &uair_proof.hadamard_pair_evals,
                 &(),
             )
-            .map_err(F2ProveError::MultipointEval)?;
+            .map_err(F2ProveError::MultipointEval)?
+        };
         let r_0 = mp_prover_state.eval_point;
 
         // Per-column MLE evals at r_0. Same pattern (consume each
@@ -3504,16 +3822,17 @@ where
         // multipoint-eval verifier consistency check at r_0; the
         // witness-primary slice is additionally bound by the F_2 PCS
         // open below.
-        let open_evals_at_r_0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(
-            projected_trace_for_mp
-        )
-        .map(|col| {
-            <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                BinaryFieldGF128,
-            >>::evaluate_with_config(col, &r_0, &())
-            .expect("MLE evaluation at r_0 should succeed")
-        })
-        .collect();
+        let open_evals_at_r_0: Vec<BinaryFieldGF128> = {
+            let _g = zinc_utils::prof::scope("open_evals_r0");
+            zinc_utils::cfg_into_iter!(projected_trace_for_mp)
+                .map(|col| {
+                    <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                        BinaryFieldGF128,
+                    >>::evaluate_with_config(col, &r_0, &())
+                    .expect("MLE evaluation at r_0 should succeed")
+                })
+                .collect()
+        };
 
         // Absorb open_evals_at_r_0 into the transcript (mirror of
         // the column_evals_at_rstar absorb done inside
@@ -3536,15 +3855,18 @@ where
         // MLE evals at r_0 locally (matches the integer protocol's
         // witness-only PCS open). Bit-op virtual contributions are
         // reconstructed verifier-side via `bit_op_specs`.
-        let open_proof = Self::prove_f2_open(
-            transcript,
-            pp,
-            &hint,
-            &trace.binary_poly[num_pub_bin..],
-            &r_0,
-            &subclaim.alpha,
-            num_column_openings,
-        );
+        let open_proof = {
+            let _g = zinc_utils::prof::scope("open");
+            Self::prove_f2_open(
+                transcript,
+                pp,
+                &hint,
+                &trace.binary_poly[num_pub_bin..],
+                &r_0,
+                &subclaim.alpha,
+                num_column_openings,
+            )
+        };
 
         Ok(F2FullProof {
             commitment,
@@ -3586,13 +3908,16 @@ where
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
 
         // Step 0: commit pre-paired witness + absorb root + public cols.
-        let (hint, commitment) = Self::commit_and_absorb_pre_paired_witness(
-            transcript,
-            pp,
-            paired_primary_witness,
-            &trace.binary_poly[..num_pub_bin],
-        )
-        .expect("F_2 pre-paired commit should succeed for a well-shaped trace");
+        let (hint, commitment) = {
+            let _g = zinc_utils::prof::scope("commit");
+            Self::commit_and_absorb_pre_paired_witness(
+                transcript,
+                pp,
+                paired_primary_witness,
+                &trace.binary_poly[..num_pub_bin],
+            )
+            .expect("F_2 pre-paired commit should succeed for a well-shaped trace")
+        };
 
         let _ = bit_op_specs; // currently unused after the commit step;
                               // kept in the signature to mirror the
@@ -4048,7 +4373,7 @@ pub struct F2OblongHadamardProof<const D: usize> {
     pub open: F2OpenProof<D>,
     /// The oblong AND-zerocheck proof (round message + Gruen round polys + the
     /// closing `a/b/c_eval`). Its eval-point `[z, γ]` is transcript-re-derived.
-    pub oblong: zinc_poly::univariate::oblong_and::OblongAndProof,
+    pub oblong: zinc_poly::univariate::oblong_and::OblongAndProof<D>,
     /// Trusted `ψ_z` operand parents of the **adder** relations at `γ_word`
     /// (3 per adder: U,V,W), in adder order. Honest-prover (Issue 1), same as the
     /// fused discharge — the bit-level carry recurrence (`SHR¹`, `β=Maj`, `X·c`)
@@ -6268,8 +6593,7 @@ mod tests {
             w_sigma1: cols::W_SIGMA1,
             w_sig0: cols::W_SIG0,
             w_sig1: cols::W_SIG1,
-            w_uef: cols::W_UEF,
-            w_uneg_e_g: cols::W_UNEG_E_G,
+            w_u_ch: cols::W_U_CH,
             w_maj: cols::W_MAJ,
             w_t1: cols::W_T1,
             w_t2: cols::W_T2,
@@ -6278,11 +6602,10 @@ mod tests {
             w_t1_s1: cols::W_T1_S1,
             w_t1_s2: cols::W_T1_S2,
             w_t1_s3: cols::W_T1_S3,
-            w_t1_s4: cols::W_T1_S4,
         }
     }
 
-    /// All **16** SHA-256 Hadamard relations (3 ANDs + 13 adders) discharged
+    /// All **14** SHA-256 Hadamard relations (2 ANDs + 12 adders) discharged
     /// end-to-end on the real `sha256_f2` trace via a **single**
     /// `prove/verify_f2_full_with_hadamard` call — the production path. The
     /// specs + active-row masks are derived from
@@ -6316,10 +6639,10 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // The 16 relations, derived from the SHA layout.
+        // The 14 relations, derived from the SHA layout.
         let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
-        assert_eq!(and_specs.len(), 3);
-        assert_eq!(adder_specs.len(), 13);
+        assert_eq!(and_specs.len(), 2);
+        assert_eq!(adder_specs.len(), 12);
 
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
@@ -6334,7 +6657,7 @@ mod tests {
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_hadamard on all 16 SHA relations should succeed");
+        .expect("prove_f2_full_with_hadamard on all 14 SHA relations should succeed");
         assert!(proof.uair.hadamard_proof.is_some());
 
         let mut vt = Blake3Transcript::new();
@@ -6351,22 +6674,573 @@ mod tests {
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
-        .expect("honest all-16 SHA Hadamard proof must verify");
+        .expect("honest all-14 SHA Hadamard proof must verify");
     }
 
-    /// The three SHA-256 **AND** Hadamard relations C12/C13/C14 discharged
-    /// end-to-end on the real `sha256_f2` trace (no `W_β`, no X·, columns
-    /// already committed witness cols filled as correct ANDs):
-    ///   C12 `u_ef[t]   = e[t] & e[t−1]`,
-    ///   C13 `u_neg[t]  = (¬e[t]) & e[t−2]`,
+    /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
+    /// Keccak-f[1600] permutation: the θρπ rotation identities + the
+    /// transition/boundary constraints (the UAIR's `constrain_general`, the
+    /// degree-1 ideal lane) and the **25 χ AND** Hadamard relations
+    /// `Q[x][y] = B[x+1][y] ⊙ B[x+2][y]` — *plain same-row columns*, so all
+    /// `Δ = 0` and the discharge's single open binds them fully (no trusted
+    /// row-shift parents, unlike SHA's adders; Keccak has **no adders**). One
+    /// `prove/verify_f2_full_with_hadamard` call at the 64-bit lane width.
+    ///
+    /// This is the first all-`F_2[X]` proof at `D = 64`: it exercises the
+    /// const-generic oblong AND zerocheck (naive `GF(2^128)` scheme at
+    /// `WB = 64`), the D-generic commitment (`CPS = 1`, no cell-pairing), and
+    /// the D-generic IC / multipoint-eval / open.
+    #[test]
+    fn keccak_f2_full_hadamard_roundtrips() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::keccak_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, KeccakAndRelation, KeccakF2Ideal, KeccakF2Uair,
+            keccak_f2_project_ideal, keccak_f2_project_scalar,
+        };
+
+        const D: usize = 64;
+        type R = Int<4>;
+        type U = KeccakF2Uair<R>;
+
+        // 2^6 = 64 rows ≥ 2·24 = 48: `generate_random_trace` fills the
+        // available permutation blocks, so this exercises a **2-permutation**
+        // (multi-block) sponge through the full prover. A deterministic
+        // 3-permutation variant is `keccak_f2_multi_block_hadamard_roundtrips`.
+        let num_vars: usize = 6;
+        let row_len: usize = 8;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        // The 25 χ AND relations (plain same-row columns; no adders), built from
+        // the UAIR's absolute column indices.
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+        assert_eq!(and_specs.len(), 25);
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            /* adder_specs */ &[],
+            num_vars,
+            keccak_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("prove_f2_full_with_hadamard on Keccak χ relations should succeed");
+        assert!(proof.uair.hadamard_proof.is_some());
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<KeccakF2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            /* adder_specs */ &[],
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<KeccakF2Ideal>| keccak_f2_project_ideal(ideal),
+        )
+        .expect("honest Keccak χ Hadamard proof must verify");
+    }
+
+    /// **Multi-block Keccak-256 over `F_2[X]`, end-to-end (`D=64`).** A
+    /// 3-permutation sponge (a 300-byte message ⇒ 3 rate blocks) proved and
+    /// verified through `prove/verify_f2_full_with_hadamard`, exercising the
+    /// block-boundary **absorb transition** (each permutation's χ-output XORed
+    /// with the next message block feeds the next permutation's input). A
+    /// deterministic message; the per-round χ relations and the linear lane are
+    /// identical to the single-permutation case — only the trace is taller and
+    /// the `S_ABSORB`-gated transitions chain the blocks.
+    #[test]
+    fn keccak_f2_multi_block_hadamard_roundtrips() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::keccak_f2::cols;
+        use zinc_test_uair::{
+            KeccakAndRelation, KeccakF2Ideal, KeccakF2Uair, build_keccak_trace,
+            keccak_f2_project_ideal, keccak_f2_project_scalar,
+        };
+
+        const D: usize = 64;
+        type R = Int<4>;
+        type U = KeccakF2Uair<R>;
+
+        let num_vars: usize = 7; // 2^7 = 128 ≥ 3·24 = 72 round rows
+        let row_len: usize = 8;
+        let num_rows = (1usize << num_vars) / row_len;
+
+        // A 300-byte message ⇒ 3 rate blocks ⇒ 3 chained permutations.
+        let msg: Vec<u8> = (0..300u32)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7) & 0xff) as u8)
+            .collect();
+        let trace = build_keccak_trace::<R>(&msg, num_vars, 136, 0x01);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            /* adder_specs */ &[],
+            num_vars,
+            keccak_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("multi-block Keccak prove_f2_full_with_hadamard should succeed");
+        assert!(proof.uair.hadamard_proof.is_some());
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<KeccakF2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            /* adder_specs */ &[],
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<KeccakF2Ideal>| keccak_f2_project_ideal(ideal),
+        )
+        .expect("honest multi-block Keccak proof must verify");
+    }
+
+    /// **Keccak soundness (tamper rejection).** A corrupt χ product is rejected
+    /// end-to-end. The corruption is placed at the last round-row on a
+    /// non-digest lane (≥4): the transition is gated off there (last round) and
+    /// the output boundary covers only lanes 0..3, so the linear lane (IC) stays
+    /// clean and the `Q ≠ B⊙B'` violation is caught *only* by the Hadamard
+    /// discharge — confirming that the χ relations are genuinely bound, not
+    /// merely assumed. (Linear-lane rejection is covered at the constraint level
+    /// by `keccak_f2::corrupted_witness_is_caught`.)
+    #[test]
+    fn keccak_f2_tamper_rejected() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_poly::univariate::F2PackU64;
+        use zinc_test_uair::keccak_f2::{cols, idx};
+        use zinc_test_uair::{
+            KeccakAndRelation, KeccakF2Ideal, KeccakF2Uair, build_keccak_trace,
+            keccak_f2_project_ideal, keccak_f2_project_scalar,
+        };
+
+        const D: usize = 64;
+        type R = Int<4>;
+        type U = KeccakF2Uair<R>;
+
+        let num_vars = 6usize;
+        let row_len = 8usize;
+        let num_rows = (1usize << num_vars) / row_len;
+        // 1-block message ⇒ 1 permutation, last active round-row = 23.
+        let honest = build_keccak_trace::<R>(b"tamper soundness", num_vars, 136, 0x01);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+
+        let prove = |tr: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+                &mut Blake3Transcript::new(),
+                &pp,
+                tr,
+                &[],
+                &[],
+                &and_specs,
+                &[],
+                num_vars,
+                keccak_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("the prover runs on any trace (it does not self-check)")
+        };
+        let verify = |proof: &F2FullProof<D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<KeccakF2Ideal>(
+                &mut Blake3Transcript::new(),
+                &pp,
+                proof,
+                &[],
+                &[],
+                &and_specs,
+                &[],
+                &honest.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                |i: &IdealOrZero<KeccakF2Ideal>| keccak_f2_project_ideal(i),
+            )
+        };
+
+        // Honest sanity.
+        verify(&prove(&honest)).expect("honest proof must verify");
+
+        // Corrupt one bit of χ product Q at the last round-row, lane 5 (non-digest).
+        let last = cols::ROWS_PER_PERM - 1;
+        let q_col = cols::q(idx(0, 1));
+        let mut bad = honest.clone();
+        {
+            let cells = bad.binary_poly.to_mut();
+            let v = cells[q_col].evaluations[last].pack_u64();
+            cells[q_col].evaluations[last] = BinaryPoly::<D>::from(v ^ 1);
+        }
+        assert!(
+            matches!(
+                verify(&prove(&bad)),
+                Err(F2FullVerifyError::Uair(F2VerifyError::Hadamard(_)))
+            ),
+            "a corrupt χ product must be rejected by the Hadamard zerocheck",
+        );
+    }
+
+    /// **The oblong $\psi_z$ discharge at $D=64$** (the discharge of the note's
+    /// §5). Proves the $25$ Keccak χ AND relations through the naive
+    /// (monomial-$\K$) oblong univariate-skip zerocheck at the $64$-bit lane
+    /// width --- the first run of the oblong discharge above the $32$-bit word.
+    /// Honest round-trips; a corrupt χ product is rejected by the zerocheck.
+    /// (This exercises the oblong discharge + ψ_z tie standalone; folding its
+    /// pair-evals into the committed multipoint open --- the sound binding of
+    /// `prove_f2_full_with_oblong_hadamard`, currently gf8/D=32 --- is the
+    /// remaining integration step.)
+    #[test]
+    fn keccak_f2_oblong_discharge_d64_roundtrips() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crate::f2_oblong_hadamard::{prove_oblong_and_batch, verify_oblong_and_batch};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_poly::univariate::F2PackU64;
+        use zinc_test_uair::keccak_f2::cols;
+        use zinc_test_uair::{KeccakAndRelation, KeccakF2Uair, build_keccak_trace};
+
+        const D: usize = 64;
+        type R = Int<4>;
+
+        let num_vars = 6usize;
+        let trace = build_keccak_trace::<R>(b"oblong d64", num_vars, 136, 0x01);
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+
+        // Honest: prove + verify the χ relations via the naive oblong zerocheck.
+        let mut pt = Blake3Transcript::new();
+        let proof =
+            prove_oblong_and_batch::<D, _>(&mut pt, &trace.binary_poly, &and_specs, &[], num_vars);
+        let mut vt = Blake3Transcript::new();
+        verify_oblong_and_batch::<D, _>(&mut vt, &proof, &trace.binary_poly, &and_specs, &[], num_vars)
+            .expect("honest Keccak oblong discharge must verify at D=64");
+
+        // Tamper: corrupt a χ product ⇒ the oblong zerocheck rejects.
+        let mut bad = trace.clone();
+        {
+            let cells = bad.binary_poly.to_mut();
+            let qc = cols::q(0);
+            let v = cells[qc].evaluations[0].pack_u64();
+            cells[qc].evaluations[0] = BinaryPoly::<D>::from(v ^ 1);
+        }
+        let mut pt2 = Blake3Transcript::new();
+        let bad_proof =
+            prove_oblong_and_batch::<D, _>(&mut pt2, &bad.binary_poly, &and_specs, &[], num_vars);
+        let mut vt2 = Blake3Transcript::new();
+        assert!(
+            verify_oblong_and_batch::<D, _>(
+                &mut vt2,
+                &bad_proof,
+                &bad.binary_poly,
+                &and_specs,
+                &[],
+                num_vars,
+            )
+            .is_err(),
+            "a corrupt χ product must be rejected by the oblong zerocheck at D=64",
+        );
+    }
+
+    /// **Keccak full e2e through the sound oblong $\psi_z$ discharge at $D = 64$.**
+    /// The integration the §5 note calls for: Keccak's $25$ χ AND relations
+    /// proved/verified through `prove/verify_f2_full_with_oblong_hadamard_naive`
+    /// — the monomial-$\K$ oblong univariate-skip zerocheck whose
+    /// $\psi_z(\mathrm{col}{\downarrow}\Delta)(\gamma_{\mathrm{word}})$ pair-evals
+    /// are folded into the committed multipoint open (the **sound binding**), the
+    /// `ψ_z` binding $\psi_z(a') = \sum_g \gamma_g\,z\_r0\_evals[g]$ ties them to
+    /// the bit-slice claim, and `oblong_tie_from_bound` closes the tie. This is
+    /// the first run of the *sound* oblong discharge (not just the standalone
+    /// zerocheck of `keccak_f2_oblong_discharge_d64_roundtrips`) above the
+    /// $32$-bit word — the GF(2⁸) accel of the `<_, _, 32>`
+    /// `prove_f2_full_with_oblong_hadamard` is 32-bit-only; this is the
+    /// monomial-$\K$ twin at the $64$-bit lane.
+    ///
+    /// Asserts: the honest proof verifies; a corrupt χ product (at the last
+    /// round-row, non-digest lane — invisible to the linear lane) is rejected by
+    /// the oblong zerocheck.
+    #[test]
+    fn keccak_f2_full_oblong_hadamard_roundtrips() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_poly::univariate::F2PackU64;
+        use zinc_test_uair::keccak_f2::{cols, idx};
+        use zinc_test_uair::{
+            KeccakAndRelation, KeccakF2Ideal, KeccakF2Uair, build_keccak_trace,
+            keccak_f2_project_ideal, keccak_f2_project_scalar,
+        };
+
+        const D: usize = 64;
+        type R = Int<4>;
+        type U = KeccakF2Uair<R>;
+
+        let num_vars = 6usize;
+        let row_len = 8usize;
+        let num_rows = (1usize << num_vars) / row_len;
+        // 1-block message ⇒ 1 permutation, last active round-row = 23.
+        let honest = build_keccak_trace::<R>(b"oblong full d64", num_vars, 136, 0x01);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+        assert_eq!(and_specs.len(), 25);
+
+        let prove = |tr: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_hadamard_naive(
+                &mut Blake3Transcript::new(),
+                &pp,
+                tr,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                /* adder_specs */ &[],
+                num_vars,
+                keccak_f2_project_scalar::<R>,
+                /* num_column_openings */ 4,
+            )
+            .expect("prove_f2_full_with_oblong_hadamard_naive on Keccak χ must succeed")
+        };
+        let verify = |proof: &F2OblongHadamardProof<D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_hadamard_naive::<
+                KeccakF2Ideal,
+            >(
+                &mut Blake3Transcript::new(),
+                &pp,
+                proof,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                /* adder_specs */ &[],
+                &honest.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                |i: &IdealOrZero<KeccakF2Ideal>| keccak_f2_project_ideal(i),
+            )
+        };
+
+        // -- honest round-trip --
+        let proof = prove(&honest);
+        // z-evals span every witness primary col (S, B, Q = 75 lanes).
+        assert_eq!(proof.z_r0_evals.len(), cols::NUM_BIN - cols::NUM_BIN_PUB);
+        // 50 distinct (col, Δ=0) AND pairs: 25 B operands + 25 Q products.
+        assert_eq!(proof.pair_evals.len(), 50);
+        verify(&proof).expect("honest sound oblong-discharge Keccak proof must verify at D=64");
+
+        // -- corrupt one χ product Q at the last round-row, lane idx(0,1)=5
+        //    (non-digest): the linear lane is gated off there, so rejection is
+        //    *specifically* by the oblong zerocheck. --
+        let last = cols::ROWS_PER_PERM - 1;
+        let q_col = cols::q(idx(0, 1));
+        let mut bad = honest.clone();
+        {
+            let cells = bad.binary_poly.to_mut();
+            let v = cells[q_col].evaluations[last].pack_u64();
+            cells[q_col].evaluations[last] = BinaryPoly::<D>::from(v ^ 1);
+        }
+        assert!(
+            matches!(verify(&prove(&bad)), Err(F2FullVerifyError::Oblong(_))),
+            "a corrupt χ product must be rejected by the oblong zerocheck at D=64",
+        );
+    }
+
+    /// **Keccak full e2e through the GF(2⁸)-accelerated oblong discharge at
+    /// `D = 64`.** Same sound binding as `keccak_f2_full_oblong_hadamard_roundtrips`
+    /// (naive monomial-`K`), but routed through the *fast* GF(2⁸) byte-lookup NTT
+    /// scheme — now generalized from the 32-bit word to the 64-bit lane (the
+    /// `embed(H)` domain `{Gf8(0..127)}` fits GF(2⁸)). This is the path Keccak's
+    /// production prover takes; it must produce the same proof *shape* (50 AND
+    /// pairs, 75 z-evals) and the same honest-accept / corrupt-reject behaviour as
+    /// the naive lane, only faster. The GF(2⁸) discharge proof is **not**
+    /// cross-verifiable with the naive verifier (different reconstruction
+    /// subspace) — `prove_gf8` pairs with `verify_gf8`.
+    #[test]
+    fn keccak_f2_full_oblong_hadamard_gf8_roundtrips() {
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand};
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_poly::univariate::F2PackU64;
+        use zinc_test_uair::keccak_f2::{cols, idx};
+        use zinc_test_uair::{
+            KeccakAndRelation, KeccakF2Ideal, KeccakF2Uair, build_keccak_trace,
+            keccak_f2_project_ideal, keccak_f2_project_scalar,
+        };
+
+        const D: usize = 64;
+        type R = Int<4>;
+        type U = KeccakF2Uair<R>;
+
+        let num_vars = 6usize;
+        let row_len = 8usize;
+        let num_rows = (1usize << num_vars) / row_len;
+        let honest = build_keccak_trace::<R>(b"oblong gf8 d64", num_vars, 136, 0x01);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let and_specs: Vec<F2HadamardSpec> = KeccakF2Uair::<R>::hadamard_relations()
+            .into_iter()
+            .map(
+                |KeccakAndRelation { q_col, b1_col, b2_col }| F2HadamardSpec {
+                    u: F2Operand::col(b1_col),
+                    v: F2Operand::col(b2_col),
+                    w: F2Operand::col(q_col),
+                },
+            )
+            .collect();
+
+        let prove = |tr: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_hadamard(
+                &mut Blake3Transcript::new(),
+                &pp,
+                tr,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                /* adder_specs */ &[],
+                num_vars,
+                keccak_f2_project_scalar::<R>,
+                /* num_column_openings */ 4,
+            )
+            .expect("gf8 prove_f2_full_with_oblong_hadamard on Keccak χ must succeed at D=64")
+        };
+        let verify = |proof: &F2OblongHadamardProof<D>| {
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_hadamard::<KeccakF2Ideal>(
+                &mut Blake3Transcript::new(),
+                &pp,
+                proof,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                /* adder_specs */ &[],
+                &honest.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                |i: &IdealOrZero<KeccakF2Ideal>| keccak_f2_project_ideal(i),
+            )
+        };
+
+        // -- honest round-trip through the GF(2⁸) fast lane --
+        let proof = prove(&honest);
+        assert_eq!(proof.z_r0_evals.len(), cols::NUM_BIN - cols::NUM_BIN_PUB);
+        assert_eq!(proof.pair_evals.len(), 50);
+        verify(&proof).expect("honest GF(2⁸) oblong-discharge Keccak proof must verify at D=64");
+
+        // -- corrupt χ product at a non-digest last-round-row cell ⇒ oblong reject --
+        let last = cols::ROWS_PER_PERM - 1;
+        let q_col = cols::q(idx(0, 1));
+        let mut bad = honest.clone();
+        {
+            let cells = bad.binary_poly.to_mut();
+            let v = cells[q_col].evaluations[last].pack_u64();
+            cells[q_col].evaluations[last] = BinaryPoly::<D>::from(v ^ 1);
+        }
+        assert!(
+            matches!(verify(&prove(&bad)), Err(F2FullVerifyError::Oblong(_))),
+            "a corrupt χ product must be rejected by the GF(2⁸) oblong zerocheck at D=64",
+        );
+    }
+
+    /// The two SHA-256 **AND** Hadamard relations C12 (Ch) / C14 (Maj)
+    /// discharged end-to-end on the real `sha256_f2` trace (no `W_β`, no X·,
+    /// columns already committed witness cols filled as correct ANDs):
+    ///   C12 `u_ch[t]   = e[t] & (e[t−1] ⊕ e[t−2])`  (the 1-AND Ch product),
     ///   C14 `maj[t]    = Maj(a[t], a[t−1], a[t−2])`  (`sha256_f2.rs`).
     ///
     /// Registered in the codebase `↓Δ = row i → col[i+Δ]` convention
     /// (`ShiftSpec`, `build_shifted_bit_slice_mles`). The fills are written
     /// `i−Δ`, so each is re-expressed `i+Δ` (substitute `t → t+Δ_max`,
     /// shifting the result column up too):
-    ///   C12 ⇒ `W_E^↓1 ⊙ W_E = W_UEF^↓1`,
-    ///   C13 ⇒ `¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2`,
+    ///   C12 ⇒ `W_E^↓2 ⊙ (W_E^↓1 ⊕ W_E) = W_U_CH^↓2`,
     ///   C14 ⇒ `(W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A)`
     ///         (the Binius identity `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
     /// The complement/combo boundary (where the shifted column zero-pads,
@@ -6403,10 +7277,10 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // C12/C13/C14 from the production builder.
+        // C12 (Ch) / C14 (Maj) from the production builder.
         let specs = sha256_f2_hadamard_layout(num_vars).and_specs();
 
-        // Prove + verify the bundled flow with C12/C13/C14 registered.
+        // Prove + verify the bundled flow with C12/C14 registered.
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
             &mut pt,
@@ -6420,7 +7294,7 @@ mod tests {
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_hadamard on SHA C12/C13/C14 should succeed");
+        .expect("prove_f2_full_with_hadamard on SHA C12/C14 should succeed");
         assert!(proof.uair.hadamard_proof.is_some());
 
         let mut vt = Blake3Transcript::new();
@@ -6437,7 +7311,7 @@ mod tests {
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
-        .expect("honest SHA C12/C13/C14 proof must verify");
+        .expect("honest SHA C12/C14 proof must verify");
     }
 
     /// DOCUMENTS the row-selectivity gap for the SHA-256 adders C5–C11.
@@ -6485,7 +7359,7 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // All 13 adders from the builder, but with the active-row masks
+        // All 12 adders from the builder, but with the active-row masks
         // CLEARED — a *uniform* registration the verifier must reject (the
         // adders are row-selective; `target = x+y` doesn't hold off-chain).
         let mut adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
@@ -6545,7 +7419,7 @@ mod tests {
     ///   - C7 (target `W_T2` is unshifted, row-local at `t=k+3`):
     ///         `[start+3, start+67)`
     ///   - C10 / C11 (digest feed-forward):               `[start+64, start+68)`
-    /// Completes the 16 SHA Hadamard relations (3 ANDs + 13 adders).
+    /// Completes the 14 SHA Hadamard relations (2 ANDs + 12 adders).
     /// (Adder parents are trusted — honest-prover; a sound discharge for the
     /// row/bit-shifts is the ledger's Issue-1 follow-up.)
     #[test]
@@ -6575,9 +7449,9 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // The 13 adders (with masks) from the production builder.
+        // The 12 adders (with masks) from the production builder.
         let adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
-        assert_eq!(adders.len(), 13);
+        assert_eq!(adders.len(), 12);
         let sel: &[crate::f2_hadamard::F2AdderSpec] = &adders;
 
         let mut pt = Blake3Transcript::new();

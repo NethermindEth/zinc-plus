@@ -210,9 +210,14 @@ fn f2_full_proof_parts(proof: &F2FullProof<D>) -> Vec<(&'static str, Vec<u8>)> {
         serialize_gf128poly(&mut b_vector, v);
     }
 
-    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * D * ALPHA_BYTES);
-    for v in &proof.open.combined_row {
-        serialize_gf128poly(&mut combined_row, v);
+    // β-collapsed: Vec<GF128Poly<1>>, one GF(2^128) scalar each.
+    let mut combined_row = Vec::with_capacity(proof.open.combined_row.len() * ALPHA_BYTES);
+    {
+        let mut buf = vec![0u8; ALPHA_BYTES];
+        for v in &proof.open.combined_row {
+            v.coeffs[0].inner().write_transcription_bytes_exact(&mut buf);
+            combined_row.extend_from_slice(&buf);
+        }
     }
 
     let bytes_per_cell = 2 * D.div_ceil(8);

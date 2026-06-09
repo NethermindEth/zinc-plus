@@ -257,6 +257,102 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         Ok(())
     }
 
+    /// Open-at-tensor verification: checks an opening produced by
+    /// [`super::ZipPlus::prove_with_tensors_f`] — i.e. that the claimed value
+    /// `eval_f` equals `⟨committed poly, q_0 ⊗ q_1⟩` for the caller-supplied
+    /// tensors `q_0` (length `num_rows`) and `q_1` (length `row_len`). Mirrors
+    /// [`Self::verify_with_alphas`] but injects the tensors directly instead of
+    /// expanding `eq(point)`. Used by the Euclidean-norm JL pass to bind a ±1
+    /// random projection (one JL coordinate) to the commitment.
+    #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
+    pub fn verify_with_tensors<F, const CHECK_FOR_OVERFLOW: bool>(
+        transcript: &mut PcsVerifierTranscript,
+        vp: &ZipPlusParams<Zt, Lc>,
+        comm: &ZipPlusCommitment,
+        field_cfg: &F::Config,
+        q_0: &[F],
+        q_1: &[F],
+        eval_f: &F,
+    ) -> Result<(), ZipError>
+    where
+        F: FromPrimitiveWithConfig
+            + FromRef<F>
+            + for<'a> FromWithConfig<&'a Zt::CombR>
+            + for<'a> FromWithConfig<&'a Zt::Chal>
+            + for<'a> MulByScalar<&'a F>,
+        F::Inner: Transcribable,
+        F::Modulus: FromRef<Zt::Fmod> + Transcribable,
+    {
+        let num_rows = vp.num_rows;
+        let row_len = vp.linear_code.row_len();
+        let batch_size = comm.batch_size;
+        assert_eq!(q_0.len(), num_rows, "q_0 must have num_rows entries");
+        assert_eq!(q_1.len(), row_len, "q_1 must have row_len entries");
+
+        let per_poly_alphas = Self::sample_alphas(&mut transcript.fs_transcript, batch_size);
+        let zero_f = F::zero_with_cfg(field_cfg);
+
+        let b: Vec<F> = transcript.read_field_elements(num_rows)?;
+
+        // Check 1: <q_0, b> == eval_f
+        if MBSInnerProduct::inner_product::<UNCHECKED>(q_0, &b, zero_f.clone())? != *eval_f {
+            return Err(ZipError::InvalidPcsOpen(
+                "Evaluation consistency failure".into(),
+            ));
+        }
+
+        let coeffs: Vec<Zt::Chal> = if num_rows == 1 {
+            vec![Zt::Chal::ONE]
+        } else {
+            transcript.fs_transcript.get_challenges(num_rows)
+        };
+
+        let combined_row: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        let encoded_combined_row: Vec<Zt::CombR> = vp.linear_code.encode_wide(&combined_row);
+
+        // Check 2: <combined_row, q_1> == <coeffs, b>
+        let lhs = MBSInnerProduct::inner_product_field(&combined_row, q_1, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
+        if lhs != rhs {
+            return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));
+        }
+
+        let columns_and_proofs: Vec<_> = (0..Zt::NUM_COLUMN_OPENINGS)
+            .map(|_| -> Result<_, ZipError> {
+                let column_idx = transcript.squeeze_challenge_idx(vp.linear_code.codeword_len());
+                let column_values = transcript.read_const_many(batch_size * vp.num_rows)?;
+                let proof = transcript.read_merkle_proof().map_err(|e| {
+                    ZipError::InvalidPcsOpen(format!("Failed to read Merkle a proof: {e}"))
+                })?;
+                Ok((column_idx, column_values, proof))
+            })
+            .try_collect()?;
+
+        cfg_into_iter!(columns_and_proofs).try_for_each(
+            |(column_idx, column_values, proof)| -> Result<(), ZipError> {
+                Self::verify_column_testing_batched::<CHECK_FOR_OVERFLOW>(
+                    &per_poly_alphas,
+                    &coeffs,
+                    &encoded_combined_row,
+                    &column_values,
+                    column_idx,
+                    vp.num_rows,
+                    batch_size,
+                )?;
+
+                proof
+                    .verify(&comm.root, &column_values, column_idx)
+                    .map_err(|e| {
+                        ZipError::InvalidPcsOpen(format!("Column opening verification failed: {e}"))
+                    })?;
+
+                Ok(())
+            },
+        )?;
+
+        Ok(())
+    }
+
     /// Phase 1 of [`Self::verify_with_alphas`]: reads `b` and `combined_row`
     /// from the transcript, runs evaluation-consistency and coherence checks,
     /// and returns the state needed for the column-opening checks.
@@ -514,6 +610,84 @@ mod tests {
 
     type TestZip = ZipPlus<Zt, C>;
     type TestPolyZip = ZipPlus<PolyZt, PolyC>;
+
+    /// Spike (Euclidean-norm JL, single signature): open one committed witness
+    /// at a ±1 rank-1 tensor `Π = q_0 ⊗ q_1` — a single JL coordinate
+    /// `p = ⟨w, Π⟩` — through the open-at-tensor seam, and check it BINDS: the
+    /// honest opening verifies and a tampered value is rejected. Per-signature
+    /// de-risking step for the JL norm proof
+    /// (documentation/falcon-arithmetization-design.md §9.8). `p` equals
+    /// `⟨w, q_0 ⊗ q_1⟩` by construction (it is `⟨q_0, b⟩` with `b_j = ⟨w_j, q_1⟩`,
+    /// the identity the eq-point roundtrip already validates); the statistical
+    /// `Σ_k p_k² ≈ ‖w‖²` concentration is quantified separately, numerically.
+    #[test]
+    fn norm_jl_pm1_tensor_opening_binds() {
+        // One Falcon-512 signature is 2n = 1024 coefficients → num_vars = 10,
+        // row_len = 256, num_rows = 4.
+        let num_vars = 10;
+        let (pp, w) = setup_test_params(num_vars);
+        let row_len = pp.linear_code.row_len();
+        let num_rows = pp.num_rows;
+        assert_eq!(row_len * num_rows, 1usize << num_vars);
+
+        let (hint, comm) = TestZip::commit_single(&pp, &w).unwrap();
+
+        let mut prover_transcript = PcsProverTranscript::new_from_commitment(&comm);
+        let field_cfg = get_field_cfg::<Zt, F>(&mut prover_transcript.fs_transcript);
+
+        // Deterministic ±1 tensors (a fixed public projection shared by both
+        // parties; the deployed pass would Fiat–Shamir these post-commitment).
+        let mut rng = StdRng::seed_from_u64(0xF0C0_1234_5678_9ABC);
+        let pm1 = |rng: &mut StdRng| -> F {
+            let sign = if (rng.next_u32() & 1) == 1 { 1i32 } else { -1i32 };
+            Int::<N>::from(sign).into_with_cfg(&field_cfg)
+        };
+        let q_0: Vec<F> = (0..num_rows).map(|_| pm1(&mut rng)).collect();
+        let q_1: Vec<F> = (0..row_len).map(|_| pm1(&mut rng)).collect();
+
+        let p = TestZip::prove_with_tensors_f::<F, CHECKED>(
+            &mut prover_transcript,
+            &pp,
+            std::slice::from_ref(&w),
+            q_0.clone(),
+            q_1.clone(),
+            &hint,
+            &field_cfg,
+        )
+        .expect("open-at-tensor prove must succeed");
+
+        let verifier_transcript = {
+            let mut t = prover_transcript.into_verification_transcript();
+            t.fs_transcript.absorb_slice(&comm.root);
+            t
+        };
+
+        // (a) Honest JL coordinate binds to the commitment.
+        {
+            let mut t = verifier_transcript.clone();
+            let field_cfg = get_field_cfg::<Zt, F>(&mut t.fs_transcript);
+            TestZip::verify_with_tensors::<F, CHECKED>(
+                &mut t, &pp, &comm, &field_cfg, &q_0, &q_1, &p,
+            )
+            .expect("honest ±1-tensor opening must verify");
+        }
+
+        // (b) A tampered value (p + 1) is rejected — the opening is binding.
+        {
+            let mut t = verifier_transcript.clone();
+            let field_cfg = get_field_cfg::<Zt, F>(&mut t.fs_transcript);
+            let one = F::one_with_cfg(&field_cfg);
+            let p_bad = {
+                let mut v = p.clone();
+                v += &one;
+                v
+            };
+            let res = TestZip::verify_with_tensors::<F, CHECKED>(
+                &mut t, &pp, &comm, &field_cfg, &q_0, &q_1, &p_bad,
+            );
+            assert!(res.is_err(), "tampered JL coordinate must fail to verify");
+        }
+    }
 
     #[test]
     fn successful_verification_of_valid_proof() {
