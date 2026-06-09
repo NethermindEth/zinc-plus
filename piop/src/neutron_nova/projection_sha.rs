@@ -665,7 +665,54 @@ pub fn build_sha_sumfold_linear_accumulator_direct_with_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
-    F: DelayedFieldProductSum,
+    F: ShaLinearAccumulatorField,
+{
+    F::build_sha_sumfold_linear_accumulator_direct_with_weights(traces, publics, plan, field_cfg)
+}
+
+pub trait ShaLinearAccumulatorField: DelayedFieldProductSum + Send + Sync + Sized {
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
+        traces: &[ProjectedTrace<Self>],
+        publics: &[ProjectedPublic<Self>],
+        plan: &ShaLinearResidualWeightPlan<Self>,
+        field_cfg: &Self::Config,
+    ) -> Result<Vec<Self>, ShaProjectionError>;
+}
+
+impl ShaLinearAccumulatorField for MontyField<4> {
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
+        traces: &[ProjectedTrace<Self>],
+        publics: &[ProjectedPublic<Self>],
+        plan: &ShaLinearResidualWeightPlan<Self>,
+        field_cfg: &Self::Config,
+    ) -> Result<Vec<Self>, ShaProjectionError> {
+        build_sha_sumfold_linear_accumulator_direct_with_weights_dmr(
+            traces, publics, plan, field_cfg,
+        )
+    }
+}
+
+impl ShaLinearAccumulatorField for BoxedMontyField {
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
+        traces: &[ProjectedTrace<Self>],
+        publics: &[ProjectedPublic<Self>],
+        plan: &ShaLinearResidualWeightPlan<Self>,
+        field_cfg: &Self::Config,
+    ) -> Result<Vec<Self>, ShaProjectionError> {
+        build_sha_sumfold_linear_accumulator_direct_with_weights_generic(
+            traces, publics, plan, field_cfg,
+        )
+    }
+}
+
+fn build_sha_sumfold_linear_accumulator_direct_with_weights_generic<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    plan: &ShaLinearResidualWeightPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: DelayedFieldProductSum + Send + Sync,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -673,7 +720,6 @@ where
             expected: traces.len(),
         });
     }
-    let eval_plan = ShaDirectResidualEvalPlan::new(&plan.a_powers, &plan.lambda_powers, field_cfg)?;
     cfg_iter!(traces)
         .zip(cfg_iter!(publics))
         .map(|(trace, public)| {
@@ -682,11 +728,49 @@ where
                 validate_trace(trace)?;
                 validate_public(public)?;
             }
-            sha_linear_residual_sum_with_plan(
+            sha_linear_residual_sum_with_weights(
+                trace,
+                public,
+                &plan.row_weights,
+                &plan.a_powers,
+                &plan.lambda_powers,
+                field_cfg,
+            )
+        })
+        .collect()
+}
+
+fn build_sha_sumfold_linear_accumulator_direct_with_weights_dmr<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    plan: &ShaLinearResidualWeightPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
+{
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    let eval_plan = ShaDirectResidualEvalPlan::new(&plan.a_powers, &plan.lambda_powers, field_cfg)?;
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
+    cfg_iter!(traces)
+        .zip(cfg_iter!(publics))
+        .map(|(trace, public)| {
+            #[cfg(debug_assertions)]
+            {
+                validate_trace(trace)?;
+                validate_public(public)?;
+            }
+            sha_linear_residual_sum_with_plan_dmr(
                 trace,
                 public,
                 &plan.row_weights,
                 &eval_plan,
+                &reducer,
                 field_cfg,
             )
         })
@@ -1797,24 +1881,40 @@ fn sha_linear_residual_sum_with_weights<F>(
 where
     F: DelayedFieldProductSum,
 {
-    let eval_plan = ShaDirectResidualEvalPlan::new(a_powers, lambda_powers, field_cfg)?;
-    sha_linear_residual_sum_with_plan(trace, public, row_weights, &eval_plan, field_cfg)
+    let mut values = Vec::with_capacity(row_weights.len());
+    for row in 0..row_weights.len() {
+        values.push(sha_linear_residual_row_value_with_powers(
+            trace,
+            public,
+            row,
+            a_powers,
+            lambda_powers,
+            field_cfg,
+        )?);
+    }
+    FieldFieldInnerProduct::inner_product::<UNCHECKED>(
+        row_weights,
+        &values,
+        F::zero_with_cfg(field_cfg),
+    )
+    .map_err(ShaProjectionError::from)
 }
 
-fn sha_linear_residual_sum_with_plan<F>(
+fn sha_linear_residual_sum_with_plan_dmr<F>(
     trace: &ProjectedTrace<F>,
     public: &ProjectedPublic<F>,
     row_weights: &[F],
     eval_plan: &ShaDirectResidualEvalPlan<F>,
+    reducer: &BarrettDelayedReduction<'_, F>,
     field_cfg: &F::Config,
 ) -> Result<F, ShaProjectionError>
 where
-    F: DelayedFieldProductSum,
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
     let mut values = Vec::with_capacity(row_weights.len());
     for row in 0..row_weights.len() {
         values.push(sha_linear_residual_row_value_direct(
-            trace, public, row, eval_plan, field_cfg,
+            trace, public, row, eval_plan, reducer, field_cfg,
         )?);
     }
     FieldFieldInnerProduct::inner_product::<UNCHECKED>(
@@ -1971,10 +2071,11 @@ fn sha_linear_residual_row_value_direct<F>(
     public: &ProjectedPublic<F>,
     row: usize,
     plan: &ShaDirectResidualEvalPlan<F>,
+    reducer: &BarrettDelayedReduction<'_, F>,
     field_cfg: &F::Config,
 ) -> Result<F, ShaProjectionError>
 where
-    F: DelayedFieldProductSum,
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
     let lambda = &plan.lambda_powers;
     let s_init = public_scalar_shifted_fast(public, ShaPublicCol::SInit, row, 0, field_cfg);
@@ -1995,8 +2096,9 @@ where
         if F::is_zero(coeff) {
             return Ok(());
         }
-        linear += trace_word_eval_at_row_with_weights(trace, col, row, shift, weights, field_cfg)?
-            * coeff;
+        linear += trace_word_eval_at_row_with_weights(
+            trace, col, row, shift, weights, field_cfg, reducer,
+        )? * coeff;
         Ok(())
     };
 
@@ -2143,6 +2245,7 @@ where
             row,
             &plan.word_weights,
             field_cfg,
+            reducer,
         )? * coeff;
         Ok(())
     };
@@ -3649,6 +3752,16 @@ where
     if booleanity_sources.is_empty() {
         return Ok(table);
     }
+    if is_canonical_production_booleanity_sources(booleanity_sources) {
+        return build_sha_booleanity_prefix_tail_table_production_fast(
+            traces,
+            prefix_vars,
+            tail_len,
+            row_weights,
+            booleanity_weights,
+            field_cfg,
+        );
+    }
 
     let coeff_plans = ternary_coeff_plans(prefix_vars)?;
     let word_bit_source_count = booleanity_sources
@@ -3803,6 +3916,284 @@ where
         }
     }
     Ok(table)
+}
+
+fn is_canonical_production_booleanity_sources(booleanity_sources: &[ShaBooleanitySource]) -> bool {
+    let word_bit_count = ShaWordCol::COUNT * SHA_WORD_BITS;
+    if booleanity_sources.len() != word_bit_count + 3 * SHA_WORD_BITS {
+        return false;
+    }
+    for (col_idx, col) in ShaWordCol::ALL.iter().enumerate() {
+        for bit in 0..SHA_WORD_BITS {
+            let source_idx = col_idx * SHA_WORD_BITS + bit;
+            if booleanity_sources[source_idx] != (ShaBooleanitySource::WordBit { col: *col, bit }) {
+                return false;
+            }
+        }
+    }
+    for bit in 0..SHA_WORD_BITS {
+        let base = word_bit_count + bit * 3;
+        if booleanity_sources[base] != (ShaBooleanitySource::VirtualCh1 { bit })
+            || booleanity_sources[base + 1] != (ShaBooleanitySource::VirtualCh2 { bit })
+            || booleanity_sources[base + 2] != (ShaBooleanitySource::VirtualMaj { bit })
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn build_sha_booleanity_prefix_tail_table_production_fast<F>(
+    traces: &[ProjectedTrace<F>],
+    prefix_vars: usize,
+    tail_len: usize,
+    row_weights: &[F],
+    booleanity_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let prefix_len = binary_len(prefix_vars);
+    let ternary_len = checked_ternary_len(prefix_vars)?;
+    let mask_count = 1usize << prefix_len;
+    let coeff_plans = ternary_coeff_plans(prefix_vars)?;
+    let small_square_fields: Vec<F> = small_square_field_table(field_cfg);
+    let mut mask_coeff_table = Vec::with_capacity(mask_count);
+    for mask in 0..mask_count {
+        let source_mask = u8::try_from(mask).map_err(|_| {
+            ShaProjectionError::NonCanonicalProofObject(
+                "booleanity prefix masks require at most eight prefix entries",
+            )
+        })?;
+        let mut entries = Vec::new();
+        for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
+            let coeff = booleanity_word_bit_mask_degree_two_coeff(
+                source_mask,
+                plan,
+                &small_square_fields,
+                field_cfg,
+            );
+            if !F::is_zero(&coeff) {
+                entries.push((ternary_idx, coeff));
+            }
+        }
+        mask_coeff_table.push(entries);
+    }
+
+    let word_bit_count = ShaWordCol::COUNT * SHA_WORD_BITS;
+    let one = F::one_with_cfg(field_cfg);
+    let partials = cfg_chunks!(row_weights, 8)
+        .enumerate()
+        .map(|(chunk_idx, row_weight_chunk)| {
+            let row_offset = chunk_idx * 8;
+            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
+            let mut mask_weights = vec![F::zero_with_cfg(field_cfg); mask_count];
+            let mut touched_masks = Vec::new();
+            let mut virtuals_by_prefix = Vec::with_capacity(prefix_len);
+            let mut generic_values = vec![F::zero_with_cfg(field_cfg); prefix_len];
+
+            for tail in 0..tail_len {
+                for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
+                    let row = row_offset + row_in_chunk;
+                    for col_idx in 0..ShaWordCol::COUNT {
+                        for bit in 0..SHA_WORD_BITS {
+                            let source_idx = col_idx * SHA_WORD_BITS + bit;
+                            add_booleanity_mask_weight(
+                                &mut mask_weights,
+                                &mut touched_masks,
+                                booleanity_table_prefix_mask(
+                                    traces,
+                                    bit_slice_index(col_idx, bit, SHA_WORD_BITS),
+                                    prefix_vars,
+                                    prefix_len,
+                                    tail,
+                                    row,
+                                ),
+                                &booleanity_weights[source_idx],
+                            );
+                        }
+                    }
+
+                    virtuals_by_prefix.clear();
+                    for prefix in 0..prefix_len {
+                        let instance_idx = prefix + (tail << prefix_vars);
+                        virtuals_by_prefix.push(reconstruct_virtual_ch_maj_at_row_unchecked(
+                            &traces[instance_idx],
+                            row,
+                            field_cfg,
+                        )?);
+                    }
+
+                    for bit in 0..SHA_WORD_BITS {
+                        for family_idx in 0..3 {
+                            let source_idx = word_bit_count + bit * 3 + family_idx;
+                            let mut mask_idx = 0usize;
+                            let mut is_binary = true;
+                            for (prefix, virtuals) in virtuals_by_prefix.iter().enumerate() {
+                                let value = virtual_family_bit(virtuals, family_idx, bit);
+                                generic_values[prefix] = value.clone();
+                                if F::is_zero(value) {
+                                    continue;
+                                }
+                                if value == &one {
+                                    mask_idx |= 1usize << prefix;
+                                } else {
+                                    is_binary = false;
+                                }
+                            }
+                            if is_binary {
+                                add_booleanity_mask_weight(
+                                    &mut mask_weights,
+                                    &mut touched_masks,
+                                    mask_idx,
+                                    &booleanity_weights[source_idx],
+                                );
+                            } else {
+                                let source_weight =
+                                    row_weight.clone() * &booleanity_weights[source_idx];
+                                for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
+                                    let coeff = booleanity_degree_two_coeff_from_prefix_values(
+                                        &generic_values,
+                                        plan,
+                                        field_cfg,
+                                    );
+                                    if F::is_zero(&coeff) {
+                                        continue;
+                                    }
+                                    partial[tail * ternary_len + ternary_idx] +=
+                                        source_weight.clone() * coeff;
+                                }
+                            }
+                        }
+                    }
+
+                    flush_booleanity_mask_weights(
+                        &mut partial,
+                        tail,
+                        ternary_len,
+                        &mask_coeff_table,
+                        &mut mask_weights,
+                        &mut touched_masks,
+                        row_weight,
+                        field_cfg,
+                    );
+                }
+            }
+            Ok(partial)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+
+    let mut table = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
+    for partial in partials {
+        for (acc, value) in table.iter_mut().zip(partial) {
+            *acc += value;
+        }
+    }
+    Ok(table)
+}
+
+fn add_booleanity_mask_weight<F>(
+    mask_weights: &mut [F],
+    touched_masks: &mut Vec<usize>,
+    mask_idx: usize,
+    weight: &F,
+) where
+    F: PrimeField,
+{
+    if F::is_zero(weight) {
+        return;
+    }
+    if F::is_zero(&mask_weights[mask_idx]) {
+        touched_masks.push(mask_idx);
+    }
+    mask_weights[mask_idx] += weight;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_booleanity_mask_weights<F>(
+    partial: &mut [F],
+    tail: usize,
+    ternary_len: usize,
+    mask_coeff_table: &[Vec<(usize, F)>],
+    mask_weights: &mut [F],
+    touched_masks: &mut Vec<usize>,
+    row_weight: &F,
+    field_cfg: &F::Config,
+) where
+    F: PrimeField,
+{
+    for &mask_idx in touched_masks.iter() {
+        if F::is_zero(&mask_weights[mask_idx]) {
+            continue;
+        }
+        let source_weight = row_weight.clone() * &mask_weights[mask_idx];
+        for (ternary_idx, coeff) in &mask_coeff_table[mask_idx] {
+            partial[tail * ternary_len + *ternary_idx] += source_weight.clone() * coeff;
+        }
+        mask_weights[mask_idx] = F::zero_with_cfg(field_cfg);
+    }
+    touched_masks.clear();
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn booleanity_table_prefix_mask<F>(
+    traces: &[ProjectedTrace<F>],
+    table_idx: usize,
+    prefix_vars: usize,
+    prefix_len: usize,
+    tail: usize,
+    row: usize,
+) -> usize
+where
+    F: PrimeField,
+{
+    let mut value_mask = 0usize;
+    for prefix in 0..prefix_len {
+        let instance_idx = prefix + (tail << prefix_vars);
+        debug_assert!(instance_idx < traces.len());
+        debug_assert!(table_idx < traces[instance_idx].bit_slices.len());
+        debug_assert!(row < traces[instance_idx].bit_slices[table_idx].evaluations.len());
+        if !F::is_zero(&traces[instance_idx].bit_slices[table_idx].evaluations[row]) {
+            value_mask |= 1usize << prefix;
+        }
+    }
+    value_mask
+}
+
+fn virtual_family_bit<F>(virtuals: &VirtualChMajValues<F>, family_idx: usize, bit: usize) -> &F {
+    match family_idx {
+        0 => &virtuals.ch1[bit],
+        1 => &virtuals.ch2[bit],
+        2 => &virtuals.maj[bit],
+        _ => unreachable!("production virtual family index is in 0..3"),
+    }
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn booleanity_degree_two_coeff_from_prefix_values<F>(
+    values: &[F],
+    plan: &TernaryCoeffPlan,
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    if plan.support_mask == 0 {
+        let d = values[plan.finite_bits].clone();
+        return d.clone() * (d - F::one_with_cfg(field_cfg));
+    }
+
+    let mut delta = F::zero_with_cfg(field_cfg);
+    for (prefix, positive) in &plan.vertices {
+        if *positive {
+            delta += &values[*prefix];
+        } else {
+            delta -= &values[*prefix];
+        }
+    }
+    delta.clone() * delta
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -6157,14 +6548,15 @@ fn trace_word_eval_at_row_with_weights<F>(
     shift: usize,
     weights: &[F],
     field_cfg: &F::Config,
+    reducer: &BarrettDelayedReduction<'_, F>,
 ) -> Result<F, ShaProjectionError>
 where
-    F: DelayedFieldProductSum,
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
     let bits: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
         bit_at_shifted_or_zero_fast(trace, col, row, shift, bit, field_cfg)
     });
-    project_bits_dmr(&bits, weights, field_cfg)
+    project_binary_bits_conditional_add_dmr(&bits, weights, field_cfg, reducer)
 }
 
 fn int_scalar_fast<F>(
@@ -6211,9 +6603,10 @@ fn public_word_or_const_eval_at_row_with_weights<F>(
     row: usize,
     weights: &[F],
     field_cfg: &F::Config,
+    reducer: &BarrettDelayedReduction<'_, F>,
 ) -> Result<F, ShaProjectionError>
 where
-    F: DelayedFieldProductSum,
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
     let Some(word_col) = col.public_word_col() else {
         return Ok(public_scalar_shifted_fast(public, col, row, 0, field_cfg));
@@ -6230,7 +6623,7 @@ where
         debug_assert!(row < bit_slices[table_idx].evaluations.len());
         bit_slices[table_idx].evaluations[row].clone()
     });
-    project_bits_dmr(&bits, weights, field_cfg)
+    project_binary_bits_conditional_add_dmr(&bits, weights, field_cfg, reducer)
 }
 
 fn int_const_poly<F>(

@@ -41,10 +41,11 @@ use zinc_piop::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
         NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic, ProjectedTrace, ProjectionFoldWitness,
         SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaAggregateIdealWeightPlan,
-        ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol, ShaLinearResidualWeightPlan,
-        ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaWordCol,
-        beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
-        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
+        ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol, ShaLinearAccumulatorField,
+        ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol, ShaPublicWordCol,
+        ShaResidualFamily, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
+        bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
+        build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators, build_sha_lambda_powers,
         build_sha_residual_eval_powers, build_sha_sumfold_linear_accumulator,
         build_sha_sumfold_linear_accumulator_direct_with_weights,
@@ -1351,7 +1352,8 @@ where
         + FromPrimitiveWithConfig
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaLinearAccumulatorField,
     F::Inner: Transcribable + Zero + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1427,7 +1429,8 @@ where
         + FromPrimitiveWithConfig
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaLinearAccumulatorField,
     F::Inner: Transcribable + Zero + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1658,7 +1661,8 @@ where
         + HyraxFieldBridge<C>
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaLinearAccumulatorField,
     F::Inner: Transcribable + Zero + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
@@ -2239,7 +2243,7 @@ fn build_sumfold_linear_accumulator_phase<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
-    F: DelayedFieldProductSum + Send + Sync + 'static,
+    F: ShaLinearAccumulatorField + DelayedFieldProductSum + Send + Sync + 'static,
 {
     build_sha_sumfold_linear_accumulator_direct_with_weights(
         traces,
