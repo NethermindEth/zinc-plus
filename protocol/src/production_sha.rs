@@ -192,22 +192,15 @@ pub struct ShaIntEndpointEval<F> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShaMpSource {
-    WordBit { col: ShaWordCol, bit: usize },
+    Word { col: ShaWordCol },
     Int { col: ShaIntCol },
     Public { col: ShaPublicCol },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShaMpShiftSource {
-    WordBit {
-        col: ShaWordCol,
-        bit: usize,
-        shift: usize,
-    },
-    Public {
-        col: ShaPublicCol,
-        shift: usize,
-    },
+    Word { col: ShaWordCol, shift: usize },
+    Public { col: ShaPublicCol, shift: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1184,8 +1177,7 @@ where
 {
     let field_cfg = &pp.field_cfg;
     ensure_production_sha_word_degree::<F, D>()?;
-    let prepared =
-        prepare_linear_ideal_fold_witnesses::<U, Zt, F, D>(shape, witnesses, field_cfg)?;
+    let prepared = prepare_linear_ideal_fold_witnesses::<U, Zt, F, D>(shape, witnesses, field_cfg)?;
     prove_prepared_linear_ideal_fold::<P, U, Zt, F, D>(pp, shape, &prepared, transcript)
 }
 
@@ -1472,6 +1464,18 @@ where
     for (instance_idx, prepared) in prepared_instances.iter().enumerate() {
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &prepared.public_trace);
     }
+
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fresh_precompute_pcs",
+        side = "prove",
+        phase = "fresh_precompute_pcs",
+    )
+    .in_scope(|| {
+        P::BinaryPCS::precompute_ck(&pcs_params.binary);
+        P::ArbitraryPCS::precompute_ck(&pcs_params.arbitrary);
+        P::IntPCS::precompute_ck(&pcs_params.int);
+    });
 
     let artifacts = cfg_iter!(prepared_instances)
         .map(|prepared| {
@@ -2256,6 +2260,7 @@ where
             &endpoint_evals,
             &row_output.r_star,
             &row_output.r_star_eq_weights,
+            a_powers,
             field_cfg,
         )
     })?;
@@ -2856,13 +2861,16 @@ where
         &endpoint_evals,
         folded_public,
         &row_output.r_star,
+        a,
         field_cfg,
     )?;
+    let a_powers = build_sha_residual_eval_powers(a, field_cfg);
     let open_evals = multipoint_open_evals_from_pcs_lifted(
         &proof.witness_lifted_evals,
         &production_sha_multipoint_layout(),
         folded_public,
         &subclaim.sumcheck_subclaim.point,
+        &a_powers,
         field_cfg,
     )?;
     verify_sha_endpoint_multipoint_open_evals(&subclaim, &open_evals, &shift_specs, field_cfg)?;
@@ -4243,12 +4251,14 @@ fn multipoint_open_evals_from_pcs_lifted<F>(
     layout: &ShaMultipointLayout,
     folded_public: &ProjectedPublic<F>,
     r_0: &[F],
+    a_powers: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
     F: PrimeField,
 {
     split_folded_sha_pcs_lifted_evals(lifted_evals)?;
+    validate_sha_word_powers(a_powers)?;
     layout
         .sources
         .iter()
@@ -4257,11 +4267,9 @@ where
                 sha_public_at_point(folded_public, col, 0, r_0, field_cfg)
                     .map_err(ProductionShaError::from)
             }
-            ShaMpSource::WordBit { col, bit } => Ok(lifted_evals[col.index()]
-                .coeffs
-                .get(bit)
-                .cloned()
-                .unwrap_or_else(|| F::zero_with_cfg(field_cfg))),
+            ShaMpSource::Word { col } => {
+                evaluate_lifted_sha_word_at_powers(&lifted_evals[col.index()], a_powers, field_cfg)
+            }
             ShaMpSource::Int { col } => Ok(lifted_evals[ShaWordCol::COUNT + col.index()]
                 .coeffs
                 .first()
@@ -4269,6 +4277,43 @@ where
                 .unwrap_or_else(|| F::zero_with_cfg(field_cfg))),
         })
         .collect()
+}
+
+fn validate_sha_word_powers<F>(a_powers: &[F]) -> Result<(), ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    if a_powers.len() < SHA_WORD_BITS {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "SHA word scalarization powers",
+            got: a_powers.len(),
+            expected: SHA_WORD_BITS,
+        });
+    }
+    Ok(())
+}
+
+fn evaluate_lifted_sha_word_at_powers<F>(
+    lifted_eval: &DynamicPolynomialF<F>,
+    a_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    validate_sha_word_powers(a_powers)?;
+    if lifted_eval.coeffs.len() > SHA_WORD_BITS {
+        return Err(ProductionShaError::NonCanonicalProofObject(
+            "folded SHA word lifted eval has too many coefficients",
+        ));
+    }
+    Ok(lifted_eval
+        .coeffs
+        .iter()
+        .zip(a_powers.iter())
+        .fold(F::zero_with_cfg(field_cfg), |acc, (coeff, power)| {
+            acc + coeff.clone() * power
+        }))
 }
 
 pub fn prove_sha_sumfold_targets<F>(
@@ -5332,10 +5377,8 @@ where
 
             let r0 = a_word.clone() * &rho_sig0 - &sigma0 - two.clone() * &ov_sigma0;
             let r1 = e_word.clone() * &rho_sig1 - &sigma1 - two.clone() * &ov_sigma1;
-            let r2 = w_rot25 + w_rot14 + w_shift3 - &small_sigma0
-                - two.clone() * &ov_small_sigma0;
-            let r3 = w_rot15 + w_rot13 + w_shift10 - &small_sigma1
-                - two.clone() * &ov_small_sigma1;
+            let r2 = w_rot25 + w_rot14 + w_shift3 - &small_sigma0 - two.clone() * &ov_small_sigma0;
+            let r3 = w_rot15 + w_rot13 + w_shift10 - &small_sigma1 - two.clone() * &ov_small_sigma1;
             let r4 = w_shift16 - &w - small_sigma0_shift1 - w_shift9 - small_sigma1_shift14
                 + &mu_w
                 + int_value(ShaIntCol::CompSchedule);
@@ -5857,9 +5900,7 @@ pub fn production_sha_multipoint_layout() -> ShaMultipointLayout {
     };
 
     for (col, _) in production_sha_endpoint_word_sources() {
-        for bit in 0..32 {
-            push_source(ShaMpSource::WordBit { col, bit });
-        }
+        push_source(ShaMpSource::Word { col });
     }
     for col in production_sha_endpoint_int_sources() {
         push_source(ShaMpSource::Int { col });
@@ -5875,9 +5916,7 @@ pub fn production_sha_multipoint_layout() -> ShaMultipointLayout {
         if shift == 0 {
             continue;
         }
-        for bit in 0..32 {
-            push_shift(ShaMpShiftSource::WordBit { col, bit, shift });
-        }
+        push_shift(ShaMpShiftSource::Word { col, shift });
     }
 
     ShaMultipointLayout { sources, shifts }
@@ -6062,6 +6101,7 @@ pub fn prove_sha_endpoint_multipoint<F>(
     folded_public: &ProjectedPublic<F>,
     endpoint_evals: &ShaEndpointEvals<F>,
     r_star: &[F],
+    a: &F,
     field_cfg: &F::Config,
 ) -> Result<(MultipointEvalProof<F>, Vec<F>), ProductionShaError<F>>
 where
@@ -6075,6 +6115,7 @@ where
     F::Modulus: Transcribable,
 {
     let row_weights = build_eq_x_r_vec(r_star, field_cfg)?;
+    let a_powers = build_sha_residual_eval_powers(a, field_cfg);
     prove_sha_endpoint_multipoint_with_row_weights(
         transcript,
         folded_trace,
@@ -6082,6 +6123,7 @@ where
         endpoint_evals,
         r_star,
         &row_weights,
+        &a_powers,
         field_cfg,
     )
 }
@@ -6093,6 +6135,7 @@ pub fn prove_sha_endpoint_multipoint_with_row_weights<F>(
     endpoint_evals: &ShaEndpointEvals<F>,
     r_star: &[F],
     row_weights: &[F],
+    a_powers: &[F],
     field_cfg: &F::Config,
 ) -> Result<(MultipointEvalProof<F>, Vec<F>), ProductionShaError<F>>
 where
@@ -6112,6 +6155,7 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    validate_sha_word_powers(a_powers)?;
     validate_sha_endpoint_layout(endpoint_evals)?;
     let layout = tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -6127,7 +6171,9 @@ where
         phase = "multipoint_trace_mles",
         sources = layout.sources.len(),
     )
-    .in_scope(|| sha_multipoint_trace_mles(folded_trace, folded_public, &layout, field_cfg))?;
+    .in_scope(|| {
+        sha_multipoint_trace_mles(folded_trace, folded_public, &layout, a_powers, field_cfg)
+    })?;
     let up_evals = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "multipoint_up_evals",
@@ -6188,6 +6234,7 @@ pub fn verify_sha_endpoint_multipoint<F>(
     endpoint_evals: &ShaEndpointEvals<F>,
     folded_public: &ProjectedPublic<F>,
     r_star: &[F],
+    a: &F,
     field_cfg: &F::Config,
 ) -> Result<(MultipointSubclaim<F>, Vec<ShiftSpec>), ProductionShaError<F>>
 where
@@ -6201,6 +6248,7 @@ where
     F::Modulus: Transcribable,
 {
     validate_sha_endpoint_layout(endpoint_evals)?;
+    verify_endpoint_scalarization(endpoint_evals, a, field_cfg)?;
     let layout = production_sha_multipoint_layout();
     let up_evals =
         sha_multipoint_up_evals(endpoint_evals, folded_public, r_star, &layout, field_cfg)?;
@@ -6564,21 +6612,27 @@ fn sha_multipoint_trace_mles<F>(
     folded_trace: &ProjectedTrace<F>,
     folded_public: &ProjectedPublic<F>,
     layout: &ShaMultipointLayout,
+    a_powers: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<DenseMultilinearExtension<F::Inner>>, ProductionShaError<F>>
 where
     F: InnerTransparentField + Sync,
     F::Inner: Send + Sync,
 {
+    validate_sha_word_powers(a_powers)?;
     let zero_inner = F::zero_with_cfg(field_cfg).inner().clone();
     cfg_iter!(layout.sources)
         .map(|source| {
+            let values = sha_mp_source_column_values(
+                folded_trace,
+                folded_public,
+                *source,
+                a_powers,
+                field_cfg,
+            )?;
             Ok(DenseMultilinearExtension::from_evaluations_vec(
                 SHA_ROW_VARS,
-                sha_mp_source_column_values(folded_trace, folded_public, *source)?
-                    .iter()
-                    .map(|value| value.inner().clone())
-                    .collect(),
+                values.iter().map(|value| value.inner().clone()).collect(),
                 zero_inner.clone(),
             ))
         })
@@ -6664,17 +6718,10 @@ where
     let mut evals = Vec::with_capacity(layout.shifts.len());
     for shift in &layout.shifts {
         let (source, amount, value) = match *shift {
-            ShaMpShiftSource::WordBit { col, bit, shift } => (
-                ShaMpSource::WordBit { col, bit },
+            ShaMpShiftSource::Word { col, shift } => (
+                ShaMpSource::Word { col },
                 shift,
-                source_bits(endpoint_evals, col, shift)?
-                    .get(bit)
-                    .cloned()
-                    .ok_or(ProductionShaError::LengthMismatch {
-                        label: "shifted word bit",
-                        got: bit,
-                        expected: 32,
-                    })?,
+                source_scalarized(endpoint_evals, col, shift)?,
             ),
             ShaMpShiftSource::Public { col, shift } => (
                 ShaMpSource::Public { col },
@@ -6707,20 +6754,24 @@ fn sha_mp_source_column_values<'a, F>(
     folded_trace: &'a ProjectedTrace<F>,
     folded_public: &'a ProjectedPublic<F>,
     source: ShaMpSource,
-) -> Result<&'a [F], ProductionShaError<F>>
+    a_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<Cow<'a, [F]>, ProductionShaError<F>>
 where
     F: PrimeField,
 {
+    if let ShaMpSource::Word { col } = source {
+        return Ok(Cow::Owned(scalarized_sha_word_column_values(
+            folded_trace,
+            col,
+            a_powers,
+            field_cfg,
+        )?));
+    }
+
     let values =
         match source {
-            ShaMpSource::WordBit { col, bit } => folded_trace
-                .bit_slices
-                .get(bit_slice_index(col.index(), bit, SHA_WORD_BITS))
-                .ok_or(ProductionShaError::LengthMismatch {
-                    label: "multipoint word bit source",
-                    got: bit_slice_index(col.index(), bit, SHA_WORD_BITS),
-                    expected: folded_trace.bit_slices.len(),
-                })?,
+            ShaMpSource::Word { .. } => unreachable!("word sources are handled above"),
             ShaMpSource::Int { col } => folded_trace.int_columns.get(col.index()).ok_or(
                 ProductionShaError::LengthMismatch {
                     label: "multipoint int source",
@@ -6743,7 +6794,43 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
-    Ok(&values.evaluations)
+    Ok(Cow::Borrowed(&values.evaluations))
+}
+
+fn scalarized_sha_word_column_values<F>(
+    folded_trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    a_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    validate_sha_word_powers(a_powers)?;
+    let mut values = vec![F::zero_with_cfg(field_cfg); SHA_ROW_COUNT];
+    for (bit, power) in a_powers.iter().take(SHA_WORD_BITS).enumerate() {
+        let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+        let column =
+            folded_trace
+                .bit_slices
+                .get(table_idx)
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "multipoint scalarized word bit source",
+                    got: table_idx,
+                    expected: folded_trace.bit_slices.len(),
+                })?;
+        if column.num_vars != SHA_ROW_VARS || column.evaluations.len() != SHA_ROW_COUNT {
+            return Err(ProductionShaError::LengthMismatch {
+                label: "multipoint scalarized word rows",
+                got: column.evaluations.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        for (out, bit_value) in values.iter_mut().zip(column.evaluations.iter()) {
+            *out += bit_value.clone() * power;
+        }
+    }
+    Ok(values)
 }
 
 fn sha_mp_source_endpoint_value_with_row_weights<F>(
@@ -6757,14 +6844,7 @@ where
     F: PrimeField,
 {
     match source {
-        ShaMpSource::WordBit { col, bit } => source_bits(endpoint_evals, col, 0)?
-            .get(bit)
-            .cloned()
-            .ok_or(ProductionShaError::LengthMismatch {
-                label: "endpoint word bit",
-                got: bit,
-                expected: 32,
-            }),
+        ShaMpSource::Word { col } => source_scalarized(endpoint_evals, col, 0),
         ShaMpSource::Int { col } => endpoint_evals
             .int_sources
             .iter()
@@ -7212,6 +7292,22 @@ where
         .ok_or(ProductionShaError::MissingEndpointEval { col, shift })
 }
 
+fn source_scalarized<F>(
+    endpoint_evals: &ShaEndpointEvals<F>,
+    col: ShaWordCol,
+    shift: usize,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    endpoint_evals
+        .sources
+        .iter()
+        .find(|source| source.col == col && source.shift == shift)
+        .map(|source| source.scalarized.clone())
+        .ok_or(ProductionShaError::MissingEndpointEval { col, shift })
+}
+
 fn sumfold_expected_eval<F>(
     beta: &[F],
     fresh_targets: &[F],
@@ -7283,7 +7379,8 @@ mod tests {
         crypto_bigint_uint::Uint,
     };
     use zinc_piop::neutron_nova::{
-        SHA_ROW_COUNT, SHA_WORD_BITS, expression_folded_row_sum, fold_projected_traces,
+        SHA_ROW_COUNT, SHA_WORD_BITS, expression_folded_row_sum,
+        expression_folded_row_sum_with_vectors, fold_projected_traces,
     };
     use zinc_poly::mle::MultilinearExtensionWithConfig;
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
@@ -8766,6 +8863,7 @@ mod tests {
             &public,
             &endpoint_evals,
             &r_star,
+            &a,
             &field_cfg,
         )
         .unwrap();
@@ -8778,13 +8876,24 @@ mod tests {
             &endpoint_evals,
             &public,
             &r_star,
+            &a,
             &field_cfg,
         )
         .unwrap();
         assert_eq!(subclaim.sumcheck_subclaim.point, r_0);
 
         let layout = production_sha_multipoint_layout();
-        let trace_mles = sha_multipoint_trace_mles(&trace, &public, &layout, &field_cfg).unwrap();
+        assert_eq!(layout.sources.len(), ShaWordCol::COUNT + ShaIntCol::COUNT);
+        assert_eq!(
+            layout.shifts.len(),
+            production_sha_endpoint_word_sources()
+                .iter()
+                .filter(|(_, shift)| *shift != 0)
+                .count()
+        );
+        let a_powers = build_sha_residual_eval_powers(&a, &field_cfg);
+        let trace_mles =
+            sha_multipoint_trace_mles(&trace, &public, &layout, &a_powers, &field_cfg).unwrap();
         let open_evals = trace_mles
             .iter()
             .map(|mle| mle.clone().evaluate_with_config(&r_0, &field_cfg).unwrap())
@@ -8816,6 +8925,25 @@ mod tests {
                 &bad_endpoint_evals,
                 &public,
                 &r_star,
+                &a,
+                &field_cfg
+            )
+            .is_err()
+        );
+
+        let mut stale_scalarized =
+            build_sha_endpoint_evals_from_trace(&trace, &r_star, &a, &field_cfg).unwrap();
+        stale_scalarized.sources[0].bits[0] += f(1);
+        let mut stale_transcript = Blake3Transcript::new();
+        stale_transcript.absorb_slice(b"endpoint-multipoint-context");
+        assert!(
+            verify_sha_endpoint_multipoint(
+                &mut stale_transcript,
+                &proof,
+                &stale_scalarized,
+                &public,
+                &r_star,
+                &a,
                 &field_cfg
             )
             .is_err()
@@ -8882,23 +9010,20 @@ mod tests {
             DynamicPolynomialF::new_trimmed(vec![F::zero_with_cfg(&field_cfg)]);
             ShaWordCol::COUNT + ShaIntCol::COUNT
         ];
-        lifted[ShaWordCol::A.index()] = DynamicPolynomialF::new_trimmed(vec![f(3)]);
+        let a = f(5);
+        let a_powers = build_sha_residual_eval_powers(&a, &field_cfg);
+        lifted[ShaWordCol::A.index()] = DynamicPolynomialF::new_trimmed(vec![f(3), f(4)]);
         lifted[ShaWordCol::COUNT + ShaIntCol::CompSchedule.index()] =
             DynamicPolynomialF::new_trimmed(vec![f(7)]);
 
-        let open_evals =
-            multipoint_open_evals_from_pcs_lifted(&lifted, &layout, &public, &r_0, &field_cfg)
-                .unwrap();
+        let open_evals = multipoint_open_evals_from_pcs_lifted(
+            &lifted, &layout, &public, &r_0, &a_powers, &field_cfg,
+        )
+        .unwrap();
         let a0_idx = layout
             .sources
             .iter()
-            .position(|source| {
-                *source
-                    == ShaMpSource::WordBit {
-                        col: ShaWordCol::A,
-                        bit: 0,
-                    }
-            })
+            .position(|source| *source == ShaMpSource::Word { col: ShaWordCol::A })
             .unwrap();
         let int_idx = layout
             .sources
@@ -8917,12 +9042,25 @@ mod tests {
             }
         )));
 
-        assert_eq!(open_evals[a0_idx], f(3));
+        assert_eq!(open_evals[a0_idx], f(23));
         assert_eq!(open_evals[int_idx], f(7));
         assert_eq!(
             sha_public_at_point(&public, ShaPublicCol::K, 0, &r_0, &field_cfg).unwrap(),
             f(99)
         );
+
+        let mut bad_lifted = lifted;
+        bad_lifted[ShaWordCol::A.index()].coeffs[1] += f(1);
+        let bad_open_evals = multipoint_open_evals_from_pcs_lifted(
+            &bad_lifted,
+            &layout,
+            &public,
+            &r_0,
+            &a_powers,
+            &field_cfg,
+        )
+        .unwrap();
+        assert_ne!(open_evals[a0_idx], bad_open_evals[a0_idx]);
     }
 
     #[test]
