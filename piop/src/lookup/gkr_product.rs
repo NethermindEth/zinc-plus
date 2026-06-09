@@ -35,6 +35,8 @@
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
     utils::{build_eq_x_r_inner, eq_eval},
