@@ -559,6 +559,81 @@ pub struct HyraxProverData<C: AffineRepr> {
     pub(crate) blinds: Vec<C::ScalarField>,
 }
 
+impl<C> HyraxCommitment<C>
+where
+    C: AffineRepr,
+{
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn num_lanes(&self) -> usize {
+        self.num_lanes
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyraxMixedCommitment<C: AffineRepr> {
+    pub binary: HyraxCommitment<C>,
+    pub int: HyraxCommitment<C>,
+    pub comm_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyraxMixedProverData<C: AffineRepr> {
+    pub binary: HyraxProverData<C>,
+    pub int: HyraxProverData<C>,
+}
+
+impl<C> HyraxMixedCommitment<C>
+where
+    C: AffineRepr,
+{
+    pub fn from_parts(
+        binary: HyraxCommitment<C>,
+        int: HyraxCommitment<C>,
+    ) -> Result<Self, ZipError> {
+        let mut comm_bytes = Vec::with_capacity(binary.comm_bytes.len() + int.comm_bytes.len());
+        comm_bytes.extend_from_slice(&binary.comm_bytes);
+        comm_bytes.extend_from_slice(&int.comm_bytes);
+        Ok(Self {
+            binary,
+            int,
+            comm_bytes,
+        })
+    }
+
+    pub fn absorb<T: Transcript>(&self, transcript: &mut T) {
+        transcript.absorb_slice(b"hyrax_mixed_commitment_begin");
+        transcript.absorb_slice(&(self.binary.batch_size as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.binary.num_lanes as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.binary.num_rows as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.int.batch_size as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.int.num_lanes as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.int.num_rows as u64).to_le_bytes());
+        transcript.absorb_slice(&[self.binary.blinding_mode.as_u8()]);
+        transcript.absorb_slice(&[self.int.blinding_mode.as_u8()]);
+        transcript.absorb_slice(&self.comm_bytes);
+        transcript.absorb_slice(b"hyrax_mixed_commitment_end");
+    }
+
+    pub fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(self.binary.batch_size as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.binary.num_lanes as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.binary.num_rows as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.int.batch_size as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.int.num_lanes as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.int.num_rows as u64).to_le_bytes());
+        buf.push(self.binary.blinding_mode.as_u8());
+        buf.push(self.int.blinding_mode.as_u8());
+        buf.extend_from_slice(&self.comm_bytes);
+    }
+}
+
 pub trait HyraxFieldBridge<C: AffineRepr>: PrimeField {
     fn field_to_scalar(value: &Self) -> Result<C::ScalarField, ZipError>;
     fn scalar_to_field(value: &C::ScalarField, cfg: &Self::Config) -> Result<Self, ZipError>;
@@ -996,6 +1071,155 @@ impl<C: AffineRepr, Lanes> HyraxPCS<C, Lanes> {
                 bases,
                 h,
                 blinding_mode,
+            },
+        ))
+    }
+}
+
+impl<C> HyraxPCS<C, BinaryLanes>
+where
+    C: AffineRepr,
+{
+    pub fn commit_binary_and_int<IntEval, const D: usize>(
+        binary_ck: &HyraxCommitmentKey<C>,
+        int_ck: &HyraxCommitmentKey<C>,
+        binary_polys: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        int_polys: &[DenseMultilinearExtension<IntEval>],
+    ) -> Result<(HyraxMixedProverData<C>, HyraxMixedCommitment<C>), ZipError>
+    where
+        IntEval: Clone + Debug + Send + Sync,
+        IntScalarLane: HyraxLanes<C, IntEval, D>,
+    {
+        validate_shared_commitment_keys(binary_ck, int_ck)?;
+        if binary_polys.is_empty() || int_polys.is_empty() {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax mixed SHA commitment expects non-empty binary and int groups".to_string(),
+            ));
+        }
+        validate_polys(binary_polys)?;
+        validate_polys(int_polys)?;
+
+        let binary_n = binary_polys[0].evaluations.len();
+        let int_n = int_polys[0].evaluations.len();
+        if binary_n != int_n {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Hyrax mixed commitment domain mismatch: binary has {binary_n}, int has {int_n}"
+            )));
+        }
+        let num_rows = num_rows(binary_n, binary_ck.num_cols)?;
+
+        <BinaryLanes as HyraxLanes<C, BinaryPoly<D>, D>>::Strategy::precompute_ck(
+            &binary_ck.msm_ck,
+        );
+        <IntScalarLane as HyraxLanes<C, IntEval, D>>::Strategy::precompute_ck(&int_ck.msm_ck);
+
+        let binary_parts = cfg_iter!(binary_polys)
+            .map(|poly| {
+                commit_hyrax_poly::<C, BinaryLanes, BinaryPoly<D>, D>(binary_ck, poly, num_rows)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let int_parts = cfg_iter!(int_polys)
+            .map(|poly| commit_hyrax_poly::<C, IntScalarLane, IntEval, D>(int_ck, poly, num_rows))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let binary_comm_len = binary_polys.len()
+            * <BinaryLanes as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES
+            * num_rows;
+        let int_comm_len =
+            int_polys.len() * <IntScalarLane as HyraxLanes<C, IntEval, D>>::NUM_LANES * num_rows;
+        let expected_blinds = if binary_ck.blinding_mode.is_blinded() {
+            binary_comm_len + int_comm_len
+        } else {
+            0
+        };
+
+        let mut binary_comm = Vec::with_capacity(binary_comm_len);
+        let mut binary_blinds = if binary_ck.blinding_mode.is_blinded() {
+            Vec::with_capacity(binary_comm_len)
+        } else {
+            Vec::new()
+        };
+        for (comm, blinds) in binary_parts {
+            binary_comm.extend(comm);
+            binary_blinds.extend(blinds);
+        }
+
+        let mut int_comm = Vec::with_capacity(int_comm_len);
+        let mut int_blinds = if int_ck.blinding_mode.is_blinded() {
+            Vec::with_capacity(int_comm_len)
+        } else {
+            Vec::new()
+        };
+        for (comm, blinds) in int_parts {
+            int_comm.extend(comm);
+            int_blinds.extend(blinds);
+        }
+
+        if binary_comm.len() != binary_comm_len || int_comm.len() != int_comm_len {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax mixed commitment internal group count mismatch".to_string(),
+            ));
+        }
+        if binary_blinds.len() + int_blinds.len() != expected_blinds {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax mixed commitment internal blind count mismatch".to_string(),
+            ));
+        }
+
+        let mut all_comm = Vec::with_capacity(binary_comm_len + int_comm_len);
+        all_comm.extend_from_slice(&binary_comm);
+        all_comm.extend_from_slice(&int_comm);
+        let all_affine = C::Group::normalize_batch(&all_comm);
+        let all_bytes = affine_points_bytes::<C>(&all_affine)?;
+        let group_size = C::zero().serialized_size(Compress::Yes);
+        let binary_bytes_len = binary_comm_len * group_size;
+
+        let (binary_affine, int_affine) = all_affine.split_at(binary_comm_len);
+        let (binary_bytes, int_bytes) = all_bytes.split_at(binary_bytes_len);
+
+        let binary = HyraxCommitment {
+            batch_size: binary_polys.len(),
+            num_lanes: <BinaryLanes as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES,
+            num_rows,
+            blinding_mode: binary_ck.blinding_mode,
+            comm: binary_comm,
+            comm_affine: binary_affine.to_vec(),
+            comm_bytes: binary_bytes.to_vec(),
+        };
+        let int = HyraxCommitment {
+            batch_size: int_polys.len(),
+            num_lanes: <IntScalarLane as HyraxLanes<C, IntEval, D>>::NUM_LANES,
+            num_rows,
+            blinding_mode: int_ck.blinding_mode,
+            comm: int_comm,
+            comm_affine: int_affine.to_vec(),
+            comm_bytes: int_bytes.to_vec(),
+        };
+
+        validate_commitment_shape::<C, BinaryLanes, BinaryPoly<D>, D>(&binary)?;
+        validate_commitment_shape::<C, IntScalarLane, IntEval, D>(&int)?;
+
+        Ok((
+            HyraxMixedProverData {
+                binary: HyraxProverData {
+                    batch_size: binary_polys.len(),
+                    num_lanes: <BinaryLanes as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES,
+                    num_rows,
+                    blinding_mode: binary_ck.blinding_mode,
+                    blinds: binary_blinds,
+                },
+                int: HyraxProverData {
+                    batch_size: int_polys.len(),
+                    num_lanes: <IntScalarLane as HyraxLanes<C, IntEval, D>>::NUM_LANES,
+                    num_rows,
+                    blinding_mode: int_ck.blinding_mode,
+                    blinds: int_blinds,
+                },
+            },
+            HyraxMixedCommitment {
+                binary,
+                int,
+                comm_bytes: all_bytes,
             },
         ))
     }

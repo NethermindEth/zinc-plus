@@ -198,10 +198,12 @@ where
                 s.levals.push(comb_fn(&s.vals));
 
                 s.steps.clear();
-                s.steps
-                    .extend(s.vals.iter().zip(s.vals0.iter()).map(|(v1, v0)| {
-                        v1.clone() - v0.clone()
-                    }));
+                s.steps.extend(
+                    s.vals
+                        .iter()
+                        .zip(s.vals0.iter())
+                        .map(|(v1, v0)| v1.clone() - v0.clone()),
+                );
 
                 for _ in 2..=degree {
                     for (value, step) in s.vals.iter_mut().zip(s.steps.iter()) {

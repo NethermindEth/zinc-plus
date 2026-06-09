@@ -40,8 +40,8 @@ use zinc_protocol::{
     production_sha::{
         LinearIdealFoldProverParams, LinearIdealFoldVerifierParams, ProductionShaError,
         ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
-        prepare_linear_ideal_fold_witnesses, prove_prepared_linear_ideal_fold,
-        setup_verify_linear_ideal_fold, verify_linear_ideal_fold,
+        prepare_linear_ideal_fold_witnesses, prove_prepared_linear_ideal_fold_mixed_hyrax,
+        setup_verify_linear_ideal_fold, verify_linear_ideal_fold_mixed_hyrax,
     },
 };
 use zinc_test_uair::{
@@ -1042,10 +1042,13 @@ where
     C: AffineRepr,
 {
     let width = SHA_ROW_COUNT;
-    let (binary_ck, binary_vk) = projection_sha_hyrax_key_pair::<C, BinaryLanes>(width, 0);
+    let (shared_ck, shared_vk) = projection_sha_hyrax_key_pair::<C, BinaryLanes>(width, 0);
     let (arbitrary_ck, arbitrary_vk) =
         projection_sha_hyrax_key_pair::<C, DensePolyScalarLanes>(width, 1_000);
-    let (int_ck, int_vk) = projection_sha_hyrax_key_pair::<C, IntScalarLane>(width, 2_000);
+    let binary_ck = shared_ck.clone();
+    let int_ck = shared_ck;
+    let binary_vk = shared_vk.clone();
+    let int_vk = shared_vk;
 
     (
         PCSParams::<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
@@ -2118,35 +2121,32 @@ where
     group.bench_function(BenchmarkId::new("Prove", &params), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
-            black_box(prove_prepared_linear_ideal_fold::<
-                P<C>,
+            black_box(prove_prepared_linear_ideal_fold_mixed_hyrax::<
+                C,
                 U,
                 RealEcdsaBenchZincTypes,
                 F,
                 DEGREE_PLUS_ONE,
-            >(&pp, &shape, &prepared_instances, &mut transcript))
+            >(
+                &pp, &shape, &prepared_instances, &mut transcript
+            ))
             .expect("ProjectionFold Concise prover failed");
         });
     });
 
     let mut prover_transcript = Blake3Transcript::new();
-    let output = prove_prepared_linear_ideal_fold::<
-        P<C>,
+    let output = prove_prepared_linear_ideal_fold_mixed_hyrax::<
+        C,
         U,
         RealEcdsaBenchZincTypes,
         F,
         DEGREE_PLUS_ONE,
-    >(
-        &pp,
-        &shape,
-        &prepared_instances,
-        &mut prover_transcript,
-    )
+    >(&pp, &shape, &prepared_instances, &mut prover_transcript)
     .expect("proof generation for ProjectionFold verifier bench");
 
     let mut verifier_transcript = Blake3Transcript::new();
     let verified =
-        verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+        verify_linear_ideal_fold_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
             &vs,
             &output.fresh_instances,
             &output.proof,
@@ -2164,29 +2164,29 @@ where
         .finish();
     tracing::subscriber::with_default(subscriber, || {
         let mut prover_transcript = Blake3Transcript::new();
-        let traced_output = prove_prepared_linear_ideal_fold::<
-            P<C>,
+        let traced_output = prove_prepared_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        >(&pp, &shape, &prepared_instances, &mut prover_transcript)
+        .expect("ProjectionFold traced prover failed");
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let traced_verified = verify_linear_ideal_fold_mixed_hyrax::<
+            C,
             U,
             RealEcdsaBenchZincTypes,
             F,
             DEGREE_PLUS_ONE,
         >(
-            &pp,
-            &shape,
-            &prepared_instances,
-            &mut prover_transcript,
+            &vs,
+            &traced_output.fresh_instances,
+            &traced_output.proof,
+            &mut verifier_transcript,
         )
-        .expect("ProjectionFold traced prover failed");
-
-        let mut verifier_transcript = Blake3Transcript::new();
-        let traced_verified =
-            verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-                &vs,
-                &traced_output.fresh_instances,
-                &traced_output.proof,
-                &mut verifier_transcript,
-            )
-            .expect("ProjectionFold traced verifier failed");
+        .expect("ProjectionFold traced verifier failed");
         assert_eq!(traced_verified.target, traced_output.folded_instance.target);
         assert_eq!(traced_verified.public, traced_output.folded_instance.public);
     });
@@ -2194,8 +2194,8 @@ where
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter(|| {
             let mut transcript = Blake3Transcript::new();
-            black_box(verify_linear_ideal_fold::<
-                P<C>,
+            black_box(verify_linear_ideal_fold_mixed_hyrax::<
+                C,
                 U,
                 RealEcdsaBenchZincTypes,
                 F,
