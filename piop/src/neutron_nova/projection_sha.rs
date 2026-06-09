@@ -475,6 +475,7 @@ where
         });
     }
 
+    let constants = ShaResidualPolyConstants::new(field_cfg);
     let partials = cfg_iter!(traces)
         .zip(cfg_iter!(publics))
         .zip(cfg_iter!(&plan.beta_row_weights))
@@ -492,7 +493,6 @@ where
                     expected: SHA_ROW_COUNT,
                 });
             }
-            let constants = ShaResidualPolyConstants::new(field_cfg);
             let mut acc = NonzeroResidualCoeffAccumulator::new(field_cfg);
             for (row, beta_row_weight) in beta_row_weights.iter().enumerate() {
                 accumulate_nonzero_ideal_row_fixed(
@@ -1146,6 +1146,7 @@ where
             expected: SHA_ROW_COUNT,
         });
     }
+    let constants: ShaResidualPolyConstants<F> = ShaResidualPolyConstants::new(field_cfg);
     cfg_iter!(traces)
         .zip(cfg_iter!(publics))
         .map(|(trace, public)| {
@@ -1154,7 +1155,6 @@ where
                 validate_trace(trace)?;
                 validate_public(public)?;
             }
-            let constants = ShaResidualPolyConstants::new(field_cfg);
             let partials = cfg_chunks!(row_weights, 64)
                 .enumerate()
                 .map(|(chunk_idx, row_weight_chunk)| {
