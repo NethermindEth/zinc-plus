@@ -6677,6 +6677,181 @@ mod tests {
         .expect("honest all-14 SHA Hadamard proof must verify");
     }
 
+    /// **Task 4a (lookup adder, step 1): drop the 12 adder Hadamards.**
+    /// The SHA-256 F_2 honest roundtrip still succeeds with `adder_specs = &[]`
+    /// (only the 2 AND relations enforced). Confirms the discharge handles the
+    /// empty adder list on the real SHA path; the adds are simply *unenforced*
+    /// here — the grand-product lookup adder (follow-up) re-establishes them
+    /// soundly in place of these 12 Hadamards.
+    #[test]
+    fn sha256_f2_drops_adder_hadamards_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        assert_eq!(and_specs.len(), 2);
+        assert_eq!(adder_specs.len(), 12);
+
+        // Drop the 12 adder Hadamards.
+        let no_adders: &[crate::f2_hadamard::F2AdderSpec] = &[];
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            no_adders,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("prove with the 12 adder Hadamards dropped should succeed");
+
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            no_adders,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("honest SHA proof with adders dropped must verify (adds unenforced)");
+    }
+
+    /// **Task 4b (lookup adder, step 2): the grand-product lookup proves the
+    /// REAL SHA-256 adds.** Extracts every byte-limb tuple from a real SHA F_2
+    /// trace via the 12 adder specs (handling the `y2` Ch term, the row
+    /// shifts, and the per-relation active-row masks), then proves + verifies
+    /// the multiplicative grand-product lookup `∏(δ−a_i)=∏_t(δ−fp_t)^{m_t}`
+    /// against the public add table. This validates the decomposition +
+    /// multiplicity logic against the actual adder structure (not synthetic
+    /// inputs). Uses 4-bit limbs for a fast 2^9-row table; production is 8-bit.
+    /// (Honest-prover-first: the witness fingerprints are not yet bound to the
+    /// commitment — that binding, which closes Issue-1, is the next step.)
+    #[test]
+    fn sha256_f2_lookup_adder_proves_real_adds() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_piop::lookup::add_lookup::{
+            LimbTuple, add_table_fingerprints, decompose_add, multiplicities, tuple_fingerprints,
+        };
+        use zinc_piop::lookup::gkr_lookup::{
+            prove_lookup, table_leaves, verify_lookup, witness_leaves,
+        };
+        use zinc_poly::univariate::binary_gf128::BinaryFieldGF128 as Gf;
+        use zinc_test_uair::{GenerateRandomTrace, Sha256F2Uair};
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4; // 4-bit limbs → 2^9 table (fast); production = 8-bit
+        const KBITS: usize = 16;
+
+        let num_vars = 9usize;
+        let n = 1usize << num_vars;
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let cols = &trace.binary_poly;
+
+        let (_and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        assert_eq!(adder_specs.len(), 12);
+
+        // Read a (row-shifted, tail-zeroed) operand word as a u32.
+        let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
+            match r.checked_add(term.row_shift).filter(|&i| i < n) {
+                Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[term.col].evaluations[i]) as u32,
+                None => 0,
+            }
+        };
+
+        // Extract every limb tuple from the real SHA adds.
+        let mut tuples: Vec<LimbTuple> = Vec::new();
+        for spec in &adder_specs {
+            let masked = !spec.active_rows.is_empty();
+            for r in 0..n {
+                if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                    continue;
+                }
+                let xv = cell(&spec.x, r);
+                let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                let tv = cell(&spec.t, r);
+                let (tup, _carries) = decompose_add(xv, yv, tv, 0, LB);
+                tuples.extend(tup);
+            }
+        }
+        assert!(!tuples.is_empty(), "a real SHA trace must contain adds");
+
+        // Every honest tuple must be a valid add-table row.
+        let mask = (1u32 << LB) - 1;
+        for t in &tuples {
+            assert_eq!(t.s, (t.x + t.y + t.cin) & mask, "honest limb sum");
+            assert_eq!(t.cout, (t.x + t.y + t.cin) >> LB, "honest limb carry");
+        }
+
+        // Prove + verify the grand-product lookup over the real adds.
+        let gamma = Gf::from_words([0x9e37_79b9, 0x1234_5678]);
+        let delta = Gf::from_words([0xc0ff_ee00, 0xdead_beef]);
+        let table = add_table_fingerprints::<Gf>(&gamma, LB, &());
+        let wfps = tuple_fingerprints(&tuples, &gamma, &());
+        let mults = multiplicities(&tuples, LB, KBITS);
+        let wl = witness_leaves(&wfps, &delta);
+        let tl = table_leaves(&table, &mults, &delta, &());
+
+        let mut pt = Blake3Transcript::new();
+        let (proof, _bind) = prove_lookup(&mut pt, wl, tl, &());
+        assert_eq!(
+            proof.witness.root, proof.table.root,
+            "real SHA adds: witness and table products must match"
+        );
+        let mut vt = Blake3Transcript::new();
+        verify_lookup(&mut vt, &proof, &()).expect("lookup over real SHA adds must verify");
+
+        // Soundness: corrupting one looked-up limb breaks the product equality.
+        let mut bad = tuples.clone();
+        bad[0].s ^= 1;
+        let bad_wfps = tuple_fingerprints(&bad, &gamma, &());
+        let bad_mults = multiplicities(&bad, LB, KBITS);
+        let bad_wl = witness_leaves(&bad_wfps, &delta);
+        let bad_tl = table_leaves(&table, &bad_mults, &delta, &());
+        let mut pt2 = Blake3Transcript::new();
+        let (bad_proof, _) = prove_lookup(&mut pt2, bad_wl, bad_tl, &());
+        let mut vt2 = Blake3Transcript::new();
+        assert!(
+            verify_lookup(&mut vt2, &bad_proof, &()).is_err(),
+            "a corrupted SHA add limb must be rejected"
+        );
+    }
+
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
     /// Keccak-f[1600] permutation: the θρπ rotation identities + the
     /// transition/boundary constraints (the UAIR's `constrain_general`, the
