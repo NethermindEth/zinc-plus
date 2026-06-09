@@ -6593,10 +6593,20 @@ fn trace_word_eval_at_row_with_weights<F>(
 where
     F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
 {
-    let bits: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
-        bit_at_shifted_or_zero_fast(trace, col, row, shift, bit, field_cfg)
-    });
-    project_binary_bits_conditional_add_dmr(&bits, weights, field_cfg, reducer)
+    let Some(shifted) = row.checked_add(shift) else {
+        return Ok(F::zero_with_cfg(field_cfg));
+    };
+    if shifted >= SHA_ROW_COUNT {
+        return Ok(F::zero_with_cfg(field_cfg));
+    }
+    project_bit_slice_word_row_conditional_add_dmr(
+        &trace.bit_slices,
+        col.index(),
+        shifted,
+        weights,
+        field_cfg,
+        reducer,
+    )
 }
 
 fn int_scalar_fast<F>(
@@ -6657,13 +6667,14 @@ where
     if row >= SHA_ROW_COUNT {
         return Ok(F::zero_with_cfg(field_cfg));
     }
-    let bits: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
-        let table_idx = bit_slice_index(word_col.index(), bit, SHA_WORD_BITS);
-        debug_assert!(table_idx < bit_slices.len());
-        debug_assert!(row < bit_slices[table_idx].evaluations.len());
-        bit_slices[table_idx].evaluations[row].clone()
-    });
-    project_binary_bits_conditional_add_dmr(&bits, weights, field_cfg, reducer)
+    project_bit_slice_word_row_conditional_add_dmr(
+        bit_slices,
+        word_col.index(),
+        row,
+        weights,
+        field_cfg,
+        reducer,
+    )
 }
 
 fn int_const_poly<F>(
@@ -6891,6 +6902,79 @@ where
         F::zero_with_cfg(field_cfg),
     )
     .map_err(ShaProjectionError::from)
+}
+
+fn project_bit_slice_word_row_conditional_add_dmr<F>(
+    bit_slices: &MleTable<F>,
+    col_idx: usize,
+    row: usize,
+    powers: &[F],
+    field_cfg: &F::Config,
+    reducer: &BarrettDelayedReduction<'_, F>,
+) -> Result<F, ShaProjectionError>
+where
+    F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
+{
+    if SHA_WORD_BITS > powers.len() {
+        return Err(ShaProjectionError::NonCanonicalProofObject(
+            "SHA binary bit projection exceeds precomputed scalarization power bound",
+        ));
+    }
+    let one = F::one_with_cfg(field_cfg);
+    let mut bucket = Uint::<5>::zero();
+    let mut pending_adds = 0usize;
+    let mut acc = F::zero_with_cfg(field_cfg);
+
+    for (bit, power) in powers.iter().enumerate().take(SHA_WORD_BITS) {
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        let bit_col = bit_slices
+            .get(table_idx)
+            .ok_or(ShaProjectionError::MissingColumn {
+                kind: "bit_slices",
+                col: table_idx,
+            })?;
+        let bit_value = bit_col
+            .evaluations
+            .get(row)
+            .ok_or(ShaProjectionError::ColumnRowCount {
+                kind: "bit_slices",
+                col: table_idx,
+                got: bit_col.evaluations.len(),
+                expected: row + 1,
+            })?;
+        if F::is_zero(bit_value) {
+            continue;
+        }
+        if bit_value != &one {
+            let bits = (0..SHA_WORD_BITS)
+                .map(|fallback_bit| {
+                    let fallback_idx = bit_slice_index(col_idx, fallback_bit, SHA_WORD_BITS);
+                    bit_slices
+                        .get(fallback_idx)
+                        .and_then(|col| col.evaluations.get(row))
+                        .cloned()
+                        .ok_or(ShaProjectionError::MissingColumn {
+                            kind: "bit_slices",
+                            col: fallback_idx,
+                        })
+                })
+                .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+            return project_bits_dmr(&bits, powers, field_cfg);
+        }
+
+        reducer.add(&mut bucket, power);
+        pending_adds = pending_adds.saturating_add(1);
+        if pending_adds >= reducer.flush_adds() {
+            let pending = std::mem::replace(&mut bucket, Uint::zero());
+            acc += reducer.reduce(pending);
+            pending_adds = 0;
+        }
+    }
+
+    if !bucket.is_zero() {
+        acc += reducer.reduce(bucket);
+    }
+    Ok(acc)
 }
 
 fn project_binary_bits_conditional_add_dmr<F>(
