@@ -416,6 +416,106 @@ where
     Ok(aggregate)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaAggregateIdealWeightPlan<F: PrimeField> {
+    /// Indexed as `[instance][row]`.
+    pub beta_row_weights: Vec<Vec<F>>,
+}
+
+impl<F> ShaAggregateIdealWeightPlan<F>
+where
+    F: PrimeField,
+{
+    pub fn new(beta_eq_weights: &[F], row_weights: &[F]) -> Result<Self, ShaProjectionError> {
+        if row_weights.len() != SHA_ROW_COUNT {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "row_weights",
+                col: 0,
+                got: row_weights.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        Ok(Self {
+            beta_row_weights: beta_eq_weights
+                .iter()
+                .map(|beta_weight| {
+                    row_weights
+                        .iter()
+                        .map(|row_weight| beta_weight.clone() * row_weight)
+                        .collect()
+                })
+                .collect(),
+        })
+    }
+
+    pub fn instance_count(&self) -> usize {
+        self.beta_row_weights.len()
+    }
+}
+
+pub fn beta_aggregate_nonzero_ideal_polys_direct_with_weights<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    plan: &ShaAggregateIdealWeightPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    if plan.instance_count() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: plan.instance_count(),
+            expected: traces.len(),
+        });
+    }
+
+    let partials = cfg_iter!(traces)
+        .zip(cfg_iter!(publics))
+        .zip(cfg_iter!(&plan.beta_row_weights))
+        .map(|((trace, public), beta_row_weights)| {
+            #[cfg(debug_assertions)]
+            {
+                validate_trace(trace)?;
+                validate_public(public)?;
+            }
+            if beta_row_weights.len() != SHA_ROW_COUNT {
+                return Err(ShaProjectionError::ColumnRowCount {
+                    kind: "beta_row_weights",
+                    col: 0,
+                    got: beta_row_weights.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+            let constants = ShaResidualPolyConstants::new(field_cfg);
+            let mut acc = NonzeroResidualCoeffAccumulator::new(field_cfg);
+            for (row, beta_row_weight) in beta_row_weights.iter().enumerate() {
+                accumulate_nonzero_ideal_row_fixed(
+                    &mut acc,
+                    trace,
+                    public,
+                    row,
+                    beta_row_weight,
+                    &constants,
+                    field_cfg,
+                )?;
+            }
+            Ok(acc)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+
+    let mut aggregate = NonzeroResidualCoeffAccumulator::new(field_cfg);
+    for partial in partials {
+        aggregate.add_assign(partial);
+    }
+    Ok(aggregate.into_polys())
+}
+
 pub fn build_sha_residual_eval_powers<F>(a: &F, field_cfg: &F::Config) -> Vec<F>
 where
     F: PrimeField,
@@ -510,6 +610,85 @@ where
                 F::zero_with_cfg(field_cfg),
             )
             .map_err(ShaProjectionError::from)
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaLinearResidualWeightPlan<F: PrimeField> {
+    pub row_weights: Vec<F>,
+    pub a_powers: Vec<F>,
+    pub lambda_powers: Vec<F>,
+}
+
+impl<F> ShaLinearResidualWeightPlan<F>
+where
+    F: PrimeField,
+{
+    pub fn new(
+        row_weights: &[F],
+        a_powers: &[F],
+        lambda_powers: &[F],
+    ) -> Result<Self, ShaProjectionError> {
+        if row_weights.len() != SHA_ROW_COUNT {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "row_weights",
+                col: 0,
+                got: row_weights.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+            return Err(ShaProjectionError::MissingColumn {
+                kind: "a_powers",
+                col: a_powers.len(),
+            });
+        }
+        if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+            return Err(ShaProjectionError::MissingColumn {
+                kind: "lambda_powers",
+                col: lambda_powers.len(),
+            });
+        }
+        Ok(Self {
+            row_weights: row_weights.to_vec(),
+            a_powers: a_powers.to_vec(),
+            lambda_powers: lambda_powers.to_vec(),
+        })
+    }
+}
+
+pub fn build_sha_sumfold_linear_accumulator_direct_with_weights<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    plan: &ShaLinearResidualWeightPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: DelayedFieldProductSum,
+{
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    let eval_plan = ShaDirectResidualEvalPlan::new(&plan.a_powers, &plan.lambda_powers, field_cfg)?;
+    cfg_iter!(traces)
+        .zip(cfg_iter!(publics))
+        .map(|(trace, public)| {
+            #[cfg(debug_assertions)]
+            {
+                validate_trace(trace)?;
+                validate_public(public)?;
+            }
+            sha_linear_residual_sum_with_plan(
+                trace,
+                public,
+                &plan.row_weights,
+                &eval_plan,
+                field_cfg,
+            )
         })
         .collect()
 }
@@ -1618,15 +1797,24 @@ fn sha_linear_residual_sum_with_weights<F>(
 where
     F: DelayedFieldProductSum,
 {
+    let eval_plan = ShaDirectResidualEvalPlan::new(a_powers, lambda_powers, field_cfg)?;
+    sha_linear_residual_sum_with_plan(trace, public, row_weights, &eval_plan, field_cfg)
+}
+
+fn sha_linear_residual_sum_with_plan<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row_weights: &[F],
+    eval_plan: &ShaDirectResidualEvalPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: DelayedFieldProductSum,
+{
     let mut values = Vec::with_capacity(row_weights.len());
     for row in 0..row_weights.len() {
-        values.push(sha_linear_residual_row_value_with_powers(
-            trace,
-            public,
-            row,
-            a_powers,
-            lambda_powers,
-            field_cfg,
+        values.push(sha_linear_residual_row_value_direct(
+            trace, public, row, eval_plan, field_cfg,
         )?);
     }
     FieldFieldInnerProduct::inner_product::<UNCHECKED>(
@@ -1635,6 +1823,368 @@ where
         F::zero_with_cfg(field_cfg),
     )
     .map_err(ShaProjectionError::from)
+}
+
+#[derive(Clone, Debug)]
+struct ShaDirectResidualEvalPlan<F: PrimeField> {
+    word_weights: Vec<F>,
+    w0_base_weights: Vec<F>,
+    mu_packed_weights: Vec<F>,
+    lambda_powers: Vec<F>,
+    rho_sig0: F,
+    rho_sig1: F,
+    two: F,
+}
+
+impl<F> ShaDirectResidualEvalPlan<F>
+where
+    F: PrimeField,
+{
+    fn new(
+        a_powers: &[F],
+        lambda_powers: &[F],
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+            return Err(ShaProjectionError::MissingColumn {
+                kind: "a_powers",
+                col: a_powers.len(),
+            });
+        }
+        if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+            return Err(ShaProjectionError::MissingColumn {
+                kind: "lambda_powers",
+                col: lambda_powers.len(),
+            });
+        }
+
+        let shift_weights = |shift: usize| {
+            (0..SHA_WORD_BITS)
+                .map(|bit| {
+                    if bit >= shift {
+                        a_powers[bit - shift].clone()
+                    } else {
+                        F::zero_with_cfg(field_cfg)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let rot_weights = |shift: usize| {
+            (0..SHA_WORD_BITS)
+                .map(|bit| a_powers[(bit + shift) % SHA_WORD_BITS].clone())
+                .collect::<Vec<_>>()
+        };
+        let word_weights = a_powers[..SHA_WORD_BITS].to_vec();
+        let rot25_weights = rot_weights(25);
+        let rot14_weights = rot_weights(14);
+        let rot15_weights = rot_weights(15);
+        let rot13_weights = rot_weights(13);
+        let shift0_weights = shift_weights(0);
+        let shift2_weights = shift_weights(2);
+        let shift3_weights = shift_weights(3);
+        let shift5_weights = shift_weights(5);
+        let shift8_weights = shift_weights(8);
+        let shift9_weights = shift_weights(9);
+        let shift10_weights = shift_weights(10);
+
+        let zero = F::zero_with_cfg(field_cfg);
+        let mut w0_base_weights = vec![zero.clone(); SHA_WORD_BITS];
+        add_scaled_weights(&mut w0_base_weights, &rot25_weights, &lambda_powers[2]);
+        add_scaled_weights(&mut w0_base_weights, &rot14_weights, &lambda_powers[2]);
+        add_scaled_weights(&mut w0_base_weights, &shift3_weights, &lambda_powers[2]);
+        add_scaled_weights(&mut w0_base_weights, &rot15_weights, &lambda_powers[3]);
+        add_scaled_weights(&mut w0_base_weights, &rot13_weights, &lambda_powers[3]);
+        add_scaled_weights(&mut w0_base_weights, &shift10_weights, &lambda_powers[3]);
+        let w0_word_coeff =
+            zero.clone() - &(lambda_powers[4].clone() + &lambda_powers[5] + &lambda_powers[6]);
+        add_scaled_weights(&mut w0_base_weights, &word_weights, &w0_word_coeff);
+
+        let low_mu_coeff = pow_two(32, field_cfg);
+        let high_mu_w_coeff = pow_two(34, field_cfg);
+        let high_mu_3_bit_coeff = pow_two(35, field_cfg);
+        let high_mu_1_bit_coeff = pow_two(33, field_cfg);
+        let mut mu_packed_weights = vec![zero.clone(); SHA_WORD_BITS];
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift0_weights,
+            &(lambda_powers[4].clone() * &low_mu_coeff),
+        );
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift2_weights,
+            &(lambda_powers[5].clone() * &low_mu_coeff
+                - &(lambda_powers[4].clone() * &high_mu_w_coeff)),
+        );
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift5_weights,
+            &(lambda_powers[6].clone() * &low_mu_coeff
+                - &(lambda_powers[5].clone() * &high_mu_3_bit_coeff)),
+        );
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift8_weights,
+            &(lambda_powers[9].clone() * &low_mu_coeff
+                - &(lambda_powers[6].clone() * &high_mu_3_bit_coeff)),
+        );
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift9_weights,
+            &(lambda_powers[10].clone() * &low_mu_coeff
+                - &(lambda_powers[9].clone() * &high_mu_1_bit_coeff)),
+        );
+        add_scaled_weights(
+            &mut mu_packed_weights,
+            &shift10_weights,
+            &(lambda_powers[17].clone() - &(lambda_powers[10].clone() * &high_mu_1_bit_coeff)),
+        );
+
+        let one = F::one_with_cfg(field_cfg);
+        let two = one.clone() + &one;
+        Ok(Self {
+            word_weights,
+            w0_base_weights,
+            mu_packed_weights,
+            lambda_powers: lambda_powers.to_vec(),
+            rho_sig0: a_powers[10].clone() + &a_powers[19] + &a_powers[30],
+            rho_sig1: a_powers[7].clone() + &a_powers[21] + &a_powers[26],
+            two,
+        })
+    }
+}
+
+fn add_scaled_weights<F>(dst: &mut [F], weights: &[F], scalar: &F)
+where
+    F: PrimeField,
+{
+    if F::is_zero(scalar) {
+        return;
+    }
+    debug_assert_eq!(dst.len(), weights.len());
+    for (dst, weight) in dst.iter_mut().zip(weights.iter()) {
+        *dst += weight.clone() * scalar;
+    }
+}
+
+fn sha_linear_residual_row_value_direct<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row: usize,
+    plan: &ShaDirectResidualEvalPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: DelayedFieldProductSum,
+{
+    let lambda = &plan.lambda_powers;
+    let s_init = public_scalar_shifted_fast(public, ShaPublicCol::SInit, row, 0, field_cfg);
+    let s_msg = public_scalar_shifted_fast(public, ShaPublicCol::SMsg, row, 0, field_cfg);
+    let s_sched = public_scalar_shifted_fast(public, ShaPublicCol::SSched, row, 0, field_cfg);
+    let s_upd = public_scalar_shifted_fast(public, ShaPublicCol::SUpd, row, 0, field_cfg);
+    let s_ff = public_scalar_shifted_fast(public, ShaPublicCol::SFf, row, 0, field_cfg);
+    let s_out = public_scalar_shifted_fast(public, ShaPublicCol::SOut, row, 0, field_cfg);
+    let s_init_out = s_init.clone() + &s_out;
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut linear = zero.clone();
+
+    let mut add_trace_word = |col: ShaWordCol,
+                              shift: usize,
+                              weights: &[F],
+                              coeff: &F|
+     -> Result<(), ShaProjectionError> {
+        if F::is_zero(coeff) {
+            return Ok(());
+        }
+        linear += trace_word_eval_at_row_with_weights(trace, col, row, shift, weights, field_cfg)?
+            * coeff;
+        Ok(())
+    };
+
+    add_trace_word(
+        ShaWordCol::A,
+        0,
+        &plan.word_weights,
+        &(lambda[0].clone() * &plan.rho_sig0 - &lambda[6] + lambda[7].clone() * &s_init_out
+            - &lambda[9]),
+    )?;
+    add_trace_word(
+        ShaWordCol::E,
+        0,
+        &plan.word_weights,
+        &(lambda[1].clone() * &plan.rho_sig1 - &lambda[5] - &lambda[6]
+            + lambda[8].clone() * &s_init_out
+            - &lambda[10]),
+    )?;
+    add_trace_word(
+        ShaWordCol::Sigma0,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[0]),
+    )?;
+    add_trace_word(
+        ShaWordCol::Sigma1,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[1]),
+    )?;
+    add_trace_word(
+        ShaWordCol::SmallSigma0,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[2]),
+    )?;
+    add_trace_word(
+        ShaWordCol::SmallSigma1,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[3]),
+    )?;
+    add_trace_word(
+        ShaWordCol::OvSigma0,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &(lambda[0].clone() * &plan.two)),
+    )?;
+    add_trace_word(
+        ShaWordCol::OvSigma1,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &(lambda[1].clone() * &plan.two)),
+    )?;
+    add_trace_word(
+        ShaWordCol::OvSmallSigma0,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &(lambda[2].clone() * &plan.two)),
+    )?;
+    add_trace_word(
+        ShaWordCol::OvSmallSigma1,
+        0,
+        &plan.word_weights,
+        &(zero.clone() - &(lambda[3].clone() * &plan.two)),
+    )?;
+
+    let w0_selector_coeff = lambda[11].clone() * &s_msg;
+    if F::is_zero(&w0_selector_coeff) {
+        add_trace_word(
+            ShaWordCol::W,
+            0,
+            &plan.w0_base_weights,
+            &F::one_with_cfg(field_cfg),
+        )?;
+    } else {
+        let w0_weights: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
+            plan.w0_base_weights[bit].clone() + w0_selector_coeff.clone() * &plan.word_weights[bit]
+        });
+        add_trace_word(ShaWordCol::W, 0, &w0_weights, &F::one_with_cfg(field_cfg))?;
+    }
+
+    add_trace_word(ShaWordCol::W, 16, &plan.word_weights, &lambda[4])?;
+    add_trace_word(
+        ShaWordCol::SmallSigma0,
+        1,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[4]),
+    )?;
+    add_trace_word(
+        ShaWordCol::W,
+        9,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[4]),
+    )?;
+    add_trace_word(
+        ShaWordCol::SmallSigma1,
+        14,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[4]),
+    )?;
+    add_trace_word(
+        ShaWordCol::A,
+        4,
+        &plan.word_weights,
+        &(lambda[5].clone() + &lambda[9]),
+    )?;
+    add_trace_word(
+        ShaWordCol::E,
+        4,
+        &plan.word_weights,
+        &(lambda[6].clone() + &lambda[10]),
+    )?;
+    let neg_l5_l6 = zero.clone() - &(lambda[5].clone() + &lambda[6]);
+    add_trace_word(ShaWordCol::Sigma1, 3, &plan.word_weights, &neg_l5_l6)?;
+    add_trace_word(ShaWordCol::Uef, 3, &plan.word_weights, &neg_l5_l6)?;
+    add_trace_word(ShaWordCol::UNegEg, 3, &plan.word_weights, &neg_l5_l6)?;
+    add_trace_word(
+        ShaWordCol::Sigma0,
+        3,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[5]),
+    )?;
+    add_trace_word(
+        ShaWordCol::Maj,
+        3,
+        &plan.word_weights,
+        &(zero.clone() - &lambda[5]),
+    )?;
+    add_trace_word(
+        ShaWordCol::MuPacked,
+        0,
+        &plan.mu_packed_weights,
+        &F::one_with_cfg(field_cfg),
+    )?;
+
+    let mut add_public_word = |col: ShaPublicCol, coeff: &F| -> Result<(), ShaProjectionError> {
+        if F::is_zero(coeff) {
+            return Ok(());
+        }
+        linear += public_word_or_const_eval_at_row_with_weights(
+            public,
+            col,
+            row,
+            &plan.word_weights,
+            field_cfg,
+        )? * coeff;
+        Ok(())
+    };
+    add_public_word(
+        ShaPublicCol::PAIn,
+        &(zero.clone() - &(lambda[7].clone() * &s_init)),
+    )?;
+    add_public_word(
+        ShaPublicCol::PAOut,
+        &(zero.clone() - &(lambda[7].clone() * &s_out)),
+    )?;
+    add_public_word(
+        ShaPublicCol::PEIn,
+        &(zero.clone() - &(lambda[8].clone() * &s_init)),
+    )?;
+    add_public_word(
+        ShaPublicCol::PEOut,
+        &(zero.clone() - &(lambda[8].clone() * &s_out)),
+    )?;
+    add_public_word(
+        ShaPublicCol::Message,
+        &(zero.clone() - &(lambda[11].clone() * &s_msg)),
+    )?;
+
+    linear += public_scalar_shifted_fast(public, ShaPublicCol::K, row, 3, field_cfg) * &neg_l5_l6;
+    linear += public_scalar_shifted_fast(public, ShaPublicCol::PAIn, row, 0, field_cfg)
+        * &(zero.clone() - &lambda[9]);
+    linear += public_scalar_shifted_fast(public, ShaPublicCol::PEIn, row, 0, field_cfg)
+        * &(zero.clone() - &lambda[10]);
+
+    linear += int_scalar_fast(trace, ShaIntCol::CompSchedule, row, field_cfg)
+        * &(lambda[4].clone() + lambda[12].clone() * &s_sched);
+    linear += int_scalar_fast(trace, ShaIntCol::CompUpdateA, row, field_cfg)
+        * &(lambda[5].clone() + lambda[13].clone() * &s_upd);
+    linear += int_scalar_fast(trace, ShaIntCol::CompUpdateE, row, field_cfg)
+        * &(lambda[6].clone() + lambda[14].clone() * &s_upd);
+    linear += int_scalar_fast(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)
+        * &(lambda[9].clone() + lambda[15].clone() * &s_ff);
+    linear += int_scalar_fast(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)
+        * &(lambda[10].clone() + lambda[16].clone() * &s_ff);
+
+    Ok(linear)
 }
 
 fn sha_linear_residual_row_value_with_powers<F>(
@@ -4090,6 +4640,143 @@ impl<F: PrimeField> ShaResidualPolyConstants<F> {
 }
 
 #[derive(Clone, Debug)]
+struct NonzeroResidualCoeffAccumulator<F: PrimeField> {
+    coeffs: [Vec<F>; NUM_NONZERO_SHA_FAMILIES],
+}
+
+impl<F> NonzeroResidualCoeffAccumulator<F>
+where
+    F: PrimeField,
+{
+    fn new(field_cfg: &F::Config) -> Self {
+        Self {
+            coeffs: std::array::from_fn(|_| {
+                vec![F::zero_with_cfg(field_cfg); SHA_RESIDUAL_EVAL_POWER_COUNT]
+            }),
+        }
+    }
+
+    fn add_assign(&mut self, rhs: Self) {
+        for (dst_family, rhs_family) in self.coeffs.iter_mut().zip(rhs.coeffs) {
+            for (dst, rhs) in dst_family.iter_mut().zip(rhs_family) {
+                *dst += rhs;
+            }
+        }
+    }
+
+    fn into_polys(mut self) -> [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES] {
+        std::array::from_fn(|slot| {
+            let mut coeffs = std::mem::take(&mut self.coeffs[slot]);
+            while coeffs.last().is_some_and(F::is_zero) {
+                coeffs.pop();
+            }
+            DynamicPolynomialF { coeffs }
+        })
+    }
+
+    #[inline(always)]
+    fn add_scaled_to_slot(&mut self, slot: usize, coeff_idx: usize, value: &F, scale: &F) {
+        if F::is_zero(value) || F::is_zero(scale) {
+            return;
+        }
+        debug_assert!(slot < NUM_NONZERO_SHA_FAMILIES);
+        debug_assert!(coeff_idx < self.coeffs[slot].len());
+        self.coeffs[slot][coeff_idx] += value.clone() * scale;
+    }
+
+    fn add_trace_word_scaled(
+        &mut self,
+        slot: usize,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        row_shift: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for bit in 0..SHA_WORD_BITS {
+            let value = bit_at_shifted_or_zero(trace, col, row, row_shift, bit, field_cfg)?;
+            self.add_scaled_to_slot(slot, bit, &value, scale);
+        }
+        Ok(())
+    }
+
+    fn add_trace_word_shift_r_scaled(
+        &mut self,
+        slot: usize,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        shift: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        debug_assert!(shift < SHA_WORD_BITS);
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for out_bit in 0..(SHA_WORD_BITS - shift) {
+            let value = bit_at_shifted_or_zero(trace, col, row, 0, out_bit + shift, field_cfg)?;
+            self.add_scaled_to_slot(slot, out_bit, &value, scale);
+        }
+        Ok(())
+    }
+
+    fn add_trace_word_sparse_product_scaled(
+        &mut self,
+        slot: usize,
+        trace: &ProjectedTrace<F>,
+        col: ShaWordCol,
+        row: usize,
+        shifts: &[usize],
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        if F::is_zero(scale) {
+            return Ok(());
+        }
+        for bit in 0..SHA_WORD_BITS {
+            let value = bit_at_shifted_or_zero(trace, col, row, 0, bit, field_cfg)?;
+            for &shift in shifts {
+                self.add_scaled_to_slot(slot, bit + shift, &value, scale);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_trace_int_const_scaled(
+        &mut self,
+        slot: usize,
+        trace: &ProjectedTrace<F>,
+        col: ShaIntCol,
+        row: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        let value = int_scalar(trace, col, row, field_cfg)?;
+        self.add_scaled_to_slot(slot, 0, &value, scale);
+        Ok(())
+    }
+
+    fn add_public_scalar_const_scaled(
+        &mut self,
+        slot: usize,
+        public: &ProjectedPublic<F>,
+        col: ShaPublicCol,
+        row: usize,
+        scale: &F,
+        field_cfg: &F::Config,
+    ) -> Result<(), ShaProjectionError> {
+        let value = public_scalar(public, col, row, field_cfg)?;
+        self.add_scaled_to_slot(slot, 0, &value, scale);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
 struct FixedResidualCoeffAccumulator<F: PrimeField> {
     coeffs: Vec<Vec<F>>,
 }
@@ -4347,6 +5034,241 @@ where
         &high_scale,
         field_cfg,
     )
+}
+
+fn add_nonzero_mu_contribution<F>(
+    acc: &mut NonzeroResidualCoeffAccumulator<F>,
+    slot: usize,
+    trace: &ProjectedTrace<F>,
+    row: usize,
+    low_shift: usize,
+    high_shift: usize,
+    high_coeff: &F,
+    row_weight: &F,
+    constants: &ShaResidualPolyConstants<F>,
+    field_cfg: &F::Config,
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let low_scale = scaled(row_weight, &constants.low_mu_coeff);
+    let high_scale = neg(&scaled(row_weight, high_coeff));
+    acc.add_trace_word_shift_r_scaled(
+        slot,
+        trace,
+        ShaWordCol::MuPacked,
+        row,
+        low_shift,
+        &low_scale,
+        field_cfg,
+    )?;
+    acc.add_trace_word_shift_r_scaled(
+        slot,
+        trace,
+        ShaWordCol::MuPacked,
+        row,
+        high_shift,
+        &high_scale,
+        field_cfg,
+    )
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_nonzero_ideal_row_fixed<F>(
+    acc: &mut NonzeroResidualCoeffAccumulator<F>,
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row: usize,
+    row_weight: &F,
+    constants: &ShaResidualPolyConstants<F>,
+    field_cfg: &F::Config,
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if F::is_zero(row_weight) {
+        return Ok(());
+    }
+
+    let minus_row = neg(row_weight);
+    let minus_two_row = neg(&scaled(row_weight, &constants.two));
+
+    // R0/R1: big-sigma residuals.
+    acc.add_trace_word_sparse_product_scaled(
+        0,
+        trace,
+        ShaWordCol::A,
+        row,
+        &[10, 19, 30],
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(0, trace, ShaWordCol::Sigma0, row, 0, &minus_row, field_cfg)?;
+    acc.add_trace_word_scaled(
+        0,
+        trace,
+        ShaWordCol::OvSigma0,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_sparse_product_scaled(
+        1,
+        trace,
+        ShaWordCol::E,
+        row,
+        &[7, 21, 26],
+        row_weight,
+        field_cfg,
+    )?;
+    acc.add_trace_word_scaled(1, trace, ShaWordCol::Sigma1, row, 0, &minus_row, field_cfg)?;
+    acc.add_trace_word_scaled(
+        1,
+        trace,
+        ShaWordCol::OvSigma1,
+        row,
+        0,
+        &minus_two_row,
+        field_cfg,
+    )?;
+
+    // R4: schedule transition.
+    acc.add_trace_word_scaled(2, trace, ShaWordCol::W, row, 16, row_weight, field_cfg)?;
+    for (col, shift) in [
+        (ShaWordCol::W, 0usize),
+        (ShaWordCol::SmallSigma0, 1),
+        (ShaWordCol::W, 9),
+        (ShaWordCol::SmallSigma1, 14),
+    ] {
+        acc.add_trace_word_scaled(2, trace, col, row, shift, &minus_row, field_cfg)?;
+    }
+    add_nonzero_mu_contribution(
+        acc,
+        2,
+        trace,
+        row,
+        0,
+        2,
+        &constants.high_mu_w_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        2,
+        trace,
+        ShaIntCol::CompSchedule,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    // R5/R6: compression round updates.
+    acc.add_trace_word_scaled(3, trace, ShaWordCol::A, row, 4, row_weight, field_cfg)?;
+    for (col, shift) in [
+        (ShaWordCol::E, 0usize),
+        (ShaWordCol::Sigma1, 3),
+        (ShaWordCol::Uef, 3),
+        (ShaWordCol::UNegEg, 3),
+        (ShaWordCol::W, 0),
+        (ShaWordCol::Sigma0, 3),
+        (ShaWordCol::Maj, 3),
+    ] {
+        acc.add_trace_word_scaled(3, trace, col, row, shift, &minus_row, field_cfg)?;
+    }
+    acc.add_public_scalar_const_scaled(3, public, ShaPublicCol::K, row + 3, &minus_row, field_cfg)?;
+    add_nonzero_mu_contribution(
+        acc,
+        3,
+        trace,
+        row,
+        2,
+        5,
+        &constants.high_mu_3_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(3, trace, ShaIntCol::CompUpdateA, row, row_weight, field_cfg)?;
+
+    acc.add_trace_word_scaled(4, trace, ShaWordCol::E, row, 4, row_weight, field_cfg)?;
+    for (col, shift) in [
+        (ShaWordCol::A, 0usize),
+        (ShaWordCol::E, 0),
+        (ShaWordCol::Sigma1, 3),
+        (ShaWordCol::Uef, 3),
+        (ShaWordCol::UNegEg, 3),
+        (ShaWordCol::W, 0),
+    ] {
+        acc.add_trace_word_scaled(4, trace, col, row, shift, &minus_row, field_cfg)?;
+    }
+    acc.add_public_scalar_const_scaled(4, public, ShaPublicCol::K, row + 3, &minus_row, field_cfg)?;
+    add_nonzero_mu_contribution(
+        acc,
+        4,
+        trace,
+        row,
+        5,
+        8,
+        &constants.high_mu_3_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(4, trace, ShaIntCol::CompUpdateE, row, row_weight, field_cfg)?;
+
+    // R9/R10: feed-forward rows.
+    acc.add_trace_word_scaled(5, trace, ShaWordCol::A, row, 4, row_weight, field_cfg)?;
+    acc.add_trace_word_scaled(5, trace, ShaWordCol::A, row, 0, &minus_row, field_cfg)?;
+    acc.add_public_scalar_const_scaled(5, public, ShaPublicCol::PAIn, row, &minus_row, field_cfg)?;
+    add_nonzero_mu_contribution(
+        acc,
+        5,
+        trace,
+        row,
+        8,
+        9,
+        &constants.high_mu_1_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        5,
+        trace,
+        ShaIntCol::CompFeedForwardA,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    acc.add_trace_word_scaled(6, trace, ShaWordCol::E, row, 4, row_weight, field_cfg)?;
+    acc.add_trace_word_scaled(6, trace, ShaWordCol::E, row, 0, &minus_row, field_cfg)?;
+    acc.add_public_scalar_const_scaled(6, public, ShaPublicCol::PEIn, row, &minus_row, field_cfg)?;
+    add_nonzero_mu_contribution(
+        acc,
+        6,
+        trace,
+        row,
+        9,
+        10,
+        &constants.high_mu_1_bit_coeff,
+        row_weight,
+        constants,
+        field_cfg,
+    )?;
+    acc.add_trace_int_const_scaled(
+        6,
+        trace,
+        ShaIntCol::CompFeedForwardE,
+        row,
+        row_weight,
+        field_cfg,
+    )?;
+
+    Ok(())
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -5226,6 +6148,89 @@ where
     debug_assert!(table_idx < trace.bit_slices.len());
     debug_assert!(shifted < trace.bit_slices[table_idx].evaluations.len());
     trace.bit_slices[table_idx].evaluations[shifted].clone()
+}
+
+fn trace_word_eval_at_row_with_weights<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    row: usize,
+    shift: usize,
+    weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: DelayedFieldProductSum,
+{
+    let bits: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
+        bit_at_shifted_or_zero_fast(trace, col, row, shift, bit, field_cfg)
+    });
+    project_bits_dmr(&bits, weights, field_cfg)
+}
+
+fn int_scalar_fast<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaIntCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    if row >= SHA_ROW_COUNT {
+        return F::zero_with_cfg(field_cfg);
+    }
+    debug_assert!(col.index() < trace.int_columns.len());
+    debug_assert!(row < trace.int_columns[col.index()].evaluations.len());
+    trace.int_columns[col.index()].evaluations[row].clone()
+}
+
+fn public_scalar_shifted_fast<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    shift: usize,
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    let Some(shifted) = row.checked_add(shift) else {
+        return F::zero_with_cfg(field_cfg);
+    };
+    if shifted >= SHA_ROW_COUNT {
+        return F::zero_with_cfg(field_cfg);
+    }
+    debug_assert!(col.index() < public.columns.len());
+    debug_assert!(shifted < public.columns[col.index()].evaluations.len());
+    public.columns[col.index()].evaluations[shifted].clone()
+}
+
+fn public_word_or_const_eval_at_row_with_weights<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<F, ShaProjectionError>
+where
+    F: DelayedFieldProductSum,
+{
+    let Some(word_col) = col.public_word_col() else {
+        return Ok(public_scalar_shifted_fast(public, col, row, 0, field_cfg));
+    };
+    let Some(bit_slices) = &public.bit_slices else {
+        return Ok(public_scalar_shifted_fast(public, col, row, 0, field_cfg));
+    };
+    if row >= SHA_ROW_COUNT {
+        return Ok(F::zero_with_cfg(field_cfg));
+    }
+    let bits: [F; SHA_WORD_BITS] = std::array::from_fn(|bit| {
+        let table_idx = bit_slice_index(word_col.index(), bit, SHA_WORD_BITS);
+        debug_assert!(table_idx < bit_slices.len());
+        debug_assert!(row < bit_slices[table_idx].evaluations.len());
+        bit_slices[table_idx].evaluations[row].clone()
+    });
+    project_bits_dmr(&bits, weights, field_cfg)
 }
 
 fn int_const_poly<F>(
@@ -6125,6 +7130,81 @@ mod tests {
             beta_aggregate_nonzero_ideal_polys_with_weights(&tables, &beta_eq_weights).unwrap();
 
         assert_eq!(cached, wrapped);
+    }
+
+    #[test]
+    fn direct_aggregate_and_linear_accumulators_match_residual_table_path() {
+        let cfg = test_config();
+        let a = f(5);
+        let mut traces = vec![
+            synthetic_boolean_trace(11, &a),
+            synthetic_boolean_trace(29, &a),
+        ];
+        for (trace_idx, trace) in traces.iter_mut().enumerate() {
+            for (col_idx, column) in trace.int_columns.iter_mut().enumerate() {
+                for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                    *value = f(
+                        u64::try_from((trace_idx + 2) * (col_idx + 3) * (row_idx % 17 + 1))
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+
+        let mut publics = vec![zero_public(), zero_public()];
+        for (public_idx, public) in publics.iter_mut().enumerate() {
+            for (col_idx, column) in public.columns.iter_mut().enumerate() {
+                for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                    *value = f(u64::try_from(
+                        (public_idx + 5) * (col_idx + 7) * (row_idx % 19 + 1),
+                    )
+                    .unwrap());
+                }
+            }
+        }
+
+        let row_weights = (0..SHA_ROW_COUNT)
+            .map(|row| f(u64::try_from(row % 23 + 1).unwrap()))
+            .collect::<Vec<_>>();
+        let coeff_tables = build_linear_residual_coeff_tables_with_row_weights(
+            &traces,
+            &publics,
+            &row_weights,
+            &cfg,
+        )
+        .unwrap();
+
+        let beta = [f(17)];
+        let beta_eq_weights = zinc_poly::utils::build_eq_x_r_vec(&beta, &cfg).unwrap();
+        let aggregate_plan =
+            ShaAggregateIdealWeightPlan::new(&beta_eq_weights, &row_weights).unwrap();
+        let direct_aggregate = beta_aggregate_nonzero_ideal_polys_direct_with_weights(
+            &traces,
+            &publics,
+            &aggregate_plan,
+            &cfg,
+        )
+        .unwrap();
+        let table_aggregate =
+            beta_aggregate_nonzero_ideal_polys_with_weights(&coeff_tables, &beta_eq_weights)
+                .unwrap();
+        assert_eq!(direct_aggregate, table_aggregate);
+
+        let a_powers = build_sha_residual_eval_powers(&f(31), &cfg);
+        let lambda_powers = build_sha_lambda_powers(&f(37), &cfg);
+        let linear_plan =
+            ShaLinearResidualWeightPlan::new(&row_weights, &a_powers, &lambda_powers).unwrap();
+        let direct_linear = build_sha_sumfold_linear_accumulator_direct_with_weights(
+            &traces,
+            &publics,
+            &linear_plan,
+            &cfg,
+        )
+        .unwrap();
+        let table_linear =
+            build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, &cfg)
+                .unwrap();
+        assert_eq!(direct_linear, table_linear);
     }
 
     #[test]

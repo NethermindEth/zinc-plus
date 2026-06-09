@@ -24,6 +24,11 @@ use thiserror::Error;
 use zinc_piop::neutron_nova::expression_folded_row_sum_with_vectors;
 #[cfg(debug_assertions)]
 use zinc_piop::neutron_nova::validate_projected_trace;
+#[cfg(test)]
+use zinc_piop::neutron_nova::{
+    beta_aggregate_nonzero_ideal_polys_with_weights,
+    build_linear_residual_coeff_tables_with_row_weights,
+};
 use zinc_piop::{
     combined_poly_resolver::Proof as CombinedPolyResolverProof,
     ideal_check::Proof as IdealCheckProof,
@@ -35,13 +40,14 @@ use zinc_piop::{
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
         NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic, ProjectedTrace, ProjectionFoldWitness,
-        SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanitySource,
-        ShaIntCol, ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily,
-        ShaWordCol, beta_aggregate_nonzero_ideal_polys_with_weights, bit_slice_index,
+        SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaAggregateIdealWeightPlan,
+        ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol, ShaLinearResidualWeightPlan,
+        ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaWordCol,
+        beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
         build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
-        build_linear_residual_coeff_tables_with_row_weights,
         build_production_sha_sumfold_group_from_prefix_accumulators, build_sha_lambda_powers,
         build_sha_residual_eval_powers, build_sha_sumfold_linear_accumulator,
+        build_sha_sumfold_linear_accumulator_direct_with_weights,
         build_sha_sumfold_quadratic_prefix_accumulator, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
         folded_row_integrand_sum, production_sha_booleanity_sources,
@@ -1479,13 +1485,18 @@ where
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let r_ic_eq_weights = build_eq_x_r_vec(&r_ic, field_cfg)?;
-    let coeff_tables =
-        build_residual_coeff_tables_phase(&traces, &publics, &r_ic_eq_weights, field_cfg)?;
 
     let beta = sample_instance_batch_challenge(transcript, instance_count, field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(&beta, field_cfg)?;
-    let (ideal_check, aggregate_ideal_polys) =
-        prove_aggregate_ideal_phase(&coeff_tables, &beta_eq_weights, transcript, field_cfg)?;
+    let aggregate_weight_plan =
+        ShaAggregateIdealWeightPlan::new(&beta_eq_weights, &r_ic_eq_weights)?;
+    let (ideal_check, aggregate_ideal_polys) = prove_aggregate_ideal_phase(
+        &traces,
+        &publics,
+        &aggregate_weight_plan,
+        transcript,
+        field_cfg,
+    )?;
 
     let (a, lambda, rho, xi) = sample_post_aggregate_ideal_challenges(transcript, field_cfg);
     let a_powers = build_sha_residual_eval_powers(&a, field_cfg);
@@ -1498,6 +1509,10 @@ where
         &lambda_powers,
         field_cfg,
     )?;
+    let linear_weight_plan =
+        ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
+    let linear_accumulator =
+        build_sumfold_linear_accumulator_phase(&traces, &publics, &linear_weight_plan, field_cfg)?;
 
     let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
         build_sumfold_accumulators_phase(
@@ -1505,9 +1520,7 @@ where
             &beta,
             &beta_eq_weights,
             &r_ic_eq_weights,
-            &coeff_tables,
-            &a_powers,
-            &lambda_powers,
+            &linear_accumulator,
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
@@ -1701,13 +1714,18 @@ where
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let r_ic_eq_weights = build_eq_x_r_vec(&r_ic, field_cfg)?;
-    let coeff_tables =
-        build_residual_coeff_tables_phase(&traces, &publics, &r_ic_eq_weights, field_cfg)?;
 
     let beta = sample_instance_batch_challenge(transcript, instance_count, field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(&beta, field_cfg)?;
-    let (ideal_check, aggregate_ideal_polys) =
-        prove_aggregate_ideal_phase(&coeff_tables, &beta_eq_weights, transcript, field_cfg)?;
+    let aggregate_weight_plan =
+        ShaAggregateIdealWeightPlan::new(&beta_eq_weights, &r_ic_eq_weights)?;
+    let (ideal_check, aggregate_ideal_polys) = prove_aggregate_ideal_phase(
+        &traces,
+        &publics,
+        &aggregate_weight_plan,
+        transcript,
+        field_cfg,
+    )?;
 
     let (a, lambda, rho, xi) = sample_post_aggregate_ideal_challenges(transcript, field_cfg);
     let a_powers = build_sha_residual_eval_powers(&a, field_cfg);
@@ -1720,6 +1738,10 @@ where
         &lambda_powers,
         field_cfg,
     )?;
+    let linear_weight_plan =
+        ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
+    let linear_accumulator =
+        build_sumfold_linear_accumulator_phase(&traces, &publics, &linear_weight_plan, field_cfg)?;
 
     let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
         build_sumfold_accumulators_phase(
@@ -1727,9 +1749,7 @@ where
             &beta,
             &beta_eq_weights,
             &r_ic_eq_weights,
-            &coeff_tables,
-            &a_powers,
-            &lambda_powers,
+            &linear_accumulator,
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
@@ -2171,32 +2191,12 @@ where
     target = "zinc_protocol::production_sha",
     level = "info",
     skip_all,
-    fields(side = "prove", phase = "residual_coeff_tables", instances = traces.len())
-)]
-fn build_residual_coeff_tables_phase<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
-    r_ic_eq_weights: &[F],
-    field_cfg: &F::Config,
-) -> Result<Vec<LinearResidualCoeffTable<F>>, ProductionShaError<F>>
-where
-    F: PrimeField,
-    F::Inner: Transcribable,
-    F::Modulus: Transcribable,
-{
-    build_linear_residual_coeff_tables_with_row_weights(traces, publics, r_ic_eq_weights, field_cfg)
-        .map_err(ProductionShaError::from)
-}
-
-#[tracing::instrument(
-    target = "zinc_protocol::production_sha",
-    level = "info",
-    skip_all,
-    fields(side = "prove", phase = "aggregate_ideal", instances = coeff_tables.len())
+    fields(side = "prove", phase = "aggregate_ideal", instances = traces.len())
 )]
 fn prove_aggregate_ideal_phase<F>(
-    coeff_tables: &[LinearResidualCoeffTable<F>],
-    beta_eq_weights: &[F],
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    aggregate_weight_plan: &ShaAggregateIdealWeightPlan<F>,
     transcript: &mut impl Transcript,
     field_cfg: &F::Config,
 ) -> Result<
@@ -2211,8 +2211,12 @@ where
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
-    let aggregate_ideal_polys =
-        beta_aggregate_nonzero_ideal_polys_with_weights(coeff_tables, beta_eq_weights)?;
+    let aggregate_ideal_polys = beta_aggregate_nonzero_ideal_polys_direct_with_weights(
+        traces,
+        publics,
+        aggregate_weight_plan,
+        field_cfg,
+    )?;
     let ideal_check = IdealCheckProof {
         combined_mle_values: aggregate_ideal_polys.iter().cloned().collect(),
     };
@@ -2220,6 +2224,30 @@ where
     check_aggregate_sha_ideal_membership(&aggregate_ideal_polys, field_cfg)?;
     absorb_aggregate_sha_ideal_polys(transcript, &aggregate_ideal_polys, field_cfg);
     Ok((ideal_check, aggregate_ideal_polys))
+}
+
+#[tracing::instrument(
+    target = "zinc_protocol::production_sha",
+    level = "info",
+    skip_all,
+    fields(side = "prove", phase = "sumfold_linear_accumulator", instances = traces.len())
+)]
+fn build_sumfold_linear_accumulator_phase<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    linear_weight_plan: &ShaLinearResidualWeightPlan<F>,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum + Send + Sync + 'static,
+{
+    build_sha_sumfold_linear_accumulator_direct_with_weights(
+        traces,
+        publics,
+        linear_weight_plan,
+        field_cfg,
+    )
+    .map_err(ProductionShaError::from)
 }
 
 #[tracing::instrument(
@@ -2239,9 +2267,7 @@ fn build_sumfold_accumulators_phase<F>(
     beta: &[F],
     beta_eq_weights: &[F],
     r_ic_eq_weights: &[F],
-    coeff_tables: &[LinearResidualCoeffTable<F>],
-    a_powers: &[F],
-    lambda_powers: &[F],
+    linear_accumulator: &[F],
     booleanity_weights: &[F],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
@@ -2251,15 +2277,6 @@ where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
 {
-    let linear_accumulator = tracing::info_span!(
-        target: "zinc_protocol::production_sha",
-        "sumfold_linear_accumulator",
-        side = "prove",
-        phase = "sumfold_linear_accumulator",
-    )
-    .in_scope(|| {
-        build_sha_sumfold_linear_accumulator(coeff_tables, a_powers, lambda_powers, field_cfg)
-    })?;
     let quadratic_prefix_accumulator = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "sumfold_quadratic_prefix_accumulator",
@@ -2288,7 +2305,7 @@ where
             beta,
             beta_eq_weights,
             r_ic_eq_weights,
-            &linear_accumulator,
+            linear_accumulator,
             &quadratic_prefix_accumulator,
             booleanity_weights,
             booleanity_sources,
@@ -2297,7 +2314,7 @@ where
         )
     })?;
     Ok((
-        linear_accumulator,
+        linear_accumulator.to_vec(),
         quadratic_prefix_accumulator,
         sumfold_group,
     ))
