@@ -3959,7 +3959,6 @@ where
     let ternary_len = checked_ternary_len(prefix_vars)?;
     let mask_count = 1usize << prefix_len;
     let coeff_plans = ternary_coeff_plans(prefix_vars)?;
-    let small_square_fields: Vec<F> = small_square_field_table(field_cfg);
     let mut mask_coeff_table = Vec::with_capacity(mask_count);
     for mask in 0..mask_count {
         let source_mask = u8::try_from(mask).map_err(|_| {
@@ -3969,13 +3968,8 @@ where
         })?;
         let mut entries = Vec::new();
         for (ternary_idx, plan) in coeff_plans.iter().enumerate() {
-            let coeff = booleanity_word_bit_mask_degree_two_coeff(
-                source_mask,
-                plan,
-                &small_square_fields,
-                field_cfg,
-            );
-            if !F::is_zero(&coeff) {
+            let coeff = booleanity_word_bit_mask_degree_two_coeff_small(source_mask, plan);
+            if coeff != 0 {
                 entries.push((ternary_idx, coeff));
             }
         }
@@ -4116,7 +4110,7 @@ fn flush_booleanity_mask_weights<F>(
     partial: &mut [F],
     tail: usize,
     ternary_len: usize,
-    mask_coeff_table: &[Vec<(usize, F)>],
+    mask_coeff_table: &[Vec<(usize, u8)>],
     mask_weights: &mut [F],
     touched_masks: &mut Vec<usize>,
     row_weight: &F,
@@ -4130,11 +4124,39 @@ fn flush_booleanity_mask_weights<F>(
         }
         let source_weight = row_weight.clone() * &mask_weights[mask_idx];
         for (ternary_idx, coeff) in &mask_coeff_table[mask_idx] {
-            partial[tail * ternary_len + *ternary_idx] += source_weight.clone() * coeff;
+            add_small_coeff_product(
+                &mut partial[tail * ternary_len + *ternary_idx],
+                &source_weight,
+                *coeff,
+            );
         }
         mask_weights[mask_idx] = F::zero_with_cfg(field_cfg);
     }
     touched_masks.clear();
+}
+
+fn add_small_coeff_product<F>(acc: &mut F, value: &F, coeff: u8)
+where
+    F: PrimeField,
+{
+    match coeff {
+        0 => {}
+        1 => *acc += value,
+        4 => {
+            let mut term = value.clone();
+            term += value;
+            let doubled = term.clone();
+            term += &doubled;
+            *acc += term;
+        }
+        _ => {
+            let mut term = value.clone();
+            for _ in 1..coeff {
+                term += value;
+            }
+            *acc += term;
+        }
+    }
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -4414,6 +4436,24 @@ where
         .get(square)
         .cloned()
         .unwrap_or_else(|| small_usize_to_field(square, field_cfg))
+}
+
+fn booleanity_word_bit_mask_degree_two_coeff_small(source_mask: u8, plan: &TernaryCoeffPlan) -> u8 {
+    if plan.support_mask == 0 {
+        return 0;
+    }
+    let mut delta = 0i32;
+    for (prefix, positive) in &plan.vertices {
+        if ((source_mask >> prefix) & 1) == 0 {
+            continue;
+        }
+        if *positive {
+            delta += 1;
+        } else {
+            delta -= 1;
+        }
+    }
+    u8::try_from(delta * delta).expect("booleanity coefficient square fits u8")
 }
 
 fn small_square_field_table<F>(field_cfg: &F::Config) -> Vec<F>
