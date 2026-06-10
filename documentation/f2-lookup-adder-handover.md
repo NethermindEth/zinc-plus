@@ -2,14 +2,17 @@
 
 Branch: **`f2-clean-lookup`** (off `f2-clean`). Status: **the char-2-sound,
 commitment-bound grand-product lookup adder for mod-2³² addition is built,
-tested, measured — and its carries are now VIRTUALIZED: zero committed
-adder-specific columns** (was 12 committed carry columns). It replaces the 12
-trusted carry Hadamards (the "Issue-1" soundness gap) on the F_2[X] SHA-256
-path, with strictly less committed data than the Binius identity's
-1-committed-β-bit floor. This doc is the single entry point for whoever
-continues; the full design history (including rejected approaches, the
-dropped-carry attack, and why the tag exists) lives in
-`documentation/f2x-sha-todo.md` under the lookup-adder entries (2026-06-09/10).
+tested, measured, carries VIRTUALIZED (zero adder-specific committed
+columns), η-batched, and PORTED ONTO THE PRODUCTION OBLONG PIPELINE** —
+`prove/verify_f2_full_with_oblong_lookup_adder` is the first fully-sound
+SHA-256 F_2 prove path: the 2 ANDs ride the GF(2⁸) oblong zerocheck, the 12
+adders ride the lookup, nothing is trusted anywhere. It replaces the 12
+trusted carry Hadamards (the "Issue-1" soundness gap), with strictly less
+committed data than the Binius identity's 1-committed-β-bit floor. This doc
+is the single entry point for whoever continues; the full design history
+(including rejected approaches, the dropped-carry attack, and why the tag
+exists) lives in `documentation/f2x-sha-todo.md` under the lookup-adder
+entries (2026-06-09/10).
 
 **Read first:** `CLAUDE.md` — every design/optimization decision on this path
 must be ledgered in `f2x-sha-todo.md` before ending your turn. ⚠️ The working
@@ -20,9 +23,22 @@ Keccak, recursion, R1CS entries) — do not lose them; keep editing in place.
 
 ## 1. What exists and works
 
-`prove/verify_f2_full_with_lookup_adder_bound` (in `protocol/src/f2_prove.rs`)
-prove SHA-256 F_2 with the adders enforced by a multiplicative grand-product
-lookup, **sound end-to-end, with zero adder-specific committed columns**:
+Two complete bound pipelines in `protocol/src/f2_prove.rs`, sharing one
+lookup phase (`prove/verify_lookup_adder_bound_phase`):
+
+- **`prove/verify_f2_full_with_oblong_lookup_adder` — THE PRODUCTION PATH**:
+  GF(2⁸) oblong zerocheck for the 2 ANDs + the lookup for the 12 adders;
+  the η-blocks join the oblong's combined multipoint as a third segment
+  (`[α-cols] ++ [z-cols] ++ [η-blocks]`); the single open binds both
+  discharge families via two weight-vector projections of the same `a′`
+  (`ψ_z(a′)` and `proj(a′, W_η)`); `adder_parents` must be empty (verifier-
+  enforced — no trusted-operand channel remains).
+- **`prove/verify_f2_full_with_lookup_adder_bound`** — the monomial-pipeline
+  twin (the original integration target; kept as the like-for-like A/B arm).
+
+Both prove SHA-256 F_2 with the adders enforced by a multiplicative
+grand-product lookup, **sound end-to-end, with zero adder-specific committed
+columns**:
 
 - **Carries virtualized**: every inter-limb carry is the boundary-bit z-read
   `cin_i = cout_{i−1} = z[ℓi]`, `z = x⊕y(⊕y2)⊕t` — single-bit reads of
@@ -52,23 +68,23 @@ lookup, **sound end-to-end, with zero adder-specific committed columns**:
 
 | Arm | Prove | Verify |
 |---|---|---|
-| A monomial pipeline, 14 rel (12 adders TRUSTED) | 400.3 ms | 3.5 ms |
-| B monomial pipeline + SOUND lookup adder (virtualized carries, η-batched) | **320.3 ms** | 35.0 ms |
-| C **production** oblong-GF8, 14 rel (trusted) | **78.8 ms** | — |
+| A monomial pipeline, 14 rel (12 adders TRUSTED) | 407.4 ms | 4.0 ms |
+| B monomial pipeline + SOUND lookup adder | 320.7 ms | 34.9 ms |
+| C **production** oblong-GF8, 14 rel (trusted) | 80.8 ms | — |
+| D **production oblong-GF8 + SOUND lookup adder** | **285.4 ms** | 34.9 ms |
 
-**The sound lookup adder is now FASTER than the trusted-Hadamard pipeline it
-replaces** (B beats A by ~80 ms like-for-like: it displaces the 12-adder
-in-flow zerocheck and, η-batched, the binding overhead no longer eats the
-win). History at this shape: B was 535.0 (committed carries) → 515.5
-(virtualized) → 320.3 (η-batched); the machine swings ~8% thermally —
-compare within a run. Per-phase (B): lookup machinery ≈ 202 ms (`gkr_tree`
-67, `leaves` 43, `binding` 37, `lblocks` 16, `tuples` 15, self 24),
-`multipoint_eval` 29 (was 156 pre-batching), `uair` 61, commit ~19. Verify
-35.0 ms — the table side dominates (2×2¹⁷ fingerprint rows, the `m′`
-product, ~2 MB of absorbed counts; §5.2 kills these). **Honest position:
-the sound adder is ~4.1× the production oblong prove**; the fight is
-(i) ride the oblong path, (ii) the remaining machinery hot spots
-(`gkr_tree`/`leaves`/`binding`), (iii) verifier table side.
+**The fully-sound production pipeline (D) is 3.5× the trusted one (C)** —
+down from 6.4× at the first measurement. Per-phase (D ≈ 280): commit ~19,
+discharge (2 ANDs only) **6.1** (vs ~32 at 14 rel), α-uair 11.6, **lookup
+machinery 203** (`gkr_tree` 68, `leaves` 43, `binding` 37, `tuples` 16,
+`lblocks` 15, self 24), z_block 2.6, multipoint 30, open ~8 — i.e.
+**D ≈ C's shared phases (~77 ms) + the lookup machinery (~203 ms)**: the
+port itself is overhead-free, and ALL remaining prover work is the machinery
+hot-spot list (§5.1). B history at this shape: 535.0 (committed carries) →
+515.5 (virtualized) → 320.3 (η-batched); the machine swings ~8% thermally —
+compare within a run. Verify 34.9 ms on both bound arms — the table side
+dominates (2×2¹⁷ fingerprint rows, the `m′` product, ~2 MB of absorbed
+counts; §5.2 kills these).
 
 ---
 
@@ -80,7 +96,7 @@ the sound adder is ~4.1× the production oblong prove**; the fight is
 | `piop/src/lookup/gkr_lookup.rs` | Two-tree grand-product lookup (`prove/verify_lookup`). **Only the honest-first path uses it now**; the bound path uses the witness tree + clear multiplicities. Keep for reference or fold away. |
 | `piop/src/lookup/add_lookup.rs` | Public add table `T={(x,y,cin,s,cout)}` + the **marginalised `T′={(x,y,cin,s)}`** (`add_table_fingerprints[_marginal]`), `decompose_add` (honest chain — the honest-first path), **`decompose_add_zread`** (virtualized carries — the bound path), `fingerprint[_marginal]`, `marginal_tag` (= `emb(2)`), `multiplicities`. The z-read unit suite incl. the dropped-carry attack + its negative control. Parameterised by `limb_bits` (tests 4 ⇒ 2⁹ table; production 8 ⇒ 2¹⁷). |
 | `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`): `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`), `lookup_binding_public_part` (PubMLE), `prove/verify_lookup_binding` (degree-3 `eq·Σ_a mask_a·Q_a`), `family_proj_eval_pub` (verifier public-col recompute), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W` — serves both the block builder and the `a′` projection; `family_weights` is the per-family reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows` (one combined block per witness col, single masked pass). Module doc has the math. |
-| `protocol/src/f2_prove.rs` | `prove/verify_f2_full_with_lookup_adder_bound` (the real pipeline — UNAUGMENTED trace), `sha_add_limb_tuples_zread`, `sha_lookup_witness_leaves_tensor_zread`, `F2LookupAdderProof` (incl. `mult_counts_marginal`), the honest-first wrapper `prove_f2_full_with_lookup_adder` (still on committed carries + old helpers — scaffolding), all tests + the A/B bench. |
+| `protocol/src/f2_prove.rs` | **`prove/verify_f2_full_with_oblong_lookup_adder` (PRODUCTION)** and `prove/verify_f2_full_with_lookup_adder_bound` (monomial twin), both over the shared `prove/verify_lookup_adder_bound_phase` (the factored lookup phase: γ/m+m′/δ/leaves/tree/binding/η/blocks); `sha_add_limb_tuples_zread`, `sha_lookup_witness_leaves_tensor_zread`, `F2LookupAdderProof` (incl. `mult_counts_marginal`) + `F2OblongLookupAdderProof` (adds the η-blocks' `r_0` evals — the oblong proof segments its `r_0` evals α/z/lookup), the honest-first wrapper `prove_f2_full_with_lookup_adder` (still on committed carries + old helpers — scaffolding), all tests + the A/B/C/D bench. |
 
 Tests (run with `--features parallel,simd,unchecked`): unit z-read suite in
 `add_lookup.rs` (`zread_*` — incl. `zread_rejects_dropped_carry` and the
@@ -88,8 +104,11 @@ negative control `zread_dropped_carry_passes_without_tag`); in `f2_prove.rs`:
 `sha256_f2_lookup_adder_proves_real_adds`, `…_in_prover_roundtrips`,
 `…_binding_identity_holds`, `…_binding_sumcheck_roundtrips`,
 `…_bound_roundtrips` (+ tamper arms incl. lying `m′`), `…_rejects_wrong_sum`,
-`…_rejects_dropped_carry`, `sha256_f2_drops_adder_hadamards_roundtrips`.
-Bench:
+`…_rejects_dropped_carry`, `sha256_f2_drops_adder_hadamards_roundtrips`, and
+the PRODUCTION-path suite `sha256_f2_oblong_lookup_adder_roundtrips`
+(+ tamper arms: lying `m`/`m′`, tampered family eval, tampered η-block `r_0`
+eval, smuggled adder parents), `…_rejects_wrong_sum`,
+`…_rejects_dropped_carry`. Bench (4 arms):
 
 ```bash
 AB_NVARS=16 cargo test --release -p zinc-protocol \
@@ -100,9 +119,23 @@ AB_NVARS=16 cargo test --release -p zinc-protocol \
 
 ---
 
-## 3. Protocol flow (bound path) — transcript order is load-bearing
+## 3. Protocol flow (bound paths) — transcript order is load-bearing
 
-Prover (`prove_f2_full_with_lookup_adder_bound`):
+**PRODUCTION path** (`prove_f2_full_with_oblong_lookup_adder`): commit the
+plain trace → the GF(2⁸) oblong AND-zerocheck, **ANDs only** (the adders
+ride the lookup; `adder_parents` empty) → the α-only UAIR → the shared
+lookup phase (steps 3–6 below) → the ψ_z z-block of all witness cols + the
+η-block `r*`-evals → absorb `(z_up_evals, pair_evals, adder_parents=[],
+lblock r*-evals)` → ONE combined multipoint over
+`[α-cols] ++ [z-cols] ++ [η-blocks]` (AND pair claims at `γ_word` against
+the z-cols; the η-combined lookup claims at `r★` against the η-blocks) →
+`r_0` evals absorbed α/z/lookup → the single γ-batched open. The verifier
+additionally checks BOTH `a′` projections against the open's returned batch
+γ — `ψ_z(a′) = Σ γ_g·z_r0[g]` and `proj(a′, W_η) = Σ γ_g·F^η_g(r_0)` — and
+ties the oblong zerocheck from the bound pair evals only (`k = 2`, no
+trusted parents).
+
+**Monomial twin** (`prove_f2_full_with_lookup_adder_bound`):
 1. Commit the **plain trace** (no augmentation — carries virtualized).
 2. Base UAIR (IC + α + the 2 AND Hadamards + sumcheck) — adders dropped.
 3. `γ` (fingerprint challenge) → **absorb `mult_counts` then
@@ -131,9 +164,9 @@ Verifier mirrors 1–7 plus: two-table root recompute
 (`∏(δ−fpT)^m·∏(δ−fpT′)^{m′}`, counts capped at `2^k_bits`), witness-tree
 depth check (`nv + pair_vars`), and the **single η-combined `a′`
 consistency** `proj(a′, W) == Σ_g γ_open,g·F^η_g(r_0)` (the same `W` table
-the blocks were built from) — `γ_open` re-derived from a **transcript
-clone** taken just before the open verify (`a′ = proof.open.lifted_claim`).
-The bound verifier therefore requires `T: Transcript + Clone`.
+the blocks were built from) — `γ_open` is the open verify's RETURN VALUE
+(`a′ = proof.open.lifted_claim`); no transcript clone is needed on either
+bound path.
 
 ---
 
@@ -177,35 +210,34 @@ The bound verifier therefore requires `T: Transcript + Clone`.
 
 ## 5. Roadmap (prioritized; designs already in the ledger)
 
-1. **Port onto the oblong pipeline** (strategic): the lookup currently rides
-   the slow monomial path; the real baseline is `prove_f2_full_with_oblong_
-   hadamard` (78.8 ms same-run). The lookup phase + binding + fold-claims
-   should slot into the oblong prove the same way (its binding data already
-   flows through the same multipoint/open); main work is wiring + the
-   ψ_z-vs-ψ_α block bookkeeping on that path. The η-batched shape makes this
-   smaller: only `num_wit` extra fold sources + ~36 claims to carry over.
-2. **Remaining machinery hot spots** (post-η-batching profile, B arm ≈
-   202 ms lookup self): `gkr_tree` 67 ms (the 2²²-leaf witness tree — 25%
-   pair-padding + ~6% inactive `1`-leaves skippable via a sparse bottom
-   layer), `leaves` 43 ms (fuse with `tuples` into one `pack_u64` cell-read
-   pass + parallelize), `binding` 37 ms (parallelize the 12 `Q_a`
-   materializations; closed-form mask-MLEs). `multipoint_eval` is DONE
-   (156 → 29 ms via η-batching); the sources/evals split is now marginal
-   (only 18 block sources remain).
-3. **Verifier + proof size** (verify is 35 ms, table-side dominated):
+1. **Machinery hot spots** — now THE whole prover fight (D ≈ C's ~77 ms of
+   shared phases + ~203 ms lookup machinery): `gkr_tree` 68 ms (the
+   2²²-leaf witness tree — 25% pair-padding + ~6% inactive `1`-leaves
+   skippable via a sparse bottom layer), `leaves` 43 ms (fuse with `tuples`
+   into one `pack_u64` cell-read pass + parallelize), `binding` 37 ms
+   (parallelize the 12 `Q_a` materializations; closed-form mask-MLEs),
+   `lblocks`+`tuples` ~31 ms (parallel + fused). Realistic target ≈
+   60–90 ms machinery ⇒ a ~140–170 ms fully-sound production prove.
+   (`multipoint_eval` is DONE — 156 → 29 ms via η-batching; the oblong port
+   is DONE — overhead-free splice.)
+2. **Verifier + proof size** (verify is 35 ms, table-side dominated):
    derive `T′` fingerprints from `T`'s in one add/row
    (`fpT′ = fpT + γ⁴·(emb(cout)+X)`, char 2) instead of a second 2¹⁷-row
    build; sparse-encode `m′` (and `m`: 2¹⁷×8B ≈ 1 MB each); closed-form
    mask-MLEs (periodic 68-row interval structure) replacing 12×O(n) passes;
    **structured-table MLE** for a succinct table side (the v2 path —
    subsumes the first two).
-4. **κ/LsbX IC simplification** (new, from virtualization): tuple 0's
+3. **κ/LsbX IC simplification** (new, from virtualization): tuple 0's
    `cin = 0` constant pins the low limb incl. the LSB through the chain, so
    the κ compensator is redundant for adds. Unexplored.
-5. **Column savings beyond carries** (user interest): k-ary add tables could
+4. **Column savings beyond carries** (user interest): k-ary add tables could
    delete the 5 intermediate-sum columns (`w_w_s1/s2`, `w_t1_s1/s2/s3`) —
    viable only at smaller `ℓ` (table `2^{kℓ}`); longfellow-zk does 7-input
    adds this way. Unexplored trade.
+5. **Retire the trusted oblong arm**: once the machinery work lands, make
+   `prove_f2_full_with_oblong_lookup_adder` the default SHA-256 F_2 entry
+   point (benches, e2e) and demote `prove_f2_full_with_oblong_hadamard`'s
+   trusted-adder mode to a comparison arm.
 
 ## 6. Gotchas
 

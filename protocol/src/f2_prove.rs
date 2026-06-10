@@ -4017,6 +4017,276 @@ where
         proof
     }
 
+    /// The shared η-batched lookup-adder **prover phase** (both bound
+    /// pipelines — monomial and oblong — run it identically on their shared
+    /// transcript): z-read tuples → γ → clear multiplicities for `T`/`T′`
+    /// (absorbed pre-δ) → δ → tensor witness leaves → the witness product
+    /// tree → the binding sumcheck (absorbs the family evals) → fresh η →
+    /// the η-combined family blocks (one per witness col). The caller wires
+    /// the blocks into its multipoint fold: sources + `r*` up-evals + one
+    /// pointed claim per witness `(col, Δ)` pair with down-eval
+    /// `Σ_f η^f·limb_evals[pair][f]`, and ships the blocks' `r_0` evals for
+    /// the verifier's single η-`a′` consistency equation.
+    fn prove_lookup_adder_bound_phase(
+        transcript: &mut impl Transcript,
+        cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        num_pub_bin: usize,
+        limb_bits: usize,
+        k_bits: usize,
+    ) -> LookupAdderProverPhase {
+        use crate::f2_lookup_binding::{
+            binding_distinct_pairs, eta_block_rows, eta_combined_weights, lookup_binding_coeffs,
+            num_families, prove_lookup_binding,
+        };
+        use zinc_piop::lookup::add_lookup;
+
+        let n = 1usize << num_vars;
+        let nf = num_families::<D>(limb_bits);
+
+        // γ, then the multiplicity COUNTS for BOTH tables (shipped in the
+        // clear — the system is not ZK — and absorbed BEFORE δ so the
+        // table-side polynomial is fixed pre-challenge: that is what makes
+        // the Schwartz–Zippel grand-product argument sound), then δ. The
+        // table side needs no GKR tree: the verifier recomputes
+        // `∏_t (δ−fpT_t)^{m_t} · ∏_t (δ−fpT′_t)^{m′_t}` itself and checks it
+        // against the witness tree's root.
+        let (t_tuples, last_tuples) = {
+            let _g = zinc_utils::prof::scope("lookup:tuples");
+            Self::sha_add_limb_tuples_zread(cols, adder_specs, num_vars, limb_bits)
+        };
+        let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let pack_counts = |tuples: &[add_lookup::LimbTuple]| -> Vec<u64> {
+            add_lookup::multiplicities(tuples, limb_bits, k_bits)
+                .iter()
+                .map(|b| {
+                    b.iter()
+                        .enumerate()
+                        .fold(0u64, |acc, (i, &set)| acc | (u64::from(set) << i))
+                })
+                .collect()
+        };
+        let mult_counts = pack_counts(&t_tuples);
+        let mult_counts_marginal = pack_counts(&last_tuples);
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for &c in mult_counts.iter().chain(&mult_counts_marginal) {
+            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut buf);
+        }
+        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let (wl, _fp_rows) = {
+            let _g = zinc_utils::prof::scope("lookup:leaves");
+            Self::sha_lookup_witness_leaves_tensor_zread(
+                cols, adder_specs, num_vars, limb_bits, &gamma_fp, &delta,
+            )
+        };
+        let (witness_tree, gkr_point, gkr_eval) = {
+            let _g = zinc_utils::prof::scope("lookup:gkr_tree");
+            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &())
+        };
+        let gkr_bind = LookupWitnessClaim { r_w: gkr_point, eval_w: gkr_eval };
+
+        // Binding sumcheck: reduce the GKR leaf claim to family shifted
+        // evals at r★ (absorbed inside).
+        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
+        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
+        let (binding, r_star) = {
+            let _g = zinc_utils::prof::scope("lookup:binding");
+            prove_lookup_binding::<D>(
+                transcript, cols, adder_specs, &coeffs, num_vars, limb_bits, r_row,
+            )
+        };
+
+        // η-batched family blocks: a FRESH η (the family evals were just
+        // absorbed by the binding ⟹ SZ pins each family individually
+        // through the combination — unlike the rejected stale-α per-bit
+        // pattern) combines the nf families into ONE block per WITNESS col
+        // (open order).
+        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let eta_w = eta_combined_weights::<D>(&eta, limb_bits);
+        let mut eta_pows = Vec::with_capacity(nf);
+        {
+            let mut acc = BinaryFieldGF128::one();
+            for _ in 0..nf {
+                eta_pows.push(acc);
+                acc = acc * eta;
+            }
+        }
+        let num_wit = cols.len() - num_pub_bin;
+        let zero_inner = BinaryFieldGF128::zero().into_inner();
+        let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
+        let blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> = (0
+            ..num_wit)
+            .map(|g| {
+                let v = eta_block_rows::<D>(cols, num_pub_bin + g, &eta_w, n);
+                DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    v.iter().map(|x| *x.inner()).collect(),
+                    zero_inner.clone(),
+                )
+            })
+            .collect();
+
+        LookupAdderProverPhase {
+            witness_tree,
+            mult_counts,
+            mult_counts_marginal,
+            binding,
+            r_star,
+            eta_pows,
+            pairs: binding_distinct_pairs(&coeffs),
+            blocks,
+        }
+    }
+
+    /// The shared lookup-adder **verifier phase**: replays γ → both tables'
+    /// clear counts (cap check + absorb, pre-δ) → δ → verifies the witness
+    /// product tree → the self-computed two-table root equality → the
+    /// binding sumcheck (absorbs the family evals) → recomputes the PUBLIC
+    /// columns' family claims directly → fresh η. Returns what the caller's
+    /// fold + `a′` wiring needs; errors are static strings the caller maps
+    /// into its own error type.
+    fn verify_lookup_adder_bound_phase(
+        transcript: &mut impl Transcript,
+        lookup_proof: &F2LookupAdderProof,
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        num_vars: usize,
+        num_pub_bin: usize,
+        limb_bits: usize,
+        k_bits: usize,
+    ) -> Result<LookupAdderVerifierPhase, &'static str> {
+        use crate::f2_lookup_binding::{
+            binding_distinct_pairs, eta_combined_weights, family_proj_eval_pub,
+            lookup_binding_coeffs, lookup_binding_public_part, num_families,
+            verify_lookup_binding,
+        };
+
+        let nl = D / limb_bits;
+        let nf = num_families::<D>(limb_bits);
+
+        let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let table_fps = zinc_piop::lookup::add_lookup::add_table_fingerprints::<BinaryFieldGF128>(
+            &gamma_fp, limb_bits, &(),
+        );
+        let table_fps_marginal =
+            zinc_piop::lookup::add_lookup::add_table_fingerprints_marginal::<BinaryFieldGF128>(
+                &gamma_fp, limb_bits, &(),
+            );
+        if lookup_proof.mult_counts.len() != table_fps.len()
+            || lookup_proof.mult_counts_marginal.len() != table_fps_marginal.len()
+        {
+            return Err("multiplicity count length mismatch");
+        }
+        let mut mbuf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for &c in lookup_proof.mult_counts.iter().chain(&lookup_proof.mult_counts_marginal) {
+            if k_bits < 64 && c >= (1u64 << k_bits) {
+                return Err("multiplicity exceeds k_bits");
+            }
+            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut mbuf);
+        }
+        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+
+        // Witness tree, at the tensor-layout depth (rows + pair vars).
+        let pair_vars = (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
+        let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
+            transcript,
+            &lookup_proof.witness_tree,
+            num_vars + pair_vars,
+            &(),
+        )
+        .map_err(|_| "witness product tree rejected")?;
+
+        // Table side: recompute the multiplicity-weighted product directly,
+        // over both tables.
+        let table_root = {
+            let mut acc = BinaryFieldGF128::one();
+            for (fp, &m) in table_fps
+                .iter()
+                .zip(&lookup_proof.mult_counts)
+                .chain(table_fps_marginal.iter().zip(&lookup_proof.mult_counts_marginal))
+            {
+                let mut base = delta + *fp; // δ − fp_t (char 2)
+                let mut mm = m;
+                while mm != 0 {
+                    if mm & 1 == 1 {
+                        acc *= &base;
+                    }
+                    base = base * base;
+                    mm >>= 1;
+                }
+            }
+            acc
+        };
+        if table_root != lookup_proof.witness_tree.root {
+            return Err("grand-product mismatch: witness adds not contained in the add table");
+        }
+        let gkr_bind = LookupWitnessClaim { r_w, eval_w };
+        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
+
+        // Binding sumcheck: eval_w + PubMLE(r_w) reduced to family evals at r★.
+        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
+        let claimed_b = gkr_bind.eval_w
+            + lookup_binding_public_part::<D>(
+                adder_specs, num_vars, limb_bits, r_row, r_pair, &delta,
+            );
+        let r_star = verify_lookup_binding::<D>(
+            transcript,
+            &lookup_proof.binding,
+            &claimed_b,
+            adder_specs,
+            &coeffs,
+            num_vars,
+            limb_bits,
+            r_row,
+        )
+        .map_err(|_| "binding sumcheck rejected")?;
+
+        // PUBLIC columns' family claims: recompute directly.
+        let pairs = binding_distinct_pairs(&coeffs);
+        for (pi, &(col, shift)) in pairs.iter().enumerate() {
+            if col >= num_pub_bin {
+                continue;
+            }
+            for f in 0..nf {
+                let computed = family_proj_eval_pub::<D>(
+                    public_binary_trace,
+                    col,
+                    shift,
+                    f,
+                    limb_bits,
+                    num_vars,
+                    &r_star,
+                );
+                if computed != lookup_proof.binding.limb_evals[pi][f] {
+                    return Err("public-column limb claim mismatch");
+                }
+            }
+        }
+
+        // η (fresh: the family evals are absorbed).
+        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let eta_w = eta_combined_weights::<D>(&eta, limb_bits);
+        let mut eta_pows = Vec::with_capacity(nf);
+        {
+            let mut acc = BinaryFieldGF128::one();
+            for _ in 0..nf {
+                eta_pows.push(acc);
+                acc = acc * eta;
+            }
+        }
+
+        Ok(LookupAdderVerifierPhase { r_star, eta_w, eta_pows, pairs })
+    }
+
     /// **Lookup-adder prove path with the WITNESS BINDING wired into the
     /// fold** (closes the witness half of Issue-1; the table side is still
     /// trusted pending the m-bit binding). Carries are **virtualized** —
@@ -4052,14 +4322,6 @@ where
         limb_bits: usize,
         k_bits: usize,
     ) -> Result<(F2FullProof<D>, F2LookupAdderProof), F2ProveError<U>> {
-        use crate::f2_lookup_binding::{
-            binding_distinct_pairs, lookup_binding_coeffs, num_families, prove_lookup_binding,
-        };
-        use zinc_piop::lookup::add_lookup;
-
-        let n = 1usize << num_vars;
-        let nf = num_families::<D>(limb_bits);
-
         let (hint, commitment) = Self::commit_and_absorb_f2_trace_with_virtuals(
             transcript,
             pp,
@@ -4082,105 +4344,28 @@ where
             )?
         };
 
-        // -- Lookup phase. γ, then the multiplicity COUNTS for BOTH tables
-        //    (shipped in the clear — the system is not ZK — and absorbed
-        //    BEFORE δ so the table-side polynomial is fixed pre-challenge:
-        //    that is what makes the Schwartz–Zippel grand-product argument
-        //    sound), then δ. The table side needs no GKR tree: the verifier
-        //    recomputes `∏_t (δ−fpT_t)^{m_t} · ∏_t (δ−fpT′_t)^{m′_t}` itself
-        //    and checks it against the witness tree's root. Only the WITNESS
-        //    product tree is proven. --
-        let _g_lookup = zinc_utils::prof::scope("lookup_adder");
-        let (t_tuples, last_tuples) = {
-            let _g = zinc_utils::prof::scope("lookup:tuples");
-            Self::sha_add_limb_tuples_zread(&trace.binary_poly, adder_specs, num_vars, limb_bits)
-        };
-        let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let pack_counts = |tuples: &[add_lookup::LimbTuple]| -> Vec<u64> {
-            add_lookup::multiplicities(tuples, limb_bits, k_bits)
-                .iter()
-                .map(|b| {
-                    b.iter()
-                        .enumerate()
-                        .fold(0u64, |acc, (i, &set)| acc | (u64::from(set) << i))
-                })
-                .collect()
-        };
-        let mult_counts = pack_counts(&t_tuples);
-        let mult_counts_marginal = pack_counts(&last_tuples);
-        let mut buf = vec![
-            0u8;
-            <<BinaryFieldGF128 as Field>::Inner
-                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-        ];
-        for &c in mult_counts.iter().chain(&mult_counts_marginal) {
-            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut buf);
-        }
-        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let (wl, _fp_rows) = {
-            let _g = zinc_utils::prof::scope("lookup:leaves");
-            Self::sha_lookup_witness_leaves_tensor_zread(
-                &trace.binary_poly,
-                adder_specs,
-                num_vars,
-                limb_bits,
-                &gamma_fp,
-                &delta,
-            )
-        };
-        let (witness_tree, gkr_point, gkr_eval) = {
-            let _g = zinc_utils::prof::scope("lookup:gkr_tree");
-            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &())
-        };
-        let gkr_bind = LookupWitnessClaim { r_w: gkr_point, eval_w: gkr_eval };
-
-        // -- Binding sumcheck: reduce the GKR leaf claim to family shifted
-        //    evals at r★. --
-        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
-        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
-        let (binding_proof, r_star) = {
-            let _g = zinc_utils::prof::scope("lookup:binding");
-            prove_lookup_binding::<D>(
-                transcript,
-                &trace.binary_poly,
-                adder_specs,
-                &coeffs,
-                num_vars,
-                limb_bits,
-                r_row,
-            )
-        };
-
-        // -- η-batched family blocks: a FRESH η (the family evals were just
-        //    absorbed by the binding ⟹ SZ pins each family individually
-        //    through the combination — unlike the rejected stale-α per-bit
-        //    pattern) combines the nf families into ONE block per WITNESS
-        //    col (open order), appended as a fold source. --
-        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let eta_w = crate::f2_lookup_binding::eta_combined_weights::<D>(&eta, limb_bits);
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-        let num_wit = trace.binary_poly.len() - num_pub_bin;
-        let zero_inner = BinaryFieldGF128::zero().into_inner();
-        let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
+
+        // The shared lookup phase: γ / clear m+m′ (pre-δ) / δ / leaves /
+        // witness tree / binding sumcheck / fresh η / η-combined blocks.
+        let _g_lookup = zinc_utils::prof::scope("lookup_adder");
+        let lk = Self::prove_lookup_adder_bound_phase(
+            transcript,
+            &trace.binary_poly,
+            adder_specs,
+            num_vars,
+            num_pub_bin,
+            limb_bits,
+            k_bits,
+        );
+
+        // The blocks join the fold as sources; their r*-evals are the
+        // multipoint up-claims — absorbed before the fold samples its
+        // challenges.
         let mut extended_trace = projected_trace_for_mp;
         let lblock_base = extended_trace.len();
-        for g in 0..num_wit {
-            let v = crate::f2_lookup_binding::eta_block_rows::<D>(
-                &trace.binary_poly,
-                num_pub_bin + g,
-                &eta_w,
-                n,
-            );
-            extended_trace.push(DenseMultilinearExtension::from_evaluations_vec(
-                num_vars,
-                v.iter().map(|x| *x.inner()).collect(),
-                zero_inner.clone(),
-            ));
-        }
-
-        // r*-evals of the L-blocks (multipoint up-claims) — absorbed before
-        // the fold samples its challenges.
+        extended_trace.extend(lk.blocks);
         let lblock_evals_at_rstar: Vec<BinaryFieldGF128> =
             zinc_utils::cfg_iter!(extended_trace[lblock_base..])
                 .map(|col| {
@@ -4198,7 +4383,6 @@ where
         for v in &lblock_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
         }
-        drop(_g_lb);
         drop(_g_lookup);
         let up_evals: Vec<BinaryFieldGF128> = uair_proof
             .column_evals_at_rstar
@@ -4221,25 +4405,16 @@ where
             })
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = uair_proof.hadamard_pair_evals.clone();
-        let pairs = binding_distinct_pairs(&coeffs);
-        let mut eta_pows = Vec::with_capacity(nf);
-        {
-            let mut acc = BinaryFieldGF128::one();
-            for _ in 0..nf {
-                eta_pows.push(acc);
-                acc = acc * eta;
-            }
-        }
-        for (pi, &(col, shift)) in pairs.iter().enumerate() {
+        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
             if col < num_pub_bin {
                 continue;
             }
             let mut down = BinaryFieldGF128::zero();
-            for f in 0..nf {
-                down = down + eta_pows[f] * binding_proof.limb_evals[pi][f];
+            for (ep, ev) in lk.eta_pows.iter().zip(&lk.binding.limb_evals[pi]) {
+                down = down + *ep * *ev;
             }
             pointed_shifts.push(PointedShiftClaim {
-                point: r_star.clone(),
+                point: lk.r_star.clone(),
                 shift,
                 source_col: lblock_base + (col - num_pub_bin),
             });
@@ -4301,10 +4476,10 @@ where
                 open: open_proof,
             },
             F2LookupAdderProof {
-                witness_tree,
-                mult_counts,
-                mult_counts_marginal,
-                binding: binding_proof,
+                witness_tree: lk.witness_tree,
+                mult_counts: lk.mult_counts,
+                mult_counts_marginal: lk.mult_counts_marginal,
+                binding: lk.binding,
                 lblock_evals_at_rstar,
             },
         ))
@@ -4319,11 +4494,11 @@ where
     /// family claims via the fold (their pointed-shift reductions land in
     /// `open_evals_at_r_0`); and the per-family `a′` consistency
     /// `w_f(a′) = Σ_g γ_open,g·F_{f,g}(r_0)` under the fresh `γ_open`
-    /// (re-derived from a transcript clone). `num_primary_columns` is the
+    /// (the open verify returns it). `num_primary_columns` is the
     /// plain trace width — carries are virtualized, nothing is appended.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-    pub fn verify_f2_full_with_lookup_adder_bound<IdealOverF, T: Transcript + Clone>(
-        transcript: &mut T,
+    pub fn verify_f2_full_with_lookup_adder_bound<IdealOverF>(
+        transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
         proof: &F2FullProof<D>,
         lookup_proof: &F2LookupAdderProof,
@@ -4342,14 +4517,7 @@ where
         IdealOverF: zinc_uair::ideal::Ideal
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
-        use crate::f2_lookup_binding::{
-            binding_distinct_pairs, family_proj_eval_pub, lookup_binding_coeffs,
-            lookup_binding_public_part, num_families, verify_lookup_binding,
-        };
         use zinc_poly::univariate::binary_gf128::gf128poly_project;
-
-        let nl = D / limb_bits;
-        let nf = num_families::<D>(limb_bits);
 
         // Step 0 + steps 2-4 (base pipeline, adders replaced by the lookup).
         Self::absorb_commitment(transcript, &proof.commitment);
@@ -4387,124 +4555,22 @@ where
             }
         }
 
-        // -- Lookup phase replay: γ, absorb the clear multiplicities of BOTH
-        //    tables (pre-δ: fixes the table polynomial before the challenge —
-        //    the SZ soundness requirement), δ, then the WITNESS product tree.
-        //    The table side is recomputed locally:
-        //    `∏_t (δ−fpT_t)^{m_t} · ∏_t (δ−fpT′_t)^{m′_t}` must equal the
-        //    witness tree's root (`T′` = the cout-marginalised, TAGGED table
-        //    the virtualized last limbs are looked up in). --
-        let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let table_fps = zinc_piop::lookup::add_lookup::add_table_fingerprints::<BinaryFieldGF128>(
-            &gamma_fp, limb_bits, &(),
-        );
-        let table_fps_marginal =
-            zinc_piop::lookup::add_lookup::add_table_fingerprints_marginal::<BinaryFieldGF128>(
-                &gamma_fp, limb_bits, &(),
-            );
-        if lookup_proof.mult_counts.len() != table_fps.len()
-            || lookup_proof.mult_counts_marginal.len() != table_fps_marginal.len()
-        {
-            return Err(F2FullVerifyError::LookupAdder("multiplicity count length mismatch"));
-        }
-        let mut mbuf = vec![
-            0u8;
-            <<BinaryFieldGF128 as Field>::Inner
-                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
-        ];
-        for &c in lookup_proof.mult_counts.iter().chain(&lookup_proof.mult_counts_marginal) {
-            if k_bits < 64 && c >= (1u64 << k_bits) {
-                return Err(F2FullVerifyError::LookupAdder("multiplicity exceeds k_bits"));
-            }
-            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut mbuf);
-        }
-        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-
-        // Witness tree, at the tensor-layout depth (rows + pair vars).
-        let pair_vars = (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
-        let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
+        // The shared lookup replay: γ / both tables' clear counts (cap +
+        // absorb, pre-δ) / δ / witness tree / two-table root equality /
+        // binding sumcheck / public family recompute / fresh η.
+        let lk = Self::verify_lookup_adder_bound_phase(
             transcript,
-            &lookup_proof.witness_tree,
-            num_vars + pair_vars,
-            &(),
-        )
-        .map_err(|_| F2FullVerifyError::LookupAdder("witness product tree rejected"))?;
-
-        // Table side: recompute the multiplicity-weighted product directly,
-        // over both tables.
-        let table_root = {
-            let mut acc = BinaryFieldGF128::one();
-            for (fp, &m) in table_fps
-                .iter()
-                .zip(&lookup_proof.mult_counts)
-                .chain(table_fps_marginal.iter().zip(&lookup_proof.mult_counts_marginal))
-            {
-                let mut base = delta + *fp; // δ − fp_t (char 2)
-                let mut mm = m;
-                while mm != 0 {
-                    if mm & 1 == 1 {
-                        acc *= &base;
-                    }
-                    base = base * base;
-                    mm >>= 1;
-                }
-            }
-            acc
-        };
-        if table_root != lookup_proof.witness_tree.root {
-            return Err(F2FullVerifyError::LookupAdder(
-                "grand-product mismatch: witness adds not contained in the add table",
-            ));
-        }
-        let gkr_bind = LookupWitnessClaim { r_w, eval_w };
-        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
-
-        // -- Binding sumcheck: eval_w + PubMLE(r_w) reduced to family evals at r★. --
-        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
-        let claimed_b = gkr_bind.eval_w
-            + lookup_binding_public_part::<D>(
-                adder_specs, num_vars, limb_bits, r_row, r_pair, &delta,
-            );
-        let r_star = verify_lookup_binding::<D>(
-            transcript,
-            &lookup_proof.binding,
-            &claimed_b,
+            lookup_proof,
             adder_specs,
-            &coeffs,
+            public_binary_trace,
             num_vars,
+            num_pub_bin,
             limb_bits,
-            r_row,
+            k_bits,
         )
-        .map_err(|_| F2FullVerifyError::LookupAdder("binding sumcheck rejected"))?;
+        .map_err(F2FullVerifyError::LookupAdder)?;
 
-        // -- PUBLIC columns' family claims: recompute directly. --
-        let pairs = binding_distinct_pairs(&coeffs);
-        for (pi, &(col, shift)) in pairs.iter().enumerate() {
-            if col >= num_pub_bin {
-                continue;
-            }
-            for f in 0..nf {
-                let computed = family_proj_eval_pub::<D>(
-                    public_binary_trace,
-                    col,
-                    shift,
-                    f,
-                    limb_bits,
-                    num_vars,
-                    &r_star,
-                );
-                if computed != lookup_proof.binding.limb_evals[pi][f] {
-                    return Err(F2FullVerifyError::LookupAdder(
-                        "public-column limb claim mismatch",
-                    ));
-                }
-            }
-        }
-
-        // -- η (fresh: the family evals are absorbed) + the combined-block
-        //    up-claims + the extended fold. --
-        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let eta_w = crate::f2_lookup_binding::eta_combined_weights::<D>(&eta, limb_bits);
+        // -- The combined-block up-claims + the extended fold. --
         if lookup_proof.lblock_evals_at_rstar.len() != num_wit {
             return Err(F2FullVerifyError::LookupAdder("L-block eval count mismatch"));
         }
@@ -4535,24 +4601,16 @@ where
             })
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = proof.uair.hadamard_pair_evals.clone();
-        let mut eta_pows = Vec::with_capacity(nf);
-        {
-            let mut acc = BinaryFieldGF128::one();
-            for _ in 0..nf {
-                eta_pows.push(acc);
-                acc = acc * eta;
-            }
-        }
-        for (pi, &(col, shift)) in pairs.iter().enumerate() {
+        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
             if col < num_pub_bin {
                 continue;
             }
             let mut down = BinaryFieldGF128::zero();
-            for f in 0..nf {
-                down = down + eta_pows[f] * lookup_proof.binding.limb_evals[pi][f];
+            for (ep, ev) in lk.eta_pows.iter().zip(&lookup_proof.binding.limb_evals[pi]) {
+                down = down + *ep * *ev;
             }
             pointed_shifts.push(PointedShiftClaim {
-                point: r_star.clone(),
+                point: lk.r_star.clone(),
                 shift,
                 source_col: lblock_base + (col - num_pub_bin),
             });
@@ -4608,8 +4666,7 @@ where
         )
         .map_err(F2FullVerifyError::MultipointEval)?;
 
-        // -- The open at r_0, with γ_open re-derived from a clone for the
-        //    per-family a′ consistency. --
+        // -- The open at r_0 (returns its batch γ). --
         let primary_evals_at_r_0 = &proof.open_evals_at_r_0[..num_primary_columns];
         let subclaim_at_r_0 = F2VerifierSubclaim {
             ic_evaluation_point: subclaim.ic_evaluation_point.clone(),
@@ -4620,8 +4677,7 @@ where
             hadamard_rstar: Vec::new(),
             hadamard_pairs: Vec::new(),
         };
-        let mut gamma_fork = transcript.clone();
-        Self::verify_f2_open_with_virtuals(
+        let gamma_open = Self::verify_f2_open_with_virtuals(
             transcript,
             pp,
             &proof.commitment,
@@ -4634,12 +4690,11 @@ where
         // The η-combined a′ consistency:
         // `proj(a′, W) == Σ_g γ_open,g·F^η_g(r_0)` with
         // `W = Σ_f η^f·w_f` (the same table the blocks were built from).
-        // γ_open is the open's first transcript draw; the combined blocks'
+        // γ_open is the open's batch challenge; the combined blocks'
         // r_0 evals were absorbed before it ⟹ fresh ⟹ SZ binds each g;
         // η (fresh post-binding-absorb) binds each family inside the
         // combination.
-        let gamma_open: Vec<BinaryFieldGF128> = gamma_fork.get_field_challenges(num_wit, &());
-        let lhs = gf128poly_project::<D>(&proof.open.lifted_claim, &eta_w);
+        let lhs = gf128poly_project::<D>(&proof.open.lifted_claim, &lk.eta_w);
         let mut rhs = BinaryFieldGF128::zero();
         for g in 0..num_wit {
             rhs += &(gamma_open[g] * proof.open_evals_at_r_0[lblock_base + g]);
@@ -4649,6 +4704,588 @@ where
                 "limb-family a' consistency failed",
             ));
         }
+
+        Ok(())
+    }
+
+    /// **The PRODUCTION-pipeline sound adder: oblong-GF8 discharge + the
+    /// η-batched lookup adder.** The 2 AND relations ride the GF(2⁸) oblong
+    /// zerocheck (sound ψ_z binding); the 12 adder relations ride the
+    /// grand-product lookup with virtualized carries — NOTHING is trusted
+    /// and nothing adder-specific is committed. Structure = the oblong
+    /// pipeline with the lookup phase spliced in after the α-UAIR and its
+    /// η-combined blocks appended to the SAME combined multipoint
+    /// (`[α-cols] ++ [z-cols] ++ [η-blocks]`), all bound by the single
+    /// γ-batched open: the z-cols via the ψ_z `a′` projection, the η-blocks
+    /// via the η-`a′` projection — two weight vectors against the same
+    /// opened bit-slice claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_f2_full_with_oblong_lookup_adder(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+        limb_bits: usize,
+        k_bits: usize,
+    ) -> Result<(F2OblongHadamardProof<D>, F2OblongLookupAdderProof), F2ProveError<U>> {
+        use zinc_poly::univariate::binary_gf128::project_column_with_powers;
+        use zinc_transcript::traits::ConstTranscribable;
+
+        let (hint, commitment) = {
+            let _g = zinc_utils::prof::scope("commit");
+            Self::commit_and_absorb_f2_trace_with_virtuals(
+                transcript,
+                pp,
+                &trace.binary_poly,
+                bit_op_specs,
+            )
+            .expect("F_2 commit should succeed for a well-shaped trace")
+        };
+
+        // -- Oblong AND-zerocheck discharge, ANDs ONLY (the adders ride the
+        //    lookup — `adder_parents` is empty, no trusted operands). --
+        let (oblong_proof, binding) = {
+            let _g = zinc_utils::prof::scope("discharge");
+            let (oblong_proof, oblong_point) =
+                crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8::<D, _>(
+                    transcript,
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    /* adders ride the lookup */ &[],
+                    num_vars,
+                );
+            let binding = {
+                let _gb = zinc_utils::prof::scope("discharge:binding");
+                crate::f2_oblong_hadamard::oblong_binding_data_gf8::<D>(
+                    &trace.binary_poly,
+                    hadamard_specs,
+                    &[],
+                    num_vars,
+                    &oblong_point,
+                )
+            };
+            (oblong_proof, binding)
+        };
+
+        // -- Main UAIR (α-only: empty fused-Hadamard specs). --
+        let (uair_proof, subclaim, projected_trace) = {
+            let _g = zinc_utils::prof::scope("uair");
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                &[],
+                &[],
+                num_vars,
+                project_scalar,
+            )?
+        };
+
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_wit = trace.binary_poly.len() - num_pub_bin;
+        let zero_inner = BinaryFieldGF128::zero().into_inner();
+
+        // -- The shared lookup phase: γ / clear m+m′ (pre-δ) / δ / leaves /
+        //    witness tree / binding sumcheck / fresh η / η-combined blocks. --
+        let _g_lookup = zinc_utils::prof::scope("lookup_adder");
+        let lk = Self::prove_lookup_adder_bound_phase(
+            transcript,
+            &trace.binary_poly,
+            adder_specs,
+            num_vars,
+            num_pub_bin,
+            limb_bits,
+            k_bits,
+        );
+        drop(_g_lookup);
+
+        // -- z-block: ψ_z projections of every WITNESS PRIMARY col (the ψ_z
+        //    binding rides the open's full-batch a′, so ALL witness cols are
+        //    needed). --
+        let witness_cols = &trace.binary_poly[num_pub_bin..];
+        let z_block_guard = zinc_utils::prof::scope("z_block");
+        let z_block: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
+            cfg_iter!(witness_cols)
+                .map(|col| {
+                    let proj =
+                        project_column_with_powers::<D>(&col.evaluations, &binding.lagrange_z);
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        proj.iter().map(|x| *x.inner()).collect(),
+                        zero_inner.clone(),
+                    )
+                })
+                .collect();
+        let z_up_evals: Vec<BinaryFieldGF128> = cfg_iter!(z_block)
+            .map(|col| {
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF128,
+                >>::evaluate_with_config(col.clone(), &subclaim.sumcheck_point, &())
+                .expect("z up-eval at r* should succeed")
+            })
+            .collect();
+        drop(z_block_guard);
+
+        // η-block r*-evals (the lookup sources' multipoint up-claims).
+        let lblock_evals_at_rstar: Vec<BinaryFieldGF128> = cfg_iter!(lk.blocks)
+            .map(|col| {
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF128,
+                >>::evaluate_with_config(col.clone(), &subclaim.sumcheck_point, &())
+                .expect("L-block eval at r* should succeed")
+            })
+            .collect();
+
+        // Absorb (z_up_evals, pair_evals, adder_parents=[], lblock r*-evals)
+        // before the multipoint challenges.
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &z_up_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &binding.pair_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &binding.adder_parents {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &lblock_evals_at_rstar {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- Combined multipoint trace: [α-cols] ++ [z-cols] ++ [η-blocks].
+        //    Pointed claims: the AND pairs at γ_word against the z-cols, then
+        //    ONE η-combined lookup claim per witness (col,Δ) pair at r★
+        //    against the η-blocks. --
+        let c = projected_trace.len();
+        let lblock_base = c + num_wit;
+        let mut trace_mles = projected_trace;
+        trace_mles.extend(z_block);
+        trace_mles.extend(lk.blocks);
+
+        let mut up_evals = uair_proof.column_evals_at_rstar.clone();
+        up_evals.extend_from_slice(&z_up_evals);
+        up_evals.extend_from_slice(&lblock_evals_at_rstar);
+
+        let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = binding
+            .pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: binding.gamma_word.clone(),
+                shift,
+                source_col: c + (col - num_pub_bin),
+            })
+            .collect();
+        let mut down_evals = binding.pair_evals.clone();
+        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
+            if col < num_pub_bin {
+                continue;
+            }
+            let mut down = BinaryFieldGF128::zero();
+            for (ep, ev) in lk.eta_pows.iter().zip(&lk.binding.limb_evals[pi]) {
+                down = down + *ep * *ev;
+            }
+            pointed_shifts.push(PointedShiftClaim {
+                point: lk.r_star.clone(),
+                shift,
+                source_col: lblock_base + (col - num_pub_bin),
+            });
+            down_evals.push(down);
+        }
+
+        let (mp_proof, mp_prover_state) = {
+            let _g = zinc_utils::prof::scope("multipoint_eval");
+            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol_with_pointed_shifts(
+                transcript,
+                &trace_mles,
+                &subclaim.sumcheck_point,
+                &up_evals,
+                &pointed_shifts,
+                &down_evals,
+                &(),
+            )
+            .map_err(F2ProveError::MultipointEval)?
+        };
+        let r_0 = mp_prover_state.eval_point;
+
+        // r_0 evals for the whole combined trace; split α / z / lookup and
+        // absorb in that order (mirrored by the verifier).
+        let open_evals_guard = zinc_utils::prof::scope("open_evals_r0");
+        let all_r0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(trace_mles)
+            .map(|col| {
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF128,
+                >>::evaluate_with_config(col, &r_0, &())
+                .expect("MLE evaluation at r_0 should succeed")
+            })
+            .collect();
+        drop(open_evals_guard);
+        let (alpha_r0_evals, rest) = all_r0.split_at(c);
+        let (z_r0_evals, lblock_evals_at_r0) = rest.split_at(num_wit);
+        let alpha_r0_evals = alpha_r0_evals.to_vec();
+        let z_r0_evals = z_r0_evals.to_vec();
+        let lblock_evals_at_r0 = lblock_evals_at_r0.to_vec();
+        for v in alpha_r0_evals
+            .iter()
+            .chain(&z_r0_evals)
+            .chain(&lblock_evals_at_r0)
+        {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- γ-batched open over the witness primary slice at r_0. --
+        let open_proof = {
+            let _g = zinc_utils::prof::scope("open");
+            Self::prove_f2_open(
+                transcript,
+                pp,
+                &hint,
+                &trace.binary_poly[num_pub_bin..],
+                &r_0,
+                &subclaim.alpha,
+                num_column_openings,
+            )
+        };
+
+        Ok((
+            F2OblongHadamardProof {
+                commitment,
+                uair: uair_proof,
+                multipoint_eval: mp_proof,
+                alpha_r0_evals,
+                z_up_evals,
+                z_r0_evals,
+                pair_evals: binding.pair_evals,
+                open: open_proof,
+                oblong: oblong_proof,
+                adder_parents: binding.adder_parents,
+            },
+            F2OblongLookupAdderProof {
+                lookup: F2LookupAdderProof {
+                    witness_tree: lk.witness_tree,
+                    mult_counts: lk.mult_counts,
+                    mult_counts_marginal: lk.mult_counts_marginal,
+                    binding: lk.binding,
+                    lblock_evals_at_rstar,
+                },
+                lblock_evals_at_r0,
+            },
+        ))
+    }
+
+    /// Verifier for [`Self::prove_f2_full_with_oblong_lookup_adder`]: the
+    /// oblong pipeline checks (AND-only zerocheck + ψ_z binding + tie) PLUS
+    /// the lookup-adder checks (two-table root, binding sumcheck, public
+    /// family recompute, the η-combined fold claims, and the η-`a′`
+    /// consistency) — both `a′` projections read the same single open.
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+    pub fn verify_f2_full_with_oblong_lookup_adder<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2OblongHadamardProof<D>,
+        lookup_proof: &F2OblongLookupAdderProof,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        num_vars: usize,
+        num_primary_columns: usize,
+        limb_bits: usize,
+        k_bits: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
+    {
+        use zinc_poly::univariate::binary_gf128::gf128poly_project;
+        use zinc_transcript::traits::ConstTranscribable;
+
+        // Step 0: absorb commitment + public cols (mirror the prover).
+        Self::absorb_commitment(transcript, &proof.commitment);
+        crate::absorb_public_columns(transcript, public_binary_trace);
+
+        // -- Oblong zerocheck verify, ANDs ONLY (k excludes the adders; the
+        //    proof must carry no trusted adder parents). --
+        if !proof.adder_parents.is_empty() {
+            return Err(F2FullVerifyError::LookupAdder(
+                "adder parents must be empty — the adders ride the lookup",
+            ));
+        }
+        let k = hadamard_specs.len();
+        let out = crate::f2_oblong_hadamard::verify_oblong_zerocheck_gf8::<D, _>(
+            transcript,
+            &proof.oblong,
+            k,
+            num_vars,
+        )
+        .map_err(F2FullVerifyError::Oblong)?;
+        let (lagrange_z, gamma_word, oblong_pairs) =
+            crate::f2_oblong_hadamard::oblong_verifier_binding_gf8::<D>(
+                hadamard_specs,
+                num_vars,
+                &out.eval_point,
+            );
+
+        // -- Main UAIR verify (α-only) + public column binding at r*. --
+        let subclaim = Self::verify_f2_uair_with_groups(
+            transcript,
+            &proof.uair,
+            virtual_specs,
+            &[],
+            &[],
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+        )
+        .map_err(F2FullVerifyError::Uair)?;
+
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_wit = num_primary_columns - num_pub_bin;
+        if num_pub_bin > 0 {
+            let computed = recompute_public_col_evals_at::<D>(
+                public_binary_trace,
+                &subclaim.alpha,
+                &subclaim.sumcheck_point,
+            );
+            for (g, &computed) in computed.iter().enumerate() {
+                let claimed = subclaim.primary_column_evals[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatch {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // -- The shared lookup replay (γ / m+m′ / δ / tree / two-table root /
+        //    binding sumcheck / public family recompute / fresh η). --
+        let lk = Self::verify_lookup_adder_bound_phase(
+            transcript,
+            &lookup_proof.lookup,
+            adder_specs,
+            public_binary_trace,
+            num_vars,
+            num_pub_bin,
+            limb_bits,
+            k_bits,
+        )
+        .map_err(F2FullVerifyError::LookupAdder)?;
+
+        // Shape checks on the per-witness-col eval segments.
+        if proof.z_up_evals.len() != num_wit
+            || proof.z_r0_evals.len() != num_wit
+            || lookup_proof.lookup.lblock_evals_at_rstar.len() != num_wit
+            || lookup_proof.lblock_evals_at_r0.len() != num_wit
+        {
+            return Err(F2FullVerifyError::LookupAdder("per-column eval count mismatch"));
+        }
+
+        // Absorb (z_up_evals, pair_evals, adder_parents=[], lblock r*-evals)
+        // before the multipoint challenges — mirror the prover.
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &proof.z_up_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &proof.pair_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &proof.adder_parents {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &lookup_proof.lookup.lblock_evals_at_rstar {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- Multipoint verify: ups = α ++ z ++ η-blocks; claims = the AND
+        //    pairs at γ_word (downs = pair_evals) ++ the η-combined lookup
+        //    claims at r★ (downs recombined from the shipped family evals). --
+        let c = proof.uair.column_evals_at_rstar.len();
+        let lblock_base = c + num_wit;
+        let mut up_evals = proof.uair.column_evals_at_rstar.clone();
+        up_evals.extend_from_slice(&proof.z_up_evals);
+        up_evals.extend_from_slice(&lookup_proof.lookup.lblock_evals_at_rstar);
+
+        let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = oblong_pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: gamma_word.clone(),
+                shift,
+                source_col: c + (col - num_pub_bin),
+            })
+            .collect();
+        let mut down_evals = proof.pair_evals.clone();
+        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
+            if col < num_pub_bin {
+                continue;
+            }
+            let mut down = BinaryFieldGF128::zero();
+            for (ep, ev) in lk.eta_pows.iter().zip(&lookup_proof.lookup.binding.limb_evals[pi]) {
+                down = down + *ep * *ev;
+            }
+            pointed_shifts.push(PointedShiftClaim {
+                point: lk.r_star.clone(),
+                shift,
+                source_col: lblock_base + (col - num_pub_bin),
+            });
+            down_evals.push(down);
+        }
+        let sources: Vec<usize> = pointed_shifts.iter().map(|p| p.source_col).collect();
+
+        let mp_subclaim =
+            MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol_with_pointed_shifts(
+                transcript,
+                proof.multipoint_eval.clone(),
+                &subclaim.sumcheck_point,
+                &up_evals,
+                &pointed_shifts,
+                &down_evals,
+                num_vars,
+                &(),
+            )
+            .map_err(F2FullVerifyError::MultipointEval)?;
+        let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+        // Absorb r_0 evals (α, z, lookup) — mirror the prover.
+        for v in proof
+            .alpha_r0_evals
+            .iter()
+            .chain(&proof.z_r0_evals)
+            .chain(&lookup_proof.lblock_evals_at_r0)
+        {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        if proof.alpha_r0_evals.len() != c {
+            return Err(F2FullVerifyError::OpenEvalsLengthMismatch {
+                got: proof.alpha_r0_evals.len(),
+                expected: c,
+            });
+        }
+
+        // Public col MLE evals at r_0.
+        if num_pub_bin > 0 {
+            let computed =
+                recompute_public_col_evals_at::<D>(public_binary_trace, &subclaim.alpha, &r_0);
+            for (g, &computed) in computed.iter().enumerate() {
+                let claimed = proof.alpha_r0_evals[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatchAtR0 {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // XOR-virtual cols at r_0: derive + check.
+        let (primary_evals_at_r_0, virtual_evals_from_proof) =
+            proof.alpha_r0_evals.split_at(num_primary_columns);
+        let virtual_evals_derived = derive_f2_virtual_evals_at(primary_evals_at_r_0, virtual_specs);
+        for (vk, (claimed, derived)) in virtual_evals_from_proof
+            .iter()
+            .zip(virtual_evals_derived.iter())
+            .enumerate()
+        {
+            if claimed != derived {
+                return Err(F2FullVerifyError::VirtualColumnEvalMismatchAtR0 {
+                    virtual_idx: vk,
+                    derived: *derived,
+                    claimed: *claimed,
+                });
+            }
+        }
+
+        // Finalise the multipoint check against the full combined r_0 evals.
+        let mut combined_r0 = proof.alpha_r0_evals.clone();
+        combined_r0.extend_from_slice(&proof.z_r0_evals);
+        combined_r0.extend_from_slice(&lookup_proof.lblock_evals_at_r0);
+        MultipointEval::<BinaryFieldGF128>::verify_subclaim_pointed(
+            &mp_subclaim,
+            &combined_r0,
+            &sources,
+            &(),
+        )
+        .map_err(F2FullVerifyError::MultipointEval)?;
+
+        // -- γ-batched open at r_0 (returns its batch γ). --
+        let subclaim_at_r_0 = F2VerifierSubclaim {
+            ic_evaluation_point: subclaim.ic_evaluation_point.clone(),
+            alpha: subclaim.alpha,
+            sumcheck_point: r_0,
+            primary_column_evals: primary_evals_at_r_0.to_vec(),
+            virtual_column_evals: virtual_evals_derived,
+            hadamard_rstar: Vec::new(),
+            hadamard_pairs: Vec::new(),
+        };
+        let gamma = Self::verify_f2_open_with_virtuals(
+            transcript,
+            pp,
+            &proof.commitment,
+            &proof.open,
+            &subclaim_at_r_0,
+            bit_op_specs,
+        )
+        .map_err(F2FullVerifyError::Open)?;
+
+        // -- ψ_z binding: ψ_z(a′) == Σ_g γ_g·z_r0_evals[g]. --
+        let psi_z = gf128poly_project::<D>(&proof.open.lifted_claim, &lagrange_z);
+        let mut expected_z = BinaryFieldGF128::zero();
+        for (g, gamma_g) in gamma.iter().enumerate() {
+            let mut term = *gamma_g;
+            term *= &proof.z_r0_evals[g];
+            expected_z += &term;
+        }
+        if psi_z != expected_z {
+            return Err(F2FullVerifyError::PsiZBinding {
+                computed: psi_z,
+                expected: expected_z,
+            });
+        }
+
+        // -- The η-combined a′ consistency for the lookup blocks:
+        //    proj(a′, W) == Σ_g γ_g·F^η_g(r_0) — the same opened a′, a
+        //    second weight vector. --
+        let lhs = gf128poly_project::<D>(&proof.open.lifted_claim, &lk.eta_w);
+        let mut rhs = BinaryFieldGF128::zero();
+        for (g, gamma_g) in gamma.iter().enumerate() {
+            rhs += &(*gamma_g * lookup_proof.lblock_evals_at_r0[g]);
+        }
+        if lhs != rhs {
+            return Err(F2FullVerifyError::LookupAdder(
+                "limb-family a' consistency failed",
+            ));
+        }
+
+        // -- ψ_z tie: AND parents from the (now-bound) pair-evals only —
+        //    no trusted adder parents on this path. --
+        crate::f2_oblong_hadamard::oblong_tie_from_bound(
+            &out,
+            hadamard_specs,
+            &[],
+            num_vars,
+            &oblong_pairs,
+            &lagrange_z,
+            &proof.pair_evals,
+            &proof.adder_parents,
+        )
+        .map_err(F2FullVerifyError::Oblong)?;
 
         Ok(())
     }
@@ -5330,11 +5967,51 @@ pub struct F2LookupAdderProof {
     pub lblock_evals_at_rstar: Vec<BinaryFieldGF128>,
 }
 
+/// Companion proof of the **oblong** lookup-adder path
+/// ([`ZincPlusPiopF2::prove_f2_full_with_oblong_lookup_adder`]): the shared
+/// lookup data plus the η-combined blocks' `r_0` evals — on the monomial
+/// path those ride `open_evals_at_r_0`, but the oblong proof keeps its `r_0`
+/// evals segmented (α / z / lookup), so the lookup tail ships here.
+#[derive(Clone, Debug)]
+pub struct F2OblongLookupAdderProof {
+    pub lookup: F2LookupAdderProof,
+    /// `F^η_g(r_0)` per witness col `g` — the verifier's single η-`a′`
+    /// consistency equation reads these (absorbed pre-`γ_open`).
+    pub lblock_evals_at_r0: Vec<BinaryFieldGF128>,
+}
+
 /// The witness tree's output claim: leaf-MLE eval `eval_w` at the GKR
 /// descent point `r_w` (split by the binding as `(r_row, r_pair)`).
 struct LookupWitnessClaim {
     r_w: Vec<BinaryFieldGF128>,
     eval_w: BinaryFieldGF128,
+}
+
+/// Prover output of the shared η-batched lookup-adder phase
+/// (`prove_lookup_adder_bound_phase`): the proof pieces plus everything the
+/// caller's fold wiring needs (the η-combined blocks, the claim point `r★`,
+/// the η powers for the down-evals, and the distinct binding `(col, Δ)`
+/// pairs).
+struct LookupAdderProverPhase {
+    witness_tree: zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>,
+    mult_counts: Vec<u64>,
+    mult_counts_marginal: Vec<u64>,
+    binding: crate::f2_lookup_binding::LookupBindingProof,
+    r_star: Vec<BinaryFieldGF128>,
+    eta_pows: Vec<BinaryFieldGF128>,
+    pairs: Vec<(usize, usize)>,
+    blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>>,
+}
+
+/// Verifier output of the shared lookup-adder phase
+/// (`verify_lookup_adder_bound_phase`): the claim point `r★`, the fused
+/// η-weight table `W` (for the single `a′` consistency equation), the η
+/// powers (for the claim down-evals), and the distinct binding pairs.
+struct LookupAdderVerifierPhase {
+    r_star: Vec<BinaryFieldGF128>,
+    eta_w: Vec<BinaryFieldGF128>,
+    eta_pows: Vec<BinaryFieldGF128>,
+    pairs: Vec<(usize, usize)>,
 }
 
 /// Proof of an F_2 statement with a **sound oblong-Hadamard discharge**: the
@@ -8235,10 +8912,7 @@ mod tests {
             .expect("bound lookup-adder prove should succeed");
 
         let mut vt = Blake3Transcript::new();
-        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-            Sha256F2Ideal,
-            _,
-        >(
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
             &mut vt,
             &pp,
             &base,
@@ -8269,10 +8943,7 @@ mod tests {
             counts[hot] += 1;
             let mut vtm = Blake3Transcript::new();
             assert!(
-                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-                    Sha256F2Ideal,
-                    _,
-                >(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
                     &mut vtm,
                     &pp,
                     &base,
@@ -8299,10 +8970,7 @@ mod tests {
         bad.binding.limb_evals[0][0] = bad.binding.limb_evals[0][0] + BinaryFieldGF128::one();
         let mut vt2 = Blake3Transcript::new();
         assert!(
-            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-                Sha256F2Ideal,
-                _,
-            >(
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
                 &mut vt2,
                 &pp,
                 &base,
@@ -8397,10 +9065,7 @@ mod tests {
         if let Ok((base, lookup)) = proved {
             let mut vt = Blake3Transcript::new();
             assert!(
-                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-                    Sha256F2Ideal,
-                    _,
-                >(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
                     &mut vt,
                     &pp,
                     &base,
@@ -8519,10 +9184,7 @@ mod tests {
         if let Ok((base, lookup)) = proved {
             let mut vt = Blake3Transcript::new();
             assert!(
-                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-                    Sha256F2Ideal,
-                    _,
-                >(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
                     &mut vt,
                     &pp,
                     &base,
@@ -8540,6 +9202,324 @@ mod tests {
                 )
                 .is_err(),
                 "a dropped carry must be rejected (the marginal tag's e2e canary)"
+            );
+        }
+    }
+
+    /// **The PRODUCTION-pipeline sound adder, end-to-end**: oblong-GF8
+    /// discharge for the 2 ANDs + the η-batched virtualized-carry lookup
+    /// adder for the 12 adds — nothing trusted, nothing adder-specific
+    /// committed. Honest roundtrip + tamper arms: lying multiplicities
+    /// (either table), a tampered family eval, a tampered η-block r_0 eval
+    /// (the a′ consistency's input), and non-empty adder parents (the
+    /// trusted-operand channel must stay closed on this path).
+    #[test]
+    fn sha256_f2_oblong_lookup_adder_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4;
+        const KBITS: usize = 16;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+
+        let mut pt = Blake3Transcript::new();
+        let (base, lookup) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_lookup_adder(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+                LB,
+                KBITS,
+            )
+            .expect("oblong lookup-adder prove should succeed");
+        assert!(
+            base.adder_parents.is_empty(),
+            "no trusted adder operands may ship on this path"
+        );
+
+        let verify = |base: &_, lookup: &_| -> Result<(), _> {
+            let mut vt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_lookup_adder::<
+                Sha256F2Ideal,
+            >(
+                &mut vt,
+                &pp,
+                base,
+                lookup,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                &trace.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                LB,
+                KBITS,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+        };
+
+        verify(&base, &lookup).expect("honest oblong lookup-adder proof must verify");
+
+        // Lying multiplicities, either table.
+        for marginal in [false, true] {
+            let mut bad = lookup.clone();
+            let counts = if marginal {
+                &mut bad.lookup.mult_counts_marginal
+            } else {
+                &mut bad.lookup.mult_counts
+            };
+            let hot = counts.iter().position(|&c| c > 0).expect("some table row is used");
+            counts[hot] += 1;
+            assert!(
+                verify(&base, &bad).is_err(),
+                "lying multiplicities (marginal={marginal}) must be rejected"
+            );
+        }
+
+        // A tampered family eval (the binding recombination / fold catches it).
+        let mut bad = lookup.clone();
+        bad.lookup.binding.limb_evals[0][0] =
+            bad.lookup.binding.limb_evals[0][0] + BinaryFieldGF128::one();
+        assert!(verify(&base, &bad).is_err(), "a tampered family eval must be rejected");
+
+        // A tampered η-block r_0 eval (the η-a′ consistency catches it).
+        let mut bad = lookup.clone();
+        bad.lblock_evals_at_r0[0] = bad.lblock_evals_at_r0[0] + BinaryFieldGF128::one();
+        assert!(
+            verify(&base, &bad).is_err(),
+            "a tampered η-block r_0 eval must be rejected"
+        );
+
+        // Smuggled trusted adder parents must be rejected outright.
+        let mut bad_base = base.clone();
+        bad_base.adder_parents = vec![BinaryFieldGF128::one(); 3];
+        assert!(
+            verify(&bad_base, &lookup).is_err(),
+            "non-empty adder parents must be rejected on the lookup path"
+        );
+    }
+
+    /// A WRONG SUM (non-LSB bit) is rejected by the PRODUCTION oblong +
+    /// lookup pipeline — the oblong twin of
+    /// `sha256_f2_lookup_adder_rejects_wrong_sum`.
+    #[test]
+    fn sha256_f2_oblong_lookup_adder_rejects_wrong_sum() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4;
+        const KBITS: usize = 16;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let mut trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+
+        // Corrupt bit 5 of C7's add result (w_t2, Δ=0) at its first active row.
+        let spec = &adder_specs[7];
+        let r = spec.active_rows.iter().position(|&a| a).expect("C7 has active rows");
+        {
+            let cols_mut = trace.binary_poly.to_mut();
+            let cell = &cols_mut[spec.t.col].evaluations[r + spec.t.row_shift];
+            let corrupted = crate::f2_hadamard::cell_from_mask::<D>(
+                crate::f2_hadamard::cell_mask::<D>(cell) ^ (1 << 5),
+            );
+            cols_mut[spec.t.col].evaluations[r + spec.t.row_shift] = corrupted;
+        }
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let mut pt = Blake3Transcript::new();
+        let proved = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_lookup_adder(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+            LB,
+            KBITS,
+        );
+        if let Ok((base, lookup)) = proved {
+            let mut vt = Blake3Transcript::new();
+            assert!(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_lookup_adder::<
+                    Sha256F2Ideal,
+                >(
+                    &mut vt,
+                    &pp,
+                    &base,
+                    &lookup,
+                    &[],
+                    &[],
+                    &and_specs,
+                    &adder_specs,
+                    &trace.binary_poly[..cols::NUM_BIN_PUB],
+                    num_vars,
+                    cols::NUM_BIN,
+                    LB,
+                    KBITS,
+                    |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+                )
+                .is_err(),
+                "a wrong add sum must be rejected by the oblong lookup adder"
+            );
+        }
+    }
+
+    /// The dropped-carry attack is rejected by the PRODUCTION oblong +
+    /// lookup pipeline — the oblong twin of
+    /// `sha256_f2_lookup_adder_rejects_dropped_carry` (the marginal tag's
+    /// e2e canary on this path).
+    #[test]
+    fn sha256_f2_oblong_lookup_adder_rejects_dropped_carry() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_piop::lookup::add_lookup::{decompose_add, num_limbs};
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4;
+        const KBITS: usize = 16;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        let n = poly_size;
+
+        let mut rng_local = rng();
+        let mut trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+
+        let spec = &adder_specs[7];
+        let nl = num_limbs(LB);
+        let mut corrupted = false;
+        'rows: for r in 0..n {
+            if !spec.active_rows.get(r).copied().unwrap_or(false) {
+                continue;
+            }
+            let cell = |term: &crate::f2_hadamard::F2OperandTerm| -> u32 {
+                match r.checked_add(term.row_shift).filter(|&i| i < n) {
+                    Some(i) => crate::f2_hadamard::cell_mask::<D>(
+                        &trace.binary_poly[term.col].evaluations[i],
+                    ) as u32,
+                    None => 0,
+                }
+            };
+            let (xv, yv, tv) = (cell(&spec.x), cell(&spec.y), cell(&spec.t));
+            let (_, carries) = decompose_add(xv, yv, tv, 0, LB);
+            for j in 0..nl - 1 {
+                if carries[j] == 1 {
+                    let t_dropped = tv.wrapping_sub(1 << (LB * (j + 1)));
+                    let cols_mut = trace.binary_poly.to_mut();
+                    cols_mut[spec.t.col].evaluations[r + spec.t.row_shift] =
+                        crate::f2_hadamard::cell_from_mask::<D>(u64::from(t_dropped));
+                    corrupted = true;
+                    break 'rows;
+                }
+            }
+        }
+        assert!(corrupted, "random trace must have a carry at some C7 boundary");
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let mut pt = Blake3Transcript::new();
+        let proved = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_lookup_adder(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+            LB,
+            KBITS,
+        );
+        if let Ok((base, lookup)) = proved {
+            let mut vt = Blake3Transcript::new();
+            assert!(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_lookup_adder::<
+                    Sha256F2Ideal,
+                >(
+                    &mut vt,
+                    &pp,
+                    &base,
+                    &lookup,
+                    &[],
+                    &[],
+                    &and_specs,
+                    &adder_specs,
+                    &trace.binary_poly[..cols::NUM_BIN_PUB],
+                    num_vars,
+                    cols::NUM_BIN,
+                    LB,
+                    KBITS,
+                    |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+                )
+                .is_err(),
+                "a dropped carry must be rejected by the oblong lookup adder"
             );
         }
     }
@@ -8667,6 +9647,27 @@ mod tests {
             .expect("arm C prove");
         });
 
+        // Arm D: the PRODUCTION pipeline made SOUND — oblong-GF8 for the 2
+        // ANDs + the η-batched virtualized-carry lookup for the 12 adders.
+        time_runs("D  Oblong-GF8 + LookupAdder (SOUND, production pipeline) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_lookup_adder(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+                LB,
+                KBITS,
+            )
+            .expect("arm D prove");
+        });
+
         // Verifier times (once each).
         let mut pt = Blake3Transcript::new();
         let proof_a = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
@@ -8719,10 +9720,7 @@ mod tests {
             .expect("prove B");
         let t0 = Instant::now();
         let mut vt = Blake3Transcript::new();
-        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
-            Sha256F2Ideal,
-            _,
-        >(
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<Sha256F2Ideal>(
             &mut vt,
             &pp,
             &base,
@@ -8740,6 +9738,46 @@ mod tests {
         )
         .expect("verify B");
         eprintln!("B  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+
+        let mut pt = Blake3Transcript::new();
+        let (base_d, lookup_d) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_lookup_adder(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+                LB,
+                KBITS,
+            )
+            .expect("prove D");
+        let t0 = Instant::now();
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_oblong_lookup_adder::<
+            Sha256F2Ideal,
+        >(
+            &mut vt,
+            &pp,
+            &base_d,
+            &lookup_d,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            LB,
+            KBITS,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify D");
+        eprintln!("D  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     }
 
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
