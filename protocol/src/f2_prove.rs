@@ -4125,7 +4125,9 @@ where
 
         // -- The witness FOREST: one product tree per relation chunk of the
         //    binary decomposition (12 → [0..8), [8..12) — exact powers of
-        //    two of pair blocks, ZERO padding). --
+        //    two of pair blocks, ZERO padding), with same-index layers
+        //    BATCHED into one multi-group sumcheck per layer under a fresh
+        //    per-layer ρ. --
         let nl = D / limb_bits;
         let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
         let mut chunk_leaves: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
@@ -4134,15 +4136,12 @@ where
         }
         chunk_leaves.push(wl);
         chunk_leaves.reverse();
-        let mut witness_trees = Vec::with_capacity(chunks.len());
-        let mut tree_points: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
-        for leaves_t in chunk_leaves {
+        let (witness_forest, tree_claims) = {
             let _g = zinc_utils::prof::scope("lookup:gkr_tree");
-            let (tree, point, _eval) =
-                zinc_piop::lookup::gkr_product::prove_product_tree(transcript, leaves_t, &());
-            witness_trees.push(tree);
-            tree_points.push(point);
-        }
+            zinc_piop::lookup::gkr_product::prove_product_forest(transcript, chunk_leaves, &())
+        };
+        let tree_points: Vec<Vec<BinaryFieldGF128>> =
+            tree_claims.into_iter().map(|(point, _eval)| point).collect();
 
         // μ (fresh — every tree's proof is absorbed) combines the trees'
         // leaf claims into ONE binding sumcheck: tree t's coefficients are
@@ -4253,7 +4252,7 @@ where
             .collect();
 
         LookupAdderProverPhase {
-            witness_trees,
+            witness_forest,
             mult_counts,
             mult_counts_marginal,
             binding,
@@ -4348,27 +4347,28 @@ where
         }
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
 
-        // The witness FOREST: verify each tree at its tensor-layout depth
-        // (rows + that tree's pair vars; the chunks are exact powers of two
-        // of pair blocks — zero padding).
+        // The witness FOREST: batched verify of all trees at their
+        // tensor-layout depths (rows + that tree's pair vars; the chunks
+        // are exact powers of two of pair blocks -- zero padding; layers
+        // merged under a fresh per-layer batching challenge).
         let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
-        if lookup_proof.witness_trees.len() != chunks.len() {
+        if lookup_proof.witness_forest.roots.len() != chunks.len() {
             return Err("witness tree count mismatch");
         }
-        let mut tree_points: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
-        let mut tree_evals: Vec<BinaryFieldGF128> = Vec::with_capacity(chunks.len());
-        for (t, &(lo, hi)) in chunks.iter().enumerate() {
-            let pair_vars = ((hi - lo) * nl).trailing_zeros() as usize;
-            let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
-                transcript,
-                &lookup_proof.witness_trees[t],
-                num_vars + pair_vars,
-                &(),
-            )
-            .map_err(|_| "witness product tree rejected")?;
-            tree_points.push(r_w);
-            tree_evals.push(eval_w);
-        }
+        let depths: Vec<usize> = chunks
+            .iter()
+            .map(|&(lo, hi)| num_vars + ((hi - lo) * nl).trailing_zeros() as usize)
+            .collect();
+        let tree_claims = zinc_piop::lookup::gkr_product::verify_product_forest(
+            transcript,
+            &lookup_proof.witness_forest,
+            &depths,
+            &(),
+        )
+        .map_err(|_| "witness product forest rejected")?;
+        let (tree_points, tree_evals): (Vec<Vec<BinaryFieldGF128>>, Vec<BinaryFieldGF128>) =
+            tree_claims.into_iter().unzip();
+
 
         // Table side: recompute the multiplicity-weighted product directly,
         // over both tables, against the PRODUCT of the forest's roots.
@@ -4392,9 +4392,10 @@ where
             acc
         };
         let forest_root = lookup_proof
-            .witness_trees
+            .witness_forest
+            .roots
             .iter()
-            .fold(BinaryFieldGF128::one(), |acc, t| acc * t.root);
+            .fold(BinaryFieldGF128::one(), |acc, root| acc * *root);
         if table_root != forest_root {
             return Err("grand-product mismatch: witness adds not contained in the add table");
         }
@@ -4691,7 +4692,7 @@ where
                 open: open_proof,
             },
             F2LookupAdderProof {
-                witness_trees: lk.witness_trees,
+                witness_forest: lk.witness_forest,
                 mult_counts: lk.mult_counts,
                 mult_counts_marginal: lk.mult_counts_marginal,
                 binding: lk.binding,
@@ -5217,7 +5218,7 @@ where
             },
             F2OblongLookupAdderProof {
                 lookup: F2LookupAdderProof {
-                    witness_trees: lk.witness_trees,
+                    witness_forest: lk.witness_forest,
                     mult_counts: lk.mult_counts,
                     mult_counts_marginal: lk.mult_counts_marginal,
                     binding: lk.binding,
@@ -6230,7 +6231,7 @@ pub struct F2LookupAdderProof {
     /// 8·nl and 4·nl pair blocks, zero padding); the table side is
     /// verifier-recomputed from the clear multiplicities below and checked
     /// against the PRODUCT of the roots.
-    pub witness_trees: Vec<zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>>,
+    pub witness_forest: zinc_piop::lookup::gkr_product::ProductForestProof<BinaryFieldGF128>,
     /// Per-table-row use counts of the full table `T` (limbs `0..nl−1`),
     /// shipped in the clear (the system is not ZK) and absorbed BEFORE δ —
     /// fixing the table-side polynomial pre-challenge, which is what makes
@@ -6274,7 +6275,7 @@ struct LookupWitnessClaim {
 /// the ν-combined per-Δ claim sources with their down-evals, and the claim
 /// point `r★`.
 struct LookupAdderProverPhase {
-    witness_trees: Vec<zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>>,
+    witness_forest: zinc_piop::lookup::gkr_product::ProductForestProof<BinaryFieldGF128>,
     mult_counts: Vec<u64>,
     mult_counts_marginal: Vec<u64>,
     binding: crate::f2_lookup_binding::LookupBindingProof,
@@ -9658,7 +9659,7 @@ mod tests {
 
         // The witness FOREST must have exactly one tree per relation chunk.
         let mut bad = lookup.clone();
-        bad.lookup.witness_trees.truncate(1);
+        bad.lookup.witness_forest.roots.truncate(1);
         assert!(
             verify(&base, &bad).is_err(),
             "a missing forest tree must be rejected"

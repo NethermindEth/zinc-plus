@@ -43,15 +43,20 @@ use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, inner_transparent_fiel
 use super::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use super::SumcheckProof;
 
-/// One eq-weighted group: contributes `eq(x; q)·Σ_i pairs[i].0(x)·pairs[i].1(x)`
-/// to the proven sum. All groups (and all pair vectors) must share the same
-/// number of variables `k = q.len()`, with `2^k`-length pair vectors.
+/// One eq-weighted group: contributes
+/// `scale·eq(x; q)·Σ_i pairs[i].0(x)·pairs[i].1(x)` to the proven sum. All
+/// groups (and all pair vectors) must share the same number of variables
+/// `k = q.len()`, with `2^k`-length pair vectors.
 pub struct EqInnerGroup<F> {
     /// The eq point of this group.
     pub q: Vec<F>,
     /// The `(L_i, R_i)` multilinear pairs (evaluation vectors, consumed —
     /// they become the fold buffers).
     pub pairs: Vec<(Vec<F>, Vec<F>)>,
+    /// Public scalar multiplying the whole group (a batching challenge in
+    /// the batched-forest GKR; `1` otherwise). Costs nothing: it seeds the
+    /// group's prefix scalar.
+    pub scale: F,
 }
 
 /// Per-group suffix tensors `V_j` (`j = 1..=k`), built back-to-front:
@@ -119,6 +124,7 @@ where
         groups.iter().map(|g| suffix_tensors(&g.q, field_cfg)).collect()
     };
     let qs: Vec<Vec<F>> = groups.iter().map(|g| g.q.clone()).collect();
+    let scales: Vec<F> = groups.iter().map(|g| g.scale.clone()).collect();
     // Per-group fold buffers.
     let mut bufs: Vec<Vec<(Vec<F>, Vec<F>)>> =
         groups.into_iter().map(|g| g.pairs).collect();
@@ -130,7 +136,7 @@ where
     transcript.absorb_random_field(&F::from_with_cfg(k as u64, field_cfg), &mut buf);
     transcript.absorb_random_field(&F::from_with_cfg(3u64, field_cfg), &mut buf);
 
-    let mut a_scalars = vec![one.clone(); num_groups];
+    let mut a_scalars = scales;
     let mut randomness: Vec<F> = Vec::with_capacity(k);
     let mut messages: Vec<ProverMsg<F>> = Vec::with_capacity(k);
     let mut claimed_sum = zero.clone();

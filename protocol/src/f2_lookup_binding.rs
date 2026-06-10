@@ -556,6 +556,7 @@ pub fn prove_lookup_binding<const D: usize>(
                 .zip(q_rows_of(g.coeffs))
                 .map(|(spec, q)| (mask_vec(spec, n), q))
                 .collect(),
+            scale: Gf::one(),
         })
         .collect();
     let (sumcheck, r_star, _final_evals) =
