@@ -7276,6 +7276,126 @@ mod tests {
         assert_eq!(lhs, rhs, "binding identity must hold on the tensor layout");
     }
 
+    /// **Task 4c-2: the binding sumcheck reduces the GKR leaf claim to
+    /// bit-slice evals.** On a real SHA trace (with the committed carry
+    /// columns appended): computes `eval_w = leafMLE(r_w)` directly, then
+    /// proves `B = eval_w + PubMLE(r_w)` with the degree-3 binding sumcheck
+    /// and verifies it — the verifier recombining `Q̃_a(r★)` from the shipped
+    /// bit-slice shifted evals with public weights. Also: a tampered bit eval
+    /// and a tampered claim must both be rejected. (The bit evals' own ψ_α
+    /// binding to the commitment is the next increment.)
+    #[test]
+    fn sha256_f2_lookup_binding_sumcheck_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_piop::lookup::add_lookup::num_limbs;
+        use zinc_poly::mle::MultilinearExtensionWithConfig;
+        use zinc_test_uair::{GenerateRandomTrace, Sha256F2Uair};
+
+        use crate::f2_lookup_binding::{
+            LookupBindingError, lookup_binding_public_part, lookup_binding_weights,
+            prove_lookup_binding, verify_lookup_binding,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        type Gf = BinaryFieldGF128;
+        const LB: usize = 4;
+
+        let num_vars = 9usize;
+        let n = 1usize << num_vars;
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let (_and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        let nl = num_limbs(LB);
+        let pair_vars =
+            (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
+
+        // Augment with the committed carry columns (as the prover does).
+        let carry_base = trace.binary_poly.len();
+        let carry_cols = ZincPlusPiopF2::<F2Types<D>, U, D>::sha_lookup_carry_columns(
+            &trace.binary_poly,
+            &adder_specs,
+            num_vars,
+            LB,
+        );
+        let mut cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> =
+            trace.binary_poly.to_vec();
+        cols.extend(carry_cols);
+
+        let gamma = Gf::from_words([0x1357_9bdf, 0x2468_ace0]);
+        let delta = Gf::from_words([0xfeed_f00d, 0x0bad_cafe]);
+        let (leaves, _fp_rows) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::sha_lookup_witness_leaves_tensor(
+                &cols, &adder_specs, num_vars, LB, &gamma, &delta,
+            );
+
+        // The GKR's would-be claim at an arbitrary point r_w.
+        let r_w: Vec<Gf> = (0..num_vars + pair_vars)
+            .map(|k| Gf::from_words([0xdead_beef ^ (k as u64) * 0x9e37_79b9, 0x1234 + k as u64]))
+            .collect();
+        let (r_row, r_pair) = r_w.split_at(num_vars);
+        let zero_inner = Gf::zero().into_inner();
+        let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars + pair_vars,
+            leaves.iter().map(|v| *v.inner()).collect(),
+            zero_inner,
+        );
+        let eval_w: Gf =
+            <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
+                leaf_mle, &r_w, &(),
+            )
+            .expect("leaf MLE eval");
+
+        // B = eval_w + PubMLE(r_w)  (char 2).
+        let pub_part = lookup_binding_public_part::<D>(
+            &adder_specs, num_vars, LB, r_row, r_pair, &delta,
+        );
+        let b = eval_w + pub_part;
+
+        let weights =
+            lookup_binding_weights::<D>(&adder_specs, carry_base, r_pair, &gamma, LB);
+
+        let mut pt = Blake3Transcript::new();
+        let (proof, _r_star) = prove_lookup_binding::<D>(
+            &mut pt, &cols, &adder_specs, &weights, num_vars, r_row,
+        );
+        assert_eq!(proof.sumcheck.claimed_sum, b, "sumcheck must prove exactly B");
+
+        let mut vt = Blake3Transcript::new();
+        verify_lookup_binding::<D>(
+            &mut vt, &proof, &b, &adder_specs, &weights, num_vars, r_row,
+        )
+        .expect("honest binding must verify");
+
+        // Tamper 1: a corrupted bit-slice eval must be rejected.
+        let mut bad = proof.clone();
+        bad.bit_evals[0][0] = bad.bit_evals[0][0] + Gf::one();
+        let mut vt2 = Blake3Transcript::new();
+        assert!(matches!(
+            verify_lookup_binding::<D>(
+                &mut vt2, &bad, &b, &adder_specs, &weights, num_vars, r_row,
+            ),
+            Err(LookupBindingError::FinalEvalMismatch)
+        ));
+
+        // Tamper 2: a wrong claim B must be rejected.
+        let mut vt3 = Blake3Transcript::new();
+        assert!(
+            verify_lookup_binding::<D>(
+                &mut vt3,
+                &proof,
+                &(b + Gf::one()),
+                &adder_specs,
+                &weights,
+                num_vars,
+                r_row,
+            )
+            .is_err()
+        );
+    }
+
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
     /// Keccak-f[1600] permutation: the θρπ rotation identities + the
     /// transition/boundary constraints (the UAIR's `constrain_general`, the
