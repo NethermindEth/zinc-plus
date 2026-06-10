@@ -100,7 +100,7 @@ cuts need the univariate-skip lever or a different multiset argument.
 | File | Contents |
 |---|---|
 | `piop/src/sumcheck/eq_factored.rs` | The **shared eq-factored sumcheck prover**: `prove_eq_inner_sumcheck` proves `Σ_x Σ_t eq(x;q_t)·Σ_i L_i·R_i` with every eq factored (per-group suffix tensors + prefix scalars, never materialised/folded; char-2 affine-flat fourth node, runtime-detected, in-pass fallback for prime fields), **byte-identical** to the generic `MLSumcheck` path (which remains the verifier everywhere). Callers: the GKR layers (1 group, 1 pair) and the lookup binding (1 group per forest tree, (mask, Q) pairs). |
-| `piop/src/lookup/gkr_product.rs` | GKR product-tree engine: `prove/verify_product_tree` (∏ leaves = root → leaf-MLE claim at a point); layer sumchecks via the shared eq-factored driver. Field-generic; tested at GF(2¹²⁸) AND a prime field. |
+| `piop/src/lookup/gkr_product.rs` | GKR product engine: **`prove/verify_product_forest`** (batched-forest GKR — same-index layers of all trees merged into one multi-group eq-factored sumcheck per layer under a fresh per-layer ρ, shared λ; `ProductForestProof`) + `prove/verify_product_tree` (single-tree thin wrappers, transcript-identical to the pre-forest form — the old tests are byte-identity guards). Field-generic; tested at GF(2¹²⁸) AND a prime field. |
 | `piop/src/lookup/gkr_lookup.rs` | Two-tree grand-product lookup (`prove/verify_lookup`). **Only the honest-first path uses it now**; the bound path uses the witness tree + clear multiplicities. Keep for reference or fold away. |
 | `piop/src/lookup/add_lookup.rs` | Public add table `T={(x,y,cin,s,cout)}` + the **marginalised `T′={(x,y,cin,s)}`** (`add_table_fingerprints[_marginal]`), `decompose_add` (honest chain — the honest-first path), **`decompose_add_zread`** (virtualized carries — the bound path), `fingerprint[_marginal]`, `marginal_tag` (= `emb(2)`), `multiplicities`. The z-read unit suite incl. the dropped-carry attack + its negative control. Parameterised by `limb_bits` (tests 4 ⇒ 2⁹ table; production 8 ⇒ 2¹⁷). |
 | `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`), now FOREST-aware: `relation_tree_chunks` (the binary decomposition), `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`, SCALED by the tree's μ-power), `BindingTreeGroup` + `prove/verify_lookup_binding` (one μ-combined degree-3 sumcheck over all trees via the eq-factored driver; `Q_a` rows from per-(relation,pair) precombined bit-weight tables — pure adds; family + mask evals via the **bit-bucket kit**: `eq_table_gf`, `family_proj_evals_bucketed`, `binding_distinct_pairs_grouped`), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W`; `family_weights` is the reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows`. Module doc has the math. |
@@ -226,15 +226,22 @@ bound path.
 
 ## 5. Roadmap (prioritized; designs already in the ledger)
 
-1. **Remaining prover spots** (both 2026-06-10 rounds done — machinery
-   203 → ~75, then binding/multipoint eq-factored + forest + ν-batched):
-   `gkr_tree` ~53 is the last big block and its cheap levers are EXHAUSTED
-   (eq-factored ✓, forest split measured ~neutral ✓, ILP unroll microbenched
-   1.3× but flat in situ and reverted ✓ — see the ledger). Further tree
-   cuts need the univariate-skip / packed-sumcheck lever (the ⭐ ledger
-   entry) or a different multiset argument. `binding` ~27 and `mp` ~18 are
-   near their structural floors; lookup self ~18 (counts absorb, transient
-   allocs) has a few ms via sparse counts + buffer reuse.
+1. **Remaining prover spots — and the tree's REAL constraint.** All cheap
+   AND structural levers on `gkr_tree` (~52 ms) are now exhausted AND
+   measured: eq-factored ✓, forest split ✓, batched-forest (merged layer
+   sumchecks, per-layer ρ) ✓, ILP unroll ✓ (reverted). **Decisive finding:
+   across three arrangements spanning a 25% leaf-count difference the tree
+   time is CONSTANT ≈ 52 ms — the floor at this size is NOT GF-mult
+   count.** Suspects: memory streaming (~300+ MB of layer/suffix/fold
+   traffic per prove), per-layer fold-buffer allocs (~100 MB of `to_vec`),
+   rayon imbalance on mid-size rounds. Any further tree work MUST start
+   with a memory/allocation profile (Instruments), not an op-count model —
+   three op-count predictions in a row measured ~zero. The design-pass
+   verdicts on the alternatives (univariate skip inapplicable — big-field
+   leaves, its pipeline target is the 6 ms discharge; fat-leaf/OMC/Quarks/
+   ℓ=16 all wash-or-worse) are in the ledger. `binding` ~27 and `mp` ~18
+   are near structural floors; lookup self ~18 has a few ms via sparse
+   counts + buffer reuse.
 2. **Verifier + proof size** (verify is ~28 ms, table-side dominated —
    now likely the best absolute-ms-per-effort target):
    derive `T′` fingerprints from `T`'s in one add/row
