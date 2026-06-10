@@ -270,13 +270,37 @@ impl BindingCoeffs {
     }
 }
 
-/// Build the per-relation coefficient maps.
+/// The relation chunks of the witness product **forest**: the greedy binary
+/// decomposition of the relation count (e.g. 12 → `[(0,8), (8,12)]`), so
+/// every tree spans `2^c · nl` pair blocks — an exact power of two with
+/// ZERO padding (`nl` is a power of two). Tree `t` covers relations
+/// `chunks[t].0 .. chunks[t].1` with LOCAL pair indexing.
+pub fn relation_tree_chunks(num_rel: usize) -> Vec<(usize, usize)> {
+    let mut chunks = Vec::new();
+    let mut off = 0usize;
+    let mut rem = num_rel;
+    while rem > 0 {
+        let c = 1usize << (usize::BITS - 1 - rem.leading_zeros());
+        chunks.push((off, off + c));
+        off += c;
+        rem -= c;
+    }
+    chunks
+}
+
+/// Build the per-relation coefficient maps for ONE tree's relation slice
+/// (`adder_specs` indexed locally — pair `a_local·nl + i` against the
+/// tree's own `r_pair`), scaled by `scale` (the tree's μ-power under the
+/// μ-combined binding; scales every term AND the tag constant, so the
+/// sumcheck's group contribution is `μ_t·G^t` with no explicit μ anywhere
+/// downstream).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn lookup_binding_coeffs<const D: usize>(
     adder_specs: &[F2AdderSpec],
     r_pair: &[Gf],
     gamma: &Gf,
     limb_bits: usize,
+    scale: &Gf,
 ) -> Vec<BindingCoeffs> {
     let nl = D / limb_bits;
     let g2 = *gamma * *gamma;
@@ -301,7 +325,7 @@ pub fn lookup_binding_coeffs<const D: usize>(
                 zread_ops.push((y2.col, y2.row_shift));
             }
             for i in 0..nl {
-                let eqp = eq_at_index(r_pair, a * nl + i);
+                let eqp = eq_at_index(r_pair, a * nl + i) * *scale;
                 acc.add(((spec.x.col, spec.x.row_shift), i), eqp);
                 acc.add(((spec.y.col, spec.y.row_shift), i), eqp * *gamma);
                 if let Some(y2) = &spec.y2 {
@@ -423,18 +447,46 @@ pub fn lookup_binding_public_part<const D: usize>(
 }
 
 
-/// Prover: one degree-3 sumcheck for `B = Σ_r eq(r_row,r)·Σ_a mask_a[r]·Q_a[r]`,
-/// then the family shifted evals at the sumcheck point `r★`.
+/// One tree of the (split) μ-combined binding sumcheck: the tree's relation
+/// slice, its μ-power-SCALED coefficient maps ([`lookup_binding_coeffs`]
+/// with `scale = μ^t`), and the tree's row point `r_row^t`. The sumcheck
+/// proves `Σ_r Σ_t eq(r_row^t, r)·Σ_{a∈t} mask_a[r]·Q_a[r]` =
+/// `Σ_t μ^t·(eval_w^t + PubMLE^t)`.
+pub struct BindingTreeGroup<'a> {
+    pub adder_specs: &'a [F2AdderSpec],
+    pub coeffs: &'a [BindingCoeffs],
+    pub r_row: &'a [Gf],
+}
+
+/// Distinct `(col, Δ)` pairs across all groups' coefficients, first-use
+/// order — the family-eval groups the prover ships once (shared across
+/// trees) and the fold binds.
+pub fn binding_distinct_pairs_grouped(groups: &[BindingTreeGroup]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for g in groups {
+        for per_rel in g.coeffs {
+            for ((key, _), _) in &per_rel.terms {
+                if !pairs.contains(key) {
+                    pairs.push(*key);
+                }
+            }
+        }
+    }
+    pairs
+}
+
+/// Prover: one degree-3 sumcheck for
+/// `B = Σ_r Σ_t eq(r_row^t, r)·Σ_{a∈t} mask_a[r]·Q_a[r]` (one group per
+/// witness tree; the μ-powers live inside the groups' coefficients), then
+/// the family shifted evals at the shared sumcheck point `r★`.
 /// Returns `(proof, r★)`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prove_lookup_binding<const D: usize>(
     transcript: &mut impl Transcript,
     cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    adder_specs: &[F2AdderSpec],
-    coeffs: &[BindingCoeffs],
+    groups: &[BindingTreeGroup],
     num_vars: usize,
     limb_bits: usize,
-    r_row: &[Gf],
 ) -> (LookupBindingProof, Vec<Gf>) {
     let n = 1usize << num_vars;
     let nl = D / limb_bits;
@@ -444,71 +496,75 @@ pub fn prove_lookup_binding<const D: usize>(
     // `W[p] = Σ_f coeff_f·w_f[p]` — so every row is pure adds over the
     // cell's set bits (the `eta_block_rows` trick with per-relation
     // weights); equal to the term-by-term form by linearity.
-    let q_rows: Vec<Vec<Gf>> = cfg_iter!(coeffs)
-        .map(|per_rel| {
-            let mut weights: Vec<((usize, usize), Vec<Gf>)> = Vec::new();
-            for (((col, shift), family), c) in &per_rel.terms {
-                let key = (*col, *shift);
-                let idx = match weights.iter().position(|(k, _)| *k == key) {
-                    Some(i) => i,
-                    None => {
-                        weights.push((key, vec![Gf::zero(); D]));
-                        weights.len() - 1
-                    }
-                };
-                let w = &mut weights[idx].1;
-                if *family < nl {
-                    for (b, slot) in
-                        w.iter_mut().skip(family * limb_bits).take(limb_bits).enumerate()
-                    {
-                        *slot = *slot + *c * x_pow(b);
-                    }
-                } else {
-                    let p = boundary_bit(*family, nl, limb_bits);
-                    w[p] = w[p] + *c;
-                }
-            }
-            let mut q = vec![per_rel.constant; n];
-            for ((col, shift), w) in &weights {
-                for (r, qr) in q.iter_mut().enumerate() {
-                    let mut m = match r.checked_add(*shift).filter(|&i| i < n) {
-                        Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[*col].evaluations[i]),
-                        None => 0,
+    let q_rows_of = |coeffs: &[BindingCoeffs]| -> Vec<Vec<Gf>> {
+        cfg_iter!(coeffs)
+            .map(|per_rel| {
+                let mut weights: Vec<((usize, usize), Vec<Gf>)> = Vec::new();
+                for (((col, shift), family), c) in &per_rel.terms {
+                    let key = (*col, *shift);
+                    let idx = match weights.iter().position(|(k, _)| *k == key) {
+                        Some(i) => i,
+                        None => {
+                            weights.push((key, vec![Gf::zero(); D]));
+                            weights.len() - 1
+                        }
                     };
-                    while m != 0 {
-                        let p = m.trailing_zeros() as usize;
-                        *qr = *qr + w[p];
-                        m &= m - 1;
+                    let w = &mut weights[idx].1;
+                    if *family < nl {
+                        for (b, slot) in
+                            w.iter_mut().skip(family * limb_bits).take(limb_bits).enumerate()
+                        {
+                            *slot = *slot + *c * x_pow(b);
+                        }
+                    } else {
+                        let p = boundary_bit(*family, nl, limb_bits);
+                        w[p] = w[p] + *c;
                     }
                 }
-            }
-            q
+                let mut q = vec![per_rel.constant; n];
+                for ((col, shift), w) in &weights {
+                    for (r, qr) in q.iter_mut().enumerate() {
+                        let mut m = match r.checked_add(*shift).filter(|&i| i < n) {
+                            Some(i) => {
+                                crate::f2_hadamard::cell_mask::<D>(&cols[*col].evaluations[i])
+                            }
+                            None => 0,
+                        };
+                        while m != 0 {
+                            let p = m.trailing_zeros() as usize;
+                            *qr = *qr + w[p];
+                            m &= m - 1;
+                        }
+                    }
+                }
+                q
+            })
+            .collect()
+    };
+
+    // Eq-factored prove — one driver group per tree, each with its own
+    // factored eq at the tree's r_row and its (mask, Q) pairs. Byte-
+    // identical to the materialised `[eq_1.., masks, Qs]` degree-3 form
+    // (which remains the verifier).
+    let driver_groups: Vec<zinc_piop::sumcheck::eq_factored::EqInnerGroup<Gf>> = groups
+        .iter()
+        .map(|g| zinc_piop::sumcheck::eq_factored::EqInnerGroup {
+            q: g.r_row.to_vec(),
+            pairs: g
+                .adder_specs
+                .iter()
+                .zip(q_rows_of(g.coeffs))
+                .map(|(spec, q)| (mask_vec(spec, n), q))
+                .collect(),
         })
         .collect();
-
-    // Eq-factored prove of `Σ_r eq(r_row, r)·Σ_a mask_a[r]·Q_a[r]`: one
-    // group at `r_row` with the 12 (mask, Q) pairs — byte-identical
-    // messages/transcript to the materialised `[eq, masks, Qs]` degree-3
-    // form (which remains the verifier), with eq never built as a
-    // multiplicand nor folded, and no Inner-MLE conversions.
-    let pairs_lr: Vec<(Vec<Gf>, Vec<Gf>)> = adder_specs
-        .iter()
-        .zip(q_rows)
-        .map(|(spec, q)| (mask_vec(spec, n), q))
-        .collect();
     let (sumcheck, r_star, _final_evals) =
-        zinc_piop::sumcheck::eq_factored::prove_eq_inner_sumcheck(
-            transcript,
-            vec![zinc_piop::sumcheck::eq_factored::EqInnerGroup {
-                q: r_row.to_vec(),
-                pairs: pairs_lr,
-            }],
-            &(),
-        );
+        zinc_piop::sumcheck::eq_factored::prove_eq_inner_sumcheck(transcript, driver_groups, &());
 
     // Family shifted evals at r★ per distinct (col, Δ) — all nf families
-    // from one add-only bucket pass per pair (`Σ_r eq·F_f = Σ_p w_f[p]·S_p`).
-    let pairs = binding_distinct_pairs(coeffs);
+    // from one add-only bucket pass per pair (`Σ_r eq·F_f = Σ_p w_f[p]·S_p`),
+    // shared across trees.
+    let pairs = binding_distinct_pairs_grouped(groups);
     let eq_star = eq_table_gf(&r_star);
     let limb_evals: Vec<Vec<Gf>> = cfg_iter!(pairs)
         .map(|&(col, shift)| {
@@ -527,21 +583,22 @@ pub fn prove_lookup_binding<const D: usize>(
     (LookupBindingProof { sumcheck, limb_evals }, r_star)
 }
 
-/// Verifier: checks the sumcheck against `claimed_b = eval_w + PubMLE(r_w)`,
-/// recombines `Q̃_a(r★)` from the shipped family evals with the public
-/// coefficients, and checks the final evaluation. Returns `r★`; the caller
-/// must bind each shipped `F̃_f(col↓Δ)(r★)` to the commitment (pointed-shift
-/// claims on the family blocks + the fresh-`γ_open` `a′` consistency).
+/// Verifier: checks the sumcheck against
+/// `claimed_b = Σ_t μ^t·(eval_w^t + PubMLE^t)`, recombines each tree's
+/// `Q̃_a(r★)` from the shipped family evals with the (μ-scaled) public
+/// coefficients, and checks the final evaluation
+/// `Σ_t eq(r★, r_row^t)·Σ_{a∈t} m̃ask_a(r★)·Q̃_a(r★)`. Returns `r★`; the
+/// caller must bind each shipped `F̃_f(col↓Δ)(r★)` to the commitment
+/// (η-combined pointed claims on the family blocks + the fresh-`γ_open`
+/// `a′` consistency).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn verify_lookup_binding<const D: usize>(
     transcript: &mut impl Transcript,
     proof: &LookupBindingProof,
     claimed_b: &Gf,
-    adder_specs: &[F2AdderSpec],
-    coeffs: &[BindingCoeffs],
+    groups: &[BindingTreeGroup],
     num_vars: usize,
     limb_bits: usize,
-    r_row: &[Gf],
 ) -> Result<Vec<Gf>, LookupBindingError> {
     if proof.sumcheck.claimed_sum != *claimed_b {
         return Err(LookupBindingError::ClaimedSumMismatch);
@@ -551,7 +608,7 @@ pub fn verify_lookup_binding<const D: usize>(
     let r_star = subclaim.point.clone();
 
     let nf = num_families::<D>(limb_bits);
-    let pairs = binding_distinct_pairs(coeffs);
+    let pairs = binding_distinct_pairs_grouped(groups);
     if proof.limb_evals.len() != pairs.len() || proof.limb_evals.iter().any(|g| g.len() != nf) {
         return Err(LookupBindingError::Shape);
     }
@@ -563,24 +620,28 @@ pub fn verify_lookup_binding<const D: usize>(
     }
 
     let one = Gf::one();
-    let eq_val = zinc_poly::utils::eq_eval(&r_star, &r_row.to_vec(), one)
-        .map_err(|_| LookupBindingError::FinalEvalMismatch)?;
-
-    // Σ_a mask̃_a(r★)·Q̃_a(r★), with Q̃ recombined from the family evals
-    // (the public constant evaluates to itself — the all-ones MLE is 1
-    // at any point) and the mask evals as add-only eq sums.
+    // Σ_t eq(r★, r_row^t)·Σ_{a∈t} mask̃_a(r★)·Q̃_a(r★), with Q̃ recombined
+    // from the family evals (the public constant evaluates to itself — the
+    // all-ones MLE is 1 at any point) and the mask evals as add-only eq
+    // sums.
     let eq_star = eq_table_gf(&r_star);
-    let mut s = Gf::zero();
-    for (a, spec) in adder_specs.iter().enumerate() {
-        let m_eval = mask_eval_from_eq(spec, &eq_star);
-        let mut q = coeffs[a].constant;
-        for ((key, family), c) in &coeffs[a].terms {
-            let gi = pairs.iter().position(|p| p == key).expect("pair from coeffs");
-            q = q + *c * proof.limb_evals[gi][*family];
+    let mut total = Gf::zero();
+    for g in groups {
+        let eq_val = zinc_poly::utils::eq_eval(&r_star, &g.r_row.to_vec(), one)
+            .map_err(|_| LookupBindingError::FinalEvalMismatch)?;
+        let mut s = Gf::zero();
+        for (a, spec) in g.adder_specs.iter().enumerate() {
+            let m_eval = mask_eval_from_eq(spec, &eq_star);
+            let mut q = g.coeffs[a].constant;
+            for ((key, family), c) in &g.coeffs[a].terms {
+                let gi = pairs.iter().position(|p| p == key).expect("pair from coeffs");
+                q = q + *c * proof.limb_evals[gi][*family];
+            }
+            s = s + m_eval * q;
         }
-        s = s + m_eval * q;
+        total = total + eq_val * s;
     }
-    if eq_val * s != subclaim.expected_evaluation {
+    if total != subclaim.expected_evaluation {
         return Err(LookupBindingError::FinalEvalMismatch);
     }
     Ok(r_star)

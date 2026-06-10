@@ -3985,7 +3985,6 @@ where
         let n = 1usize << num_vars;
         let nl = num_limbs(limb_bits);
         let num_pairs = adder_specs.len() * nl;
-        let padded_pairs = num_pairs.next_power_of_two();
         let one = BinaryFieldGF128::one();
         let mask = (1u32 << limb_bits) - 1;
         let tables = FingerprintTables::<BinaryFieldGF128>::new(gamma, limb_bits, &());
@@ -3997,7 +3996,10 @@ where
             }
         };
 
-        let mut leaves = vec![one; padded_pairs * n];
+        // NO padding: the caller splits the blocks into the witness FOREST
+        // (the binary decomposition of the relation count — every tree an
+        // exact power of two of pair blocks).
+        let mut leaves = vec![one; num_pairs * n];
         let mut fp_rows = vec![vec![BinaryFieldGF128::zero(); n]; num_pairs];
         {
             let leaf_blocks = &mut leaves[..num_pairs * n];
@@ -4114,28 +4116,66 @@ where
             transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut buf);
         }
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let (wl, _fp_rows) = {
+        let (mut wl, _fp_rows) = {
             let _g = zinc_utils::prof::scope("lookup:leaves");
             Self::sha_lookup_witness_leaves_tensor_zread(
                 cols, adder_specs, num_vars, limb_bits, &gamma_fp, &delta,
             )
         };
-        let (witness_tree, gkr_point, gkr_eval) = {
-            let _g = zinc_utils::prof::scope("lookup:gkr_tree");
-            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &())
-        };
-        let gkr_bind = LookupWitnessClaim { r_w: gkr_point, eval_w: gkr_eval };
 
-        // Binding sumcheck: reduce the GKR leaf claim to family shifted
-        // evals at r★ (absorbed inside).
-        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
-        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
+        // -- The witness FOREST: one product tree per relation chunk of the
+        //    binary decomposition (12 → [0..8), [8..12) — exact powers of
+        //    two of pair blocks, ZERO padding). --
+        let nl = D / limb_bits;
+        let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
+        let mut chunk_leaves: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
+        for (lo, _hi) in chunks.iter().skip(1).rev() {
+            chunk_leaves.push(wl.split_off(lo * nl * n));
+        }
+        chunk_leaves.push(wl);
+        chunk_leaves.reverse();
+        let mut witness_trees = Vec::with_capacity(chunks.len());
+        let mut tree_points: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
+        for leaves_t in chunk_leaves {
+            let _g = zinc_utils::prof::scope("lookup:gkr_tree");
+            let (tree, point, _eval) =
+                zinc_piop::lookup::gkr_product::prove_product_tree(transcript, leaves_t, &());
+            witness_trees.push(tree);
+            tree_points.push(point);
+        }
+
+        // μ (fresh — every tree's proof is absorbed) combines the trees'
+        // leaf claims into ONE binding sumcheck: tree t's coefficients are
+        // scaled by μ^t, so the sumcheck proves Σ_t μ^t·(eval_w^t + Pub^t).
+        let mu: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let mut scale = BinaryFieldGF128::one();
+        let mut all_coeffs: Vec<Vec<crate::f2_lookup_binding::BindingCoeffs>> =
+            Vec::with_capacity(chunks.len());
+        for (t, &(lo, hi)) in chunks.iter().enumerate() {
+            let (_r_row, r_pair) = tree_points[t].split_at(num_vars);
+            all_coeffs.push(lookup_binding_coeffs::<D>(
+                &adder_specs[lo..hi],
+                r_pair,
+                &gamma_fp,
+                limb_bits,
+                &scale,
+            ));
+            scale = scale * mu;
+        }
+        let groups: Vec<crate::f2_lookup_binding::BindingTreeGroup> = chunks
+            .iter()
+            .enumerate()
+            .map(|(t, &(lo, hi))| crate::f2_lookup_binding::BindingTreeGroup {
+                adder_specs: &adder_specs[lo..hi],
+                coeffs: &all_coeffs[t],
+                r_row: &tree_points[t][..num_vars],
+            })
+            .collect();
         let (binding, r_star) = {
             let _g = zinc_utils::prof::scope("lookup:binding");
-            prove_lookup_binding::<D>(
-                transcript, cols, adder_specs, &coeffs, num_vars, limb_bits, r_row,
-            )
+            prove_lookup_binding::<D>(transcript, cols, &groups, num_vars, limb_bits)
         };
+        let pairs = crate::f2_lookup_binding::binding_distinct_pairs_grouped(&groups);
 
         // η-batched family blocks: a FRESH η (the family evals were just
         // absorbed by the binding ⟹ SZ pins each family individually
@@ -4155,10 +4195,12 @@ where
         let num_wit = cols.len() - num_pub_bin;
         let zero_inner = BinaryFieldGF128::zero().into_inner();
         let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
+        let blocks_gf: Vec<Vec<BinaryFieldGF128>> = zinc_utils::cfg_into_iter!(0..num_wit)
+            .map(|g| eta_block_rows::<D>(cols, num_pub_bin + g, &eta_w, n))
+            .collect();
         let blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
-            zinc_utils::cfg_into_iter!(0..num_wit)
-                .map(|g| {
-                    let v = eta_block_rows::<D>(cols, num_pub_bin + g, &eta_w, n);
+            zinc_utils::cfg_iter!(blocks_gf)
+                .map(|v| {
                     DenseMultilinearExtension::from_evaluations_vec(
                         num_vars,
                         v.iter().map(|x| *x.inner()).collect(),
@@ -4166,17 +4208,91 @@ where
                     )
                 })
                 .collect();
+        drop(_g_lb);
+
+        // ν-batched fold claims: a FRESH ν (the family evals are absorbed)
+        // collapses the per-(col,Δ) pointed claims to ONE per distinct Δ,
+        // against the ν-combined source `S_Δ = Σ_i ν^i·block_{g_i}`. The
+        // ν-sources carry NO new proof data: their up/r_0 evals are exact
+        // linear recombinations of the blocks' (which the a′ equation
+        // binds), so the verifier computes them itself.
+        let nu: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let nu_batch = Self::nu_batch_plan(&pairs, num_pub_bin, &nu);
+        let nu_blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
+            zinc_utils::cfg_iter!(nu_batch.groups)
+                .map(|(_, gs)| {
+                    let mut rows = vec![BinaryFieldGF128::zero(); n];
+                    for (i, &(g, _)) in gs.iter().enumerate() {
+                        let pw = nu_batch.nu_pows[i];
+                        for (acc, v) in rows.iter_mut().zip(&blocks_gf[g]) {
+                            *acc = *acc + pw * *v;
+                        }
+                    }
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        rows.iter().map(|x| *x.inner()).collect(),
+                        zero_inner.clone(),
+                    )
+                })
+                .collect();
+        // Per-Δ down-evals: Σ_i ν^i·(Σ_f η^f·limb_evals[pi][f]).
+        let nu_downs: Vec<BinaryFieldGF128> = nu_batch
+            .groups
+            .iter()
+            .map(|(_, gs)| {
+                let mut down = BinaryFieldGF128::zero();
+                for (i, &(_, pi)) in gs.iter().enumerate() {
+                    let mut e = BinaryFieldGF128::zero();
+                    for (ep, ev) in eta_pows.iter().zip(&binding.limb_evals[pi]) {
+                        e = e + *ep * *ev;
+                    }
+                    down = down + nu_batch.nu_pows[i] * e;
+                }
+                down
+            })
+            .collect();
 
         LookupAdderProverPhase {
-            witness_tree,
+            witness_trees,
             mult_counts,
             mult_counts_marginal,
             binding,
             r_star,
-            eta_pows,
-            pairs: binding_distinct_pairs(&coeffs),
             blocks,
+            nu_blocks,
+            nu_deltas: nu_batch.groups.iter().map(|(d, _)| *d).collect(),
+            nu_downs,
         }
+    }
+
+    /// The deterministic ν-batch plan shared by prover and verifier: the
+    /// distinct row-shifts Δ among the WITNESS binding pairs (first-use
+    /// order) and, per Δ, the `(block index g, pair index pi)` list in
+    /// ν-power order. `nu_pows[i] = ν^i` up to the longest list.
+    fn nu_batch_plan(
+        pairs: &[(usize, usize)],
+        num_pub_bin: usize,
+        nu: &BinaryFieldGF128,
+    ) -> NuBatchPlan {
+        let mut groups: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+        for (pi, &(col, shift)) in pairs.iter().enumerate() {
+            if col < num_pub_bin {
+                continue;
+            }
+            let g = col - num_pub_bin;
+            match groups.iter_mut().find(|(d, _)| *d == shift) {
+                Some((_, list)) => list.push((g, pi)),
+                None => groups.push((shift, vec![(g, pi)])),
+            }
+        }
+        let max_len = groups.iter().map(|(_, l)| l.len()).max().unwrap_or(0);
+        let mut nu_pows = Vec::with_capacity(max_len);
+        let mut acc = BinaryFieldGF128::one();
+        for _ in 0..max_len {
+            nu_pows.push(acc);
+            acc = acc * *nu;
+        }
+        NuBatchPlan { groups, nu_pows }
     }
 
     /// The shared lookup-adder **verifier phase**: replays γ → both tables'
@@ -4232,18 +4348,30 @@ where
         }
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
 
-        // Witness tree, at the tensor-layout depth (rows + pair vars).
-        let pair_vars = (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
-        let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
-            transcript,
-            &lookup_proof.witness_tree,
-            num_vars + pair_vars,
-            &(),
-        )
-        .map_err(|_| "witness product tree rejected")?;
+        // The witness FOREST: verify each tree at its tensor-layout depth
+        // (rows + that tree's pair vars; the chunks are exact powers of two
+        // of pair blocks — zero padding).
+        let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
+        if lookup_proof.witness_trees.len() != chunks.len() {
+            return Err("witness tree count mismatch");
+        }
+        let mut tree_points: Vec<Vec<BinaryFieldGF128>> = Vec::with_capacity(chunks.len());
+        let mut tree_evals: Vec<BinaryFieldGF128> = Vec::with_capacity(chunks.len());
+        for (t, &(lo, hi)) in chunks.iter().enumerate() {
+            let pair_vars = ((hi - lo) * nl).trailing_zeros() as usize;
+            let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
+                transcript,
+                &lookup_proof.witness_trees[t],
+                num_vars + pair_vars,
+                &(),
+            )
+            .map_err(|_| "witness product tree rejected")?;
+            tree_points.push(r_w);
+            tree_evals.push(eval_w);
+        }
 
         // Table side: recompute the multiplicity-weighted product directly,
-        // over both tables.
+        // over both tables, against the PRODUCT of the forest's roots.
         let table_root = {
             let mut acc = BinaryFieldGF128::one();
             for (fp, &m) in table_fps
@@ -4263,33 +4391,65 @@ where
             }
             acc
         };
-        if table_root != lookup_proof.witness_tree.root {
+        let forest_root = lookup_proof
+            .witness_trees
+            .iter()
+            .fold(BinaryFieldGF128::one(), |acc, t| acc * t.root);
+        if table_root != forest_root {
             return Err("grand-product mismatch: witness adds not contained in the add table");
         }
-        let gkr_bind = LookupWitnessClaim { r_w, eval_w };
-        let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
 
-        // Binding sumcheck: eval_w + PubMLE(r_w) reduced to family evals at r★.
-        let coeffs = lookup_binding_coeffs::<D>(adder_specs, r_pair, &gamma_fp, limb_bits);
-        let claimed_b = gkr_bind.eval_w
-            + lookup_binding_public_part::<D>(
-                adder_specs, num_vars, limb_bits, r_row, r_pair, &delta,
-            );
+        // μ (fresh — the tree proofs are absorbed) combines the trees' leaf
+        // claims into ONE binding sumcheck: tree t's coefficients carry μ^t.
+        let mu: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let mut scale = BinaryFieldGF128::one();
+        let mut all_coeffs: Vec<Vec<crate::f2_lookup_binding::BindingCoeffs>> =
+            Vec::with_capacity(chunks.len());
+        let mut claimed_b = BinaryFieldGF128::zero();
+        for (t, &(lo, hi)) in chunks.iter().enumerate() {
+            let (r_row, r_pair) = tree_points[t].split_at(num_vars);
+            all_coeffs.push(lookup_binding_coeffs::<D>(
+                &adder_specs[lo..hi],
+                r_pair,
+                &gamma_fp,
+                limb_bits,
+                &scale,
+            ));
+            claimed_b = claimed_b
+                + scale
+                    * (tree_evals[t]
+                        + lookup_binding_public_part::<D>(
+                            &adder_specs[lo..hi],
+                            num_vars,
+                            limb_bits,
+                            r_row,
+                            r_pair,
+                            &delta,
+                        ));
+            scale = scale * mu;
+        }
+        let groups: Vec<crate::f2_lookup_binding::BindingTreeGroup> = chunks
+            .iter()
+            .enumerate()
+            .map(|(t, &(lo, hi))| crate::f2_lookup_binding::BindingTreeGroup {
+                adder_specs: &adder_specs[lo..hi],
+                coeffs: &all_coeffs[t],
+                r_row: &tree_points[t][..num_vars],
+            })
+            .collect();
         let r_star = verify_lookup_binding::<D>(
             transcript,
             &lookup_proof.binding,
             &claimed_b,
-            adder_specs,
-            &coeffs,
+            &groups,
             num_vars,
             limb_bits,
-            r_row,
         )
         .map_err(|_| "binding sumcheck rejected")?;
+        let pairs = crate::f2_lookup_binding::binding_distinct_pairs_grouped(&groups);
 
         // PUBLIC columns' family claims: recompute directly (one bucket
         // pass per pair yields all nf family evals).
-        let pairs = binding_distinct_pairs(&coeffs);
         let eq_star = eq_table_gf(&r_star);
         for (pi, &(col, shift)) in pairs.iter().enumerate() {
             if col >= num_pub_bin {
@@ -4310,7 +4470,9 @@ where
             }
         }
 
-        // η (fresh: the family evals are absorbed).
+        // η (fresh: the family evals are absorbed), then ν (fresh likewise)
+        // — the per-Δ batch plan and down-evals, recombined from the
+        // shipped family evals.
         let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
         let eta_w = eta_combined_weights::<D>(&eta, limb_bits);
         let mut eta_pows = Vec::with_capacity(nf);
@@ -4321,8 +4483,25 @@ where
                 acc = acc * eta;
             }
         }
+        let nu: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let nu_plan = Self::nu_batch_plan(&pairs, num_pub_bin, &nu);
+        let nu_downs: Vec<BinaryFieldGF128> = nu_plan
+            .groups
+            .iter()
+            .map(|(_, gs)| {
+                let mut down = BinaryFieldGF128::zero();
+                for (i, &(_, pi)) in gs.iter().enumerate() {
+                    let mut e = BinaryFieldGF128::zero();
+                    for (ep, ev) in eta_pows.iter().zip(&lookup_proof.binding.limb_evals[pi]) {
+                        e = e + *ep * *ev;
+                    }
+                    down = down + nu_plan.nu_pows[i] * e;
+                }
+                down
+            })
+            .collect();
 
-        Ok(LookupAdderVerifierPhase { r_star, eta_w, eta_pows, pairs })
+        Ok(LookupAdderVerifierPhase { r_star, eta_w, nu_downs, nu_plan })
     }
 
     /// **Lookup-adder prove path with the WITNESS BINDING wired into the
@@ -4398,13 +4577,17 @@ where
             k_bits,
         );
 
-        // The blocks join the fold as sources; their r*-evals are the
-        // multipoint up-claims — absorbed before the fold samples its
-        // challenges.
+        // The η-blocks (the a′ sources) and the ν-combined per-Δ claim
+        // sources join the fold; the blocks' r*-evals are SHIPPED, the
+        // ν-sources' are exact recombinations the verifier computes itself
+        // — both absorbed before the fold samples its challenges.
+        let num_wit = trace.binary_poly.len() - num_pub_bin;
         let mut extended_trace = projected_trace_for_mp;
         let lblock_base = extended_trace.len();
         extended_trace.extend(lk.blocks);
-        let lblock_evals_at_rstar: Vec<BinaryFieldGF128> =
+        let nu_base = extended_trace.len();
+        extended_trace.extend(lk.nu_blocks);
+        let all_block_evals_at_rstar: Vec<BinaryFieldGF128> =
             zinc_utils::cfg_iter!(extended_trace[lblock_base..])
                 .map(|col| {
                     <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
@@ -4413,12 +4596,13 @@ where
                     .expect("L-block eval at r* should succeed")
                 })
                 .collect();
+        let lblock_evals_at_rstar = all_block_evals_at_rstar[..num_wit].to_vec();
         let mut buf = vec![
             0u8;
             <<BinaryFieldGF128 as Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
         ];
-        for v in &lblock_evals_at_rstar {
+        for v in &all_block_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
         }
         drop(_g_lookup);
@@ -4426,13 +4610,13 @@ where
             .column_evals_at_rstar
             .iter()
             .copied()
-            .chain(lblock_evals_at_rstar.iter().copied())
+            .chain(all_block_evals_at_rstar.iter().copied())
             .collect();
 
-        // -- Pointed claims: AND pairs (existing) + ONE η-combined claim per
-        //    witness (col, Δ) pair — down-eval `Σ_f η^f·F̃_f(col↓Δ)(r★)`
-        //    against the combined block. Public-col family evals are NOT
-        //    folded (the verifier recomputes them directly). --
+        // -- Pointed claims: AND pairs (existing) + ONE ν-batched claim per
+        //    distinct witness Δ against the ν-combined source (down-eval
+        //    `Σ_i ν^i·Σ_f η^f·F̃_f(col_i↓Δ)(r★)`). Public-col family evals
+        //    are NOT folded (the verifier recomputes them directly). --
         let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = subclaim
             .hadamard_pairs
             .iter()
@@ -4443,18 +4627,11 @@ where
             })
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = uair_proof.hadamard_pair_evals.clone();
-        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
-            if col < num_pub_bin {
-                continue;
-            }
-            let mut down = BinaryFieldGF128::zero();
-            for (ep, ev) in lk.eta_pows.iter().zip(&lk.binding.limb_evals[pi]) {
-                down = down + *ep * *ev;
-            }
+        for (d, (&shift, &down)) in lk.nu_deltas.iter().zip(&lk.nu_downs).enumerate() {
             pointed_shifts.push(PointedShiftClaim {
                 point: lk.r_star.clone(),
                 shift,
-                source_col: lblock_base + (col - num_pub_bin),
+                source_col: nu_base + d,
             });
             down_evals.push(down);
         }
@@ -4514,7 +4691,7 @@ where
                 open: open_proof,
             },
             F2LookupAdderProof {
-                witness_tree: lk.witness_tree,
+                witness_trees: lk.witness_trees,
                 mult_counts: lk.mult_counts,
                 mult_counts_marginal: lk.mult_counts_marginal,
                 binding: lk.binding,
@@ -4608,16 +4785,31 @@ where
         )
         .map_err(F2FullVerifyError::LookupAdder)?;
 
-        // -- The combined-block up-claims + the extended fold. --
+        // -- The combined-block up-claims + the extended fold. The ν-source
+        //    up-evals carry no proof data: they are exact recombinations of
+        //    the shipped block evals, computed here and absorbed in the
+        //    prover's order. --
         if lookup_proof.lblock_evals_at_rstar.len() != num_wit {
             return Err(F2FullVerifyError::LookupAdder("L-block eval count mismatch"));
         }
+        let nu_evals_at_rstar: Vec<BinaryFieldGF128> = lk
+            .nu_plan
+            .groups
+            .iter()
+            .map(|(_, gs)| {
+                let mut acc = BinaryFieldGF128::zero();
+                for (i, &(g, _)) in gs.iter().enumerate() {
+                    acc += &(lk.nu_plan.nu_pows[i] * lookup_proof.lblock_evals_at_rstar[g]);
+                }
+                acc
+            })
+            .collect();
         let mut buf = vec![
             0u8;
             <<BinaryFieldGF128 as Field>::Inner
                 as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
         ];
-        for v in &lookup_proof.lblock_evals_at_rstar {
+        for v in lookup_proof.lblock_evals_at_rstar.iter().chain(&nu_evals_at_rstar) {
             transcript.absorb_random_field(v, &mut buf);
         }
         let up_evals: Vec<BinaryFieldGF128> = proof
@@ -4626,8 +4818,10 @@ where
             .iter()
             .copied()
             .chain(lookup_proof.lblock_evals_at_rstar.iter().copied())
+            .chain(nu_evals_at_rstar.iter().copied())
             .collect();
         let lblock_base = proof.uair.column_evals_at_rstar.len();
+        let nu_base = lblock_base + num_wit;
 
         let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = subclaim
             .hadamard_pairs
@@ -4639,18 +4833,11 @@ where
             })
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = proof.uair.hadamard_pair_evals.clone();
-        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
-            if col < num_pub_bin {
-                continue;
-            }
-            let mut down = BinaryFieldGF128::zero();
-            for (ep, ev) in lk.eta_pows.iter().zip(&lookup_proof.binding.limb_evals[pi]) {
-                down = down + *ep * *ev;
-            }
+        for (d, (group, &down)) in lk.nu_plan.groups.iter().zip(&lk.nu_downs).enumerate() {
             pointed_shifts.push(PointedShiftClaim {
                 point: lk.r_star.clone(),
-                shift,
-                source_col: lblock_base + (col - num_pub_bin),
+                shift: group.0,
+                source_col: nu_base + d,
             });
             down_evals.push(down);
         }
@@ -4693,6 +4880,22 @@ where
                         claimed,
                     });
                 }
+            }
+        }
+
+        // ν-source r_0 consistency: each shipped combined-source eval must
+        // be the exact ν-recombination of the blocks' r_0 evals (the blocks
+        // are what the a′ equation binds; this ties the claim sources to
+        // them at the fold's fresh point).
+        for (d, (_, gs)) in lk.nu_plan.groups.iter().enumerate() {
+            let mut acc = BinaryFieldGF128::zero();
+            for (i, &(g, _)) in gs.iter().enumerate() {
+                acc += &(lk.nu_plan.nu_pows[i] * proof.open_evals_at_r_0[lblock_base + g]);
+            }
+            if acc != proof.open_evals_at_r_0[nu_base + d] {
+                return Err(F2FullVerifyError::LookupAdder(
+                    "nu-combined source r_0 eval inconsistent with the blocks",
+                ));
             }
         }
 
@@ -4871,18 +5074,23 @@ where
             .collect();
         drop(z_block_guard);
 
-        // η-block r*-evals (the lookup sources' multipoint up-claims).
-        let lblock_evals_at_rstar: Vec<BinaryFieldGF128> = cfg_iter!(lk.blocks)
-            .map(|col| {
-                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
-                    BinaryFieldGF128,
-                >>::evaluate_with_config(col.clone(), &subclaim.sumcheck_point, &())
-                .expect("L-block eval at r* should succeed")
-            })
-            .collect();
+        // η-block + ν-source r*-evals (the lookup sources' multipoint
+        // up-claims; the ν ones are exact recombinations — computed by the
+        // verifier, absorbed but never shipped).
+        let all_lookup_evals_at_rstar: Vec<BinaryFieldGF128> =
+            cfg_iter!(lk.blocks)
+                .chain(cfg_iter!(lk.nu_blocks))
+                .map(|col| {
+                    <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                        BinaryFieldGF128,
+                    >>::evaluate_with_config(col.clone(), &subclaim.sumcheck_point, &())
+                    .expect("L-block eval at r* should succeed")
+                })
+                .collect();
+        let lblock_evals_at_rstar = all_lookup_evals_at_rstar[..num_wit].to_vec();
 
-        // Absorb (z_up_evals, pair_evals, adder_parents=[], lblock r*-evals)
-        // before the multipoint challenges.
+        // Absorb (z_up_evals, pair_evals, adder_parents=[], block r*-evals,
+        // ν-source r*-evals) before the multipoint challenges.
         let mut buf = vec![
             0u8;
             <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
@@ -4896,23 +5104,26 @@ where
         for v in &binding.adder_parents {
             transcript.absorb_random_field(v, &mut buf);
         }
-        for v in &lblock_evals_at_rstar {
+        for v in &all_lookup_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
         }
 
-        // -- Combined multipoint trace: [α-cols] ++ [z-cols] ++ [η-blocks].
-        //    Pointed claims: the AND pairs at γ_word against the z-cols, then
-        //    ONE η-combined lookup claim per witness (col,Δ) pair at r★
-        //    against the η-blocks. --
+        // -- Combined multipoint trace:
+        //    [α-cols] ++ [z-cols] ++ [η-blocks] ++ [ν-sources].
+        //    Pointed claims: the AND pairs at γ_word against the z-cols,
+        //    then ONE ν-batched lookup claim per distinct witness Δ at r★
+        //    against the ν-combined sources. --
         let c = projected_trace.len();
         let lblock_base = c + num_wit;
+        let nu_base = lblock_base + num_wit;
         let mut trace_mles = projected_trace;
         trace_mles.extend(z_block);
         trace_mles.extend(lk.blocks);
+        trace_mles.extend(lk.nu_blocks);
 
         let mut up_evals = uair_proof.column_evals_at_rstar.clone();
         up_evals.extend_from_slice(&z_up_evals);
-        up_evals.extend_from_slice(&lblock_evals_at_rstar);
+        up_evals.extend_from_slice(&all_lookup_evals_at_rstar);
 
         let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = binding
             .pairs
@@ -4924,18 +5135,11 @@ where
             })
             .collect();
         let mut down_evals = binding.pair_evals.clone();
-        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
-            if col < num_pub_bin {
-                continue;
-            }
-            let mut down = BinaryFieldGF128::zero();
-            for (ep, ev) in lk.eta_pows.iter().zip(&lk.binding.limb_evals[pi]) {
-                down = down + *ep * *ev;
-            }
+        for (d, (&shift, &down)) in lk.nu_deltas.iter().zip(&lk.nu_downs).enumerate() {
             pointed_shifts.push(PointedShiftClaim {
                 point: lk.r_star.clone(),
                 shift,
-                source_col: lblock_base + (col - num_pub_bin),
+                source_col: nu_base + d,
             });
             down_evals.push(down);
         }
@@ -4955,8 +5159,10 @@ where
         };
         let r_0 = mp_prover_state.eval_point;
 
-        // r_0 evals for the whole combined trace; split α / z / lookup and
-        // absorb in that order (mirrored by the verifier).
+        // r_0 evals for the whole combined trace; split α / z / blocks / ν
+        // and absorb in that order (mirrored by the verifier; the ν segment
+        // is absorbed but NOT shipped — the verifier recomputes it from the
+        // blocks' evals).
         let open_evals_guard = zinc_utils::prof::scope("open_evals_r0");
         let all_r0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(trace_mles)
             .map(|col| {
@@ -4968,7 +5174,8 @@ where
             .collect();
         drop(open_evals_guard);
         let (alpha_r0_evals, rest) = all_r0.split_at(c);
-        let (z_r0_evals, lblock_evals_at_r0) = rest.split_at(num_wit);
+        let (z_r0_evals, lookup_r0) = rest.split_at(num_wit);
+        let (lblock_evals_at_r0, nu_r0_evals) = lookup_r0.split_at(num_wit);
         let alpha_r0_evals = alpha_r0_evals.to_vec();
         let z_r0_evals = z_r0_evals.to_vec();
         let lblock_evals_at_r0 = lblock_evals_at_r0.to_vec();
@@ -4976,6 +5183,7 @@ where
             .iter()
             .chain(&z_r0_evals)
             .chain(&lblock_evals_at_r0)
+            .chain(nu_r0_evals)
         {
             transcript.absorb_random_field(v, &mut buf);
         }
@@ -5009,7 +5217,7 @@ where
             },
             F2OblongLookupAdderProof {
                 lookup: F2LookupAdderProof {
-                    witness_tree: lk.witness_tree,
+                    witness_trees: lk.witness_trees,
                     mult_counts: lk.mult_counts,
                     mult_counts_marginal: lk.mult_counts_marginal,
                     binding: lk.binding,
@@ -5132,8 +5340,26 @@ where
             return Err(F2FullVerifyError::LookupAdder("per-column eval count mismatch"));
         }
 
-        // Absorb (z_up_evals, pair_evals, adder_parents=[], lblock r*-evals)
-        // before the multipoint challenges — mirror the prover.
+        // ν-source up-evals: exact recombinations of the shipped block
+        // evals — computed here, absorbed in the prover's order, never
+        // shipped.
+        let nu_evals_at_rstar: Vec<BinaryFieldGF128> = lk
+            .nu_plan
+            .groups
+            .iter()
+            .map(|(_, gs)| {
+                let mut acc = BinaryFieldGF128::zero();
+                for (i, &(g, _)) in gs.iter().enumerate() {
+                    acc += &(lk.nu_plan.nu_pows[i]
+                        * lookup_proof.lookup.lblock_evals_at_rstar[g]);
+                }
+                acc
+            })
+            .collect();
+
+        // Absorb (z_up_evals, pair_evals, adder_parents=[], block r*-evals,
+        // ν-source r*-evals) before the multipoint challenges — mirror the
+        // prover.
         let mut buf = vec![
             0u8;
             <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
@@ -5147,18 +5373,21 @@ where
         for v in &proof.adder_parents {
             transcript.absorb_random_field(v, &mut buf);
         }
-        for v in &lookup_proof.lookup.lblock_evals_at_rstar {
+        for v in lookup_proof.lookup.lblock_evals_at_rstar.iter().chain(&nu_evals_at_rstar) {
             transcript.absorb_random_field(v, &mut buf);
         }
 
-        // -- Multipoint verify: ups = α ++ z ++ η-blocks; claims = the AND
-        //    pairs at γ_word (downs = pair_evals) ++ the η-combined lookup
-        //    claims at r★ (downs recombined from the shipped family evals). --
+        // -- Multipoint verify: ups = α ++ z ++ η-blocks ++ ν-sources;
+        //    claims = the AND pairs at γ_word (downs = pair_evals) ++ ONE
+        //    ν-batched lookup claim per distinct witness Δ at r★ (downs
+        //    recombined from the shipped family evals). --
         let c = proof.uair.column_evals_at_rstar.len();
         let lblock_base = c + num_wit;
+        let nu_base = lblock_base + num_wit;
         let mut up_evals = proof.uair.column_evals_at_rstar.clone();
         up_evals.extend_from_slice(&proof.z_up_evals);
         up_evals.extend_from_slice(&lookup_proof.lookup.lblock_evals_at_rstar);
+        up_evals.extend_from_slice(&nu_evals_at_rstar);
 
         let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = oblong_pairs
             .iter()
@@ -5169,18 +5398,11 @@ where
             })
             .collect();
         let mut down_evals = proof.pair_evals.clone();
-        for (pi, &(col, shift)) in lk.pairs.iter().enumerate() {
-            if col < num_pub_bin {
-                continue;
-            }
-            let mut down = BinaryFieldGF128::zero();
-            for (ep, ev) in lk.eta_pows.iter().zip(&lookup_proof.lookup.binding.limb_evals[pi]) {
-                down = down + *ep * *ev;
-            }
+        for (d, (group, &down)) in lk.nu_plan.groups.iter().zip(&lk.nu_downs).enumerate() {
             pointed_shifts.push(PointedShiftClaim {
                 point: lk.r_star.clone(),
-                shift,
-                source_col: lblock_base + (col - num_pub_bin),
+                shift: group.0,
+                source_col: nu_base + d,
             });
             down_evals.push(down);
         }
@@ -5200,12 +5422,28 @@ where
             .map_err(F2FullVerifyError::MultipointEval)?;
         let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
 
-        // Absorb r_0 evals (α, z, lookup) — mirror the prover.
+        // ν-source r_0 evals: recombined from the shipped block r_0 evals
+        // (absorbed in the prover's order, not shipped).
+        let nu_r0_evals: Vec<BinaryFieldGF128> = lk
+            .nu_plan
+            .groups
+            .iter()
+            .map(|(_, gs)| {
+                let mut acc = BinaryFieldGF128::zero();
+                for (i, &(g, _)) in gs.iter().enumerate() {
+                    acc += &(lk.nu_plan.nu_pows[i] * lookup_proof.lblock_evals_at_r0[g]);
+                }
+                acc
+            })
+            .collect();
+
+        // Absorb r_0 evals (α, z, blocks, ν) — mirror the prover.
         for v in proof
             .alpha_r0_evals
             .iter()
             .chain(&proof.z_r0_evals)
             .chain(&lookup_proof.lblock_evals_at_r0)
+            .chain(&nu_r0_evals)
         {
             transcript.absorb_random_field(v, &mut buf);
         }
@@ -5250,10 +5488,12 @@ where
             }
         }
 
-        // Finalise the multipoint check against the full combined r_0 evals.
+        // Finalise the multipoint check against the full combined r_0 evals
+        // (α ++ z ++ blocks ++ ν-sources).
         let mut combined_r0 = proof.alpha_r0_evals.clone();
         combined_r0.extend_from_slice(&proof.z_r0_evals);
         combined_r0.extend_from_slice(&lookup_proof.lblock_evals_at_r0);
+        combined_r0.extend_from_slice(&nu_r0_evals);
         MultipointEval::<BinaryFieldGF128>::verify_subclaim_pointed(
             &mp_subclaim,
             &combined_r0,
@@ -5985,9 +6225,12 @@ pub struct F2FullProof<const D: usize> {
 /// adder columns anywhere in this proof.
 #[derive(Clone, Debug)]
 pub struct F2LookupAdderProof {
-    /// The WITNESS grand-product tree (`∏(δ−a_i)`); the table side is
-    /// verifier-recomputed from the clear multiplicities below.
-    pub witness_tree: zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>,
+    /// The WITNESS grand-product FOREST (`∏(δ−a_i)` split over the binary
+    /// decomposition of the relation count — e.g. 12 relations → trees of
+    /// 8·nl and 4·nl pair blocks, zero padding); the table side is
+    /// verifier-recomputed from the clear multiplicities below and checked
+    /// against the PRODUCT of the roots.
+    pub witness_trees: Vec<zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>>,
     /// Per-table-row use counts of the full table `T` (limbs `0..nl−1`),
     /// shipped in the clear (the system is not ZK) and absorbed BEFORE δ —
     /// fixing the table-side polynomial pre-challenge, which is what makes
@@ -6027,29 +6270,39 @@ struct LookupWitnessClaim {
 
 /// Prover output of the shared η-batched lookup-adder phase
 /// (`prove_lookup_adder_bound_phase`): the proof pieces plus everything the
-/// caller's fold wiring needs (the η-combined blocks, the claim point `r★`,
-/// the η powers for the down-evals, and the distinct binding `(col, Δ)`
-/// pairs).
+/// caller's fold wiring needs — the η-combined blocks (the `a′` sources),
+/// the ν-combined per-Δ claim sources with their down-evals, and the claim
+/// point `r★`.
 struct LookupAdderProverPhase {
-    witness_tree: zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>,
+    witness_trees: Vec<zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>>,
     mult_counts: Vec<u64>,
     mult_counts_marginal: Vec<u64>,
     binding: crate::f2_lookup_binding::LookupBindingProof,
     r_star: Vec<BinaryFieldGF128>,
-    eta_pows: Vec<BinaryFieldGF128>,
-    pairs: Vec<(usize, usize)>,
     blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>>,
+    nu_blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>>,
+    nu_deltas: Vec<usize>,
+    nu_downs: Vec<BinaryFieldGF128>,
+}
+
+/// The deterministic ν-batch structure (derived identically by prover and
+/// verifier from the distinct binding pairs): per distinct witness Δ, the
+/// `(block index g, pair index pi)` list in ν-power order.
+struct NuBatchPlan {
+    groups: Vec<(usize, Vec<(usize, usize)>)>,
+    nu_pows: Vec<BinaryFieldGF128>,
 }
 
 /// Verifier output of the shared lookup-adder phase
 /// (`verify_lookup_adder_bound_phase`): the claim point `r★`, the fused
-/// η-weight table `W` (for the single `a′` consistency equation), the η
-/// powers (for the claim down-evals), and the distinct binding pairs.
+/// η-weight table `W` (for the single `a′` consistency equation), and the
+/// ν-batch data (per-Δ down-evals plus the recombination plan for the
+/// ν-sources' up/`r_0` evals, which carry no proof data of their own).
 struct LookupAdderVerifierPhase {
     r_star: Vec<BinaryFieldGF128>,
     eta_w: Vec<BinaryFieldGF128>,
-    eta_pows: Vec<BinaryFieldGF128>,
-    pairs: Vec<(usize, usize)>,
+    nu_downs: Vec<BinaryFieldGF128>,
+    nu_plan: NuBatchPlan,
 }
 
 /// Proof of an F_2 statement with a **sound oblong-Hadamard discharge**: the
@@ -8694,8 +8947,6 @@ mod tests {
         let (_and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
         let nl = num_limbs(LB);
         let num_pairs = adder_specs.len() * nl;
-        let padded_pairs = num_pairs.next_power_of_two();
-        let pair_vars = padded_pairs.trailing_zeros() as usize;
 
         let gamma = Gf::from_words([0x1357_9bdf, 0x2468_ace0]);
         let delta = Gf::from_words([0xfeed_f00d, 0x0bad_cafe]);
@@ -8708,71 +8959,86 @@ mod tests {
                 &gamma,
                 &delta,
             );
-        assert_eq!(leaves.len(), padded_pairs * n);
+        assert_eq!(leaves.len(), num_pairs * n, "no padding under the forest split");
 
-        // A fixed "random" evaluation point r_w (row vars low, pair vars high).
-        let r_w: Vec<Gf> = (0..num_vars + pair_vars)
-            .map(|k| Gf::from_words([0x9e37_79b9 ^ (k as u64) * 0x85eb_ca6b, 0xc2b2_ae35 + k as u64]))
-            .collect();
-        let (r_row, r_pair) = r_w.split_at(num_vars);
-
-        // LHS: direct leaf-MLE evaluation.
         let zero_inner = Gf::zero().into_inner();
-        let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
-            num_vars + pair_vars,
-            leaves.iter().map(|v| *v.inner()).collect(),
-            zero_inner.clone(),
-        );
-        let lhs: Gf =
-            <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
-                leaf_mle, &r_w, &(),
-            )
-            .expect("leaf MLE eval");
-
-        // eq(r_pair, p) for an integer pair index p.
-        let eq_pair = |p: usize| -> Gf {
-            let one = Gf::one();
-            (0..pair_vars).fold(one, |acc, b| {
-                let bit = (p >> b) & 1;
-                let c = r_pair[b];
-                acc * if bit == 1 { c } else { one + c }
-            })
-        };
-        // MLE-at-r_row of a Gf row vector.
-        let row_mle_eval = |v: &[Gf]| -> Gf {
+        // MLE-at-point of a Gf row vector.
+        let row_mle_eval = |v: &[Gf], point: &[Gf]| -> Gf {
             let mle = DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
                 v.iter().map(|x| *x.inner()).collect(),
                 zero_inner.clone(),
             );
             <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
-                mle, &r_row.to_vec(), &(),
+                mle, &point.to_vec(), &(),
             )
             .expect("row MLE eval")
         };
 
-        // RHS: 1 + (1+δ)·Σ_p eq_p·Ã_a + Σ_p eq_p·Φ_p.
+        // Per TREE of the forest (relations [0,8) and [8,12)): the identity
+        // with LOCAL pair indexing.
+        let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
+        assert_eq!(chunks, vec![(0, 8), (8, 12)]);
         let one = Gf::one();
-        let mut rhs = one;
-        for (a, spec) in adder_specs.iter().enumerate() {
-            // Public active-mask MLE Ã_a(r_row).
-            let mask_vec: Vec<Gf> = (0..n)
-                .map(|r| {
-                    let active = spec.active_rows.is_empty()
-                        || spec.active_rows.get(r).copied().unwrap_or(false);
-                    if active { one } else { Gf::zero() }
+        for (t, &(lo, hi)) in chunks.iter().enumerate() {
+            let tree_pairs = (hi - lo) * nl;
+            let pair_vars = tree_pairs.trailing_zeros() as usize;
+            assert_eq!(tree_pairs, 1 << pair_vars, "exact power of two — zero padding");
+
+            // A fixed "random" eval point per tree (row vars low, pair high).
+            let r_w: Vec<Gf> = (0..num_vars + pair_vars)
+                .map(|k| {
+                    Gf::from_words([
+                        0x9e37_79b9 ^ ((t * 64 + k) as u64) * 0x85eb_ca6b,
+                        0xc2b2_ae35 + (t * 64 + k) as u64,
+                    ])
                 })
                 .collect();
-            let mask_eval = row_mle_eval(&mask_vec);
-            for i in 0..nl {
-                let p = a * nl + i;
-                let eq_p = eq_pair(p);
-                let phi = row_mle_eval(&fp_rows[p]); // masked fingerprint MLE
-                rhs = rhs + eq_p * ((one + delta) * mask_eval + phi);
-            }
-        }
+            let (r_row, r_pair) = r_w.split_at(num_vars);
 
-        assert_eq!(lhs, rhs, "binding identity must hold on the tensor layout");
+            // LHS: direct leaf-MLE evaluation of THIS tree's slice.
+            let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars + pair_vars,
+                leaves[lo * nl * n..hi * nl * n].iter().map(|v| *v.inner()).collect(),
+                zero_inner.clone(),
+            );
+            let lhs: Gf = <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
+                leaf_mle, &r_w, &(),
+            )
+            .expect("leaf MLE eval");
+
+            // eq(r_pair, p) for a LOCAL integer pair index p.
+            let eq_pair = |p: usize| -> Gf {
+                (0..pair_vars).fold(one, |acc, b| {
+                    let bit = (p >> b) & 1;
+                    let c = r_pair[b];
+                    acc * if bit == 1 { c } else { one + c }
+                })
+            };
+
+            // RHS: 1 + (1+δ)·Σ_p eq_p·Ã_a + Σ_p eq_p·Φ_p over the tree's
+            // relations.
+            let mut rhs = one;
+            for (a_local, spec) in adder_specs[lo..hi].iter().enumerate() {
+                let mask_vec: Vec<Gf> = (0..n)
+                    .map(|r| {
+                        let active = spec.active_rows.is_empty()
+                            || spec.active_rows.get(r).copied().unwrap_or(false);
+                        if active { one } else { Gf::zero() }
+                    })
+                    .collect();
+                let mask_eval = row_mle_eval(&mask_vec, r_row);
+                for i in 0..nl {
+                    let p_local = a_local * nl + i;
+                    let p_global = (lo + a_local) * nl + i;
+                    let eq_p = eq_pair(p_local);
+                    let phi = row_mle_eval(&fp_rows[p_global], r_row);
+                    rhs = rhs + eq_p * ((one + delta) * mask_eval + phi);
+                }
+            }
+
+            assert_eq!(lhs, rhs, "binding identity must hold on tree {t}");
+        }
     }
 
     /// **Task 4c-2: the binding sumcheck reduces the GKR leaf claim to
@@ -8810,63 +9076,89 @@ mod tests {
 
         let (_and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
         let nl = num_limbs(LB);
-        let pair_vars =
-            (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
 
         let cols: Vec<DenseMultilinearExtension<BinaryPoly<D>>> = trace.binary_poly.to_vec();
 
         let gamma = Gf::from_words([0x1357_9bdf, 0x2468_ace0]);
         let delta = Gf::from_words([0xfeed_f00d, 0x0bad_cafe]);
+        let mu = Gf::from_words([0x5555_aaaa, 0x3333_cccc]);
         let (leaves, _fp_rows) =
             ZincPlusPiopF2::<F2Types<D>, U, D>::sha_lookup_witness_leaves_tensor_zread(
                 &cols, &adder_specs, num_vars, LB, &gamma, &delta,
             );
 
-        // The GKR's would-be claim at an arbitrary point r_w.
-        let r_w: Vec<Gf> = (0..num_vars + pair_vars)
-            .map(|k| Gf::from_words([0xdead_beef ^ (k as u64) * 0x9e37_79b9, 0x1234 + k as u64]))
-            .collect();
-        let (r_row, r_pair) = r_w.split_at(num_vars);
+        // The forest's would-be GKR claims at arbitrary per-tree points,
+        // μ-combined into one claim B = Σ_t μ^t·(eval_w^t + Pub^t).
+        let chunks = crate::f2_lookup_binding::relation_tree_chunks(adder_specs.len());
         let zero_inner = Gf::zero().into_inner();
-        let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
-            num_vars + pair_vars,
-            leaves.iter().map(|v| *v.inner()).collect(),
-            zero_inner,
-        );
-        let eval_w: Gf =
-            <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
+        let mut tree_points: Vec<Vec<Gf>> = Vec::new();
+        let mut b = Gf::zero();
+        let mut scale = Gf::one();
+        let mut all_coeffs: Vec<Vec<crate::f2_lookup_binding::BindingCoeffs>> = Vec::new();
+        for (t, &(lo, hi)) in chunks.iter().enumerate() {
+            let pair_vars = ((hi - lo) * nl).trailing_zeros() as usize;
+            let r_w: Vec<Gf> = (0..num_vars + pair_vars)
+                .map(|k| {
+                    Gf::from_words([
+                        0xdead_beef ^ ((t * 64 + k) as u64) * 0x9e37_79b9,
+                        0x1234 + (t * 64 + k) as u64,
+                    ])
+                })
+                .collect();
+            let (r_row, r_pair) = r_w.split_at(num_vars);
+            let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars + pair_vars,
+                leaves[lo * nl * n..hi * nl * n].iter().map(|v| *v.inner()).collect(),
+                zero_inner.clone(),
+            );
+            let eval_w: Gf = <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
                 leaf_mle, &r_w, &(),
             )
             .expect("leaf MLE eval");
-
-        // B = eval_w + PubMLE(r_w)  (char 2).
-        let pub_part = lookup_binding_public_part::<D>(
-            &adder_specs, num_vars, LB, r_row, r_pair, &delta,
-        );
-        let b = eval_w + pub_part;
-
-        let coeffs = lookup_binding_coeffs::<D>(&adder_specs, r_pair, &gamma, LB);
+            let pub_part = lookup_binding_public_part::<D>(
+                &adder_specs[lo..hi],
+                num_vars,
+                LB,
+                r_row,
+                r_pair,
+                &delta,
+            );
+            b = b + scale * (eval_w + pub_part);
+            all_coeffs.push(lookup_binding_coeffs::<D>(
+                &adder_specs[lo..hi],
+                r_pair,
+                &gamma,
+                LB,
+                &scale,
+            ));
+            tree_points.push(r_w);
+            scale = scale * mu;
+        }
+        let groups: Vec<crate::f2_lookup_binding::BindingTreeGroup> = chunks
+            .iter()
+            .enumerate()
+            .map(|(t, &(lo, hi))| crate::f2_lookup_binding::BindingTreeGroup {
+                adder_specs: &adder_specs[lo..hi],
+                coeffs: &all_coeffs[t],
+                r_row: &tree_points[t][..num_vars],
+            })
+            .collect();
 
         let mut pt = Blake3Transcript::new();
-        let (proof, _r_star) = prove_lookup_binding::<D>(
-            &mut pt, &cols, &adder_specs, &coeffs, num_vars, LB, r_row,
-        );
+        let (proof, _r_star) =
+            prove_lookup_binding::<D>(&mut pt, &cols, &groups, num_vars, LB);
         assert_eq!(proof.sumcheck.claimed_sum, b, "sumcheck must prove exactly B");
 
         let mut vt = Blake3Transcript::new();
-        verify_lookup_binding::<D>(
-            &mut vt, &proof, &b, &adder_specs, &coeffs, num_vars, LB, r_row,
-        )
-        .expect("honest binding must verify");
+        verify_lookup_binding::<D>(&mut vt, &proof, &b, &groups, num_vars, LB)
+            .expect("honest binding must verify");
 
         // Tamper 1: a corrupted limb eval must be rejected.
         let mut bad = proof.clone();
         bad.limb_evals[0][0] = bad.limb_evals[0][0] + Gf::one();
         let mut vt2 = Blake3Transcript::new();
         assert!(matches!(
-            verify_lookup_binding::<D>(
-                &mut vt2, &bad, &b, &adder_specs, &coeffs, num_vars, LB, r_row,
-            ),
+            verify_lookup_binding::<D>(&mut vt2, &bad, &b, &groups, num_vars, LB),
             Err(LookupBindingError::FinalEvalMismatch)
         ));
 
@@ -8877,11 +9169,9 @@ mod tests {
                 &mut vt3,
                 &proof,
                 &(b + Gf::one()),
-                &adder_specs,
-                &coeffs,
+                &groups,
                 num_vars,
                 LB,
-                r_row,
             )
             .is_err()
         );
@@ -9364,6 +9654,14 @@ mod tests {
         assert!(
             verify(&bad_base, &lookup).is_err(),
             "non-empty adder parents must be rejected on the lookup path"
+        );
+
+        // The witness FOREST must have exactly one tree per relation chunk.
+        let mut bad = lookup.clone();
+        bad.lookup.witness_trees.truncate(1);
+        assert!(
+            verify(&base, &bad).is_err(),
+            "a missing forest tree must be rejected"
         );
     }
 
