@@ -1069,28 +1069,35 @@ where
 }
 
 /// A UAIR exercising the Flavor-1 $\mathbb{F}_{q}[X]$-constraint surface
-/// for a **large** prime $q$ (large enough to project under the existing
-/// PIOP infrastructure, in contrast to [`TestUairFqRotation`] which uses
-/// $q = 2$ and is therefore out of scope of the current end-to-end PIOP).
+/// for **multiple large primes** (in contrast to [`TestUairFqRotation`]
+/// which uses $q = 2$ and is therefore out of scope of the current
+/// end-to-end PIOP).
 ///
-/// Single arbitrary-poly witness column `a`. One $\mathbb F_q[X]$-constraint:
+/// Single arbitrary-poly witness column `a`. Two $\mathbb F_{q_i}[X]$-
+/// constraints, one per declared prime $q_i$:
 ///
 /// $$
-///   \phi_q(a) \in (X - 0) \quad \text{in } \mathbb F_q[X],
+///   \phi_{q_0}(a) \in (X - 0) \quad \text{in } \mathbb F_{q_0}[X],
+///   \qquad
+///   \phi_{q_1}(a) \in (X - 0) \quad \text{in } \mathbb F_{q_1}[X],
 /// $$
 ///
-/// i.e. $\phi_q(a)(0) = 0$ — the constant term of `a` is divisible by $q$.
-/// The trace generator builds `a` so that this holds (by zeroing its
-/// $X^0$ coefficient).
+/// i.e. the constant term of `a` is zero modulo each of $q_0$ and $q_1$.
+/// The trace generator builds `a` with its $X^0$ coefficient set to
+/// integer zero, so both constraints hold simultaneously regardless of the
+/// chosen primes.
 ///
-/// Used to exercise the per-prime $\mathbb F_q[X]$ ideal-check branch of
-/// the Zinc$+$ protocol end-to-end with a large prime.
+/// Used to exercise the per-prime $\mathbb F_{q_i}[X]$ ideal-check branch
+/// of the Zinc$+$ protocol end-to-end with multiple primes, including the
+/// lockstep multi-branch driver added by `fq-unify`.
 #[derive(Clone, Debug)]
 pub struct TestUairFqLargePrime<R>(PhantomData<R>);
 
-/// Large 64-bit prime used by [`TestUairFqLargePrime`].
-/// `0xFFFFFFFFFFFFFFC5` is the largest prime that fits in `u64`.
-pub const TEST_UAIR_FQ_LARGE_PRIME: u64 = 0xFFFF_FFFF_FFFF_FFC5;
+/// Largest 64-bit prime; used as $q_0$ in [`TestUairFqLargePrime`].
+pub const TEST_UAIR_FQ_LARGE_PRIME_0: u64 = 0xFFFF_FFFF_FFFF_FFC5;
+
+/// Another large 64-bit prime; used as $q_1$ in [`TestUairFqLargePrime`].
+pub const TEST_UAIR_FQ_LARGE_PRIME_1: u64 = 0xFFFF_FFFF_FFFF_FFAD;
 
 impl<R> Uair for TestUairFqLargePrime<R>
 where
@@ -1104,7 +1111,7 @@ where
         // 1 arbitrary-poly witness column `a`, no shifts, no lookups.
         let total = TotalColumnLayout::new(0, 1, 0);
         UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
-            .with_primes(vec![TEST_UAIR_FQ_LARGE_PRIME])
+            .with_primes(vec![TEST_UAIR_FQ_LARGE_PRIME_0, TEST_UAIR_FQ_LARGE_PRIME_1])
     }
 
     fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
@@ -1121,11 +1128,17 @@ where
         MulByScalar: Fn(&B::Expr, &Self::Scalar) -> Option<B::Expr>,
         IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
     {
-        // `phi_q(a) \in (X - 0)`.
+        // One constraint per declared prime: `phi_{q_i}(a) \in (X - 0)`.
+        let ideal = fq_ideal_from_ref(&DegreeOneIdeal::<R>::new(R::ZERO));
         b.assert_in_fq_ideal(
             /* prime_idx = */ 0,
             up.arbitrary_poly[0].clone(),
-            &fq_ideal_from_ref(&DegreeOneIdeal::<R>::new(R::ZERO)),
+            &ideal,
+        );
+        b.assert_in_fq_ideal(
+            /* prime_idx = */ 1,
+            up.arbitrary_poly[0].clone(),
+            &ideal,
         );
     }
 }
@@ -1182,10 +1195,7 @@ mod tests {
     fn test_constraint_degrees() {
         fn assert_uair_shape<U: Uair>(expected_degrees: &[usize]) {
             assert_eq!(count_constraints_total::<U>(), expected_degrees.len());
-            assert_eq!(
-                count_constraint_degrees_flattened::<U>(),
-                expected_degrees
-            );
+            assert_eq!(count_constraint_degrees_flattened::<U>(), expected_degrees);
             assert_eq!(
                 count_max_degree::<U>(),
                 *expected_degrees.iter().max().unwrap()
@@ -1201,8 +1211,9 @@ mod tests {
         assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>>>(&[1, 1, 1]);
         // TestUairFqRotation: a single F_2[X] linear constraint.
         assert_uair_shape::<TestUairFqRotation<u32>>(&[1]);
-        // TestUairFqLargePrime: a single F_q[X] linear constraint.
-        assert_uair_shape::<TestUairFqLargePrime<Int<LIMBS>>>(&[1]);
+        // TestUairFqLargePrime: two F_{q_i}[X] linear constraints (one per
+        // declared prime).
+        assert_uair_shape::<TestUairFqLargePrime<Int<LIMBS>>>(&[1, 1]);
     }
 
     /// `TestUairFqRotation` declares one prime (q = 2) on its signature and

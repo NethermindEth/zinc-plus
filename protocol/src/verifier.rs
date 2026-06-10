@@ -48,10 +48,10 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Fmod: From<u64>,
     F: PrimeField,
-    F::Modulus: FromRef<Zt::Fmod>,
+    F::Integer: FromRef<Zt::Fmod>,
 {
     let fmod = Zt::Fmod::from(prime);
-    F::make_cfg(&F::Modulus::from_ref(&fmod)).expect("declared prime is assumed prime")
+    F::make_cfg(&F::Integer::from_ref(&fmod)).expect("declared prime is assumed prime")
 }
 
 //
@@ -439,7 +439,7 @@ where
         let ic_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_ideal_check,
-            None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             |ideal| project_ideal(ideal, &self.field_cfg),
@@ -478,7 +478,7 @@ where
             let _ = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 fq_proof,
-                Some(prime_idx),
+                /* branch_idx = */ add!(prime_idx, 1),
                 num_constraints.for_prime(prime_idx),
                 self.base.num_vars,
                 |_| unreachable!("F_{q_i}[X] branch"),
@@ -592,7 +592,7 @@ where
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaim,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             &self.projecting_element_f,
@@ -646,7 +646,7 @@ where
             md_subclaims.expected_evaluations()[0].clone(),
             cpr_verifier_ancillary,
             &self.projected_scalars_f,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             &self.field_cfg,
         )?;
 

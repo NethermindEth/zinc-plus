@@ -21,10 +21,17 @@ use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
 /// an `assert_*` method is called it adds it to the RLC
 /// with the next power of the challenge `\alpha`.
 pub struct ConstraintFolder<'a, F: PrimeField> {
-    /// If `None`, this would fold $Z[X]$ contraints.
-    /// If `Some(i)`, this would fold $F_{q_i}[X]$ constraints.
+    /// Branch index selecting which family of constraints to fold.
+    ///
+    /// - `0` -> $\mathbb{Q}[X]$ constraints (from `assert_in_ideal` /
+    ///   `assert_zero`).
+    /// - `i >= 1` -> $\mathbb{F}_{q_{i-1}}[X]$ constraints emitted via
+    ///   `assert_in_fq_ideal(i - 1, ...)`. The off-by-one stems from the
+    ///   UAIR-facing `prime_idx` indexing into [`UairSignature::primes`] while
+    ///   the protocol-level branch index reserves `0` for $\Q[X]$.
+    ///
     /// All unrelated constraints are skipped.
-    prime_idx: Option<usize>,
+    branch_idx: usize,
     /// A reference to precomputed powers of the challenge.
     challenge_powers: &'a [F],
     /// Index of the current constraint,
@@ -35,18 +42,11 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
 }
 
 impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
-    pub fn new_z(challenge_powers: &'a [F], zero: &F) -> Self {
+    /// Build a folder for a given `branch_idx` (`0` = Q[X], `i >= 1` =
+    /// declared prime `i - 1`).
+    pub fn new(branch_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
         Self {
-            prime_idx: None,
-            challenge_powers,
-            current_constraint: 0,
-            folded_constraints: zero.clone(),
-        }
-    }
-
-    pub fn new_fq(prime_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
-        Self {
-            prime_idx: Some(prime_idx),
+            branch_idx,
             challenge_powers,
             current_constraint: 0,
             folded_constraints: zero.clone(),
@@ -68,21 +68,25 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        if self.prime_idx.is_none() {
+        // Q[X] family -> branch 0.
+        if self.branch_idx == 0 {
             self.fold_constraint(expr);
         }
     }
 
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
-        if self.prime_idx.is_none() {
+        // Q[X] family -> branch 0.
+        if self.branch_idx == 0 {
             self.fold_constraint(expr);
         }
     }
 
     #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
-        if self.prime_idx.is_some_and(|i| i == prime_idx) {
+        // F_{q_{prime_idx}}[X] family -> branch (prime_idx + 1).
+        if self.branch_idx == prime_idx + 1 {
             self.fold_constraint(expr);
         }
     }

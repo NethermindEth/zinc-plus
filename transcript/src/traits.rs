@@ -335,7 +335,7 @@ pub trait Transcript {
     where
         F::Integer: ConstTranscribable,
     {
-        let random_inner = self.get_challenge();
+        let random_inner: F::Integer = self.get_challenge();
         F::from_with_cfg(random_inner, cfg)
     }
 

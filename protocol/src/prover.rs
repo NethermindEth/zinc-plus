@@ -50,10 +50,10 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Fmod: From<u64>,
     F: PrimeField,
-    F::Modulus: FromRef<Zt::Fmod>,
+    F::Integer: FromRef<Zt::Fmod>,
 {
     let fmod = Zt::Fmod::from(prime);
-    F::make_cfg(&F::Modulus::from_ref(&fmod)).expect("declared prime is assumed prime")
+    F::make_cfg(&F::Integer::from_ref(&fmod)).expect("declared prime is assumed prime")
 }
 
 //
@@ -594,7 +594,7 @@ impl_with_type_bounds!(ProverProjectedCombined
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             &self.field_cfg,
@@ -611,7 +611,7 @@ impl_with_type_bounds!(ProverProjectedCombined
                 &mut self.base.pcs_transcript.fs_transcript,
                 &staging.projected_trace,
                 &staging.projected_scalars_fx,
-                Some(prime_idx),
+                /* branch_idx = */ add!(prime_idx, 1),
                 num_constraints.for_prime(prime_idx),
                 self.base.num_vars,
                 &staging.field_cfg,
@@ -656,7 +656,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             &self.field_cfg,
@@ -675,7 +675,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
                 &mut self.base.pcs_transcript.fs_transcript,
                 &staging.projected_trace,
                 &staging.projected_scalars_fx,
-                Some(prime_idx),
+                /* branch_idx = */ add!(prime_idx, 1),
                 num_constraints.for_prime(prime_idx),
                 self.base.num_vars,
                 &staging.field_cfg,
@@ -776,7 +776,7 @@ impl_with_type_bounds!(ProverEvalProjected
             bit_op_down_mles,
             &self.ic_eval_point,
             &self.projected_scalars_f,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             max_degree,

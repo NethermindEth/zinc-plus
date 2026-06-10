@@ -82,8 +82,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `bit_op_specs().len()`.
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
-    /// - `prime_idx`: The index of the prime $q$ for which constraints are
-    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]`.
+    /// - `branch_idx`: which constraint family to fold. `0` -> $\Q[X]$; `i >=
+    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
@@ -96,7 +96,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         bit_op_down_mles: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
@@ -209,11 +209,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = if let Some(prime_idx) = prime_idx {
-                ConstraintFolder::new_fq(prime_idx, &folding_challenge_powers, &zero)
-            } else {
-                ConstraintFolder::new_z(&folding_challenge_powers, &zero)
-            };
+            let mut folder = ConstraintFolder::new(branch_idx, &folding_challenge_powers, &zero);
 
             let project = |scalar: &U::Scalar| {
                 projected_scalars
@@ -342,8 +338,12 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `combined_sumcheck.claimed_sums()[0]`.
     /// - `ic_check_subclaim`: Subclaim from the ideal check; provides the
     ///   evaluation point and claimed values used to verify the sumcheck sum.
-    /// - `prime_idx`: The index of the prime $q$ for which constraints are
-    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]$.
+    /// - `branch_idx`: which constraint family. `0` -> $\Q[X]$; `i >= 1` ->
+    ///   $\mathbb{F}_{q_{i-1}}[X]$. Currently unused inside this function (the
+    ///   call is branch-agnostic) but accepted for symmetry with
+    ///   `prepare_sumcheck_group` / `finalize_verifier`, and as a hook for the
+    ///   per-prime soundness chain (TODO(fq-soundness)) and shared-challenge
+    ///   unification (TODO(fq-unify)).
     /// - `num_constraints`: Number of constraint polynomials in `U`.
     /// - `num_vars`: Number of variables of the trace MLEs.
     /// - `projecting_element`: The random challenge used to project `F[X] → F`.
@@ -354,7 +354,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         proof: &CprProof<F>,
         claimed_sum: F,
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         projecting_element: &F,
@@ -370,7 +370,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // with `prepare_sumcheck_group` / `finalize_verifier` and to leave a
         // hook for the per-prime soundness chain (TODO(fq-soundness)) and the
         // shared-challenge unification (TODO(fq-unify)).
-        let _ = prime_idx;
+        let _ = branch_idx;
         let uair_sig = U::signature();
         proof.validate_evaluation_sizes(
             uair_sig.total_cols().cols(),
@@ -445,8 +445,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `ancillary`: Produced by [`prepare_verifier`]; carries folding
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
-    /// - `prime_idx`: The index of the prime $q$ for which constraints are
-    ///   folded. `None` for $Z$ constraints, `Some` for $F_q[X]`.
+    /// - `branch_idx`: which constraint family. `0` -> $\Q[X]$; `i >= 1` ->
+    ///   $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_verifier<U>(
@@ -456,7 +456,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         expected_evaluation: F,
         ancillary: CprVerifierAncillary<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
@@ -475,11 +475,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             one.clone(),
         )?;
 
-        let mut folder = if let Some(prime_idx) = prime_idx {
-            ConstraintFolder::new_fq(prime_idx, &ancillary.folding_challenge_powers, &zero)
-        } else {
-            ConstraintFolder::new_z(&ancillary.folding_challenge_powers, &zero)
-        };
+        let mut folder =
+            ConstraintFolder::new(branch_idx, &ancillary.folding_challenge_powers, &zero);
 
         let project = |scalar: &U::Scalar| {
             projected_scalars
@@ -636,7 +633,7 @@ mod tests {
         let ic_check_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             num_vars,
             ideal_over_f_from_ref,
@@ -663,7 +660,7 @@ mod tests {
             Vec::new(),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             num_vars,
             max_degree,
@@ -695,7 +692,7 @@ mod tests {
             &proof,
             md_proof.claimed_sums()[0].clone(),
             &ic_check_subclaim,
-            /* prime_idx = */ None,
+            /* branch_idx = */ 0,
             num_constraints.q,
             num_vars,
             &projecting_element,
@@ -719,7 +716,7 @@ mod tests {
                 md_subclaims.expected_evaluations()[0].clone(),
                 cpr_verifier_ancillary,
                 &projected_scalars,
-                /* prime_idx = */ None,
+                /* branch_idx = */ 0,
                 &test_config(),
             )
             .is_ok()

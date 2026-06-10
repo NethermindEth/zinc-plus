@@ -26,6 +26,7 @@ use zinc_uair::{
     ideal_collector::{IdealOrZero, collect_ideals},
 };
 use zinc_utils::inner_transparent_field::InnerTransparentField;
+use zinc_utils::sub;
 
 /// Ideal-check subprotocol.
 ///
@@ -61,18 +62,18 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ///   `DynamicPolynomialF<F>`, column-indexed: `trace_matrix[col][row]`.
     /// - `projected_scalars`: UAIR scalars projected to
     ///   `DynamicPolynomialF<F>`.
-    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
-    ///   be proven, `None` for $Q[X]$ constraints
+    /// - `branch_idx`: which constraint family to prove. `0` -> $\Q[X]$; `i >=
+    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$ (i.e. UAIR-level `prime_idx = i - 1`).
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `num_vars`: number of variables in trace MLEs.
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
     pub fn prove_mle_first<F, const DEGREE_PLUS_ONE: usize>(
         transcript: &mut impl Transcript,
         trace_matrix: &ColumnMajorTrace<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -110,13 +111,14 @@ impl<U: Uair> IdealCheckProtocol<U> {
             };
         }
 
-        if let Some(prime_idx) = prime_idx {
+        if branch_idx == 0 {
+            categorize_ideals!(ideal_collector.ideals, degrees.q_degrees);
+        } else {
+            let prime_idx = branch_idx - 1;
             categorize_ideals!(
                 ideal_collector.fq_ideals[prime_idx],
                 degrees.fq_degrees[prime_idx]
             );
-        } else {
-            categorize_ideals!(ideal_collector.ideals, degrees.q_degrees);
         }
 
         // When any linear non-zero-ideal constraint exists, run
@@ -128,7 +130,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
                 combined_poly_builder::evaluate_combined_polynomials::<_, U, DEGREE_PLUS_ONE>(
                     trace_matrix,
                     projected_scalars,
-                    prime_idx,
+                    branch_idx,
                     num_constraints,
                     &evaluation_point,
                     field_cfg,
@@ -153,7 +155,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
             let values = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 &row_major,
                 projected_scalars,
-                prime_idx,
+                branch_idx,
                 num_constraints,
                 field_cfg,
                 &nonlinear_nonzero,
@@ -191,8 +193,8 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ///   `DynamicPolynomialF<F>`, row-indexed: `trace_matrix[row][col]`.
     /// - `projected_scalars`: UAIR scalars projected to
     ///   `DynamicPolynomialF<F>`.
-    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
-    ///   be proven, `None` for $Q[X]$ constraints
+    /// - `branch_idx`: which constraint family to prove. `0` -> $\Q[X]$; `i >=
+    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `num_vars`: number of variables in trace MLEs.
     /// - `field_cfg`: random field configuration sampled on the previous steps
@@ -202,7 +204,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
         transcript: &mut impl Transcript,
         trace_matrix: &RowMajorTrace<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         field_cfg: &F::Config,
@@ -214,19 +216,20 @@ impl<U: Uair> IdealCheckProtocol<U> {
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
         let ideal_collector = collect_ideals::<U>(num_constraints);
-        let non_zero_indices: Vec<usize> = if let Some(prime_idx) = prime_idx {
-            let per_prime_ideals = &ideal_collector.fq_ideals[prime_idx];
-
-            per_prime_ideals
-                .into_iter()
+        let non_zero_indices: Vec<usize> = if branch_idx == 0 {
+            ideal_collector
+                .ideals
+                .iter()
                 .enumerate()
                 .filter(|(_, i)| !i.is_zero_ideal())
                 .map(|(idx, _)| idx)
                 .collect()
         } else {
-            ideal_collector
-                .ideals
-                .iter()
+            let prime_idx = sub!(branch_idx, 1);
+            let per_prime_ideals = &ideal_collector.fq_ideals[prime_idx];
+
+            per_prime_ideals
+                .into_iter()
                 .enumerate()
                 .filter(|(_, i)| !i.is_zero_ideal())
                 .map(|(idx, _)| idx)
@@ -240,7 +243,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
             let computed = combined_poly_builder::evaluate_for_constraints::<_, U, DEGREE_PLUS_ONE>(
                 trace_matrix,
                 projected_scalars,
-                prime_idx,
+                branch_idx,
                 num_constraints,
                 field_cfg,
                 &non_zero_indices,
@@ -281,8 +284,8 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// # Parameters
     /// - `transcript`: the Fiat-Shamir transcript.
     /// - `proof`: a purported proof produced by the prover.
-    /// - `prime_idx`: index of a prime $q_i$ if $F_{q_i}[X]$ constraints are to
-    ///   be verified, `None` for $Q[X]$ constraints
+    /// - `branch_idx`: which constraint family to verify. `0` -> $\Q[X]$; `i >=
+    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
     /// - `num_vars`: the number of variables the trace row MLEs have.
     /// - `ideal_over_f_from_ref`: since the UAIR `U` is not aware of the field
@@ -296,7 +299,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     pub fn verify_as_subprotocol<F, IdealOverF, IdealOverFFromRef, IdealOverFFromFqRef>(
         transcript: &mut impl Transcript,
         proof: Proof<F>,
-        prime_idx: Option<usize>,
+        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         ideal_over_f_from_ref: IdealOverFFromRef,
@@ -338,15 +341,15 @@ impl<U: Uair> IdealCheckProtocol<U> {
         // value is zero by construction; the sumcheck that follows
         // verifies consistency of the claimed evaluations with the
         // actual trace.
-        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) =
-            if let Some(prime_idx) = prime_idx {
-                collect_non_trival!(
-                    ideal_collector.fq_ideals[prime_idx],
-                    ideal_over_f_from_fq_ref
-                )
-            } else {
-                collect_non_trival!(ideal_collector.ideals, ideal_over_f_from_ref)
-            };
+        let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = if branch_idx == 0 {
+            collect_non_trival!(ideal_collector.ideals, ideal_over_f_from_ref)
+        } else {
+            let prime_idx = sub!(branch_idx, 1);
+            collect_non_trival!(
+                ideal_collector.fq_ideals[prime_idx],
+                ideal_over_f_from_fq_ref
+            )
+        };
 
         batched_ideal_check(&non_trivial_ideals, &non_trivial_values)?;
 
@@ -416,6 +419,7 @@ mod tests {
         let num_constraints = prime_idx
             .map(|i| num_constraints.for_prime(i))
             .unwrap_or(num_constraints.q);
+        let branch_idx = prime_idx.map_or(0, |i| i + 1);
 
         // Combined approach
         {
@@ -430,7 +434,7 @@ mod tests {
             let verifier_result = IdealCheckProtocol::<U>::verify_as_subprotocol(
                 &mut transcript.clone(),
                 proof,
-                prime_idx,
+                branch_idx,
                 num_constraints,
                 num_vars,
                 ideal_over_f_from_ref,
@@ -458,7 +462,7 @@ mod tests {
             let verifier_result = IdealCheckProtocol::<U>::verify_as_subprotocol(
                 &mut transcript.clone(),
                 proof,
-                prime_idx,
+                branch_idx,
                 num_constraints,
                 num_vars,
                 ideal_over_f_from_ref,

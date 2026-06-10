@@ -25,6 +25,7 @@
 
 pub mod fold;
 pub mod prover;
+pub mod shared_challenge;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
@@ -962,11 +963,11 @@ mod tests {
     }
 
     /// End-to-end test: [`TestUairFqLargePrime`] -- exercises the per-prime
-    /// $\mathbb F_q[X]$ ideal-check branch with a large prime
-    /// ($q = $ [`TEST_UAIR_FQ_LARGE_PRIME`]).
+    /// $\mathbb F_{q_i}[X]$ ideal-check branch with **two** large primes
+    /// (`TEST_UAIR_FQ_LARGE_PRIME_0`, `TEST_UAIR_FQ_LARGE_PRIME_1`).
     ///
-    /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_q[X]$
-    /// constraint $\phi_q(a) \in (X - 0)$.
+    /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_{q_i}[X]$
+    /// constraint per prime, both of the form $\phi_{q_i}(a) \in (X - 0)$.
     ///
     /// TODO(fq-soundness): this only checks honest-prover correctness of the
     /// ideal-membership claim. The per-prime CPR + sumcheck +
@@ -1345,7 +1346,7 @@ mod tests {
                 &proof_cpr,
                 claimed_sums[0].clone(),
                 &ic_subclaim,
-                /* prime_idx = */ None,
+                /* branch_idx = */ 0,
                 num_constraints.q,
                 nv,
                 &a,

@@ -30,6 +30,9 @@ use zinc_utils::{
 /// For $F_{q_i}[X]$ constraints, `trace_matrix` and `projected_scalars` must
 /// already be projected mod $q_i$.
 ///
+/// `branch_idx` selects the constraint family: `0` for $\Q[X]$, `i >= 1`
+/// for $\mathbb{F}_{q_{i-1}}[X]$.
+///
 /// Returns one `DynamicPolynomialF<F>` per requested constraint, in the
 /// same order as `constraint_indices`.
 ///
@@ -38,7 +41,7 @@ use zinc_utils::{
 pub fn evaluate_for_constraints<F, U, const DEGREE_PLUS_ONE: usize>(
     trace_matrix: &RowMajorTrace<F>,
     projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    prime_idx: Option<usize>,
+    branch_idx: usize,
     num_constraints: usize,
     field_cfg: &F::Config,
     constraint_indices: &[usize],
@@ -96,7 +99,7 @@ where
             evaluate_constraints_for_row::<F, U>(
                 up,
                 &down,
-                prime_idx,
+                branch_idx,
                 num_constraints,
                 projected_scalars,
                 down_layout,
@@ -180,7 +183,7 @@ where
 fn evaluate_constraints_for_row<F, U>(
     up: &[DynamicPolynomialF<F>],
     down: &[DynamicPolynomialF<F>],
-    prime_idx: Option<usize>,
+    branch_idx: usize,
     num_constraints: usize,
     projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
     down_layout: &ColumnLayout,
@@ -189,7 +192,7 @@ where
     F: PrimeField,
     U: Uair,
 {
-    let mut constraint_builder = CombinedPolyRowBuilder::new(prime_idx, num_constraints);
+    let mut constraint_builder = CombinedPolyRowBuilder::new(branch_idx, num_constraints);
 
     let project = |x: &U::Scalar| {
         projected_scalars
@@ -230,13 +233,16 @@ where
 /// For $F_{q_i}[X]$ constraints, `trace_matrix` and `projected_scalars` must
 /// already be projected mod $q_i$.
 ///
+/// `branch_idx` selects the constraint family: `0` for $\Q[X]$, `i >= 1`
+/// for $\mathbb{F}_{q_{i-1}}[X]$.
+///
 /// Does `(num_columns + num_shifted_columns) * max_num_coeffs` evaluations of
 /// MLEs.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn evaluate_combined_polynomials<F, U, const DEGREE_PLUS_ONE: usize>(
     trace_matrix: &ColumnMajorTrace<F>,
     projected_scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    prime_idx: Option<usize>,
+    branch_idx: usize,
     num_constraints: usize,
     evaluation_point: &[F],
     field_cfg: &F::Config,
@@ -337,7 +343,7 @@ where
     down_evals.extend_from_slice(&shift_down_evals[bit_op_down_offset..]);
 
     // Apply UAIR constraints to the evaluated trace values
-    let mut constraint_builder = CombinedPolyRowBuilder::new(prime_idx, num_constraints);
+    let mut constraint_builder = CombinedPolyRowBuilder::new(branch_idx, num_constraints);
 
     let project = |x: &U::Scalar| {
         projected_scalars
@@ -396,11 +402,13 @@ fn apply_bit_op_to_poly<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
     }
 }
 
-/// Row-builder that accumulates only the specific family of constraints:
-/// - $\mathbb{F}_{q_i}[X]$ if `prime_idx == Some(i)
-/// - $\mathbb{Q}[X]$ otherwise
+/// Row-builder that accumulates only the specific family of constraints,
+/// selected by `branch_idx`:
+/// - `branch_idx == 0` -> $\mathbb{Q}[X]$ constraints
+/// - `branch_idx == i (i >= 1)` -> $\mathbb{F}_{q_{i-1}}[X]$ constraints (i.e.
+///   UAIR-level `prime_idx = i - 1`).
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
-    prime_idx: Option<usize>,
+    branch_idx: usize,
     combined_evaluations: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -410,32 +418,33 @@ impl<F: PrimeField> ConstraintBuilder for CombinedPolyRowBuilder<F> {
     type FqIdeal = ImpossibleIdeal;
 
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        // Q[X] constraint
-        if self.prime_idx.is_none() {
+        // Q[X] family -> branch 0.
+        if self.branch_idx == 0 {
             self.combined_evaluations.push(expr);
         }
     }
 
     fn assert_zero(&mut self, expr: Self::Expr) {
-        // Q[X] constraint
-        if self.prime_idx.is_none() {
+        // Q[X] family -> branch 0.
+        if self.branch_idx == 0 {
             self.combined_evaluations.push(expr);
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
-        // F_q[X] constraint
-        if Some(prime_idx) == self.prime_idx {
+        // F_{q_{prime_idx}}[X] family -> branch (prime_idx + 1).
+        if self.branch_idx == prime_idx + 1 {
             self.combined_evaluations.push(expr);
         }
-        // Otherwise it belongs to a different prime's branch; silently skip.
+        // Otherwise it belongs to a different branch; silently skip.
     }
 }
 
 impl<F: PrimeField> CombinedPolyRowBuilder<F> {
-    pub fn new(prime_idx: Option<usize>, num_constraints: usize) -> Self {
+    pub fn new(branch_idx: usize, num_constraints: usize) -> Self {
         Self {
-            prime_idx,
+            branch_idx,
             combined_evaluations: Vec::with_capacity(num_constraints),
         }
     }
