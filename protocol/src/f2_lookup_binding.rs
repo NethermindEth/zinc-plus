@@ -12,31 +12,45 @@
 //!   Q_a[r] = Σ_i eq(r_pair, a·nl+i)·fp_{a,i}[r]
 //! ```
 //!
-//! Every fingerprint term is a **limb-family read** of a committed column:
-//! `L_i(col)[r] = Σ_{b<ℓ} bit_{ℓi+b}(col[r])·X^b` (a FIXED weight family per
-//! limb `i` — the carry columns are laid out with carry `j` at bit `ℓ·j`
-//! precisely so the carry reads are limb reads too). So
+//! Every fingerprint term is a **fixed-family read** of a committed column.
+//! Two family kinds (`nf = 2·nl − 1` families total, indexed `f`):
+//!
+//! - **Limb families** (`f = i < nl`): `L_i(col)[r] = Σ_{b<ℓ}
+//!   bit_{ℓi+b}(col[r])·X^b` — the operand/result limb coordinates.
+//! - **Boundary-bit families** (`f = nl+j−1`, `j ∈ 1..nl`): `e_{ℓj}(col)[r]
+//!   = bit_{ℓj}(col[r])` — the **virtualized carries**. Carry-into-bit-p of
+//!   an add `t = x+y` satisfies `C[p] = (x⊕y⊕t)[p]`, so `cin_i = cout_{i−1}
+//!   = z[ℓi] = Σ_op e_{ℓi}(op↓Δ)` is a Gf-linear parity of single-bit reads
+//!   of the ALREADY-COMMITTED operands — no carry columns exist. `cin_0 = 0`
+//!   is a constant; the LAST limb is marginalised (no cout coordinate, the
+//!   `γ⁴·emb(2)` tag constant instead — see `add_lookup::marginal_tag`).
+//!
+//! So
 //!
 //! ```text
-//!   Q_a[r] = Σ_{(col,Δ,i)} coeff_{a,(col,Δ,i)} · L_i(col↓Δ)[r]
+//!   Q_a[r] = const_a + Σ_{(col,Δ,f)} coeff_{a,(col,Δ,f)} · F_f(col↓Δ)[r]
 //! ```
 //!
-//! with public coefficients `coeff = eq(r_pair,·)·γ^ρ`. This module proves
-//! the masked row-sum `B := eval_w + PubMLE` with **one degree-3 sumcheck**
-//! (`comb = eq·Σ_a mask_a·Q_a`), reducing it to the **limb-family shifted
-//! evals** `L̃_i(col↓Δ)(r★)` at the sumcheck point — shipped per distinct
-//! `(col,Δ)` (all `nl` limbs). The verifier recombines `Q̃_a(r★)` from them
-//! with the public coefficients and checks the final evaluation.
+//! with public coefficients `coeff = eq(r_pair,·)·γ^ρ` and the public tag
+//! constant `const_a`. This module proves the masked row-sum `B := eval_w +
+//! PubMLE` with **one degree-3 sumcheck** (`comb = eq·Σ_a mask_a·Q_a`),
+//! reducing it to the **family shifted evals** `F̃_f(col↓Δ)(r★)` at the
+//! sumcheck point — shipped per distinct `(col,Δ)` (all `nf` families). The
+//! verifier recombines `Q̃_a(r★)` from them with the public coefficients and
+//! checks the final evaluation.
 //!
-//! **Why limb families (and not per-bit evals):** each shipped eval must be
-//! bound to the commitment. A fixed family `L_i` admits the z-block pattern —
-//! pointed-shift claims into the multipoint fold against `L_i`-block columns,
-//! whose `r_0`-evals are checked against the opened `a′` via
-//! `Σ_g γ_g·L_{i,g}(r_0) = w_i(a′)` with the **fresh** post-absorb `γ_open`
-//! (SZ binds each eval individually). Per-bit evals recombined under the
-//! *already-known* α would NOT bind (a cheater shifts mass between slices
-//! keeping the α-combination). The fold wiring lives in the prove pipeline;
-//! this module's contract ends at the shipped `L̃` evals.
+//! **Why fixed families (and not per-bit evals recombined under α):** each
+//! shipped eval must be bound to the commitment. A fixed family admits the
+//! z-block pattern — pointed-shift claims into the multipoint fold against
+//! family-block columns, whose `r_0`-evals are checked against the opened
+//! `a′` via `Σ_g γ_g·F_{f,g}(r_0) = w_f(a′)` with the **fresh** post-absorb
+//! `γ_open` (SZ binds each eval individually). Per-bit evals recombined
+//! under the *already-known* α would NOT bind (a cheater shifts mass between
+//! slices keeping the α-combination). Note the boundary-bit families are NOT
+//! that unsound pattern: each `e_{ℓj}` is its own fixed family with its own
+//! block columns and its own `a′` consistency under the fresh `γ_open`. The
+//! fold wiring lives in the prove pipeline; this module's contract ends at
+//! the shipped family evals.
 
 use crypto_primitives::Field;
 use zinc_piop::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
@@ -69,15 +83,50 @@ pub fn eq_at_index(point: &[Gf], j: usize) -> Gf {
     })
 }
 
-/// Per-relation public limb-read coefficients:
-/// `Q_a[r] = Σ coeff·L_limb(col↓Δ)[r]`, keyed `((col, Δ), limb)`.
-/// Mirrors `fp = emb(x_i) + γ·emb(y_i⊕y2_i) + γ²·cin_i + γ³·emb(t_i) + γ⁴·cout_i`
-/// with the carry column laid out so `cout_j` sits at bit `ℓ·j` (limb-`j`
-/// read): `cin_i = L_{i−1}(carry)` (`cin_0 = 0`), `cout_i = L_i(carry)`.
-#[derive(Clone, Debug, Default)]
+/// Number of binding families for `ℓ`-bit limbs of a `D`-bit word:
+/// `nl` limb families plus `nl−1` boundary-bit families (the virtualized
+/// carries at bits `ℓ, 2ℓ, …, ℓ(nl−1)`).
+pub fn num_families<const D: usize>(limb_bits: usize) -> usize {
+    let nl = D / limb_bits;
+    2 * nl - 1
+}
+
+/// The bit position read by family `f` when `f ≥ nl` (a boundary-bit
+/// family): `p = ℓ·(f − nl + 1)`.
+#[inline]
+fn boundary_bit(family: usize, nl: usize, limb_bits: usize) -> usize {
+    limb_bits * (family - nl + 1)
+}
+
+/// The `a′`-consistency weight vector of family `f`: for a limb family,
+/// `w[ℓf+b] = X^b`; for a boundary-bit family, `w[p] = 1` at its single bit.
+/// `gf128poly_project(a′, w_f)` must equal `Σ_g γ_open,g·F_{f,g}(r_0)`.
+pub fn family_weights<const D: usize>(family: usize, limb_bits: usize) -> Vec<Gf> {
+    let nl = D / limb_bits;
+    let mut w = vec![Gf::zero(); D];
+    if family < nl {
+        for (b, slot) in w.iter_mut().skip(family * limb_bits).take(limb_bits).enumerate() {
+            *slot = x_pow(b);
+        }
+    } else {
+        w[boundary_bit(family, nl, limb_bits)] = Gf::one();
+    }
+    w
+}
+
+/// Per-relation public family-read coefficients:
+/// `Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r]`, keyed `((col, Δ), family)`.
+/// Mirrors `fp = emb(x_i) + γ·emb(y_i⊕y2_i) + γ²·cin_i + γ³·emb(t_i) +
+/// γ⁴·cout_i` with the carries VIRTUALIZED: `cin_i = cout_{i−1} = z[ℓi]`
+/// (`z = x⊕y⊕y2⊕t`) is the boundary-bit parity `Σ_op e_{ℓi}(op↓Δ)`;
+/// `cin_0 = 0`; the last limb is marginalised, contributing the public
+/// `γ⁴·emb(2)` tag to `const_a` instead of a cout read.
+#[derive(Clone, Debug)]
 pub struct BindingCoeffs {
-    /// `((col, row_shift), limb) → coeff`, insertion-ordered.
+    /// `((col, row_shift), family) → coeff`, insertion-ordered.
     pub terms: Vec<(((usize, usize), usize), Gf)>,
+    /// Public constant addend of `Q_a` (the marginal-tag term).
+    pub constant: Gf,
 }
 
 impl BindingCoeffs {
@@ -94,7 +143,6 @@ impl BindingCoeffs {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn lookup_binding_coeffs<const D: usize>(
     adder_specs: &[F2AdderSpec],
-    carry_col_base: usize,
     r_pair: &[Gf],
     gamma: &Gf,
     limb_bits: usize,
@@ -103,24 +151,48 @@ pub fn lookup_binding_coeffs<const D: usize>(
     let g2 = *gamma * *gamma;
     let g3 = g2 * *gamma;
     let g4 = g3 * *gamma;
+    // γ⁴·emb(2): the marginalised last limb's tag (matches
+    // `add_lookup::marginal_tag` = the polynomial X).
+    let tag = g4 * Gf::from_words([2, 0]);
     adder_specs
         .iter()
         .enumerate()
         .map(|(a, spec)| {
-            let mut acc = BindingCoeffs::default();
+            let mut acc = BindingCoeffs { terms: Vec::new(), constant: Gf::zero() };
+            // The z-read operand set of this relation: the carry parity
+            // reads every term of z = x ⊕ y (⊕ y2) ⊕ t.
+            let mut zread_ops: Vec<(usize, usize)> = vec![
+                (spec.x.col, spec.x.row_shift),
+                (spec.y.col, spec.y.row_shift),
+                (spec.t.col, spec.t.row_shift),
+            ];
+            if let Some(y2) = &spec.y2 {
+                zread_ops.push((y2.col, y2.row_shift));
+            }
             for i in 0..nl {
                 let eqp = eq_at_index(r_pair, a * nl + i);
-                acc.add((((spec.x.col, spec.x.row_shift), i)), eqp);
-                acc.add((((spec.y.col, spec.y.row_shift), i)), eqp * *gamma);
+                acc.add(((spec.x.col, spec.x.row_shift), i), eqp);
+                acc.add(((spec.y.col, spec.y.row_shift), i), eqp * *gamma);
                 if let Some(y2) = &spec.y2 {
                     acc.add(((y2.col, y2.row_shift), i), eqp * *gamma);
                 }
                 acc.add(((spec.t.col, spec.t.row_shift), i), eqp * g3);
-                let carry = (carry_col_base + a, 0usize);
                 if i > 0 {
-                    acc.add((carry, i - 1), eqp * g2); // cin_i = L_{i−1}(carry)
+                    // cin_i = z[ℓi]: boundary family e_{ℓi} = nl + (i−1).
+                    for &key in &zread_ops {
+                        acc.add((key, nl + (i - 1)), eqp * g2);
+                    }
                 }
-                acc.add((carry, i), eqp * g4); // cout_i = L_i(carry)
+                if i + 1 < nl {
+                    // cout_i = z[ℓ(i+1)]: boundary family e_{ℓ(i+1)} = nl + i
+                    // — the SAME functional as cin_{i+1} (structural chain).
+                    for &key in &zread_ops {
+                        acc.add((key, nl + i), eqp * g4);
+                    }
+                } else {
+                    // Last limb: marginalised — the public tag constant.
+                    acc.constant = acc.constant + eqp * tag;
+                }
             }
             acc
         })
@@ -141,9 +213,10 @@ pub fn binding_distinct_pairs(coeffs: &[BindingCoeffs]) -> Vec<(usize, usize)> {
     pairs
 }
 
-/// Proof of the binding sumcheck: the sumcheck itself plus the limb-family
-/// shifted evals `L̃_i(col↓Δ)-MLE(r★)`, `limb_evals[pair][i]` per distinct
-/// `(col, Δ)` pair (all `nl` limbs each).
+/// Proof of the binding sumcheck: the sumcheck itself plus the family
+/// shifted evals `F̃_f(col↓Δ)-MLE(r★)`, `limb_evals[pair][f]` per distinct
+/// `(col, Δ)` pair (all `nf = 2·nl−1` families each: `nl` limb packs then
+/// `nl−1` boundary bits).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LookupBindingProof {
     pub sumcheck: SumcheckProof<Gf>,
@@ -215,66 +288,77 @@ pub fn lookup_binding_public_part<const D: usize>(
     out
 }
 
-/// Public alias of [`limb_proj_rows`] for the prove/verify pipeline (builds
-/// the L-block columns and the verifier's public-column recomputation).
-pub fn limb_proj_rows_pub<const D: usize>(
+/// Public alias of [`family_proj_rows`] for the prove/verify pipeline
+/// (builds the family-block fold sources and the verifier's public-column
+/// recomputation).
+pub fn family_proj_rows_pub<const D: usize>(
     cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
     col: usize,
     shift: usize,
-    limb: usize,
+    family: usize,
     limb_bits: usize,
     n: usize,
 ) -> Vec<Gf> {
-    limb_proj_rows::<D>(cols, col, shift, limb, limb_bits, n)
+    family_proj_rows::<D>(cols, col, shift, family, limb_bits, n)
 }
 
-/// MLE eval at `point` of a limb-projected, row-shifted column — used by the
-/// verifier to recompute PUBLIC columns' limb claims directly.
-pub fn limb_proj_eval_pub<const D: usize>(
+/// MLE eval at `point` of a family-projected, row-shifted column — used by
+/// the verifier to recompute PUBLIC columns' family claims directly.
+pub fn family_proj_eval_pub<const D: usize>(
     cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
     col: usize,
     shift: usize,
-    limb: usize,
+    family: usize,
     limb_bits: usize,
     num_vars: usize,
     point: &[Gf],
 ) -> Gf {
     let n = 1usize << num_vars;
-    let v = limb_proj_rows::<D>(cols, col, shift, limb, limb_bits, n);
+    let v = family_proj_rows::<D>(cols, col, shift, family, limb_bits, n);
     row_mle_eval(&v, num_vars, point)
 }
 
-/// The limb-family projected, row-shifted vector `L_i(col↓Δ)` as `Gf` rows
-/// (zero past the tail, mirroring the operand-read convention).
+/// The family-projected, row-shifted vector `F_f(col↓Δ)` as `Gf` rows (zero
+/// past the tail, mirroring the operand-read convention): the limb pack
+/// `Σ_b bit_{ℓf+b}·X^b` for `f < nl`, the single boundary bit `bit_{ℓ(f−nl+1)}`
+/// (as 0/1) for `f ≥ nl`.
 #[allow(clippy::arithmetic_side_effects)]
-fn limb_proj_rows<const D: usize>(
+fn family_proj_rows<const D: usize>(
     cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
     col: usize,
     shift: usize,
-    limb: usize,
+    family: usize,
     limb_bits: usize,
     n: usize,
 ) -> Vec<Gf> {
+    let nl = D / limb_bits;
+    let one = Gf::one();
     (0..n)
         .map(|r| {
             let m = match r.checked_add(shift).filter(|&i| i < n) {
                 Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[col].evaluations[i]),
                 None => 0,
             };
-            let mut acc = Gf::zero();
-            let mut bits = (m >> (limb * limb_bits)) & ((1u64 << limb_bits) - 1);
-            while bits != 0 {
-                let b = bits.trailing_zeros() as usize;
-                acc = acc + x_pow(b);
-                bits &= bits - 1;
+            if family < nl {
+                let mut acc = Gf::zero();
+                let mut bits = (m >> (family * limb_bits)) & ((1u64 << limb_bits) - 1);
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as usize;
+                    acc = acc + x_pow(b);
+                    bits &= bits - 1;
+                }
+                acc
+            } else if (m >> boundary_bit(family, nl, limb_bits)) & 1 == 1 {
+                one
+            } else {
+                Gf::zero()
             }
-            acc
         })
         .collect()
 }
 
 /// Prover: one degree-3 sumcheck for `B = Σ_r eq(r_row,r)·Σ_a mask_a[r]·Q_a[r]`,
-/// then the limb-family shifted evals at the sumcheck point `r★`.
+/// then the family shifted evals at the sumcheck point `r★`.
 /// Returns `(proof, r★)`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn prove_lookup_binding<const D: usize>(
@@ -287,16 +371,16 @@ pub fn prove_lookup_binding<const D: usize>(
     r_row: &[Gf],
 ) -> (LookupBindingProof, Vec<Gf>) {
     let n = 1usize << num_vars;
-    let nl = D / limb_bits;
+    let nf = num_families::<D>(limb_bits);
     let zero_inner = Gf::zero().into_inner();
     let num_rel = adder_specs.len();
 
-    // Q_a[r] = Σ coeff·L_limb(col↓Δ)[r].
+    // Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r].
     let q_rows: Vec<Vec<Gf>> = cfg_iter!(coeffs)
         .map(|per_rel| {
-            let mut q = vec![Gf::zero(); n];
-            for (((col, shift), limb), c) in &per_rel.terms {
-                let proj = limb_proj_rows::<D>(cols, *col, *shift, *limb, limb_bits, n);
+            let mut q = vec![per_rel.constant; n];
+            for (((col, shift), family), c) in &per_rel.terms {
+                let proj = family_proj_rows::<D>(cols, *col, *shift, *family, limb_bits, n);
                 for (qr, p) in q.iter_mut().zip(proj) {
                     *qr = *qr + *c * p;
                 }
@@ -335,13 +419,13 @@ pub fn prove_lookup_binding<const D: usize>(
         MLSumcheck::prove_as_subprotocol(transcript, mles, num_vars, 3, comb, &());
     let r_star = state.randomness.clone();
 
-    // Limb-family shifted evals at r★ per distinct (col, Δ) — all nl limbs.
+    // Family shifted evals at r★ per distinct (col, Δ) — all nf families.
     let pairs = binding_distinct_pairs(coeffs);
     let limb_evals: Vec<Vec<Gf>> = cfg_iter!(pairs)
         .map(|&(col, shift)| {
-            (0..nl)
-                .map(|i| {
-                    let v = limb_proj_rows::<D>(cols, col, shift, i, limb_bits, n);
+            (0..nf)
+                .map(|f| {
+                    let v = family_proj_rows::<D>(cols, col, shift, f, limb_bits, n);
                     row_mle_eval(&v, num_vars, &r_star)
                 })
                 .collect()
@@ -360,10 +444,10 @@ pub fn prove_lookup_binding<const D: usize>(
 }
 
 /// Verifier: checks the sumcheck against `claimed_b = eval_w + PubMLE(r_w)`,
-/// recombines `Q̃_a(r★)` from the shipped limb evals with the public
+/// recombines `Q̃_a(r★)` from the shipped family evals with the public
 /// coefficients, and checks the final evaluation. Returns `r★`; the caller
-/// must bind each shipped `L̃_i(col↓Δ)(r★)` to the commitment (pointed-shift
-/// claims on the limb-family blocks + the fresh-`γ_open` `a′` consistency).
+/// must bind each shipped `F̃_f(col↓Δ)(r★)` to the commitment (pointed-shift
+/// claims on the family blocks + the fresh-`γ_open` `a′` consistency).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn verify_lookup_binding<const D: usize>(
     transcript: &mut impl Transcript,
@@ -382,9 +466,9 @@ pub fn verify_lookup_binding<const D: usize>(
         MLSumcheck::<Gf>::verify_as_subprotocol(transcript, num_vars, 3, &proof.sumcheck, &())?;
     let r_star = subclaim.point.clone();
 
-    let nl = D / limb_bits;
+    let nf = num_families::<D>(limb_bits);
     let pairs = binding_distinct_pairs(coeffs);
-    if proof.limb_evals.len() != pairs.len() || proof.limb_evals.iter().any(|g| g.len() != nl) {
+    if proof.limb_evals.len() != pairs.len() || proof.limb_evals.iter().any(|g| g.len() != nf) {
         return Err(LookupBindingError::Shape);
     }
     let mut buf = vec![0u8; <Inner as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
@@ -399,14 +483,16 @@ pub fn verify_lookup_binding<const D: usize>(
     let eq_val = zinc_poly::utils::eq_eval(&r_star, &r_row.to_vec(), one)
         .map_err(|_| LookupBindingError::FinalEvalMismatch)?;
 
-    // Σ_a mask̃_a(r★)·Q̃_a(r★), with Q̃ recombined from the limb evals.
+    // Σ_a mask̃_a(r★)·Q̃_a(r★), with Q̃ recombined from the family evals
+    // (the public constant evaluates to itself — the all-ones MLE is 1
+    // at any point).
     let mut s = Gf::zero();
     for (a, spec) in adder_specs.iter().enumerate() {
         let m_eval = row_mle_eval(&mask_vec(spec, n), num_vars, &r_star);
-        let mut q = Gf::zero();
-        for ((key, limb), c) in &coeffs[a].terms {
+        let mut q = coeffs[a].constant;
+        for ((key, family), c) in &coeffs[a].terms {
             let gi = pairs.iter().position(|p| p == key).expect("pair from coeffs");
-            q = q + *c * proof.limb_evals[gi][*limb];
+            q = q + *c * proof.limb_evals[gi][*family];
         }
         s = s + m_eval * q;
     }
