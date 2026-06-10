@@ -69,4 +69,14 @@ pub trait LinearCode<Zt: ZipTypes>: Debug + Clone + Eq + Sync + Send {
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>
     where
         F: FromPrimitiveWithConfig + FromRef<F>;
+
+    /// Conservative bit-growth bound of the encoding over `Z`: for every
+    /// message row `m`, `|Enc(m)|_inf <= 2^bound * |m|_inf` entrywise.
+    ///
+    /// Returns `None` when the code does not provide a bound; callers that
+    /// need one (e.g. the zero-knowledge masking layer in
+    /// [`crate::pcs::zk`]) must then supply it externally.
+    fn codeword_growth_bits(&self) -> Option<u32> {
+        None
+    }
 }

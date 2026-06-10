@@ -37,7 +37,10 @@ use num_traits::{ConstOne, ConstZero};
 use rand_core::CryptoRng;
 use std::marker::PhantomData;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
-use zinc_transcript::traits::{Transcribable, Transcript};
+use zinc_transcript::{
+    Blake3Transcript,
+    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
+};
 use zinc_utils::{
     UNCHECKED, add,
     from_ref::FromRef,
@@ -102,7 +105,7 @@ where
         Self::absorb_commitment(&mut transcript.fs_transcript, comm);
     }
 
-    fn absorb_commitment(fs: &mut zinc_transcript::Blake3Transcript, comm: &ZkZipCommitment) {
+    fn absorb_commitment(fs: &mut Blake3Transcript, comm: &ZkZipCommitment) {
         fs.absorb_slice(&comm.root);
         fs.absorb_slice(&comm.seed_commitment);
     }
@@ -285,6 +288,10 @@ where
             }
         }
         transcript.write_const_many(&w_star)?;
+        // Unlike the base PCS, bind every opening message into the FS state
+        // (column challenges must depend on w*, and each on the previous
+        // openings).
+        absorb_const_many(&mut transcript.fs_transcript, &w_star);
 
         // Column openings over the masked matrix.
         for _ in 0..Zt::NUM_COLUMN_OPENINGS {
@@ -295,6 +302,7 @@ where
                 .map(|row| row[column_idx])
                 .collect();
             transcript.write_const_many(&column_values)?;
+            absorb_const_many(&mut transcript.fs_transcript, &column_values);
             let merkle_proof = hint
                 .merkle_tree
                 .prove(column_idx)
@@ -307,8 +315,10 @@ where
         // the only step that breaks column hiding.
         for seed in &hint.seeds.seeds {
             transcript.write_const_many(seed)?;
+            absorb_const_many(&mut transcript.fs_transcript, seed);
         }
         transcript.write(&MtHash::from(hint.seed_salt))?;
+        transcript.fs_transcript.absorb_slice(&hint.seed_salt);
 
         Ok(eval)
     }
@@ -364,6 +374,7 @@ where
         // bit-size enforcement; with blinding the bound is mask-dominated and
         // witness-independent.
         let w_star: Vec<Zt::CombR> = transcript.read_const_many(row_len)?;
+        absorb_const_many(&mut transcript.fs_transcript, &w_star);
         for entry in &w_star {
             if Int::<WL>::from_ref(entry).inner().abs().bits() > add!(zkp.blind_bits, 1u32) {
                 return Err(ZipError::InvalidPcsOpen("w* entry out of range".into()));
@@ -408,6 +419,7 @@ where
             let column_idx = transcript.squeeze_challenge_idx(codeword_len);
             let column_values: Vec<Int<WL>> =
                 transcript.read_const_many(add!(num_rows, 1usize))?;
+            absorb_const_many(&mut transcript.fs_transcript, &column_values);
             let merkle_proof = transcript.read_merkle_proof()?;
             merkle_proof
                 .verify(&comm.root, &column_values, column_idx)
@@ -427,10 +439,15 @@ where
         // TODO(zk-inner): replace with the R_lift ZK-IOP verifier (paper §5).
         let seeds = MaskSeeds::<WL> {
             seeds: (0..=num_rows)
-                .map(|_| transcript.read_const_many::<Uint<WL>>(zkp.mask_dim))
+                .map(|_| {
+                    let seed = transcript.read_const_many::<Uint<WL>>(zkp.mask_dim)?;
+                    absorb_const_many(&mut transcript.fs_transcript, &seed);
+                    Ok::<_, ZipError>(seed)
+                })
                 .collect::<Result<_, _>>()?,
         };
         let salt: MtHash = transcript.read()?;
+        transcript.fs_transcript.absorb_slice(&salt);
         let salt_bytes: [u8; 32] = salt
             .as_ref()
             .try_into()
@@ -483,6 +500,16 @@ where
         }
 
         Ok(())
+    }
+}
+
+/// Binds a slice of fixed-width transcript values into the Fiat--Shamir
+/// state (the byte-stream writes alone do not touch it).
+fn absorb_const_many<T: ConstTranscribable>(fs: &mut Blake3Transcript, values: &[T]) {
+    let mut buf = vec![0u8; T::NUM_BYTES];
+    for value in values {
+        value.write_transcription_bytes_exact(&mut buf);
+        fs.absorb_slice(&buf);
     }
 }
 
@@ -543,8 +570,6 @@ mod tests {
     const WL: usize = 8;
     type Zk = ZkZip<Zt, Lc, WL>;
 
-    /// Conservative bit-growth bound for the depth-1 IPRS test code.
-    const GROWTH_BITS: u32 = 80;
     const LAMBDA_ZK: u32 = 64;
 
     type Setup = (
@@ -556,9 +581,8 @@ mod tests {
     fn setup(num_vars: usize) -> Setup {
         let code = IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).expect("iprs code");
         let pp = ZipPlus::<Zt, Lc>::setup(1 << num_vars, code);
-        let zkp = ZkMaskParams::<WL>::derive::<Zt>(
-            pp.num_rows,
-            GROWTH_BITS,
+        let zkp = ZkMaskParams::<WL>::derive_for_code(
+            &pp,
             LAMBDA_ZK,
             <Zt as ZipTypes>::NUM_COLUMN_OPENINGS,
         )

@@ -11,7 +11,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign},
 };
-use zinc_utils::{from_ref::FromRef, mul_by_scalar::MulByScalar};
+use zinc_utils::{add, from_ref::FromRef, mul, mul_by_scalar::MulByScalar};
 
 /// Pseudo Reed-Solomon encoder over the integers. Internally uses a
 /// radix-8 NTT-style recursion with a base Vandermonde matrix sized
@@ -162,6 +162,16 @@ where
 
     fn encode_wide(&self, row: &[Zt::CombR]) -> Vec<Zt::CombR> {
         self.encode_inner(row)
+    }
+
+    fn codeword_growth_bits(&self) -> Option<u32> {
+        // Norm bound from the Zinc+ paper (thm:iprs):
+        // |Enc(x)|_inf <= |x|_inf * (q/2)^(depth + 1) * row_len,
+        // with q the twiddle modulus. Rounded up per factor.
+        let per_level = u32::BITS - (Config::FIELD_MODULUS / 2).leading_zeros();
+        let depth = u32::try_from(self.pntt_params.depth).ok()?;
+        let len_bits = usize::BITS - self.pntt_params.row_len.leading_zeros();
+        Some(add!(mul!(add!(depth, 1u32), per_level), len_bits))
     }
 
     fn encode_f<F>(&self, row: &[F]) -> Vec<F>

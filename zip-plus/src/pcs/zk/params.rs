@@ -15,7 +15,11 @@
 //! `p_bits + 1` bits; both parties derive it deterministically from the bit
 //! budgets, so it is a public parameter and never enters the transcript.
 
-use crate::{ZipError, pcs::structs::ZipTypes};
+use crate::{
+    ZipError,
+    code::LinearCode,
+    pcs::structs::{ZipPlusParams, ZipTypes},
+};
 use crypto_primitives::crypto_bigint_uint::Uint;
 use num_traits::ConstOne;
 use zinc_poly::ConstCoeffBitWidth;
@@ -127,6 +131,22 @@ impl<const WL: usize> ZkMaskParams<WL> {
             blind_bits,
         })
     }
+
+    /// Like [`Self::derive`], but takes the codeword growth bound from the
+    /// linear code itself ([`LinearCode::codeword_growth_bits`]).
+    pub fn derive_for_code<Zt: ZipTypes, Lc: LinearCode<Zt>>(
+        pp: &ZipPlusParams<Zt, Lc>,
+        lambda_zk: u32,
+        mask_dim: usize,
+    ) -> Result<Self, ZipError> {
+        let growth = pp.linear_code.codeword_growth_bits().ok_or_else(|| {
+            ZipError::InvalidPcsParam(
+                "linear code provides no growth bound; use derive() with an explicit bound"
+                    .into(),
+            )
+        })?;
+        Self::derive::<Zt>(pp.num_rows, growth, lambda_zk, mask_dim)
+    }
 }
 
 /// Returns the smallest probable prime `>= 2^bits` (deterministic search, so
@@ -192,5 +212,40 @@ mod tests {
     #[test]
     fn rejects_non_power_of_two_rows() {
         assert!(ZkMaskParams::<WL>::derive::<Zt>(3, 80, 64, 147).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
+    fn iprs_growth_bound_is_sound_empirically() {
+        use crate::{
+            code::{LinearCode, iprs::IprsCode},
+            pcs::test_utils::{IPRS_DEPTH, IPRS_ROW_LEN, REP_FACTOR, TestIprsConfig},
+        };
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_utils::CHECKED;
+
+        type Lc = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;
+        let code: Lc = IprsCode::new(IPRS_ROW_LEN, IPRS_DEPTH).expect("iprs code");
+        let growth = code.codeword_growth_bits().expect("IPRS provides a bound");
+
+        // Encode an adversarially large row (alternating max-magnitude
+        // entries) and check the measured growth respects the bound.
+        let max_eval_bits = 40u32; // |entry| < 2^40, leaves headroom in Cw
+        let entry = (1i64 << max_eval_bits) - 1;
+        let row: Vec<Int<1>> = (0..IPRS_ROW_LEN)
+            .map(|i| Int::from(if i % 2 == 0 { entry } else { -entry }))
+            .collect();
+        let cw = code.encode(&row);
+        let measured = cw
+            .iter()
+            .map(|v| v.inner().abs().bits())
+            .max()
+            .expect("nonempty codeword");
+        assert!(
+            measured <= max_eval_bits + growth,
+            "measured growth {} exceeds bound {}",
+            measured - max_eval_bits,
+            growth,
+        );
     }
 }
