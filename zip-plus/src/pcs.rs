@@ -7,6 +7,7 @@ pub use phase_verify::{VerifyPreOpen, VerifyPreOpenReads};
 pub mod folding;
 pub mod multi_zip;
 pub mod structs;
+pub mod zk;
 #[cfg(test)]
 pub mod test_utils;
 pub(crate) mod utils;
