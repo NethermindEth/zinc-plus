@@ -5073,6 +5073,7 @@ impl<F: PrimeField> ShaResidualPolyConstants<F> {
 #[derive(Clone, Debug)]
 struct NonzeroResidualCoeffAccumulator<F: PrimeField> {
     coeffs: [Vec<F>; NUM_NONZERO_SHA_FAMILIES],
+    one: F,
 }
 
 impl<F> NonzeroResidualCoeffAccumulator<F>
@@ -5084,6 +5085,7 @@ where
             coeffs: std::array::from_fn(|_| {
                 vec![F::zero_with_cfg(field_cfg); SHA_RESIDUAL_EVAL_POWER_COUNT]
             }),
+            one: F::one_with_cfg(field_cfg),
         }
     }
 
@@ -5107,12 +5109,16 @@ where
 
     #[inline(always)]
     fn add_scaled_to_slot(&mut self, slot: usize, coeff_idx: usize, value: &F, scale: &F) {
-        if F::is_zero(value) || F::is_zero(scale) {
+        if F::is_zero(scale) || F::is_zero(value) {
             return;
         }
         debug_assert!(slot < NUM_NONZERO_SHA_FAMILIES);
         debug_assert!(coeff_idx < self.coeffs[slot].len());
-        self.coeffs[slot][coeff_idx] += value.clone() * scale;
+        if value == &self.one {
+            self.coeffs[slot][coeff_idx] += scale;
+        } else {
+            self.coeffs[slot][coeff_idx] += value.clone() * scale;
+        }
     }
 
     fn add_trace_word_scaled(
@@ -5210,6 +5216,7 @@ where
 #[derive(Clone, Debug)]
 struct FixedResidualCoeffAccumulator<F: PrimeField> {
     coeffs: Vec<Vec<F>>,
+    one: F,
 }
 
 impl<F> FixedResidualCoeffAccumulator<F>
@@ -5221,6 +5228,7 @@ where
             coeffs: (0..family_count)
                 .map(|_| vec![F::zero_with_cfg(field_cfg); coeff_count])
                 .collect(),
+            one: F::one_with_cfg(field_cfg),
         }
     }
 
@@ -5254,12 +5262,16 @@ where
         value: &F,
         scale: &F,
     ) {
-        if F::is_zero(value) || F::is_zero(scale) {
+        if F::is_zero(scale) || F::is_zero(value) {
             return;
         }
         debug_assert!(family_idx < self.coeffs.len());
         debug_assert!(coeff_idx < self.coeffs[family_idx].len());
-        self.coeffs[family_idx][coeff_idx] += value.clone() * scale;
+        if value == &self.one {
+            self.coeffs[family_idx][coeff_idx] += scale;
+        } else {
+            self.coeffs[family_idx][coeff_idx] += value.clone() * scale;
+        }
     }
 
     #[inline(always)]
