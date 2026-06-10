@@ -215,6 +215,35 @@ pub fn lookup_binding_public_part<const D: usize>(
     out
 }
 
+/// Public alias of [`limb_proj_rows`] for the prove/verify pipeline (builds
+/// the L-block columns and the verifier's public-column recomputation).
+pub fn limb_proj_rows_pub<const D: usize>(
+    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    col: usize,
+    shift: usize,
+    limb: usize,
+    limb_bits: usize,
+    n: usize,
+) -> Vec<Gf> {
+    limb_proj_rows::<D>(cols, col, shift, limb, limb_bits, n)
+}
+
+/// MLE eval at `point` of a limb-projected, row-shifted column — used by the
+/// verifier to recompute PUBLIC columns' limb claims directly.
+pub fn limb_proj_eval_pub<const D: usize>(
+    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    col: usize,
+    shift: usize,
+    limb: usize,
+    limb_bits: usize,
+    num_vars: usize,
+    point: &[Gf],
+) -> Gf {
+    let n = 1usize << num_vars;
+    let v = limb_proj_rows::<D>(cols, col, shift, limb, limb_bits, n);
+    row_mle_eval(&v, num_vars, point)
+}
+
 /// The limb-family projected, row-shifted vector `L_i(col↓Δ)` as `Gf` rows
 /// (zero past the tail, mirroring the operand-read convention).
 #[allow(clippy::arithmetic_side_effects)]
