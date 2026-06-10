@@ -8054,6 +8054,104 @@ mod tests {
         );
     }
 
+    /// **Task 6 (core): a WRONG SUM is rejected by the bound lookup adder.**
+    /// Corrupts bit 5 of one active add-result cell — the linear IC only pins
+    /// the LSB (via the κ compensator), so bits 1..31 are exactly what the
+    /// adder argument must enforce (the old trusted-Hadamard gap, Issue-1).
+    /// With the lookup adder: the corrupted limb's tuple is off-table, the
+    /// witness/table grand products mismatch, and the bound verifier rejects.
+    #[test]
+    fn sha256_f2_lookup_adder_rejects_wrong_sum() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 4;
+        const KBITS: usize = 16;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let mut trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+
+        // Corrupt bit 5 of C7's add result (w_t2, Δ=0) at its first active row.
+        let spec = &adder_specs[7];
+        let r = spec
+            .active_rows
+            .iter()
+            .position(|&a| a)
+            .expect("C7 has active rows");
+        {
+            let cols_mut = trace.binary_poly.to_mut();
+            let cell = &cols_mut[spec.t.col].evaluations[r + spec.t.row_shift];
+            let corrupted = crate::f2_hadamard::cell_from_mask::<D>(
+                crate::f2_hadamard::cell_mask::<D>(cell) ^ (1 << 5),
+            );
+            cols_mut[spec.t.col].evaluations[r + spec.t.row_shift] = corrupted;
+        }
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+        let num_aug = cols::NUM_BIN + adder_specs.len();
+
+        let mut pt = Blake3Transcript::new();
+        let proved = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_lookup_adder_bound(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+            LB,
+            KBITS,
+        );
+        // The prover may already fail (mismatched grand-product roots) or
+        // produce a proof the verifier must reject. Either is a pass.
+        if let Ok((base, lookup)) = proved {
+            let mut vt = Blake3Transcript::new();
+            assert!(
+                ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
+                    Sha256F2Ideal,
+                    _,
+                >(
+                    &mut vt,
+                    &pp,
+                    &base,
+                    &lookup,
+                    &[],
+                    &[],
+                    &and_specs,
+                    &adder_specs,
+                    &trace.binary_poly[..cols::NUM_BIN_PUB],
+                    num_vars,
+                    num_aug,
+                    LB,
+                    |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+                )
+                .is_err(),
+                "a wrong add sum (non-LSB bit) must be rejected by the lookup adder"
+            );
+        }
+    }
+
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
     /// Keccak-f[1600] permutation: the θρπ rotation identities + the
     /// transition/boundary constraints (the UAIR's `constrain_general`, the
