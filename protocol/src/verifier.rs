@@ -1056,8 +1056,10 @@ where
         all_families.push(MultipointEvalFamilyInputs {
             field_cfg: &self.field_cfg,
             trace_mles: &[],
+            bit_op_mles: &[],
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
+            bit_op_evals: &[],
             down_evals: &self.cpr_down_evals,
         });
 
@@ -1066,8 +1068,10 @@ where
             all_families.push(MultipointEvalFamilyInputs {
                 field_cfg: &self.all_field_cfgs[family_idx],
                 trace_mles: &[],
+                bit_op_mles: &[],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals,
+                bit_op_evals: &[],
                 down_evals: &self.cpr_down_evals_fq[prime_idx],
             });
         }
@@ -1303,6 +1307,7 @@ where
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
             &q_open_evals,
+            &[],
             self.base.uair_signature.shifts(),
             &self.field_cfg,
         )?;
@@ -1335,6 +1340,7 @@ where
             MultipointEval::verify_subclaim(
                 &self.mp_subclaims_fq[prime_idx],
                 &open_evals_i,
+                &[],
                 self.base.uair_signature.shifts(),
                 cfg_i,
             )?;

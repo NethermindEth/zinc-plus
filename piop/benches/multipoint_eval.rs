@@ -87,8 +87,10 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                         vec![MultipointEvalFamilyInputs {
                             field_cfg: &field_cfg,
                             trace_mles: &trace_mles,
+                            bit_op_mles: &[],
                             eval_point: &eval_point,
                             up_evals: &up_evals,
+                            bit_op_evals: &[],
                             down_evals: &down_evals,
                         }],
                         &shifts,
@@ -110,8 +112,10 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         vec![MultipointEvalFamilyInputs {
             field_cfg: &field_cfg,
             trace_mles: &trace_mles,
+            bit_op_mles: &[],
             eval_point: &eval_point,
             up_evals: &up_evals,
+            bit_op_evals: &[],
             down_evals: &down_evals,
         }],
         &shifts,
@@ -139,8 +143,10 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     vec![MultipointEvalFamilyInputs {
                         field_cfg: &field_cfg,
                         trace_mles: &[],
+                        bit_op_mles: &[],
                         eval_point: &eval_point,
                         up_evals: &up_evals,
+                        bit_op_evals: &[],
                         down_evals: &down_evals,
                     }],
                     &shifts,
@@ -149,8 +155,14 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                 )
                 .expect("verifier failed");
                 let subclaim = subclaims.pop().expect("single family");
-                MultipointEval::<F>::verify_subclaim(&subclaim, &open_evals, &shifts, &field_cfg)
-                    .expect("subclaim check failed");
+                MultipointEval::<F>::verify_subclaim(
+                    &subclaim,
+                    &open_evals,
+                    &[],
+                    &shifts,
+                    &field_cfg,
+                )
+                .expect("subclaim check failed");
             },
             BatchSize::SmallInput,
         );

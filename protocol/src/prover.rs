@@ -1255,8 +1255,10 @@ impl_with_type_bounds!(ProverSumchecked
         all_families.push(MultipointEvalFamilyInputs {
             field_cfg: &self.field_cfg,
             trace_mles: &projected_trace_f,
+            bit_op_mles: &[],
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
+            bit_op_evals: &[],
             down_evals: &self.cpr_proof.down_evals,
         });
         for prime_idx in 0..n_fq {
@@ -1264,8 +1266,10 @@ impl_with_type_bounds!(ProverSumchecked
             all_families.push(MultipointEvalFamilyInputs {
                 field_cfg: &self.all_field_cfgs[family_idx],
                 trace_mles: &fq_trace_mles_padded[prime_idx],
+                bit_op_mles: &[],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals: &fq_up_evals_padded[prime_idx],
+                bit_op_evals: &[],
                 down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
             });
         }
