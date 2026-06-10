@@ -54,7 +54,7 @@
 
 use crypto_primitives::Field;
 use zinc_piop::sumcheck::{MLSumcheck, SumCheckError, SumcheckProof};
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
 use zinc_transcript::traits::Transcript;
@@ -438,9 +438,6 @@ pub fn prove_lookup_binding<const D: usize>(
 ) -> (LookupBindingProof, Vec<Gf>) {
     let n = 1usize << num_vars;
     let nl = D / limb_bits;
-    let nf = num_families::<D>(limb_bits);
-    let zero_inner = Gf::zero().into_inner();
-    let num_rel = adder_specs.len();
 
     // Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r]. Precombine each relation's
     // coefficients into per-bit weights per (col, Δ) —
@@ -489,35 +486,25 @@ pub fn prove_lookup_binding<const D: usize>(
         })
         .collect();
 
-    let mk = |v: Vec<Gf>| {
-        DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            v.iter().map(|x| *x.inner()).collect(),
-            zero_inner,
-        )
-    };
-    let eq_mle = zinc_poly::utils::build_eq_x_r_inner(r_row, &()).expect("eq table");
-    let mut mles = Vec::with_capacity(1 + 2 * num_rel);
-    mles.push(eq_mle);
-    for spec in adder_specs {
-        mles.push(mk(mask_vec(spec, n)));
-    }
-    for q in &q_rows {
-        mles.push(mk(q.clone()));
-    }
-
-    // comb = eq · Σ_a mask_a · Q_a   (degree 3).
-    let comb = move |vals: &[Gf]| -> Gf {
-        let eq = vals[0];
-        let mut s = Gf::zero();
-        for a in 0..num_rel {
-            s = s + vals[1 + a] * vals[1 + num_rel + a];
-        }
-        eq * s
-    };
-    let (sumcheck, state) =
-        MLSumcheck::prove_as_subprotocol(transcript, mles, num_vars, 3, comb, &());
-    let r_star = state.randomness.clone();
+    // Eq-factored prove of `Σ_r eq(r_row, r)·Σ_a mask_a[r]·Q_a[r]`: one
+    // group at `r_row` with the 12 (mask, Q) pairs — byte-identical
+    // messages/transcript to the materialised `[eq, masks, Qs]` degree-3
+    // form (which remains the verifier), with eq never built as a
+    // multiplicand nor folded, and no Inner-MLE conversions.
+    let pairs_lr: Vec<(Vec<Gf>, Vec<Gf>)> = adder_specs
+        .iter()
+        .zip(q_rows)
+        .map(|(spec, q)| (mask_vec(spec, n), q))
+        .collect();
+    let (sumcheck, r_star, _final_evals) =
+        zinc_piop::sumcheck::eq_factored::prove_eq_inner_sumcheck(
+            transcript,
+            vec![zinc_piop::sumcheck::eq_factored::EqInnerGroup {
+                q: r_row.to_vec(),
+                pairs: pairs_lr,
+            }],
+            &(),
+        );
 
     // Family shifted evals at r★ per distinct (col, Δ) — all nf families
     // from one add-only bucket pass per pair (`Σ_r eq·F_f = Σ_p w_f[p]·S_p`).
