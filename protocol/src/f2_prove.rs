@@ -8390,6 +8390,25 @@ mod tests {
             .expect("arm B prove");
         });
 
+        // Arm C: the PRODUCTION oblong-GF8 discharge, 14 relations (12
+        // adders trusted) — today's actual posture and the real baseline.
+        time_runs("C  Oblong-GF8-14 (production, trusted adders) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_oblong_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("arm C prove");
+        });
+
         // Verifier times (once each).
         let mut pt = Blake3Transcript::new();
         let proof_a = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
