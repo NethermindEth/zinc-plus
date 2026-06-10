@@ -37,13 +37,11 @@ use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use zinc_poly::{
-    mle::DenseMultilinearExtension,
-    utils::{build_eq_x_r_inner, eq_eval},
-};
+use zinc_poly::utils::eq_eval;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_chunks_mut, cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField};
 
+use crate::sumcheck::prover::{NatEvaluatedPolyWithoutConstant, ProverMsg};
 use crate::sumcheck::{MLSumcheck, SumcheckProof};
 
 /// Proof that `∏ leaves = root` for a leaf vector of length `2^d`.
@@ -126,7 +124,10 @@ where
     F::Modulus: ConstTranscribable,
     F::Config: Sync,
 {
-    let layers = build_product_tree(leaves);
+    let layers = {
+        let _g = zinc_utils::prof::scope("gkr:build");
+        build_product_tree(leaves)
+    };
     let d = layers.len() - 1;
     let root = layers[d][0].clone();
 
@@ -162,33 +163,9 @@ where
             v = (one - &lambda) * &l + &(lambda.clone() * &r);
             r_k = vec![lambda];
         } else {
-            let eq_r = build_eq_x_r_inner(&r_k, field_cfg).expect("eq(x,r_k) construction");
-            let mk = |data: &[F]| -> DenseMultilinearExtension<F::Inner> {
-                DenseMultilinearExtension::from_evaluations_vec(
-                    k,
-                    data.iter().map(|x| x.inner().clone()).collect(),
-                    inner_zero.clone(),
-                )
-            };
-            // mles = [eq, left, right]; comb_fn = eq · left · right (degree 3).
-            let mles = vec![eq_r, mk(left), mk(right)];
-            let comb_fn = move |vals: &[F]| -> F { vals[0].clone() * &(vals[1].clone() * &vals[2]) };
-
-            let (sumcheck_proof, st) =
-                MLSumcheck::prove_as_subprotocol(transcript, mles, k, 3, comb_fn, field_cfg);
-
-            // Recover left(s), right(s): each folded MLE has 1 var left;
-            // interpolate with the final challenge (mirrors the sumcheck fold).
-            let s = &st.randomness;
-            let last = s.last().expect("sumcheck has ≥ 1 challenge");
-            let one_minus_last = F::one_with_cfg(field_cfg) - last;
-            let interp = |m: &DenseMultilinearExtension<F::Inner>| -> F {
-                let v0 = F::new_unchecked_with_cfg(m[0].clone(), field_cfg);
-                let v1 = F::new_unchecked_with_cfg(m[1].clone(), field_cfg);
-                one_minus_last.clone() * &v0 + &(last.clone() * &v1)
-            };
-            let l_at = interp(&st.mles[1]);
-            let r_at = interp(&st.mles[2]);
+            let _g = zinc_utils::prof::scope("gkr:round");
+            let (sumcheck_proof, s, l_at, r_at) =
+                prove_layer_sumcheck_eq_factored(transcript, &r_k, left, right, field_cfg);
 
             transcript.absorb_random_field(&l_at, &mut buf);
             transcript.absorb_random_field(&r_at, &mut buf);
@@ -201,12 +178,187 @@ where
             let lambda: F = transcript.get_field_challenge(field_cfg);
             let one = F::one_with_cfg(field_cfg);
             v = (one - &lambda) * &l_at + &(lambda.clone() * &r_at);
-            r_k = s.clone();
+            r_k = s;
             r_k.push(lambda);
         }
     }
 
     (ProductTreeProof { root: root.clone(), layers: layer_proofs }, r_k.clone(), v)
+}
+
+/// One product-layer sumcheck `v = Σ_x eq(x; q)·L(x)·R(x)` with the eq
+/// factor **factored, never materialised or folded**. Round `j` (fixing
+/// variable `j−1`, the low bit) writes the round polynomial as
+///
+/// ```text
+///   M_j(c) = A_j · eq1(c; q_{j−1}) · H_j(c),
+///   A_j    = Π_{i<j−1} eq1(ρ_{i+1}; q_i)            (prefix scalar)
+///   H_j(c) = Σ_b V_j[b] · L_j(c,b) · R_j(c,b),       (degree 2 in c)
+///   V_j[b] = Π_{i≥j} eq1(b_{i−j}; q_i)               (suffix tensor)
+/// ```
+///
+/// The suffix tensors are precomputed back-to-front (total `O(2^k)` — the
+/// cost of ONE eq build, no divisions) and read densely; only `L`/`R` fold.
+/// `H_j` is quadratic, so its value at the fourth Lagrange node needs no
+/// extra pass: the nodes `{0, 1, X, X+1}` (`F::from(0..=3)` under the
+/// bit-pattern convention) form an affine 2-flat in characteristic 2, and
+/// every polynomial of degree ≤ 2 sums to zero over such a flat ⇒
+/// `H(X+1) = H(0) + H(1) + H(X)`.
+///
+/// **Byte-identical** to `MLSumcheck::prove_as_subprotocol` over the
+/// materialised `[eq, L, R]` with the degree-3 product comb: same round
+/// polynomials evaluated at the same nodes, same transcript ops (the
+/// `nvars`/`degree` header, the `P(1..)` tail absorb, the post-draw
+/// challenge re-absorb), same proof layout — the existing generic verifier
+/// is unchanged and every existing test doubles as an equivalence check.
+/// Returns `(proof, point, L(point), R(point))`.
+#[allow(clippy::arithmetic_side_effects)]
+fn prove_layer_sumcheck_eq_factored<F>(
+    transcript: &mut impl Transcript,
+    q: &[F],
+    left: &[F],
+    right: &[F],
+    field_cfg: &F::Config,
+) -> (SumcheckProof<F>, Vec<F>, F, F)
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: ConstTranscribable + Zero + Default + Send + Sync,
+    F::Modulus: ConstTranscribable,
+    F::Config: Sync,
+{
+    let k = q.len();
+    debug_assert!(k >= 1 && left.len() == 1 << k && right.len() == 1 << k);
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    // The generic path's boundary nodes: F::from(2) = X, F::from(3) = X+1
+    // (bit-pattern convention; for prime fields these are the integers).
+    let c2 = F::from_with_cfg(2u64, field_cfg);
+    let c3 = F::from_with_cfg(3u64, field_cfg);
+
+    // Suffix tensors V_j (j = 1..=k), built back-to-front: V_k = [1] and
+    // V_j[2b' | b0] = eq1(b0; q_j)·V_{j+1}[b'].
+    let suffix: Vec<Vec<F>> = {
+        let _g = zinc_utils::prof::scope("gkr:eq_suffix");
+        let mut suffix = Vec::with_capacity(k);
+        let mut cur = vec![one.clone()];
+        suffix.push(cur.clone());
+        for j in (1..k).rev() {
+            let e1 = q[j].clone();
+            let e0 = one.clone() - &e1;
+            let mut next = vec![zero.clone(); cur.len() * 2];
+            cfg_chunks_mut!(next, 2).zip(cfg_iter!(cur)).for_each(|(pair, v)| {
+                pair[0] = v.clone() * &e0;
+                pair[1] = v.clone() * &e1;
+            });
+            suffix.push(next.clone());
+            cur = next;
+        }
+        suffix.reverse(); // suffix[j−1] = V_j, length 2^{k−j}
+        suffix
+    };
+
+    let _g = zinc_utils::prof::scope("gkr:sumcheck");
+    let mut buf = vec![0u8; F::Inner::NUM_BYTES];
+    // Header — mirror `prove_as_subprotocol`.
+    transcript.absorb_random_field(&F::from_with_cfg(k as u64, field_cfg), &mut buf);
+    transcript.absorb_random_field(&F::from_with_cfg(3u64, field_cfg), &mut buf);
+
+    let mut lbuf: Vec<F> = left.to_vec();
+    let mut rbuf: Vec<F> = right.to_vec();
+    let mut a_scalar = one.clone();
+    let mut randomness: Vec<F> = Vec::with_capacity(k);
+    let mut messages: Vec<ProverMsg<F>> = Vec::with_capacity(k);
+    let mut claimed_sum = zero.clone();
+
+    // In characteristic 2 the nodes {0, 1, c2 = X, c3 = X+1} form an affine
+    // 2-flat, over which every degree-≤2 polynomial sums to zero — so H(c3)
+    // is free. Detect it exactly; any other field accumulates H(c3) in the
+    // same pass (still cheaper than the generic path: eq is never gathered,
+    // extrapolated, or folded).
+    let char2 = one.clone() + &one == zero && c3 == c2.clone() + &one;
+
+    for j in 1..=k {
+        let vj = &suffix[j - 1];
+        let half = lbuf.len() >> 1;
+        debug_assert_eq!(vj.len(), half);
+
+        // H(0), H(1), H(c2) [, H(c3)] in one parallel pass.
+        let h_acc = || (zero.clone(), zero.clone(), zero.clone(), zero.clone());
+        let body = |mut acc: (F, F, F, F), b: usize| {
+            let t = &vj[b];
+            let (l0, l1) = (&lbuf[b << 1], &lbuf[(b << 1) | 1]);
+            let (r0, r1) = (&rbuf[b << 1], &rbuf[(b << 1) | 1]);
+            acc.0 += t.clone() * &(l0.clone() * r0);
+            acc.1 += t.clone() * &(l1.clone() * r1);
+            let dl = l1.clone() - l0;
+            let dr = r1.clone() - r0;
+            let l2 = l0.clone() + &(c2.clone() * &dl);
+            let r2 = r0.clone() + &(c2.clone() * &dr);
+            acc.2 += t.clone() * &(l2 * &r2);
+            if !char2 {
+                let l3 = l0.clone() + &(c3.clone() * &dl);
+                let r3 = r0.clone() + &(c3.clone() * &dr);
+                acc.3 += t.clone() * &(l3 * &r3);
+            }
+            acc
+        };
+        #[cfg(feature = "parallel")]
+        let (h0, h1, h2, h3_acc) =
+            cfg_into_iter!(0..half).fold(h_acc, body).reduce(h_acc, |a, b| {
+                (a.0 + &b.0, a.1 + &b.1, a.2 + &b.2, a.3 + &b.3)
+            });
+        #[cfg(not(feature = "parallel"))]
+        let (h0, h1, h2, h3_acc) = (0..half).fold(h_acc(), body);
+        let h3 = if char2 { h0.clone() + &h1 + &h2 } else { h3_acc };
+
+        // M(c) = A_j · eq1(c; q_{j−1}) · H(c) at the four nodes.
+        let qj = &q[j - 1];
+        let e0 = one.clone() - qj;
+        let e1 = qj.clone();
+        let eq1_at = |c: &F| -> F {
+            e0.clone() * &(one.clone() - c) + &(e1.clone() * c)
+        };
+        let m0 = a_scalar.clone() * &(e0.clone() * &h0);
+        let m1 = a_scalar.clone() * &(e1.clone() * &h1);
+        let m2 = a_scalar.clone() * &(eq1_at(&c2) * &h2);
+        let m3 = a_scalar.clone() * &(eq1_at(&c3) * &h3);
+
+        if j == 1 {
+            claimed_sum = m0.clone() + &m1;
+        }
+        let tail = vec![m1, m2, m3];
+        transcript.absorb_random_field_slice(&tail, &mut buf);
+        messages.push(ProverMsg(NatEvaluatedPolyWithoutConstant::new(tail)));
+
+        let rho: F = transcript.get_field_challenge(field_cfg);
+        transcript.absorb_random_field(&rho, &mut buf);
+
+        // A_{j+1} = A_j · eq1(ρ_j; q_{j−1}); fold L, R at ρ_j.
+        a_scalar = a_scalar * &eq1_at(&rho);
+        if j < k {
+            let fold = |v: &Vec<F>| -> Vec<F> {
+                cfg_into_iter!(0..half)
+                    .map(|b| {
+                        let v0 = &v[b << 1];
+                        let v1 = &v[(b << 1) | 1];
+                        v0.clone() + &(rho.clone() * &(v1.clone() - v0))
+                    })
+                    .collect()
+            };
+            lbuf = fold(&lbuf);
+            rbuf = fold(&rbuf);
+        } else {
+            let interp = |v: &Vec<F>| -> F {
+                v[0].clone() + &(rho.clone() * &(v[1].clone() - &v[0]))
+            };
+            let l_at = interp(&lbuf);
+            let r_at = interp(&rbuf);
+            randomness.push(rho);
+            return (SumcheckProof { messages, claimed_sum }, randomness, l_at, r_at);
+        }
+        randomness.push(rho);
+    }
+    unreachable!("the final round returns")
 }
 
 /// GKR grand-product verifier.

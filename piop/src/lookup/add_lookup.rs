@@ -107,6 +107,70 @@ where
         + &(g4 * &marginal_tag::<F>(cfg))
 }
 
+/// Per-coordinate fingerprint lookup tables for `ℓ`-bit limbs:
+/// `fp(x,y,cin,s,cout) = X[x] + Y[y] + CIN[cin] + S[s] + COUT[cout]` — four
+/// GF adds per fingerprint, ZERO multiplications (the naive form pays ~7
+/// mults/row, recomputing the γ powers each call). Built once per γ
+/// (~3·2^ℓ mults); used by the prover's leaf builder and the verifier's
+/// table-fingerprint builds.
+pub struct FingerprintTables<F> {
+    /// `emb(v)`.
+    x: Vec<F>,
+    /// `γ·emb(v)`.
+    y: Vec<F>,
+    /// `γ²·v`, `v ∈ {0,1}`.
+    cin: [F; 2],
+    /// `γ³·emb(v)`.
+    s: Vec<F>,
+    /// `γ⁴·v`, `v ∈ {0,1}`.
+    cout: [F; 2],
+    /// `γ⁴·emb(2)` — the marginal family's tag ([`marginal_tag`]).
+    tag: F,
+}
+
+impl<F> FingerprintTables<F>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn new(gamma: &F, limb_bits: usize, cfg: &F::Config) -> Self {
+        let limb = 1u32 << limb_bits;
+        let g2 = gamma.clone() * gamma;
+        let g3 = g2.clone() * gamma;
+        let g4 = g3.clone() * gamma;
+        Self {
+            x: (0..limb).map(|v| emb::<F>(v, cfg)).collect(),
+            y: (0..limb).map(|v| gamma.clone() * &emb::<F>(v, cfg)).collect(),
+            cin: [F::zero_with_cfg(cfg), g2],
+            s: (0..limb).map(|v| g3.clone() * &emb::<F>(v, cfg)).collect(),
+            cout: [F::zero_with_cfg(cfg), g4.clone()],
+            tag: g4 * &marginal_tag::<F>(cfg),
+        }
+    }
+
+    /// [`fingerprint`] via table adds.
+    #[inline]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn fp(&self, t: &LimbTuple) -> F {
+        self.x[t.x as usize].clone()
+            + &self.y[t.y as usize]
+            + &self.cin[t.cin as usize]
+            + &self.s[t.s as usize]
+            + &self.cout[t.cout as usize]
+    }
+
+    /// [`fingerprint_marginal`] via table adds (`t.cout` ignored).
+    #[inline]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn fp_marginal(&self, t: &LimbTuple) -> F {
+        self.x[t.x as usize].clone()
+            + &self.y[t.y as usize]
+            + &self.cin[t.cin as usize]
+            + &self.s[t.s as usize]
+            + &self.tag
+    }
+}
+
 /// All public add-table fingerprints, indexed by [`row_index`].
 #[allow(clippy::arithmetic_side_effects)]
 pub fn add_table_fingerprints<F>(gamma: &F, limb_bits: usize, cfg: &F::Config) -> Vec<F>
@@ -115,13 +179,14 @@ where
 {
     let limb = 1u32 << limb_bits;
     let mask = limb - 1;
+    let tables = FingerprintTables::<F>::new(gamma, limb_bits, cfg);
     let mut table = Vec::with_capacity(table_size(limb_bits));
     for x in 0..limb {
         for y in 0..limb {
             for cin in 0..2u32 {
                 let sum = x + y + cin;
                 let tup = LimbTuple { x, y, cin, s: sum & mask, cout: sum >> limb_bits };
-                table.push(fingerprint(&tup, gamma, cfg));
+                table.push(tables.fp(&tup));
             }
         }
     }
@@ -141,13 +206,14 @@ where
 {
     let limb = 1u32 << limb_bits;
     let mask = limb - 1;
+    let tables = FingerprintTables::<F>::new(gamma, limb_bits, cfg);
     let mut table = Vec::with_capacity(table_size(limb_bits));
     for x in 0..limb {
         for y in 0..limb {
             for cin in 0..2u32 {
                 let sum = x + y + cin;
                 let tup = LimbTuple { x, y, cin, s: sum & mask, cout: 0 };
-                table.push(fingerprint_marginal(&tup, gamma, cfg));
+                table.push(tables.fp_marginal(&tup));
             }
         }
     }
@@ -316,6 +382,30 @@ mod tests {
             assert_eq!(tup.cout, (tup.x + tup.y + tup.cin) >> LB);
         }
         assert_eq!(carries.len(), num_limbs(LB));
+    }
+
+    /// The table-driven fingerprints must equal the reference forms exactly
+    /// (the tables are the hot path; `fingerprint[_marginal]` the spec).
+    #[test]
+    fn fingerprint_tables_match_reference() {
+        let gamma = Gf::from_words([0xaaaa_bbbb_cccc_dddd, 0x1111_2222_3333_4444]);
+        let tables = FingerprintTables::<Gf>::new(&gamma, LB, &());
+        let limb = 1u32 << LB;
+        for x in (0..limb).step_by(3) {
+            for y in (0..limb).step_by(5) {
+                for cin in 0..2u32 {
+                    for cout in 0..2u32 {
+                        let s = (x + y + cin) & (limb - 1);
+                        let tup = LimbTuple { x, y, cin, s, cout };
+                        assert_eq!(tables.fp(&tup), fingerprint(&tup, &gamma, &()));
+                        assert_eq!(
+                            tables.fp_marginal(&tup),
+                            fingerprint_marginal(&tup, &gamma, &())
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ---- Carry virtualization (z-reads + the marginalised last limb) ----

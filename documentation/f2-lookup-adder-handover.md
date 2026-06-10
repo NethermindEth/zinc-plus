@@ -64,27 +64,31 @@ columns**:
   a negative-control unit test proves the untagged variant accepts it),
   tampered family evals, lying multiplicities on either table.
 
-### Measured (nvars=16, LB=8 ⇒ 2¹⁷ table, Apple M-series, release, same-run)
+### Measured (nvars=16, LB=8 ⇒ 2¹⁷ table, Apple M-series, release)
+
+After the 2026-06-10 optimization sweep (parallel/fused loops, table-driven
+fingerprints, bit-bucketed family evals + zero-mult `Q_a`, eq-factored GKR
+layer sumcheck — all bit-identical-output refactors, ledger has the
+breakdown):
 
 | Arm | Prove | Verify |
 |---|---|---|
-| A monomial pipeline, 14 rel (12 adders TRUSTED) | 407.4 ms | 4.0 ms |
-| B monomial pipeline + SOUND lookup adder | 320.7 ms | 34.9 ms |
-| C **production** oblong-GF8, 14 rel (trusted) | 80.8 ms | — |
-| D **production oblong-GF8 + SOUND lookup adder** | **285.4 ms** | 34.9 ms |
+| A monomial pipeline, 14 rel (12 adders TRUSTED) | 459.0 ms | 4.4 ms |
+| B monomial pipeline + SOUND lookup adder | 240.9 ms | 29.7 ms |
+| C **production** oblong-GF8, 14 rel (trusted) | 92.7 ms | — |
+| D **production oblong-GF8 + SOUND lookup adder** | **206.1 ms** (best 195.9) | 28.9 ms |
 
-**The fully-sound production pipeline (D) is 3.5× the trusted one (C)** —
-down from 6.4× at the first measurement. Per-phase (D ≈ 280): commit ~19,
-discharge (2 ANDs only) **6.1** (vs ~32 at 14 rel), α-uair 11.6, **lookup
-machinery 203** (`gkr_tree` 68, `leaves` 43, `binding` 37, `tuples` 16,
-`lblocks` 15, self 24), z_block 2.6, multipoint 30, open ~8 — i.e.
-**D ≈ C's shared phases (~77 ms) + the lookup machinery (~203 ms)**: the
-port itself is overhead-free, and ALL remaining prover work is the machinery
-hot-spot list (§5.1). B history at this shape: 535.0 (committed carries) →
-515.5 (virtualized) → 320.3 (η-batched); the machine swings ~8% thermally —
-compare within a run. Verify 34.9 ms on both bound arms — the table side
-dominates (2×2¹⁷ fingerprint rows, the `m′` product, ~2 MB of absorbed
-counts; §5.2 kills these).
+**The fully-sound production pipeline (D) is ~2.2× the trusted one (C)
+same-run** — from 3.5× post-port and 6.4× at the first measurement. The
+machine swings hard thermally (cold-machine historical: A ~400 / C ~80;
+same-run ratios are the meaningful comparison). Per-phase (D ≈ 204): commit ~19,
+discharge (2 ANDs) 6, α-uair 12, **lookup machinery ~75** (`gkr_tree` 58 —
+of which the eq-factored sumchecks 42.6 + suffix build 9.3, `binding` 20.4,
+`leaves` 4.1, `counts` 2.5, `lblocks` 2.7, self ~16), z_block 2.6,
+multipoint ~30, open ~8. History of the machinery: 265 (committed carries)
+→ 229 (virtualized) → 202 (η-batched) → **~75** (sweep). Verify ~28 ms —
+still table-side dominated (2×2¹⁷ fingerprint rows, the `m′` product,
+~2 MB of absorbed counts; §5.2 kills these).
 
 ---
 
@@ -92,10 +96,10 @@ counts; §5.2 kills these).
 
 | File | Contents |
 |---|---|
-| `piop/src/lookup/gkr_product.rs` | GKR product-tree engine: `prove/verify_product_tree` (∏ leaves = root → leaf-MLE claim at a point). Field-generic; tested at GF(2¹²⁸). |
+| `piop/src/lookup/gkr_product.rs` | GKR product-tree engine: `prove/verify_product_tree` (∏ leaves = root → leaf-MLE claim at a point). The prover's layer sumchecks run `prove_layer_sumcheck_eq_factored` — eq factored (suffix tensors + prefix scalar, never materialised/folded), char-2 affine-flat fourth node, **byte-identical** to the generic `MLSumcheck` path (which remains the verifier). Field-generic (runtime char-2 detection; prime fields accumulate the 4th node in-pass); tested at GF(2¹²⁸) AND a prime field. |
 | `piop/src/lookup/gkr_lookup.rs` | Two-tree grand-product lookup (`prove/verify_lookup`). **Only the honest-first path uses it now**; the bound path uses the witness tree + clear multiplicities. Keep for reference or fold away. |
 | `piop/src/lookup/add_lookup.rs` | Public add table `T={(x,y,cin,s,cout)}` + the **marginalised `T′={(x,y,cin,s)}`** (`add_table_fingerprints[_marginal]`), `decompose_add` (honest chain — the honest-first path), **`decompose_add_zread`** (virtualized carries — the bound path), `fingerprint[_marginal]`, `marginal_tag` (= `emb(2)`), `multiplicities`. The z-read unit suite incl. the dropped-carry attack + its negative control. Parameterised by `limb_bits` (tests 4 ⇒ 2⁹ table; production 8 ⇒ 2¹⁷). |
-| `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`): `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`), `lookup_binding_public_part` (PubMLE), `prove/verify_lookup_binding` (degree-3 `eq·Σ_a mask_a·Q_a`), `family_proj_eval_pub` (verifier public-col recompute), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W` — serves both the block builder and the `a′` projection; `family_weights` is the per-family reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows` (one combined block per witness col, single masked pass). Module doc has the math. |
+| `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`): `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`), `lookup_binding_public_part` (PubMLE, add-only mask eq-sums), `prove/verify_lookup_binding` (degree-3 `eq·Σ_a mask_a·Q_a`; `Q_a` rows built from per-(relation,pair) precombined bit-weight tables — pure adds; family evals + mask evals via the **bit-bucket kit**: `eq_table_gf` + `family_proj_evals_bucketed`, one add-only pass per `(col,Δ)` for all `nf` evals), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W`; `family_weights` is the reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows`. Module doc has the math. |
 | `protocol/src/f2_prove.rs` | **`prove/verify_f2_full_with_oblong_lookup_adder` (PRODUCTION)** and `prove/verify_f2_full_with_lookup_adder_bound` (monomial twin), both over the shared `prove/verify_lookup_adder_bound_phase` (the factored lookup phase: γ/m+m′/δ/leaves/tree/binding/η/blocks); `sha_add_limb_tuples_zread`, `sha_lookup_witness_leaves_tensor_zread`, `F2LookupAdderProof` (incl. `mult_counts_marginal`) + `F2OblongLookupAdderProof` (adds the η-blocks' `r_0` evals — the oblong proof segments its `r_0` evals α/z/lookup), the honest-first wrapper `prove_f2_full_with_lookup_adder` (still on committed carries + old helpers — scaffolding), all tests + the A/B/C/D bench. |
 
 Tests (run with `--features parallel,simd,unchecked`): unit z-read suite in
@@ -210,17 +214,16 @@ bound path.
 
 ## 5. Roadmap (prioritized; designs already in the ledger)
 
-1. **Machinery hot spots** — now THE whole prover fight (D ≈ C's ~77 ms of
-   shared phases + ~203 ms lookup machinery): `gkr_tree` 68 ms (the
-   2²²-leaf witness tree — 25% pair-padding + ~6% inactive `1`-leaves
-   skippable via a sparse bottom layer), `leaves` 43 ms (fuse with `tuples`
-   into one `pack_u64` cell-read pass + parallelize), `binding` 37 ms
-   (parallelize the 12 `Q_a` materializations; closed-form mask-MLEs),
-   `lblocks`+`tuples` ~31 ms (parallel + fused). Realistic target ≈
-   60–90 ms machinery ⇒ a ~140–170 ms fully-sound production prove.
-   (`multipoint_eval` is DONE — 156 → 29 ms via η-batching; the oblong port
-   is DONE — overhead-free splice.)
-2. **Verifier + proof size** (verify is 35 ms, table-side dominated):
+1. **Remaining prover spots** (the 2026-06-10 sweep took the machinery
+   203 → ~75 ms; what's left): `gkr_tree` ~58 (the eq-factored layer
+   sumchecks are compute-bound at ~10 GF mults/pair; further cuts are
+   PROTOCOL changes — e.g. 48 = 3·16 pair blocks as 3 trees of 2²⁰ with
+   multiplied roots, −25%, not byte-identical, needs its own adversarial
+   pass; or skipping the ~44% trivial first-round pairs, ~4 ms, branchy),
+   `multipoint_eval` ~30, `binding` ~20 (the degree-3 sumcheck prove
+   itself), lookup self ~16. Realistic floor without protocol changes
+   ≈ 150–170 ms.
+2. **Verifier + proof size** (verify is ~28 ms, table-side dominated):
    derive `T′` fingerprints from `T`'s in one add/row
    (`fpT′ = fpT + γ⁴·(emb(cout)+X)`, char 2) instead of a second 2¹⁷-row
    build; sparse-encode `m′` (and `m`: 2¹⁷×8B ≈ 1 MB each); closed-form

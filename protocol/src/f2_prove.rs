@@ -3884,46 +3884,76 @@ where
         (leaves, fp_rows)
     }
 
-    /// Extract the lookup tuples from the real adds with **virtualized
-    /// carries** (z-reads — no committed carry columns; see
-    /// [`zinc_piop::lookup::add_lookup::decompose_add_zread`]). Returns
-    /// `(t_tuples, last_tuples)`: limbs `0..nl−1` (5-coordinate, table `T`)
-    /// and the marginalised last limbs (table `T′`).
-    fn sha_add_limb_tuples_zread(
+    /// The two clear multiplicity-count arrays of the virtualized-carry
+    /// lookup, computed directly from the trace (no tuple vectors
+    /// materialised): `m[row]` counts limbs `0..nl−1` against table `T`,
+    /// `m′[row]` the marginalised last limbs against `T′`, both indexed by
+    /// `row_index(x, y, cin)` with z-read carries. Parallel over relations
+    /// (per-relation partial histograms, summed); counts are truncated to
+    /// `k_bits` exactly as the tuple-based path did (an honest prover sizes
+    /// `k_bits` so no truncation occurs).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sha_lookup_mult_counts_zread(
         cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
         adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         limb_bits: usize,
-    ) -> (
-        Vec<zinc_piop::lookup::add_lookup::LimbTuple>,
-        Vec<zinc_piop::lookup::add_lookup::LimbTuple>,
-    ) {
+        k_bits: usize,
+    ) -> (Vec<u64>, Vec<u64>) {
+        use zinc_piop::lookup::add_lookup::{num_limbs, row_index, table_size};
         let n = 1usize << num_vars;
+        let nl = num_limbs(limb_bits);
+        let tsize = table_size(limb_bits);
+        let mask = (1u32 << limb_bits) - 1;
         let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
             match r.checked_add(term.row_shift).filter(|&i| i < n) {
                 Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[term.col].evaluations[i]) as u32,
                 None => 0,
             }
         };
-        let mut t_tuples = Vec::new();
-        let mut last_tuples = Vec::new();
-        for spec in adder_specs {
-            let masked = !spec.active_rows.is_empty();
-            for r in 0..n {
-                if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
-                    continue;
+        let partials: Vec<(Vec<u64>, Vec<u64>)> = zinc_utils::cfg_iter!(adder_specs)
+            .map(|spec| {
+                let mut m = vec![0u64; tsize];
+                let mut m_marginal = vec![0u64; tsize];
+                let masked = !spec.active_rows.is_empty();
+                for r in 0..n {
+                    if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let xv = cell(&spec.x, r);
+                    let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                    let tv = cell(&spec.t, r);
+                    let z = xv ^ yv ^ tv;
+                    for i in 0..nl {
+                        let shift = i * limb_bits;
+                        let cin = if i == 0 { 0 } else { (z >> shift) & 1 };
+                        let idx =
+                            row_index((xv >> shift) & mask, (yv >> shift) & mask, cin, limb_bits);
+                        if i + 1 < nl {
+                            m[idx] += 1;
+                        } else {
+                            m_marginal[idx] += 1;
+                        }
+                    }
                 }
-                let xv = cell(&spec.x, r);
-                let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
-                let tv = cell(&spec.t, r);
-                let tuples =
-                    zinc_piop::lookup::add_lookup::decompose_add_zread(xv, yv, tv, limb_bits);
-                let (last, rest) = tuples.split_last().expect("nl >= 1");
-                t_tuples.extend_from_slice(rest);
-                last_tuples.push(*last);
+                (m, m_marginal)
+            })
+            .collect();
+        let kmask = if k_bits >= 64 { u64::MAX } else { (1u64 << k_bits) - 1 };
+        let mut m = vec![0u64; tsize];
+        let mut m_marginal = vec![0u64; tsize];
+        for (pm, pmm) in &partials {
+            for (acc, v) in m.iter_mut().zip(pm) {
+                *acc += v;
+            }
+            for (acc, v) in m_marginal.iter_mut().zip(pmm) {
+                *acc += v;
             }
         }
-        (t_tuples, last_tuples)
+        for v in m.iter_mut().chain(m_marginal.iter_mut()) {
+            *v &= kmask;
+        }
+        (m, m_marginal)
     }
 
     /// Tensor-layout witness leaves with **virtualized carries**: like
@@ -3935,6 +3965,13 @@ where
     /// ([`crate::f2_lookup_binding::lookup_binding_coeffs`]) express in terms
     /// of limb + boundary-bit family reads, so the binding identity holds on
     /// corrupt traces too (the product check is what rejects them).
+    ///
+    /// Parallel over the `num_pairs` leaf blocks (the tensor layout is
+    /// block-major: block `p = a·nl + i` is the contiguous slice
+    /// `leaves[p·n..(p+1)·n]`), each block extracting only its own limb +
+    /// boundary bits from the row's cells. Fingerprints come from the
+    /// per-γ lookup tables ([`zinc_piop::lookup::add_lookup::FingerprintTables`]
+    /// — 4 table adds, no mults).
     #[allow(clippy::arithmetic_side_effects)]
     fn sha_lookup_witness_leaves_tensor_zread(
         cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
@@ -3944,14 +3981,14 @@ where
         gamma: &BinaryFieldGF128,
         delta: &BinaryFieldGF128,
     ) -> (Vec<BinaryFieldGF128>, Vec<Vec<BinaryFieldGF128>>) {
-        use zinc_piop::lookup::add_lookup::{
-            decompose_add_zread, fingerprint, fingerprint_marginal, num_limbs,
-        };
+        use zinc_piop::lookup::add_lookup::{FingerprintTables, LimbTuple, num_limbs};
         let n = 1usize << num_vars;
         let nl = num_limbs(limb_bits);
         let num_pairs = adder_specs.len() * nl;
         let padded_pairs = num_pairs.next_power_of_two();
         let one = BinaryFieldGF128::one();
+        let mask = (1u32 << limb_bits) - 1;
+        let tables = FingerprintTables::<BinaryFieldGF128>::new(gamma, limb_bits, &());
 
         let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
             match r.checked_add(term.row_shift).filter(|&i| i < n) {
@@ -3962,27 +3999,39 @@ where
 
         let mut leaves = vec![one; padded_pairs * n];
         let mut fp_rows = vec![vec![BinaryFieldGF128::zero(); n]; num_pairs];
-        for (a, spec) in adder_specs.iter().enumerate() {
-            let masked = !spec.active_rows.is_empty();
-            for r in 0..n {
-                if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
-                    continue; // leaf stays 1, fp stays 0
-                }
-                let xv = cell(&spec.x, r);
-                let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
-                let tv = cell(&spec.t, r);
-                let tuples = decompose_add_zread(xv, yv, tv, limb_bits);
-                for (i, tup) in tuples.iter().enumerate() {
-                    let p = a * nl + i;
-                    let fp = if i + 1 < nl {
-                        fingerprint::<BinaryFieldGF128>(tup, gamma, &())
-                    } else {
-                        fingerprint_marginal::<BinaryFieldGF128>(tup, gamma, &())
-                    };
-                    fp_rows[p][r] = fp;
-                    leaves[p * n + r] = *delta + fp; // δ − fp (char 2)
-                }
-            }
+        {
+            let leaf_blocks = &mut leaves[..num_pairs * n];
+            zinc_utils::cfg_chunks_mut!(leaf_blocks, n)
+                .zip(zinc_utils::cfg_iter_mut!(fp_rows))
+                .enumerate()
+                .for_each(|(p, (leaf_block, fp_row))| {
+                    let (a, i) = (p / nl, p % nl);
+                    let spec = &adder_specs[a];
+                    let masked = !spec.active_rows.is_empty();
+                    let shift = i * limb_bits;
+                    let last = i + 1 == nl;
+                    for r in 0..n {
+                        if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                            continue; // leaf stays 1, fp stays 0
+                        }
+                        let xv = cell(&spec.x, r);
+                        let yv =
+                            cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                        let tv = cell(&spec.t, r);
+                        let z = xv ^ yv ^ tv;
+                        let tup = LimbTuple {
+                            x: (xv >> shift) & mask,
+                            y: (yv >> shift) & mask,
+                            cin: if i == 0 { 0 } else { (z >> shift) & 1 },
+                            s: (tv >> shift) & mask,
+                            cout: if last { 0 } else { (z >> (shift + limb_bits)) & 1 },
+                        };
+                        let fp =
+                            if last { tables.fp_marginal(&tup) } else { tables.fp(&tup) };
+                        fp_row[r] = fp;
+                        leaf_block[r] = *delta + fp; // δ − fp (char 2)
+                    }
+                });
         }
         (leaves, fp_rows)
     }
@@ -4040,7 +4089,6 @@ where
             binding_distinct_pairs, eta_block_rows, eta_combined_weights, lookup_binding_coeffs,
             num_families, prove_lookup_binding,
         };
-        use zinc_piop::lookup::add_lookup;
 
         let n = 1usize << num_vars;
         let nf = num_families::<D>(limb_bits);
@@ -4052,23 +4100,11 @@ where
         // table side needs no GKR tree: the verifier recomputes
         // `∏_t (δ−fpT_t)^{m_t} · ∏_t (δ−fpT′_t)^{m′_t}` itself and checks it
         // against the witness tree's root.
-        let (t_tuples, last_tuples) = {
-            let _g = zinc_utils::prof::scope("lookup:tuples");
-            Self::sha_add_limb_tuples_zread(cols, adder_specs, num_vars, limb_bits)
+        let (mult_counts, mult_counts_marginal) = {
+            let _g = zinc_utils::prof::scope("lookup:counts");
+            Self::sha_lookup_mult_counts_zread(cols, adder_specs, num_vars, limb_bits, k_bits)
         };
         let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let pack_counts = |tuples: &[add_lookup::LimbTuple]| -> Vec<u64> {
-            add_lookup::multiplicities(tuples, limb_bits, k_bits)
-                .iter()
-                .map(|b| {
-                    b.iter()
-                        .enumerate()
-                        .fold(0u64, |acc, (i, &set)| acc | (u64::from(set) << i))
-                })
-                .collect()
-        };
-        let mult_counts = pack_counts(&t_tuples);
-        let mult_counts_marginal = pack_counts(&last_tuples);
         let mut buf = vec![
             0u8;
             <<BinaryFieldGF128 as Field>::Inner
@@ -4119,17 +4155,17 @@ where
         let num_wit = cols.len() - num_pub_bin;
         let zero_inner = BinaryFieldGF128::zero().into_inner();
         let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
-        let blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> = (0
-            ..num_wit)
-            .map(|g| {
-                let v = eta_block_rows::<D>(cols, num_pub_bin + g, &eta_w, n);
-                DenseMultilinearExtension::from_evaluations_vec(
-                    num_vars,
-                    v.iter().map(|x| *x.inner()).collect(),
-                    zero_inner.clone(),
-                )
-            })
-            .collect();
+        let blocks: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
+            zinc_utils::cfg_into_iter!(0..num_wit)
+                .map(|g| {
+                    let v = eta_block_rows::<D>(cols, num_pub_bin + g, &eta_w, n);
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        v.iter().map(|x| *x.inner()).collect(),
+                        zero_inner.clone(),
+                    )
+                })
+                .collect();
 
         LookupAdderProverPhase {
             witness_tree,
@@ -4161,11 +4197,12 @@ where
         k_bits: usize,
     ) -> Result<LookupAdderVerifierPhase, &'static str> {
         use crate::f2_lookup_binding::{
-            binding_distinct_pairs, eta_combined_weights, family_proj_eval_pub,
-            lookup_binding_coeffs, lookup_binding_public_part, num_families,
-            verify_lookup_binding,
+            binding_distinct_pairs, eq_table_gf, eta_combined_weights,
+            family_proj_evals_bucketed, lookup_binding_coeffs, lookup_binding_public_part,
+            num_families, verify_lookup_binding,
         };
 
+        let n = 1usize << num_vars;
         let nl = D / limb_bits;
         let nf = num_families::<D>(limb_bits);
 
@@ -4250,23 +4287,24 @@ where
         )
         .map_err(|_| "binding sumcheck rejected")?;
 
-        // PUBLIC columns' family claims: recompute directly.
+        // PUBLIC columns' family claims: recompute directly (one bucket
+        // pass per pair yields all nf family evals).
         let pairs = binding_distinct_pairs(&coeffs);
+        let eq_star = eq_table_gf(&r_star);
         for (pi, &(col, shift)) in pairs.iter().enumerate() {
             if col >= num_pub_bin {
                 continue;
             }
+            let computed = family_proj_evals_bucketed::<D>(
+                public_binary_trace,
+                col,
+                shift,
+                limb_bits,
+                &eq_star,
+                n,
+            );
             for f in 0..nf {
-                let computed = family_proj_eval_pub::<D>(
-                    public_binary_trace,
-                    col,
-                    shift,
-                    f,
-                    limb_bits,
-                    num_vars,
-                    &r_star,
-                );
-                if computed != lookup_proof.binding.limb_evals[pi][f] {
+                if computed[f] != lookup_proof.binding.limb_evals[pi][f] {
                     return Err("public-column limb claim mismatch");
                 }
             }

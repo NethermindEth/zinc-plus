@@ -166,6 +166,85 @@ pub fn eta_block_rows<const D: usize>(
         .collect()
 }
 
+/// The eq tensor of `point` as `Gf` rows (`eq[r] = eq(point, r)`, indices
+/// LSB-first — the same convention as [`eq_at_index`] and the MLE
+/// evaluator).
+pub fn eq_table_gf(point: &[Gf]) -> Vec<Gf> {
+    let mle = zinc_poly::utils::build_eq_x_r_inner(point, &()).expect("eq table");
+    mle.evaluations
+        .iter()
+        .map(|u| {
+            let w = u.as_words();
+            Gf::from_words([w[0], w[1]])
+        })
+        .collect()
+}
+
+/// Per-bit-position eq-weighted bucket sums of a row-shifted column:
+/// `S_p = Σ_{r : bit p of col[r+Δ] set} eq[r]` — one add-only pass. By
+/// linearity, EVERY family MLE eval of the `(col, Δ)` pair at the eq
+/// tensor's point is a public weighting of the buckets:
+/// `F̃_f(col↓Δ)(point) = Σ_r eq[r]·F_f(col↓Δ)[r] = Σ_p w_f[p]·S_p`.
+#[allow(clippy::arithmetic_side_effects)]
+fn bit_bucket_sums<const D: usize>(
+    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    col: usize,
+    shift: usize,
+    eq: &[Gf],
+    n: usize,
+) -> Vec<Gf> {
+    let mut s = vec![Gf::zero(); D];
+    for r in 0..n {
+        let mut m = match r.checked_add(shift).filter(|&i| i < n) {
+            Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[col].evaluations[i]),
+            None => 0,
+        };
+        while m != 0 {
+            let p = m.trailing_zeros() as usize;
+            s[p] = s[p] + eq[r];
+            m &= m - 1;
+        }
+    }
+    s
+}
+
+/// All `nf` family evals from the bucket sums: limb family `f < nl` is
+/// `Σ_b X^b·S_{ℓf+b}`, boundary family `f ≥ nl` is `S_{ℓ(f−nl+1)}`.
+#[allow(clippy::arithmetic_side_effects)]
+fn family_evals_from_buckets<const D: usize>(s: &[Gf], limb_bits: usize) -> Vec<Gf> {
+    let nl = D / limb_bits;
+    let nf = num_families::<D>(limb_bits);
+    (0..nf)
+        .map(|f| {
+            if f < nl {
+                let mut acc = Gf::zero();
+                for b in 0..limb_bits {
+                    acc = acc + x_pow(b) * s[f * limb_bits + b];
+                }
+                acc
+            } else {
+                s[boundary_bit(f, nl, limb_bits)]
+            }
+        })
+        .collect()
+}
+
+/// All `nf` family MLE evals of a (possibly shifted) column at `point` —
+/// the verifier's public-column recompute, one bucket pass instead of `nf`
+/// separate MLE evaluations. The caller supplies the eq tensor of `point`
+/// ([`eq_table_gf`]) so it is built once across columns.
+pub fn family_proj_evals_bucketed<const D: usize>(
+    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    col: usize,
+    shift: usize,
+    limb_bits: usize,
+    eq: &[Gf],
+    n: usize,
+) -> Vec<Gf> {
+    let s = bit_bucket_sums::<D>(cols, col, shift, eq, n);
+    family_evals_from_buckets::<D>(&s, limb_bits)
+}
+
 /// Per-relation public family-read coefficients:
 /// `Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r]`, keyed `((col, Δ), family)`.
 /// Mirrors `fp = emb(x_i) + γ·emb(y_i⊕y2_i) + γ²·cin_i + γ³·emb(t_i) +
@@ -301,18 +380,20 @@ fn mask_vec(spec: &F2AdderSpec, n: usize) -> Vec<Gf> {
         .collect()
 }
 
-/// MLE eval at `point` of a `Gf` row vector.
-fn row_mle_eval(v: &[Gf], num_vars: usize, point: &[Gf]) -> Gf {
-    let zero_inner = Gf::zero().into_inner();
-    let mle = DenseMultilinearExtension::from_evaluations_vec(
-        num_vars,
-        v.iter().map(|x| *x.inner()).collect(),
-        zero_inner,
-    );
-    <DenseMultilinearExtension<Inner> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
-        mle, &point.to_vec(), &(),
-    )
-    .expect("row MLE eval")
+/// MLE eval of the (0/1) active-row mask at the eq tensor's point:
+/// `m̃(point) = Σ_{r active} eq[r]` — add-only (equal to the dense MLE
+/// evaluation by linearity).
+#[allow(clippy::arithmetic_side_effects)]
+fn mask_eval_from_eq(spec: &F2AdderSpec, eq: &[Gf]) -> Gf {
+    let mut acc = Gf::zero();
+    for (r, e) in eq.iter().enumerate() {
+        let active =
+            spec.active_rows.is_empty() || spec.active_rows.get(r).copied().unwrap_or(false);
+        if active {
+            acc = acc + *e;
+        }
+    }
+    acc
 }
 
 /// `PubMLE(r_w)` — the public part of the leaf-MLE claim:
@@ -326,12 +407,13 @@ pub fn lookup_binding_public_part<const D: usize>(
     r_pair: &[Gf],
     delta: &Gf,
 ) -> Gf {
-    let n = 1usize << num_vars;
+    let _ = num_vars;
     let nl = D / limb_bits;
     let one = Gf::one();
+    let eq_row = eq_table_gf(r_row);
     let mut out = one;
     for (a, spec) in adder_specs.iter().enumerate() {
-        let m_eval = row_mle_eval(&mask_vec(spec, n), num_vars, r_row);
+        let m_eval = mask_eval_from_eq(spec, &eq_row);
         let eq_sum: Gf = (0..nl)
             .map(|i| eq_at_index(r_pair, a * nl + i))
             .fold(Gf::zero(), |acc, e| acc + e);
@@ -340,60 +422,6 @@ pub fn lookup_binding_public_part<const D: usize>(
     out
 }
 
-/// MLE eval at `point` of a family-projected, row-shifted column — used by
-/// the verifier to recompute PUBLIC columns' family claims directly.
-pub fn family_proj_eval_pub<const D: usize>(
-    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    col: usize,
-    shift: usize,
-    family: usize,
-    limb_bits: usize,
-    num_vars: usize,
-    point: &[Gf],
-) -> Gf {
-    let n = 1usize << num_vars;
-    let v = family_proj_rows::<D>(cols, col, shift, family, limb_bits, n);
-    row_mle_eval(&v, num_vars, point)
-}
-
-/// The family-projected, row-shifted vector `F_f(col↓Δ)` as `Gf` rows (zero
-/// past the tail, mirroring the operand-read convention): the limb pack
-/// `Σ_b bit_{ℓf+b}·X^b` for `f < nl`, the single boundary bit `bit_{ℓ(f−nl+1)}`
-/// (as 0/1) for `f ≥ nl`.
-#[allow(clippy::arithmetic_side_effects)]
-fn family_proj_rows<const D: usize>(
-    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    col: usize,
-    shift: usize,
-    family: usize,
-    limb_bits: usize,
-    n: usize,
-) -> Vec<Gf> {
-    let nl = D / limb_bits;
-    let one = Gf::one();
-    (0..n)
-        .map(|r| {
-            let m = match r.checked_add(shift).filter(|&i| i < n) {
-                Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[col].evaluations[i]),
-                None => 0,
-            };
-            if family < nl {
-                let mut acc = Gf::zero();
-                let mut bits = (m >> (family * limb_bits)) & ((1u64 << limb_bits) - 1);
-                while bits != 0 {
-                    let b = bits.trailing_zeros() as usize;
-                    acc = acc + x_pow(b);
-                    bits &= bits - 1;
-                }
-                acc
-            } else if (m >> boundary_bit(family, nl, limb_bits)) & 1 == 1 {
-                one
-            } else {
-                Gf::zero()
-            }
-        })
-        .collect()
-}
 
 /// Prover: one degree-3 sumcheck for `B = Σ_r eq(r_row,r)·Σ_a mask_a[r]·Q_a[r]`,
 /// then the family shifted evals at the sumcheck point `r★`.
@@ -409,18 +437,52 @@ pub fn prove_lookup_binding<const D: usize>(
     r_row: &[Gf],
 ) -> (LookupBindingProof, Vec<Gf>) {
     let n = 1usize << num_vars;
+    let nl = D / limb_bits;
     let nf = num_families::<D>(limb_bits);
     let zero_inner = Gf::zero().into_inner();
     let num_rel = adder_specs.len();
 
-    // Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r].
+    // Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r]. Precombine each relation's
+    // coefficients into per-bit weights per (col, Δ) —
+    // `W[p] = Σ_f coeff_f·w_f[p]` — so every row is pure adds over the
+    // cell's set bits (the `eta_block_rows` trick with per-relation
+    // weights); equal to the term-by-term form by linearity.
     let q_rows: Vec<Vec<Gf>> = cfg_iter!(coeffs)
         .map(|per_rel| {
-            let mut q = vec![per_rel.constant; n];
+            let mut weights: Vec<((usize, usize), Vec<Gf>)> = Vec::new();
             for (((col, shift), family), c) in &per_rel.terms {
-                let proj = family_proj_rows::<D>(cols, *col, *shift, *family, limb_bits, n);
-                for (qr, p) in q.iter_mut().zip(proj) {
-                    *qr = *qr + *c * p;
+                let key = (*col, *shift);
+                let idx = match weights.iter().position(|(k, _)| *k == key) {
+                    Some(i) => i,
+                    None => {
+                        weights.push((key, vec![Gf::zero(); D]));
+                        weights.len() - 1
+                    }
+                };
+                let w = &mut weights[idx].1;
+                if *family < nl {
+                    for (b, slot) in
+                        w.iter_mut().skip(family * limb_bits).take(limb_bits).enumerate()
+                    {
+                        *slot = *slot + *c * x_pow(b);
+                    }
+                } else {
+                    let p = boundary_bit(*family, nl, limb_bits);
+                    w[p] = w[p] + *c;
+                }
+            }
+            let mut q = vec![per_rel.constant; n];
+            for ((col, shift), w) in &weights {
+                for (r, qr) in q.iter_mut().enumerate() {
+                    let mut m = match r.checked_add(*shift).filter(|&i| i < n) {
+                        Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[*col].evaluations[i]),
+                        None => 0,
+                    };
+                    while m != 0 {
+                        let p = m.trailing_zeros() as usize;
+                        *qr = *qr + w[p];
+                        m &= m - 1;
+                    }
                 }
             }
             q
@@ -457,16 +519,13 @@ pub fn prove_lookup_binding<const D: usize>(
         MLSumcheck::prove_as_subprotocol(transcript, mles, num_vars, 3, comb, &());
     let r_star = state.randomness.clone();
 
-    // Family shifted evals at r★ per distinct (col, Δ) — all nf families.
+    // Family shifted evals at r★ per distinct (col, Δ) — all nf families
+    // from one add-only bucket pass per pair (`Σ_r eq·F_f = Σ_p w_f[p]·S_p`).
     let pairs = binding_distinct_pairs(coeffs);
+    let eq_star = eq_table_gf(&r_star);
     let limb_evals: Vec<Vec<Gf>> = cfg_iter!(pairs)
         .map(|&(col, shift)| {
-            (0..nf)
-                .map(|f| {
-                    let v = family_proj_rows::<D>(cols, col, shift, f, limb_bits, n);
-                    row_mle_eval(&v, num_vars, &r_star)
-                })
-                .collect()
+            family_proj_evals_bucketed::<D>(cols, col, shift, limb_bits, &eq_star, n)
         })
         .collect();
 
@@ -516,17 +575,17 @@ pub fn verify_lookup_binding<const D: usize>(
         }
     }
 
-    let n = 1usize << num_vars;
     let one = Gf::one();
     let eq_val = zinc_poly::utils::eq_eval(&r_star, &r_row.to_vec(), one)
         .map_err(|_| LookupBindingError::FinalEvalMismatch)?;
 
     // Σ_a mask̃_a(r★)·Q̃_a(r★), with Q̃ recombined from the family evals
     // (the public constant evaluates to itself — the all-ones MLE is 1
-    // at any point).
+    // at any point) and the mask evals as add-only eq sums.
+    let eq_star = eq_table_gf(&r_star);
     let mut s = Gf::zero();
     for (a, spec) in adder_specs.iter().enumerate() {
-        let m_eval = row_mle_eval(&mask_vec(spec, n), num_vars, &r_star);
+        let m_eval = mask_eval_from_eq(spec, &eq_star);
         let mut q = coeffs[a].constant;
         for ((key, family), c) in &coeffs[a].terms {
             let gi = pairs.iter().position(|p| p == key).expect("pair from coeffs");
