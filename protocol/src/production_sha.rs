@@ -1876,7 +1876,7 @@ pub fn verify_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -3321,7 +3321,7 @@ pub fn verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -3447,15 +3447,14 @@ fn verify_public_projection_phase<P, U, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
 ) -> Result<Vec<ProjectedPublic<F>>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
-    F: PrimeField + FromPrimitiveWithConfig,
+    F: PrimeField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
 {
     let field_cfg = &vs.field_cfg;
-    let mut publics = Vec::with_capacity(instances.len());
     for (instance_idx, instance) in instances.iter().enumerate() {
         validate_public_uair_trace_shape::<Zt::Int, Zt::Int, F, D>(
             &instance.public_trace,
@@ -3470,12 +3469,16 @@ where
             ));
         }
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &instance.public_trace);
-        publics.push(U::project_production_sha_public(
-            &vs.shape,
-            &instance.public_trace,
-            field_cfg,
-        )?);
     }
+
+    let projected = cfg_iter!(instances)
+        .map(|instance| {
+            U::project_production_sha_public(&vs.shape, &instance.public_trace, field_cfg)
+        })
+        .collect::<Vec<_>>();
+    let publics = projected
+        .into_iter()
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
 
     validate_production_sha_publics(&publics, field_cfg)?;
     absorb_production_sha_commitments::<P, Zt, F, D>(
@@ -3500,9 +3503,9 @@ fn verify_mixed_hyrax_public_projection_phase<C, U, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
 ) -> Result<Vec<ProjectedPublic<F>>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
-    F: PrimeField + FromPrimitiveWithConfig,
+    F: PrimeField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     F: HyraxFieldBridge<C>,
@@ -3511,7 +3514,6 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     let field_cfg = &vs.field_cfg;
-    let mut publics = Vec::with_capacity(instances.len());
     for (instance_idx, instance) in instances.iter().enumerate() {
         validate_public_uair_trace_shape::<Zt::Int, Zt::Int, F, D>(
             &instance.public_trace,
@@ -3523,12 +3525,16 @@ where
             ));
         }
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &instance.public_trace);
-        publics.push(U::project_production_sha_public(
-            &vs.shape,
-            &instance.public_trace,
-            field_cfg,
-        )?);
     }
+
+    let projected = cfg_iter!(instances)
+        .map(|instance| {
+            U::project_production_sha_public(&vs.shape, &instance.public_trace, field_cfg)
+        })
+        .collect::<Vec<_>>();
+    let publics = projected
+        .into_iter()
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
 
     validate_production_sha_publics(&publics, field_cfg)?;
     absorb_mixed_hyrax_production_sha_commitments(
