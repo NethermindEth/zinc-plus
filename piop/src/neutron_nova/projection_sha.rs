@@ -1509,6 +1509,20 @@ where
     reconstruct_virtual_ch_maj_at_row_unchecked(trace, row, field_cfg)
 }
 
+#[inline(always)]
+fn double_bool_or_mul<F>(bit: F, zero: &F, one: &F, two: &F) -> F
+where
+    F: PrimeField,
+{
+    if &bit == zero {
+        zero.clone()
+    } else if &bit == one {
+        two.clone()
+    } else {
+        two.clone() * bit
+    }
+}
+
 fn reconstruct_virtual_ch_maj_at_row_unchecked<F>(
     trace: &ProjectedTrace<F>,
     row: usize,
@@ -1520,37 +1534,37 @@ where
     if row >= SHA_ROW_COUNT {
         return Err(ShaProjectionError::RowIndexOutOfRange { row });
     }
-    let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
     let ch1 = build_virtual_bit_array(|bit| {
         Ok(
             bit_at_shifted_or_zero_fast(trace, ShaWordCol::E, row, 2, bit, field_cfg)
                 + bit_at_shifted_or_zero_fast(trace, ShaWordCol::E, row, 1, bit, field_cfg)
-                - two.clone()
-                    * bit_at_shifted_or_zero_fast(trace, ShaWordCol::Uef, row, 2, bit, field_cfg),
+                - double_bool_or_mul(
+                    bit_at_shifted_or_zero_fast(trace, ShaWordCol::Uef, row, 2, bit, field_cfg),
+                    &zero,
+                    &one,
+                    &two,
+                ),
         )
     });
     let ch2 = build_virtual_bit_array(|bit| {
         Ok(
             bit_at_shifted_or_zero_fast(trace, ShaWordCol::E, row, 2, bit, field_cfg)
                 - bit_at_shifted_or_zero_fast(trace, ShaWordCol::E, row, 0, bit, field_cfg)
-                + two.clone()
-                    * bit_at_shifted_or_zero_fast(
-                        trace,
-                        ShaWordCol::UNegEg,
-                        row,
-                        2,
-                        bit,
-                        field_cfg,
-                    )
-                + two.clone()
-                    * bit_at_shifted_or_zero_fast(
-                        trace,
-                        ShaWordCol::Ch2Comp,
-                        row,
-                        0,
-                        bit,
-                        field_cfg,
-                    ),
+                + double_bool_or_mul(
+                    bit_at_shifted_or_zero_fast(trace, ShaWordCol::UNegEg, row, 2, bit, field_cfg),
+                    &zero,
+                    &one,
+                    &two,
+                )
+                + double_bool_or_mul(
+                    bit_at_shifted_or_zero_fast(trace, ShaWordCol::Ch2Comp, row, 0, bit, field_cfg),
+                    &zero,
+                    &one,
+                    &two,
+                ),
         )
     });
     let maj = build_virtual_bit_array(|bit| {
@@ -1558,17 +1572,18 @@ where
             bit_at_shifted_or_zero_fast(trace, ShaWordCol::A, row, 0, bit, field_cfg)
                 + bit_at_shifted_or_zero_fast(trace, ShaWordCol::A, row, 1, bit, field_cfg)
                 + bit_at_shifted_or_zero_fast(trace, ShaWordCol::A, row, 2, bit, field_cfg)
-                - two.clone()
-                    * bit_at_shifted_or_zero_fast(trace, ShaWordCol::Maj, row, 2, bit, field_cfg)
-                - two.clone()
-                    * bit_at_shifted_or_zero_fast(
-                        trace,
-                        ShaWordCol::MajComp,
-                        row,
-                        0,
-                        bit,
-                        field_cfg,
-                    ),
+                - double_bool_or_mul(
+                    bit_at_shifted_or_zero_fast(trace, ShaWordCol::Maj, row, 2, bit, field_cfg),
+                    &zero,
+                    &one,
+                    &two,
+                )
+                - double_bool_or_mul(
+                    bit_at_shifted_or_zero_fast(trace, ShaWordCol::MajComp, row, 0, bit, field_cfg),
+                    &zero,
+                    &one,
+                    &two,
+                ),
         )
     });
 
