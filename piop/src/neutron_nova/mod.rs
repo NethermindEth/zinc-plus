@@ -55,9 +55,10 @@ pub use projection_sha::{
     sha_linear_residual_row_value, sha_linear_residual_sum, sha_public_at_point,
     sha_public_at_point_with_weights, sha_scalarized_word_at_point,
     sha_scalarized_word_at_point_with_weights, sha_word_bits_at_point,
-    sha_word_bits_at_point_with_weights, sha_word_bits_at_point_with_weights_unchecked,
-    validate_fresh_sha_ideal_polys_canonical, validate_projected_trace,
-    verify_folded_row_sumcheck_claim, verify_folded_scalarization_links,
+    sha_word_bits_at_point_with_weights,
+    sha_word_bits_at_point_with_weights_inner_product_unchecked,
+    sha_word_bits_at_point_with_weights_unchecked, validate_fresh_sha_ideal_polys_canonical,
+    validate_projected_trace, verify_folded_row_sumcheck_claim, verify_folded_scalarization_links,
     verify_folded_scalarization_links_at_point, verify_folded_shifted_scalarization_link_at_point,
     verify_fresh_sha_ideal_polys,
 };
