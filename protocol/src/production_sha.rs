@@ -5104,43 +5104,49 @@ where
         });
     }
 
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
+    let mut power = one.clone();
+    let powers_of_two: [F; SHA_WORD_BITS] = std::array::from_fn(|_| {
+        let current = power.clone();
+        power *= &two;
+        current
+    });
+
     for (word_idx, public_col) in production_sha_public_word_column_map().iter().enumerate() {
         let scalar_col = &public.columns[public_col.index()];
+        for bit in 0..SHA_WORD_BITS {
+            let table_idx = bit_slice_index(word_idx, bit, SHA_WORD_BITS);
+            let bit_col = bit_slices
+                .get(table_idx)
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "SHA public word bit column",
+                    got: table_idx,
+                    expected: bit_slices.len(),
+                })?;
+            if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
+                return Err(ProductionShaError::LengthMismatch {
+                    label: "SHA public word row count",
+                    got: bit_col.evaluations.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+        }
         for row in 0..SHA_ROW_COUNT {
-            let mut bits = Vec::with_capacity(SHA_WORD_BITS);
-            for bit in 0..SHA_WORD_BITS {
+            let mut scalarized = zero.clone();
+            for (bit, power) in powers_of_two.iter().enumerate() {
                 let table_idx = bit_slice_index(word_idx, bit, SHA_WORD_BITS);
-                let bit_col =
-                    bit_slices
-                        .get(table_idx)
-                        .ok_or(ProductionShaError::LengthMismatch {
-                            label: "SHA public word bit column",
-                            got: table_idx,
-                            expected: bit_slices.len(),
-                        })?;
-                if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
-                    return Err(ProductionShaError::LengthMismatch {
-                        label: "SHA public word row count",
-                        got: bit_col.evaluations.len(),
-                        expected: SHA_ROW_COUNT,
-                    });
-                }
-                let bit = bit_col.evaluations[row].clone();
-                if bit != F::zero_with_cfg(field_cfg) && bit != F::one_with_cfg(field_cfg) {
+                let bit_col = &bit_slices[table_idx];
+                let bit = &bit_col.evaluations[row];
+                if bit == &one {
+                    scalarized += power;
+                } else if bit != &zero {
                     return Err(ProductionShaError::NonCanonicalProofObject(
                         "production SHA public word bit is not boolean",
                     ));
                 }
-                bits.push(bit);
             }
-            if bits.len() != SHA_WORD_BITS {
-                return Err(ProductionShaError::LengthMismatch {
-                    label: "SHA public word bit count",
-                    got: bits.len(),
-                    expected: SHA_WORD_BITS,
-                });
-            }
-            let scalarized = scalarize_sha_public_word_bits_at_two(&bits, field_cfg);
             if scalarized != scalar_col.evaluations[row] {
                 return Err(ProductionShaError::NonCanonicalProofObject(
                     "production SHA public word bits do not match scalar public column",
@@ -5160,20 +5166,6 @@ fn production_sha_public_word_column_map() -> [ShaPublicCol; ShaPublicWordCol::C
         ShaPublicCol::PEOut,
         ShaPublicCol::Message,
     ]
-}
-
-fn scalarize_sha_public_word_bits_at_two<F>(bits: &[F], field_cfg: &F::Config) -> F
-where
-    F: PrimeField,
-{
-    let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
-    let mut power = F::one_with_cfg(field_cfg);
-    let mut out = F::zero_with_cfg(field_cfg);
-    for bit in bits {
-        out += bit.clone() * &power;
-        power *= &two;
-    }
-    out
 }
 
 fn production_sha_selector_expected<F>(
