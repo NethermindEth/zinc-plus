@@ -499,6 +499,168 @@ where
     }
 }
 
+impl<C> HyraxPCS<C, ScalarFieldLane>
+where
+    C: AffineRepr,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_open_scalar_field_linear_form<F, const CHECK_FOR_OVERFLOW: bool, const D: usize>(
+        transcript: &mut PcsProverTranscript,
+        ck: &HyraxCommitmentKey<C>,
+        values: &[C::ScalarField],
+        q0: &[F],
+        q1: &[F],
+        prover_data: &HyraxProverData<C>,
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        validate_scalar_field_linear_form_shape::<C, D>(ck, values, q0, q1, prover_data)?;
+
+        let q1_scalar = q1
+            .iter()
+            .map(F::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut b_scalar = vec![C::ScalarField::zero(); prover_data.num_rows];
+        for (row_idx, b) in b_scalar.iter_mut().enumerate() {
+            let lower = row_idx * ck.num_cols;
+            let upper = lower + ck.num_cols;
+            for (value, weight) in values[lower..upper].iter().zip(q1_scalar.iter()) {
+                *b += *value * weight;
+            }
+        }
+        let b_f = b_scalar
+            .iter()
+            .map(|value| F::scalar_to_field(value, field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
+        transcript.write_field_elements(&b_f)?;
+
+        let row_coeffs = if prover_data.num_rows == 1 {
+            vec![C::ScalarField::from(1u64)]
+        } else {
+            sample_scalars::<C>(&mut transcript.fs_transcript, prover_data.num_rows)
+        };
+
+        let mut combined_row = vec![C::ScalarField::zero(); ck.num_cols];
+        for (row_idx, coeff) in row_coeffs.iter().copied().enumerate() {
+            let lower = row_idx * ck.num_cols;
+            let upper = lower + ck.num_cols;
+            for (acc, value) in combined_row.iter_mut().zip(values[lower..upper].iter()) {
+                *acc += coeff * value;
+            }
+        }
+
+        write_scalars::<C>(transcript, &combined_row)?;
+        if ck.blinding_mode.is_blinded() {
+            let mut rho_star = C::ScalarField::zero();
+            for (blind, coeff) in prover_data.blinds.iter().zip(row_coeffs.iter()) {
+                rho_star += *blind * coeff;
+            }
+            write_scalar::<C>(transcript, &rho_star)?;
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_open_scalar_field_linear_form<F, const CHECK_FOR_OVERFLOW: bool, const D: usize>(
+        transcript: &mut PcsVerifierTranscript,
+        vk: &HyraxVerifierKey<C>,
+        commitment: &HyraxCommitment<C>,
+        q0: &[F],
+        q1: &[F],
+        claimed_eval: &F,
+        opening_proof: &[u8],
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let _ = CHECK_FOR_OVERFLOW;
+        let original_stream =
+            std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
+        let result = (|| {
+            validate_scalar_field_linear_form_commitment::<C, D>(vk, commitment, q0, q1)?;
+
+            let b_f = transcript.read_field_elements::<F>(commitment.num_rows)?;
+            let mut expected = F::zero_with_cfg(field_cfg);
+            for (weight, b) in q0.iter().zip(b_f.iter()) {
+                expected += weight.clone() * b;
+            }
+            if &expected != claimed_eval {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax scalar-field linear-form evaluation mismatch".to_string(),
+                ));
+            }
+
+            let b_scalar = b_f
+                .iter()
+                .map(F::field_to_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
+            let q1_scalar = q1
+                .iter()
+                .map(F::field_to_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
+            let row_coeffs = if commitment.num_rows == 1 {
+                vec![C::ScalarField::from(1u64)]
+            } else {
+                sample_scalars::<C>(&mut transcript.fs_transcript, commitment.num_rows)
+            };
+
+            let combined_row = read_scalars::<C>(transcript, vk.num_cols)?;
+            let rho_star = if vk.blinding_mode.is_blinded() {
+                Some(read_scalar::<C>(transcript)?)
+            } else {
+                None
+            };
+
+            let mut lhs = C::ScalarField::zero();
+            for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
+                lhs += *value * weight;
+            }
+            let mut rhs = C::ScalarField::zero();
+            for (coeff, b) in row_coeffs.iter().zip(b_scalar.iter()) {
+                rhs += *coeff * b;
+            }
+            if lhs != rhs {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax scalar-field linear-form row coherence failure".to_string(),
+                ));
+            }
+
+            let comm_lc = msm_unchecked::<C>(&commitment.comm_affine, &row_coeffs)?;
+            let mut expected_commitment =
+                msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
+            if let Some(rho_star) = rho_star {
+                expected_commitment += vk.h * rho_star;
+            }
+            if comm_lc != expected_commitment {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax scalar-field linear-form commitment opening failure".to_string(),
+                ));
+            }
+
+            Ok(())
+        })();
+        let consumed = transcript.stream.position() == opening_proof.len() as u64;
+        transcript.stream = original_stream;
+        result?;
+        if !consumed {
+            return Err(ZipError::InvalidPcsOpen(
+                "PCS scalar-field linear-form opening proof has trailing bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HyraxBlindingMode {
     Blinded,
@@ -559,7 +721,76 @@ pub struct HyraxProverData<C: AffineRepr> {
     pub(crate) blinds: Vec<C::ScalarField>,
 }
 
+impl<C> HyraxCommitmentKey<C>
+where
+    C: AffineRepr,
+{
+    pub fn num_cols(&self) -> usize {
+        self.num_cols
+    }
+
+    pub fn blinding_mode(&self) -> HyraxBlindingMode {
+        self.blinding_mode
+    }
+}
+
+impl<C> HyraxVerifierKey<C>
+where
+    C: AffineRepr,
+{
+    pub fn num_cols(&self) -> usize {
+        self.num_cols
+    }
+
+    pub fn blinding_mode(&self) -> HyraxBlindingMode {
+        self.blinding_mode
+    }
+}
+
 impl<C> HyraxCommitment<C>
+where
+    C: AffineRepr,
+{
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn num_lanes(&self) -> usize {
+        self.num_lanes
+    }
+
+    pub fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    pub fn group_point_count(&self) -> usize {
+        self.comm.len()
+    }
+
+    pub fn commitment_bytes_len(&self) -> usize {
+        self.comm_bytes.len()
+    }
+
+    pub fn absorb<T: Transcript>(&self, transcript: &mut T) {
+        transcript.absorb_slice(b"hyrax_commitment_begin");
+        transcript.absorb_slice(&(self.batch_size as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.num_lanes as u64).to_le_bytes());
+        transcript.absorb_slice(&(self.num_rows as u64).to_le_bytes());
+        transcript.absorb_slice(&[self.blinding_mode.as_u8()]);
+        transcript.absorb_slice(&self.comm_bytes);
+        transcript.absorb_slice(b"hyrax_commitment_end");
+    }
+
+    pub fn write_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(self.batch_size as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.num_lanes as u64).to_le_bytes());
+        buf.extend_from_slice(&(self.num_rows as u64).to_le_bytes());
+        buf.push(self.blinding_mode.as_u8());
+        buf.extend_from_slice(&self.comm_bytes);
+    }
+}
+
+impl<C> HyraxProverData<C>
 where
     C: AffineRepr,
 {
@@ -789,6 +1020,9 @@ pub struct BinaryLanes;
 pub struct IntScalarLane;
 
 #[derive(Clone, Debug)]
+pub struct ScalarFieldLane;
+
+#[derive(Clone, Debug)]
 pub struct DensePolyScalarLanes;
 
 impl<C: AffineRepr, const D: usize> HyraxLanes<C, BinaryPoly<D>, D> for BinaryLanes {
@@ -973,6 +1207,46 @@ impl<C: AffineRepr, const LIMBS: usize, const D: usize> HyraxLanes<C, Int<LIMBS>
         if lane != 0 {
             return Err(ZipError::InvalidPcsParam(format!(
                 "lifted int lane {lane} out of range"
+            )));
+        }
+        Ok(lifted_eval
+            .coeffs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| F::zero_with_cfg(field_cfg)))
+    }
+}
+
+impl<C: AffineRepr, const D: usize> HyraxLanes<C, C::ScalarField, D> for ScalarFieldLane {
+    type LaneValue = C::ScalarField;
+    type Strategy = ScalarPippengerMsm;
+
+    const NUM_LANES: usize = 1;
+
+    fn lane_value(eval: &C::ScalarField, lane: usize) -> Result<Self::LaneValue, ZipError> {
+        if lane != 0 {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "scalar-field lane {lane} out of range"
+            )));
+        }
+        Ok(*eval)
+    }
+
+    fn lane_to_scalar(value: Self::LaneValue) -> C::ScalarField {
+        value
+    }
+
+    fn lifted_eval<F>(
+        lifted_eval: &DynamicPolynomialF<F>,
+        lane: usize,
+        field_cfg: &F::Config,
+    ) -> Result<F, ZipError>
+    where
+        F: PrimeField,
+    {
+        if lane != 0 {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "lifted scalar-field lane {lane} out of range"
             )));
         }
         Ok(lifted_eval
@@ -1899,6 +2173,97 @@ where
     Ok(())
 }
 
+fn validate_scalar_field_linear_form_shape<C, const D: usize>(
+    ck: &HyraxCommitmentKey<C>,
+    values: &[C::ScalarField],
+    q0: &[impl PrimeField],
+    q1: &[impl PrimeField],
+    prover_data: &HyraxProverData<C>,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+{
+    if prover_data.batch_size != 1
+        || prover_data.num_lanes != <ScalarFieldLane as HyraxLanes<C, C::ScalarField, D>>::NUM_LANES
+        || prover_data.blinding_mode != ck.blinding_mode
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax scalar-field linear-form prover data shape mismatch".to_string(),
+        ));
+    }
+    if q1.len() != ck.num_cols {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {} column weights, got {}",
+            ck.num_cols,
+            q1.len()
+        )));
+    }
+    if q0.len() != prover_data.num_rows {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {} row weights, got {}",
+            prover_data.num_rows,
+            q0.len()
+        )));
+    }
+    let expected_values = prover_data.num_rows * ck.num_cols;
+    if values.len() != expected_values {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {expected_values} values, got {}",
+            values.len()
+        )));
+    }
+    let expected_blinds = if ck.blinding_mode.is_blinded() {
+        prover_data.num_rows
+    } else {
+        0
+    };
+    if prover_data.blinds.len() != expected_blinds {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {expected_blinds} blinds, got {}",
+            prover_data.blinds.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_scalar_field_linear_form_commitment<C, const D: usize>(
+    vk: &HyraxVerifierKey<C>,
+    commitment: &HyraxCommitment<C>,
+    q0: &[impl PrimeField],
+    q1: &[impl PrimeField],
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+{
+    if commitment.blinding_mode != vk.blinding_mode {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax scalar-field commitment blinding mode mismatch".to_string(),
+        ));
+    }
+    validate_commitment_shape::<C, ScalarFieldLane, C::ScalarField, D>(commitment)?;
+    if commitment.batch_size != 1 {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expects one committed polynomial, got {}",
+            commitment.batch_size
+        )));
+    }
+    if q1.len() != vk.num_cols {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {} column weights, got {}",
+            vk.num_cols,
+            q1.len()
+        )));
+    }
+    if q0.len() != commitment.num_rows {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax scalar-field linear-form expected {} row weights, got {}",
+            commitment.num_rows,
+            q0.len()
+        )));
+    }
+    Ok(())
+}
+
 fn same_commitment_shape<C: AffineRepr>(
     lhs: &HyraxCommitment<C>,
     rhs: &HyraxCommitment<C>,
@@ -1961,10 +2326,10 @@ fn validate_trusted_bases<C: AffineRepr>(
     bases: &[C],
     h: &C::Group,
 ) -> Result<(), ZipError> {
-    if !width.is_power_of_two() {
-        return Err(ZipError::InvalidPcsParam(format!(
-            "Hyrax row width must be a power of two, got {width}"
-        )));
+    if width == 0 {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax row width must be non-zero".to_string(),
+        ));
     }
     if bases.len() != width {
         return Err(ZipError::InvalidPcsParam(format!(
@@ -3294,6 +3659,8 @@ mod tests {
             num_rows: 0,
             blinding_mode: HyraxBlindingMode::Unblinded,
             comm: Vec::new(),
+            comm_affine: Vec::new(),
+            comm_bytes: Vec::new(),
         };
         let cfg = cfg_from_curve::<C>();
         let lifted_evals = vec![DynamicPolynomialF::new_trimmed(vec![F::zero_with_cfg(
@@ -3336,6 +3703,8 @@ mod tests {
             num_rows: 1,
             blinding_mode: HyraxBlindingMode::Unblinded,
             comm: Vec::new(),
+            comm_affine: Vec::new(),
+            comm_bytes: Vec::new(),
         };
         let cfg = cfg_from_curve::<C>();
         let mut verifier_transcript = PcsVerifierTranscript {
