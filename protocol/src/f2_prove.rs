@@ -3806,9 +3806,14 @@ where
                             cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
                         let tv = cell(&spec.t, r);
                         let (_tuples, carries) = decompose_add(xv, yv, tv, 0, limb_bits);
+                        // Carry j sits at bit ℓ·j so each carry read is a
+                        // LIMB-family read (L_j(carry) = cout_j) — the fixed
+                        // weight families the binding can soundly bind.
+                        // (Garbage in the spare limb bits only pushes a
+                        // cheater's fingerprint off-table.)
                         let mut m = 0u64;
                         for (i, c) in carries.iter().enumerate() {
-                            m |= u64::from(*c & 1) << i;
+                            m |= u64::from(*c & 1) << (i * limb_bits);
                         }
                         crate::f2_hadamard::cell_from_mask::<D>(m)
                     })
@@ -7292,7 +7297,7 @@ mod tests {
         use zinc_test_uair::{GenerateRandomTrace, Sha256F2Uair};
 
         use crate::f2_lookup_binding::{
-            LookupBindingError, lookup_binding_public_part, lookup_binding_weights,
+            LookupBindingError, lookup_binding_coeffs, lookup_binding_public_part,
             prove_lookup_binding, verify_lookup_binding,
         };
 
@@ -7354,28 +7359,27 @@ mod tests {
         );
         let b = eval_w + pub_part;
 
-        let weights =
-            lookup_binding_weights::<D>(&adder_specs, carry_base, r_pair, &gamma, LB);
+        let coeffs = lookup_binding_coeffs::<D>(&adder_specs, carry_base, r_pair, &gamma, LB);
 
         let mut pt = Blake3Transcript::new();
         let (proof, _r_star) = prove_lookup_binding::<D>(
-            &mut pt, &cols, &adder_specs, &weights, num_vars, r_row,
+            &mut pt, &cols, &adder_specs, &coeffs, num_vars, LB, r_row,
         );
         assert_eq!(proof.sumcheck.claimed_sum, b, "sumcheck must prove exactly B");
 
         let mut vt = Blake3Transcript::new();
         verify_lookup_binding::<D>(
-            &mut vt, &proof, &b, &adder_specs, &weights, num_vars, r_row,
+            &mut vt, &proof, &b, &adder_specs, &coeffs, num_vars, LB, r_row,
         )
         .expect("honest binding must verify");
 
-        // Tamper 1: a corrupted bit-slice eval must be rejected.
+        // Tamper 1: a corrupted limb eval must be rejected.
         let mut bad = proof.clone();
-        bad.bit_evals[0][0] = bad.bit_evals[0][0] + Gf::one();
+        bad.limb_evals[0][0] = bad.limb_evals[0][0] + Gf::one();
         let mut vt2 = Blake3Transcript::new();
         assert!(matches!(
             verify_lookup_binding::<D>(
-                &mut vt2, &bad, &b, &adder_specs, &weights, num_vars, r_row,
+                &mut vt2, &bad, &b, &adder_specs, &coeffs, num_vars, LB, r_row,
             ),
             Err(LookupBindingError::FinalEvalMismatch)
         ));
@@ -7388,8 +7392,9 @@ mod tests {
                 &proof,
                 &(b + Gf::one()),
                 &adder_specs,
-                &weights,
+                &coeffs,
                 num_vars,
+                LB,
                 r_row,
             )
             .is_err()
