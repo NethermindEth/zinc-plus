@@ -28,7 +28,7 @@ use crate::CombFn;
 use super::{
     SumCheckError,
     prover::{
-        NatEvaluatedPolyWithoutConstant, ProverMsg as SumcheckProverMsg,
+        EqualityFactorizedProver, NatEvaluatedPolyWithoutConstant, ProverMsg as SumcheckProverMsg,
         ProverState as SumcheckProverState,
     },
     verifier::VerifierState,
@@ -91,6 +91,10 @@ pub trait Round1FastPath<F: PrimeField>: Send + Sync {
 pub trait PrefixFastPath<F: PrimeField>: Send + Sync {
     fn prefix_len(&self) -> usize;
 
+    fn requires_full_prefix(&self) -> bool {
+        false
+    }
+
     fn prove_prefix_round(
         &mut self,
         verifier_msg: &Option<F>,
@@ -133,6 +137,61 @@ impl<F: PrimeField> PrefixFastPath<F> for Round1PrefixAdapter<F> {
     ) -> Vec<DenseMultilinearExtension<F::Inner>> {
         debug_assert_eq!(prefix_challenges.len(), 1);
         self.inner.fold_with_r1(&prefix_challenges[0], config)
+    }
+}
+
+struct EqFactorizedPrefixFastPath<F: PrimeField> {
+    inner: EqualityFactorizedProver<F, CombFn<F>>,
+}
+
+impl<F> EqFactorizedPrefixFastPath<F>
+where
+    F: FromPrimitiveWithConfig + InnerTransparentField,
+    F::Inner: Zero,
+{
+    fn new(
+        beta: Vec<F>,
+        h_degree: usize,
+        h_poly: Vec<DenseMultilinearExtension<F::Inner>>,
+        h_comb_fn: CombFn<F>,
+    ) -> Self {
+        Self {
+            inner: EqualityFactorizedProver::new(beta, h_degree, h_poly, h_comb_fn),
+        }
+    }
+}
+
+impl<F> PrefixFastPath<F> for EqFactorizedPrefixFastPath<F>
+where
+    F: FromPrimitiveWithConfig + InnerTransparentField + Send + Sync,
+    F::Inner: Zero,
+{
+    fn prefix_len(&self) -> usize {
+        self.inner.prefix_len()
+    }
+
+    fn requires_full_prefix(&self) -> bool {
+        true
+    }
+
+    fn prove_prefix_round(
+        &mut self,
+        verifier_msg: &Option<F>,
+        config: &F::Config,
+    ) -> PrefixRoundOutput<F> {
+        let out = self.inner.prove_round(verifier_msg, config);
+        PrefixRoundOutput {
+            asserted_sum: out.asserted_sum,
+            tail_evaluations: out.tail_evaluations,
+        }
+    }
+
+    fn finish_prefix(
+        self: Box<Self>,
+        prefix_challenges: &[F],
+        config: &F::Config,
+    ) -> Vec<DenseMultilinearExtension<F::Inner>> {
+        vec![self.inner.finish(prefix_challenges, config)]
     }
 }
 
@@ -195,6 +254,32 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
             poly,
             comb_fn,
             prefix_fast: Some(prefix_fast),
+        }
+    }
+
+    /// Construct an opt-in equality-factorized group for
+    /// `P(x) = eq(beta, x) * H(x)`.
+    ///
+    /// `h_degree` is the degree of `H`; the emitted verifier-visible group has
+    /// degree `h_degree + 1`, exactly like an ordinary group with an explicit
+    /// equality MLE. `beta.len()` must equal the sumcheck `num_vars`.
+    pub fn with_equality_factorized(
+        beta: Vec<F>,
+        h_degree: usize,
+        h_poly: Vec<DenseMultilinearExtension<F::Inner>>,
+        h_comb_fn: CombFn<F>,
+    ) -> Self
+    where
+        F: FromPrimitiveWithConfig + InnerTransparentField + Send + Sync + 'static,
+        F::Inner: Zero,
+    {
+        Self {
+            degree: h_degree + 1,
+            poly: Vec::new(),
+            comb_fn: Box::new(|values: &[F]| values[0].clone()),
+            prefix_fast: Some(Box::new(EqFactorizedPrefixFastPath::new(
+                beta, h_degree, h_poly, h_comb_fn,
+            ))),
         }
     }
 }
@@ -472,6 +557,13 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                     fp.prefix_len() > 0 && fp.prefix_len() <= num_vars,
                     "prefix fast path length must be in 1..=num_vars"
                 );
+                if fp.requires_full_prefix() {
+                    assert_eq!(
+                        fp.prefix_len(),
+                        num_vars,
+                        "this prefix fast path must cover all sumcheck variables"
+                    );
+                }
             }
             prover_states.push(SumcheckProverState::new(group.poly, num_vars, group.degree));
             comb_fns.push(group.comb_fn);
@@ -754,7 +846,10 @@ mod tests {
     use super::*;
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::crypto_bigint_const_monty::ConstMontyField;
-    use zinc_poly::{mle::MultilinearExtensionWithConfig, utils::build_eq_x_r_inner};
+    use zinc_poly::{
+        mle::MultilinearExtensionWithConfig,
+        utils::{build_eq_x_r_inner, eq_eval},
+    };
     use zinc_transcript::Blake3Transcript;
 
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
@@ -864,5 +959,160 @@ mod tests {
         let a_eval = mle.clone().evaluate_with_config(point, cfg).unwrap();
 
         assert_eq!(subclaims.expected_evaluations[0], eq_eval * a_eval);
+    }
+
+    #[test]
+    fn equality_factorized_product_group_matches_explicit_eq_group() {
+        let num_vars = 3;
+        let cfg = &();
+        let inner_zero = *F::from(0u32).inner();
+
+        let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 1)).collect();
+        let b_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 10)).collect();
+        let a_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            a_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+        let b_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            b_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+        let beta = vec![F::from(5u32), F::from(7u32), F::from(11u32)];
+        let eq_beta = build_eq_x_r_inner(&beta, cfg).unwrap();
+
+        let explicit = MultiDegreeSumcheckGroup::new(
+            3,
+            vec![eq_beta, a_mle.clone(), b_mle.clone()],
+            Box::new(|v: &[F]| v[0] * v[1] * v[2]),
+        );
+        let factorized = MultiDegreeSumcheckGroup::with_equality_factorized(
+            beta.clone(),
+            2,
+            vec![a_mle.clone(), b_mle.clone()],
+            Box::new(|v: &[F]| v[0] * v[1]),
+        );
+
+        let mut explicit_transcript = Blake3Transcript::new();
+        let (explicit_proof, _, explicit_expected) =
+            MultiDegreeSumcheck::<F>::prove_as_subprotocol_with_expected_evaluations(
+                &mut explicit_transcript,
+                vec![explicit],
+                num_vars,
+                cfg,
+            );
+        let mut factorized_transcript = Blake3Transcript::new();
+        let (factorized_proof, _, factorized_expected) =
+            MultiDegreeSumcheck::<F>::prove_as_subprotocol_with_expected_evaluations(
+                &mut factorized_transcript,
+                vec![factorized],
+                num_vars,
+                cfg,
+            );
+
+        assert_eq!(factorized_proof, explicit_proof);
+        assert_eq!(factorized_expected, explicit_expected);
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let subclaims = MultiDegreeSumcheck::<F>::verify_as_subprotocol(
+            &mut verifier_transcript,
+            num_vars,
+            &factorized_proof,
+            cfg,
+        )
+        .expect("factorized proof should verify");
+
+        let point = subclaims.point();
+        let eq_at_point = eq_eval(point, &beta, F::from(1u32)).unwrap();
+        let a_at_point = a_mle.evaluate_with_config(point, cfg).unwrap();
+        let b_at_point = b_mle.evaluate_with_config(point, cfg).unwrap();
+        assert_eq!(
+            subclaims.expected_evaluations()[0],
+            eq_at_point * a_at_point * b_at_point
+        );
+    }
+
+    #[test]
+    fn equality_factorized_affine_group_matches_explicit_eq_group() {
+        let num_vars = 3;
+        let cfg = &();
+        let inner_zero = *F::from(0u32).inner();
+
+        let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 3)).collect();
+        let b_vals: Vec<F> = (0u32..8).map(|i| F::from(2 * i + 1)).collect();
+        let a_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            a_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+        let b_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            b_vals.iter().map(|x| *x.inner()).collect(),
+            inner_zero,
+        );
+        let beta = vec![F::from(13u32), F::from(17u32), F::from(19u32)];
+        let eq_beta = build_eq_x_r_inner(&beta, cfg).unwrap();
+        let two = F::from(2u32);
+        let offset = F::from(9u32);
+
+        let explicit_two = two.clone();
+        let explicit_offset = offset.clone();
+        let explicit = MultiDegreeSumcheckGroup::new(
+            2,
+            vec![eq_beta, a_mle.clone(), b_mle.clone()],
+            Box::new(move |v: &[F]| {
+                v[0].clone()
+                    * (v[1].clone() + explicit_two.clone() * &v[2] + explicit_offset.clone())
+            }),
+        );
+        let factor_two = two.clone();
+        let factor_offset = offset.clone();
+        let factorized = MultiDegreeSumcheckGroup::with_equality_factorized(
+            beta.clone(),
+            1,
+            vec![a_mle.clone(), b_mle.clone()],
+            Box::new(move |v: &[F]| {
+                v[0].clone() + factor_two.clone() * &v[1] + factor_offset.clone()
+            }),
+        );
+
+        let mut explicit_transcript = Blake3Transcript::new();
+        let (explicit_proof, _, explicit_expected) =
+            MultiDegreeSumcheck::<F>::prove_as_subprotocol_with_expected_evaluations(
+                &mut explicit_transcript,
+                vec![explicit],
+                num_vars,
+                cfg,
+            );
+        let mut factorized_transcript = Blake3Transcript::new();
+        let (factorized_proof, _, factorized_expected) =
+            MultiDegreeSumcheck::<F>::prove_as_subprotocol_with_expected_evaluations(
+                &mut factorized_transcript,
+                vec![factorized],
+                num_vars,
+                cfg,
+            );
+
+        assert_eq!(factorized_proof, explicit_proof);
+        assert_eq!(factorized_expected, explicit_expected);
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let subclaims = MultiDegreeSumcheck::<F>::verify_as_subprotocol(
+            &mut verifier_transcript,
+            num_vars,
+            &factorized_proof,
+            cfg,
+        )
+        .expect("factorized proof should verify");
+
+        let point = subclaims.point();
+        let eq_at_point = eq_eval(point, &beta, F::from(1u32)).unwrap();
+        let a_at_point = a_mle.evaluate_with_config(point, cfg).unwrap();
+        let b_at_point = b_mle.evaluate_with_config(point, cfg).unwrap();
+        assert_eq!(
+            subclaims.expected_evaluations()[0],
+            eq_at_point * (a_at_point + two * b_at_point + offset)
+        );
     }
 }

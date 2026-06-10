@@ -6,7 +6,10 @@ use std::marker::PhantomData;
 
 use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, PrimeField, Semiring};
 use thiserror::Error;
-use zinc_poly::mle::{DenseMultilinearExtension, dense::project_coeffs};
+use zinc_poly::{
+    mle::{DenseMultilinearExtension, dense::project_coeffs},
+    utils::build_eq_x_r_inner,
+};
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_utils::{
     cfg_into_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -91,6 +94,101 @@ impl<F: FromPrimitiveWithConfig, R: Semiring + ProjectableToField<F>> RFSumcheck
             |x| comb_fn(&projecting_element, x),
             field_cfg,
         );
+
+        (RFSumcheckProof::new(proof), RFProverState::new(state))
+    }
+
+    /// Opt-in random-field prover for claims of the form
+    /// `eq(beta, x) * H(alpha, x)`.
+    ///
+    /// `mles` are projected into the random field as in
+    /// [`Self::prove_as_subprotocol`], `mles_f` are already over the random
+    /// field, and `h_comb_fn` receives only those non-equality evaluations.
+    /// The verifier-visible proof has degree `h_degree + 1` and verifies with
+    /// the ordinary verifier.
+    pub fn prove_equality_factorized_as_subprotocol(
+        transcript: &mut impl Transcript,
+        mles: Vec<DenseMultilinearExtension<R>>,
+        mles_f: Vec<DenseMultilinearExtension<F::Inner>>,
+        beta: Vec<F>,
+        nvars: usize,
+        h_degree: usize,
+        h_comb_fn: impl Fn(&F, &[F]) -> F + Send + Sync,
+        field_cfg: &F::Config,
+    ) -> (RFSumcheckProof<F, R>, RFProverState<F, R>)
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable + ConstIntSemiring + FromRef<F::Inner>,
+        F::Modulus: ConstTranscribable,
+    {
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
+
+        let field_mles = cfg_into_iter!(mles)
+            .map(|mle| project_coeffs(mle, &projecting_element))
+            .chain(mles_f)
+            .collect();
+
+        let (proof, state) = MLSumcheck::prove_equality_factorized_as_subprotocol(
+            transcript,
+            beta,
+            field_mles,
+            nvars,
+            h_degree,
+            |x| h_comb_fn(&projecting_element, x),
+            field_cfg,
+        );
+
+        (RFSumcheckProof::new(proof), RFProverState::new(state))
+    }
+
+    /// Opt-in random-field prover for
+    /// `eq(beta, x) * (A(alpha, x) * B(alpha, x) - C(alpha, x))`.
+    #[inline]
+    pub fn prove_quadratic_product_minus_equality_factorized_as_subprotocol(
+        transcript: &mut impl Transcript,
+        mles: Vec<DenseMultilinearExtension<R>>,
+        mles_f: Vec<DenseMultilinearExtension<F::Inner>>,
+        beta: Vec<F>,
+        nvars: usize,
+        field_cfg: &F::Config,
+    ) -> (RFSumcheckProof<F, R>, RFProverState<F, R>)
+    where
+        F: InnerTransparentField,
+        F::Inner: ConstTranscribable + ConstIntSemiring + FromRef<F::Inner>,
+        F::Modulus: ConstTranscribable,
+    {
+        let field_bytes = <F::Inner as ConstTranscribable>::NUM_BYTES;
+        let use_factorized = nvars <= 13 || (nvars == 14 && field_bytes <= 24);
+        if !use_factorized {
+            let eq_r = build_eq_x_r_inner(&beta, field_cfg)
+                .expect("validated equality point should build eq weights");
+            return Self::prove_as_subprotocol(
+                transcript,
+                mles,
+                vec![eq_r],
+                nvars,
+                3,
+                |_x, vals| (vals[0].clone() * &vals[1] - &vals[2]) * &vals[3],
+                field_cfg,
+            );
+        }
+
+        let projecting_element: F = transcript.get_field_challenge(field_cfg);
+
+        let field_mles: Vec<_> = cfg_into_iter!(mles)
+            .map(|mle| project_coeffs(mle, &projecting_element))
+            .chain(mles_f)
+            .collect();
+        assert_eq!(
+            field_mles.len(),
+            3,
+            "quadratic product-minus factorization expects A, B, and C MLEs"
+        );
+
+        let (proof, state) =
+            MLSumcheck::prove_quadratic_product_minus_equality_factorized_as_subprotocol(
+                transcript, beta, field_mles, nvars, field_cfg,
+            );
 
         (RFSumcheckProof::new(proof), RFProverState::new(state))
     }
@@ -219,5 +317,175 @@ mod tests {
             )
             .is_ok()
         )
+    }
+
+    #[test]
+    fn equality_factorized_random_field_sumcheck_matches_explicit_eq_product() {
+        let witness_size = 1 << 3;
+        let mut rng = rng();
+        let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+        let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+        let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+
+        let nvars = zinc_utils::log2(witness_size) as usize;
+
+        let a: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                a.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let b: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                b.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let c: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                c.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let mut transcript = Blake3Transcript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+        let beta = vec![F::from_with_cfg(2u32, &field_cfg); nvars];
+        let eq_r = build_eq_x_r_inner(&beta, &field_cfg).expect("Failed to build eq_r");
+
+        let explicit_proof = (RFSumcheck::<F, _>::prove_as_subprotocol(
+            &mut transcript.clone(),
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![eq_r],
+            nvars,
+            3,
+            |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
+            &field_cfg,
+        ))
+        .0;
+
+        let factorized_proof = (RFSumcheck::<F, _>::prove_equality_factorized_as_subprotocol(
+            &mut transcript.clone(),
+            vec![a, b, c],
+            vec![],
+            beta,
+            nvars,
+            2,
+            |_x, vals| &vals[0] * &vals[1] - &vals[2],
+            &field_cfg,
+        ))
+        .0;
+
+        assert_eq!(factorized_proof, explicit_proof);
+        assert_eq!(factorized_proof.0.claimed_sum, explicit_proof.0.claimed_sum);
+
+        let explicit_subclaim = RFSumcheck::<F, _>::verify_as_subprotocol(
+            &mut transcript.clone(),
+            nvars,
+            3,
+            &explicit_proof,
+            field_cfg.clone(),
+        )
+        .unwrap();
+        let factorized_subclaim = RFSumcheck::<F, _>::verify_as_subprotocol(
+            &mut transcript,
+            nvars,
+            3,
+            &factorized_proof,
+            field_cfg,
+        )
+        .unwrap();
+
+        assert_eq!(factorized_subclaim.point, explicit_subclaim.point);
+        assert_eq!(
+            factorized_subclaim.expected_evaluation,
+            explicit_subclaim.expected_evaluation
+        );
+    }
+
+    #[test]
+    fn product_minus_factorized_random_field_sumcheck_matches_explicit_eq_product() {
+        let witness_size = 1 << 3;
+        let mut rng = rng();
+        let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+        let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+        let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
+
+        let nvars = zinc_utils::log2(witness_size) as usize;
+
+        let a: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                a.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let b: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                b.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let c: DenseMultilinearExtension<BinaryPoly<32>> =
+            DenseMultilinearExtension::from_evaluations_vec(
+                nvars,
+                c.into_iter().map(BinaryPoly::from).collect(),
+                BinaryPoly::zero(),
+            );
+
+        let mut transcript = Blake3Transcript::new();
+        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+        let beta = vec![F::from_with_cfg(2u32, &field_cfg); nvars];
+        let eq_r = build_eq_x_r_inner(&beta, &field_cfg).expect("Failed to build eq_r");
+
+        let explicit_proof = (RFSumcheck::<F, _>::prove_as_subprotocol(
+            &mut transcript.clone(),
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![eq_r],
+            nvars,
+            3,
+            |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
+            &field_cfg,
+        ))
+        .0;
+
+        let factorized_proof =
+            (RFSumcheck::<F, _>::prove_quadratic_product_minus_equality_factorized_as_subprotocol(
+                &mut transcript.clone(),
+                vec![a, b, c],
+                vec![],
+                beta,
+                nvars,
+                &field_cfg,
+            ))
+            .0;
+
+        assert_eq!(factorized_proof, explicit_proof);
+
+        let explicit_subclaim = RFSumcheck::<F, _>::verify_as_subprotocol(
+            &mut transcript.clone(),
+            nvars,
+            3,
+            &explicit_proof,
+            field_cfg.clone(),
+        )
+        .unwrap();
+        let factorized_subclaim = RFSumcheck::<F, _>::verify_as_subprotocol(
+            &mut transcript,
+            nvars,
+            3,
+            &factorized_proof,
+            field_cfg,
+        )
+        .unwrap();
+
+        assert_eq!(factorized_subclaim.point, explicit_subclaim.point);
+        assert_eq!(
+            factorized_subclaim.expected_evaluation,
+            explicit_subclaim.expected_evaluation
+        );
     }
 }

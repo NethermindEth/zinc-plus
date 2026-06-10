@@ -13,9 +13,7 @@ use crypto_primitives::{
 use num_traits::Zero;
 use rand::{Rng, rng};
 use zinc_piop::random_field_sumcheck::{RFSumcheck, RFSumcheckProof};
-use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
-};
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_transcript::{
     Blake3Transcript,
@@ -69,16 +67,14 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     let prove = |(a, b, c, mut transcript): (_, _, _, Blake3Transcript)| -> RFSumcheckProof<F, BinaryPoly<32>> {
         let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Modulus, MillerRabin>();
 
-        let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
-            .expect("Failed to build eq_r");
+        let beta = vec![F::from_with_cfg(2u32, &field_cfg); nvars];
 
-        (RFSumcheck::<F, _>::prove_as_subprotocol(
+        (RFSumcheck::<F, _>::prove_quadratic_product_minus_equality_factorized_as_subprotocol(
             &mut transcript,
             vec![a, b, c],
-            vec![eq_r],
+            vec![],
+            beta,
             nvars,
-            3,
-            |_x, vals| (&vals[0] * &vals[1] - &vals[2]) * &vals[3],
             &field_cfg,
         ))
         .0

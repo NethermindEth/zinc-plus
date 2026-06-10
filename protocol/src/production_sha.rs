@@ -54,8 +54,8 @@ use zinc_piop::{
         folded_row_integrand_sum, production_sha_booleanity_sources,
         production_sha_nonzero_families, sha_int_at_point_with_weights_unchecked,
         sha_public_at_point, sha_public_at_point_with_weights,
-        sha_word_bits_at_point_with_weights_unchecked, verify_folded_row_sumcheck_claim,
-        verify_fresh_sha_ideal_polys,
+        sha_word_bits_at_point_with_weights_inner_product_unchecked,
+        verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
     },
     sumcheck::{
         SumCheckError,
@@ -2356,7 +2356,7 @@ pub fn verify_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -4329,7 +4329,7 @@ pub fn verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     LinearIdealFoldError<F>,
 >
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
     F: InnerTransparentField
         + DelayedFieldProductSum
@@ -4455,15 +4455,14 @@ fn verify_public_projection_phase<P, U, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
 ) -> Result<Vec<ProjectedPublic<F>>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
-    F: PrimeField + FromPrimitiveWithConfig,
+    F: PrimeField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
 {
     let field_cfg = &vs.field_cfg;
-    let mut publics = Vec::with_capacity(instances.len());
     for (instance_idx, instance) in instances.iter().enumerate() {
         validate_public_uair_trace_shape::<Zt::Int, Zt::Int, F, D>(
             &instance.public_trace,
@@ -4478,12 +4477,16 @@ where
             ));
         }
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &instance.public_trace);
-        publics.push(U::project_production_sha_public(
-            &vs.shape,
-            &instance.public_trace,
-            field_cfg,
-        )?);
     }
+
+    let projected = cfg_iter!(instances)
+        .map(|instance| {
+            U::project_production_sha_public(&vs.shape, &instance.public_trace, field_cfg)
+        })
+        .collect::<Vec<_>>();
+    let publics = projected
+        .into_iter()
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
 
     validate_production_sha_publics(&publics, field_cfg)?;
     absorb_production_sha_commitments::<P, Zt, F, D>(
@@ -4508,9 +4511,9 @@ fn verify_mixed_hyrax_public_projection_phase<C, U, Zt, F, const D: usize>(
     transcript: &mut impl Transcript,
 ) -> Result<Vec<ProjectedPublic<F>>, ProductionShaError<F>>
 where
-    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
-    F: PrimeField + FromPrimitiveWithConfig,
+    F: PrimeField + FromPrimitiveWithConfig + Send + Sync,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
     F: HyraxFieldBridge<C>,
@@ -4519,7 +4522,6 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     let field_cfg = &vs.field_cfg;
-    let mut publics = Vec::with_capacity(instances.len());
     for (instance_idx, instance) in instances.iter().enumerate() {
         validate_public_uair_trace_shape::<Zt::Int, Zt::Int, F, D>(
             &instance.public_trace,
@@ -4531,12 +4533,16 @@ where
             ));
         }
         absorb_public_uair_trace::<Zt, D>(transcript, instance_idx, &instance.public_trace);
-        publics.push(U::project_production_sha_public(
-            &vs.shape,
-            &instance.public_trace,
-            field_cfg,
-        )?);
     }
+
+    let projected = cfg_iter!(instances)
+        .map(|instance| {
+            U::project_production_sha_public(&vs.shape, &instance.public_trace, field_cfg)
+        })
+        .collect::<Vec<_>>();
+    let publics = projected
+        .into_iter()
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
 
     validate_production_sha_publics(&publics, field_cfg)?;
     absorb_mixed_hyrax_production_sha_commitments(
@@ -4725,7 +4731,7 @@ fn verify_fold_publics_phase<F>(
     field_cfg: &F::Config,
 ) -> Result<ProjectedPublic<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: PrimeField + Send + Sync,
 {
     fold_projected_publics(publics, weights, field_cfg)
 }
@@ -6251,7 +6257,7 @@ fn fold_mle_tables<F>(
     field_cfg: &F::Config,
 ) -> Result<MleTable<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: PrimeField + Send + Sync,
 {
     if tables.len() != theta.len() {
         return Err(ProductionShaError::LengthMismatch {
@@ -6273,8 +6279,7 @@ where
     })?;
     let row_count = first_col.evaluations.len();
     let num_vars = first_col.num_vars;
-    let mut folded = vec![vec![F::zero_with_cfg(field_cfg); row_count]; col_count];
-    for (table, weight) in tables.iter().zip(theta.iter()) {
+    for table in tables {
         if table.len() != col_count {
             return Err(ProductionShaError::LengthMismatch {
                 label: kind,
@@ -6282,7 +6287,7 @@ where
                 expected: col_count,
             });
         }
-        for (col_idx, column) in table.iter().enumerate() {
+        for column in table.iter() {
             if column.num_vars != num_vars {
                 return Err(ProductionShaError::LengthMismatch {
                     label: kind,
@@ -6297,16 +6302,24 @@ where
                     expected: row_count,
                 });
             }
-            for (out, value) in folded[col_idx].iter_mut().zip(column.evaluations.iter()) {
-                *out += weight.clone() * value;
-            }
         }
     }
-    Ok(folded
-        .into_iter()
-        .map(|evaluations| DenseMultilinearExtension {
-            evaluations,
-            num_vars,
+
+    Ok(cfg_into_iter!(0..col_count)
+        .map(|col_idx| {
+            let mut evaluations = vec![F::zero_with_cfg(field_cfg); row_count];
+            for (table, weight) in tables.iter().zip(theta.iter()) {
+                for (out, value) in evaluations
+                    .iter_mut()
+                    .zip(table[col_idx].evaluations.iter())
+                {
+                    *out += weight.clone() * value;
+                }
+            }
+            DenseMultilinearExtension {
+                evaluations,
+                num_vars,
+            }
         })
         .collect())
 }
@@ -6318,7 +6331,7 @@ fn fold_optional_mle_tables<F>(
     field_cfg: &F::Config,
 ) -> Result<Option<MleTable<F>>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: PrimeField + Send + Sync,
 {
     let has_table = tables
         .first()
@@ -6357,7 +6370,7 @@ fn fold_projected_publics<F>(
     field_cfg: &F::Config,
 ) -> Result<ProjectedPublic<F>, ProductionShaError<F>>
 where
-    F: PrimeField,
+    F: PrimeField + Send + Sync,
 {
     if publics.len() != theta.len() {
         return Err(ProductionShaError::LengthMismatch {
@@ -6485,43 +6498,49 @@ where
         });
     }
 
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
+    let mut power = one.clone();
+    let powers_of_two: [F; SHA_WORD_BITS] = std::array::from_fn(|_| {
+        let current = power.clone();
+        power *= &two;
+        current
+    });
+
     for (word_idx, public_col) in production_sha_public_word_column_map().iter().enumerate() {
         let scalar_col = &public.columns[public_col.index()];
+        for bit in 0..SHA_WORD_BITS {
+            let table_idx = bit_slice_index(word_idx, bit, SHA_WORD_BITS);
+            let bit_col = bit_slices
+                .get(table_idx)
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "SHA public word bit column",
+                    got: table_idx,
+                    expected: bit_slices.len(),
+                })?;
+            if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
+                return Err(ProductionShaError::LengthMismatch {
+                    label: "SHA public word row count",
+                    got: bit_col.evaluations.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+        }
         for row in 0..SHA_ROW_COUNT {
-            let mut bits = Vec::with_capacity(SHA_WORD_BITS);
-            for bit in 0..SHA_WORD_BITS {
+            let mut scalarized = zero.clone();
+            for (bit, power) in powers_of_two.iter().enumerate() {
                 let table_idx = bit_slice_index(word_idx, bit, SHA_WORD_BITS);
-                let bit_col =
-                    bit_slices
-                        .get(table_idx)
-                        .ok_or(ProductionShaError::LengthMismatch {
-                            label: "SHA public word bit column",
-                            got: table_idx,
-                            expected: bit_slices.len(),
-                        })?;
-                if bit_col.num_vars != SHA_ROW_VARS || bit_col.evaluations.len() != SHA_ROW_COUNT {
-                    return Err(ProductionShaError::LengthMismatch {
-                        label: "SHA public word row count",
-                        got: bit_col.evaluations.len(),
-                        expected: SHA_ROW_COUNT,
-                    });
-                }
-                let bit = bit_col.evaluations[row].clone();
-                if bit != F::zero_with_cfg(field_cfg) && bit != F::one_with_cfg(field_cfg) {
+                let bit_col = &bit_slices[table_idx];
+                let bit = &bit_col.evaluations[row];
+                if bit == &one {
+                    scalarized += power;
+                } else if bit != &zero {
                     return Err(ProductionShaError::NonCanonicalProofObject(
                         "production SHA public word bit is not boolean",
                     ));
                 }
-                bits.push(bit);
             }
-            if bits.len() != SHA_WORD_BITS {
-                return Err(ProductionShaError::LengthMismatch {
-                    label: "SHA public word bit count",
-                    got: bits.len(),
-                    expected: SHA_WORD_BITS,
-                });
-            }
-            let scalarized = scalarize_sha_public_word_bits_at_two(&bits, field_cfg);
             if scalarized != scalar_col.evaluations[row] {
                 return Err(ProductionShaError::NonCanonicalProofObject(
                     "production SHA public word bits do not match scalar public column",
@@ -6541,20 +6560,6 @@ fn production_sha_public_word_column_map() -> [ShaPublicCol; ShaPublicWordCol::C
         ShaPublicCol::PEOut,
         ShaPublicCol::Message,
     ]
-}
-
-fn scalarize_sha_public_word_bits_at_two<F>(bits: &[F], field_cfg: &F::Config) -> F
-where
-    F: PrimeField,
-{
-    let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
-    let mut power = F::one_with_cfg(field_cfg);
-    let mut out = F::zero_with_cfg(field_cfg);
-    for bit in bits {
-        out += bit.clone() * &power;
-        power *= &two;
-    }
-    out
 }
 
 fn production_sha_selector_expected<F>(
@@ -6624,7 +6629,7 @@ where
     validate_projected_trace(folded_trace)?;
     let word_lifted = cfg_iter!(&ShaWordCol::ALL)
         .map(|&col| {
-            let coeffs = sha_word_bits_at_point_with_weights_unchecked(
+            let coeffs = sha_word_bits_at_point_with_weights_inner_product_unchecked(
                 folded_trace,
                 col,
                 0,
@@ -9141,7 +9146,7 @@ pub fn reconstruct_folded_row_terminal_from_endpoints<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: DelayedFieldProductSum,
+    F: DelayedFieldProductSum + Send + Sync,
 {
     if r_star.len() != SHA_ROW_VARS {
         return Err(ProductionShaError::LengthMismatch {
@@ -9181,7 +9186,7 @@ pub fn reconstruct_folded_row_terminal_from_endpoints_with_row_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: DelayedFieldProductSum,
+    F: DelayedFieldProductSum + Send + Sync,
 {
     if r_star.len() != SHA_ROW_VARS {
         return Err(ProductionShaError::LengthMismatch {
@@ -9228,7 +9233,7 @@ pub fn reconstruct_folded_row_terminal_from_endpoints_with_vectors<F>(
     field_cfg: &F::Config,
 ) -> Result<F, ProductionShaError<F>>
 where
-    F: DelayedFieldProductSum,
+    F: DelayedFieldProductSum + Send + Sync,
 {
     if r_star.len() != SHA_ROW_VARS {
         return Err(ProductionShaError::LengthMismatch {
@@ -9728,7 +9733,7 @@ fn residual_polys_from_endpoints_with_row_weights<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<DynamicPolynomialF<F>>, ProductionShaError<F>>
 where
-    F: DelayedFieldProductSum,
+    F: DelayedFieldProductSum + Send + Sync,
 {
     if row_weights.len() != SHA_ROW_COUNT {
         return Err(ProductionShaError::LengthMismatch {
@@ -9860,45 +9865,17 @@ where
         row_weights,
         field_cfg,
     )?;
+    let public_word_polys =
+        endpoint_public_word_polys_with_row_weights(folded_public, row_weights, field_cfg)?;
+    let public_word_poly = |col| {
+        &public_word_polys[public_word_col_index(col)
+            .expect("production SHA public word column should have an index")]
+    };
 
-    let r7 = scale_endpoint_poly(
-        &(a.clone()
-            - &endpoint_public_word_or_const_poly_with_row_weights(
-                folded_public,
-                ShaPublicCol::PAIn,
-                row_weights,
-                field_cfg,
-            )?),
-        &s_init,
-    ) + &scale_endpoint_poly(
-        &(a.clone()
-            - &endpoint_public_word_or_const_poly_with_row_weights(
-                folded_public,
-                ShaPublicCol::PAOut,
-                row_weights,
-                field_cfg,
-            )?),
-        &s_out,
-    );
-    let r8 = scale_endpoint_poly(
-        &(e.clone()
-            - &endpoint_public_word_or_const_poly_with_row_weights(
-                folded_public,
-                ShaPublicCol::PEIn,
-                row_weights,
-                field_cfg,
-            )?),
-        &s_init,
-    ) + &scale_endpoint_poly(
-        &(e.clone()
-            - &endpoint_public_word_or_const_poly_with_row_weights(
-                folded_public,
-                ShaPublicCol::PEOut,
-                row_weights,
-                field_cfg,
-            )?),
-        &s_out,
-    );
+    let r7 = scale_endpoint_poly(&(a.clone() - public_word_poly(ShaPublicCol::PAIn)), &s_init)
+        + &scale_endpoint_poly(&(a.clone() - public_word_poly(ShaPublicCol::PAOut)), &s_out);
+    let r8 = scale_endpoint_poly(&(e.clone() - public_word_poly(ShaPublicCol::PEIn)), &s_init)
+        + &scale_endpoint_poly(&(e.clone() - public_word_poly(ShaPublicCol::PEOut)), &s_out);
 
     let r9 = endpoint_word_poly(endpoint_evals, ShaWordCol::A, 4, field_cfg)?
         - &a
@@ -9922,15 +9899,7 @@ where
         )?
         + &mu_ff_e
         + &endpoint_int_const_poly(endpoint_evals, ShaIntCol::CompFeedForwardE, field_cfg)?;
-    let r11 = scale_endpoint_poly(
-        &(w - &endpoint_public_word_or_const_poly_with_row_weights(
-            folded_public,
-            ShaPublicCol::Message,
-            row_weights,
-            field_cfg,
-        )?),
-        &s_msg,
-    );
+    let r11 = scale_endpoint_poly(&(w - public_word_poly(ShaPublicCol::Message)), &s_msg);
 
     let comp_schedule =
         endpoint_int_const_poly(endpoint_evals, ShaIntCol::CompSchedule, field_cfg)?;
@@ -10062,6 +10031,34 @@ where
         );
     }
     Ok(DynamicPolynomialF::new_trimmed(coeffs))
+}
+
+fn endpoint_public_word_polys_with_row_weights<F>(
+    folded_public: &ProjectedPublic<F>,
+    row_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<[DynamicPolynomialF<F>; ShaPublicWordCol::COUNT], ProductionShaError<F>>
+where
+    F: DelayedFieldProductSum + Send + Sync,
+{
+    let public_cols = production_sha_public_word_column_map();
+    let polynomials = cfg_into_iter!(0..ShaPublicWordCol::COUNT)
+        .map(|word_idx| {
+            endpoint_public_word_or_const_poly_with_row_weights(
+                folded_public,
+                public_cols[word_idx],
+                row_weights,
+                field_cfg,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut ordered = Vec::with_capacity(ShaPublicWordCol::COUNT);
+    for polynomial in polynomials {
+        ordered.push(polynomial?);
+    }
+    Ok(ordered
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("public word column count is fixed")))
 }
 
 fn endpoint_mu_contribution<F>(
