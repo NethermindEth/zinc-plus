@@ -3771,6 +3771,67 @@ where
         tuples
     }
 
+    /// **Tensor-layout witness leaves for the lookup-adder binding.**
+    ///
+    /// Leaf index `j = p·2^num_vars + r` with `p = a·n_limbs + i` (adder
+    /// relation `a`, limb `i`; row vars are the LOW MLE variables). Per slot:
+    /// ```text
+    ///   leaf[p·n + r] = 1 + active_a[r]·(1 + δ + fp_{a,i}[r])      (char 2)
+    /// ```
+    /// i.e. `δ − fp` on active rows and the no-op factor `1` on inactive rows
+    /// and in the all-ones padding blocks (`p ≥ 12·n_limbs`). Unlike the flat
+    /// extraction, inactive rows are *kept* (as `1`) so the leaf MLE factors
+    /// as a tensor over (pair-vars, row-vars) — the split the binding uses:
+    /// `leafMLE(r_w) = PubMLE(r_w) + Σ_p eq(r_w^p, p)·Φ_p(r_w^row)`.
+    ///
+    /// Returns `(leaves, fp_rows)` where `fp_rows[p][r]` is the fingerprint
+    /// (0 on inactive rows) — the masked data the binding sumcheck proves.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sha_lookup_witness_leaves_tensor(
+        cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        limb_bits: usize,
+        gamma: &BinaryFieldGF128,
+        delta: &BinaryFieldGF128,
+    ) -> (Vec<BinaryFieldGF128>, Vec<Vec<BinaryFieldGF128>>) {
+        use zinc_piop::lookup::add_lookup::{decompose_add, fingerprint, num_limbs};
+        let n = 1usize << num_vars;
+        let nl = num_limbs(limb_bits);
+        let num_pairs = adder_specs.len() * nl;
+        let padded_pairs = num_pairs.next_power_of_two();
+        let one = BinaryFieldGF128::one();
+
+        let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
+            match r.checked_add(term.row_shift).filter(|&i| i < n) {
+                Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[term.col].evaluations[i]) as u32,
+                None => 0,
+            }
+        };
+
+        let mut leaves = vec![one; padded_pairs * n];
+        let mut fp_rows = vec![vec![BinaryFieldGF128::zero(); n]; num_pairs];
+        for (a, spec) in adder_specs.iter().enumerate() {
+            let masked = !spec.active_rows.is_empty();
+            for r in 0..n {
+                if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                    continue; // leaf stays 1, fp stays 0
+                }
+                let xv = cell(&spec.x, r);
+                let yv = cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                let tv = cell(&spec.t, r);
+                let (tuples, _carries) = decompose_add(xv, yv, tv, 0, limb_bits);
+                for (i, tup) in tuples.iter().enumerate() {
+                    let p = a * nl + i;
+                    let fp = fingerprint::<BinaryFieldGF128>(tup, gamma, &());
+                    fp_rows[p][r] = fp;
+                    leaves[p * n + r] = *delta + fp; // δ − fp (char 2)
+                }
+            }
+        }
+        (leaves, fp_rows)
+    }
+
     /// The grand-product lookup phase, on the shared transcript: extract the
     /// limb tuples from the real adds, sample γ (fingerprint compression) then
     /// δ (grand-product point), and prove `∏(δ−a_i)=∏_t(δ−fp_t)^{m_t}` against
@@ -3788,10 +3849,14 @@ where
         let tuples = Self::sha_add_limb_tuples(cols, adder_specs, num_vars, limb_bits);
         let gamma: BinaryFieldGF128 = transcript.get_field_challenge(&());
         let table = add_lookup::add_table_fingerprints::<BinaryFieldGF128>(&gamma, limb_bits, &());
-        let wfps = add_lookup::tuple_fingerprints(&tuples, &gamma, &());
         let mults = add_lookup::multiplicities(&tuples, limb_bits, k_bits);
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let wl = gkr_lookup::witness_leaves(&wfps, &delta);
+        // Tensor layout (inactive rows = no-op `1` factors): same multiset as
+        // the flat tuples, but the leaf MLE factors over (pair, row) vars —
+        // the structure the binding decomposition relies on.
+        let (wl, _fp_rows) = Self::sha_lookup_witness_leaves_tensor(
+            cols, adder_specs, num_vars, limb_bits, &gamma, &delta,
+        );
         let tl = gkr_lookup::table_leaves(&table, &mults, &delta, &());
         let (proof, _bind) = gkr_lookup::prove_lookup(transcript, wl, tl, &());
         proof
@@ -7037,6 +7102,121 @@ mod tests {
         let _delta: BinaryFieldGF128 = vt.get_field_challenge(&());
         zinc_piop::lookup::gkr_lookup::verify_lookup(&mut vt, &lookup, &())
             .expect("the in-prover lookup over the real SHA adds must verify");
+    }
+
+    /// **Task 4c-0: the binding identity holds on the tensor leaf layout.**
+    /// Validates, numerically on a real SHA trace, the decomposition the leaf
+    /// binding rests on:
+    /// ```text
+    ///   leafMLE(r_w) = 1 + (1+δ)·Σ_p eq(r_w^p,p)·Ã_a(r_w^row)
+    ///                    +       Σ_p eq(r_w^p,p)·Φ_p(r_w^row)
+    /// ```
+    /// where `Ã_a` is the (public) active-mask MLE and `Φ_p` the masked
+    /// fingerprint MLE — i.e. the GKR's leaf-eval claim splits into a
+    /// verifier-computable public part plus per-pair masked read-offs of the
+    /// committed data. Checks variable ordering (rows = low vars), the eq
+    /// tensor factoring, `Σ_x eq(p,x) = 1`, and the char-2 signs.
+    #[test]
+    fn sha256_f2_lookup_binding_identity_holds() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_piop::lookup::add_lookup::num_limbs;
+        use zinc_poly::mle::MultilinearExtensionWithConfig;
+        use zinc_test_uair::{GenerateRandomTrace, Sha256F2Uair};
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        type Gf = BinaryFieldGF128;
+        const LB: usize = 4;
+
+        let num_vars = 9usize;
+        let n = 1usize << num_vars;
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let cols = &trace.binary_poly;
+
+        let (_and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        let nl = num_limbs(LB);
+        let num_pairs = adder_specs.len() * nl;
+        let padded_pairs = num_pairs.next_power_of_two();
+        let pair_vars = padded_pairs.trailing_zeros() as usize;
+
+        let gamma = Gf::from_words([0x1357_9bdf, 0x2468_ace0]);
+        let delta = Gf::from_words([0xfeed_f00d, 0x0bad_cafe]);
+        let (leaves, fp_rows) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::sha_lookup_witness_leaves_tensor(
+                cols,
+                &adder_specs,
+                num_vars,
+                LB,
+                &gamma,
+                &delta,
+            );
+        assert_eq!(leaves.len(), padded_pairs * n);
+
+        // A fixed "random" evaluation point r_w (row vars low, pair vars high).
+        let r_w: Vec<Gf> = (0..num_vars + pair_vars)
+            .map(|k| Gf::from_words([0x9e37_79b9 ^ (k as u64) * 0x85eb_ca6b, 0xc2b2_ae35 + k as u64]))
+            .collect();
+        let (r_row, r_pair) = r_w.split_at(num_vars);
+
+        // LHS: direct leaf-MLE evaluation.
+        let zero_inner = Gf::zero().into_inner();
+        let leaf_mle = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars + pair_vars,
+            leaves.iter().map(|v| *v.inner()).collect(),
+            zero_inner.clone(),
+        );
+        let lhs: Gf =
+            <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
+                leaf_mle, &r_w, &(),
+            )
+            .expect("leaf MLE eval");
+
+        // eq(r_pair, p) for an integer pair index p.
+        let eq_pair = |p: usize| -> Gf {
+            let one = Gf::one();
+            (0..pair_vars).fold(one, |acc, b| {
+                let bit = (p >> b) & 1;
+                let c = r_pair[b];
+                acc * if bit == 1 { c } else { one + c }
+            })
+        };
+        // MLE-at-r_row of a Gf row vector.
+        let row_mle_eval = |v: &[Gf]| -> Gf {
+            let mle = DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                v.iter().map(|x| *x.inner()).collect(),
+                zero_inner.clone(),
+            );
+            <DenseMultilinearExtension<_> as MultilinearExtensionWithConfig<Gf>>::evaluate_with_config(
+                mle, &r_row.to_vec(), &(),
+            )
+            .expect("row MLE eval")
+        };
+
+        // RHS: 1 + (1+δ)·Σ_p eq_p·Ã_a + Σ_p eq_p·Φ_p.
+        let one = Gf::one();
+        let mut rhs = one;
+        for (a, spec) in adder_specs.iter().enumerate() {
+            // Public active-mask MLE Ã_a(r_row).
+            let mask_vec: Vec<Gf> = (0..n)
+                .map(|r| {
+                    let active = spec.active_rows.is_empty()
+                        || spec.active_rows.get(r).copied().unwrap_or(false);
+                    if active { one } else { Gf::zero() }
+                })
+                .collect();
+            let mask_eval = row_mle_eval(&mask_vec);
+            for i in 0..nl {
+                let p = a * nl + i;
+                let eq_p = eq_pair(p);
+                let phi = row_mle_eval(&fp_rows[p]); // masked fingerprint MLE
+                rhs = rhs + eq_p * ((one + delta) * mask_eval + phi);
+            }
+        }
+
+        assert_eq!(lhs, rhs, "binding identity must hold on the tensor layout");
     }
 
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
