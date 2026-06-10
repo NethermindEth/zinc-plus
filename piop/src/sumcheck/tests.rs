@@ -4,7 +4,10 @@ use crypto_bigint::{U128, const_monty_params};
 use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
 use num_traits::{ConstOne, ConstZero, Zero};
 use rand::RngCore;
-use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
+use zinc_poly::{
+    mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig},
+    utils::build_eq_x_r_inner,
+};
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
 
@@ -228,6 +231,77 @@ fn protocol_is_deterministic_with_same_transcript() {
     );
 
     assert_eq!(proof1, proof2);
+}
+
+#[test]
+fn equality_factorized_sumcheck_matches_explicit_eq_product() {
+    let num_vars = 3;
+    let inner_zero = *F::from(0u32).inner();
+
+    let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 1)).collect();
+    let b_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 10)).collect();
+    let a_mle = DenseMultilinearExtension::from_evaluations_vec(
+        num_vars,
+        a_vals.iter().map(|x| *x.inner()).collect(),
+        inner_zero,
+    );
+    let b_mle = DenseMultilinearExtension::from_evaluations_vec(
+        num_vars,
+        b_vals.iter().map(|x| *x.inner()).collect(),
+        inner_zero,
+    );
+    let beta = vec![F::from(5u32), F::from(7u32), F::from(11u32)];
+    let eq_beta = build_eq_x_r_inner(&beta, &()).unwrap();
+
+    let mut explicit_transcript = Blake3Transcript::default();
+    let (explicit_proof, _) = MLSumcheck::prove_as_subprotocol(
+        &mut explicit_transcript,
+        vec![eq_beta, a_mle.clone(), b_mle.clone()],
+        num_vars,
+        3,
+        |v| v[0] * v[1] * v[2],
+        &(),
+    );
+
+    let mut factorized_transcript = Blake3Transcript::default();
+    let (factorized_proof, _) = MLSumcheck::prove_equality_factorized_as_subprotocol(
+        &mut factorized_transcript,
+        beta,
+        vec![a_mle, b_mle],
+        num_vars,
+        2,
+        |v| v[0] * v[1],
+        &(),
+    );
+
+    assert_eq!(factorized_proof, explicit_proof);
+    assert_eq!(factorized_proof.claimed_sum, explicit_proof.claimed_sum);
+
+    let mut explicit_verifier_transcript = Blake3Transcript::default();
+    let explicit_subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut explicit_verifier_transcript,
+        num_vars,
+        3,
+        &explicit_proof,
+        &(),
+    )
+    .unwrap();
+
+    let mut factorized_verifier_transcript = Blake3Transcript::default();
+    let factorized_subclaim = MLSumcheck::verify_as_subprotocol(
+        &mut factorized_verifier_transcript,
+        num_vars,
+        3,
+        &factorized_proof,
+        &(),
+    )
+    .unwrap();
+
+    assert_eq!(factorized_subclaim.point, explicit_subclaim.point);
+    assert_eq!(
+        factorized_subclaim.expected_evaluation,
+        explicit_subclaim.expected_evaluation
+    );
 }
 
 #[test]
