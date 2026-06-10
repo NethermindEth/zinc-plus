@@ -114,6 +114,58 @@ pub fn family_weights<const D: usize>(family: usize, limb_bits: usize) -> Vec<Gf
     w
 }
 
+/// The η-combined per-bit weight table `W[p] = Σ_f η^f·w_f[p]` — i.e.
+/// `η^{⌊p/ℓ⌋}·X^{p mod ℓ}`, plus `η^{nl+j−1}` at the boundary bits `p = ℓj`
+/// (`j ≥ 1`). One table serves both consumers of the η-batched binding:
+/// the combined block column is the per-row read `Σ_{set bits p} W[p]`
+/// ([`eta_block_rows`]), and the single `a′` consistency equation projects
+/// `a′` against `W` directly (`Σ_f η^f·w_f(a′) = proj(a′, W)`).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn eta_combined_weights<const D: usize>(eta: &Gf, limb_bits: usize) -> Vec<Gf> {
+    let nl = D / limb_bits;
+    let nf = num_families::<D>(limb_bits);
+    let mut eta_pows = Vec::with_capacity(nf);
+    let mut acc = Gf::one();
+    for _ in 0..nf {
+        eta_pows.push(acc);
+        acc = acc * *eta;
+    }
+    let mut w = vec![Gf::zero(); D];
+    for (p, slot) in w.iter_mut().enumerate() {
+        let (f, b) = (p / limb_bits, p % limb_bits);
+        *slot = eta_pows[f] * x_pow(b);
+        if b == 0 && f >= 1 {
+            *slot = *slot + eta_pows[nl + f - 1]; // boundary-bit family e_{ℓf}
+        }
+    }
+    w
+}
+
+/// The η-combined family block of one column: row `r` is
+/// `Σ_f η^f·F_f(col)[r] = Σ_{set bits p of the cell} W[p]` (zero past the
+/// tail). The single fold source per witness column under the η-batched
+/// binding.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn eta_block_rows<const D: usize>(
+    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    col: usize,
+    weights: &[Gf],
+    n: usize,
+) -> Vec<Gf> {
+    (0..n)
+        .map(|r| {
+            let mut m = crate::f2_hadamard::cell_mask::<D>(&cols[col].evaluations[r]);
+            let mut acc = Gf::zero();
+            while m != 0 {
+                let p = m.trailing_zeros() as usize;
+                acc = acc + weights[p];
+                m &= m - 1;
+            }
+            acc
+        })
+        .collect()
+}
+
 /// Per-relation public family-read coefficients:
 /// `Q_a[r] = const_a + Σ coeff·F_f(col↓Δ)[r]`, keyed `((col, Δ), family)`.
 /// Mirrors `fp = emb(x_i) + γ·emb(y_i⊕y2_i) + γ²·cin_i + γ³·emb(t_i) +
@@ -286,20 +338,6 @@ pub fn lookup_binding_public_part<const D: usize>(
         out = out + (one + *delta) * eq_sum * m_eval;
     }
     out
-}
-
-/// Public alias of [`family_proj_rows`] for the prove/verify pipeline
-/// (builds the family-block fold sources and the verifier's public-column
-/// recomputation).
-pub fn family_proj_rows_pub<const D: usize>(
-    cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
-    col: usize,
-    shift: usize,
-    family: usize,
-    limb_bits: usize,
-    n: usize,
-) -> Vec<Gf> {
-    family_proj_rows::<D>(cols, col, shift, family, limb_bits, n)
 }
 
 /// MLE eval at `point` of a family-projected, row-shifted column — used by
@@ -500,4 +538,37 @@ pub fn verify_lookup_binding<const D: usize>(
         return Err(LookupBindingError::FinalEvalMismatch);
     }
     Ok(r_star)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fused η-table must equal the η-combination of the per-family
+    /// reference weights — pins the boundary-family indexing inside
+    /// [`eta_combined_weights`] (the table mixes limb `X^b` weights with
+    /// boundary-bit `1`s at `p = ℓj`; an index slip there would silently
+    /// unbind a family).
+    #[test]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn eta_table_matches_per_family_weights() {
+        const D: usize = 32;
+        let eta = Gf::from_words([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210]);
+        for limb_bits in [4usize, 8] {
+            let nf = num_families::<D>(limb_bits);
+            let mut expected = vec![Gf::zero(); D];
+            let mut pow = Gf::one();
+            for f in 0..nf {
+                for (slot, w) in expected.iter_mut().zip(family_weights::<D>(f, limb_bits)) {
+                    *slot = *slot + pow * w;
+                }
+                pow = pow * eta;
+            }
+            assert_eq!(
+                eta_combined_weights::<D>(&eta, limb_bits),
+                expected,
+                "ℓ = {limb_bits}"
+            );
+        }
+    }
 }

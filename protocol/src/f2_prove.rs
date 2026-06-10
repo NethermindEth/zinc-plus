@@ -4032,11 +4032,12 @@ where
     ///    limb), the witness GKR product tree → `(r_w, eval_w)`;
     /// 4. binding sumcheck at `r_row` → family shifted evals at `r★`
     ///    (`nl` limb families + `nl−1` boundary-bit families);
-    /// 5. **family-block columns** (per family f × witness col g) appended
-    ///    as multipoint sources; the family evals fold as pointed-shift
-    ///    claims at `(r★, Δ)`; one open at `r_0` binds everything (the
-    ///    verifier adds the per-family `a′` consistency
-    ///    `w_f(a′) = Σ_g γ_g·F_{f,g}(r_0)` under the fresh `γ_open`).
+    /// 5. a FRESH `η` combines the `nf` families: ONE **η-combined block
+    ///    column** per witness col joins the multipoint fold, ONE pointed
+    ///    claim per witness `(col, Δ)` pair (down-eval
+    ///    `Σ_f η^f·F̃_f(col↓Δ)(r★)`), and ONE `a′` consistency equation
+    ///    `proj(a′, Σ_f η^f·w_f) = Σ_g γ_g·F^η_g(r_0)` under the fresh
+    ///    `γ_open`; one open at `r_0` binds everything.
     pub fn prove_f2_full_with_lookup_adder_bound(
         transcript: &mut impl Transcript,
         pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
@@ -4150,9 +4151,13 @@ where
             )
         };
 
-        // -- Family blocks: per family f (limb packs, then boundary bits),
-        //    per WITNESS col g (open order), the projected column F_{f,g}
-        //    appended as a fold source. --
+        // -- η-batched family blocks: a FRESH η (the family evals were just
+        //    absorbed by the binding ⟹ SZ pins each family individually
+        //    through the combination — unlike the rejected stale-α per-bit
+        //    pattern) combines the nf families into ONE block per WITNESS
+        //    col (open order), appended as a fold source. --
+        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let eta_w = crate::f2_lookup_binding::eta_combined_weights::<D>(&eta, limb_bits);
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_wit = trace.binary_poly.len() - num_pub_bin;
@@ -4160,22 +4165,18 @@ where
         let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
         let mut extended_trace = projected_trace_for_mp;
         let lblock_base = extended_trace.len();
-        for f in 0..nf {
-            for g in 0..num_wit {
-                let v = crate::f2_lookup_binding::family_proj_rows_pub::<D>(
-                    &trace.binary_poly,
-                    num_pub_bin + g,
-                    0,
-                    f,
-                    limb_bits,
-                    n,
-                );
-                extended_trace.push(DenseMultilinearExtension::from_evaluations_vec(
-                    num_vars,
-                    v.iter().map(|x| *x.inner()).collect(),
-                    zero_inner.clone(),
-                ));
-            }
+        for g in 0..num_wit {
+            let v = crate::f2_lookup_binding::eta_block_rows::<D>(
+                &trace.binary_poly,
+                num_pub_bin + g,
+                &eta_w,
+                n,
+            );
+            extended_trace.push(DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                v.iter().map(|x| *x.inner()).collect(),
+                zero_inner.clone(),
+            ));
         }
 
         // r*-evals of the L-blocks (multipoint up-claims) — absorbed before
@@ -4206,9 +4207,10 @@ where
             .chain(lblock_evals_at_rstar.iter().copied())
             .collect();
 
-        // -- Pointed claims: AND pairs (existing) + the witness-col family
-        //    evals at (r★, Δ). Public-col family evals are NOT folded (the
-        //    verifier recomputes them directly). --
+        // -- Pointed claims: AND pairs (existing) + ONE η-combined claim per
+        //    witness (col, Δ) pair — down-eval `Σ_f η^f·F̃_f(col↓Δ)(r★)`
+        //    against the combined block. Public-col family evals are NOT
+        //    folded (the verifier recomputes them directly). --
         let mut pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = subclaim
             .hadamard_pairs
             .iter()
@@ -4220,18 +4222,28 @@ where
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = uair_proof.hadamard_pair_evals.clone();
         let pairs = binding_distinct_pairs(&coeffs);
+        let mut eta_pows = Vec::with_capacity(nf);
+        {
+            let mut acc = BinaryFieldGF128::one();
+            for _ in 0..nf {
+                eta_pows.push(acc);
+                acc = acc * eta;
+            }
+        }
         for (pi, &(col, shift)) in pairs.iter().enumerate() {
             if col < num_pub_bin {
                 continue;
             }
+            let mut down = BinaryFieldGF128::zero();
             for f in 0..nf {
-                pointed_shifts.push(PointedShiftClaim {
-                    point: r_star.clone(),
-                    shift,
-                    source_col: lblock_base + f * num_wit + (col - num_pub_bin),
-                });
-                down_evals.push(binding_proof.limb_evals[pi][f]);
+                down = down + eta_pows[f] * binding_proof.limb_evals[pi][f];
             }
+            pointed_shifts.push(PointedShiftClaim {
+                point: r_star.clone(),
+                shift,
+                source_col: lblock_base + (col - num_pub_bin),
+            });
+            down_evals.push(down);
         }
 
         let (mp_proof, mp_prover_state) = {
@@ -4331,7 +4343,7 @@ where
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
         use crate::f2_lookup_binding::{
-            binding_distinct_pairs, family_proj_eval_pub, family_weights, lookup_binding_coeffs,
+            binding_distinct_pairs, family_proj_eval_pub, lookup_binding_coeffs,
             lookup_binding_public_part, num_families, verify_lookup_binding,
         };
         use zinc_poly::univariate::binary_gf128::gf128poly_project;
@@ -4489,8 +4501,11 @@ where
             }
         }
 
-        // -- Family-block up-claims + the extended fold. --
-        if lookup_proof.lblock_evals_at_rstar.len() != nf * num_wit {
+        // -- η (fresh: the family evals are absorbed) + the combined-block
+        //    up-claims + the extended fold. --
+        let eta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+        let eta_w = crate::f2_lookup_binding::eta_combined_weights::<D>(&eta, limb_bits);
+        if lookup_proof.lblock_evals_at_rstar.len() != num_wit {
             return Err(F2FullVerifyError::LookupAdder("L-block eval count mismatch"));
         }
         let mut buf = vec![
@@ -4520,18 +4535,28 @@ where
             })
             .collect();
         let mut down_evals: Vec<BinaryFieldGF128> = proof.uair.hadamard_pair_evals.clone();
+        let mut eta_pows = Vec::with_capacity(nf);
+        {
+            let mut acc = BinaryFieldGF128::one();
+            for _ in 0..nf {
+                eta_pows.push(acc);
+                acc = acc * eta;
+            }
+        }
         for (pi, &(col, shift)) in pairs.iter().enumerate() {
             if col < num_pub_bin {
                 continue;
             }
+            let mut down = BinaryFieldGF128::zero();
             for f in 0..nf {
-                pointed_shifts.push(PointedShiftClaim {
-                    point: r_star.clone(),
-                    shift,
-                    source_col: lblock_base + f * num_wit + (col - num_pub_bin),
-                });
-                down_evals.push(lookup_proof.binding.limb_evals[pi][f]);
+                down = down + eta_pows[f] * lookup_proof.binding.limb_evals[pi][f];
             }
+            pointed_shifts.push(PointedShiftClaim {
+                point: r_star.clone(),
+                shift,
+                source_col: lblock_base + (col - num_pub_bin),
+            });
+            down_evals.push(down);
         }
         let pointed_shift_sources: Vec<usize> =
             pointed_shifts.iter().map(|p| p.source_col).collect();
@@ -4606,25 +4631,23 @@ where
         )
         .map_err(F2FullVerifyError::Open)?;
 
-        // Per-family consistency: w_f(a′) == Σ_g γ_open,g·F_{f,g}(r_0)
-        // (limb-pack weights X^b for f < nl, the single boundary bit for
-        // f ≥ nl). γ_open is the open's first transcript draw; the family
-        // evals were absorbed before it ⟹ fresh ⟹ SZ binds each
-        // individually.
+        // The η-combined a′ consistency:
+        // `proj(a′, W) == Σ_g γ_open,g·F^η_g(r_0)` with
+        // `W = Σ_f η^f·w_f` (the same table the blocks were built from).
+        // γ_open is the open's first transcript draw; the combined blocks'
+        // r_0 evals were absorbed before it ⟹ fresh ⟹ SZ binds each g;
+        // η (fresh post-binding-absorb) binds each family inside the
+        // combination.
         let gamma_open: Vec<BinaryFieldGF128> = gamma_fork.get_field_challenges(num_wit, &());
-        for f in 0..nf {
-            let w = family_weights::<D>(f, limb_bits);
-            let lhs = gf128poly_project::<D>(&proof.open.lifted_claim, &w);
-            let mut rhs = BinaryFieldGF128::zero();
-            for g in 0..num_wit {
-                rhs += &(gamma_open[g]
-                    * proof.open_evals_at_r_0[lblock_base + f * num_wit + g]);
-            }
-            if lhs != rhs {
-                return Err(F2FullVerifyError::LookupAdder(
-                    "limb-family a' consistency failed",
-                ));
-            }
+        let lhs = gf128poly_project::<D>(&proof.open.lifted_claim, &eta_w);
+        let mut rhs = BinaryFieldGF128::zero();
+        for g in 0..num_wit {
+            rhs += &(gamma_open[g] * proof.open_evals_at_r_0[lblock_base + g]);
+        }
+        if lhs != rhs {
+            return Err(F2FullVerifyError::LookupAdder(
+                "limb-family a' consistency failed",
+            ));
         }
 
         Ok(())
