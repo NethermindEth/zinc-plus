@@ -3987,8 +3987,11 @@ where
         //    table side needs no GKR tree: the verifier recomputes
         //    `∏_t (δ−fp_t)^{m_t}` itself and checks it against the witness
         //    tree's root. Only the WITNESS product tree is proven. --
-        let tuples =
-            Self::sha_add_limb_tuples(&aug.binary_poly, adder_specs, num_vars, limb_bits);
+        let _g_lookup = zinc_utils::prof::scope("lookup_adder");
+        let tuples = {
+            let _g = zinc_utils::prof::scope("lookup:tuples");
+            Self::sha_add_limb_tuples(&aug.binary_poly, adder_specs, num_vars, limb_bits)
+        };
         let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
         let mult_counts: Vec<u64> = {
             let bits = add_lookup::multiplicities(&tuples, limb_bits, k_bits);
@@ -4009,16 +4012,21 @@ where
             transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut buf);
         }
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let (wl, _fp_rows) = Self::sha_lookup_witness_leaves_tensor(
-            &aug.binary_poly,
-            adder_specs,
-            num_vars,
-            limb_bits,
-            &gamma_fp,
-            &delta,
-        );
-        let (witness_tree, gkr_point, gkr_eval) =
-            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &());
+        let (wl, _fp_rows) = {
+            let _g = zinc_utils::prof::scope("lookup:leaves");
+            Self::sha_lookup_witness_leaves_tensor(
+                &aug.binary_poly,
+                adder_specs,
+                num_vars,
+                limb_bits,
+                &gamma_fp,
+                &delta,
+            )
+        };
+        let (witness_tree, gkr_point, gkr_eval) = {
+            let _g = zinc_utils::prof::scope("lookup:gkr_tree");
+            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &())
+        };
         let gkr_bind = LookupWitnessClaim { r_w: gkr_point, eval_w: gkr_eval };
 
         // -- Binding sumcheck: reduce the GKR leaf claim to limb-family
@@ -4031,15 +4039,18 @@ where
             &gamma_fp,
             limb_bits,
         );
-        let (binding_proof, r_star) = prove_lookup_binding::<D>(
-            transcript,
-            &aug.binary_poly,
-            adder_specs,
-            &coeffs,
-            num_vars,
-            limb_bits,
-            r_row,
-        );
+        let (binding_proof, r_star) = {
+            let _g = zinc_utils::prof::scope("lookup:binding");
+            prove_lookup_binding::<D>(
+                transcript,
+                &aug.binary_poly,
+                adder_specs,
+                &coeffs,
+                num_vars,
+                limb_bits,
+                r_row,
+            )
+        };
 
         // -- L-blocks: per limb family i, per WITNESS col g (open order),
         //    the projected column L_{i,g} appended as a fold source. --
@@ -4047,6 +4058,7 @@ where
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_wit = aug.binary_poly.len() - num_pub_bin;
         let zero_inner = BinaryFieldGF128::zero().into_inner();
+        let _g_lb = zinc_utils::prof::scope("lookup:lblocks");
         let mut extended_trace = projected_trace_for_mp;
         let lblock_base = extended_trace.len();
         for i in 0..nl {
@@ -4086,6 +4098,8 @@ where
         for v in &lblock_evals_at_rstar {
             transcript.absorb_random_field(v, &mut buf);
         }
+        drop(_g_lb);
+        drop(_g_lookup);
         let up_evals: Vec<BinaryFieldGF128> = uair_proof
             .column_evals_at_rstar
             .iter()
@@ -8270,6 +8284,185 @@ mod tests {
                 "a wrong add sum (non-LSB bit) must be rejected by the lookup adder"
             );
         }
+    }
+
+    /// **Task 8: prover-time A/B — trusted adder Hadamards vs the sound
+    /// lookup adder**, like-for-like in the same (monomial) pipeline. Run
+    /// explicitly, release mode:
+    /// ```text
+    /// AB_NVARS=16 cargo test --release -p zinc-protocol \
+    ///   --features parallel,simd,unchecked \
+    ///   sha256_f2_lookup_adder_ab_timing -- --ignored --nocapture
+    /// ```
+    /// Arms: (A) `prove_f2_full_with_hadamard` with all 14 relations (2 AND +
+    /// 12 TRUSTED adder Hadamards — today's posture); (B)
+    /// `prove_f2_full_with_lookup_adder_bound` (2 AND Hadamards + the SOUND
+    /// lookup adder, LB=8 ⇒ the 2^17 add table). `OBLONG_PROFILE=1` adds the
+    /// per-phase breakdown. Verifier times reported once per arm.
+    #[test]
+    #[ignore = "manual A/B benchmark — run with --ignored --nocapture in release"]
+    fn sha256_f2_lookup_adder_ab_timing() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use std::time::Instant;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+        const LB: usize = 8; // production limbs => the 2^17-row add table
+        const KBITS: usize = 16;
+
+        let num_vars: usize = std::env::var("AB_NVARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let poly_size = 1usize << num_vars;
+        // Square-ish PCS shape.
+        let num_rows = 1usize << (num_vars / 2);
+        let row_len = poly_size / num_rows;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        let num_aug = cols::NUM_BIN + adder_specs.len();
+        eprintln!(
+            "A/B @ nvars={num_vars} (rows {num_rows} x len {row_len}), LB={LB}, KBITS={KBITS}"
+        );
+
+        let mut time_runs = |label: &str, f: &mut dyn FnMut()| {
+            f(); // warmup
+            zinc_utils::prof::dump_and_reset("ab");
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                let t0 = Instant::now();
+                f();
+                times.push(t0.elapsed().as_secs_f64() * 1e3);
+                zinc_utils::prof::dump_and_reset("ab");
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!("{label}: median {:.1} ms  (runs: {:?})", times[1], times);
+        };
+
+        // Arm A: 14 relations, 12 adder Hadamards TRUSTED (today's posture).
+        time_runs("A  Hadamard-14 (trusted adders) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("arm A prove");
+        });
+
+        // Arm B: the SOUND lookup adder (bound).
+        time_runs("B  LookupAdder-bound (sound) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_lookup_adder_bound(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+                LB,
+                KBITS,
+            )
+            .expect("arm B prove");
+        });
+
+        // Verifier times (once each).
+        let mut pt = Blake3Transcript::new();
+        let proof_a = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+        )
+        .expect("prove A");
+        let t0 = Instant::now();
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof_a,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify A");
+        eprintln!("A  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+
+        let mut pt = Blake3Transcript::new();
+        let (base, lookup) =
+            ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_lookup_adder_bound(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+                LB,
+                KBITS,
+            )
+            .expect("prove B");
+        let t0 = Instant::now();
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
+            Sha256F2Ideal,
+            _,
+        >(
+            &mut vt,
+            &pp,
+            &base,
+            &lookup,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            num_aug,
+            LB,
+            KBITS,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify B");
+        eprintln!("B  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     }
 
     /// **Keccak-256 over `F_2[X]` (`D = 64`), end-to-end.** Proves one
