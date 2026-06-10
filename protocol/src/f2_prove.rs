@@ -3946,7 +3946,7 @@ where
         use crate::f2_lookup_binding::{
             binding_distinct_pairs, lookup_binding_coeffs, prove_lookup_binding,
         };
-        use zinc_piop::lookup::{add_lookup, gkr_lookup};
+        use zinc_piop::lookup::add_lookup;
 
         let n = 1usize << num_vars;
         let nl = D / limb_bits;
@@ -3980,13 +3980,34 @@ where
             )?
         };
 
-        // -- Lookup phase: γ/δ, leaves, the two product trees. --
+        // -- Lookup phase. γ, then the multiplicity COUNTS (shipped in the
+        //    clear — the system is not ZK — and absorbed BEFORE δ so the
+        //    table-side polynomial is fixed pre-challenge: that is what makes
+        //    the Schwartz–Zippel grand-product argument sound), then δ. The
+        //    table side needs no GKR tree: the verifier recomputes
+        //    `∏_t (δ−fp_t)^{m_t}` itself and checks it against the witness
+        //    tree's root. Only the WITNESS product tree is proven. --
         let tuples =
             Self::sha_add_limb_tuples(&aug.binary_poly, adder_specs, num_vars, limb_bits);
         let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let table =
-            add_lookup::add_table_fingerprints::<BinaryFieldGF128>(&gamma_fp, limb_bits, &());
-        let mults = add_lookup::multiplicities(&tuples, limb_bits, k_bits);
+        let mult_counts: Vec<u64> = {
+            let bits = add_lookup::multiplicities(&tuples, limb_bits, k_bits);
+            bits.iter()
+                .map(|b| {
+                    b.iter()
+                        .enumerate()
+                        .fold(0u64, |acc, (i, &set)| acc | (u64::from(set) << i))
+                })
+                .collect()
+        };
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for &c in &mult_counts {
+            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut buf);
+        }
         let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
         let (wl, _fp_rows) = Self::sha_lookup_witness_leaves_tensor(
             &aug.binary_poly,
@@ -3996,8 +4017,9 @@ where
             &gamma_fp,
             &delta,
         );
-        let tl = gkr_lookup::table_leaves(&table, &mults, &delta, &());
-        let (lookup_proof, gkr_bind) = gkr_lookup::prove_lookup(transcript, wl, tl, &());
+        let (witness_tree, gkr_point, gkr_eval) =
+            zinc_piop::lookup::gkr_product::prove_product_tree(transcript, wl, &());
+        let gkr_bind = LookupWitnessClaim { r_w: gkr_point, eval_w: gkr_eval };
 
         // -- Binding sumcheck: reduce the GKR leaf claim to limb-family
         //    shifted evals at r★. --
@@ -4154,7 +4176,8 @@ where
                 open: open_proof,
             },
             F2LookupAdderProof {
-                lookup: lookup_proof,
+                witness_tree,
+                mult_counts,
                 binding: binding_proof,
                 lblock_evals_at_rstar,
             },
@@ -4185,6 +4208,7 @@ where
         num_vars: usize,
         num_primary_columns: usize,
         limb_bits: usize,
+        k_bits: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
     ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
     where
@@ -4236,18 +4260,63 @@ where
             }
         }
 
-        // -- Lookup phase replay: γ/δ, the two product trees, root equality. --
+        // -- Lookup phase replay: γ, absorb the clear multiplicities (pre-δ:
+        //    fixes the table polynomial before the challenge — the SZ
+        //    soundness requirement), δ, then the WITNESS product tree. The
+        //    table side is recomputed locally: `∏_t (δ−fp_t)^{m_t}` must
+        //    equal the witness tree's root. --
         let gamma_fp: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
-        let gkr_bind =
-            zinc_piop::lookup::gkr_lookup::verify_lookup(transcript, &lookup_proof.lookup, &())
-                .map_err(|_| F2FullVerifyError::LookupAdder("grand-product lookup rejected"))?;
-
-        // The witness tree's depth must match the tensor layout.
-        let pair_vars = (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
-        if gkr_bind.r_w.len() != num_vars + pair_vars {
-            return Err(F2FullVerifyError::LookupAdder("witness tree depth mismatch"));
+        let table_fps = zinc_piop::lookup::add_lookup::add_table_fingerprints::<BinaryFieldGF128>(
+            &gamma_fp, limb_bits, &(),
+        );
+        if lookup_proof.mult_counts.len() != table_fps.len() {
+            return Err(F2FullVerifyError::LookupAdder("multiplicity count length mismatch"));
         }
+        let mut mbuf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES
+        ];
+        for &c in &lookup_proof.mult_counts {
+            if k_bits < 64 && c >= (1u64 << k_bits) {
+                return Err(F2FullVerifyError::LookupAdder("multiplicity exceeds k_bits"));
+            }
+            transcript.absorb_random_field(&BinaryFieldGF128::from_words([c, 0]), &mut mbuf);
+        }
+        let delta: BinaryFieldGF128 = transcript.get_field_challenge(&());
+
+        // Witness tree, at the tensor-layout depth (rows + pair vars).
+        let pair_vars = (adder_specs.len() * nl).next_power_of_two().trailing_zeros() as usize;
+        let (r_w, eval_w) = zinc_piop::lookup::gkr_product::verify_product_tree(
+            transcript,
+            &lookup_proof.witness_tree,
+            num_vars + pair_vars,
+            &(),
+        )
+        .map_err(|_| F2FullVerifyError::LookupAdder("witness product tree rejected"))?;
+
+        // Table side: recompute the multiplicity-weighted product directly.
+        let table_root = {
+            let mut acc = BinaryFieldGF128::one();
+            for (fp, &m) in table_fps.iter().zip(&lookup_proof.mult_counts) {
+                let mut base = delta + *fp; // δ − fp_t (char 2)
+                let mut mm = m;
+                while mm != 0 {
+                    if mm & 1 == 1 {
+                        acc *= &base;
+                    }
+                    base = base * base;
+                    mm >>= 1;
+                }
+            }
+            acc
+        };
+        if table_root != lookup_proof.witness_tree.root {
+            return Err(F2FullVerifyError::LookupAdder(
+                "grand-product mismatch: witness adds not contained in the add table",
+            ));
+        }
+        let gkr_bind = LookupWitnessClaim { r_w, eval_w };
         let (r_row, r_pair) = gkr_bind.r_w.split_at(num_vars);
 
         // -- Binding sumcheck: eval_w + PubMLE(r_w) reduced to limb evals at r★. --
@@ -5100,9 +5169,23 @@ pub struct F2FullProof<const D: usize> {
 /// columns' `r*`-evals (the multipoint up-claims for the appended sources).
 #[derive(Clone, Debug)]
 pub struct F2LookupAdderProof {
-    pub lookup: zinc_piop::lookup::gkr_lookup::GrandProductLookupProof<BinaryFieldGF128>,
+    /// The WITNESS grand-product tree (`∏(δ−a_i)`); the table side is
+    /// verifier-recomputed from the clear multiplicities below.
+    pub witness_tree: zinc_piop::lookup::gkr_product::ProductTreeProof<BinaryFieldGF128>,
+    /// Per-table-row use counts, shipped in the clear (the system is not
+    /// ZK) and absorbed BEFORE δ — fixing the table-side polynomial
+    /// pre-challenge, which is what makes the SZ grand-product argument
+    /// sound. The verifier recomputes `∏_t(δ−fp_t)^{m_t}` from these.
+    pub mult_counts: Vec<u64>,
     pub binding: crate::f2_lookup_binding::LookupBindingProof,
     pub lblock_evals_at_rstar: Vec<BinaryFieldGF128>,
+}
+
+/// The witness tree's output claim: leaf-MLE eval `eval_w` at the GKR
+/// descent point `r_w` (split by the binding as `(r_row, r_pair)`).
+struct LookupWitnessClaim {
+    r_w: Vec<BinaryFieldGF128>,
+    eval_w: BinaryFieldGF128,
 }
 
 /// Proof of an F_2 statement with a **sound oblong-Hadamard discharge**: the
@@ -8021,9 +8104,44 @@ mod tests {
             num_vars,
             num_aug,
             LB,
+            KBITS,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
         .expect("honest bound lookup-adder proof must verify");
+
+        // Adversarial: lying multiplicities — the verifier's self-computed
+        // table product no longer matches the witness root.
+        let mut bad_m = lookup.clone();
+        let hot = bad_m
+            .mult_counts
+            .iter()
+            .position(|&c| c > 0)
+            .expect("some table row is used");
+        bad_m.mult_counts[hot] += 1;
+        let mut vtm = Blake3Transcript::new();
+        assert!(
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_lookup_adder_bound::<
+                Sha256F2Ideal,
+                _,
+            >(
+                &mut vtm,
+                &pp,
+                &base,
+                &bad_m,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                &trace.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                num_aug,
+                LB,
+                KBITS,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+            .is_err(),
+            "lying multiplicities must be rejected (table-product mismatch)"
+        );
 
         // Adversarial: tamper one shipped limb eval — the verifier must
         // reject (the binding recombination / the fold catches it).
@@ -8047,6 +8165,7 @@ mod tests {
                 num_vars,
                 num_aug,
                 LB,
+                KBITS,
                 |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
             )
             .is_err(),
@@ -8144,6 +8263,7 @@ mod tests {
                     num_vars,
                     num_aug,
                     LB,
+                    KBITS,
                     |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
                 )
                 .is_err(),
