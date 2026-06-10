@@ -39,7 +39,7 @@ use std::marker::PhantomData;
 use zinc_poly::{Polynomial, mle::DenseMultilinearExtension};
 use zinc_transcript::{
     Blake3Transcript,
-    traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript},
+    traits::{ConstTranscribable, Transcribable, Transcript},
 };
 use zinc_utils::{
     UNCHECKED, add,
@@ -155,16 +155,30 @@ where
             masked_rows.push(cw.iter().map(Int::<WL>::from_ref).collect());
         }
 
-        // Add the modular Reed--Solomon masks over Z.
-        let seeds = MaskSeeds::<WL>::sample(
-            rng,
-            add!(num_rows, 1usize),
-            zkp.mask_dim,
-            &zkp.mask_modulus,
-        );
+        // Add the modular Reed--Solomon masks over Z. Each row's seed is
+        // resampled until every mask symbol lands in the power-of-two window
+        // [0, 2^(bits(p)-1)), so the inner ZK-IOP's range checks stay pure
+        // bit decompositions. The resample probability is about
+        // n * (prime gap)/p per row — it never fires in practice.
         let mask_cfg = mask::mask_field_cfg(&zkp.mask_modulus)?;
-        for (row, seed) in masked_rows.iter_mut().zip(&seeds.seeds) {
-            let mask_vector = mask::mask_row(seed, codeword_len, &mask_cfg);
+        let window_bits = sub!(zkp.mask_modulus_bits, 1u32, "modulus bits underflow");
+        let mut seeds = MaskSeeds::<WL> {
+            seeds: Vec::with_capacity(add!(num_rows, 1usize)),
+        };
+        for row in masked_rows.iter_mut() {
+            let (seed, mask_vector) = loop {
+                let seed = MaskSeeds::<WL>::sample(rng, 1, zkp.mask_dim, &zkp.mask_modulus)
+                    .seeds
+                    .pop()
+                    .ok_or_else(|| ZipError::InvalidPcsParam("seed sampling failed".into()))?;
+                let mask_vector = mask::mask_row(&seed, codeword_len, &mask_cfg);
+                if mask_vector
+                    .iter()
+                    .all(|symbol| symbol.inner().bits() <= window_bits)
+                {
+                    break (seed, mask_vector);
+                }
+            };
             for (entry, symbol) in row.iter_mut().zip(&mask_vector) {
                 *entry = add!(
                     *entry,
@@ -172,6 +186,7 @@ where
                     "masked codeword entry overflow"
                 );
             }
+            seeds.seeds.push(seed);
         }
 
         let row_refs: Vec<&[Int<WL>]> = masked_rows.iter().map(Vec::as_slice).collect();

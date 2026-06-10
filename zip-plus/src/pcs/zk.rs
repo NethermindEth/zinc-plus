@@ -58,6 +58,7 @@
 //!   affine/coset variant of mutual correlated agreement (paper
 //!   Assumption 2.7).
 
+pub mod inner;
 pub mod mask;
 pub mod params;
 pub mod protocol;

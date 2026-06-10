@@ -14,7 +14,7 @@ use crypto_primitives::{
 };
 use rand_core::CryptoRng;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable};
-use zinc_utils::{add, mul};
+use zinc_utils::{add, mul, sub};
 
 /// Per-row mask seeds: `seeds[i]` is the seed `s_i in [0, p)^D` of committed
 /// row `i` (row 0 is the blinding row).
@@ -45,8 +45,12 @@ pub enum MaskConsistencyProof<const WL: usize> {
 
 impl<const WL: usize> MaskSeeds<WL> {
     /// Samples `count` independent seeds of dimension `dim`, each entry
-    /// uniform in `[0, p)` by rejection from `rng` (acceptance probability
-    /// `>= 1/2` since `p` has its top bit set within the sampled window).
+    /// uniform in the power-of-two window `[0, 2^(bits(p)-1)) ⊂ [0, p)`.
+    ///
+    /// The window misses only `[2^(bits(p)-1), p)` — a `(prime gap)/p`
+    /// fraction, statistically negligible — and in exchange the seed range
+    /// checks of the inner ZK-IOP become pure bit decompositions (cf. the
+    /// note's §5 / power-of-two-modulus discussion).
     ///
     /// Mask randomness is *secret prover randomness*: it must come from an
     /// RNG, never from the public transcript.
@@ -56,8 +60,9 @@ impl<const WL: usize> MaskSeeds<WL> {
         dim: usize,
         modulus: &Uint<WL>,
     ) -> Self {
+        let window_bits = sub!(modulus.inner().bits(), 1u32);
         let seeds = (0..count)
-            .map(|_| (0..dim).map(|_| sample_below(rng, modulus)).collect())
+            .map(|_| (0..dim).map(|_| sample_window(rng, window_bits)).collect())
             .collect();
         Self { seeds }
     }
@@ -101,26 +106,21 @@ impl<const WL: usize> MaskSeeds<WL> {
     }
 }
 
-/// Uniform value in `[0, modulus)` by rejection sampling.
+/// Uniform value in `[0, 2^bits)`.
 #[allow(clippy::arithmetic_side_effects)] // byte/bit index arithmetic bounded by construction
-fn sample_below<const WL: usize>(rng: &mut impl CryptoRng, modulus: &Uint<WL>) -> Uint<WL> {
-    let bits = modulus.inner().bits();
+fn sample_window<const WL: usize>(rng: &mut impl CryptoRng, bits: u32) -> Uint<WL> {
+    debug_assert!(usize::try_from(bits).expect("bits fits usize") < WL * 64);
     let full_bytes = usize::try_from(bits.div_ceil(8)).expect("bit count fits usize");
     let top_mask: u8 = match bits % 8 {
         0 => 0xff,
         r => u8::MAX >> (8 - r),
     };
     let mut buf = vec![0u8; mul!(WL, 8usize)];
-    loop {
-        rng.fill_bytes(&mut buf[..full_bytes]);
-        if let Some(last) = buf[..full_bytes].last_mut() {
-            *last &= top_mask;
-        }
-        let candidate = Uint::new(crypto_bigint::Uint::from_le_slice(&buf));
-        if &candidate < modulus {
-            return candidate;
-        }
+    rng.fill_bytes(&mut buf[..full_bytes]);
+    if let Some(last) = buf[..full_bytes].last_mut() {
+        *last &= top_mask;
     }
+    Uint::new(crypto_bigint::Uint::from_le_slice(&buf))
 }
 
 /// Returns the field configuration (`MontyParams`) for the mask field `F_p`.

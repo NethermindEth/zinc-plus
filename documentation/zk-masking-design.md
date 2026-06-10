@@ -102,3 +102,55 @@ mask-budget rejection. All 102 `zip-plus` tests pass.
 `2(D + 2C)` values, so the v1 inner ZK-IOP will be negligible there; the
 overhead concentrates in `w*` entry growth (`B -> B + B_rho + lambda_zk`) and
 the ~`4x` committed-entry growth. See note §6.1 / Table 2.
+
+---
+
+## Increment 2 (2026-06-10): hardening + inner ZK-IOP foundation
+
+**What.**
+
+1. `LinearCode::codeword_growth_bits` (default `None`) with the IPRS
+   implementation from the paper's norm bound (`thm:iprs`:
+   `(q/2)^(depth+1) * row_len`, rounded up per factor — 41 bits for the
+   depth-1 test code) plus an empirical soundness test;
+   `ZkMaskParams::derive_for_code` consumes it.
+2. FS absorption: the zk opening now absorbs every proof message (`w*`,
+   column values, seeds, salt) into the Fiat–Shamir state on both sides, so
+   column challenges bind to `w*` and to previous openings. The base PCS's
+   `write_const_many` messages are still unabsorbed — that audit item stays
+   open for the non-zk path.
+3. **Window convention** (prerequisite for the inner constraint system, cf.
+   note §5 / power-of-two discussion): `p` is the least prime above
+   `2^p_bits`, seeds are sampled from `[0, 2^(bits(p)-1))` (negligibly
+   non-uniform mod `p` — prime-gap/p), and commit-time seeds are resampled
+   until every mask symbol lands in the same window (probability ~0). Every
+   inner range check is therefore a pure bit decomposition; no comparison
+   against an arbitrary modulus is ever emitted.
+4. **`zk/inner/` foundation:**
+   - `inner/field.rs` — deterministic FFT-friendly inner-prime search
+     (`p' = c * 2^tau + 1` with its two-adic decomposition tracked), QNR /
+     root-of-unity / Fermat-inverse helpers, square-and-multiply `pow`, and
+     a radix-2 NTT (forward / inverse / coset evaluation). Tested against
+     Horner evaluation and for coset-subgroup disjointness (the Ligero
+     message/codeword domain split of the next increment).
+   - `inner/constraints.rs` — the `R_lift`-to-bits compiler: `LiftLayout`
+     (witness = bits of seeds, lifts `X`, quotients `Y`; index helpers;
+     `required_inner_bits` for sizing `p'`), sparse linear constraints over
+     `F_p'` (lift equations `<G_l, s_i> = X + p Y` and aggregation
+     equations `rem_l = X_0 + sum rho_j X_j` emitted directly over bits —
+     Lemma 5.3: linear; booleanity is left to the IOP's quadratic test),
+     and the honest-witness builder (exact integer lifts recomputed in
+     `Uint<IL>` with `div_rem`). Tests: honest witness satisfies all
+     constraints (incl. duplicate columns and a negative weight), tampered
+     bit / wrong `rem` violate, bound bookkeeping.
+
+**State.** 23 zk tests, 111 total in `zip-plus`, zk files clippy-clean.
+Remaining for v1-inner (next increment): `inner/ligero.rs` — the ZK-Ligero
+IOP over `F_p'` (interleaved RS commitment on a coset domain via the NTT
+tooling, `t`-symbol random padding for exact column hiding, blinded linear
+test + booleanity quadratic test, column spot checks), the split commitment
+(seed bits at outer-commit time, `X`/`Y` bits at opening), and the swap of
+`MaskConsistencyProof::Transparent`. Open design knob: inner soundness
+parameters (spot-check count, padding budget) need calibration; bits-as-
+field-elements is wasteful (note Rem 5.6 recommends the limbed field +
+lookups eventually) — correctness first.
