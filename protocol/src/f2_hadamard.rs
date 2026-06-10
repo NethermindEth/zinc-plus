@@ -353,7 +353,7 @@ fn shifted_cell<const D: usize>(
 
 /// Build a `BinaryPoly<D>` cell from the low `D` bits of `m`.
 #[inline]
-fn cell_from_mask<const D: usize>(m: u64) -> BinaryPoly<D> {
+pub(crate) fn cell_from_mask<const D: usize>(m: u64) -> BinaryPoly<D> {
     let coeffs: [Boolean; D] = std::array::from_fn(|i| Boolean::new((m >> i) & 1 != 0));
     BinaryPoly::<D>::new(coeffs)
 }

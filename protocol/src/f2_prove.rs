@@ -3771,6 +3771,53 @@ where
         tuples
     }
 
+    /// **Committed carry columns for the lookup adder** — one `BinaryPoly<D>`
+    /// witness column per adder relation; bit `i` of the cell at row `r` is
+    /// the limb-`i` carry-out `cout_i` of that row's add (0 on inactive
+    /// rows). The fingerprints' `cin_i`/`cout_i` coordinates then become
+    /// linear read-offs of these committed bits (`cin_i = bit_{i−1}`,
+    /// `cin_0 = 0`), which is what makes the witness side bindable.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn sha_lookup_carry_columns(
+        cols: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        limb_bits: usize,
+    ) -> Vec<DenseMultilinearExtension<BinaryPoly<D>>> {
+        use zinc_piop::lookup::add_lookup::decompose_add;
+        let n = 1usize << num_vars;
+        let cell = |term: &crate::f2_hadamard::F2OperandTerm, r: usize| -> u32 {
+            match r.checked_add(term.row_shift).filter(|&i| i < n) {
+                Some(i) => crate::f2_hadamard::cell_mask::<D>(&cols[term.col].evaluations[i]) as u32,
+                None => 0,
+            }
+        };
+        adder_specs
+            .iter()
+            .map(|spec| {
+                let masked = !spec.active_rows.is_empty();
+                let cells: Vec<BinaryPoly<D>> = (0..n)
+                    .map(|r| {
+                        if masked && !spec.active_rows.get(r).copied().unwrap_or(false) {
+                            return crate::f2_hadamard::cell_from_mask::<D>(0);
+                        }
+                        let xv = cell(&spec.x, r);
+                        let yv =
+                            cell(&spec.y, r) ^ spec.y2.as_ref().map_or(0, |y2| cell(y2, r));
+                        let tv = cell(&spec.t, r);
+                        let (_tuples, carries) = decompose_add(xv, yv, tv, 0, limb_bits);
+                        let mut m = 0u64;
+                        for (i, c) in carries.iter().enumerate() {
+                            m |= u64::from(*c & 1) << i;
+                        }
+                        crate::f2_hadamard::cell_from_mask::<D>(m)
+                    })
+                    .collect();
+                DenseMultilinearExtension { evaluations: cells, num_vars }
+            })
+            .collect()
+    }
+
     /// **Tensor-layout witness leaves for the lookup-adder binding.**
     ///
     /// Leaf index `j = p·2^num_vars + r` with `p = a·n_limbs + i` (adder
@@ -3887,10 +3934,18 @@ where
         ),
         F2ProveError<U>,
     > {
+        // Augment the trace with the committed carry columns (one per adder
+        // relation, appended at the end of the witness section) BEFORE the
+        // commit — γ/δ are sampled after, so the carries are fixed first.
+        let carry_cols =
+            Self::sha_lookup_carry_columns(&trace.binary_poly, adder_specs, num_vars, limb_bits);
+        let mut aug = trace.clone();
+        aug.binary_poly.to_mut().extend(carry_cols);
+
         let base = Self::prove_f2_full_with_hadamard(
             transcript,
             pp,
-            trace,
+            &aug,
             virtual_specs,
             bit_op_specs,
             hadamard_specs,
@@ -3901,7 +3956,7 @@ where
         )?;
         let lookup = Self::prove_lookup_adder_phase(
             transcript,
-            &trace.binary_poly,
+            &aug.binary_poly,
             adder_specs,
             num_vars,
             limb_bits,
@@ -7092,7 +7147,9 @@ mod tests {
             /* adders dropped */ &[],
             &trace.binary_poly[..cols::NUM_BIN_PUB],
             num_vars,
-            cols::NUM_BIN,
+            // The lookup adder appends one committed carry column per adder
+            // relation to the witness section.
+            cols::NUM_BIN + adder_specs.len(),
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
         .expect("base SHA proof (adders dropped) must verify");
