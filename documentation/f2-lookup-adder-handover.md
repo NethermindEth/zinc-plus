@@ -64,31 +64,34 @@ columns**:
   a negative-control unit test proves the untagged variant accepts it),
   tampered family evals, lying multiplicities on either table.
 
-### Measured (nvars=16, LB=8 ⇒ 2¹⁷ table, Apple M-series, release)
+### Measured (nvars=16, LB=8 ⇒ 2¹⁷ table, Apple M-series, release, COOL same-run)
 
-After the 2026-06-10 optimization sweep (parallel/fused loops, table-driven
-fingerprints, bit-bucketed family evals + zero-mult `Q_a`, eq-factored GKR
-layer sumcheck — all bit-identical-output refactors, ledger has the
+After BOTH 2026-06-10 optimization rounds (round 1: parallel/fused loops,
+table-driven fingerprints, bit-bucketed family evals + zero-mult `Q_a`,
+eq-factored GKR layer sumcheck; round 2: the shared multi-group eq-factored
+driver + eq-factored binding, the witness FOREST with zero padding +
+μ-combined binding, and the ν-batched fold claims — ledger has every
 breakdown):
 
 | Arm | Prove | Verify |
 |---|---|---|
-| A monomial pipeline, 14 rel (12 adders TRUSTED) | 459.0 ms | 4.4 ms |
-| B monomial pipeline + SOUND lookup adder | 240.9 ms | 29.7 ms |
-| C **production** oblong-GF8, 14 rel (trusted) | 92.7 ms | — |
-| D **production oblong-GF8 + SOUND lookup adder** | **206.1 ms** (best 195.9) | 28.9 ms |
+| A monomial pipeline, 14 rel (12 adders TRUSTED) | 409.2 ms | 3.7 ms |
+| B monomial pipeline + SOUND lookup adder | 218.8 ms | 28.0 ms |
+| C **production** oblong-GF8, 14 rel (trusted) | 80.1 ms | — |
+| D **production oblong-GF8 + SOUND lookup adder** | **179.3 ms** | 28.5 ms |
 
-**The fully-sound production pipeline (D) is ~2.2× the trusted one (C)
-same-run** — from 3.5× post-port and 6.4× at the first measurement. The
-machine swings hard thermally (cold-machine historical: A ~400 / C ~80;
-same-run ratios are the meaningful comparison). Per-phase (D ≈ 204): commit ~19,
-discharge (2 ANDs) 6, α-uair 12, **lookup machinery ~75** (`gkr_tree` 58 —
-of which the eq-factored sumchecks 42.6 + suffix build 9.3, `binding` 20.4,
-`leaves` 4.1, `counts` 2.5, `lblocks` 2.7, self ~16), z_block 2.6,
-multipoint ~30, open ~8. History of the machinery: 265 (committed carries)
-→ 229 (virtualized) → 202 (η-batched) → **~75** (sweep). Verify ~28 ms —
-still table-side dominated (2×2¹⁷ fingerprint rows, the `m′` product,
-~2 MB of absorbed counts; §5.2 kills these).
+**The fully-sound production pipeline (D) is 2.24× the trusted one (C)** —
+from 3.5× post-port and 6.4× at the first measurement; B (sound) is 53% of
+A (trusted) like-for-like. Per-phase (D): shared phases ~75 (commit ~19,
+discharge-2AND ~6, α-uair ~12, z_block ~3, mp's trusted share, open ~8),
+`gkr_tree` ~53 (two trees), `binding` ~27, `multipoint_eval` ~18 (was 156
+pre-η/ν-batching), lookup self ~18, counts/leaves/lblocks ~9. Machinery
+history: 265 (committed carries) → 229 (virtualized) → 202 (η-batched) →
+~75 (round 1) → the round-2 gains landed in `binding`/`multipoint`. Verify
+~28 ms — table-side dominated (2×2¹⁷ fingerprint rows, the `m′` product,
+~2 MB of absorbed counts; §5.2 kills these). The no-protocol-change prover
+floor (~150–170 ms) is effectively reached modulo the tree; further tree
+cuts need the univariate-skip lever or a different multiset argument.
 
 ---
 
@@ -96,10 +99,11 @@ still table-side dominated (2×2¹⁷ fingerprint rows, the `m′` product,
 
 | File | Contents |
 |---|---|
-| `piop/src/lookup/gkr_product.rs` | GKR product-tree engine: `prove/verify_product_tree` (∏ leaves = root → leaf-MLE claim at a point). The prover's layer sumchecks run `prove_layer_sumcheck_eq_factored` — eq factored (suffix tensors + prefix scalar, never materialised/folded), char-2 affine-flat fourth node, **byte-identical** to the generic `MLSumcheck` path (which remains the verifier). Field-generic (runtime char-2 detection; prime fields accumulate the 4th node in-pass); tested at GF(2¹²⁸) AND a prime field. |
+| `piop/src/sumcheck/eq_factored.rs` | The **shared eq-factored sumcheck prover**: `prove_eq_inner_sumcheck` proves `Σ_x Σ_t eq(x;q_t)·Σ_i L_i·R_i` with every eq factored (per-group suffix tensors + prefix scalars, never materialised/folded; char-2 affine-flat fourth node, runtime-detected, in-pass fallback for prime fields), **byte-identical** to the generic `MLSumcheck` path (which remains the verifier everywhere). Callers: the GKR layers (1 group, 1 pair) and the lookup binding (1 group per forest tree, (mask, Q) pairs). |
+| `piop/src/lookup/gkr_product.rs` | GKR product-tree engine: `prove/verify_product_tree` (∏ leaves = root → leaf-MLE claim at a point); layer sumchecks via the shared eq-factored driver. Field-generic; tested at GF(2¹²⁸) AND a prime field. |
 | `piop/src/lookup/gkr_lookup.rs` | Two-tree grand-product lookup (`prove/verify_lookup`). **Only the honest-first path uses it now**; the bound path uses the witness tree + clear multiplicities. Keep for reference or fold away. |
 | `piop/src/lookup/add_lookup.rs` | Public add table `T={(x,y,cin,s,cout)}` + the **marginalised `T′={(x,y,cin,s)}`** (`add_table_fingerprints[_marginal]`), `decompose_add` (honest chain — the honest-first path), **`decompose_add_zread`** (virtualized carries — the bound path), `fingerprint[_marginal]`, `marginal_tag` (= `emb(2)`), `multiplicities`. The z-read unit suite incl. the dropped-carry attack + its negative control. Parameterised by `limb_bits` (tests 4 ⇒ 2⁹ table; production 8 ⇒ 2¹⁷). |
-| `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`): `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`), `lookup_binding_public_part` (PubMLE, add-only mask eq-sums), `prove/verify_lookup_binding` (degree-3 `eq·Σ_a mask_a·Q_a`; `Q_a` rows built from per-(relation,pair) precombined bit-weight tables — pure adds; family evals + mask evals via the **bit-bucket kit**: `eq_table_gf` + `family_proj_evals_bucketed`, one add-only pass per `(col,Δ)` for all `nf` evals), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W`; `family_weights` is the reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows`. Module doc has the math. |
+| `protocol/src/f2_lookup_binding.rs` | The witness-binding sumcheck over **families** (`num_families = 2nl−1`: limb packs `L_i` + boundary bits `e_{ℓj}`), now FOREST-aware: `relation_tree_chunks` (the binary decomposition), `lookup_binding_coeffs` (per-relation `((col,Δ),family)→coeff` maps + the public tag `constant`, SCALED by the tree's μ-power), `BindingTreeGroup` + `prove/verify_lookup_binding` (one μ-combined degree-3 sumcheck over all trees via the eq-factored driver; `Q_a` rows from per-(relation,pair) precombined bit-weight tables — pure adds; family + mask evals via the **bit-bucket kit**: `eq_table_gf`, `family_proj_evals_bucketed`, `binding_distinct_pairs_grouped`), and the **η-batching kit**: `eta_combined_weights` (the fused per-bit table `W`; `family_weights` is the reference form, pinned by the `eta_table_matches_per_family_weights` canary) + `eta_block_rows`. Module doc has the math. |
 | `protocol/src/f2_prove.rs` | **`prove/verify_f2_full_with_oblong_lookup_adder` (PRODUCTION)** and `prove/verify_f2_full_with_lookup_adder_bound` (monomial twin), both over the shared `prove/verify_lookup_adder_bound_phase` (the factored lookup phase: γ/m+m′/δ/leaves/tree/binding/η/blocks); `sha_add_limb_tuples_zread`, `sha_lookup_witness_leaves_tensor_zread`, `F2LookupAdderProof` (incl. `mult_counts_marginal`) + `F2OblongLookupAdderProof` (adds the η-blocks' `r_0` evals — the oblong proof segments its `r_0` evals α/z/lookup), the honest-first wrapper `prove_f2_full_with_lookup_adder` (still on committed carries + old helpers — scaffolding), all tests + the A/B/C/D bench. |
 
 Tests (run with `--features parallel,simd,unchecked`): unit z-read suite in
@@ -144,21 +148,27 @@ trusted parents).
 2. Base UAIR (IC + α + the 2 AND Hadamards + sumcheck) — adders dropped.
 3. `γ` (fingerprint challenge) → **absorb `mult_counts` then
    `mult_counts_marginal`** → `δ`.
-4. Tensor witness leaves (`leaf[p·n+r]`, `p=(adder,limb)` HIGH vars, rows LOW;
-   inactive rows = `1` factors; z-read carries; last limb tagged-marginal) →
-   **witness product tree** → claim `(r_w, eval_w)`; split
-   `r_w = (r_row, r_pair)`.
-5. **Binding sumcheck** at `r_row`: proves `eval_w + PubMLE(r_w) =
-   Σ_r eq·Σ_a mask_a·Q_a` (`Q_a` includes the public tag constant), ships
-   family shifted evals `F̃_f(col↓Δ)(r★)` per distinct `(col,Δ)` — all
+4. Tensor witness leaves (`leaf[p·n+r]`, `p=(adder,limb)` HIGH vars, rows
+   LOW; inactive rows = `1` factors; z-read carries; last limb
+   tagged-marginal; NO padding) → the **witness FOREST**: one product tree
+   per relation chunk of the binary decomposition (12 → [0,8) and [8,12) —
+   exact powers of two of pair blocks; `relation_tree_chunks`). Claims
+   `(r_w^t, eval_w^t)` per tree.
+5. **μ + the combined binding sumcheck**: a FRESH `μ` (post-tree-absorb)
+   scales tree `t`'s coefficients by `μ^t`
+   (`lookup_binding_coeffs(…, scale)`), so ONE sumcheck (the multi-group
+   eq-factored driver, one group per tree at its own `r_row^t`) proves
+   `Σ_t μ^t·(eval_w^t + PubMLE^t)`. Ships family shifted evals
+   `F̃_f(col↓Δ)(r★)` per distinct `(col,Δ)` (union across trees) — all
    `nf = 2nl−1` families each — and absorbs them.
-6. **η + combined blocks**: a FRESH `η` (drawn right after step 5 ⇒
-   post-absorb of the family evals — that freshness is what makes the
-   batching sound), then ONE η-combined block per witness col `g`
-   (`eta_block_rows` over the `eta_combined_weights` table `W`) joins the
-   multipoint fold as a source (`r*` up-evals shipped as
-   `lblock_evals_at_rstar`, absorbed pre-fold). ONE pointed-shift claim per
-   witness `(col,Δ)` pair, down-eval `Σ_f η^f·F̃_f(col↓Δ)(r★)` — computed by
+6. **η + ν + blocks**: a FRESH `η` (post-absorb of the family evals)
+   combines the families: ONE η-block per witness col `g` joins the fold
+   (the `a′` sources; `r*` up-evals shipped as `lblock_evals_at_rstar`).
+   Then a FRESH `ν` collapses the per-(col,Δ) claims to ONE per distinct Δ
+   against ν-combined sources `S_Δ = Σ_i ν^i·block_{g_i}` — the ν-sources
+   carry NO proof data (up-evals are verifier-recomputed from the shipped
+   block evals; their `r_0` evals are checked against / computed from the
+   blocks'). Down-evals `Σ_i ν^i·Σ_f η^f·F̃_f(col_i↓Δ)(r★)` are computed by
    the verifier from the shipped per-family evals (PUBLIC cols — `pa_k/a/e`
    — are recomputed directly, all families, for the binding recombination).
 7. Multipoint → `r_0` → extended `open_evals_at_r_0` (absorbed) → the single
@@ -187,13 +197,15 @@ bound path.
    ever fails, the attack model changed — re-derive before touching the tag.
 3. **Never ship per-bit-slice evals recombined under an already-known
    challenge.** The sound form: FIXED weight families, recombined ONLY under
-   challenges drawn AFTER the evals are absorbed. Both fresh-challenge uses
-   here — `η` (combines the `nf` families: drawn right after the binding
-   absorbs the family evals) and `γ_open` (combines the witness columns in
-   the `a′` equation) — are the sound z-block pattern; the rejected 4c-2
-   per-bit form failed precisely because α predated the evals. If you move
-   the η draw EARLIER than the binding's absorb, the batching becomes that
-   broken pattern.
+   challenges drawn AFTER the evals are absorbed. ALL FOUR fresh-challenge
+   uses here — `μ` (combines the forest's leaf claims: drawn after the tree
+   proofs are absorbed), `η` (combines the `nf` families: drawn right after
+   the binding absorbs the family evals), `ν` (combines the per-Δ claims:
+   drawn after η, same absorbed evals), and `γ_open` (combines the witness
+   columns in the `a′` equation) — are the sound z-block pattern; the
+   rejected 4c-2 per-bit form failed precisely because α predated the
+   evals. If you move ANY of these draws earlier than the absorbs they
+   follow, the batching becomes that broken pattern.
 4. **The leaves and the binding coefficients must express the SAME
    functional.** Leaves use `decompose_add_zread` + `fingerprint[_marginal]`;
    coefficients use limb/boundary-bit reads + the tag constant. The 4c-2
@@ -214,16 +226,17 @@ bound path.
 
 ## 5. Roadmap (prioritized; designs already in the ledger)
 
-1. **Remaining prover spots** (the 2026-06-10 sweep took the machinery
-   203 → ~75 ms; what's left): `gkr_tree` ~58 (the eq-factored layer
-   sumchecks are compute-bound at ~10 GF mults/pair; further cuts are
-   PROTOCOL changes — e.g. 48 = 3·16 pair blocks as 3 trees of 2²⁰ with
-   multiplied roots, −25%, not byte-identical, needs its own adversarial
-   pass; or skipping the ~44% trivial first-round pairs, ~4 ms, branchy),
-   `multipoint_eval` ~30, `binding` ~20 (the degree-3 sumcheck prove
-   itself), lookup self ~16. Realistic floor without protocol changes
-   ≈ 150–170 ms.
-2. **Verifier + proof size** (verify is ~28 ms, table-side dominated):
+1. **Remaining prover spots** (both 2026-06-10 rounds done — machinery
+   203 → ~75, then binding/multipoint eq-factored + forest + ν-batched):
+   `gkr_tree` ~53 is the last big block and its cheap levers are EXHAUSTED
+   (eq-factored ✓, forest split measured ~neutral ✓, ILP unroll microbenched
+   1.3× but flat in situ and reverted ✓ — see the ledger). Further tree
+   cuts need the univariate-skip / packed-sumcheck lever (the ⭐ ledger
+   entry) or a different multiset argument. `binding` ~27 and `mp` ~18 are
+   near their structural floors; lookup self ~18 (counts absorb, transient
+   allocs) has a few ms via sparse counts + buffer reuse.
+2. **Verifier + proof size** (verify is ~28 ms, table-side dominated —
+   now likely the best absolute-ms-per-effort target):
    derive `T′` fingerprints from `T`'s in one add/row
    (`fpT′ = fpT + γ⁴·(emb(cout)+X)`, char 2) instead of a second 2¹⁷-row
    build; sparse-encode `m′` (and `m`: 2¹⁷×8B ≈ 1 MB each); closed-form
