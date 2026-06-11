@@ -236,6 +236,18 @@ existing files in milestone 1.
      either a 4x sub-column split (8 coefficients each, batch x4 --- works
      with the existing coeff_weights machinery) or an arity-32 first round;
      it is the smallest lane.
+   - Depth experiment (e2e, nvars = 9, both lanes, rate 1/4, Q = 150):
+     the lanes already run at MAXIMAL depth (R = floor(num_vars/3): bin 4,
+     int 3); capping at R = 2 gives raw 1964 KB / zstd 621 KB / pcs verify
+     177 ms (vs 2548 / 799 / 232 at full depth) but pcs OPEN jumps 52.5 ->
+     172.8 ms --- the shallow chain's dense lifted-Vandermonde base case
+     (m*n/8^D) bites the prover, exactly as the radix-2 dial predicted.
+     Three-way trade at small m: fewer rounds = smaller proof + faster
+     verify + slower prover. None of it touches the dominant round-0 batch
+     leaf cost (Q * B * 8 * 48 B), and none of it approaches the 184 KB
+     all-Zip+ baseline at this scale. R stays at full depth by default (the
+     polylog target and the cheap-prover regime); the scaling study should
+     treat R as a per-scale knob.
    - Next (5): the scaling study --- nvars sweep with both basefold lanes
      vs all-Zip+ to locate the crossover; then the size/verify levers
      (tight-width leaves, radix-2 batch round 0, fraction-free LU
