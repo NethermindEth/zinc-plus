@@ -1,6 +1,7 @@
 # Zip+ basefold variant — design ledger
 
-Branch: `zip-plus-basefold` (off `main-beta`). Status: milestone 1 in progress.
+Branch: `zip-plus-basefold` (off `main-beta`). Status: milestones 1-2 done
+(interactive IOPP + Merkle/Fiat-Shamir compilation with spot-check queries).
 
 This branch implements the **limbwise-folding (BaseFold-style) variant of Zip+**:
 a hash-based IOPP over the integers with polylogarithmic verification, following
@@ -33,10 +34,17 @@ in clear).
 
 ```
 zip-plus/src/basefold/
-  mod.rs       module doc + re-exports
+  mod.rs       module doc + error type
   limbs.rs     balanced base-2^p decomposition / recombination over Int<N>
   chain.rs     radix-2 foldable IPRS chain (encode at every level; twiddles)
-  iopp.rs      prover + verifier (interactive milestone; FS/Merkle in M2)
+  iopp.rs      interactive prover + verifier (full oracles, all positions);
+               also hosts the shared round/claim/consistency helpers
+  compiled.rs  Merkle-compiled prover + verifier: pair-bundled leaves
+               (leaf j of round r = (u_t[j], u_t[j+n_{r+1}]) for all limbs t,
+               one tree per round), roots absorbed instead of oracles,
+               Q spot checks at chained positions j_{r-1} = s mod n_r with
+               one leaf opening per round per query; CompiledProof +
+               size_bytes accounting
 ```
 
 `pub mod basefold;` added to `zip-plus/src/lib.rs` — the only touch to
@@ -77,12 +85,14 @@ existing files in milestone 1.
 
 ## Milestones
 
-1. **(this)** `limbs.rs` + `chain.rs` + interactive `iopp.rs` (explicit
+1. **done** `limbs.rs` + `chain.rs` + interactive `iopp.rs` (explicit
    oracles, challenges from a transcript, consistency checked at all
-   positions), completeness + tamper tests at m = 2^10.
-2. Merkle per round (leaf = pair-bundled positions {j, j + n_{r+1}}, all limbs
-   in one leaf) + Fiat–Shamir query phase (j_r = s mod n_{r+1} chaining),
-   proof struct + size reporting.
+   positions), completeness + tamper tests.
+2. **done** Merkle per round (leaf = pair-bundled positions {j, j + n_{r+1}},
+   all limbs in one leaf) + Fiat–Shamir query phase (j_{r-1} = s mod n_r
+   chaining), CompiledProof + size accounting. Toy-scale datapoint:
+   ~84 KB at m = 2^8, R = 6, Q = 30 (query openings dominate, as expected;
+   real sizing needs m >= 2^16 and the parameter work of milestone 3).
 3. Parameters: arity-8 folds (reuse radix-8 butterflies), bigger base field
    (5*2^25+1) for long rows, depth dial, measured gamma at depth 4-6.
 4. Integration: `LinearCode`/`ZipTypes`-shaped adapter, batching

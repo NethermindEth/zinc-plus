@@ -22,6 +22,7 @@
 //! the Integers with Polylogarithmic Verification via Limbwise Folding"*.
 
 pub mod chain;
+pub mod compiled;
 pub mod iopp;
 pub mod limbs;
 
@@ -38,6 +39,8 @@ pub enum BasefoldError {
     ClaimCheckFailed { round: usize },
     /// A cross-round consistency check failed.
     ConsistencyCheckFailed { round: usize, position: usize },
+    /// A Merkle opening failed to verify against its round root.
+    MerkleCheckFailed { round: usize, query: usize },
     /// The cleartext tail failed its checks.
     TailCheckFailed(String),
 }
@@ -59,6 +62,12 @@ impl core::fmt::Display for BasefoldError {
                 write!(
                     f,
                     "cross-round consistency check failed at round {round}, position {position}"
+                )
+            }
+            Self::MerkleCheckFailed { round, query } => {
+                write!(
+                    f,
+                    "merkle opening verification failed at round {round}, query {query}"
                 )
             }
             Self::TailCheckFailed(msg) => write!(f, "cleartext tail check failed: {msg}"),

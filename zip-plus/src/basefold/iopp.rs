@@ -54,6 +54,8 @@ pub struct BasefoldParams<C: ChainConfig> {
     pub num_rounds: usize,
     /// `log2` of the witness length.
     pub num_vars: usize,
+    /// Number of spot-check queries of the compiled (Merkle) protocol.
+    pub num_queries: usize,
 }
 
 impl<C: ChainConfig> BasefoldParams<C> {
@@ -61,7 +63,13 @@ impl<C: ChainConfig> BasefoldParams<C> {
         chain: FoldableIprsChain<C>,
         p: u32,
         num_rounds: usize,
+        num_queries: usize,
     ) -> Result<Self, BasefoldError> {
+        if num_queries == 0 {
+            return Err(BasefoldError::InvalidParams(
+                "num_queries must be positive".to_owned(),
+            ));
+        }
         if num_rounds == 0 || num_rounds > chain.num_levels() {
             return Err(BasefoldError::InvalidParams(format!(
                 "num_rounds ({num_rounds}) must be in 1..={}",
@@ -75,6 +83,7 @@ impl<C: ChainConfig> BasefoldParams<C> {
             p,
             num_rounds,
             num_vars,
+            num_queries,
         })
     }
 }
@@ -96,7 +105,7 @@ pub struct BasefoldProof<F: PrimeField, const ND: usize, const NK: usize> {
 
 /// Challenge bitlength implied by the challenge width parameter.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // NCU is a small const
-const fn lambda_bits(ncu: usize) -> u32 {
+pub(super) const fn lambda_bits(ncu: usize) -> u32 {
     64 * (ncu as u32)
 }
 
@@ -117,7 +126,7 @@ where
     ])
 }
 
-fn check_witness_digits<C: ChainConfig, const ND: usize>(
+pub(super) fn check_witness_digits<C: ChainConfig, const ND: usize>(
     params: &BasefoldParams<C>,
     witness: &[Int<ND>],
 ) -> Result<(), BasefoldError> {
@@ -139,7 +148,7 @@ fn check_witness_digits<C: ChainConfig, const ND: usize>(
 
 /// The balanced digit range `[-2^{p-1}, 2^{p-1})` as `(lower, upper)`.
 #[allow(clippy::arithmetic_side_effects)] // p is validated against the digit width
-fn balanced_digit_bounds<const ND: usize>(p: u32) -> (Int<ND>, Int<ND>) {
+pub(super) fn balanced_digit_bounds<const ND: usize>(p: u32) -> (Int<ND>, Int<ND>) {
     let half = Int::<ND>::ONE << sub!(p, 1u32);
     (-half, half)
 }
@@ -407,30 +416,27 @@ where
     Ok(())
 }
 
-/// The cleared-denominator consistency check at one position.
+/// The cleared-denominator consistency check at one position, on raw opened
+/// values:
 ///
-/// `2 tau * sum_j' 2^{p(j'-1)} child[j'][j] ==
+/// `2 tau * sum_j' 2^{p(j'-1)} child_at_j[j'] ==
 ///   sum_t alpha^e_t * tau * (c1_t + c2_t) + alpha^o_t * (c1_t - c2_t)`.
 #[allow(clippy::arithmetic_side_effects)] // widths budgeted; checked ops via macros
-fn check_consistency_at<C, const NK: usize, const NW: usize, const CHECK: bool>(
-    params: &BasefoldParams<C>,
+pub(super) fn check_consistency_values<const NK: usize, const NW: usize, const CHECK: bool>(
+    p: u32,
+    tau: i64,
+    parent_pairs: &[(Int<NK>, Int<NK>)],
+    child_at_j: &[Int<NK>],
+    challenges: &[(Int<NW>, Int<NW>)],
     round: usize,
     j: usize,
-    parent: &[Vec<Int<NK>>],
-    child: &[Vec<Int<NK>>],
-    challenges: &[(Int<NW>, Int<NW>)],
-) -> Result<(), BasefoldError>
-where
-    C: ChainConfig,
-{
-    let n_r = params.chain.codeword_len_at(round);
-    let tau = params.chain.twiddle(sub!(round, 1usize), j);
+) -> Result<(), BasefoldError> {
     let two_tau = mul_i64(2, tau);
 
     // LHS: recombine the child limbs at position j, times 2*tau.
     let mut lhs = Int::<NW>::ZERO;
-    for limb_cw in child.iter().rev() {
-        lhs = add!(lhs << params.p, limb_cw[j].resize::<NW>());
+    for v in child_at_j.iter().rev() {
+        lhs = add!(lhs << p, v.resize::<NW>());
     }
     let lhs = lhs
         .mul_by_scalar::<CHECK>(&two_tau)
@@ -438,9 +444,9 @@ where
 
     // RHS: sum over parent limbs of alpha^e * tau * (c1 + c2) + alpha^o * (c1 - c2).
     let mut rhs = Int::<NW>::ZERO;
-    for (limb_cw, (alpha_e, alpha_o)) in parent.iter().zip(challenges) {
-        let c1 = limb_cw[j].resize::<NW>();
-        let c2 = limb_cw[add!(j, n_r)].resize::<NW>();
+    for ((c1, c2), (alpha_e, alpha_o)) in parent_pairs.iter().zip(challenges) {
+        let c1 = c1.resize::<NW>();
+        let c2 = c2.resize::<NW>();
         let even_part = add!(c1, c2)
             .mul_by_scalar::<CHECK>(&tau)
             .ok_or_else(overflow_err(round, j))?
@@ -462,13 +468,44 @@ where
     }
 }
 
+/// Interactive-milestone wrapper of [`check_consistency_values`] over full
+/// oracles.
+fn check_consistency_at<C, const NK: usize, const NW: usize, const CHECK: bool>(
+    params: &BasefoldParams<C>,
+    round: usize,
+    j: usize,
+    parent: &[Vec<Int<NK>>],
+    child: &[Vec<Int<NK>>],
+    challenges: &[(Int<NW>, Int<NW>)],
+) -> Result<(), BasefoldError>
+where
+    C: ChainConfig,
+{
+    let n_r = params.chain.codeword_len_at(round);
+    let tau = params.chain.twiddle(sub!(round, 1usize), j);
+    let parent_pairs: Vec<(Int<NK>, Int<NK>)> = parent
+        .iter()
+        .map(|cw| (cw[j], cw[add!(j, n_r)]))
+        .collect();
+    let child_at_j: Vec<Int<NK>> = child.iter().map(|cw| cw[j]).collect();
+    check_consistency_values::<NK, NW, CHECK>(
+        params.p,
+        tau,
+        &parent_pairs,
+        &child_at_j,
+        challenges,
+        round,
+        j,
+    )
+}
+
 fn overflow_err(round: usize, position: usize) -> impl Fn() -> BasefoldError {
     move || BasefoldError::ConsistencyCheckFailed { round, position }
 }
 
 // ---------- helpers ----------
 
-fn validate_widths<const ND: usize, const NK: usize, const NW: usize, const NCU: usize>(
+pub(super) fn validate_widths<const ND: usize, const NK: usize, const NW: usize, const NCU: usize>(
     params: &BasefoldParams<impl ChainConfig>,
 ) -> Result<(), BasefoldError> {
     let lambda = lambda_bits(NCU);
@@ -520,7 +557,7 @@ where
     Ok(())
 }
 
-fn split_even_odd<const ND: usize>(limb: &[Int<ND>]) -> (Vec<Int<ND>>, Vec<Int<ND>>) {
+pub(super) fn split_even_odd<const ND: usize>(limb: &[Int<ND>]) -> (Vec<Int<ND>>, Vec<Int<ND>>) {
     let even = limb.iter().step_by(2).copied().collect();
     let odd = limb.iter().skip(1).step_by(2).copied().collect();
     (even, odd)
@@ -528,7 +565,7 @@ fn split_even_odd<const ND: usize>(limb: &[Int<ND>]) -> (Vec<Int<ND>>, Vec<Int<N
 
 /// `sum_t alpha^e_t * even_t + alpha^o_t * odd_t`, accumulated wide.
 #[allow(clippy::arithmetic_side_effects)] // index arithmetic over verified lengths
-fn fold_limbs<const ND: usize, const NW: usize, const CHECK: bool>(
+pub(super) fn fold_limbs<const ND: usize, const NW: usize, const CHECK: bool>(
     limbs: &[Vec<Int<ND>>],
     challenges: &[(Int<NW>, Int<NW>)],
 ) -> Vec<Int<NW>> {
@@ -554,7 +591,7 @@ fn fold_limbs<const ND: usize, const NW: usize, const CHECK: bool>(
 }
 
 /// Project the digits mod `q0` and evaluate the resulting MLE at `point`.
-fn eval_projected_mle<F, const ND: usize>(
+pub(super) fn eval_projected_mle<F, const ND: usize>(
     digits: &[Int<ND>],
     point: &[F],
     cfg: &F::Config,
@@ -584,7 +621,7 @@ fn squeeze_challenge<const NW: usize, const NCU: usize>(
     Int::<NW>::new(crypto_bigint::Int::from_words(wide.to_words()))
 }
 
-fn squeeze_round_challenges<const NW: usize, const NCU: usize>(
+pub(super) fn squeeze_round_challenges<const NW: usize, const NCU: usize>(
     transcript: &mut impl Transcript,
     k: usize,
 ) -> Vec<(Int<NW>, Int<NW>)> {
@@ -597,7 +634,7 @@ fn squeeze_round_challenges<const NW: usize, const NCU: usize>(
         .collect()
 }
 
-fn absorb_ints<T: ConstTranscribable>(transcript: &mut impl Transcript, vals: &[T]) {
+pub(super) fn absorb_ints<T: ConstTranscribable>(transcript: &mut impl Transcript, vals: &[T]) {
     let mut buf = vec![0u8; T::NUM_BYTES];
     for v in vals {
         v.write_transcription_bytes_exact(&mut buf);
@@ -605,7 +642,7 @@ fn absorb_ints<T: ConstTranscribable>(transcript: &mut impl Transcript, vals: &[
     }
 }
 
-fn absorb_field<F>(transcript: &mut impl Transcript, v: &F)
+pub(super) fn absorb_field<F>(transcript: &mut impl Transcript, v: &F)
 where
     F: PrimeField,
     F::Inner: Transcribable,
@@ -617,7 +654,7 @@ where
 
 /// `2^bits` as a field element.
 #[allow(clippy::arithmetic_side_effects)] // shl is overflow-checked by crypto-bigint
-fn two_pow<F, const NW: usize>(bits: u32, cfg: &F::Config) -> F
+pub(super) fn two_pow<F, const NW: usize>(bits: u32, cfg: &F::Config) -> F
 where
     F: PrimeField + for<'a> FromWithConfig<&'a Int<NW>>,
 {
@@ -626,7 +663,7 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn mul_u32(a: u32, b: usize) -> u32 {
+pub(super) fn mul_u32(a: u32, b: usize) -> u32 {
     a.checked_mul(u32::try_from(b).expect("limb index fits u32"))
         .expect("power-of-two exponent overflow")
 }
@@ -672,7 +709,7 @@ mod tests {
         let msg_len = 1usize << num_vars;
         let chain =
             FoldableIprsChain::<ChainConfigF65537>::new(msg_len, 4, num_rounds).unwrap();
-        let params = BasefoldParams::new(chain, P, num_rounds).unwrap();
+        let params = BasefoldParams::new(chain, P, num_rounds, 30).unwrap();
         // Signed witness entries, small but representative.
         let witness: Vec<Int<ND>> = (0..msg_len as i32)
             .map(|i| Int::from(31 * i - 1000))
