@@ -93,8 +93,41 @@ existing files in milestone 1.
    chaining), CompiledProof + size accounting. Toy-scale datapoint:
    ~84 KB at m = 2^8, R = 6, Q = 30 (query openings dominate, as expected;
    real sizing needs m >= 2^16 and the parameter work of milestone 3).
-3. Parameters: arity-8 folds (reuse radix-8 butterflies), bigger base field
-   (5*2^25+1) for long rows, depth dial, measured gamma at depth 4-6.
+3. Parameters (in progress).
+   - **done** `ChainConfigF167772161` (5*2^25+1, two-adicity 25, generator 3):
+     codeword lengths up to 2^25; twiddle lifts <= 28 bits.
+   - **done** Norm-growth measurement (`norm_growth_report`): at q = 5*2^25+1,
+     measured per-level growth is ~26 bits vs the 27.3-bit worst case --- the
+     multiplicative twiddle chain dominates and centered-representative
+     cancellation does NOT compound (~1.4 bits/level saved; the dramatic
+     savings observed at depth 1-2 with radix 8 come from the additive terms,
+     not the chain). Depth 10 at 129-bit digits: 387 measured vs 436
+     worst-case bits. Consequences: (a) leaf width should be sized from the
+     measured profile + margin (~35-40% leaf-byte saving vs worst-case-wide
+     ints); (b) prefer the smallest field whose two-adicity covers n
+     (F_65537 up to n = 2^16: ~15 bits/level, roughly half the big field's
+     growth); (c) the draft paper's hope of a sub-worst-case exponent at
+     depth needs revising --- effective gamma ~ (depth+1)(log2(q/2) - 1.4).
+   - **done** Depth-dial experiment (`depth_dial_report`, #[ignore]d): proof
+     size breakdown + commit/prove/verify times across R at m = 2^12, Q = 100,
+     q = 5*2^25+1, 80 B worst-case-wide leaf ints. Measured (release, M-series):
+       R= 2: 181 KB, commit 1.08s, prove 1.07s, verify 541ms (dense tail!)
+       R= 6: 391 KB, commit  74ms, prove 138ms, verify 3.0ms
+       R=12: 678 KB, commit  10ms, prove  20ms, verify 2.0ms (max leaf 435 bits)
+     Readings: (a) polylog verifier confirmed (1.6-3 ms at R >= 6; the 541 ms
+     at R = 2 is the dense lifted-Vandermonde tail re-encode --- the predicted
+     shallow-chain failure mode); (b) with this encoder, DEEP chains are
+     cheaper for the prover too (shallow depth pays m*n/2^D for the dense base
+     case; full depth is n*D butterflies); (c) at m = 2^12 the query side
+     (~5 KB/round/100 queries) dominates and small R wins on size --- the size
+     case for depth only opens at larger m, and competitive sizes need the
+     levers: arity-8 (~3x fewer rounds), Q ~ 50 (Johnson), tight leaf widths
+     (~20-38%), path dedup across queries, smallest adequate base field.
+   - TODO: arity-8 folds (radix-8 levels + 8x8 lifted-DFT block inversion via
+     Bareiss/adjugate with cleared determinant denominators) --- milestone 3b.
+   - TODO: tight leaf widths (serialize leaves at measured-width bytes rather
+     than the Int<NK> fixed width; needs a variable-width or per-round-width
+     leaf format).
 4. Integration: `LinearCode`/`ZipTypes`-shaped adapter, batching
    (batch-then-fold round 0 on the interleaved commitment), wiring into
    `protocol` as an alternative opening for the int lane; benches.

@@ -68,6 +68,36 @@ impl ChainConfig for ChainConfigF65537 {
     }
 }
 
+mod f167772161 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "167772161"]
+    #[generator = "3"]
+    pub struct Config;
+
+    pub type Backend = MontBackend<Config, 1>;
+    pub type Field = Fp64<Backend>;
+
+    #[allow(clippy::cast_possible_truncation)] // modulus is 28 bits
+    pub const MODULUS: u32 = Config::MODULUS.0[0] as u32;
+}
+
+/// Chain configuration over `F_{5 * 2^25 + 1}` (two-adicity 25); supports
+/// codeword lengths up to `2^25`. Twiddle lifts are at most 28 bits, so the
+/// per-level worst-case norm growth is ~28 bits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainConfigF167772161;
+
+impl ChainConfig for ChainConfigF167772161 {
+    type Field = f167772161::Field;
+    const FIELD_MODULUS: u32 = f167772161::MODULUS;
+
+    fn field_to_int_centered(x: Self::Field) -> TwiddleInt {
+        normalize_field_element(x.into_bigint().0[0], Self::FIELD_MODULUS)
+    }
+}
+
 /// Centered lift for at-most-32-bit field moduli.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
 fn normalize_field_element(x: u64, q: u32) -> TwiddleInt {
@@ -254,6 +284,7 @@ impl<C: ChainConfig> FoldableIprsChain<C> {
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
     clippy::unwrap_used
 )]
 mod tests {
@@ -301,6 +332,82 @@ mod tests {
         let cw_e: Vec<I8w> = chain.encode_at_level::<_, _, true>(1, &even);
         let cw_o: Vec<I8w> = chain.encode_at_level::<_, _, true>(1, &odd);
 
+        let half = chain.codeword_len_at(1);
+        for j in 0..half {
+            let tau = chain.twiddle(0, j);
+            let t = cw_o[j].mul_by_scalar::<true>(&tau).unwrap();
+            assert_eq!(cw[j], add!(cw_e[j], t));
+            assert_eq!(cw[j + half], sub!(cw_e[j], t));
+        }
+    }
+
+    fn random_digit<const N: usize>(rng: &mut impl rand::Rng, bits: u32) -> Int<N> {
+        let mut words = [0u64; N];
+        let full_words = (bits / 64) as usize;
+        for w in words.iter_mut().take(full_words) {
+            *w = rng.random();
+        }
+        let rem = bits % 64;
+        if rem > 0 && full_words < N {
+            words[full_words] = rng.random::<u64>() & ((1u64 << rem) - 1);
+        }
+        let mag = Int::<N>::new(crypto_bigint::Int::from_words(words));
+        if rng.random::<bool>() { -mag } else { mag }
+    }
+
+    fn max_bits<const N: usize>(values: &[Int<N>]) -> u32 {
+        values
+            .iter()
+            .map(|v| v.inner().abs().bits())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Measured vs worst-case codeword norm growth of the chain encoders,
+    /// per depth. The worst-case bound (companion thm) is
+    /// `input_bits + (depth + 1) * log2(q/2) + log2(msg_len)`; centered
+    /// representatives cancel heavily in practice, and the measured value
+    /// drives the leaf width (and hence proof size) of the compiled IOPP.
+    #[test]
+    fn norm_growth_report() {
+        use super::super::limbs::num_limbs_for;
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let input_bits = 129u32; // balanced digits at p = 130
+        let msg_len = 1usize << 10;
+        let q = f167772161::MODULUS;
+        let log_q_half = 32 - (q / 2).leading_zeros();
+        for depth in [2usize, 4, 6, 8, 10] {
+            let chain =
+                FoldableIprsChain::<ChainConfigF167772161>::new(msg_len, 4, depth).unwrap();
+            let msg: Vec<Int<3>> = (0..msg_len)
+                .map(|_| random_digit::<3>(&mut rng, input_bits))
+                .collect();
+            let cw: Vec<Int<10>> = chain.encode_at_level::<_, _, true>(0, &msg);
+            let measured = max_bits(&cw);
+            let worst =
+                input_bits + (depth as u32 + 1) * log_q_half + msg_len.ilog2();
+            let growth = measured.saturating_sub(input_bits);
+            eprintln!(
+                "depth {depth:2}: measured {measured:4} bits (growth {growth:3},                  {:.1}/level) vs worst-case {worst} bits",
+                f64::from(growth) / depth as f64
+            );
+            assert!(measured <= worst, "worst-case bound violated");
+            // Sanity for the IOPP type budget used by the experiments.
+            assert!(num_limbs_for(input_bits, 130) == 1);
+        }
+    }
+
+    #[test]
+    fn big_field_chain_works() {
+        // The locality identity over the 5*2^25+1 field.
+        let chain = FoldableIprsChain::<ChainConfigF167772161>::new(64, 4, 4).unwrap();
+        let msg: Vec<Int<3>> = (0..64).map(|i| Int::from(13 * i - 100)).collect();
+        let cw: Vec<I8w> = chain.encode_at_level::<_, _, true>(0, &msg);
+        let even: Vec<Int<3>> = msg.iter().step_by(2).cloned().collect();
+        let odd: Vec<Int<3>> = msg.iter().skip(1).step_by(2).cloned().collect();
+        let cw_e: Vec<I8w> = chain.encode_at_level::<_, _, true>(1, &even);
+        let cw_o: Vec<I8w> = chain.encode_at_level::<_, _, true>(1, &odd);
         let half = chain.codeword_len_at(1);
         for j in 0..half {
             let tau = chain.twiddle(0, j);

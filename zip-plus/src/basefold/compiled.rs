@@ -599,6 +599,119 @@ mod tests {
         );
     }
 
+    /// Depth-dial experiment: proof size and timing across fold-round
+    /// counts at a fixed message length, over the 5*2^25+1 chain with
+    /// production-flavored parameters (p = 130, lambda = 128, Q = 100,
+    /// random 129-bit signed witness digits).
+    ///
+    /// Run with:
+    /// `cargo test -p zip-plus depth_dial_report -- --ignored --nocapture`
+    #[test]
+    #[ignore = "experiment; run explicitly with --ignored --nocapture"]
+    fn depth_dial_report() {
+        use crate::basefold::chain::ChainConfigF167772161;
+        use rand::{Rng, SeedableRng};
+        use std::time::Instant;
+
+        const NKB: usize = 10; // 640-bit codeword leaves (worst-case safe)
+        const NWB: usize = 12; // 768-bit check accumulators
+        const QQ: usize = 100;
+
+        let num_vars = 12usize;
+        let msg_len = 1usize << num_vars;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(99);
+        let witness: Vec<Int<ND>> = (0..msg_len)
+            .map(|_| {
+                let mut words = [0u64; ND];
+                words[0] = rng.random();
+                words[1] = rng.random();
+                words[2] = rng.random::<u64>() & 1; // 129-bit magnitude
+                let v = Int::<ND>::new(crypto_bigint::Int::from_words(words));
+                if rng.random::<bool>() { -v } else { v }
+            })
+            .collect();
+
+        eprintln!(
+            "depth dial: m = 2^{num_vars}, rep = 4, q = 5*2^25+1, p = {P},              lambda = 128, Q = {QQ}, leaf ints {} B",
+            <Int<NKB> as ConstTranscribable>::NUM_BYTES
+        );
+        for num_rounds in [2usize, 4, 6, 8, 10, 12] {
+            let chain = FoldableIprsChain::<ChainConfigF167772161>::new(
+                msg_len, 4, num_rounds,
+            )
+            .unwrap();
+            let params = BasefoldParams::new(chain, P, num_rounds, QQ).unwrap();
+
+            let t0 = Instant::now();
+            let (commitment, hint) =
+                commit::<_, ND, NKB, true>(&params, &witness).unwrap();
+            let t_commit = t0.elapsed();
+
+            let (mut tp, cfg, point) = {
+                let mut t = Blake3Transcript::new();
+                t.absorb_slice(&commitment.root.0);
+                let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+                let point: Vec<F> = t.get_field_challenges(num_vars, &cfg);
+                (t, cfg, point)
+            };
+            let t0 = Instant::now();
+            let (proof, eval) = prove::<_, F, ND, NKB, NWB, NCU, true>(
+                &params, &witness, &hint, &point, &cfg, &mut tp,
+            )
+            .unwrap();
+            let t_prove = t0.elapsed();
+
+            let (mut tv, cfg_v, point_v) = {
+                let mut t = Blake3Transcript::new();
+                t.absorb_slice(&commitment.root.0);
+                let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+                let point: Vec<F> = t.get_field_challenges(num_vars, &cfg);
+                (t, cfg, point)
+            };
+            let t0 = Instant::now();
+            verify::<_, F, ND, NKB, NWB, NCU, true>(
+                &params,
+                &commitment,
+                &proof,
+                &point_v,
+                &eval,
+                &cfg_v,
+                &mut tv,
+            )
+            .unwrap();
+            let t_verify = t0.elapsed();
+
+            // Size breakdown and the leaf-width headroom (max bits actually
+            // present in opened leaf values vs the fixed 64*NKB serialization).
+            let nk_bytes = <Int<NKB> as ConstTranscribable>::NUM_BYTES;
+            let nd_bytes = <Int<ND> as ConstTranscribable>::NUM_BYTES;
+            let total = proof.size_bytes(32);
+            let tail_b: usize = proof.tail.iter().map(|l| l.len() * nd_bytes).sum();
+            let roots_b = proof.round_roots.len() * 32;
+            let claims_b = (2 * proof.half_claims.iter().map(Vec::len).sum::<usize>()
+                + proof.limb_claims.iter().map(Vec::len).sum::<usize>())
+                * 32;
+            let (mut leaf_vals_b, mut paths_b, mut max_leaf_bits) = (0usize, 0usize, 0u32);
+            for o in proof.queries.iter().flat_map(|q| q.iter()) {
+                leaf_vals_b += o.values.len() * nk_bytes;
+                paths_b += o.proof.siblings.len() * 32 + 16;
+                for v in &o.values {
+                    max_leaf_bits = max_leaf_bits.max(v.inner().abs().bits());
+                }
+            }
+            let tight = total - leaf_vals_b
+                + leaf_vals_b * (max_leaf_bits as usize + 8).div_ceil(8)
+                    / nk_bytes.max(1);
+            let tail_exp = num_vars - num_rounds;
+            eprintln!(
+                "R = {num_rounds:2}: tail 2^{tail_exp} | {total:7} B total (tail {tail_b:6}, \
+                 roots {roots_b:4}, claims {claims_b:5}, leaf vals {leaf_vals_b:6}, \
+                 paths {paths_b:6}) | max leaf bits {max_leaf_bits:3} -> tight-width \
+                 ~{tight:7} B | commit {t_commit:?} prove {t_prove:?} verify {t_verify:?}"
+            );
+        }
+    }
+
     #[test]
     fn rejects_wrong_eval_compiled() {
         let s = setup(6, 4);
