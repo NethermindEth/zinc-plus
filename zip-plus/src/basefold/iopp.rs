@@ -613,7 +613,7 @@ where
 }
 
 /// Squeeze one non-negative `64 * NCU`-bit challenge, zero-extended wide.
-fn squeeze_challenge<const NW: usize, const NCU: usize>(
+pub(super) fn squeeze_challenge<const NW: usize, const NCU: usize>(
     transcript: &mut impl Transcript,
 ) -> Int<NW> {
     let u: Uint<NCU> = transcript.get_challenge();

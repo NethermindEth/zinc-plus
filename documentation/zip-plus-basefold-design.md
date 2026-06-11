@@ -123,11 +123,28 @@ existing files in milestone 1.
      case for depth only opens at larger m, and competitive sizes need the
      levers: arity-8 (~3x fewer rounds), Q ~ 50 (Johnson), tight leaf widths
      (~20-38%), path dedup across queries, smallest adequate base field.
-   - TODO: arity-8 folds (radix-8 levels + 8x8 lifted-DFT block inversion via
-     Bareiss/adjugate with cleared determinant denominators) --- milestone 3b.
+   - **done (3b)** Arity-8 folds: `chain8.rs` (true radix-8 lift: one twiddle
+     per DFT-block entry, so per-folded-variable norm growth ~9-10 bits vs
+     radix-2's ~26 --- measured 240-bit leaves at m = 2^12 full depth vs 435)
+     and `arity8.rs` (8-way class split, 8 challenges/limb, 3 z-coords per
+     round with Lagrange class weights, 8-coset leaves, p = lambda + 4).
+     Verifier derivation solves the transposed system M_j^T z = alpha
+     fraction-free per queried position (Bareiss triangularization + exact
+     back-substitution; divisions exact since d*z is integral) and checks
+     d * recombined_child == sum_t z_t^T c_t --- still no rationals.
+     Dial at m = 2^12, Q = 100, 40 B leaves (vs radix-2 full depth:
+     678 KB / prove 20 ms / verify 2.0 ms):
+       R = 2: tail 2^6 | 164 KB | commit 28ms prove 9.1ms verify 26ms
+       R = 3: tail 2^3 | 243 KB | commit 11ms prove 3.6ms verify 40ms
+       R = 4: tail 2^0 | 316 KB | commit 13ms prove 3.7ms verify 54ms
+     Proof size halved at full depth; prover 5x faster; the verifier regression
+     (2 ms -> 26-54 ms) is exactly the lazy per-position Bareiss cost
+     (~0.13 ms/solve x Q*R).
+   - TODO: precompute the fraction-free LU (or adjugate) of every DFT block
+     at setup and keep it as verifier advice --- drops per-proof solve work to
+     back-substitution (~2-4 ms verify expected; ~few MB advice at m = 2^12).
    - TODO: tight leaf widths (serialize leaves at measured-width bytes rather
-     than the Int<NK> fixed width; needs a variable-width or per-round-width
-     leaf format).
+     than the Int<NK> fixed width; 240 measured vs 320 fixed bits at arity 8).
 4. Integration: `LinearCode`/`ZipTypes`-shaped adapter, batching
    (batch-then-fold round 0 on the interleaved commitment), wiring into
    `protocol` as an alternative opening for the int lane; benches.

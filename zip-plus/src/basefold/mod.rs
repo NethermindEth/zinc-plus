@@ -21,7 +21,9 @@
 //! and its analysis follow the working draft *"Zip++: Hash-Based IOPPs over
 //! the Integers with Polylogarithmic Verification via Limbwise Folding"*.
 
+pub mod arity8;
 pub mod chain;
+pub mod chain8;
 pub mod compiled;
 pub mod iopp;
 pub mod limbs;

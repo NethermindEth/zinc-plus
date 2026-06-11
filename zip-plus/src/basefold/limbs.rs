@@ -36,10 +36,19 @@ pub fn num_limbs_for(bits: u32, p: u32) -> usize {
 /// stabilizes at `k = 2`, with the fold bound strictly below the balanced
 /// representability limit of two digits.
 pub fn next_limb_count(lambda: u32, p: u32, k_prev: usize) -> usize {
-    debug_assert!(k_prev >= 1);
+    next_limb_count_arity(lambda, p, k_prev, 1)
+}
+
+/// Arity-`2^s` variant of [`next_limb_count`]: folding the `2^s * k_prev`
+/// limb pieces with challenges in `[0, 2^lambda)` and balanced digits yields
+/// values bounded by `2^s * k * (2^lambda - 1) * 2^{p-1}
+/// < 2^{lambda + p + s - 1 + ceil(log2(k_prev))}`. Stabilizes at `k = 2`
+/// for `p >= lambda + s + 1`.
+pub fn next_limb_count_arity(lambda: u32, p: u32, k_prev: usize, log_arity: u32) -> usize {
+    debug_assert!(k_prev >= 1 && log_arity >= 1);
     // ceil(log2(k_prev))
     let log_k = sub!(usize::BITS, sub!(k_prev, 1usize).leading_zeros());
-    num_limbs_for(add!(add!(lambda, p), log_k), p)
+    num_limbs_for(add!(add!(lambda, p), add!(log_k, sub!(log_arity, 1u32))), p)
 }
 
 /// Balanced base-`2^p` decomposition of a single integer.
@@ -233,6 +242,9 @@ mod tests {
         assert_eq!(k, 2);
         // p = lambda + 1 is not enough.
         assert!(next_limb_count(lambda, lambda + 1, 2) > 2);
+        // Arity 8 (s = 3): stable at two limbs iff p >= lambda + s + 1.
+        assert_eq!(next_limb_count_arity(lambda, lambda + 4, 2, 3), 2);
+        assert!(next_limb_count_arity(lambda, lambda + 3, 2, 3) > 2);
     }
 
     #[test]
