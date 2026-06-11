@@ -1675,6 +1675,9 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12).
+        + for<'b> FromWithConfig<&'b Int<3>>
+        + for<'b> FromWithConfig<&'b Int<12>>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
@@ -1749,6 +1752,9 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12).
+        + for<'b> FromWithConfig<&'b Int<3>>
+        + for<'b> FromWithConfig<&'b Int<12>>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
@@ -1824,6 +1830,9 @@ where
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Int<INT_LIMBS>>
         + for<'b> FromWithConfig<&'b Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12).
+        + for<'b> FromWithConfig<&'b Int<3>>
+        + for<'b> FromWithConfig<&'b Int<12>>
         + for<'b> FromWithConfig<&'b <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'b> FromWithConfig<&'b <ZtF::IntZt as ZipTypes>::CombR>
@@ -2336,14 +2345,22 @@ where
         eval_f
     };
 
+    // Under the basefold int lane, the int slot is not part of any Zip+
+    // batch; its commitment root belongs to the basefold tree and is
+    // checked separately below.
+    let int_zip_batch_size = if cfg!(feature = "basefold-int") {
+        0
+    } else {
+        proof.commitments.2.batch_size
+    };
     let nonempty_count = (proof.commitments.0.batch_size > 0) as u8
         + (proof.commitments.1.batch_size > 0) as u8
-        + (proof.commitments.2.batch_size > 0) as u8;
+        + (int_zip_batch_size > 0) as u8;
     let nonempty_roots_match = {
         let mut roots = [
             (proof.commitments.0.batch_size > 0).then_some(&proof.commitments.0.root),
             (proof.commitments.1.batch_size > 0).then_some(&proof.commitments.1.root),
-            (proof.commitments.2.batch_size > 0).then_some(&proof.commitments.2.root),
+            (int_zip_batch_size > 0).then_some(&proof.commitments.2.root),
         ]
         .into_iter()
         .flatten();
@@ -2389,7 +2406,7 @@ where
             (Vec::new(), None, None)
         };
 
-        let (alphas_int, reads_int, eval_f_int) = if proof.commitments.2.batch_size > 0 {
+        let (alphas_int, reads_int, eval_f_int) = if int_zip_batch_size > 0 {
             let alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
                 &mut pcs_transcript.fs_transcript,
                 proof.commitments.2.batch_size,
@@ -2474,7 +2491,17 @@ where
             vp_int_split4,
             &proof.commitments.0,
             &proof.commitments.1,
-            &proof.commitments.2,
+            // Under the basefold int lane the int slot holds the basefold
+            // root and is not part of the shared Zip+ tree: present it as
+            // an empty instance with the shared root.
+            &if cfg!(feature = "basefold-int") {
+                zip_plus::pcs::structs::ZipPlusCommitment {
+                    root: proof.commitments.0.root.clone(),
+                    batch_size: 0,
+                }
+            } else {
+                proof.commitments.2.clone()
+            },
             &alphas_bin,
             &alphas_arb,
             &alphas_int,
@@ -2524,10 +2551,10 @@ where
             )
             .map_err(|e| ProtocolError::PcsVerification(1, e))?;
         }
-        if proof.commitments.2.batch_size > 0 {
+        if int_zip_batch_size > 0 {
             let alphas = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::sample_alphas(
                 &mut pcs_transcript.fs_transcript,
-                proof.commitments.2.batch_size,
+                int_zip_batch_size,
             );
             let eval_f = int_eval_f(&alphas);
             ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
@@ -2542,6 +2569,49 @@ where
             .map_err(|e| ProtocolError::PcsVerification(2, e))?;
         }
     }
+    #[cfg(feature = "basefold-int")]
+    if proof.commitments.2.batch_size > 0 {
+        use num_traits::ConstOne;
+        use zip_plus::basefold::protocol_glue::{
+            BF_NCU, BF_NK, BF_NW, bf_zip_err, int_lane_params, read_arity8_proof,
+        };
+        let b = proof.commitments.2.batch_size;
+        let ones_alphas: Vec<Vec<<ZtF::IntZt as ZipTypes>::Chal>> =
+            vec![vec![<ZtF::IntZt as ZipTypes>::Chal::ONE]; b];
+        let eval_f = int_eval_f(&ones_alphas);
+        let rep = <ZtF::IntLc as zip_plus::code::LinearCode<ZtF::IntZt>>::REPETITION_FACTOR;
+        let bf_params = int_lane_params(
+            r0_ext.len(),
+            rep,
+            <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, b, &field_cfg)
+            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+        let weights = vec![F::one_with_cfg(&field_cfg); b];
+        zip_plus::basefold::arity8::verify_batch::<
+            _,
+            F,
+            3,
+            BF_NK,
+            BF_NW,
+            BF_NCU,
+            CHECK_FOR_OVERFLOW,
+        >(
+            &bf_params,
+            &zip_plus::basefold::arity8::Arity8Commitment {
+                root: proof.commitments.2.root.clone(),
+            },
+            &bf_proof,
+            &weights,
+            &r0_ext,
+            &eval_f,
+            &field_cfg,
+            &mut pcs_transcript.fs_transcript,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(2, bf_zip_err(e)))?;
+    }
+
     if let Some(t) = timings.as_mut() {
         t.step7_pcs_verify = _t_step7.elapsed();
     }

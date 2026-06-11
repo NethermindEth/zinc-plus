@@ -45,6 +45,10 @@ iprs-rate-1-8 = []
 # Switch the IPRS bench code to inverse-rate 16 (rate 1/16). Takes precedence
 # over `iprs-rate-1-8` if both are enabled.
 iprs-rate-1-16 = []
+# Open the integer witness lane with the basefold (limbwise-folding, Zip++)
+# IOPP instead of Zip+ in the folded-4x pipeline. Binary and arbitrary lanes
+# stay on Zip+; the int lane gets its own arity-8 chain commitment.
+basefold-int = []
 
 [[bench]]
 name = "e2e"

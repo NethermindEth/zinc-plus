@@ -157,25 +157,50 @@ existing files in milestone 1.
      psi-alphas = [1]) proves `sum_j phi_q0(poly_j)~(point) = eval_f` at
      `point = r_0_ext` (num_vars + 2 coords in F, the quartered columns
      concatenated). Tested incl. correlated round-0 lies.
-   - TODO (4b) Serialization: `Arity8Proof` to/from the PCS byte stream
-     (fixed-width ConstTranscribable encodings; MtHash raw 32 B; MerkleProof
-     index/count/siblings) so the proof embeds in `Proof::zip`.
-   - TODO (4c) Protocol wiring, behind a `basefold-int` feature: step 0
-     commits the int lane via `commit_batch` (forces the non-MultiZip3 path
-     for the int lane; binary/arbitrary stay on Zip+/MultiZip), step 7
-     prover calls `prove_batch` with all-one weights at `r_0_ext`, verifier
-     step mirrors with `verify_batch`; FS challenges flow through the shared
-     `fs_transcript` (Blake3) inside Pcs{Prover,Verifier}Transcript.
-     Call sites: protocol/src/prover.rs prove_folded_4x_inner (~1817-2371,
-     commit ~2244-2367, open ~2238-2371), protocol/src/verifier.rs
-     verify_pcs_batch! (~897-974). Int lane types in the bench:
-     Eval = Int<2> (64-bit quarters), point = 11 F-coords at num_vars = 9,
-     F = secp256k1 MontyField<4> via fixed_prime.
-   - TODO (4d) e2e bench: run protocol/benches/e2e.rs sha_ecdsa folded-4x
-     with the feature on; report raw + zstd proof sizes via
-     eprint_proof_size for apples-to-apples vs Zip+ (the basefold dial
-     numbers so far are UNCOMPRESSED fixed-width estimates; the tight-width
-     column approximates what zstd recovers from sign-extension padding).
+   - **done (4b)** Serialization: `protocol_glue.rs` ---
+     `write_arity8_proof` / `read_arity8_proof` over the PCS byte stream
+     (stream-only, no FS absorption: prove/verify do their own symmetric
+     absorbs; the verifier deserializes first, then replays). All shapes
+     derive from (params, batch_size) via the limb schedule. Roundtrip
+     tested through the real Pcs{Prover,Verifier}Transcript.
+   - **done (4c)** Protocol wiring behind the `basefold-int` feature
+     (protocol/Cargo.toml): in `prove_folded_4x_inner` the int lane is
+     excluded from the Zip+ batches (`int_witness_for_zip = &[]`), committed
+     via `commit_batch` over the arity-8 chain (quartered columns resized
+     Int<2> -> Int<3>; the basefold root rides in the int slot of
+     `Proof::commitments`, absorbed unchanged by the transcript init), and
+     opened after the Zip+ lanes with `prove_batch` at `r_0_ext` with
+     all-one weights + `write_arity8_proof`. `verify_folded_4x_inner`
+     mirrors: the int slot is zip-empty (`int_zip_batch_size = 0` under the
+     feature; the shared-tree call gets a shared-root/empty-batch stand-in
+     since `verify_columns_shared` asserts equal roots and sizes its stream
+     reads by `batch_size`), then `read_arity8_proof` + `verify_batch`
+     against `int_eval_f(ones)` (the int lane's per-poly psi-alphas are
+     trivially ONE, FS-silent). Params derived identically on both sides:
+     `int_lane_params(r0_ext.len(), IntLc::REPETITION_FACTOR,
+     IntZt::NUM_COLUMN_OPENINGS)`, q = 5*2^25+1, R = floor((nv+2)/3),
+     widths BF_ND=3 / BF_NK=6 / BF_NW=12 / lambda=128 / p=132.
+   - **done (4d)** e2e validation: `cargo bench -p zinc-protocol --features
+     "parallel basefold-int" --bench e2e -- "Folded 4x" --test` runs the
+     ShaEcdsa folded-4x prove+verify roundtrip (and the N=100 timing
+     harness) green. Measured at nvars = 9 (int lane m = 2^11, R = 3,
+     Q = 150, rate 1/4, checked arithmetic, parallel):
+       baseline (all-Zip+):  proof.zip raw  399 KB, zstd 184 KB;
+                             step-7 open 12.7 ms, step-7 verify  59.4 ms
+       basefold int lane:    proof.zip raw 1465 KB, zstd 542 KB;
+                             step-7 open 10.6 ms, step-7 verify 151.0 ms
+     Reading: correctness and the full FS/serialization pipeline validated;
+     at this scale the basefold int lane is NOT competitive on size or
+     verify time, exactly as the dial predicted --- m = 2^11 with Q = 150
+     is deep in the query-dominated regime, the batch round-0 leaves carry
+     all B columns' 8-cosets (B*8 values/leaf at 48 B fixed width), and the
+     verifier pays the lazy per-position Bareiss solves (~441 of them).
+     The integration is the vehicle; the prize remains the big lanes at
+     larger m via the X-dimension extension. Levers specific to this lane:
+     tight-width leaf serialization (round-0 entries are ~180 bits in 384-bit
+     slots; zstd already recovers much of it --- 2.7:1 on the blob), a
+     radix-2 round 0 (pairs instead of 8-cosets for the batch round,
+     B*2 values/leaf), and the LU-precompute for verify time.
    - Later (4e): binary/arbitrary lanes need the X-dimension-as-variables
      extension (monomial-basis claim rounds with psi-alpha weights
      (1, alpha^{2^i})) --- the big prize, since those lanes dominate the

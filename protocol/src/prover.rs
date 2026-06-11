@@ -1646,6 +1646,10 @@ where
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12);
+        // the impls are generic over limb counts, so these are free.
+        + for<'a> FromWithConfig<&'a Int<3>>
+        + for<'a> FromWithConfig<&'a Int<12>>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
@@ -1711,6 +1715,10 @@ where
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12);
+        // the impls are generic over limb counts, so these are free.
+        + for<'a> FromWithConfig<&'a Int<3>>
+        + for<'a> FromWithConfig<&'a Int<12>>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
@@ -1782,6 +1790,10 @@ where
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12);
+        // the impls are generic over limb counts, so these are free.
+        + for<'a> FromWithConfig<&'a Int<3>>
+        + for<'a> FromWithConfig<&'a Int<12>>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
@@ -1849,6 +1861,10 @@ where
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Int<INT_LIMBS>>
         + for<'a> FromWithConfig<&'a Int<INT_QUARTER_LIMBS>>
+        // Widths of the basefold int lane (BF_ND = 3, BF_NW = 12);
+        // the impls are generic over limb counts, so these are free.
+        + for<'a> FromWithConfig<&'a Int<3>>
+        + for<'a> FromWithConfig<&'a Int<12>>
         + for<'a> FromWithConfig<&'a <ZtF::BinaryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::ArbitraryZt as ZipTypes>::CombR>
         + for<'a> FromWithConfig<&'a <ZtF::IntZt as ZipTypes>::CombR>
@@ -1880,12 +1896,21 @@ where
             &witness_trace.int,
         );
 
+    // With the basefold int lane, the integer columns are committed and
+    // opened by the limbwise-folding (Zip++) IOPP; exclude them from the
+    // Zip+ batches.
+    #[cfg(feature = "basefold-int")]
+    let int_witness_for_zip: &[DenseMultilinearExtension<Int<INT_QUARTER_LIMBS>>] = &[];
+    #[cfg(not(feature = "basefold-int"))]
+    let int_witness_for_zip: &[DenseMultilinearExtension<Int<INT_QUARTER_LIMBS>>] =
+        &split_int_witness;
+
     // Shared-Merkle dispatch (same criterion as the 1× int-fold path):
     // ≥2 non-empty batches AND arb is empty / has matching codeword.
     let arb_compatible = witness_trace.arbitrary_poly.is_empty()
         || pp_arb.linear_code.codeword_len() == pp_bin_split2.linear_code.codeword_len();
     let bin_nonempty = !split_binary_witness.is_empty();
-    let int_nonempty = !split_int_witness.is_empty();
+    let int_nonempty = !int_witness_for_zip.is_empty();
     let arb_nonempty = !witness_trace.arbitrary_poly.is_empty();
     let nonempty_count = (bin_nonempty as u8) + (arb_nonempty as u8) + (int_nonempty as u8);
     let use_multi = nonempty_count >= 2 && arb_compatible;
@@ -1912,19 +1937,54 @@ where
             pp_int_split4,
             &split_binary_witness,
             &witness_trace.arbitrary_poly,
-            &split_int_witness,
+            int_witness_for_zip,
         )?;
         (None, None, None, Some(multi), comm_bin, comm_arb, comm_int)
     } else {
         let (res_bin, (res_arb, res_int)) = cfg_join!(
             commit_optionally(pp_bin_split2, &split_binary_witness),
             commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
-            commit_optionally(pp_int_split4, &split_int_witness),
+            commit_optionally(pp_int_split4, int_witness_for_zip),
         );
         let (hb, cb) = res_bin?;
         let (ha, ca) = res_arb?;
         let (hi, ci) = res_int?;
         (hb, ha, hi, None, cb, ca, ci)
+    };
+
+    // Basefold int lane: commit the quartered integer columns under the
+    // arity-8 limbwise-folding chain; its root takes the int slot of the
+    // proof commitments (and of the transcript absorption below).
+    #[cfg(feature = "basefold-int")]
+    let (bf_params, bf_witnesses, bf_hint, commitment_int) = {
+        use zip_plus::basefold::protocol_glue::{BF_ND, BF_NK, bf_zip_err, int_lane_params};
+        debug_assert!(INT_QUARTER_LIMBS <= BF_ND);
+        let rep = <ZtF::IntLc as zip_plus::code::LinearCode<ZtF::IntZt>>::REPETITION_FACTOR;
+        let bf_params = int_lane_params(
+            add!(num_vars, 2usize),
+            rep,
+            <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+        )?;
+        let bf_witnesses: Vec<Vec<Int<3>>> = split_int_witness
+            .iter()
+            .map(|mle| mle.evaluations.iter().map(|x| x.resize::<3>()).collect())
+            .collect();
+        if bf_witnesses.is_empty() {
+            (bf_params, bf_witnesses, None, commitment_int)
+        } else {
+            let (bf_comm, bf_hint) = zip_plus::basefold::arity8::commit_batch::<
+                _,
+                3,
+                BF_NK,
+                CHECK_FOR_OVERFLOW,
+            >(&bf_params, &bf_witnesses)
+            .map_err(bf_zip_err)?;
+            let commitment_int = zip_plus::pcs::structs::ZipPlusCommitment {
+                root: bf_comm.root,
+                batch_size: bf_witnesses.len(),
+            };
+            (bf_params, bf_witnesses, Some(bf_hint), commitment_int)
+        }
     };
 
     let mut pcs_transcript = PcsProverTranscript::new_from_commitments(
@@ -2257,7 +2317,7 @@ where
                 pp_int_split4,
                 &split_binary_witness,
                 &witness_trace.arbitrary_poly,
-                &split_int_witness,
+                int_witness_for_zip,
                 &r0_ext,
                 multi,
                 &field_cfg,
@@ -2280,7 +2340,7 @@ where
                 pp_int_split4,
                 &split_binary_witness,
                 &witness_trace.arbitrary_poly,
-                &split_int_witness,
+                int_witness_for_zip,
                 &r0_ext,
                 multi,
                 &field_cfg,
@@ -2341,14 +2401,14 @@ where
             }
         }
         if let Some(hint_int) = &hint_int_split {
-            if let Some(bd) = zip_breakdown.as_deref_mut() {
+            if let Some(bd) = zip_breakdown {
                 let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f_with_byte_breakdown::<
                     _,
                     CHECK_FOR_OVERFLOW,
                 >(
                     &mut pcs_transcript,
                     pp_int_split4,
-                    &split_int_witness,
+                    int_witness_for_zip,
                     &r0_ext,
                     hint_int,
                     &field_cfg,
@@ -2358,7 +2418,7 @@ where
                 let _ = ZipPlus::<ZtF::IntZt, ZtF::IntLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                     &mut pcs_transcript,
                     pp_int_split4,
-                    &split_int_witness,
+                    int_witness_for_zip,
                     &r0_ext,
                     hint_int,
                     &field_cfg,
@@ -2366,6 +2426,33 @@ where
             }
         }
     }
+    #[cfg(feature = "basefold-int")]
+    if let Some(bf_hint) = &bf_hint {
+        use zip_plus::basefold::protocol_glue::{
+            BF_NCU, BF_NK, BF_NW, bf_zip_err, write_arity8_proof,
+        };
+        let weights = vec![F::one_with_cfg(&field_cfg); bf_witnesses.len()];
+        let (bf_proof, _bf_eval) = zip_plus::basefold::arity8::prove_batch::<
+            _,
+            F,
+            3,
+            BF_NK,
+            BF_NW,
+            BF_NCU,
+            CHECK_FOR_OVERFLOW,
+        >(
+            &bf_params,
+            &bf_witnesses,
+            &weights,
+            bf_hint,
+            &r0_ext,
+            &field_cfg,
+            &mut pcs_transcript.fs_transcript,
+        )
+        .map_err(bf_zip_err)?;
+        write_arity8_proof(&mut pcs_transcript, &bf_proof)?;
+    }
+
     if let Some(t) = timings.as_mut() {
         t.step7_pcs_open = _t_step7.elapsed();
     }
