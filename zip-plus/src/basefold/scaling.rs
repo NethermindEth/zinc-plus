@@ -16,7 +16,7 @@ use crate::{
     basefold::{
         arity8::{commit_batch, prove_batch, verify_batch},
         protocol_glue::{
-            BF_NCU, BF_ND, BF_NK, BF_NW, int_lane_params, read_arity8_proof, write_arity8_proof,
+            BF_NCU, BF_ND, BF_NK, BF_NW, read_arity8_proof, write_arity8_proof,
         },
     },
     code::iprs::{IprsCode, PnttConfigF65537},
@@ -31,6 +31,25 @@ use zinc_primality::MillerRabin;
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
 
 type F = MontyField<4>;
+
+/// Rate-1/8 Zip+ instantiation: production query count 100.
+#[derive(Debug, Clone)]
+struct StudyZt8 {}
+impl crate::pcs::structs::ZipTypes for StudyZt8 {
+    const NUM_COLUMN_OPENINGS: usize = 100;
+    type Eval = Int<2>;
+    type Cw = Int<3>;
+    type Fmod = crypto_primitives::crypto_bigint_uint::Uint<3>;
+    type PrimeTest = MillerRabin;
+    type Chal = Int<2>;
+    type Pt = Int<2>;
+    type CombR = Int<5>;
+    type Comb = Self::CombR;
+    type EvalDotChal = zinc_utils::inner_product::ScalarProduct;
+    type CombDotChal = zinc_utils::inner_product::ScalarProduct;
+    type ArrCombRDotChal = zinc_utils::inner_product::MBSInnerProduct;
+}
+type ZipLc8 = IprsCode<StudyZt8, PnttConfigF65537, 8, true>;
 // Eval = Int<2> (the int-lane shape: 64-bit values), Cw = Int<3>,
 // CombR = Int<5> (the lc-width check needs 268 bits). NUM_COLUMN_OPENINGS =
 // 147 (rate 1/4 production count).
@@ -73,16 +92,27 @@ struct Row {
     eval: F,
 }
 
-fn run_zip(
+fn run_zip<ZtX, const REPX: usize>(
     polys: &[DenseMultilinearExtension<Int<2>>],
     num_vars: usize,
     row_len: usize,
     cfg: &<F as PrimeField>::Config,
     point: &[F],
-) -> Row {
+) -> Row
+where
+    ZtX: crate::pcs::structs::ZipTypes<
+            Eval = Int<2>,
+            Cw = Int<3>,
+            Chal = Int<2>,
+            CombR = Int<5>,
+            Comb = Int<5>,
+        >,
+    <F as crypto_primitives::Field>::Modulus: zinc_utils::from_ref::FromRef<ZtX::Fmod>,
+{
     let m = 1usize << num_vars;
-    let code = ZipLc::new_with_optimal_depth(row_len).expect("zip code");
-    let pp = ZipPlus::<Zt, _>::setup(m, code);
+    let code = IprsCode::<ZtX, PnttConfigF65537, REPX, true>::new_with_optimal_depth(row_len)
+        .expect("zip code");
+    let pp = ZipPlus::<ZtX, _>::setup(m, code);
 
     let t0 = Instant::now();
     let (hint, comm) = ZipPlus::commit(&pp, polys).expect("zip commit");
@@ -100,8 +130,11 @@ fn run_zip(
     let mut vt = pt.into_verification_transcript();
     vt.fs_transcript.absorb_slice(&comm.root.0);
     let t0 = Instant::now();
-    let alphas = ZipPlus::<Zt, ZipLc>::sample_alphas(&mut vt.fs_transcript, polys.len());
-    ZipPlus::<Zt, _>::verify_with_alphas::<F, true>(
+    let alphas = ZipPlus::<ZtX, IprsCode<ZtX, PnttConfigF65537, REPX, true>>::sample_alphas(
+        &mut vt.fs_transcript,
+        polys.len(),
+    );
+    ZipPlus::<ZtX, _>::verify_with_alphas::<F, true>(
         &mut vt, &pp, &comm, cfg, point, &eval, &alphas,
     )
     .expect("zip verify");
@@ -120,10 +153,27 @@ fn run_zip(
 fn run_basefold(
     witnesses: &[Vec<Int<BF_ND>>],
     num_vars: usize,
+    rep: usize,
+    q: usize,
+    num_rounds: usize,
     cfg: &<F as PrimeField>::Config,
     point: &[F],
 ) -> Row {
-    let params = int_lane_params(num_vars, REP, Q).expect("bf params");
+    use crate::basefold::{arity8::Arity8Params, chain8::Radix8Chain, protocol_glue::BF_P};
+    let chain = crate::basefold::chain::ChainConfigF167772161;
+    let _ = chain;
+    // Build the chain at FULL depth regardless of how many rounds fold:
+    // the tail then encodes through butterflies (O(n log n)) instead of a
+    // dense base case (m*n/8^R), making shallow-R configs viable.
+    let full_levels = (num_vars / 3).max(1);
+    let chain =
+        Radix8Chain::<crate::basefold::chain::ChainConfigF167772161>::new(
+            1usize << num_vars,
+            rep,
+            full_levels,
+        )
+        .expect("bf chain");
+    let params = Arity8Params::new(chain, BF_P, num_rounds, q).expect("bf params");
     let batch = witnesses.len();
 
     let t0 = Instant::now();
@@ -183,20 +233,11 @@ fn run_basefold(
 #[ignore = "scaling study; run with --release --ignored --nocapture"]
 fn scaling_study_zip_vs_basefold() {
     eprintln!(
-        "scaling study: rate 1/4, Q = {Q}, 64-bit witness entries, \
-         zip = F65537 IPRS (optimal depth, row_len swept), \
-         zip++ = arity-8 chain over 5*2^25+1 at full depth"
+        "scaling study (best config vs best config), 64-bit witness entries.\n\
+         zip+  : F65537 IPRS, optimal depth, row_len swept; rate 1/4 (Q=147) and 1/8 (Q=100)\n\
+         zip++ : arity-8 chain over 5*2^25+1; R swept; rate 1/4 (Q=147) and 1/8 (Q=100)"
     );
-    let cases: &[(usize, usize)] = &[
-        (12, 1),
-        (14, 1),
-        (16, 1),
-        (18, 1),
-        (20, 1),
-        (12, 8),
-        (14, 8),
-        (16, 8),
-    ];
+    let cases: &[(usize, usize)] = &[(12, 1), (14, 1), (16, 1), (18, 1), (20, 1), (16, 8)];
     for &(num_vars, batch) in cases {
         let m = 1usize << num_vars;
         let mut rng = StdRng::seed_from_u64(7 + num_vars as u64);
@@ -212,43 +253,54 @@ fn scaling_study_zip_vs_basefold() {
             .collect();
         let (cfg, point) = shared_cfg_point(num_vars);
 
-        // Zip+ at its best row length. The size optimum sits well above
-        // sqrt(m) because Q multiplies the column side
-        // (row_len* ~ sqrt(Q * m * cw_bytes / comb_bytes)), so sweep wide.
+        // ---- Zip+ at its best (row_len x rate). ----
         let half = num_vars.div_ceil(2);
-        let mut best: Option<(usize, Row)> = None;
+        let mut zip_best: Option<(String, Row)> = None;
         for rl_log in half.saturating_sub(1)..=(half + 5).min(14) {
             let row_len = 1usize << rl_log;
-            if !(64..=(1 << 14)).contains(&row_len) || !m.is_multiple_of(row_len) || row_len > m {
+            if !(64..=(1 << 14)).contains(&row_len) || !m.is_multiple_of(row_len) || row_len > m
+            {
                 continue;
             }
-            let row = run_zip(&polys, num_vars, row_len, &cfg, &point);
-            if best.as_ref().is_none_or(|(_, b)| row.raw < b.raw) {
-                best = Some((row_len, row));
+            let row = run_zip::<Zt, 4>(&polys, num_vars, row_len, &cfg, &point);
+            let tag = format!("rate 1/4 Q=147 rl=2^{rl_log}");
+            if zip_best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+                zip_best = Some((tag, row));
+            }
+            // Rate 1/8: codeword_len = row_len * 8 must stay under 65537.
+            if row_len <= (1 << 13) {
+                let row = run_zip::<StudyZt8, 8>(&polys, num_vars, row_len, &cfg, &point);
+                let tag = format!("rate 1/8 Q=100 rl=2^{rl_log}");
+                if zip_best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+                    zip_best = Some((tag, row));
+                }
             }
         }
-        let (best_rl, zip) = best.expect("no feasible zip row length");
+        let (zip_tag, zip) = zip_best.expect("no feasible zip config");
 
-        let bf = run_basefold(&witnesses, num_vars, &cfg, &point);
-        assert_eq!(zip.eval, bf.eval, "cross-validation: schemes disagree");
+        // ---- Zip++ at its best (R x rate). Lower-bound R so the dense
+        // base case stays tractable (m * n / 8^R <= ~2^30). ----
+        let mut bf_best: Option<(String, Row)> = None;
+        for &(rep, q) in &[(4usize, 147usize), (8, 100)] {
+            let full = (num_vars / 3).max(1);
+            for r in 1..=full {
+                let row = run_basefold(&witnesses, num_vars, rep, q, r, &cfg, &point);
+                assert_eq!(row.eval, zip.eval, "cross-validation: schemes disagree");
+                let tag = format!("rate 1/{rep} Q={q} R={r}");
+                if bf_best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+                    bf_best = Some((tag, row));
+                }
+            }
+        }
+        let (bf_tag, bf) = bf_best.expect("no feasible basefold config");
 
         eprintln!(
-            "m=2^{num_vars} B={batch}: zip+  raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms (row_len 2^{})",
-            zip.raw,
-            zip.zstd,
-            zip.commit_ms,
-            zip.open_ms,
-            zip.verify_ms,
-            best_rl.trailing_zeros(),
+            "m=2^{num_vars} B={batch}: zip+  raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms ({zip_tag})",
+            zip.raw, zip.zstd, zip.commit_ms, zip.open_ms, zip.verify_ms,
         );
         eprintln!(
-            "            zip++ raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms (R={})",
-            bf.raw,
-            bf.zstd,
-            bf.commit_ms,
-            bf.open_ms,
-            bf.verify_ms,
-            num_vars / 3,
+            "            zip++ raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms ({bf_tag})",
+            bf.raw, bf.zstd, bf.commit_ms, bf.open_ms, bf.verify_ms,
         );
     }
 }
