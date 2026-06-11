@@ -630,12 +630,19 @@ mod tests {
 
         let num_constraints = count_constraints::<U>();
 
+        // Mirror the prover's evaluation-point sampling:
+        // the test helper (`run_ideal_check_prover_combined`) squeezed `num_vars` field
+        // challenges from the prover transcript before invoking `prove_combined`, so do
+        // the same here for the verifier.
+        let ic_evaluation_point: Vec<MontyField<LIMBS>> =
+            verifier_transcript.get_field_challenges(num_vars, &test_config());
+
         let ic_check_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
             /* branch_idx = */ 0,
             num_constraints.q,
-            num_vars,
+            &ic_evaluation_point,
             ideal_over_f_from_ref,
             |_| panic!("F_q[X] not supported here!"),
             &test_config(),

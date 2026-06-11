@@ -68,6 +68,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     .collect()
             });
 
+        let evaluation_point: Vec<F<FIELD_LIMBS>> =
+            transcript.get_field_challenges(num_vars, field_cfg);
         let (ic_proof, ic_prover_state) =
             IdealCheckProtocol::<TestUairNoMultiplication<_>>::prove_combined::<
                 _,
@@ -78,7 +80,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 &projected_scalars,
                 /* branch_idx = */ 0,
                 num_constraints.q,
-                num_vars,
+                &evaluation_point,
                 field_cfg,
             )
             .expect("IC Prover failed");
@@ -154,6 +156,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
             prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
+        let ic_evaluation_point: Vec<F<FIELD_LIMBS>> =
+            verifier_transcript.get_field_challenges(num_vars, &field_cfg);
         let ic_check_subclaim =
             IdealCheckProtocol::<TestUairNoMultiplication<_>>::verify_as_subprotocol::<
                 F<FIELD_LIMBS>,
@@ -165,7 +169,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 ic_proof,
                 /* branch_idx = */ 0,
                 num_constraints.q,
-                num_vars,
+                &ic_evaluation_point,
                 |ideal_over_ring| {
                     ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
                 },
@@ -261,6 +265,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
+        let evaluation_point: Vec<F<FIELD_LIMBS>> =
+            transcript.get_field_challenges(num_vars, field_cfg);
         let (ic_proof, ic_prover_state) = IdealCheckProtocol::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
         >::prove_combined::<_, DEGREE_PLUS_ONE>(
@@ -269,7 +275,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             &projected_scalars,
             /* branch_idx = */ 0,
             num_constraints.q,
-            num_vars,
+            &evaluation_point,
             field_cfg,
         )
         .expect("IC Prover failed");
@@ -349,6 +355,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
                 prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
+            let ic_evaluation_point =
+                verifier_transcript.get_field_challenges(num_vars, &field_cfg);
             let ic_check_subclaim =
                 IdealCheckProtocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>::verify_as_subprotocol::<
                     F<FIELD_LIMBS>,
@@ -360,7 +368,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     ic_proof,
                     /* branch_idx = */ 0,
                     num_constraints.q,
-                    num_vars,
+                    &ic_evaluation_point,
                     |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
                     |_| unreachable!("not used here"),
                     &field_cfg,

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
+
 use crate::{
     ideal_check::{
         IdealCheckProtocol, Proof as IdealCheckProof, ProverState as IdealCheckProverState,
@@ -28,7 +30,6 @@ type F = MontyField<4>;
 
 /// Run ideal check prover using MLE-first approach (for linear constraints).
 /// Uses column-indexed trace.
-#[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
@@ -65,13 +66,15 @@ where
 
     let trace: ColumnMajorTrace<F> = project_trace_coeffs_column_major(trace, &field_cfg);
 
+    let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
+
     let (proof, state) = IdealCheckProtocol::<U>::prove_mle_first::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
         branch_idx,
         num_constraints,
-        num_vars,
+        &evaluation_point,
         &field_cfg,
     )
     .unwrap();
@@ -81,7 +84,6 @@ where
 
 /// Run ideal check prover using combined polynomial approach (for any
 /// constraints). Uses row-indexed (transposed) trace.
-#[allow(clippy::type_complexity)]
 pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     num_vars: usize,
     trace: &UairTrace<Int<5>, Int<5>, DEGREE_PLUS_ONE, DEGREE_PLUS_ONE>,
@@ -118,13 +120,15 @@ where
 
     let trace: RowMajorTrace<F> = project_trace_coeffs_row_major(trace, &field_cfg);
 
+    let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
+
     let (proof, state) = IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
         branch_idx,
         num_constraints,
-        num_vars,
+        &evaluation_point,
         &field_cfg,
     )
     .unwrap();

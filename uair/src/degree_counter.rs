@@ -3,10 +3,10 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
+use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
 use crypto_primitives::Semiring;
 use num_traits::{CheckedAdd, CheckedMul, CheckedSub};
-
-use crate::{ConstraintBuilder, TraceRow, Uair, ideal::ImpossibleIdeal};
+use zinc_utils::add;
 
 /// Compute the maximum number of multiplicands
 /// in products of witness elements in the UAIR `U`.
@@ -77,7 +77,7 @@ impl ConstraintBuilder for ConstraintDegreeCollector {
 
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
         if self.fq_degrees.len() <= prime_idx {
-            self.fq_degrees.resize(prime_idx + 1, Vec::new());
+            self.fq_degrees.resize(add!(prime_idx, 1), Vec::new());
         }
         self.fq_degrees[prime_idx].push(expr.0);
     }

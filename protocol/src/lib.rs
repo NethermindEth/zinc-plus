@@ -33,7 +33,7 @@ use rayon::prelude::*;
 
 use crate::fold::FoldTrace;
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, iter, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
@@ -57,8 +57,8 @@ use zinc_poly::{
 };
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_uair::Uair;
-use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, named::Named, powers};
+use zinc_uair::{Uair, UairSignature};
+use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, from_ref::FromRef, named::Named, powers};
 use zip_plus::{
     ZipError,
     code::LinearCode,
@@ -394,7 +394,7 @@ pub enum ProtocolError<F: PrimeField> {
     #[error("F_q[X] ideal check failed at prime_idx {prime_idx} (q = {q}): {source}")]
     FqIdealCheck {
         prime_idx: usize,
-        q: u64,
+        q: String,
         source: IdealCheckError<F>,
     },
 }
@@ -551,6 +551,30 @@ where
     scalar
         .iter()
         .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+        .collect()
+}
+
+/// Build the list of per-branch [`F::Config`]'s in branch order:
+/// `prime_cfgs[0]` is the $Q[X]$ branch's sampled prime $q_0$,
+/// `prime_cfgs[1..=n]` are the declared $q_1, ..., q_n$ in
+/// [`zinc_uair::UairSignature::primes`] order.
+///
+/// The branch indexing convention follows the paper's
+/// `prot:zincplus-ucs-pior`: branch 0 = $\mathbb{Q}[X]$,
+/// branches $i \ge 1$ = $\mathbb{F}_{q_i}[X]$.
+///
+/// Primality is the UAIR author's responsibility (the UAIR is part of the
+/// pre-agreed relation index); no runtime check needed here.
+fn build_all_cfgs<F>(sig: &UairSignature, qx_cfg: F::Config) -> Vec<F::Config>
+where
+    F: PrimeField,
+    F::Integer: FromRef<u64>,
+{
+    iter::once(qx_cfg)
+        .chain(sig.primes().iter().map(|q| {
+            // TODO: Change type!
+            F::make_cfg(&F::Integer::from_ref(q)).expect("declared prime is assumed prime")
+        }))
         .collect()
 }
 
@@ -820,8 +844,7 @@ mod tests {
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>,
-        <F as Field>::Integer: FromRef<Zt::Fmod>,
-        Zt::Fmod: From<u64>,
+        <F as Field>::Integer: FromRef<Zt::Fmod> + FromRef<u64>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);

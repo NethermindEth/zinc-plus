@@ -1,5 +1,5 @@
 use std::fmt::{Display, Formatter};
-use zinc_utils::from_ref::FromRef;
+use zinc_utils::{add, from_ref::FromRef};
 
 use crate::{
     ConstraintBuilder, TraceRow, Uair,
@@ -74,7 +74,7 @@ where
 
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, _expr: Self::Expr, ideal: &Self::FqIdeal) {
         if self.fq_ideals.len() <= prime_idx {
-            self.fq_ideals.resize(prime_idx + 1, Vec::new());
+            self.fq_ideals.resize(add!(prime_idx, 1), Vec::new());
         }
         self.fq_ideals[prime_idx].push(ideal.clone());
     }

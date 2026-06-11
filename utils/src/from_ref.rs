@@ -53,6 +53,21 @@ macro_rules! impl_int_from_primitive_ref {
 
 impl_int_from_primitive_ref!(i8, i16, i32, i64, i128);
 
+macro_rules! impl_uint_from_primitive_ref {
+    ($($t:ty),+) => {
+        $(
+            impl<const LIMBS: usize> FromRef<$t> for Uint<LIMBS> {
+                #[inline(always)]
+                fn from_ref(value: &$t) -> Self {
+                    Self::from(*value)
+                }
+            }
+        )+
+    };
+}
+
+impl_uint_from_primitive_ref!(u8, u16, u32, u64, u128);
+
 impl<const LIMBS: usize, const LIMBS2: usize> FromRef<Int<LIMBS2>> for Int<LIMBS> {
     #[inline]
     fn from_ref(value: &Int<LIMBS2>) -> Self {

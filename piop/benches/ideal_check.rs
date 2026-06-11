@@ -69,13 +69,14 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         // Even though this UAIR is linear, using prove_combined yields much better
         // prover performance for it.
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
         IdealCheckProtocol::<TestUairNoMultiplication<_>>::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
             /* branch_idx = */ 0,
             num_constraints.q,
-            num_vars,
+            &evaluation_point,
             field_cfg,
         )
         .expect("Prover failed")
@@ -102,13 +103,14 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         bench.iter_batched(
             || (proof.clone(), transcript.clone()),
             |(proof, mut transcript)| {
+                let evaluation_point = transcript.get_field_challenges(num_vars, &field_cfg);
                 let _ = black_box(
                     IdealCheckProtocol::<TestUairNoMultiplication<_>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         /* branch_idx = */ 0,
                         num_constraints.q,
-                        num_vars,
+                        &evaluation_point,
                         |ideal_over_ring| {
                             ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
                         },
@@ -165,13 +167,14 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 .collect()
         });
 
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
         IdealCheckProtocol::<TestUairSimpleMultiplication<_>>::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
             /* branch_idx = */ 0,
             num_constraints.q,
-            num_vars,
+            &evaluation_point,
             field_cfg,
         )
         .expect("Prover failed")
@@ -201,12 +204,14 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             bench.iter_batched(
                 || (proof.clone(), transcript.clone()),
                 |(proof, mut transcript)| {
+                    let evaluation_point =
+                        transcript.get_field_challenges(num_vars, &field_cfg);
                     let _ = black_box(IdealCheckProtocol::<TestUairSimpleMultiplication<_>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         /* branch_idx = */ 0,
                         num_constraints.q,
-                        num_vars,
+                        &evaluation_point,
                         |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
                         |_| unreachable!("not used here"),
                         &field_cfg,
@@ -260,13 +265,14 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                     .collect()
             });
 
+        let evaluation_point = transcript.get_field_challenges(num_vars, field_cfg);
         IdealCheckProtocol::<BinaryDecompositionUair<_>>::prove_combined::<_, DEGREE_PLUS_ONE>(
             transcript,
             &trace,
             &projected_scalars,
             /* branch_idx = */ 0,
             num_constraints.q,
-            num_vars,
+            &evaluation_point,
             field_cfg,
         )
         .expect("Prover failed")
@@ -293,13 +299,14 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
         bench.iter_batched(
             || (proof.clone(), transcript.clone()),
             |(proof, mut transcript)| {
+                let evaluation_point = transcript.get_field_challenges(num_vars, &field_cfg);
                 let _ = black_box(
                     IdealCheckProtocol::<BinaryDecompositionUair<u32>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         /* branch_idx = */ 0,
                         num_constraints.q,
-                        num_vars,
+                        &evaluation_point,
                         |ideal_over_ring| {
                             ideal_over_ring.map(|ideal_over_ring| {
                                 DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)
@@ -344,13 +351,14 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                         .collect()
                 });
 
+            let evaluation_point = $transcript.get_field_challenges(num_vars, $field_cfg);
             IdealCheckProtocol::<BigLinearUair<_>>::$prove_fn::<_, DEGREE_PLUS_ONE>(
                 $transcript,
                 &trace,
                 &projected_scalars,
                 /* branch_idx = */ 0,
                 num_constraints.q,
-                num_vars,
+                &evaluation_point,
                 $field_cfg,
             )
             .expect("Prover failed")
@@ -413,13 +421,14 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
         bench.iter_batched(
             || (proof.clone(), transcript.clone()),
             |(proof, mut transcript)| {
+                let evaluation_point = transcript.get_field_challenges(num_vars, &field_cfg);
                 let _ = black_box(
                     IdealCheckProtocol::<BigLinearUair<u32>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
                         /* branch_idx = */ 0,
                         num_constraints.q,
-                        num_vars,
+                        &evaluation_point,
                         |ideal_over_ring| {
                             ideal_over_ring.map(|ideal_over_ring| {
                                 DegreeOneIdeal::from_with_cfg(ideal_over_ring, &field_cfg)

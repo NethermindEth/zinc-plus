@@ -37,22 +37,7 @@ use zip_plus::{
 // Per-prime F_q[X] branch helpers
 //
 
-/// Build a [`PrimeField`] config from a `u64` prime declared in
-/// [`UairSignature::primes`]. Verifier-side mirror of the prover's helper.
-///
-/// Primality is the UAIR author's responsibility (the UAIR is part of the
-/// pre-agreed relation index); no runtime check needed here.
-#[inline]
-fn build_verifier_fq_field_cfg<Zt, F, const D: usize, const FD: usize>(prime: u64) -> F::Config
-where
-    Zt: ZincTypes<D, FD>,
-    Zt::Fmod: From<u64>,
-    F: PrimeField,
-    F::Integer: FromRef<Zt::Fmod>,
-{
-    let fmod = Zt::Fmod::from(prime);
-    F::make_cfg(&F::Integer::from_ref(&fmod)).expect("declared prime is assumed prime")
-}
+// FIXME
 
 //
 // Shared base
@@ -410,8 +395,8 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
-    Zt::Fmod: From<u64>,
+    F::Integer:
+        ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod> + FromRef<u64>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -419,6 +404,11 @@ where
     ///
     /// `project_fq_ideal` is only invoked when the UAIR declares at least
     /// one prime; legacy UAIRs can pass `|_, _| unreachable!()`.
+    ///
+    /// **`fq-unify` evaluation point.** Mirrors the prover: sample one
+    /// shared $\mathbf r \in [0, q^*)^\mu$ from the transcript and lift it
+    /// into each branch's field via `F::from_with_cfg`, then run the
+    /// per-branch verifications in `branch_idx` order.
     ///
     /// TODO(fq-soundness): the per-prime ideal-check subclaims produced
     /// here are *discarded* -- this only verifies that each combined
@@ -435,33 +425,15 @@ where
         // The Q[X]-branch ideal check only consumes Q[X] constraints; F_q[X]
         // constraints are handled by the per-prime branch below.
         let num_constraints = count_constraints::<U>();
-
-        let ic_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
-            &mut self.base.pcs_transcript.fs_transcript,
-            self.proof_ideal_check,
-            /* branch_idx = */ 0,
-            num_constraints.q,
-            self.base.num_vars,
-            |ideal| project_ideal(ideal, &self.field_cfg),
-            |_| unreachable!("Q[X] branch"),
-            &self.field_cfg,
-        )?;
-
-        // Per-prime F_q[X] ideal-check verifications. The transcript
-        // ordering MUST match the prover: Q[X] first, then per-prime in
-        // `primes()` order.
         let primes = self.base.uair_signature.primes().to_vec();
+
         if primes.len() != self.proof_ideal_checks_fq.len() {
-            // Honest prover always emits one proof per declared prime; a
-            // mismatch is a malformed proof.
+            // Honest prover always emits one proof per declared prime
             return Err(ProtocolError::FqIdealCheck {
                 prime_idx: self.proof_ideal_checks_fq.len(),
-                q: primes
-                    .get(self.proof_ideal_checks_fq.len())
-                    .copied()
-                    .unwrap_or(0),
+                q: "<Length mismatch>".to_owned(),
                 source: IdealCheckError::IdealCollectorError(
-                    zinc_piop::ideal_check::BatchedIdealCheckError::LengthMismatch {
+                    ideal_check::BatchedIdealCheckError::LengthMismatch {
                         num_ideals: primes.len(),
                         provided_values: self.proof_ideal_checks_fq.len(),
                     },
@@ -469,27 +441,56 @@ where
             });
         }
 
-        for (prime_idx, (&q_i, fq_proof)) in
-            primes.iter().zip(self.proof_ideal_checks_fq).enumerate()
+        // `fq-unify`: rebuild per-branch field configs, then sample the
+        // shared evaluation point from the transcript exactly as the
+        // prover does. Branch 0 = Q[X] (random sampled prime); branches
+        // i >= 1 = declared primes in `primes()` order.
+        let all_field_cfgs = build_all_cfgs::<F>(&self.base.uair_signature, self.field_cfg.clone());
+        let q_star_cfg = shared_challenge::compute_q_star::<F>(&all_field_cfgs);
+        let shared_eval_points: Vec<Vec<F>> = shared_challenge::sample_shared_field_challenges::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.base.num_vars,
+            q_star_cfg,
+            &all_field_cfgs,
+        );
+
+        let ic_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            self.proof_ideal_check,
+            /* branch_idx = */ 0,
+            num_constraints.q,
+            &shared_eval_points[0],
+            |ideal| project_ideal(ideal, &self.field_cfg),
+            |_| unreachable!("Q[X] branch"),
+            &self.field_cfg,
+        )?;
+
+        // Per-prime F_q[X] ideal-check verifications. The transcript
+        // ordering MUST match the prover:
+        // Q[X] first, then per-prime in `primes()` order.
+        for (prime_idx, (cfg_q_i, fq_proof)) in all_field_cfgs[1..]
+            .iter()
+            .zip(self.proof_ideal_checks_fq)
+            .enumerate()
         {
-            let cfg_i = build_verifier_fq_field_cfg::<Zt, F, D, FD>(q_i);
+            let branch_idx = add!(prime_idx, 1);
             // The per-prime subclaim is currently discarded -- see the
             // TODO(fq-soundness) on the method doc.
             let _ = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 fq_proof,
-                /* branch_idx = */ add!(prime_idx, 1),
+                branch_idx,
                 num_constraints.for_prime(prime_idx),
-                self.base.num_vars,
-                |_| unreachable!("F_{q_i}[X] branch"),
+                &shared_eval_points[branch_idx],
+                |_| unreachable!("F_q[X] branch"),
                 // The lifted F_q[X] ideal's coefficient modulus must match
                 // the per-prime field config
-                |ideal| project_fq_ideal(ideal, &cfg_i),
-                &cfg_i,
+                |ideal| project_fq_ideal(ideal, cfg_q_i),
+                cfg_q_i,
             )
             .map_err(|source| ProtocolError::FqIdealCheck {
                 prime_idx,
-                q: q_i,
+                q: F::modulus(cfg_q_i).to_string(),
                 source,
             })?;
         }
@@ -1069,8 +1070,8 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
-    Zt::Fmod: From<u64>,
+    F::Integer:
+        ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod> + FromRef<u64>,
     U: Uair + 'static,
 {
     /// Zinc+ full PIOP verifier.

@@ -17,29 +17,10 @@
 use crypto_primitives::PrimeField;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-/// Build the list of per-branch [`F::Config`]'s in branch order:
-/// `prime_cfgs[0]` is the Q[X] branch's sampled prime $q_0$,
-/// `prime_cfgs[1..=n]` are the declared $q_1, \ldots, q_n$ in
-/// [`zinc_uair::UairSignature::primes`] order.
-///
-/// The branch indexing convention follows the paper's
-/// `prot:zincplus-ucs-pior`: branch 0 = $\mathbb{Q}[X]$,
-/// branches $i \ge 1$ = $\mathbb{F}_{q_i}[X]$.
-#[inline]
-pub fn build_prime_cfgs<F>(q0_cfg: F::Config, declared_cfgs: Vec<F::Config>) -> Vec<F::Config>
-where
-    F: PrimeField,
-{
-    let mut cfgs = Vec::with_capacity(1 + declared_cfgs.len());
-    cfgs.push(q0_cfg);
-    cfgs.extend(declared_cfgs);
-    cfgs
-}
-
 /// Compute $q^* := \min$ of the moduli across all declared branches.
 ///
-/// `prime_cfgs[0]` is $q_0$ (Q[X] branch); `prime_cfgs[1..=n]` are $q_i$
-/// (F_q[X] branches). The result is the minimum modulus.
+/// `prime_cfgs[0]` is $q_0$ ($Q[X]$ branch); `prime_cfgs[1..=n]` are $q_i$
+/// ($F_q[X]$ branches). The result is the minimum modulus.
 ///
 /// # Panics
 /// Panics if `prime_cfgs` is empty.
@@ -163,7 +144,7 @@ mod tests {
         let q_star = compute_q_star::<F>(&cfgs);
         let mut transcript = Blake3Transcript::new();
 
-        let per_branch = sample_shared_field_challenge::<F>(&mut transcript, &q_star, &cfgs);
+        let per_branch = sample_shared_field_challenge::<F>(&mut transcript, q_star, &cfgs);
         assert_eq!(per_branch.len(), cfgs.len());
 
         // Every branch must hold the same underlying *natural integer*
@@ -197,7 +178,7 @@ mod tests {
 
         // Batched sampling.
         let mut t_batch = Blake3Transcript::new();
-        let batched = sample_shared_field_challenges::<F>(&mut t_batch, n, &q_star, &cfgs);
+        let batched = sample_shared_field_challenges::<F>(&mut t_batch, n, q_star, &cfgs);
         assert_eq!(batched.len(), cfgs.len());
         for branch in &batched {
             assert_eq!(branch.len(), n);
@@ -208,7 +189,7 @@ mod tests {
         let mut singles_per_branch: Vec<Vec<F>> =
             cfgs.iter().map(|_| Vec::with_capacity(n)).collect();
         for _ in 0..n {
-            let per_branch = sample_shared_field_challenge::<F>(&mut t_single, &q_star, &cfgs);
+            let per_branch = sample_shared_field_challenge::<F>(&mut t_single, q_star, &cfgs);
             for (i, fe) in per_branch.into_iter().enumerate() {
                 singles_per_branch[i].push(fe);
             }
