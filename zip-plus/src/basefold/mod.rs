@@ -28,6 +28,7 @@ pub mod compiled;
 pub mod iopp;
 pub mod limbs;
 pub mod protocol_glue;
+mod scaling;
 
 /// Errors of the basefold IOPP components.
 #[derive(Debug, Clone, PartialEq, Eq)]

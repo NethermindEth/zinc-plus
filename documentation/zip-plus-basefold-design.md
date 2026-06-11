@@ -248,10 +248,48 @@ existing files in milestone 1.
      all-Zip+ baseline at this scale. R stays at full depth by default (the
      polylog target and the cheap-prover regime); the scaling study should
      treat R as a per-scale knob.
-   - Next (5): the scaling study --- nvars sweep with both basefold lanes
-     vs all-Zip+ to locate the crossover; then the size/verify levers
-     (tight-width leaves, radix-2 batch round 0, fraction-free LU
-     precompute).
+5. **done** Scaling study (`basefold/scaling.rs`, ignored test
+   `scaling_study_zip_vs_basefold`): PCS-layer head-to-head on identical
+   witnesses, points, and field configs (cross-validated: both schemes
+   return equal evaluations at every scale). 64-bit entries, rate 1/4,
+   Q = 147 both sides, Zip+ at its best row length (swept), Zip++ at full
+   depth, serial (no parallel feature), zstd-3. Results (zstd KB,
+   verify ms):
+
+     m (B=1)   Zip+ KB / ms      Zip++ KB / ms     ratio (size)
+     2^12        55 /   3.0       127 /  75.7        2.31x
+     2^14        89 /  10.8       205 /  75.8        2.30x
+     2^16       153 /  41.5       303 / 102.0        1.98x
+     2^18       290 /  25.7       393 / 115.6        1.35x
+     2^20       545 /  90.4       511 / 115.6        0.94x  <-- CROSSOVER
+     B=8:
+     2^12       120 /  41.0       313 / 111.2        2.61x
+     2^14       215 /  31.6       425 / 111.0        1.97x
+     2^16       398 /  90.7       544 / 134.3        1.37x
+
+   Readings:
+   (a) **Size crossover at B = 1: m ~ 2^20** (zstd; raw crosses ~2^21 ---
+       Zip++'s fixed-width padding compresses, which tight-width
+       serialization would realize without zstd). Beyond the crossover the
+       gap widens fast: Zip+ grows ~1.9x per 4x witness, Zip++ adds only
+       ~165 KB per extra round (one round per 8x witness).
+   (b) **Zip++'s verify time is essentially FLAT** (76 -> 116 ms over 256x
+       witness growth --- it is Q*R lazy Bareiss solves at ~0.13 ms each),
+       while Zip+'s grows with sqrt(m). As-is the verify crossover is
+       ~2^20-2^22; with the LU-precompute lever Zip++ verify drops to a
+       few ms flat and wins from ~2^14 on.
+   (c) **Batching pushes the size crossover up** (B = 8: ~2^17-2^18 by
+       trend) because round-0 leaves carry B*8 values per query --- the
+       round-0 levers (radix-2 batch round, tight widths) attack exactly
+       this term.
+   (d) Prover totals are comparable at scale (both ~6-7 s serial at
+       2^20); Zip++'s open is slower (per-round re-encodes), its commit
+       slightly faster at large m.
+   (e) The SHA-ECDSA demo lanes (m = 2^11-2^14, B = 5-16) sit 64-500x
+       below the crossover --- fully consistent with the e2e numbers.
+   Next levers, in order of impact: fraction-free LU precompute (verify),
+   tight-width leaf serialization + radix-2 batch round 0 (size, moves
+   the crossover down ~2-4x), then rate/Q variants.
 
 ## Open design questions (tracked, not blocking)
 
