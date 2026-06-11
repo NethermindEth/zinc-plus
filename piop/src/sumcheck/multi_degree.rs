@@ -186,7 +186,7 @@ where
     }
 
     fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
-        buf = zinc_transcript::append_field_cfg::<F>(buf, &self.claimed_sums[0].modulus());
+        buf = zinc_transcript::append_field_cfg::<F>(buf, &F::modulus(self.claimed_sums[0].cfg()));
 
         let num_groups =
             u32::try_from(self.group_messages.len()).expect("num groups must fit into u32");

@@ -513,7 +513,7 @@ where
         }
         if let Some(element) = self.0.iter().find_map(|poly| poly.coeffs.first()) {
             buf[0] = 1; // Indicate that modulus is present
-            buf = zinc_transcript::append_field_cfg::<F>(&mut buf[1..], &element.modulus());
+            buf = zinc_transcript::append_field_cfg::<F>(&mut buf[1..], &F::modulus(element.cfg()));
         } else {
             buf[0] = 0;
             buf = &mut buf[1..];

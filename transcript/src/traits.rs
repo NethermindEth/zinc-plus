@@ -393,7 +393,7 @@ pub trait Transcript {
         F::Integer: Transcribable,
     {
         self.absorb_inner(&[0x3]);
-        v.modulus().write_transcription_bytes_exact(buf);
+        F::modulus(v.cfg()).write_transcription_bytes_exact(buf);
         self.absorb_inner(buf);
         self.absorb_inner(&[0x5]);
 
@@ -571,7 +571,7 @@ where
         if self.is_empty() {
             return;
         }
-        let buf = super::append_field_cfg::<F>(buf, &self[0].modulus());
+        let buf = super::append_field_cfg::<F>(buf, &F::modulus(self[0].cfg()));
         let buf = super::append_field_vec_lifted(buf, self);
         assert!(
             buf.is_empty(),

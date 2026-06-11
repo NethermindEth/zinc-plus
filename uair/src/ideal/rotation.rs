@@ -63,12 +63,11 @@ impl<F: PrimeField, const W: usize> IdealCheck<DynamicPolynomialF<F>>
                 if !value.coeffs.is_empty() {
                     // We could technically do the conversion here, but this is not expected
                     // to happen and likely signifies a bug.
-                    let coeffs_modulus = value.coeffs[0].modulus();
-                    if coeffs_modulus != generating_root.modulus() {
+                    let coeffs_modulus = F::modulus(value.coeffs[0].cfg());
+                    let root_modulus = F::modulus(generating_root.cfg());
+                    if coeffs_modulus != root_modulus {
                         return Err(IdealCheckError(format!(
-                            "Coefficient modulus {:?} doesn not match generating root modulus {:?}",
-                            coeffs_modulus,
-                            generating_root.modulus()
+                            "Coefficient modulus {coeffs_modulus} doesn not match generating root modulus {root_modulus}",
                         )));
                     }
                 }

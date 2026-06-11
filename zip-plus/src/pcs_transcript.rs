@@ -102,7 +102,7 @@ impl PcsProverTranscript {
         F::Integer: Transcribable,
     {
         if !elems.is_empty() {
-            let num_bytes = F::Integer::get_num_bytes(&elems[0].modulus());
+            let num_bytes = F::Integer::get_num_bytes(&F::modulus(elems[0].cfg()));
             let num_bytes_arr = num_bytes
                 .to_le_bytes()
                 .into_iter()
@@ -130,7 +130,7 @@ impl PcsProverTranscript {
         F::Integer: Transcribable,
     {
         self.fs_transcript.absorb_random_field(fe, buf);
-        fe.modulus().write_transcription_bytes_exact(buf);
+        F::modulus(fe.cfg()).write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;
         fe.lift_to_integer().write_transcription_bytes_exact(buf);
         self.stream.write_all(buf)?;

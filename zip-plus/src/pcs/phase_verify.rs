@@ -449,7 +449,7 @@ mod tests {
 
             // Sanity check that we didn't mess up the tampering
             let tampered_f0: F = proof.clone().read_field_elements(1).unwrap().remove(0);
-            assert_eq!(original_f0.modulus(), tampered_f0.modulus());
+            assert_eq!(F::modulus(original_f0.cfg()), F::modulus(tampered_f0.cfg()));
             assert_ne!(original_f0, tampered_f0);
 
             proof
@@ -850,7 +850,7 @@ mod tests {
         // New transcript starts with b field elements: [1-byte prefix][modulus|value
         // per elem]. Flip a byte inside the first b element's VALUE to corrupt
         // eval consistency.
-        let num_bytes_f_mod = eval_f.modulus().get_num_bytes();
+        let num_bytes_f_mod = F::modulus(eval_f.cfg()).get_num_bytes();
         let num_bytes_f_val = eval_f.inner().get_num_bytes();
         let flip_at = 1 + num_bytes_f_mod + num_bytes_f_val / 4;
 

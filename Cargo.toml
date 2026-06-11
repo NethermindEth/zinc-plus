@@ -25,7 +25,7 @@ publish = false
 blake3 = "1.8"
 criterion = "0.7.0"
 crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", rev = "234f101", features = ["std", "crypto_bigint", "rand"] }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", rev = "30a8c38", features = ["std", "crypto_bigint", "rand"] }
 derive_more = { version = "2.1.1", features = ["full"] }
 itertools = "0.14"
 num-traits = "0.2"

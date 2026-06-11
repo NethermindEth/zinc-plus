@@ -66,7 +66,7 @@ where
     }
 
     fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
-        buf = zinc_transcript::append_field_cfg::<F>(buf, &self.claimed_sum.modulus());
+        buf = zinc_transcript::append_field_cfg::<F>(buf, &F::modulus(self.claimed_sum.cfg()));
         buf = {
             let len =
                 u32::try_from(self.messages.len()).expect("messages length must fit into u32");
