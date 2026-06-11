@@ -41,10 +41,10 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    <F<FIELD_LIMBS> as Field>::Integer: ConstIntSemiring + ConstTranscribable,
     TestUairNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
-    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Integer>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;
@@ -225,10 +225,10 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    <F<FIELD_LIMBS> as Field>::Inner: ConstIntSemiring + ConstTranscribable,
+    <F<FIELD_LIMBS> as Field>::Integer: ConstIntSemiring + ConstTranscribable,
     TestUairSimpleMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>>
         + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
-    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Inner>,
+    MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Integer>,
 {
     let mut rng = rng();
     let num_vars = zinc_utils::log2(witness_size) as usize;

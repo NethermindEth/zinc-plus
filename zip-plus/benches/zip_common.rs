@@ -45,7 +45,7 @@ pub fn do_bench<Zt: ZipTypes, Lc: LinearCode<Zt>, const CHECK_FOR_OVERFLOWS: boo
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
+    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
     encode_rows::<Zt, Lc, 12>(group, make_linear_code);
@@ -244,7 +244,7 @@ pub fn prove<
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
+    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();
@@ -332,7 +332,7 @@ pub fn verify<
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
         + for<'a> MulByScalar<&'a F>,
-    <F as Field>::Inner: FromRef<Zt::Fmod> + Transcribable,
+    <F as Field>::Integer: FromRef<Zt::Fmod> + Transcribable,
     Zt::Eval: ProjectableToField<F>,
 {
     let mut rng = ThreadRng::default();

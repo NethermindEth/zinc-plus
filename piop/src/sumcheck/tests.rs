@@ -278,13 +278,13 @@ fn sumcheck_with_zero_polynomial() {
 
     let poly_degree = 2;
     let num_mles = 2;
-    let zero_evals = vec![<F as Field>::Inner::ZERO; 1 << num_vars];
+    let zero_evals = vec![<F as Field>::Integer::ZERO; 1 << num_vars];
     let poly_mles: Vec<DenseMultilinearExtension<<F as Field>::Inner>> = (0..num_mles)
         .map(|_| {
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
                 zero_evals.clone(),
-                <F as Field>::Inner::ZERO,
+                <F as Field>::Integer::ZERO,
             )
         })
         .collect();
@@ -330,7 +330,7 @@ fn sumcheck_with_constant_polynomial() {
             DenseMultilinearExtension::from_evaluations_vec(
                 num_vars,
                 const_evals.clone(),
-                <F as Field>::Inner::ZERO,
+                <F as Field>::Integer::ZERO,
             )
         })
         .collect();
