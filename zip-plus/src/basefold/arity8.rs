@@ -326,6 +326,7 @@ where
         params,
         std::slice::from_ref(&witness.to_vec()),
         &weights,
+        None,
         hint,
         point,
         cfg,
@@ -337,7 +338,17 @@ where
 /// phi_{q0}(witness_j)~(point)` of the committed batch. The round-0 claims
 /// `e_{0,j}` are part of the proof; everything else is one folding chain
 /// over all columns at once.
-#[allow(clippy::too_many_lines)]
+///
+/// `coeff_weights`: the X-dimension extension. When `Some`, each witness is
+/// the flattening of cell *polynomials* with `ARITY` coefficients (the
+/// coefficient index in the low 3 bits), and the **first** fold round
+/// consumes the coefficient dimension with the given per-column weight
+/// vectors (the lane's per-poly psi-alphas) instead of Lagrange weights;
+/// the per-column claim becomes
+/// `e_{0,t} = sum_i coeff_weights[t][i] * phi(class_i(w_t))~(point)`, and
+/// `point` then has `num_vars - 3` coordinates. Arbitrary weights are sound
+/// here because the whole coefficient dimension folds in one round.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn prove_batch<
     C,
     F,
@@ -350,6 +361,7 @@ pub fn prove_batch<
     params: &Arity8Params<C>,
     witnesses: &[Vec<Int<ND>>],
     weights: &[F],
+    coeff_weights: Option<&[Vec<F>]>,
     hint: &Arity8Hint<NK>,
     point: &[F],
     cfg: &F::Config,
@@ -373,7 +385,15 @@ where
     for witness in witnesses {
         check_digit_range(witness, params.p, "witness")?;
     }
-    if point.len() != params.num_vars
+    let coeff_shift = usize::from(coeff_weights.is_some());
+    if let Some(cw) = coeff_weights
+        && (cw.len() != witnesses.len() || cw.iter().any(|w| w.len() != ARITY))
+    {
+        return Err(BasefoldError::InvalidParams(
+            "coeff_weights shape mismatch".to_owned(),
+        ));
+    }
+    if add!(point.len(), mul!(3usize, coeff_shift)) != params.num_vars
         || params.num_vars < mul!(3usize, params.num_rounds)
     {
         return Err(BasefoldError::InvalidParams(
@@ -386,8 +406,18 @@ where
     // Round-0 per-column claims and the weighted batch evaluation.
     let mut initial_claims: Vec<F> = Vec::with_capacity(witnesses.len());
     let mut eval = F::zero_with_cfg(cfg);
-    for (witness, w) in witnesses.iter().zip(weights) {
-        let e = eval_projected_mle::<F, ND>(witness, point, cfg)?;
+    for (t, (witness, w)) in witnesses.iter().zip(weights).enumerate() {
+        let e = match coeff_weights {
+            None => eval_projected_mle::<F, ND>(witness, point, cfg)?,
+            Some(cw) => {
+                let mut acc = F::zero_with_cfg(cfg);
+                for (i, class) in split_classes(witness).iter().enumerate() {
+                    acc += cw[t][i].clone()
+                        * eval_projected_mle::<F, ND>(class, point, cfg)?;
+                }
+                acc
+            }
+        };
         absorb_field(transcript, &e);
         eval += w.clone() * e.clone();
         initial_claims.push(e);
@@ -402,7 +432,7 @@ where
     let mut inter_trees: Vec<MerkleTree> = Vec::with_capacity(r_max.saturating_sub(1));
 
     for r in 1..=r_max {
-        let suffix = &point[mul!(3usize, r)..];
+        let suffix = &point[mul!(3usize, sub!(r, coeff_shift))..];
 
         // 1. Class claims for every current limb.
         let mut round_class_claims: Vec<[F; ARITY]> = Vec::with_capacity(cur_limbs.len());
@@ -534,7 +564,7 @@ where
 {
     let weights = vec![F::one_with_cfg(cfg)];
     verify_batch::<C, F, ND, NK, NW, NCU, CHECK>(
-        params, commitment, proof, &weights, point, claimed_eval, cfg, transcript,
+        params, commitment, proof, &weights, None, point, claimed_eval, cfg, transcript,
     )
 }
 
@@ -555,6 +585,7 @@ pub fn verify_batch<
     commitment: &Arity8Commitment,
     proof: &Arity8Proof<F, ND, NK>,
     weights: &[F],
+    coeff_weights: Option<&[Vec<F>]>,
     point: &[F],
     claimed_eval: &F,
     cfg: &F::Config,
@@ -572,12 +603,20 @@ where
 {
     validate_widths8::<NW, NCU>(params)?;
     let r_max = params.num_rounds;
+    let coeff_shift = usize::from(coeff_weights.is_some());
+    if let Some(cw) = coeff_weights
+        && (cw.len() != weights.len() || cw.iter().any(|w| w.len() != ARITY))
+    {
+        return Err(BasefoldError::InvalidParams(
+            "coeff_weights shape mismatch".to_owned(),
+        ));
+    }
     if proof.class_claims.len() != r_max
         || proof.limb_claims.len() != sub!(r_max, 1usize)
         || proof.round_roots.len() != sub!(r_max, 1usize)
         || proof.queries.len() != params.num_queries
         || proof.queries.iter().any(|q| q.len() != r_max)
-        || point.len() != params.num_vars
+        || add!(point.len(), mul!(3usize, coeff_shift)) != params.num_vars
         || proof.initial_claims.len() != weights.len()
         || proof.initial_claims.is_empty()
     {
@@ -602,8 +641,17 @@ where
     let mut tail_codewords: Vec<Vec<Int<NK>>> = Vec::new();
 
     for r in 1..=r_max {
-        let z_round = &point[mul!(3usize, sub!(r, 1usize))..mul!(3usize, r)];
-        let weights = class_weights::<F>(z_round, cfg);
+        // Round 1 of the X-dimension extension uses the per-column
+        // coefficient weights; every other round uses the three-variable
+        // Lagrange weights of its point window.
+        let cw_round = (r == 1).then_some(coeff_weights).flatten();
+        let lagrange_weights = if cw_round.is_none() {
+            let z_start = mul!(3usize, sub!(sub!(r, 1usize), coeff_shift));
+            let z_round = &point[z_start..add!(z_start, 3usize)];
+            Some(class_weights::<F>(z_round, cfg))
+        } else {
+            None
+        };
         let k_prev = cur_claims.len();
 
         // 1. Class-claim split identities.
@@ -612,8 +660,13 @@ where
             return Err(BasefoldError::ClaimCheckFailed { round: r });
         }
         for (t, claims) in round_class_claims.iter().enumerate() {
+            let weights_t: &[F] = match (cw_round, &lagrange_weights) {
+                (Some(cw), _) => &cw[t],
+                (None, Some(lw)) => lw,
+                (None, None) => unreachable!(),
+            };
             let mut recombined = F::zero_with_cfg(cfg);
-            for (w, e) in weights.iter().zip(claims.iter()) {
+            for (w, e) in weights_t.iter().zip(claims.iter()) {
                 recombined += w.clone() * e.clone();
             }
             if recombined != cur_claims[t] {
@@ -666,7 +719,7 @@ where
                 absorb_ints(transcript, limb);
                 claims.push(eval_projected_mle::<F, ND>(
                     limb,
-                    &point[mul!(3usize, r)..],
+                    &point[mul!(3usize, sub!(r, coeff_shift))..],
                     cfg,
                 )?);
                 tail_codewords.push(
@@ -989,7 +1042,7 @@ mod tests {
         let (mut tp, cfg, point) = open_transcript(&commitment, num_vars);
         let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg)).collect();
         let (proof, eval) = prove_batch::<_, F, ND, NK, NW, NCU, true>(
-            &params, &witnesses, &weights, &hint, &point, &cfg, &mut tp,
+            &params, &witnesses, &weights, None, &hint, &point, &cfg, &mut tp,
         )
         .unwrap();
 
@@ -1006,6 +1059,7 @@ mod tests {
             &commitment,
             &proof,
             &weights,
+            None,
             &point_v,
             &eval,
             &cfg_v,
@@ -1025,6 +1079,116 @@ mod tests {
             &commitment,
             &bad,
             &weights,
+            None,
+            &point_v,
+            &eval,
+            &cfg_v,
+            &mut tv,
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn coeff_weights_x_dimension() {
+        // The X-dimension extension: each witness is the flattening of
+        // cells with ARITY coefficients (coefficient index in the low 3
+        // bits, e.g. bit-polynomial cells of the binary lane); round 1
+        // consumes the coefficient dimension with arbitrary per-column
+        // weight vectors, later rounds consume the 9-coordinate point.
+        let num_vars_flat = 12usize;
+        let num_rounds = 4usize;
+        let batch = 3usize;
+        let msg_len = 1usize << num_vars_flat;
+        let chain =
+            Radix8Chain::<ChainConfigF167772161>::new(msg_len, 4, num_rounds).unwrap();
+        let params = Arity8Params::new(chain, P, num_rounds, Q).unwrap();
+        let mut rng = StdRng::seed_from_u64(321);
+        // Binary-lane-like witnesses: flattened bits.
+        let witnesses: Vec<Vec<Int<ND>>> = (0..batch)
+            .map(|_| {
+                (0..msg_len)
+                    .map(|_| Int::from(i32::from(rng.random::<bool>())))
+                    .collect()
+            })
+            .collect();
+        let (commitment, hint) =
+            commit_batch::<_, ND, NK, true>(&params, &witnesses).unwrap();
+
+        let point_len = num_vars_flat - 3;
+        let (mut tp, cfg, point) = {
+            let mut t = Blake3Transcript::new();
+            t.absorb_slice(&commitment.root.0);
+            let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+            let point: Vec<F> = t.get_field_challenges(point_len, &cfg);
+            (t, cfg, point)
+        };
+        let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg)).collect();
+        let coeff_w: Vec<Vec<F>> = (0..batch)
+            .map(|_| tp.get_field_challenges(ARITY, &cfg))
+            .collect();
+        let (proof, eval) = prove_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &witnesses,
+            &weights,
+            Some(&coeff_w),
+            &hint,
+            &point,
+            &cfg,
+            &mut tp,
+        )
+        .unwrap();
+
+        // Reference: eval = sum_t sum_i coeff_w[t][i] * class_i(w_t)~(point).
+        let mut expected = F::zero_with_cfg(&cfg);
+        for (t, w) in witnesses.iter().enumerate() {
+            for (i, class) in split_classes(w).iter().enumerate() {
+                expected += coeff_w[t][i].clone()
+                    * eval_projected_mle::<F, ND>(class, &point, &cfg).unwrap();
+            }
+        }
+        assert_eq!(eval, expected);
+
+        let (mut tv, cfg_v, point_v) = {
+            let mut t = Blake3Transcript::new();
+            t.absorb_slice(&commitment.root.0);
+            let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+            let point: Vec<F> = t.get_field_challenges(point_len, &cfg);
+            (t, cfg, point)
+        };
+        let coeff_w_v: Vec<Vec<F>> = (0..batch)
+            .map(|_| tv.get_field_challenges(ARITY, &cfg_v))
+            .collect();
+        verify_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &commitment,
+            &proof,
+            &weights,
+            Some(&coeff_w_v),
+            &point_v,
+            &eval,
+            &cfg_v,
+            &mut tv,
+        )
+        .unwrap();
+
+        // Wrong coefficient weights must fail the round-1 split check.
+        let (mut tv, cfg_v, point_v) = {
+            let mut t = Blake3Transcript::new();
+            t.absorb_slice(&commitment.root.0);
+            let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+            let point: Vec<F> = t.get_field_challenges(point_len, &cfg);
+            (t, cfg, point)
+        };
+        let mut bad_w: Vec<Vec<F>> = (0..batch)
+            .map(|_| tv.get_field_challenges(ARITY, &cfg_v))
+            .collect();
+        bad_w[0][0] = bad_w[0][0].clone() + F::one_with_cfg(&cfg_v);
+        let res = verify_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &commitment,
+            &proof,
+            &weights,
+            Some(&bad_w),
             &point_v,
             &eval,
             &cfg_v,

@@ -201,10 +201,45 @@ existing files in milestone 1.
      slots; zstd already recovers much of it --- 2.7:1 on the blob), a
      radix-2 round 0 (pairs instead of 8-cosets for the batch round,
      B*2 values/leaf), and the LU-precompute for verify time.
-   - Later (4e): binary/arbitrary lanes need the X-dimension-as-variables
-     extension (monomial-basis claim rounds with psi-alpha weights
-     (1, alpha^{2^i})) --- the big prize, since those lanes dominate the
-     SHA-ECDSA witness.
+   - **done (4e, binary lane)** X-dimension extension:
+     `prove_batch`/`verify_batch` gained `coeff_weights: Option<&[Vec<F>]>`
+     --- when set, each committed column is the flattening of cells with
+     ARITY = 8 polynomial coefficients (coefficient index in the low 3
+     bits), and the FIRST fold round consumes the coefficient dimension
+     with the given per-column weight vectors instead of Lagrange weights;
+     `point` then carries num_vars - 3 coordinates (consumed from round 2).
+     Key insight: arbitrary (non-tensor) weights are sound there because
+     the whole coefficient dimension folds in a single arity-8 round ---
+     and the binary lane's cells have exactly 8 coefficients
+     (QUARTER_D = 8), with the lane's per-poly psi-alphas as the weights.
+     The per-column claim becomes e_{0,t} = sum_i alpha_{t,i} *
+     class_i(w_t)~(r0_ext), equal by linearity to Zip+'s
+     <alpha_t, lifted-eval> claim, so the existing verifier-side
+     bin_eval_f(alphas) is the expected value unchanged. `basefold-bin`
+     feature mirrors `basefold-int` (flattened bit columns via
+     `flatten_binary_columns`, basefold root in the bin commitment slot,
+     sample_alphas on both sides at the same transcript position,
+     generalized shared-root stand-ins for verify_columns_shared).
+     Composable with basefold-int. Unit test `coeff_weights_x_dimension`
+     (claim reference + wrong-weights rejection); ShaEcdsa folded-4x e2e
+     green with BOTH lanes on Zip++ (only the arbitrary lane remains on
+     Zip+). Measured at nvars = 9, rate 1/4, Q = 150:
+       baseline (all Zip+):       raw  399 KB, zstd 184 KB, pcs verify  59 ms
+       int on Zip++:              raw 1465 KB, zstd 542 KB, pcs verify 151 ms
+       bin + int on Zip++:        raw 2548 KB, zstd 799 KB, pcs verify 232 ms
+       (pcs open 12.7 -> 10.6 -> 52.5 ms)
+     Same story as the int lane, amplified: at nvars = 9 the witness is far
+     too small for the polylog branch (m_flat = 2^14, Q = 150,
+     query-dominated; 1-bit round-0 entries serialized in 48 B slots).
+     The machinery is now complete for the scaling study.
+   - Remaining (4f): the arbitrary lane (cells with 32 coefficients) needs
+     either a 4x sub-column split (8 coefficients each, batch x4 --- works
+     with the existing coeff_weights machinery) or an arity-32 first round;
+     it is the smallest lane.
+   - Next (5): the scaling study --- nvars sweep with both basefold lanes
+     vs all-Zip+ to locate the crossover; then the size/verify levers
+     (tight-width leaves, radix-2 batch round 0, fraction-free LU
+     precompute).
 
 ## Open design questions (tracked, not blocking)
 

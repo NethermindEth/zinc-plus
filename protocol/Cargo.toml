@@ -49,6 +49,11 @@ iprs-rate-1-16 = []
 # IOPP instead of Zip+ in the folded-4x pipeline. Binary and arbitrary lanes
 # stay on Zip+; the int lane gets its own arity-8 chain commitment.
 basefold-int = []
+# Open the binary witness lane with the basefold IOPP (X-dimension
+# extension: bit-polynomial cells are flattened and the coefficient
+# dimension folds in the first arity-8 round with the lane's per-poly
+# psi-alphas as class weights). Composable with basefold-int.
+basefold-bin = []
 
 [[bench]]
 name = "e2e"

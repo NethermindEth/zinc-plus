@@ -41,6 +41,56 @@ pub fn bf_zip_err(e: BasefoldError) -> ZipError {
     ZipError::InvalidSnark(format!("basefold: {e}"))
 }
 
+/// Flatten bit-polynomial columns for the X-dimension extension: cell `b`'s
+/// coefficient `l` lands at index `l + D * b` (coefficient index in the low
+/// bits), so the first arity-8 fold round consumes the coefficient
+/// dimension. Requires `D == ARITY`.
+pub fn flatten_binary_columns<const D: usize>(
+    cols: &[zinc_poly::mle::DenseMultilinearExtension<
+        zinc_poly::univariate::binary::BinaryPoly<D>,
+    >],
+) -> Result<Vec<Vec<Int<BF_ND>>>, ZipError> {
+    use num_traits::{ConstOne, ConstZero};
+    if D != ARITY {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "X-dimension extension requires cell degree bound {ARITY}, got {D}"
+        )));
+    }
+    Ok(cols
+        .iter()
+        .map(|col| {
+            let mut out = Vec::with_capacity(col.evaluations.len().saturating_mul(D));
+            for cell in &col.evaluations {
+                for b in cell.iter() {
+                    let b: crypto_primitives::boolean::Boolean =
+                        *std::borrow::Borrow::<crypto_primitives::boolean::Boolean>::borrow(&b);
+                    out.push(if bool::from(b) {
+                        Int::<BF_ND>::ONE
+                    } else {
+                        Int::<BF_ND>::ZERO
+                    });
+                }
+            }
+            out
+        })
+        .collect())
+}
+
+/// Convert per-poly challenge vectors into the field weight vectors of the
+/// coefficient round.
+pub fn alphas_to_coeff_weights<F, Chal>(
+    alphas: &[Vec<Chal>],
+    cfg: &F::Config,
+) -> Vec<Vec<F>>
+where
+    F: PrimeField + for<'a> crypto_primitives::FromWithConfig<&'a Chal>,
+{
+    alphas
+        .iter()
+        .map(|a| a.iter().map(|c| F::from_with_cfg(c, cfg)).collect())
+        .collect()
+}
+
 /// The arity-8 parameters of the int-lane opening. Both sides derive them
 /// from public data: the extended variable count (`num_vars + 2` for the
 /// quartered columns), the lane's repetition factor, and its query count.
@@ -158,8 +208,7 @@ where
         class_claims.push(round);
     }
     let mut limb_claims = Vec::with_capacity(sub!(r_max, 1usize));
-    for r in 1..r_max {
-        let k_r = ks[r];
+    for &k_r in &ks[1..r_max] {
         let mut round = Vec::with_capacity(k_r);
         for _ in 0..k_r {
             round.push(read_f(transcript)?);
@@ -174,9 +223,9 @@ where
     let mut queries = Vec::with_capacity(params.num_queries);
     for _ in 0..params.num_queries {
         let mut openings = Vec::with_capacity(r_max);
-        for r in 0..r_max {
+        for &k_r in &ks[..r_max] {
             let values =
-                transcript.read_const_many::<Int<BF_NK>>(mul!(ks[r], ARITY))?;
+                transcript.read_const_many::<Int<BF_NK>>(mul!(k_r, ARITY))?;
             let proof = transcript.read_merkle_proof()?;
             openings.push(Leaf8Opening { values, proof });
         }
@@ -200,7 +249,6 @@ mod tests {
     use crate::basefold::arity8::{commit_batch, prove_batch, verify_batch};
     use crate::pcs::structs::ZipPlusCommitment;
     use crypto_primitives::crypto_bigint_monty::MontyField;
-    use num_traits::ConstOne;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use zinc_primality::MillerRabin;
     use zinc_transcript::traits::Transcript;
@@ -246,6 +294,7 @@ mod tests {
             &params,
             &witnesses,
             &weights,
+            None,
             &hint,
             &point,
             &cfg,
@@ -269,6 +318,7 @@ mod tests {
             &commitment,
             &proof_v,
             &weights_v,
+            None,
             &point_v,
             &eval,
             &cfg_v,

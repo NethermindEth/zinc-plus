@@ -1891,6 +1891,14 @@ where
     let split_binary_witness: Vec<DenseMultilinearExtension<BinaryPoly<QUARTER_D>>> =
         zip_plus::pcs::folding::split_columns::<HALF_D, QUARTER_D>(&split1);
     drop(split1);
+
+    // With the basefold binary lane (X-dimension extension), the binary
+    // columns are committed and opened by the limbwise-folding IOPP.
+    #[cfg(feature = "basefold-bin")]
+    let bin_witness_for_zip: &[DenseMultilinearExtension<BinaryPoly<QUARTER_D>>] = &[];
+    #[cfg(not(feature = "basefold-bin"))]
+    let bin_witness_for_zip: &[DenseMultilinearExtension<BinaryPoly<QUARTER_D>>] =
+        &split_binary_witness;
     let split_int_witness: Vec<DenseMultilinearExtension<Int<INT_QUARTER_LIMBS>>> =
         zip_plus::pcs::folding::split_int_columns_4x::<INT_LIMBS, INT_QUARTER_LIMBS>(
             &witness_trace.int,
@@ -1909,7 +1917,7 @@ where
     // ≥2 non-empty batches AND arb is empty / has matching codeword.
     let arb_compatible = witness_trace.arbitrary_poly.is_empty()
         || pp_arb.linear_code.codeword_len() == pp_bin_split2.linear_code.codeword_len();
-    let bin_nonempty = !split_binary_witness.is_empty();
+    let bin_nonempty = !bin_witness_for_zip.is_empty();
     let int_nonempty = !int_witness_for_zip.is_empty();
     let arb_nonempty = !witness_trace.arbitrary_poly.is_empty();
     let nonempty_count = (bin_nonempty as u8) + (arb_nonempty as u8) + (int_nonempty as u8);
@@ -1935,14 +1943,14 @@ where
             pp_bin_split2,
             pp_arb,
             pp_int_split4,
-            &split_binary_witness,
+            bin_witness_for_zip,
             &witness_trace.arbitrary_poly,
             int_witness_for_zip,
         )?;
         (None, None, None, Some(multi), comm_bin, comm_arb, comm_int)
     } else {
         let (res_bin, (res_arb, res_int)) = cfg_join!(
-            commit_optionally(pp_bin_split2, &split_binary_witness),
+            commit_optionally(pp_bin_split2, bin_witness_for_zip),
             commit_optionally(pp_arb, &witness_trace.arbitrary_poly),
             commit_optionally(pp_int_split4, int_witness_for_zip),
         );
@@ -1984,6 +1992,41 @@ where
                 batch_size: bf_witnesses.len(),
             };
             (bf_params, bf_witnesses, Some(bf_hint), commitment_int)
+        }
+    };
+
+    // Basefold binary lane (X-dimension extension): flatten the
+    // bit-polynomial cells (coefficient index in the low 3 bits) and commit
+    // under the arity-8 chain; the first fold round will consume the
+    // coefficient dimension with the lane's per-poly psi-alphas.
+    #[cfg(feature = "basefold-bin")]
+    let (bf_bin_params, bf_bin_witnesses, bf_bin_hint, commitment_bin) = {
+        use zip_plus::basefold::protocol_glue::{
+            BF_NK, bf_zip_err, flatten_binary_columns, int_lane_params,
+        };
+        let rep =
+            <ZtF::BinaryLc as zip_plus::code::LinearCode<ZtF::BinaryZt>>::REPETITION_FACTOR;
+        let bf_bin_params = int_lane_params(
+            add!(num_vars, 5usize),
+            rep,
+            <ZtF::BinaryZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+        )?;
+        let bf_bin_witnesses = flatten_binary_columns::<QUARTER_D>(&split_binary_witness)?;
+        if bf_bin_witnesses.is_empty() {
+            (bf_bin_params, bf_bin_witnesses, None, commitment_bin)
+        } else {
+            let (bf_comm, bf_hint) = zip_plus::basefold::arity8::commit_batch::<
+                _,
+                3,
+                BF_NK,
+                CHECK_FOR_OVERFLOW,
+            >(&bf_bin_params, &bf_bin_witnesses)
+            .map_err(bf_zip_err)?;
+            let commitment_bin = zip_plus::pcs::structs::ZipPlusCommitment {
+                root: bf_comm.root,
+                batch_size: bf_bin_witnesses.len(),
+            };
+            (bf_bin_params, bf_bin_witnesses, Some(bf_hint), commitment_bin)
         }
     };
 
@@ -2315,7 +2358,7 @@ where
                 pp_bin_split2,
                 pp_arb,
                 pp_int_split4,
-                &split_binary_witness,
+                bin_witness_for_zip,
                 &witness_trace.arbitrary_poly,
                 int_witness_for_zip,
                 &r0_ext,
@@ -2338,7 +2381,7 @@ where
                 pp_bin_split2,
                 pp_arb,
                 pp_int_split4,
-                &split_binary_witness,
+                bin_witness_for_zip,
                 &witness_trace.arbitrary_poly,
                 int_witness_for_zip,
                 &r0_ext,
@@ -2355,7 +2398,7 @@ where
                 >(
                     &mut pcs_transcript,
                     pp_bin_split2,
-                    &split_binary_witness,
+                    bin_witness_for_zip,
                     &r0_ext,
                     hint_bin,
                     &field_cfg,
@@ -2365,7 +2408,7 @@ where
                 let _ = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::prove_f::<_, CHECK_FOR_OVERFLOW>(
                     &mut pcs_transcript,
                     pp_bin_split2,
-                    &split_binary_witness,
+                    bin_witness_for_zip,
                     &r0_ext,
                     hint_bin,
                     &field_cfg,
@@ -2426,6 +2469,39 @@ where
             }
         }
     }
+    #[cfg(feature = "basefold-bin")]
+    if let Some(bf_bin_hint) = &bf_bin_hint {
+        use zip_plus::basefold::protocol_glue::{
+            BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err, write_arity8_proof,
+        };
+        let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+            &mut pcs_transcript.fs_transcript,
+            bf_bin_witnesses.len(),
+        );
+        let coeff_w: Vec<Vec<F>> = alphas_to_coeff_weights(&alphas, &field_cfg);
+        let weights = vec![F::one_with_cfg(&field_cfg); bf_bin_witnesses.len()];
+        let (bf_proof, _bf_eval) = zip_plus::basefold::arity8::prove_batch::<
+            _,
+            F,
+            3,
+            BF_NK,
+            BF_NW,
+            BF_NCU,
+            CHECK_FOR_OVERFLOW,
+        >(
+            &bf_bin_params,
+            &bf_bin_witnesses,
+            &weights,
+            Some(&coeff_w),
+            bf_bin_hint,
+            &r0_ext,
+            &field_cfg,
+            &mut pcs_transcript.fs_transcript,
+        )
+        .map_err(bf_zip_err)?;
+        write_arity8_proof(&mut pcs_transcript, &bf_proof)?;
+    }
+
     #[cfg(feature = "basefold-int")]
     if let Some(bf_hint) = &bf_hint {
         use zip_plus::basefold::protocol_glue::{
@@ -2444,6 +2520,7 @@ where
             &bf_params,
             &bf_witnesses,
             &weights,
+            None,
             bf_hint,
             &r0_ext,
             &field_cfg,

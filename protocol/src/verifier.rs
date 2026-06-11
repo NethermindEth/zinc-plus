@@ -2345,20 +2345,25 @@ where
         eval_f
     };
 
-    // Under the basefold int lane, the int slot is not part of any Zip+
-    // batch; its commitment root belongs to the basefold tree and is
+    // Under the basefold lanes, the corresponding slots are not part of any
+    // Zip+ batch; their commitment roots belong to basefold trees and are
     // checked separately below.
+    let bin_zip_batch_size = if cfg!(feature = "basefold-bin") {
+        0
+    } else {
+        proof.commitments.0.batch_size
+    };
     let int_zip_batch_size = if cfg!(feature = "basefold-int") {
         0
     } else {
         proof.commitments.2.batch_size
     };
-    let nonempty_count = (proof.commitments.0.batch_size > 0) as u8
+    let nonempty_count = (bin_zip_batch_size > 0) as u8
         + (proof.commitments.1.batch_size > 0) as u8
         + (int_zip_batch_size > 0) as u8;
     let nonempty_roots_match = {
         let mut roots = [
-            (proof.commitments.0.batch_size > 0).then_some(&proof.commitments.0.root),
+            (bin_zip_batch_size > 0).then_some(&proof.commitments.0.root),
             (proof.commitments.1.batch_size > 0).then_some(&proof.commitments.1.root),
             (int_zip_batch_size > 0).then_some(&proof.commitments.2.root),
         ]
@@ -2372,7 +2377,7 @@ where
     if shared_merkle {
         // Sequential phase: alpha-sample + pre-open transcript reads for
         // each instance. FS state requires this to be serial.
-        let (alphas_bin, reads_bin, eval_f_bin) = if proof.commitments.0.batch_size > 0 {
+        let (alphas_bin, reads_bin, eval_f_bin) = if bin_zip_batch_size > 0 {
             let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
                 &mut pcs_transcript.fs_transcript,
                 proof.commitments.0.batch_size,
@@ -2489,18 +2494,45 @@ where
             vp_bin_split2,
             vp_arb,
             vp_int_split4,
-            &proof.commitments.0,
-            &proof.commitments.1,
-            // Under the basefold int lane the int slot holds the basefold
-            // root and is not part of the shared Zip+ tree: present it as
-            // an empty instance with the shared root.
-            &if cfg!(feature = "basefold-int") {
-                zip_plus::pcs::structs::ZipPlusCommitment {
-                    root: proof.commitments.0.root.clone(),
-                    batch_size: 0,
+            // Basefold lanes hold basefold roots and are not part of the
+            // shared Zip+ tree: present them as empty instances with the
+            // shared root (verify_columns_shared asserts equal roots and
+            // sizes its stream reads by batch_size).
+            &{
+                let shared_root = if bin_zip_batch_size > 0 {
+                    proof.commitments.0.root.clone()
+                } else if proof.commitments.1.batch_size > 0 {
+                    proof.commitments.1.root.clone()
+                } else {
+                    proof.commitments.2.root.clone()
+                };
+                let _ = &shared_root;
+                if bin_zip_batch_size > 0 {
+                    proof.commitments.0.clone()
+                } else {
+                    zip_plus::pcs::structs::ZipPlusCommitment {
+                        root: shared_root,
+                        batch_size: 0,
+                    }
                 }
-            } else {
-                proof.commitments.2.clone()
+            },
+            &proof.commitments.1,
+            &{
+                let shared_root = if bin_zip_batch_size > 0 {
+                    proof.commitments.0.root.clone()
+                } else if proof.commitments.1.batch_size > 0 {
+                    proof.commitments.1.root.clone()
+                } else {
+                    proof.commitments.2.root.clone()
+                };
+                if int_zip_batch_size > 0 {
+                    proof.commitments.2.clone()
+                } else {
+                    zip_plus::pcs::structs::ZipPlusCommitment {
+                        root: shared_root,
+                        batch_size: 0,
+                    }
+                }
             },
             &alphas_bin,
             &alphas_arb,
@@ -2512,7 +2544,7 @@ where
         .map_err(|e| ProtocolError::PcsVerification(0, e))?;
     } else {
         // Per-instance fallback.
-        if proof.commitments.0.batch_size > 0 {
+        if bin_zip_batch_size > 0 {
             let alphas =
                 ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
                     &mut pcs_transcript.fs_transcript,
@@ -2569,6 +2601,54 @@ where
             .map_err(|e| ProtocolError::PcsVerification(2, e))?;
         }
     }
+    #[cfg(feature = "basefold-bin")]
+    if proof.commitments.0.batch_size > 0 {
+        use zip_plus::basefold::protocol_glue::{
+            BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err, int_lane_params,
+            read_arity8_proof,
+        };
+        let b = proof.commitments.0.batch_size;
+        let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+            &mut pcs_transcript.fs_transcript,
+            b,
+        );
+        let eval_f = bin_eval_f(&alphas);
+        let coeff_w: Vec<Vec<F>> = alphas_to_coeff_weights(&alphas, &field_cfg);
+        let rep =
+            <ZtF::BinaryLc as zip_plus::code::LinearCode<ZtF::BinaryZt>>::REPETITION_FACTOR;
+        let bf_params = int_lane_params(
+            add!(r0_ext.len(), 3usize),
+            rep,
+            <ZtF::BinaryZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, b, &field_cfg)
+            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        let weights = vec![F::one_with_cfg(&field_cfg); b];
+        zip_plus::basefold::arity8::verify_batch::<
+            _,
+            F,
+            3,
+            BF_NK,
+            BF_NW,
+            BF_NCU,
+            CHECK_FOR_OVERFLOW,
+        >(
+            &bf_params,
+            &zip_plus::basefold::arity8::Arity8Commitment {
+                root: proof.commitments.0.root.clone(),
+            },
+            &bf_proof,
+            &weights,
+            Some(&coeff_w),
+            &r0_ext,
+            &eval_f,
+            &field_cfg,
+            &mut pcs_transcript.fs_transcript,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(0, bf_zip_err(e)))?;
+    }
+
     #[cfg(feature = "basefold-int")]
     if proof.commitments.2.batch_size > 0 {
         use num_traits::ConstOne;
@@ -2604,6 +2684,7 @@ where
             },
             &bf_proof,
             &weights,
+            None,
             &r0_ext,
             &eval_f,
             &field_cfg,
