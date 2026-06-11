@@ -615,7 +615,6 @@ mod tests {
 
         const NKB: usize = 10; // 640-bit codeword leaves (worst-case safe)
         const NWB: usize = 12; // 768-bit check accumulators
-        const QQ: usize = 100;
 
         let num_vars = 12usize;
         let msg_len = 1usize << num_vars;
@@ -631,16 +630,18 @@ mod tests {
             })
             .collect();
 
+        for (rep, qq) in [(4usize, 147usize), (8, 100)] {
         eprintln!(
-            "depth dial: m = 2^{num_vars}, rep = 4, q = 5*2^25+1, p = {P},              lambda = 128, Q = {QQ}, leaf ints {} B",
+            "depth dial: m = 2^{num_vars}, rep = {rep}, q = 5*2^25+1, p = {P}, \
+             lambda = 128, Q = {qq}, leaf ints {} B",
             <Int<NKB> as ConstTranscribable>::NUM_BYTES
         );
         for num_rounds in [2usize, 4, 6, 8, 10, 12] {
             let chain = FoldableIprsChain::<ChainConfigF167772161>::new(
-                msg_len, 4, num_rounds,
+                msg_len, rep, num_rounds,
             )
             .unwrap();
-            let params = BasefoldParams::new(chain, P, num_rounds, QQ).unwrap();
+            let params = BasefoldParams::new(chain, P, num_rounds, qq).unwrap();
 
             let t0 = Instant::now();
             let (commitment, hint) =
@@ -709,6 +710,7 @@ mod tests {
                  paths {paths_b:6}) | max leaf bits {max_leaf_bits:3} -> tight-width \
                  ~{tight:7} B | commit {t_commit:?} prove {t_prove:?} verify {t_verify:?}"
             );
+        }
         }
     }
 

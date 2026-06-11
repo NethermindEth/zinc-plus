@@ -121,8 +121,9 @@ existing files in milestone 1.
      case; full depth is n*D butterflies); (c) at m = 2^12 the query side
      (~5 KB/round/100 queries) dominates and small R wins on size --- the size
      case for depth only opens at larger m, and competitive sizes need the
-     levers: arity-8 (~3x fewer rounds), Q ~ 50 (Johnson), tight leaf widths
-     (~20-38%), path dedup across queries, smallest adequate base field.
+     levers: arity-8 (~3x fewer rounds), tight leaf widths (~20-38%), path
+     dedup across queries, smallest adequate base field. (A Johnson-regime
+     query reduction was considered and dropped --- not pursuing.)
    - **done (3b)** Arity-8 folds: `chain8.rs` (true radix-8 lift: one twiddle
      per DFT-block entry, so per-folded-variable norm growth ~9-10 bits vs
      radix-2's ~26 --- measured 240-bit leaves at m = 2^12 full depth vs 435)
@@ -145,9 +146,40 @@ existing files in milestone 1.
      back-substitution (~2-4 ms verify expected; ~few MB advice at m = 2^12).
    - TODO: tight leaf widths (serialize leaves at measured-width bytes rather
      than the Int<NK> fixed width; 240 measured vs 320 fixed bits at arity 8).
-4. Integration: `LinearCode`/`ZipTypes`-shaped adapter, batching
-   (batch-then-fold round 0 on the interleaved commitment), wiring into
-   `protocol` as an alternative opening for the int lane; benches.
+4. Integration into `protocol` for the SHA-ECDSA bench (in progress).
+   - **done (4a)** Batch layer: `commit_batch` / `prove_batch` /
+     `verify_batch` in `arity8.rs` --- a batch of B columns committed as the
+     round-0 "limbs" of one tree; per-column claims `e_{0,j}` ship in the
+     proof, the verifier checks `sum_j weights[j] * e_{0,j} == eval_f`, and
+     the first fold combines all B columns with fresh challenges
+     (batch-then-fold). Matches the protocol's int-lane PCS contract exactly:
+     `ZipPlus::prove_f` for the int lane (DEGREE_BOUND = 0, per-poly
+     psi-alphas = [1]) proves `sum_j phi_q0(poly_j)~(point) = eval_f` at
+     `point = r_0_ext` (num_vars + 2 coords in F, the quartered columns
+     concatenated). Tested incl. correlated round-0 lies.
+   - TODO (4b) Serialization: `Arity8Proof` to/from the PCS byte stream
+     (fixed-width ConstTranscribable encodings; MtHash raw 32 B; MerkleProof
+     index/count/siblings) so the proof embeds in `Proof::zip`.
+   - TODO (4c) Protocol wiring, behind a `basefold-int` feature: step 0
+     commits the int lane via `commit_batch` (forces the non-MultiZip3 path
+     for the int lane; binary/arbitrary stay on Zip+/MultiZip), step 7
+     prover calls `prove_batch` with all-one weights at `r_0_ext`, verifier
+     step mirrors with `verify_batch`; FS challenges flow through the shared
+     `fs_transcript` (Blake3) inside Pcs{Prover,Verifier}Transcript.
+     Call sites: protocol/src/prover.rs prove_folded_4x_inner (~1817-2371,
+     commit ~2244-2367, open ~2238-2371), protocol/src/verifier.rs
+     verify_pcs_batch! (~897-974). Int lane types in the bench:
+     Eval = Int<2> (64-bit quarters), point = 11 F-coords at num_vars = 9,
+     F = secp256k1 MontyField<4> via fixed_prime.
+   - TODO (4d) e2e bench: run protocol/benches/e2e.rs sha_ecdsa folded-4x
+     with the feature on; report raw + zstd proof sizes via
+     eprint_proof_size for apples-to-apples vs Zip+ (the basefold dial
+     numbers so far are UNCOMPRESSED fixed-width estimates; the tight-width
+     column approximates what zstd recovers from sign-extension padding).
+   - Later (4e): binary/arbitrary lanes need the X-dimension-as-variables
+     extension (monomial-basis claim rounds with psi-alpha weights
+     (1, alpha^{2^i})) --- the big prize, since those lanes dominate the
+     SHA-ECDSA witness.
 
 ## Open design questions (tracked, not blocking)
 
@@ -155,4 +187,6 @@ existing files in milestone 1.
   k_0 > 1 limbs deferred (tests use entries < 2^{p-1}, k_0 = 1).
 - Soundness-slack bound B* = (p+2)R + p k_0 must be threaded into the outer
   protocol's bitsize accounting when integrating (draft Thm 6.1).
-- Query count / proximity regime: unique-decoding first; 1.5-Johnson later.
+- Query count / proximity regime: unique decoding, production counts
+  (Q = 147 at rate 1/4, Q = 100 at rate 1/8). Johnson-regime reduction
+  considered and dropped.

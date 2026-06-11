@@ -104,6 +104,9 @@ pub struct Leaf8Opening<const NK: usize> {
 
 #[derive(Clone, Debug)]
 pub struct Arity8Proof<F: PrimeField, const ND: usize, const NK: usize> {
+    /// Per-column round-0 claims `e_{0,j}` (the verifier checks their
+    /// weighted sum against the batched evaluation).
+    pub initial_claims: Vec<F>,
     pub round_roots: Vec<MtHash>,
     pub tail: Vec<Vec<Int<ND>>>,
     /// Per round, per limb: the eight class claims.
@@ -121,7 +124,8 @@ impl<F: PrimeField, const ND: usize, const NK: usize> Arity8Proof<F, ND, NK> {
         let nk = <Int<NK> as ConstTranscribable>::NUM_BYTES;
         let roots = self.round_roots.len() * hash;
         let tail: usize = self.tail.iter().map(|l| l.len() * nd).sum();
-        let claims = (ARITY * self.class_claims.iter().map(Vec::len).sum::<usize>()
+        let claims = (self.initial_claims.len()
+            + ARITY * self.class_claims.iter().map(Vec::len).sum::<usize>()
             + self.limb_claims.iter().map(Vec::len).sum::<usize>())
             * field_elem_bytes;
         let queries: usize = self
@@ -167,17 +171,38 @@ pub fn commit<C, const ND: usize, const NK: usize, const CHECK: bool>(
 where
     C: ChainConfig,
 {
-    if witness.len() != params.chain.msg_len_at(0) {
-        return Err(BasefoldError::InvalidParams(
-            "witness length mismatch".to_owned(),
-        ));
+    commit_batch::<C, ND, NK, CHECK>(params, std::slice::from_ref(&witness.to_vec()))
+}
+
+/// Commit a batch of witness columns as the round-0 "limbs" of one tree
+/// (batch-then-fold: the first fold round combines all of them with fresh
+/// challenges; their claims recombine with caller-provided weights).
+pub fn commit_batch<C, const ND: usize, const NK: usize, const CHECK: bool>(
+    params: &Arity8Params<C>,
+    witnesses: &[Vec<Int<ND>>],
+) -> Result<(Arity8Commitment, Arity8Hint<NK>), BasefoldError>
+where
+    C: ChainConfig,
+{
+    if witnesses.is_empty() {
+        return Err(BasefoldError::InvalidParams("empty batch".to_owned()));
     }
-    check_digit_range(witness, params.p, "witness")?;
-    let codewords = vec![
-        params
-            .chain
-            .encode_at_level::<Int<ND>, Int<NK>, CHECK>(0, witness),
-    ];
+    for witness in witnesses {
+        if witness.len() != params.chain.msg_len_at(0) {
+            return Err(BasefoldError::InvalidParams(
+                "witness length mismatch".to_owned(),
+            ));
+        }
+        check_digit_range(witness, params.p, "witness")?;
+    }
+    let codewords = witnesses
+        .iter()
+        .map(|witness| {
+            params
+                .chain
+                .encode_at_level::<Int<ND>, Int<NK>, CHECK>(0, witness)
+        })
+        .collect::<Vec<_>>();
     let tree = build_round_tree(&codewords);
     Ok((
         Arity8Commitment { root: tree.root() },
@@ -271,7 +296,6 @@ fn validate_widths8<const NW: usize, const NCU: usize>(
 }
 
 /// Prover. Caller has absorbed `commitment.root` and sampled `cfg`, `point`.
-#[allow(clippy::too_many_lines)]
 pub fn prove<
     C,
     F,
@@ -297,8 +321,58 @@ where
     F::Inner: Transcribable + ConstTranscribable,
     F::Modulus: Transcribable,
 {
+    let weights = vec![F::one_with_cfg(cfg)];
+    prove_batch::<C, F, ND, NK, NW, NCU, CHECK>(
+        params,
+        std::slice::from_ref(&witness.to_vec()),
+        &weights,
+        hint,
+        point,
+        cfg,
+        transcript,
+    )
+}
+
+/// Batched prover: opens the weighted sum `sum_j weights[j] *
+/// phi_{q0}(witness_j)~(point)` of the committed batch. The round-0 claims
+/// `e_{0,j}` are part of the proof; everything else is one folding chain
+/// over all columns at once.
+#[allow(clippy::too_many_lines)]
+pub fn prove_batch<
+    C,
+    F,
+    const ND: usize,
+    const NK: usize,
+    const NW: usize,
+    const NCU: usize,
+    const CHECK: bool,
+>(
+    params: &Arity8Params<C>,
+    witnesses: &[Vec<Int<ND>>],
+    weights: &[F],
+    hint: &Arity8Hint<NK>,
+    point: &[F],
+    cfg: &F::Config,
+    transcript: &mut impl Transcript,
+) -> Result<(Arity8Proof<F, ND, NK>, F), BasefoldError>
+where
+    C: ChainConfig,
+    F: InnerTransparentField
+        + for<'a> FromWithConfig<&'a Int<ND>>
+        + for<'a> FromWithConfig<&'a Int<NW>>
+        + Clone,
+    F::Inner: Transcribable + ConstTranscribable,
+    F::Modulus: Transcribable,
+{
     validate_widths8::<NW, NCU>(params)?;
-    check_digit_range(witness, params.p, "witness")?;
+    if witnesses.is_empty() || witnesses.len() != weights.len() {
+        return Err(BasefoldError::InvalidParams(
+            "batch/weights length mismatch".to_owned(),
+        ));
+    }
+    for witness in witnesses {
+        check_digit_range(witness, params.p, "witness")?;
+    }
     if point.len() != params.num_vars
         || params.num_vars < mul!(3usize, params.num_rounds)
     {
@@ -308,9 +382,18 @@ where
     }
 
     let r_max = params.num_rounds;
-    let eval = eval_projected_mle::<F, ND>(witness, point, cfg)?;
 
-    let mut cur_limbs: Vec<Vec<Int<ND>>> = vec![witness.to_vec()];
+    // Round-0 per-column claims and the weighted batch evaluation.
+    let mut initial_claims: Vec<F> = Vec::with_capacity(witnesses.len());
+    let mut eval = F::zero_with_cfg(cfg);
+    for (witness, w) in witnesses.iter().zip(weights) {
+        let e = eval_projected_mle::<F, ND>(witness, point, cfg)?;
+        absorb_field(transcript, &e);
+        eval += w.clone() * e.clone();
+        initial_claims.push(e);
+    }
+
+    let mut cur_limbs: Vec<Vec<Int<ND>>> = witnesses.to_vec();
     let mut class_claims_all: Vec<Vec<[F; ARITY]>> = Vec::with_capacity(r_max);
     let mut limb_claims_all: Vec<Vec<F>> = Vec::with_capacity(r_max.saturating_sub(1));
     let mut tail: Vec<Vec<Int<ND>>> = Vec::new();
@@ -410,6 +493,7 @@ where
 
     Ok((
         Arity8Proof {
+            initial_claims,
             round_roots,
             tail,
             class_claims: class_claims_all,
@@ -421,7 +505,6 @@ where
 }
 
 /// Verifier. Caller has absorbed `commitment.root` and sampled `cfg`, `point`.
-#[allow(clippy::too_many_lines)]
 pub fn verify<
     C,
     F,
@@ -449,6 +532,44 @@ where
     F::Inner: Transcribable + ConstTranscribable,
     F::Modulus: Transcribable,
 {
+    let weights = vec![F::one_with_cfg(cfg)];
+    verify_batch::<C, F, ND, NK, NW, NCU, CHECK>(
+        params, commitment, proof, &weights, point, claimed_eval, cfg, transcript,
+    )
+}
+
+/// Batched verifier: checks the weighted batch evaluation
+/// `sum_j weights[j] * e_{0,j} == claimed_eval` and the folding chain over
+/// the whole committed batch.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn verify_batch<
+    C,
+    F,
+    const ND: usize,
+    const NK: usize,
+    const NW: usize,
+    const NCU: usize,
+    const CHECK: bool,
+>(
+    params: &Arity8Params<C>,
+    commitment: &Arity8Commitment,
+    proof: &Arity8Proof<F, ND, NK>,
+    weights: &[F],
+    point: &[F],
+    claimed_eval: &F,
+    cfg: &F::Config,
+    transcript: &mut impl Transcript,
+) -> Result<(), BasefoldError>
+where
+    C: ChainConfig,
+    F: InnerTransparentField
+        + for<'a> FromWithConfig<&'a Int<ND>>
+        + for<'a> FromWithConfig<&'a Int<NW>>
+        + Clone
+        + PartialEq,
+    F::Inner: Transcribable + ConstTranscribable,
+    F::Modulus: Transcribable,
+{
     validate_widths8::<NW, NCU>(params)?;
     let r_max = params.num_rounds;
     if proof.class_claims.len() != r_max
@@ -457,15 +578,27 @@ where
         || proof.queries.len() != params.num_queries
         || proof.queries.iter().any(|q| q.len() != r_max)
         || point.len() != params.num_vars
+        || proof.initial_claims.len() != weights.len()
+        || proof.initial_claims.is_empty()
     {
         return Err(BasefoldError::InvalidParams(
             "proof shape does not match parameters".to_owned(),
         ));
     }
 
-    let mut cur_claims: Vec<F> = vec![claimed_eval.clone()];
+    // Round-0: weighted batch claim.
+    let mut batch_eval = F::zero_with_cfg(cfg);
+    for (e, w) in proof.initial_claims.iter().zip(weights) {
+        absorb_field(transcript, e);
+        batch_eval += w.clone() * e.clone();
+    }
+    if batch_eval != *claimed_eval {
+        return Err(BasefoldError::ClaimCheckFailed { round: 0 });
+    }
+
+    let mut cur_claims: Vec<F> = proof.initial_claims.clone();
     let mut all_challenges: Vec<Vec<[Int<NW>; ARITY]>> = Vec::with_capacity(r_max);
-    let mut limb_counts: Vec<usize> = vec![1];
+    let mut limb_counts: Vec<usize> = vec![proof.initial_claims.len()];
     let mut tail_codewords: Vec<Vec<Int<NK>>> = Vec::new();
 
     for r in 1..=r_max {
@@ -771,7 +904,7 @@ mod tests {
             &cfg_v,
             &mut tv,
         );
-        assert!(matches!(res, Err(BasefoldError::ClaimCheckFailed { round: 1 })));
+        assert!(matches!(res, Err(BasefoldError::ClaimCheckFailed { round: 0 })));
     }
 
     #[test]
@@ -823,6 +956,83 @@ mod tests {
         assert!(res.is_err());
     }
 
+    #[test]
+    fn batch_open_int_lane_shape() {
+        // Mimics the SHA-ECDSA integer lane: a batch of B columns with
+        // 64-bit entries, committed under one tree and opened as the
+        // weighted sum of their projected MLE evaluations at one point
+        // (weights are all ones for the int lane, where the per-poly
+        // psi-alphas are trivial).
+        let num_vars = 9usize;
+        let num_rounds = 3usize;
+        let batch = 8usize;
+        let msg_len = 1usize << num_vars;
+        let chain =
+            Radix8Chain::<ChainConfigF167772161>::new(msg_len, 4, num_rounds).unwrap();
+        let params = Arity8Params::new(chain, P, num_rounds, Q).unwrap();
+        let mut rng = StdRng::seed_from_u64(123);
+        let witnesses: Vec<Vec<Int<ND>>> = (0..batch)
+            .map(|_| {
+                (0..msg_len)
+                    .map(|_| {
+                        let mut words = [0u64; ND];
+                        words[0] = rng.random();
+                        let v = Int::<ND>::new(crypto_bigint::Int::from_words(words));
+                        if rng.random::<bool>() { -v } else { v }
+                    })
+                    .collect()
+            })
+            .collect();
+        let (commitment, hint) =
+            commit_batch::<_, ND, NK, true>(&params, &witnesses).unwrap();
+
+        let (mut tp, cfg, point) = open_transcript(&commitment, num_vars);
+        let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg)).collect();
+        let (proof, eval) = prove_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params, &witnesses, &weights, &hint, &point, &cfg, &mut tp,
+        )
+        .unwrap();
+
+        // The batched evaluation is the plain sum of the per-column claims.
+        let mut expected = F::zero_with_cfg(&cfg);
+        for w in &witnesses {
+            expected += eval_projected_mle::<F, ND>(w, &point, &cfg).unwrap();
+        }
+        assert_eq!(eval, expected);
+
+        let (mut tv, cfg_v, point_v) = open_transcript(&commitment, num_vars);
+        verify_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &commitment,
+            &proof,
+            &weights,
+            &point_v,
+            &eval,
+            &cfg_v,
+            &mut tv,
+        )
+        .unwrap();
+
+        // Correlated lies on the round-0 claims (preserving the weighted
+        // sum) must be caught by the subsequent rounds.
+        let mut bad = proof.clone();
+        let one = F::one_with_cfg(&cfg);
+        bad.initial_claims[0] = bad.initial_claims[0].clone() + one.clone();
+        bad.initial_claims[1] = bad.initial_claims[1].clone() - one;
+        let (mut tv, cfg_v, point_v) = open_transcript(&commitment, num_vars);
+        let res = verify_batch::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &commitment,
+            &bad,
+            &weights,
+            &point_v,
+            &eval,
+            &cfg_v,
+            &mut tv,
+        );
+        assert!(res.is_err());
+    }
+
     /// Arity-8 depth dial at m = 2^12 with production-flavored parameters;
     /// compare against the radix-2 numbers in
     /// `compiled::tests::depth_dial_report`.
@@ -830,23 +1040,23 @@ mod tests {
     #[ignore = "experiment; run with --ignored --nocapture"]
     fn depth_dial_report_arity8() {
         use std::time::Instant;
-        const QQ: usize = 100;
         let num_vars = 12usize;
         let msg_len = 1usize << num_vars;
         let mut rng = StdRng::seed_from_u64(99);
         let witness = random_witness(&mut rng, msg_len);
 
+        for (rep, qq) in [(4usize, 147usize), (8, 100)] {
         eprintln!(
-            "arity-8 depth dial: m = 2^{num_vars}, rep = 4, q = 5*2^25+1, \
-             p = {P}, lambda = 128, Q = {QQ}, leaf ints {} B",
+            "arity-8 depth dial: m = 2^{num_vars}, rep = {rep}, q = 5*2^25+1, \
+             p = {P}, lambda = 128, Q = {qq}, leaf ints {} B",
             <Int<NK> as ConstTranscribable>::NUM_BYTES
         );
         for num_rounds in [2usize, 3, 4] {
             let chain = Radix8Chain::<ChainConfigF167772161>::new(
-                msg_len, 4, num_rounds,
+                msg_len, rep, num_rounds,
             )
             .unwrap();
-            let params = Arity8Params::new(chain, P, num_rounds, QQ).unwrap();
+            let params = Arity8Params::new(chain, P, num_rounds, qq).unwrap();
 
             let t0 = Instant::now();
             let (commitment, hint) = commit::<_, ND, NK, true>(&params, &witness).unwrap();
@@ -886,6 +1096,7 @@ mod tests {
                  {max_leaf_bits:3} | commit {t_commit:?} prove {t_prove:?} verify {t_verify:?}",
                 proof.size_bytes(32)
             );
+        }
         }
     }
 }
