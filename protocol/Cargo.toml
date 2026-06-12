@@ -36,7 +36,7 @@ workspace = true
 
 
 [features]
-parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel"]
+parallel = ["dep:rayon", "zinc-piop/parallel", "zinc-poly/parallel", "zinc-uair/parallel", "zinc-utils/parallel", "zip-plus/parallel"]
 simd = ["zinc-poly/simd", "zinc-piop/simd", "zip-plus/simd"]
 unchecked = []
 # Switch the IPRS bench code from inverse-rate 4 (rate 1/4) to inverse-rate 8
