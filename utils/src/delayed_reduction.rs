@@ -5,10 +5,11 @@
 //! reduction. The limb routines are adapted from Spartan2's MIT-licensed
 //! `big_num` helpers.
 
+use ark_ff::{Field as ArkField, MontBackend, MontConfig};
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams, MontyForm};
 use crypto_primitives::{
-    PrimeField, crypto_bigint_const_monty::ConstMontyField, crypto_bigint_monty::MontyField,
-    crypto_bigint_uint::Uint,
+    PrimeField, ark_ff_fp::Fp as ArkFp, crypto_bigint_const_monty::ConstMontyField,
+    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use num_traits::Zero;
 use std::marker::PhantomData;
@@ -460,6 +461,32 @@ where
             .collect();
 
         ConstMontyField::from(ConstMontyForm::lincomb(&products)) + zero
+    }
+}
+
+impl<M, const N: usize> DelayedFieldProductSum for ArkFp<MontBackend<M, N>, N>
+where
+    M: MontConfig<N>,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn delayed_sum_of_products(lhs: &[Self], rhs: &[Self], zero: Self) -> Self {
+        // The Montgomery backend's `sum_of_products` accumulates with delayed
+        // reduction but only accepts fixed-size chunks.
+        const CHUNK: usize = 8;
+        let lhs_chunks = lhs.chunks_exact(CHUNK);
+        let rhs_chunks = rhs.chunks_exact(CHUNK);
+        let lhs_rem = lhs_chunks.remainder();
+        let rhs_rem = rhs_chunks.remainder();
+
+        let mut acc = zero;
+        for (left, right) in lhs_chunks.zip(rhs_chunks) {
+            let left: [ark_ff::Fp<MontBackend<M, N>, N>; CHUNK] =
+                std::array::from_fn(|i| *left[i].inner());
+            let right: [ark_ff::Fp<MontBackend<M, N>, N>; CHUNK] =
+                std::array::from_fn(|i| *right[i].inner());
+            acc += ArkFp::new(ArkField::sum_of_products(&left, &right));
+        }
+        naive_sum_of_products(lhs_rem, rhs_rem, acc)
     }
 }
 

@@ -8,12 +8,16 @@ use std::{
 };
 
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{AdditiveGroup, BigInteger, PrimeField as ArkPrimeField, UniformRand, Zero};
+use ark_ff::{
+    AdditiveGroup, BigInteger, MontBackend, MontConfig, PrimeField as ArkPrimeField, UniformRand,
+    Zero,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use crypto_bigint::{BoxedUint, modular::BoxedMontyForm};
 use crypto_primitives::{
-    FromWithConfig, IntRing, PrimeField, crypto_bigint_boxed_monty::BoxedMontyField,
-    crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    FromWithConfig, IntRing, PrimeField, ark_ff_fp::Fp as ArkFp,
+    crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use num_integer::Integer;
 use zinc_poly::{
@@ -917,6 +921,22 @@ where
         )
         .expect("curve scalar must fit protocol field precision");
         Ok(BoxedMontyField::from_with_cfg(&scalar_uint, cfg))
+    }
+}
+
+/// Identity bridge for the arkworks-backed constant prime field: when the
+/// protocol field is the curve scalar field itself, conversions are free.
+impl<C, M, const N: usize> HyraxFieldBridge<C> for ArkFp<MontBackend<M, N>, N>
+where
+    C: AffineRepr<ScalarField = ark_ff::Fp<MontBackend<M, N>, N>>,
+    M: MontConfig<N>,
+{
+    fn field_to_scalar(value: &Self) -> Result<C::ScalarField, ZipError> {
+        Ok(*value.inner())
+    }
+
+    fn scalar_to_field(value: &C::ScalarField, _cfg: &Self::Config) -> Result<Self, ZipError> {
+        Ok(ArkFp::new(*value))
     }
 }
 
@@ -3177,19 +3197,23 @@ mod tests {
         ));
     }
 
-    fn binary_hyrax_open_verify_round_trip_with_modes(
+    fn binary_hyrax_open_verify_round_trip_with_modes_in<F>(
+        field_cfg: &F::Config,
         commit_mode: HyraxBlindingMode,
         verify_mode: HyraxBlindingMode,
-    ) -> Result<(), ZipError> {
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<ark_bn254::G1Affine>,
+        F::Inner: ConstTranscribable,
+        F::Modulus: Transcribable,
+    {
         type C = ark_bn254::G1Affine;
-        type F = MontyField<4>;
         const D: usize = 32;
 
         fn bp(bits: u32) -> BinaryPoly<D> {
             BinaryPoly::<D>::from(bits)
         }
 
-        let cfg = cfg_from_curve::<C>();
         let width = 512;
         let (ck, _) = HyraxPCS::<C, BinaryLanes>::setup(
             width,
@@ -3229,14 +3253,14 @@ mod tests {
         .iter()
         .map(|bytes| {
             let scalar = <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(bytes);
-            <F as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)
+            <F as HyraxFieldBridge<C>>::scalar_to_field(&scalar, field_cfg)
         })
         .collect::<Result<Vec<_>, _>>()?;
-        let eq = eq_tensor_f::<F>(&point, &cfg);
+        let eq = eq_tensor_f::<F>(&point, field_cfg);
         let lifted_evals = polys
             .iter()
             .map(|poly| {
-                let mut coeffs = vec![F::zero_with_cfg(&cfg); D];
+                let mut coeffs = vec![F::zero_with_cfg(field_cfg); D];
                 for (weight, eval) in eq.iter().zip(poly.evaluations.iter()) {
                     for (lane, bit) in eval.iter().enumerate() {
                         if bit.inner() {
@@ -3268,7 +3292,7 @@ mod tests {
             &polys,
             &point,
             &prover_data,
-            &cfg,
+            field_cfg,
         )?;
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
@@ -3289,7 +3313,19 @@ mod tests {
             &point,
             &lifted_evals,
             &Vec::new(),
+            field_cfg,
+        )
+    }
+
+    fn binary_hyrax_open_verify_round_trip_with_modes(
+        commit_mode: HyraxBlindingMode,
+        verify_mode: HyraxBlindingMode,
+    ) -> Result<(), ZipError> {
+        let cfg = cfg_from_curve::<ark_bn254::G1Affine>();
+        binary_hyrax_open_verify_round_trip_with_modes_in::<MontyField<4>>(
             &cfg,
+            commit_mode,
+            verify_mode,
         )
     }
 
@@ -3309,6 +3345,65 @@ mod tests {
             HyraxBlindingMode::Unblinded,
         )
         .unwrap();
+    }
+
+    type ArkF = crypto_primitives::ark_ff_fp::Fp<ark_ff::MontBackend<ark_bn254::FrConfig, 4>, 4>;
+
+    #[test]
+    fn ark_field_bridge_round_trips_bn254_scalar_field() {
+        type C = ark_bn254::G1Affine;
+        for value in [0u64, 1, 2, 17, 123, 1 << 20] {
+            let field = ArkF::from(value);
+            let scalar = <ArkF as HyraxFieldBridge<C>>::field_to_scalar(&field).unwrap();
+            assert_eq!(scalar, <C as AffineRepr>::ScalarField::from(value));
+
+            let field_again = <ArkF as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &()).unwrap();
+            assert_eq!(field_again, field);
+        }
+
+        let large_values = [
+            <C as AffineRepr>::ScalarField::from(2u64).inverse().unwrap(),
+            -<C as AffineRepr>::ScalarField::from(1u64),
+            <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(&[0xA5; 64]),
+        ];
+        for scalar in large_values {
+            let field = <ArkF as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &()).unwrap();
+            let scalar_again = <ArkF as HyraxFieldBridge<C>>::field_to_scalar(&field).unwrap();
+            assert_eq!(scalar_again, scalar);
+        }
+    }
+
+    #[test]
+    fn ark_field_binary_hyrax_open_verify_round_trip() {
+        binary_hyrax_open_verify_round_trip_with_modes_in::<ArkF>(
+            &(),
+            HyraxBlindingMode::Blinded,
+            HyraxBlindingMode::Blinded,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ark_field_unblinded_binary_hyrax_open_verify_round_trip() {
+        binary_hyrax_open_verify_round_trip_with_modes_in::<ArkF>(
+            &(),
+            HyraxBlindingMode::Unblinded,
+            HyraxBlindingMode::Unblinded,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ark_field_delayed_sum_of_products_matches_naive() {
+        let lhs = (0..19u64)
+            .map(|idx| ArkF::from(idx.wrapping_mul(0x9E37_79B9).wrapping_add(1)))
+            .collect::<Vec<_>>();
+        let rhs = (0..19u64)
+            .map(|idx| ArkF::from(idx.wrapping_mul(0x85EB_CA6B).wrapping_add(7)))
+            .collect::<Vec<_>>();
+        let seed = ArkF::from(11u64);
+        let expected = lhs.iter().zip(&rhs).fold(seed, |acc, (l, r)| acc + *l * *r);
+        assert_eq!(ArkF::delayed_sum_of_products(&lhs, &rhs, seed), expected);
     }
 
     #[test]

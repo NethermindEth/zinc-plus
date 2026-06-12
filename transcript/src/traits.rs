@@ -2,6 +2,7 @@
 // Transcribable and Transcript
 //
 
+use ark_ff::BigInt;
 use crypto_bigint::{BitOps, BoxedUint, Word};
 use crypto_primitives::{
     ConstIntSemiring, PrimeField, WORD_FACTOR, boolean::Boolean, crypto_bigint_int::Int,
@@ -570,6 +571,37 @@ impl<const LIMBS: usize> GenTranscribable for Int<LIMBS> {
 
 impl<const LIMBS: usize> ConstTranscribable for Int<LIMBS> {
     const NUM_BYTES: usize = Uint::<LIMBS>::NUM_BYTES;
+}
+
+impl<const N: usize> GenTranscribable for BigInt<N> {
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        // ark_ff::BigInt stores u64 limbs in least-to-most significant order,
+        // independent of the platform word width.
+        let (chunked, rem) = bytes.as_chunks::<8>();
+        assert!(rem.is_empty(), "Invalid byte slice length for BigInt");
+        let limbs = chunked
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
+            .collect_array::<N>()
+            .expect("Invalid length for BigInt");
+        BigInt::new(limbs)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
+        // ark_ff::BigInt stores u64 limbs in least-to-most significant order,
+        // independent of the platform word width.
+        assert_eq!(buf.len(), Self::NUM_BYTES, "Buffer size mismatch for BigInt");
+        const LIMB_SIZE: usize = size_of::<u64>();
+        for (i, limb) in self.0.iter().enumerate() {
+            buf[(i * LIMB_SIZE)..(i * LIMB_SIZE + LIMB_SIZE)]
+                .copy_from_slice(&limb.to_le_bytes());
+        }
+    }
+}
+
+impl<const N: usize> ConstTranscribable for BigInt<N> {
+    const NUM_BYTES: usize = 8 * N;
 }
 
 impl GenTranscribable for BoxedUint {

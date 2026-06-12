@@ -11,9 +11,10 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand"] }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", branch = "main", features = ["std", "crypto_bigint", "rand", "ark_ff"] }
 
 ahash = { version = "0.8", default-features = false, features = ["std"] }
+ark-ff = { version = "0.5.0", default-features = false }
 blake3 = "1.8"
 crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
 criterion = "0.7.0"
