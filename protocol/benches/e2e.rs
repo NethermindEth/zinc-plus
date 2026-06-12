@@ -1,14 +1,16 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+use ark_ff::{MontBackend, MontConfig};
 use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
     measurement::WallTime,
 };
 use crypto_bigint::U64;
 use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, ConstSemiring, Field, FixedSemiring, FromWithConfig,
-    PrimeField, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    ConstIntRing, ConstIntSemiring, ConstSemiring, Field, FixedSemiring, FromPrimitiveWithConfig,
+    FromWithConfig, IntRing, PrimeField, ark_ff_fp::Fp as ArkFp, crypto_bigint_int::Int,
+    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use num_traits::Zero;
 use rand::rng;
@@ -20,7 +22,7 @@ use std::{
 };
 use zinc_piop::neutron_nova::{
     MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-    ShaPublicCol, bit_slice_index,
+    ShaBinaryFoldField, ShaLinearAccumulatorField, ShaPublicCol, bit_slice_index,
 };
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
@@ -42,8 +44,9 @@ use zinc_protocol::{
     },
     production_sha::{
         LinearIdealFoldProverParams, LinearIdealFoldVerifierParams, PACKED_SHA_VALUES_PER_INSTANCE,
-        ProductionShaError, ProductionShaMixedHyraxProof, ProductionShaPackedHyraxProof,
-        ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape, packed_sha_layout,
+        ProductionShaError, ProductionShaMixedHyraxPcs, ProductionShaMixedHyraxProof,
+        ProductionShaPackedHyraxProof, ProductionShaProjectionAdapter, ProductionShaWitnessPolys,
+        UairShape, packed_sha_layout,
         prepare_linear_ideal_fold_witnesses, prove_prepared_linear_ideal_fold_mixed_hyrax,
         prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold,
         verify_linear_ideal_fold_mixed_hyrax, verify_linear_ideal_fold_packed_hyrax,
@@ -68,9 +71,12 @@ use zinc_uair::{
 };
 use zinc_utils::{
     cfg_into_iter, cfg_iter,
-    delayed_reduction::{BarrettDelayedReduction, DelayedModularReductionAlgorithm},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+    },
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
+    inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar,
     named::Named,
     projectable_to_field::ProjectableToField,
@@ -532,7 +538,76 @@ where
     }
 }
 
-fn projection_sha_binary_col<'a>(
+type ArkFBn254 = ArkFp<MontBackend<ark_bn254::FrConfig, 4>, 4>;
+type ArkFSecp256k1 = ArkFp<MontBackend<ark_secp256k1::FrConfig, 4>, 4>;
+
+/// Field-specific hooks for the ProjectionFold bench projection helpers.
+///
+/// The arkworks-backed const field cannot implement
+/// `FromWithConfig<&RealEcdsaInt>` (trait and type are both foreign) and has
+/// no Montgomery-limb Barrett reducer, so config acquisition, int projection,
+/// and bit-slice scalarization route through this seam.
+trait BenchShaField: PrimeField + FromPrimitiveWithConfig {
+    fn curve_field_cfg<C: AffineRepr>() -> Self::Config;
+
+    fn from_bench_int(value: &RealEcdsaInt, field_cfg: &Self::Config) -> Self;
+
+    fn scalarize_bit_slices(
+        bit_slices: &MleTable<Self>,
+        a: &Self,
+        field_cfg: &Self::Config,
+    ) -> Result<MleTable<Self>, ProductionShaError<Self>>;
+}
+
+impl BenchShaField for MontyField<FIELD_LIMBS> {
+    fn curve_field_cfg<C: AffineRepr>() -> Self::Config {
+        field_cfg_from_curve_scalar::<Self, Uint<FIELD_LIMBS>, C>()
+    }
+
+    fn from_bench_int(value: &RealEcdsaInt, field_cfg: &Self::Config) -> Self {
+        Self::from_with_cfg(value, field_cfg)
+    }
+
+    fn scalarize_bit_slices(
+        bit_slices: &MleTable<Self>,
+        a: &Self,
+        field_cfg: &Self::Config,
+    ) -> Result<MleTable<Self>, ProductionShaError<Self>> {
+        projection_sha_scalarize_bit_slices_dmr(bit_slices, a, field_cfg)
+    }
+}
+
+impl<M: MontConfig<4>> BenchShaField for ArkFp<MontBackend<M, 4>, 4> {
+    fn curve_field_cfg<C: AffineRepr>() -> Self::Config {}
+
+    fn from_bench_int(value: &RealEcdsaInt, _field_cfg: &Self::Config) -> Self {
+        let (abs, is_negative) = if value.is_negative() {
+            (
+                value.checked_abs().expect("bench int fits absolute value"),
+                true,
+            )
+        } else {
+            (*value, false)
+        };
+        let words = abs.as_uint().as_words();
+        let mut bytes = Vec::with_capacity(words.len() * size_of::<u64>());
+        for word in words {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let magnitude = ArkFp::new(ark_ff::PrimeField::from_le_bytes_mod_order(&bytes));
+        if is_negative { -magnitude } else { magnitude }
+    }
+
+    fn scalarize_bit_slices(
+        bit_slices: &MleTable<Self>,
+        a: &Self,
+        field_cfg: &Self::Config,
+    ) -> Result<MleTable<Self>, ProductionShaError<Self>> {
+        projection_sha_scalarize_bit_slices_generic(bit_slices, a, field_cfg)
+    }
+}
+
+fn projection_sha_binary_col<'a, F: PrimeField>(
     public_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
     witness_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
     flat_col: usize,
@@ -559,7 +634,7 @@ fn projection_sha_binary_col<'a>(
     }
 }
 
-fn projection_sha_int_col<'a>(
+fn projection_sha_int_col<'a, F: PrimeField>(
     public_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
     witness_trace: &'a UairTrace<'_, RealEcdsaInt, RealEcdsaInt, DEGREE_PLUS_ONE>,
     flat_col: usize,
@@ -586,7 +661,7 @@ fn projection_sha_int_col<'a>(
     }
 }
 
-fn projection_sha_project_binary_source(
+fn projection_sha_project_binary_source<F: PrimeField>(
     col: &DenseMultilinearExtension<BinaryPoly<DEGREE_PLUS_ONE>>,
     field_cfg: &<F as PrimeField>::Config,
 ) -> Result<Vec<Vec<F>>, ProductionShaError<F>> {
@@ -614,7 +689,7 @@ fn projection_sha_project_binary_source(
         .collect())
 }
 
-fn projection_sha_project_int_source(
+fn projection_sha_project_int_source<F: BenchShaField>(
     col: &DenseMultilinearExtension<RealEcdsaInt>,
     field_cfg: &<F as PrimeField>::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>> {
@@ -627,11 +702,11 @@ fn projection_sha_project_int_source(
     }
     let rows = &col.evaluations[..SHA_ROW_COUNT];
     Ok(cfg_iter!(rows)
-        .map(|value| F::from_with_cfg(value, field_cfg))
+        .map(|value| F::from_bench_int(value, field_cfg))
         .collect())
 }
 
-fn projection_sha_truncate_row_domain<Eval: Clone + Send + Sync>(
+fn projection_sha_truncate_row_domain<Eval: Clone + Send + Sync, F: PrimeField>(
     col: &DenseMultilinearExtension<Eval>,
     label: &'static str,
 ) -> Result<DenseMultilinearExtension<Eval>, ProductionShaError<F>> {
@@ -650,7 +725,10 @@ fn projection_sha_truncate_row_domain<Eval: Clone + Send + Sync>(
     })
 }
 
-fn projection_sha_word_scalar_at_two(bits: &[F], field_cfg: &<F as PrimeField>::Config) -> F {
+fn projection_sha_word_scalar_at_two<F: PrimeField>(
+    bits: &[F],
+    field_cfg: &<F as PrimeField>::Config,
+) -> F {
     let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
     let mut power = F::one_with_cfg(field_cfg);
     let mut value = F::zero_with_cfg(field_cfg);
@@ -703,7 +781,7 @@ fn projection_sha_flatten_bit_column_refs<T: Clone + Send + Sync>(
     projection_sha_mle_table_from_columns(flattened)
 }
 
-fn projection_sha_scalarize_bit_slices(
+fn projection_sha_scalarize_bit_slices_dmr(
     bit_slices: &MleTable<F>,
     a: &F,
     field_cfg: &<F as PrimeField>::Config,
@@ -734,6 +812,53 @@ fn projection_sha_scalarize_bit_slices(
                 out_col.push(projection_sha_scalarize_binary_row_dmr(
                     &bit_cols, row, &powers, &one, field_cfg, &reducer,
                 ));
+            }
+            Ok(out_col)
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+    Ok(projection_sha_mle_table_from_columns(words))
+}
+
+fn projection_sha_scalarize_bit_slices_generic<F: PrimeField>(
+    bit_slices: &MleTable<F>,
+    a: &F,
+    field_cfg: &F::Config,
+) -> Result<MleTable<F>, ProductionShaError<F>> {
+    let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
+    let word_count = bit_slices.len() / SHA_WORD_BITS;
+    let one = F::one_with_cfg(field_cfg);
+    let words = cfg_into_iter!(0..word_count)
+        .map(|col_idx| {
+            let bit_cols = (0..SHA_WORD_BITS)
+                .map(|bit| {
+                    let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
+                    if bit_col.num_vars != SHA_ROW_VARS
+                        || bit_col.evaluations.len() != SHA_ROW_COUNT
+                    {
+                        return Err(ProductionShaError::LengthMismatch {
+                            label: "SHA scalarized bit-slice rows",
+                            got: bit_col.evaluations.len(),
+                            expected: SHA_ROW_COUNT,
+                        });
+                    }
+                    Ok(bit_col)
+                })
+                .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+            let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
+            for row in 0..SHA_ROW_COUNT {
+                let mut value = F::zero_with_cfg(field_cfg);
+                for (bit_col, power) in bit_cols.iter().zip(&powers) {
+                    let bit = &bit_col.evaluations[row];
+                    if F::is_zero(bit) {
+                        continue;
+                    }
+                    if bit == &one {
+                        value += power.clone();
+                    } else {
+                        value += bit.clone() * power;
+                    }
+                }
+                out_col.push(value);
             }
             Ok(out_col)
         })
@@ -789,7 +914,7 @@ fn projection_sha_scalarize_row_naive(
     value
 }
 
-fn projection_sha_selector_expected(
+fn projection_sha_selector_expected<F: PrimeField>(
     selector: ShaPublicCol,
     row: usize,
     field_cfg: &<F as PrimeField>::Config,
@@ -810,7 +935,10 @@ fn projection_sha_selector_expected(
     }
 }
 
-fn projection_sha_k_expected(row: usize, field_cfg: &<F as PrimeField>::Config) -> F {
+fn projection_sha_k_expected<F: PrimeField + FromPrimitiveWithConfig>(
+    row: usize,
+    field_cfg: &<F as PrimeField>::Config,
+) -> F {
     if (3..67).contains(&row) {
         F::from_with_cfg(K_CANONICAL[row - 3] as u64, field_cfg)
     } else {
@@ -818,7 +946,7 @@ fn projection_sha_k_expected(row: usize, field_cfg: &<F as PrimeField>::Config) 
     }
 }
 
-fn projection_sha_projected_public_from_sources(
+fn projection_sha_projected_public_from_sources<F: PrimeField + FromPrimitiveWithConfig>(
     pa_a: &[Vec<F>],
     pa_e: &[Vec<F>],
     message: &[Vec<F>],
@@ -854,7 +982,7 @@ fn projection_sha_projected_public_from_sources(
     projection_sha_mle_table_from_columns(columns)
 }
 
-impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
+impl<F: BenchShaField> ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
     for ProjectionShaBenchUair<RealEcdsaInt>
 {
     fn project_production_sha_public(
@@ -945,7 +1073,7 @@ impl ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
             .map(|&col| projection_sha_project_binary_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let bit_slices = projection_sha_flatten_bit_columns(bit_columns);
-        let scalarized = projection_sha_scalarize_bit_slices(
+        let scalarized = F::scalarize_bit_slices(
             &bit_slices,
             &F::from_with_cfg(2u64, field_cfg),
             field_cfg,
@@ -1042,12 +1170,13 @@ where
     .expect("Hyrax benchmark setup must be valid")
 }
 
-fn projection_sha_hyrax_pcs_params<C>() -> (
+fn projection_sha_hyrax_pcs_params<C, F>() -> (
     PCSParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
     PCSVerifierParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
 )
 where
     C: AffineRepr,
+    F: PrimeField + zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
 {
     let width = SHA_ROW_COUNT;
     let (shared_ck, shared_vk) = projection_sha_hyrax_key_pair::<C, BinaryLanes>(width, 0);
@@ -1072,7 +1201,7 @@ where
     )
 }
 
-fn projection_sha_packed_hyrax_pcs_params<C>(
+fn projection_sha_packed_hyrax_pcs_params<C, F>(
     width: usize,
 ) -> (
     PCSParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
@@ -1080,6 +1209,7 @@ fn projection_sha_packed_hyrax_pcs_params<C>(
 )
 where
     C: AffineRepr,
+    F: PrimeField + zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
 {
     let (packed_ck, packed_vk) = projection_sha_hyrax_key_pair::<C, ScalarFieldLane>(width, 10_000);
     let (arbitrary_ck, arbitrary_vk) =
@@ -1854,7 +1984,7 @@ pub fn run_hyrax_width_sweep_report() {
         kind: "og_zip",
     });
 
-    let (mixed_pcs_params, mixed_verifier_params) = projection_sha_hyrax_pcs_params::<C>();
+    let (mixed_pcs_params, mixed_verifier_params) = projection_sha_hyrax_pcs_params::<C, F>();
     let mixed_pp =
         LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
             mixed_pcs_params,
@@ -1934,7 +2064,7 @@ pub fn run_hyrax_width_sweep_report() {
 
     for (label, width) in widths {
         let layout = packed_sha_layout::<F>(width).expect("requested packed width is valid");
-        let (pcs_params, verifier_params) = projection_sha_packed_hyrax_pcs_params::<C>(width);
+        let (pcs_params, verifier_params) = projection_sha_packed_hyrax_pcs_params::<C, F>(width);
         let pp =
             LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
                 pcs_params,
@@ -3002,10 +3132,25 @@ fn bench_og_sha256_zip_compare(group: &mut BenchmarkGroup<WallTime>, num_vars: u
     );
 }
 
-fn bench_projectionfold_sha256_concise_hyrax<C>(group: &mut BenchmarkGroup<WallTime>, label: &str)
-where
-    C: AffineRepr + Send + Sync + 'static,
-    F: zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
+fn bench_projectionfold_sha256_concise_hyrax<C, F>(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+) where
+    C: ProductionShaMixedHyraxPcs<RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>
+        + Send
+        + Sync
+        + 'static,
+    F: BenchShaField
+        + InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + ShaLinearAccumulatorField
+        + zip_plus::pcs::hyrax::HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
 {
     type P<C> = AllHyraxPCSTypes<C>;
     type U = ProjectionShaBenchUair<RealEcdsaInt>;
@@ -3026,12 +3171,8 @@ where
     assert_eq!(mono_final_state, projection_final_state);
 
     let shape = UairShape::<U>::new(SHA_ROW_VARS);
-    let field_cfg = field_cfg_from_curve_scalar::<
-        F,
-        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
-        C,
-    >();
-    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params::<C>();
+    let field_cfg = F::curve_field_cfg::<C>();
+    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params::<C, F>();
     let pp =
         LinearIdealFoldProverParams::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
             pcs_params,
@@ -3148,14 +3289,23 @@ where
 }
 
 fn bench_projectionfold_sha256_concise_hyrax_bn254(group: &mut BenchmarkGroup<WallTime>) {
-    bench_projectionfold_sha256_concise_hyrax::<ark_bn254::G1Affine>(
+    bench_projectionfold_sha256_concise_hyrax::<ark_bn254::G1Affine, ArkFBn254>(
         group,
         "ProjectionFoldConcise-HyraxBn254",
     );
 }
 
+/// Same pipeline on the dynamic Montgomery field, kept as a comparison point
+/// for the curve-native arkworks instantiation above.
+fn bench_projectionfold_sha256_concise_hyrax_bn254_monty(group: &mut BenchmarkGroup<WallTime>) {
+    bench_projectionfold_sha256_concise_hyrax::<ark_bn254::G1Affine, MontyField<FIELD_LIMBS>>(
+        group,
+        "ProjectionFoldConcise-HyraxBn254-MontyField",
+    );
+}
+
 fn bench_projectionfold_sha256_concise_hyrax_secp256k1(group: &mut BenchmarkGroup<WallTime>) {
-    bench_projectionfold_sha256_concise_hyrax::<ark_secp256k1::Affine>(
+    bench_projectionfold_sha256_concise_hyrax::<ark_secp256k1::Affine, ArkFSecp256k1>(
         group,
         "ProjectionFoldConcise-HyraxSecp256k1",
     );
@@ -3304,6 +3454,7 @@ fn sha256_proving_system_compare_benches(c: &mut Criterion) {
 
     bench_og_sha256_zip_compare(&mut group, REAL_SHA256_CHAIN_NUM_VARS);
     bench_projectionfold_sha256_concise_hyrax_bn254(&mut group);
+    bench_projectionfold_sha256_concise_hyrax_bn254_monty(&mut group);
     bench_projectionfold_sha256_concise_hyrax_secp256k1(&mut group);
 
     group.finish();
