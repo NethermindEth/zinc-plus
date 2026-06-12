@@ -49,14 +49,10 @@ impl crate::pcs::structs::ZipTypes for StudyZt8 {
     type CombDotChal = zinc_utils::inner_product::ScalarProduct;
     type ArrCombRDotChal = zinc_utils::inner_product::MBSInnerProduct;
 }
-type ZipLc8 = IprsCode<StudyZt8, PnttConfigF65537, 8, true>;
 // Eval = Int<2> (the int-lane shape: 64-bit values), Cw = Int<3>,
 // CombR = Int<5> (the lc-width check needs 268 bits). NUM_COLUMN_OPENINGS =
 // 147 (rate 1/4 production count).
 type Zt = TestZipTypes<2, 3, 5>;
-type ZipLc = IprsCode<Zt, PnttConfigF65537, REP, true>;
-const REP: usize = 4;
-const Q: usize = 147;
 
 fn zstd_len(bytes: &[u8]) -> usize {
     zstd::stream::encode_all(bytes, 3).unwrap().len()
@@ -195,7 +191,7 @@ fn run_basefold(
         &mut pt.fs_transcript,
     )
     .unwrap();
-    write_arity8_proof(&mut pt, &proof).unwrap();
+    write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
     let open_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let bytes = pt.stream.get_ref().clone();
@@ -204,7 +200,7 @@ fn run_basefold(
     let mut vt = pt.into_verification_transcript();
     vt.fs_transcript.absorb_slice(&comm.root.0);
     let t0 = Instant::now();
-    let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
+    let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, cfg).unwrap();
     verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
         &params,
         &comm,
@@ -226,6 +222,204 @@ fn run_basefold(
         open_ms,
         verify_ms,
         eval,
+    }
+}
+
+/// Commit once (R-independent with the full-depth chain), then sweep the
+/// fold-round count and return the zstd-smallest configuration.
+fn run_basefold_sweep(
+    witnesses: &[Vec<Int<BF_ND>>],
+    num_vars: usize,
+    rep: usize,
+    q: usize,
+    r_lo: usize,
+    r_hi: usize,
+    cfg: &<F as PrimeField>::Config,
+    point: &[F],
+) -> (usize, Row, String) {
+    use crate::basefold::{arity8::Arity8Params, chain8::Radix8Chain, protocol_glue::BF_P};
+    let full_levels = (num_vars / 3).max(1);
+    let chain = Radix8Chain::<crate::basefold::chain::ChainConfigF167772161>::new(
+        1usize << num_vars,
+        rep,
+        full_levels,
+    )
+    .expect("bf chain");
+    let mut params = Arity8Params::new(chain, BF_P, 1, q).expect("bf params");
+    let batch = witnesses.len();
+    let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
+
+    let t0 = Instant::now();
+    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, true>(&params, witnesses).unwrap();
+    let commit_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut best: Option<(usize, Row)> = None;
+    for r in r_lo.max(1)..=r_hi.min(full_levels) {
+        params.num_rounds = r;
+
+        let mut pt = PcsProverTranscript::new_from_commitments(std::iter::empty());
+        pt.fs_transcript.absorb_slice(&comm.root.0);
+        let t0 = Instant::now();
+        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+            &params,
+            witnesses,
+            &weights,
+            None,
+            &hint,
+            point,
+            cfg,
+            &mut pt.fs_transcript,
+        )
+        .unwrap();
+        write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
+        let open_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let bytes = pt.stream.get_ref().clone();
+        let (raw, zs) = (bytes.len(), zstd_len(&bytes));
+
+        let mut vt = pt.into_verification_transcript();
+        vt.fs_transcript.absorb_slice(&comm.root.0);
+        let t0 = Instant::now();
+        let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, cfg).unwrap();
+        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+            &params,
+            &comm,
+            &proof_v,
+            &weights,
+            None,
+            point,
+            &eval,
+            cfg,
+            &mut vt.fs_transcript,
+        )
+        .unwrap();
+        let verify_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let row = Row {
+            raw,
+            zstd: zs,
+            commit_ms,
+            open_ms,
+            verify_ms,
+            eval,
+        };
+        if best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+            best = Some((r, row));
+        }
+    }
+    let (best_r, row) = best.expect("no feasible basefold config");
+    params.num_rounds = best_r;
+    (best_r, row, profile_string(&params, batch, q))
+}
+
+/// Raw-byte budget of the proof stream by component, for the best config.
+fn profile_string(
+    params: &crate::basefold::arity8::Arity8Params<
+        crate::basefold::chain::ChainConfigF167772161,
+    >,
+    batch: usize,
+    q: usize,
+) -> String {
+    use crate::basefold::{limbs::next_limb_count_arity, protocol_glue::tight_widths};
+    let r_max = params.num_rounds;
+    let w = tight_widths(params, 64);
+    let mut ks = vec![batch];
+    for _ in 0..r_max {
+        ks.push(next_limb_count_arity(128, params.p, *ks.last().unwrap(), 3));
+    }
+    let fb = 32usize; // F::Inner bytes per claim
+    let claims = fb
+        * (batch
+            + (1..=r_max).map(|r| ks[r - 1] * 8).sum::<usize>()
+            + ks[1..r_max].iter().sum::<usize>());
+    let roots = (r_max - 1) * 32;
+    let tail = ks[r_max] * params.chain.msg_len_at(r_max) * w.tail;
+    let leaves = q
+        * (0..r_max)
+            .map(|r| ks[r] * 8 * w.leaf[r])
+            .sum::<usize>();
+    let paths = q
+        * (0..r_max)
+            .map(|r| {
+                4 + 32 * params.chain.codeword_len_at(r + 1).trailing_zeros() as usize
+            })
+            .sum::<usize>();
+    format!(
+        "claims {claims} roots {roots} tail {tail} leaves {leaves} paths {paths} \
+         (leaf B/round: {:?})",
+        w.leaf
+    )
+}
+
+/// Consolidation study: the Zip++ analogue of "N-x Folded Zip". A fixed
+/// amount of witness data is presented as B columns of T/B entries each;
+/// consolidating means fewer, longer columns (smaller B). For the int lane
+/// (all-ones weights) consolidation needs no machinery at all: the
+/// column-index bits fold as plain MLE variables at 1/2-coordinates (see
+/// `arity8::tests::consolidation_all_ones_is_point_extension`), so B=1 is
+/// the fully consolidated shape of the same data.
+#[test]
+#[ignore = "consolidation study; run with --release --ignored --nocapture"]
+fn consolidation_study() {
+    eprintln!(
+        "consolidation study: fixed total data T, B columns of m = T/B 64-bit entries.\n\
+         both schemes at rate 1/8, Q=100 (the winning dial everywhere in the main study);\n\
+         zip+ row_len swept, zip++ fold rounds R swept (one commit per config)."
+    );
+    for log_t in [19usize, 21] {
+        eprintln!("--- total data 2^{log_t} ---");
+        for log_b in [5usize, 4, 3, 2, 1, 0] {
+            let batch = 1usize << log_b;
+            let num_vars = log_t - log_b;
+            let m = 1usize << num_vars;
+            let mut rng = StdRng::seed_from_u64(7 + log_t as u64);
+            let polys: Vec<DenseMultilinearExtension<Int<2>>> = (0..batch)
+                .map(|_| DenseMultilinearExtension {
+                    num_vars,
+                    evaluations: random_witness(&mut rng, m),
+                })
+                .collect();
+            let witnesses: Vec<Vec<Int<BF_ND>>> = polys
+                .iter()
+                .map(|p| p.evaluations.iter().map(|x| x.resize::<BF_ND>()).collect())
+                .collect();
+            let (cfg, point) = shared_cfg_point(num_vars);
+
+            // Zip+ reference at the same (B, m) shape.
+            let half = num_vars.div_ceil(2);
+            let mut zip_best: Option<(usize, Row)> = None;
+            for rl_log in half.saturating_sub(1)..=(half + 5).min(13) {
+                let row_len = 1usize << rl_log;
+                if !(64..=(1 << 13)).contains(&row_len)
+                    || !m.is_multiple_of(row_len)
+                    || row_len > m
+                {
+                    continue;
+                }
+                let row = run_zip::<StudyZt8, 8>(&polys, num_vars, row_len, &cfg, &point);
+                if zip_best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+                    zip_best = Some((rl_log, row));
+                }
+            }
+            let (zip_rl, zip) = zip_best.expect("no feasible zip config");
+
+            // Zip++ R window around the known optimum (R ~ (nv - 9)/3).
+            let r_lo = num_vars.saturating_sub(12) / 3;
+            let r_hi = (num_vars / 4).max(2);
+            let (bf_r, bf, bf_profile) =
+                run_basefold_sweep(&witnesses, num_vars, 8, 100, r_lo, r_hi, &cfg, &point);
+            assert_eq!(bf.eval, zip.eval, "cross-validation: schemes disagree");
+
+            eprintln!(
+                "B={batch:2} m=2^{num_vars}: zip+  raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms (rl=2^{zip_rl})",
+                zip.raw, zip.zstd, zip.commit_ms, zip.open_ms, zip.verify_ms,
+            );
+            eprintln!(
+                "              zip++ raw {:8} zstd {:8} | commit {:8.1} open {:8.1} verify {:7.1} ms (R={bf_r})",
+                bf.raw, bf.zstd, bf.commit_ms, bf.open_ms, bf.verify_ms,
+            );
+            eprintln!("              zip++ bytes: {bf_profile}");
+        }
     }
 }
 

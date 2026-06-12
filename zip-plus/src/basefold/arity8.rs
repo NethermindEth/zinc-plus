@@ -1197,6 +1197,82 @@ mod tests {
         assert!(res.is_err());
     }
 
+    #[test]
+    fn consolidation_all_ones_is_point_extension() {
+        // Folded-Zip-style consolidation for the integer lane: 8^W columns
+        // with all-ones batch weights equal ONE interleaved column of 8^W
+        // times the length, opened at the point extended by 3W coordinates
+        // fixed to 1/2 -- the Lagrange class weights at z = (1/2,1/2,1/2)
+        // are uniformly 1/8, so sum_j f_j~(r) = 8^W * F~(1/2,...,1/2, r).
+        // No weight machinery is needed at any consolidation factor.
+        use num_traits::Inv;
+        let w_levels = 2usize; // 64-way consolidation
+        let cols = 1usize << (3 * w_levels);
+        let col_vars = 6usize;
+        let col_len = 1usize << col_vars;
+        let num_vars = col_vars + 3 * w_levels;
+        let num_rounds = 4usize;
+        let msg_len = 1usize << num_vars;
+
+        let mut rng = StdRng::seed_from_u64(2026);
+        let columns: Vec<Vec<Int<ND>>> = (0..cols)
+            .map(|_| random_witness(&mut rng, col_len))
+            .collect();
+        // Interleave with the column index in the low 3W bits.
+        let mut flat: Vec<Int<ND>> = vec![Int::ZERO; msg_len];
+        for (j, col) in columns.iter().enumerate() {
+            for (i, v) in col.iter().enumerate() {
+                flat[cols * i + j] = *v;
+            }
+        }
+
+        let chain =
+            Radix8Chain::<ChainConfigF167772161>::new(msg_len, 4, num_rounds).unwrap();
+        let params = Arity8Params::new(chain, P, num_rounds, Q).unwrap();
+        let (commitment, hint) = commit::<_, ND, NK, true>(&params, &flat).unwrap();
+
+        let build = |commitment: &Arity8Commitment| {
+            let mut t = Blake3Transcript::new();
+            t.absorb_slice(&commitment.root.0);
+            let cfg = t.get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
+            let half = (F::one_with_cfg(&cfg) + F::one_with_cfg(&cfg))
+                .inv()
+                .unwrap();
+            let r: Vec<F> = t.get_field_challenges(col_vars, &cfg);
+            let mut point = vec![half; 3 * w_levels];
+            point.extend(r.iter().cloned());
+            (t, cfg, point, r)
+        };
+
+        let (mut tp, cfg, point, r) = build(&commitment);
+        let (proof, eval) =
+            prove::<_, F, ND, NK, NW, NCU, true>(&params, &flat, &hint, &point, &cfg, &mut tp)
+                .unwrap();
+
+        // 8^W * F~(1/2..1/2, r) == sum_j f_j~(r).
+        let mut scale = F::one_with_cfg(&cfg);
+        for _ in 0..3 * w_levels {
+            scale = scale.clone() + scale;
+        }
+        let mut expected = F::zero_with_cfg(&cfg);
+        for col in &columns {
+            expected += eval_projected_mle::<F, ND>(col, &r, &cfg).unwrap();
+        }
+        assert_eq!(scale * eval.clone(), expected);
+
+        let (mut tv, cfg_v, point_v, _) = build(&commitment);
+        verify::<_, F, ND, NK, NW, NCU, true>(
+            &params,
+            &commitment,
+            &proof,
+            &point_v,
+            &eval,
+            &cfg_v,
+            &mut tv,
+        )
+        .unwrap();
+    }
+
     /// Arity-8 depth dial at m = 2^12 with production-flavored parameters;
     /// compare against the radix-2 numbers in
     /// `compiled::tests::depth_dial_report`.
