@@ -1970,7 +1970,8 @@ where
     #[cfg(feature = "basefold-int")]
     let (bf_params, bf_witnesses, bf_consol_vars, bf_hint, commitment_int) = {
         use zip_plus::basefold::protocol_glue::{
-            BF_ND, BF_NK, bf_zip_err, int_lane_params, interleave_columns,
+            BF_INT_WITNESS_MAG_EXP, BF_ND, BF_NK, bf_zip_err, int_lane_params,
+            interleave_columns,
         };
         debug_assert!(INT_QUARTER_LIMBS <= BF_ND);
         let rep = <ZtF::IntLc as zip_plus::code::LinearCode<ZtF::IntZt>>::REPETITION_FACTOR;
@@ -1983,6 +1984,7 @@ where
                 add!(num_vars, 2usize),
                 rep,
                 <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+                BF_INT_WITNESS_MAG_EXP,
             )?;
             (bf_params, Vec::new(), 0usize, None, commitment_int)
         } else {
@@ -1992,6 +1994,7 @@ where
                 add!(num_vars, add!(2usize, bf_t)),
                 rep,
                 <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+                BF_INT_WITNESS_MAG_EXP,
             )?;
             let bf_witnesses = vec![bf_flat];
             let (bf_comm, bf_hint) = zip_plus::basefold::arity8::commit_batch::<
@@ -2016,7 +2019,7 @@ where
     #[cfg(feature = "basefold-bin")]
     let (bf_bin_params, bf_bin_witnesses, bf_bin_hint, commitment_bin) = {
         use zip_plus::basefold::protocol_glue::{
-            BF_NK, bf_zip_err, flatten_binary_columns, int_lane_params,
+            BF_BIN_WITNESS_MAG_EXP, BF_NK, bf_zip_err, flatten_binary_columns, int_lane_params,
         };
         let rep =
             <ZtF::BinaryLc as zip_plus::code::LinearCode<ZtF::BinaryZt>>::REPETITION_FACTOR;
@@ -2024,6 +2027,7 @@ where
             add!(num_vars, 5usize),
             rep,
             <ZtF::BinaryZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+            BF_BIN_WITNESS_MAG_EXP,
         )?;
         let bf_bin_witnesses = flatten_binary_columns::<QUARTER_D>(&split_binary_witness)?;
         if bf_bin_witnesses.is_empty() {
@@ -2486,8 +2490,7 @@ where
     #[cfg(feature = "basefold-bin")]
     if let Some(bf_bin_hint) = &bf_bin_hint {
         use zip_plus::basefold::protocol_glue::{
-            BF_BIN_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err,
-            write_arity8_proof,
+            BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err, write_arity8_proof,
         };
         let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
             &mut pcs_transcript.fs_transcript,
@@ -2514,13 +2517,13 @@ where
             &mut pcs_transcript.fs_transcript,
         )
         .map_err(bf_zip_err)?;
-        write_arity8_proof(&mut pcs_transcript, &bf_bin_params, BF_BIN_WITNESS_MAG, &bf_proof)?;
+        write_arity8_proof(&mut pcs_transcript, &bf_bin_params, &bf_proof)?;
     }
 
     #[cfg(feature = "basefold-int")]
     if let Some(bf_hint) = &bf_hint {
         use zip_plus::basefold::protocol_glue::{
-            BF_INT_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, bf_zip_err, write_arity8_proof,
+            BF_NCU, BF_NK, BF_NW, bf_zip_err, write_arity8_proof,
         };
         // Consolidated opening: one column, weight 2^t, point extended by
         // t half-coordinates (sum of columns = 2^t * F~(1/2,..,1/2, r0_ext)).
@@ -2552,7 +2555,7 @@ where
             &mut pcs_transcript.fs_transcript,
         )
         .map_err(bf_zip_err)?;
-        write_arity8_proof(&mut pcs_transcript, &bf_params, BF_INT_WITNESS_MAG, &bf_proof)?;
+        write_arity8_proof(&mut pcs_transcript, &bf_params, &bf_proof)?;
     }
 
     if let Some(t) = timings.as_mut() {

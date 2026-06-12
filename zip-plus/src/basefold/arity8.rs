@@ -25,7 +25,7 @@ use super::{
         absorb_field, absorb_ints, balanced_digit_bounds, eval_projected_mle, mul_u32,
         squeeze_challenge, two_pow,
     },
-    limbs::{decompose_balanced, next_limb_count_arity},
+    limbs::{decompose_balanced, next_limb_count_arity_from_mag},
 };
 use crate::merkle::{MerkleProof, MerkleTree, MtHash};
 use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_int::Int};
@@ -51,6 +51,12 @@ pub struct Arity8Params<C: ChainConfig> {
     pub num_vars: usize,
     /// Number of spot-check queries.
     pub num_queries: usize,
+    /// Declared witness-entry magnitude exponent: `|entry| <= 2^this`.
+    /// Sets the ROUND-1 limb count (small witnesses skip limbs the generic
+    /// digit recursion would allocate) and the round-0 leaf serialization
+    /// width. Defaults to the digit bound `p - 1`; the bin lane declares 0
+    /// (bits), the int lane 64 (column quarters).
+    pub witness_mag_exp: u32,
 }
 
 impl<C: ChainConfig> Arity8Params<C> {
@@ -74,11 +80,21 @@ impl<C: ChainConfig> Arity8Params<C> {
         let num_vars = chain.msg_len_at(0).trailing_zeros() as usize;
         Ok(Self {
             chain,
+            witness_mag_exp: sub!(p, 1u32),
             p,
             num_rounds,
             num_vars,
             num_queries,
         })
+    }
+
+    /// Declare the witness-entry magnitude (`|entry| <= 2^mag_exp`); both
+    /// sides must use the same value (it shapes the round-1 limb count and
+    /// the round-0 leaf widths).
+    #[must_use]
+    pub fn with_witness_mag_exp(mut self, mag_exp: u32) -> Self {
+        self.witness_mag_exp = mag_exp.min(sub!(self.p, 1u32));
+        self
     }
 }
 
@@ -451,10 +467,22 @@ where
         // 2. Challenges (eight per limb).
         let challenges = squeeze_class_challenges::<NW, NCU>(transcript, cur_limbs.len());
 
-        // 3. Fold all classes, re-decompose, commit or send tail.
+        // 3. Fold all classes, re-decompose, commit or send tail. Round 1
+        // folds raw witness columns, so its limb count follows the declared
+        // witness magnitude rather than the generic digit bound.
         let folded = fold_classes::<ND, NW, CHECK>(&cur_limbs, &challenges);
-        let k_next =
-            next_limb_count_arity(lambda_bits(NCU), params.p, cur_limbs.len(), LOG_ARITY);
+        let mag = if r == 1 {
+            params.witness_mag_exp
+        } else {
+            sub!(params.p, 1u32)
+        };
+        let k_next = next_limb_count_arity_from_mag(
+            lambda_bits(NCU),
+            params.p,
+            cur_limbs.len(),
+            LOG_ARITY,
+            mag,
+        );
         let new_limbs = decompose_balanced::<NW, ND>(&folded, params.p, k_next)?;
 
         if r < r_max {
@@ -687,9 +715,20 @@ where
             }
         }
 
-        // 3. Root / tail absorption and the recombination check.
-        let k_next =
-            next_limb_count_arity(lambda_bits(NCU), params.p, k_prev, LOG_ARITY);
+        // 3. Root / tail absorption and the recombination check. Round 1's
+        // limb count follows the declared witness magnitude.
+        let mag = if r == 1 {
+            params.witness_mag_exp
+        } else {
+            sub!(params.p, 1u32)
+        };
+        let k_next = next_limb_count_arity_from_mag(
+            lambda_bits(NCU),
+            params.p,
+            k_prev,
+            LOG_ARITY,
+            mag,
+        );
         let claims_r: Vec<F> = if r < r_max {
             transcript.absorb_slice(&proof.round_roots[sub!(r, 1usize)].0);
             let claims = proof.limb_claims[sub!(r, 1usize)].clone();
@@ -1195,6 +1234,56 @@ mod tests {
             &mut tv,
         );
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn bit_witness_round1_limb_count() {
+        // Binary witnesses fold to ~(lambda + s + log B)-bit values, far
+        // below the generic digit bound, so the magnitude-aware round-1
+        // schedule allocates 2 limbs for a 20-column bit batch (the digit
+        // recursion would give 3) and a single limb for one bit column.
+        let num_vars = 9usize;
+        let num_rounds = 3usize;
+        let msg_len = 1usize << num_vars;
+        let mut rng = StdRng::seed_from_u64(77);
+        for (batch, expect_k1) in [(20usize, 2usize), (1, 1)] {
+            let chain =
+                Radix8Chain::<ChainConfigF167772161>::new(msg_len, 4, num_rounds).unwrap();
+            let params = Arity8Params::new(chain, P, num_rounds, Q)
+                .unwrap()
+                .with_witness_mag_exp(0);
+            let witnesses: Vec<Vec<Int<ND>>> = (0..batch)
+                .map(|_| {
+                    (0..msg_len)
+                        .map(|_| Int::from(i32::from(rng.random::<bool>())))
+                        .collect()
+                })
+                .collect();
+            let (commitment, hint) =
+                commit_batch::<_, ND, NK, true>(&params, &witnesses).unwrap();
+            let (mut tp, cfg, point) = open_transcript(&commitment, num_vars);
+            let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg)).collect();
+            let (proof, eval) = prove_batch::<_, F, ND, NK, NW, NCU, true>(
+                &params, &witnesses, &weights, None, &hint, &point, &cfg, &mut tp,
+            )
+            .unwrap();
+            // Round-1 leaves carry k_1 limbs x 8 coset values.
+            assert_eq!(proof.queries[0][1].values.len(), expect_k1 * 8);
+
+            let (mut tv, cfg_v, point_v) = open_transcript(&commitment, num_vars);
+            verify_batch::<_, F, ND, NK, NW, NCU, true>(
+                &params,
+                &commitment,
+                &proof,
+                &weights,
+                None,
+                &point_v,
+                &eval,
+                &cfg_v,
+                &mut tv,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

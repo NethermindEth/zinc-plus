@@ -13,7 +13,7 @@ use super::{
     arity8::{Arity8Params, Arity8Proof, Leaf8Opening},
     chain::ChainConfigF167772161,
     chain8::{ARITY, LOG_ARITY, Radix8Chain},
-    limbs::next_limb_count_arity,
+    limbs::next_limb_count_arity_from_mag,
 };
 use crate::{
     ZipError,
@@ -37,12 +37,13 @@ pub const BF_NW: usize = 12;
 pub const BF_NCU: usize = 2;
 /// Balanced digit width (`lambda + LOG_ARITY + 1`).
 pub const BF_P: u32 = 132;
-/// Declared witness-entry magnitude (bits) of the int lane (64-bit column
-/// quarters) for the tight round-0 leaf serialization.
-pub const BF_INT_WITNESS_MAG: u32 = 64;
-/// Declared witness-entry magnitude (bits) of the binary lane (flattened
-/// bits).
-pub const BF_BIN_WITNESS_MAG: u32 = 1;
+/// Declared witness-entry magnitude exponent (`|entry| <= 2^exp`) of the
+/// int lane (64-bit column quarters). Shapes the round-1 limb count and the
+/// round-0 leaf serialization width.
+pub const BF_INT_WITNESS_MAG_EXP: u32 = 64;
+/// Declared witness-entry magnitude exponent of the binary lane (flattened
+/// bits, `|entry| <= 1`).
+pub const BF_BIN_WITNESS_MAG_EXP: u32 = 0;
 
 pub fn bf_zip_err(e: BasefoldError) -> ZipError {
     ZipError::InvalidSnark(format!("basefold: {e}"))
@@ -122,13 +123,16 @@ where
         .collect()
 }
 
-/// The arity-8 parameters of the int-lane opening. Both sides derive them
-/// from public data: the extended variable count (`num_vars + 2` for the
-/// quartered columns), the lane's repetition factor, and its query count.
+/// The arity-8 parameters of a basefold lane opening. Both sides derive
+/// them from public data: the extended variable count, the lane's
+/// repetition factor, its query count, and the declared witness-entry
+/// magnitude exponent ([`BF_INT_WITNESS_MAG_EXP`] /
+/// [`BF_BIN_WITNESS_MAG_EXP`]).
 pub fn int_lane_params(
     num_vars_ext: usize,
     rep: usize,
     num_queries: usize,
+    witness_mag_exp: u32,
 ) -> Result<Arity8Params<ChainConfigF167772161>, ZipError> {
     let msg_len = 1usize
         .checked_shl(u32::try_from(num_vars_ext).unwrap_or(u32::MAX))
@@ -136,10 +140,14 @@ pub fn int_lane_params(
     let num_rounds = (num_vars_ext / 3).max(1);
     let chain =
         Radix8Chain::<ChainConfigF167772161>::new(msg_len, rep, num_rounds).map_err(bf_zip_err)?;
-    Arity8Params::new(chain, BF_P, num_rounds, num_queries).map_err(bf_zip_err)
+    Ok(Arity8Params::new(chain, BF_P, num_rounds, num_queries)
+        .map_err(bf_zip_err)?
+        .with_witness_mag_exp(witness_mag_exp))
 }
 
 /// The limb-count schedule `k_0..=k_R` for a batch of `batch_size` columns.
+/// Round 1 follows the declared witness magnitude; later rounds the digit
+/// bound.
 fn limb_schedule<C: super::chain::ChainConfig>(
     params: &Arity8Params<C>,
     batch_size: usize,
@@ -148,8 +156,13 @@ fn limb_schedule<C: super::chain::ChainConfig>(
     let mut ks = Vec::with_capacity(add!(params.num_rounds, 1usize));
     ks.push(batch_size);
     let mut k = batch_size;
-    for _ in 0..params.num_rounds {
-        k = next_limb_count_arity(lambda, params.p, k, LOG_ARITY);
+    for r in 1..=params.num_rounds {
+        let mag = if r == 1 {
+            params.witness_mag_exp
+        } else {
+            sub!(params.p, 1u32)
+        };
+        k = next_limb_count_arity_from_mag(lambda, params.p, k, LOG_ARITY, mag);
         ks.push(k);
     }
     ks
@@ -208,20 +221,21 @@ fn read_int_tight<const N: usize>(
 /// Byte widths of the tight proof stream, derived from public data only
 /// (prover and verifier must agree): round-`r` leaf values are level-`r`
 /// codeword entries of `p`-balanced-digit limbs (round 0: of the witness,
-/// whose entry magnitude the caller declares), tail entries are balanced
-/// digits.
+/// whose declared magnitude lives in the params), tail entries are
+/// balanced digits.
 pub struct TightWidths {
     pub leaf: Vec<usize>,
     pub tail: usize,
 }
 
-pub fn tight_widths<C: super::chain::ChainConfig>(
-    params: &Arity8Params<C>,
-    witness_mag_bits: u32,
-) -> TightWidths {
+pub fn tight_widths<C: super::chain::ChainConfig>(params: &Arity8Params<C>) -> TightWidths {
     let leaf = (0..params.num_rounds)
         .map(|r| {
-            let msg_bits = if r == 0 { witness_mag_bits } else { params.p };
+            let msg_bits = if r == 0 {
+                add!(params.witness_mag_exp, 1u32)
+            } else {
+                params.p
+            };
             let mag = params.chain.codeword_mag_bits(r, msg_bits);
             bytes_for_bits(add!(mag, 1u32)).min(<Int<BF_NK> as ConstTranscribable>::NUM_BYTES)
         })
@@ -234,18 +248,17 @@ pub fn tight_widths<C: super::chain::ChainConfig>(
 
 /// Write the proof into the PCS stream (no transcript absorption). Leaf
 /// values, tail digits, and Merkle openings use tight widths derived from
-/// `(params, witness_mag_bits)`; see [`tight_widths`].
+/// the params; see [`tight_widths`].
 pub fn write_arity8_proof<F, C: super::chain::ChainConfig>(
     transcript: &mut PcsProverTranscript,
     params: &Arity8Params<C>,
-    witness_mag_bits: u32,
     proof: &Arity8Proof<F, BF_ND, BF_NK>,
 ) -> Result<(), ZipError>
 where
     F: PrimeField,
     F::Inner: Transcribable,
 {
-    let widths = tight_widths(params, witness_mag_bits);
+    let widths = tight_widths(params);
     for e in &proof.initial_claims {
         transcript.write(e.inner())?;
     }
@@ -287,12 +300,11 @@ where
 }
 
 /// Read the proof back from the PCS stream; all shapes are determined by
-/// `(params, batch_size, witness_mag_bits)`.
+/// `(params, batch_size)`.
 pub fn read_arity8_proof<F, C: super::chain::ChainConfig>(
     transcript: &mut PcsVerifierTranscript,
     params: &Arity8Params<C>,
     batch_size: usize,
-    witness_mag_bits: u32,
     cfg: &F::Config,
 ) -> Result<Arity8Proof<F, BF_ND, BF_NK>, ZipError>
 where
@@ -301,7 +313,7 @@ where
 {
     let r_max = params.num_rounds;
     let ks = limb_schedule(params, batch_size);
-    let widths = tight_widths(params, witness_mag_bits);
+    let widths = tight_widths(params);
 
     let read_f = |t: &mut PcsVerifierTranscript| -> Result<F, ZipError> {
         let inner: F::Inner = t.read()?;
@@ -403,7 +415,7 @@ mod tests {
         // Int-lane shape: B columns of 64-bit entries, opened as their sum.
         let num_vars_ext = 11usize;
         let batch = 4usize;
-        let params = int_lane_params(num_vars_ext, 4, 20).unwrap();
+        let params = int_lane_params(num_vars_ext, 4, 20, BF_INT_WITNESS_MAG_EXP).unwrap();
         let msg_len = 1usize << num_vars_ext;
         let mut rng = StdRng::seed_from_u64(11);
         let witnesses: Vec<Vec<Int<BF_ND>>> = (0..batch)
@@ -443,7 +455,7 @@ mod tests {
             &mut pt.fs_transcript,
         )
         .unwrap();
-        write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
+        write_arity8_proof(&mut pt, &params, &proof).unwrap();
 
         // Verifier side: fresh fs, same stream.
         let mut vt = pt.into_verification_transcript();
@@ -453,7 +465,7 @@ mod tests {
             .get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
         let point_v: Vec<F> = vt.fs_transcript.get_field_challenges(num_vars_ext, &cfg_v);
         let proof_v =
-            read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, &cfg_v).unwrap();
+            read_arity8_proof::<F, _>(&mut vt, &params, batch, &cfg_v).unwrap();
         let weights_v: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg_v)).collect();
         verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
             &params,

@@ -45,10 +45,28 @@ pub fn next_limb_count(lambda: u32, p: u32, k_prev: usize) -> usize {
 /// < 2^{lambda + p + s - 1 + ceil(log2(k_prev))}`. Stabilizes at `k = 2`
 /// for `p >= lambda + s + 1`.
 pub fn next_limb_count_arity(lambda: u32, p: u32, k_prev: usize, log_arity: u32) -> usize {
+    next_limb_count_arity_from_mag(lambda, p, k_prev, log_arity, sub!(p, 1u32))
+}
+
+/// Magnitude-aware variant for the FIRST fold round, whose inputs are raw
+/// witness columns rather than `p`-balanced digits: entries of magnitude
+/// `|x| <= 2^mag_exp` fold to values bounded by
+/// `2^s * k * (2^lambda - 1) * 2^mag_exp < 2^{lambda + mag_exp + s +
+/// ceil(log2(k_prev))}`. [`next_limb_count_arity`] is the digit case
+/// `mag_exp = p - 1`. Small witnesses need fewer round-1 limbs: bits
+/// (`mag_exp = 0`, any batch up to 32 columns) give k = 2 instead of 3,
+/// and a single bit column gives k = 1.
+pub fn next_limb_count_arity_from_mag(
+    lambda: u32,
+    p: u32,
+    k_prev: usize,
+    log_arity: u32,
+    mag_exp: u32,
+) -> usize {
     debug_assert!(k_prev >= 1 && log_arity >= 1);
     // ceil(log2(k_prev))
     let log_k = sub!(usize::BITS, sub!(k_prev, 1usize).leading_zeros());
-    num_limbs_for(add!(add!(lambda, p), add!(log_k, sub!(log_arity, 1u32))), p)
+    num_limbs_for(add!(add!(lambda, mag_exp), add!(log_k, log_arity)), p)
 }
 
 /// Balanced base-`2^p` decomposition of a single integer.

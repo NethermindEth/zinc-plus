@@ -2604,7 +2604,7 @@ where
     #[cfg(feature = "basefold-bin")]
     if proof.commitments.0.batch_size > 0 {
         use zip_plus::basefold::protocol_glue::{
-            BF_BIN_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err,
+            BF_BIN_WITNESS_MAG_EXP, BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err,
             int_lane_params, read_arity8_proof,
         };
         let b = proof.commitments.0.batch_size;
@@ -2620,16 +2620,11 @@ where
             add!(r0_ext.len(), 3usize),
             rep,
             <ZtF::BinaryZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+            BF_BIN_WITNESS_MAG_EXP,
         )
         .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-        let bf_proof = read_arity8_proof::<F, _>(
-            &mut pcs_transcript,
-            &bf_params,
-            b,
-            BF_BIN_WITNESS_MAG,
-            &field_cfg,
-        )
-        .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, b, &field_cfg)
+            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
         let weights = vec![F::one_with_cfg(&field_cfg); b];
         zip_plus::basefold::arity8::verify_batch::<
             _,
@@ -2659,7 +2654,7 @@ where
     if proof.commitments.2.batch_size > 0 {
         use num_traits::ConstOne;
         use zip_plus::basefold::protocol_glue::{
-            BF_INT_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, bf_zip_err, int_lane_params,
+            BF_INT_WITNESS_MAG_EXP, BF_NCU, BF_NK, BF_NW, bf_zip_err, int_lane_params,
             read_arity8_proof,
         };
         let b = proof.commitments.2.batch_size;
@@ -2674,16 +2669,11 @@ where
             add!(r0_ext.len(), bf_t),
             rep,
             <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
+            BF_INT_WITNESS_MAG_EXP,
         )
         .map_err(|e| ProtocolError::PcsVerification(2, e))?;
-        let bf_proof = read_arity8_proof::<F, _>(
-            &mut pcs_transcript,
-            &bf_params,
-            1,
-            BF_INT_WITNESS_MAG,
-            &field_cfg,
-        )
-        .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, 1, &field_cfg)
+            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
         let one = F::one_with_cfg(&field_cfg);
         let mut scale = one.clone();
         for _ in 0..bf_t {

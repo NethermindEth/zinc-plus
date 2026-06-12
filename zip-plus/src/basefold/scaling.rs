@@ -169,7 +169,9 @@ fn run_basefold(
             full_levels,
         )
         .expect("bf chain");
-    let params = Arity8Params::new(chain, BF_P, num_rounds, q).expect("bf params");
+    let params = Arity8Params::new(chain, BF_P, num_rounds, q)
+        .expect("bf params")
+        .with_witness_mag_exp(64);
     let batch = witnesses.len();
 
     let t0 = Instant::now();
@@ -191,7 +193,7 @@ fn run_basefold(
         &mut pt.fs_transcript,
     )
     .unwrap();
-    write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
+    write_arity8_proof(&mut pt, &params, &proof).unwrap();
     let open_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let bytes = pt.stream.get_ref().clone();
@@ -200,7 +202,7 @@ fn run_basefold(
     let mut vt = pt.into_verification_transcript();
     vt.fs_transcript.absorb_slice(&comm.root.0);
     let t0 = Instant::now();
-    let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, cfg).unwrap();
+    let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
     verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
         &params,
         &comm,
@@ -245,7 +247,9 @@ fn run_basefold_sweep(
         full_levels,
     )
     .expect("bf chain");
-    let mut params = Arity8Params::new(chain, BF_P, 1, q).expect("bf params");
+    let mut params = Arity8Params::new(chain, BF_P, 1, q)
+        .expect("bf params")
+        .with_witness_mag_exp(64);
     let batch = witnesses.len();
     let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
 
@@ -271,7 +275,7 @@ fn run_basefold_sweep(
             &mut pt.fs_transcript,
         )
         .unwrap();
-        write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
+        write_arity8_proof(&mut pt, &params, &proof).unwrap();
         let open_ms = t0.elapsed().as_secs_f64() * 1e3;
 
         let bytes = pt.stream.get_ref().clone();
@@ -280,7 +284,7 @@ fn run_basefold_sweep(
         let mut vt = pt.into_verification_transcript();
         vt.fs_transcript.absorb_slice(&comm.root.0);
         let t0 = Instant::now();
-        let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, cfg).unwrap();
+        let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
         verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
             &params,
             &comm,
@@ -320,12 +324,19 @@ fn profile_string(
     batch: usize,
     q: usize,
 ) -> String {
-    use crate::basefold::{limbs::next_limb_count_arity, protocol_glue::tight_widths};
+    use crate::basefold::{limbs::next_limb_count_arity_from_mag, protocol_glue::tight_widths};
     let r_max = params.num_rounds;
-    let w = tight_widths(params, 64);
+    let w = tight_widths(params);
     let mut ks = vec![batch];
-    for _ in 0..r_max {
-        ks.push(next_limb_count_arity(128, params.p, *ks.last().unwrap(), 3));
+    for r in 1..=r_max {
+        let mag = if r == 1 { params.witness_mag_exp } else { params.p - 1 };
+        ks.push(next_limb_count_arity_from_mag(
+            128,
+            params.p,
+            *ks.last().unwrap(),
+            3,
+            mag,
+        ));
     }
     let fb = 32usize; // F::Inner bytes per claim
     let claims = fb
