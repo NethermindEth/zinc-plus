@@ -371,6 +371,23 @@ impl Gf8Scheme {
     pub fn full_subspace(&self) -> &BinarySubspace {
         &self.full
     }
+
+    /// The eq-split round message with a **caller-supplied big-field eq**
+    /// (one weight per 8-word chunk), instead of building it from challenges.
+    /// Lets callers fold extra per-chunk weights into `eq_big` — e.g. the
+    /// merged Hadamard discharge stacks its relations and bakes the
+    /// relation-batching `γ_h^k` into each relation's chunk weights, so one
+    /// fully-parallel kernel pass covers every relation
+    /// (`Σ_k Σ_x γ_h^k·eq(x)·(A_k·B_k − C_k)`).
+    pub fn round_message_with_eq_big(
+        &self,
+        a: &[u32],
+        b: &[u32],
+        c: &[u32],
+        eq_big: &[F128],
+    ) -> [F128; WORD_BITS] {
+        gf8_round_message_split(a, b, c, eq_big, &self.ntt, &self.eq_small_gf8)
+    }
 }
 
 impl OblongScheme for Gf8Scheme {

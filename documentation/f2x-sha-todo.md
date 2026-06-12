@@ -75,6 +75,81 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Merged (inline) Hadamard discharge — the Lagrange-reinterpretation construction, end-to-end + optimized (2026-06-12)
+- **What**: a new prove/verify arm `prove/verify_f2_full_with_merged_hadamard`
+  (`f2_prove.rs`) + the module **`protocol/src/f2_merged_hadamard.rs`** (module
+  doc has the math). The Hadamard relations ride the MAIN pipeline instead of
+  the standalone oblong zerocheck: reinterpreting cell bits as subspace-Lagrange
+  coefficients turns bitwise AND into the ring congruence
+  `L(u)*L(v) = L(w) mod Z_H`, so the discharge is (1) a **Phase-1 ideal-check
+  message** absorbed before alpha — the D extension-domain evals of
+  `R0 = sum_rows eq(row; r_had) * sum_k gamma_h^k (L(U_k)L(V_k) - L(W_k))`, a
+  base-domain-vanishing polynomial (the `<Z_H>` membership, so the base half
+  never travels); (2) a **degree-3 group in the existing Step-4
+  `MultiDegreeSumcheck`** over the `L_b(alpha)`-folded operand columns, claimed
+  sum `R0(alpha)` (verifier-reconstructed via `r0_at`); (3) **end claims at
+  r***: Lagrange-weight pair evals via the weight-generic
+  `pair_alpha_evals`/`derive_operand_parents` machinery, folded through the
+  SINGLE multipoint (pointed-shifts at r*, only AND-referenced cols appended),
+  bound by `psi_W(a') == sum_g gamma_g * lag_r0[g]` (the psi_z binding at
+  `z = alpha`). No `r_H`, no oblong Phase 2, no all-cols z-block/`z_up_evals`.
+  Soundness is the oblong's verbatim — the Phase-1 messages are in bijection
+  with the oblong's off-subspace values (`psi_alpha . L = psi_z|_{z=alpha}`).
+  Adders ride with trusted parents (same posture as the fused/oblong arms).
+- **The GF(2^8) fast lane (as shipped)**: Phase-1 runs the byte-lookup NTT with
+  the eq-split on the hybrid zerocheck point
+  `r_had = [s0,s1,s2] ++ r_IC[3..]` (`merged_eq_point`) — the scheme's
+  deterministic small challenges on the LOW row vars + the shared IC point on
+  the rest; the kernel's composite weighting equals `build_eq_x_r(r_had)`
+  exactly (both little-endian, embed is a field hom — pinned by the
+  `hybrid_eq_table_matches_kernel_convention` canary). All relations run as
+  ONE stacked kernel pass (`Gf8Scheme::round_message_with_eq_big`, new
+  additive method): `gamma_h^k` folds into relation k's per-chunk big-eq
+  weights, full `K*2^nu`-range parallelism. End claims come off the sumcheck's
+  residual state for free (`residual_evals`: the post-last-round length-2
+  tables fold once by the final challenge); AND pair evals project each
+  referenced col once (`pair_evals_dedup`). Shared-helper win:
+  `f2_hadamard::cell_mask`/`cell_from_mask` now use `F2PackU64` (single field
+  read/store under `simd` instead of per-bit Boolean loops) — also speeds the
+  fused + oblong operand builders. Ported `zinc_utils::prof` (env-gated
+  per-region timers, `OBLONG_PROFILE=1`) to support the optimization loop.
+- **Measured** (`sha256_f2_merged_ab_timing`, all 16 SHA relations = 3 ANDs +
+  13 adders, trusted adders, Apple M-series, release, same-run): nu=16 prove —
+  **E merged 109.8 ms vs C oblong-GF8 120.8 ms (E ~9% faster)**, A fused
+  582.7 ms; nu=9 prove — E 4.6 vs C 4.4 ms (tied within run variance).
+  Verify — nu=9: **E 0.5 vs C 1.1 ms (2x faster)**; nu=16: E 5.6 vs C 5.0 ms
+  (E pays two `Gf8Ntt` lut builds per verify — see the OnceLock item below).
+  Tests: 2 module unit tests (incl. the eq-convention canary), 3-col roundtrip
+  with 5 tamper arms (specific variants for the claimed-sum + closing-eval
+  checks), operand-features roundtrip (row-shift/complement/XOR combo, delta>0
+  pointed shifts at r*), real-SHA all-16 e2e with an unreferenced-col binding
+  tamper arm. All 65 protocol + 150 poly tests green.
+- **Identified, not implemented** (the optimization backlog for this arm):
+  (a) the degree-3 group's generic rounds (~9 ms @nu=16) — W-bar-precombine of
+  ALL W-operand MLEs (they enter the comb linearly; one gamma-weighted MLE;
+  sound — adder parts are trusted anyway, AND `zw(r*)` stay derived from the
+  bound pair evals; group 49 -> 34 MLEs here) and/or a Round1FastPath for the
+  merged group (round 1 is ~half the group cost; group-0's char-2
+  eq-factoring pattern applies). (b) **words-direct operand building**: build
+  operand u32 words straight into the stacked layout (skip the
+  `build_operand_column` -> `BinaryPoly` -> `cell_mask` -> concat round-trip;
+  fold the group MLEs from the same words via `fold_word_at`) — Phase-1 is
+  now mostly operand materialization, ~2x headroom; also removes the
+  **large-nu memory spike** (at nu=22 the three stacks + operand cols are
+  ~GB-scale transient — latent at the deployed nu=9; the full fix at scale is
+  computing operand words on the fly per kernel chunk). (c) eq-table hygiene:
+  move (don't clone) the group's eq table (64 MB @nu=22); build
+  `eq_big(r_IC[3..])` once and outer-product into BOTH group-0's `eq(r_IC)`
+  and the merged `eq(r_had)`; **OnceLock the `Gf8Scheme`** (built 2x per
+  prove and 2x per verify for the lut — the nu=16 verify gap). (d) `lag_r0`
+  for unreferenced cols via the open's per-column `a'_g` if exposed (~2 ms).
+  (e) **The structural follow-up**: pair the merged AND discharge with a sound
+  adder treatment (the lookup-adder workstream lives on `f2-clean-lookup`;
+  with only the AND relations in the merged group its cost nearly vanishes).
+- **Provenance**: designed + first implemented on `f2-clean-lookup` (where the
+  A/B also ran against the lookup arms), then ported here as its home branch
+  per review; the lookup branch keeps no copy (its ledger entry points here).
+
 ### Prover-path parallelization sweep — Prove-Hadamard-Oblong 154 → ~100 ms (commits `d8cfe4b`, `1a69adc`, `7ea7dff`)
 - **What**: a sweep for *serial code on a parallel machine* across the sound-oblong
   prove path. The discharge/open/uair/commit are all rayon-parallel, but several

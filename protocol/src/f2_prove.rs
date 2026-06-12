@@ -141,6 +141,14 @@ pub struct F2Proof {
     /// `W_β` + row/bit-shift binding) is the follow-up. Empty when there are
     /// no adder relations.
     pub hadamard_adder_parents: Vec<BinaryFieldGF128>,
+    /// **Merged-Hadamard** Phase-1 message (`crate::f2_merged_hadamard`): the
+    /// `D` extension-domain evaluations of the γ_h-batched `R₀`, absorbed
+    /// before α. Non-empty iff the merged discharge ran; the verifier checks
+    /// the merged sumcheck group's claimed sum against `r0_at(msg, α)`. When
+    /// the merged path is active, `hadamard_pair_evals` /
+    /// `hadamard_adder_parents` carry the **Lagrange-weight** pair evals /
+    /// trusted adder parents at the MAIN sumcheck point `r*` (not `r*_H`).
+    pub merged_hadamard_msg: Vec<BinaryFieldGF128>,
 }
 
 /// Errors emitted by [`ZincPlusPiopF2::prove_f2_uair`].
@@ -367,6 +375,22 @@ where
     HadamardRecombination(
         zinc_piop::lookup::booleanity::BooleanityError<BinaryFieldGF128>,
     ),
+    #[error("merged-hadamard Phase-1 message length {got} ≠ D = {expected}")]
+    MergedHadamardMsgLength { got: usize, expected: usize },
+    #[error(
+        "merged-hadamard claimed sum {claimed:?} ≠ R₀(α) reconstructed from the Phase-1 message ({reconstructed:?})"
+    )]
+    MergedClaimedSumMismatch {
+        claimed: BinaryFieldGF128,
+        reconstructed: BinaryFieldGF128,
+    },
+    #[error(
+        "merged-hadamard closing eval mismatch: sumcheck expects {expected:?}, derived operand parents give {got:?}"
+    )]
+    MergedGroupEvalMismatch {
+        expected: BinaryFieldGF128,
+        got: BinaryFieldGF128,
+    },
     #[error("internal: U::Uair phantom")]
     _Uair(std::marker::PhantomData<U>),
 }
@@ -838,15 +862,20 @@ where
         );
 
         // -- Main UAIR (α-only: empty fused-Hadamard specs). --
-        let (uair_proof, subclaim, projected_trace) = Self::prove_f2_uair_with_groups(
-            transcript,
-            trace,
-            virtual_specs,
-            &[],
-            &[],
-            num_vars,
-            project_scalar,
-        )?;
+        let (uair_proof, subclaim, projected_trace) = {
+            let _g = zinc_utils::prof::scope("uair");
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                &[],
+                &[],
+                &[],
+                &[],
+                num_vars,
+                project_scalar,
+            )?
+        };
 
         let sig = U::signature();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -1032,6 +1061,8 @@ where
             transcript,
             &proof.uair,
             virtual_specs,
+            &[],
+            &[],
             &[],
             &[],
             num_vars,
@@ -1231,6 +1262,478 @@ where
     Zt: F2ZincTypes<D>,
     U: Uair + 'static,
 {
+    /// Full prove with the **merged (inline) Hadamard discharge**
+    /// ([`crate::f2_merged_hadamard`]): commit → UAIR with the `⟨Z_H⟩`
+    /// Phase-1 message + the Hadamard product term riding the MAIN Step-4
+    /// sumcheck (one sumcheck, one point `r*`) → the Lagrange-α projections
+    /// of the AND-referenced witness cols join the multipoint (pair claims
+    /// as pointed-shifts at `r*`) → one γ-batched open at `r_0` with the
+    /// W-binding `gf128poly_project(a', L_b(α)) == Σ_g γ_g·lag_r0_evals[g]`.
+    ///
+    /// Deltas vs [`ZincPlusPiopF2::<_, _, 32>::prove_f2_full_with_oblong_hadamard`]:
+    /// no standalone oblong zerocheck (no second transcript point
+    /// `[z, γ_word]`, no Phase-2 row MLE-check), the multipoint appends ONLY
+    /// the AND-referenced cols (not all witness cols), and the discharge is
+    /// scheme-free (the monomial additive NTT works at any `D` — Keccak's
+    /// `D = 64` runs the same entry point). Adder specs ride along with
+    /// **trusted** parents (arm-C parity); pass `adder_specs = &[]` and
+    /// discharge adders via the lookup for a fully-sound pipeline.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn prove_f2_full_with_merged_hadamard(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
+        num_column_openings: usize,
+    ) -> Result<F2MergedHadamardProof<D>, F2ProveError<U>> {
+        use zinc_poly::univariate::binary_gf128::project_column_with_powers;
+        use zinc_transcript::traits::ConstTranscribable;
+
+        let (hint, commitment) = {
+            let _g = zinc_utils::prof::scope("commit");
+            Self::commit_and_absorb_f2_trace_with_virtuals(
+                transcript,
+                pp,
+                &trace.binary_poly,
+                bit_op_specs,
+            )
+            .expect("F_2 commit should succeed for a well-shaped trace")
+        };
+
+        // -- UAIR with the merged discharge riding it (Phase-1 message +
+        //    Step-4 group + Lagrange-weight end claims at r*). --
+        let (uair_proof, subclaim, projected_trace) = {
+            let _g = zinc_utils::prof::scope("uair");
+            Self::prove_f2_uair_with_groups(
+                transcript,
+                trace,
+                virtual_specs,
+                &[],
+                &[],
+                hadamard_specs,
+                adder_specs,
+                num_vars,
+                project_scalar,
+            )?
+        };
+
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let zero_inner = BinaryFieldGF128::zero().into_inner();
+        let merged_scheme = zinc_poly::univariate::oblong_and_gf8::Gf8Scheme::new();
+        let lag_alpha =
+            crate::f2_merged_hadamard::lagrange_alpha(&merged_scheme, subclaim.alpha);
+        let pairs = subclaim.hadamard_pairs.clone();
+        let dcols = crate::f2_merged_hadamard::distinct_pair_cols(&pairs);
+        debug_assert!(
+            dcols.iter().all(|&g| g >= num_pub_bin && g < trace.binary_poly.len()),
+            "merged-Hadamard AND pairs must reference witness primary cols",
+        );
+
+        // -- W-block: Lagrange-α projections of the AND-referenced cols ONLY
+        //    (the multipoint pointed-shift sources). The unreferenced witness
+        //    cols never enter the multipoint — their `ψ_{L(α)}` evals at r_0
+        //    are computed directly for the binding equation below. --
+        let w_block_guard = zinc_utils::prof::scope("merged_w_block");
+        let w_cols: Vec<DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>> =
+            cfg_iter!(dcols)
+                .map(|&g| {
+                    let proj = project_column_with_powers::<D>(
+                        &trace.binary_poly[g].evaluations,
+                        &lag_alpha,
+                    );
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        proj.iter().map(|x| *x.inner()).collect(),
+                        zero_inner.clone(),
+                    )
+                })
+                .collect();
+        let w_up_evals: Vec<BinaryFieldGF128> = cfg_iter!(w_cols)
+            .map(|col| {
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF128,
+                >>::evaluate_with_config(col.clone(), &subclaim.sumcheck_point, &())
+                .expect("W up-eval at r* should succeed")
+            })
+            .collect();
+        drop(w_block_guard);
+
+        // Absorb the W up-evals before the multipoint challenges (the pair
+        // evals + adder parents were already absorbed inside the UAIR).
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &w_up_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- Combined multipoint: [α-cols] ++ [W-cols (referenced only)].
+        //    Every AND pair folds as a pointed-shift AT r* (Δ=0 included)
+        //    against its W-col; everything reduces to one r_0. --
+        let c = projected_trace.len();
+        let mut trace_mles = projected_trace;
+        trace_mles.extend(w_cols);
+
+        let mut up_evals = uair_proof.column_evals_at_rstar.clone();
+        up_evals.extend_from_slice(&w_up_evals);
+
+        let col_pos = |col: usize| -> usize {
+            dcols
+                .binary_search(&col)
+                .expect("pair col must be in the distinct-col set")
+        };
+        let pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: subclaim.sumcheck_point.clone(),
+                shift,
+                source_col: c + col_pos(col),
+            })
+            .collect();
+
+        let (mp_proof, mp_prover_state) = {
+            let _g = zinc_utils::prof::scope("multipoint_eval");
+            MultipointEval::<BinaryFieldGF128>::prove_as_subprotocol_with_pointed_shifts(
+                transcript,
+                &trace_mles,
+                &subclaim.sumcheck_point,
+                &up_evals,
+                &pointed_shifts,
+                &uair_proof.hadamard_pair_evals,
+                &(),
+            )
+            .map_err(F2ProveError::MultipointEval)?
+        };
+        let r_0 = mp_prover_state.eval_point;
+
+        // r_0 evals of the combined trace; split α-cols / W-cols.
+        let open_evals_guard = zinc_utils::prof::scope("open_evals_r0");
+        let all_r0: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(trace_mles)
+            .map(|col| {
+                <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                    BinaryFieldGF128,
+                >>::evaluate_with_config(col, &r_0, &())
+                .expect("MLE evaluation at r_0 should succeed")
+            })
+            .collect();
+        let (alpha_r0_evals, w_r0_evals) = all_r0.split_at(c);
+        let alpha_r0_evals = alpha_r0_evals.to_vec();
+
+        // -- lag_r0_evals over EVERY witness primary col (the open's γ-batch):
+        //    referenced cols reuse the multipoint output; unreferenced cols
+        //    get a direct `ψ_{L(α)}` projection + eval at r_0. They feed only
+        //    the W-binding equation (and are pinned by it, RLC-style). --
+        let num_witness = trace.binary_poly.len() - num_pub_bin;
+        let lag_r0_evals: Vec<BinaryFieldGF128> = zinc_utils::cfg_into_iter!(0..num_witness)
+            .map(|gw| {
+                let g_abs = num_pub_bin + gw;
+                if let Ok(pos) = dcols.binary_search(&g_abs) {
+                    w_r0_evals[pos]
+                } else {
+                    let proj = project_column_with_powers::<D>(
+                        &trace.binary_poly[g_abs].evaluations,
+                        &lag_alpha,
+                    );
+                    let mle = DenseMultilinearExtension::from_evaluations_vec(
+                        num_vars,
+                        proj.iter().map(|x| *x.inner()).collect(),
+                        zero_inner.clone(),
+                    );
+                    <DenseMultilinearExtension<_> as zinc_poly::mle::MultilinearExtensionWithConfig<
+                        BinaryFieldGF128,
+                    >>::evaluate_with_config(mle, &r_0, &())
+                    .expect("ψ_{L(α)} eval at r_0 should succeed")
+                }
+            })
+            .collect();
+        drop(open_evals_guard);
+
+        // Absorb r_0 evals (α-cols then the full lag vector), mirror order.
+        for v in &alpha_r0_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &lag_r0_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- γ-batched open over the witness primary slice at r_0. --
+        let open_proof = {
+            let _g = zinc_utils::prof::scope("open");
+            Self::prove_f2_open(
+                transcript,
+                pp,
+                &hint,
+                &trace.binary_poly[num_pub_bin..],
+                &r_0,
+                &subclaim.alpha,
+                num_column_openings,
+            )
+        };
+
+        Ok(F2MergedHadamardProof {
+            commitment,
+            uair: uair_proof,
+            multipoint_eval: mp_proof,
+            alpha_r0_evals,
+            w_up_evals,
+            lag_r0_evals,
+            open: open_proof,
+        })
+    }
+
+    /// Verify a [`F2MergedHadamardProof`]: the standard F_2 pipeline checks
+    /// with the merged-Hadamard additions. The UAIR verify already enforced
+    /// the `⟨Z_H⟩` claimed sum (`R₀(α)`) and the merged group's closing
+    /// evaluation against the (absorbed) Lagrange-weight pair evals; here the
+    /// pair claims fold through the multipoint at `r*` over the appended
+    /// W-cols, reduce to `r_0`, and bind to the committed bit-slice claim via
+    /// `gf128poly_project(a', L_b(α)) == Σ_g γ_g·lag_r0_evals[g]` — the same
+    /// weight-vector binding as the oblong's ψ_z check, at `z = α`.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn verify_f2_full_with_merged_hadamard<IdealOverF>(
+        transcript: &mut impl Transcript,
+        pp: &ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
+        proof: &F2MergedHadamardProof<D>,
+        virtual_specs: &[F2VirtualBpSpec],
+        bit_op_specs: &[F2BitOpVirtualSpec],
+        hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        public_binary_trace: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        num_vars: usize,
+        num_primary_columns: usize,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
+    ) -> Result<(), F2FullVerifyError<U, IdealOverF>>
+    where
+        IdealOverF: zinc_uair::ideal::Ideal
+            + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
+    {
+        use zinc_poly::univariate::binary_gf128::gf128poly_project;
+        use zinc_transcript::traits::ConstTranscribable;
+
+        // Step 0: absorb commitment + public cols (mirror the prover).
+        Self::absorb_commitment(transcript, &proof.commitment);
+        crate::absorb_public_columns(transcript, public_binary_trace);
+
+        // -- UAIR verify with the merged discharge (checks the ⟨Z_H⟩ claimed
+        //    sum and the merged group's closing evaluation internally). --
+        let subclaim = Self::verify_f2_uair_with_groups(
+            transcript,
+            &proof.uair,
+            virtual_specs,
+            &[],
+            &[],
+            hadamard_specs,
+            adder_specs,
+            num_vars,
+            num_primary_columns,
+            project_ideal,
+        )
+        .map_err(F2FullVerifyError::Uair)?;
+
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_witness = num_primary_columns - num_pub_bin;
+        let merged_scheme = zinc_poly::univariate::oblong_and_gf8::Gf8Scheme::new();
+        let lag_alpha =
+            crate::f2_merged_hadamard::lagrange_alpha(&merged_scheme, subclaim.alpha);
+        let pairs = subclaim.hadamard_pairs.clone();
+        let dcols = crate::f2_merged_hadamard::distinct_pair_cols(&pairs);
+
+        if proof.w_up_evals.len() != dcols.len() {
+            return Err(F2FullVerifyError::MergedEvalsLengthMismatch {
+                what: "w_up_evals",
+                got: proof.w_up_evals.len(),
+                expected: dcols.len(),
+            });
+        }
+        if proof.lag_r0_evals.len() != num_witness {
+            return Err(F2FullVerifyError::MergedEvalsLengthMismatch {
+                what: "lag_r0_evals",
+                got: proof.lag_r0_evals.len(),
+                expected: num_witness,
+            });
+        }
+
+        // Public column MLE evals at r* — bind to the actual public input.
+        if num_pub_bin > 0 {
+            let computed = recompute_public_col_evals_at::<D>(
+                public_binary_trace,
+                &subclaim.alpha,
+                &subclaim.sumcheck_point,
+            );
+            for (g, &computed) in computed.iter().enumerate() {
+                let claimed = subclaim.primary_column_evals[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatch {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // Absorb the W up-evals before the multipoint challenges (mirror).
+        let mut buf = vec![
+            0u8;
+            <<BinaryFieldGF128 as Field>::Inner as ConstTranscribable>::NUM_BYTES
+        ];
+        for v in &proof.w_up_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        // -- Multipoint verify: up = α-evals ++ w_up_evals; every AND pair as
+        //    a pointed-shift AT r* over the appended W-cols. --
+        let c = proof.uair.column_evals_at_rstar.len();
+        let mut up_evals = proof.uair.column_evals_at_rstar.clone();
+        up_evals.extend_from_slice(&proof.w_up_evals);
+        let col_pos = |col: usize| -> usize {
+            dcols
+                .binary_search(&col)
+                .expect("pair col must be in the distinct-col set")
+        };
+        let pointed_shifts: Vec<PointedShiftClaim<BinaryFieldGF128>> = pairs
+            .iter()
+            .map(|&(col, shift)| PointedShiftClaim {
+                point: subclaim.sumcheck_point.clone(),
+                shift,
+                source_col: c + col_pos(col),
+            })
+            .collect();
+        let sources: Vec<usize> = pointed_shifts.iter().map(|p| p.source_col).collect();
+        let mp_subclaim =
+            MultipointEval::<BinaryFieldGF128>::verify_as_subprotocol_with_pointed_shifts(
+                transcript,
+                proof.multipoint_eval.clone(),
+                &subclaim.sumcheck_point,
+                &up_evals,
+                &pointed_shifts,
+                &proof.uair.hadamard_pair_evals,
+                num_vars,
+                &(),
+            )
+            .map_err(F2FullVerifyError::MultipointEval)?;
+        let r_0 = mp_subclaim.sumcheck_subclaim.point.clone();
+
+        // Absorb r_0 evals (α then the full lag vector) — mirror the prover.
+        for v in &proof.alpha_r0_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+        for v in &proof.lag_r0_evals {
+            transcript.absorb_random_field(v, &mut buf);
+        }
+
+        if proof.alpha_r0_evals.len() != c {
+            return Err(F2FullVerifyError::OpenEvalsLengthMismatch {
+                got: proof.alpha_r0_evals.len(),
+                expected: c,
+            });
+        }
+
+        // Public col MLE evals at r_0.
+        if num_pub_bin > 0 {
+            let computed = recompute_public_col_evals_at::<D>(
+                public_binary_trace,
+                &subclaim.alpha,
+                &r_0,
+            );
+            for (g, &computed) in computed.iter().enumerate() {
+                let claimed = proof.alpha_r0_evals[g];
+                if computed != claimed {
+                    return Err(F2FullVerifyError::PublicColumnEvalMismatchAtR0 {
+                        public_col_idx: g,
+                        computed,
+                        claimed,
+                    });
+                }
+            }
+        }
+
+        // XOR-virtual cols at r_0: derive + check.
+        let (primary_evals_at_r_0, virtual_evals_from_proof) =
+            proof.alpha_r0_evals.split_at(num_primary_columns);
+        let virtual_evals_derived = derive_f2_virtual_evals_at(primary_evals_at_r_0, virtual_specs);
+        for (vk, (claimed, derived)) in virtual_evals_from_proof
+            .iter()
+            .zip(virtual_evals_derived.iter())
+            .enumerate()
+        {
+            if claimed != derived {
+                return Err(F2FullVerifyError::VirtualColumnEvalMismatchAtR0 {
+                    virtual_idx: vk,
+                    derived: *derived,
+                    claimed: *claimed,
+                });
+            }
+        }
+
+        // Finalise the multipoint: combined r_0 evals = α-cols ++ the
+        // REFERENCED entries of the lag vector (which thereby get pinned to
+        // the multipoint's reduction — the unreferenced entries are pinned by
+        // the W-binding equation below).
+        let mut combined_r0 = proof.alpha_r0_evals.clone();
+        for &g in &dcols {
+            combined_r0.push(proof.lag_r0_evals[g - num_pub_bin]);
+        }
+        MultipointEval::<BinaryFieldGF128>::verify_subclaim_pointed(
+            &mp_subclaim,
+            &combined_r0,
+            &sources,
+            &(),
+        )
+        .map_err(F2FullVerifyError::MultipointEval)?;
+
+        // -- γ-batched open at r_0 (binds a' = Σ_g γ_g·a'_g; returns γ). --
+        let subclaim_at_r_0 = F2VerifierSubclaim {
+            ic_evaluation_point: subclaim.ic_evaluation_point.clone(),
+            alpha: subclaim.alpha,
+            sumcheck_point: r_0,
+            primary_column_evals: primary_evals_at_r_0.to_vec(),
+            virtual_column_evals: virtual_evals_derived,
+            hadamard_rstar: Vec::new(),
+            hadamard_pairs: Vec::new(),
+        };
+        let gamma = Self::verify_f2_open_with_virtuals(
+            transcript,
+            pp,
+            &proof.commitment,
+            &proof.open,
+            &subclaim_at_r_0,
+            bit_op_specs,
+        )
+        .map_err(F2FullVerifyError::Open)?;
+
+        // -- W-binding: ψ_{L(α)}(a') == Σ_g γ_g·lag_r0_evals[g] over the
+        //    witness cols (same γ-batch + same cols as the open's ψ_α
+        //    Check 2). This is the oblong's ψ_z binding at z = α — it pins
+        //    every lag_r0 entry to the committed bit-slice claim, closing the
+        //    chain group-eval → pair-evals → multipoint → a' → commitment. --
+        let psi_w = gf128poly_project::<D>(&proof.open.lifted_claim, &lag_alpha);
+        let mut expected_w = BinaryFieldGF128::zero();
+        for (g, gamma_g) in gamma.iter().enumerate() {
+            let mut term = *gamma_g;
+            term *= &proof.lag_r0_evals[g];
+            expected_w += &term;
+        }
+        if psi_w != expected_w {
+            return Err(F2FullVerifyError::PsiZBinding {
+                computed: psi_w,
+                expected: expected_w,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Run the F_2 prove pipeline up to (but not including) the MLE
     /// evaluation claims.
     ///
@@ -1262,6 +1765,8 @@ where
         let (proof, subclaim, _projected_trace) = Self::prove_f2_uair_with_groups(
             transcript,
             trace,
+            &[],
+            &[],
             &[],
             &[],
             &[],
@@ -1297,6 +1802,8 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
         adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        merged_and_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        merged_adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         project_scalar: impl Fn(&U::Scalar) -> DynamicPolynomialF<BinaryFieldGF128> + Sync,
     ) -> Result<
@@ -1307,6 +1814,13 @@ where
         ),
         F2ProveError<U>,
     > {
+        // The fused (Step-2.5 zerocheck) and merged (inline ⟨Z_H⟩ + Step-4
+        // group) Hadamard discharges are mutually exclusive pipeline shapes.
+        let has_merged = !merged_and_specs.is_empty() || !merged_adder_specs.is_empty();
+        assert!(
+            !(has_merged && (!hadamard_specs.is_empty() || !adder_specs.is_empty())),
+            "fused and merged Hadamard discharges cannot run together",
+        );
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
         let num_primary = trace.binary_poly.len();
@@ -1382,27 +1896,30 @@ where
         // SHA-256 F_2 is degree-1 and takes the MLE-first lane; the
         // TinyF2Uair test fixtures may not be, hence the gate.
         let effective_degree = zinc_uair::degree_counter::count_effective_max_degree::<U>();
-        let (ic_proof, ic_state) = if effective_degree <= 1 {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
-                transcript,
-                &extended_binary_poly,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-                |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF128> {
-                    let _ = cfg;
-                    project_scalar(s)
-                },
-            )
-        } else {
-            crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
-                transcript,
-                &extended_binary_poly,
-                num_constraints,
-                num_vars,
-                &field_cfg,
-                project_scalar_to_bits,
-            )
+        let (ic_proof, ic_state) = {
+            let _g = zinc_utils::prof::scope("uair:ic");
+            if effective_degree <= 1 {
+                crate::f2_native_ic::F2NativeIc::<U>::prove_linear::<BinaryFieldGF128, _, D>(
+                    transcript,
+                    &extended_binary_poly,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                    |s: &U::Scalar, cfg: &()| -> DynamicPolynomialF<BinaryFieldGF128> {
+                        let _ = cfg;
+                        project_scalar(s)
+                    },
+                )
+            } else {
+                crate::f2_native_ic::F2NativeIc::<U>::prove_combined::<BinaryFieldGF128, _, D>(
+                    transcript,
+                    &extended_binary_poly,
+                    num_constraints,
+                    num_vars,
+                    &field_cfg,
+                    project_scalar_to_bits,
+                )
+            }
         };
 
         // -- Step 2.5: Hadamard zerocheck (Wiring R) ---------------
@@ -1420,6 +1937,55 @@ where
             &ic_state.evaluation_point,
             num_vars,
         );
+
+        // -- Step 2.5M: merged-Hadamard Phase-1 (the ⟨Z_H⟩ ideal check) --
+        // The GF(2⁸) fast lane: the family's zerocheck randomness is the
+        // hybrid point r_had = [small challenges] ++ r_IC[3..] (the eq-split
+        // enabler — see `crate::f2_merged_hadamard`); a fresh γ_h batches the
+        // relations. The D extension-domain evals of R₀ are absorbed BEFORE α
+        // so the claimed group sum R₀(α) is fixed first. Operand columns +
+        // the eq(·; r_had) table are kept for the Step-4 group below.
+        let merged_scheme: Option<zinc_poly::univariate::oblong_and_gf8::Gf8Scheme> =
+            if has_merged {
+                Some(zinc_poly::univariate::oblong_and_gf8::Gf8Scheme::new())
+            } else {
+                None
+            };
+        let merged_phase: Option<(
+            BinaryFieldGF128,
+            Vec<DenseMultilinearExtension<BinaryPoly<D>>>,
+            DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>,
+            Vec<BinaryFieldGF128>,
+        )> = if let Some(scheme) = merged_scheme.as_ref() {
+            let _g = zinc_utils::prof::scope("uair:merged_phase1");
+            let gamma_h: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
+            let operand_cols = crate::f2_merged_hadamard::merged_operand_columns::<D>(
+                &extended_binary_poly,
+                merged_and_specs,
+                merged_adder_specs,
+                num_vars,
+            );
+            let r_had = crate::f2_merged_hadamard::merged_eq_point(
+                scheme,
+                &ic_state.evaluation_point,
+            );
+            let eq_inner = zinc_poly::utils::build_eq_x_r_inner(&r_had, &field_cfg)
+                .expect("eq table construction must succeed for valid hybrid point");
+            let msg = crate::f2_merged_hadamard::merged_round_message::<D>(
+                scheme,
+                &operand_cols,
+                &ic_state.evaluation_point,
+                gamma_h,
+            );
+            let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+            for v in &msg {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            Some((gamma_h, operand_cols, eq_inner, msg))
+        } else {
+            None
+        };
 
         // -- Step 3: Evaluation projection (X = α) -----------------
         let alpha: BinaryFieldGF128 = transcript.get_field_challenge(&field_cfg);
@@ -1605,11 +2171,47 @@ where
             Box::new(|v: &[BinaryFieldGF128]| v[0] * v[1]),
             fast_path,
         );
+        let mut groups = vec![group];
+
+        // -- Step 4m: the merged-Hadamard group rides the SAME sumcheck. --
+        // Fold each operand column with the embed(H₈) base-Lagrange weights
+        // L_b(α) (`ψ_α∘L = ψ_z|_{z=α}`) and add the degree-3 group
+        // `eq(·;r_had)·Σ_k γ_h^k·(ZU_k·ZV_k + ZW_k)` with claimed sum R₀(α).
+        // The Lagrange weights are kept for the post-sumcheck pair evals.
+        let merged_lag_alpha: Vec<BinaryFieldGF128> = match merged_scheme.as_ref() {
+            Some(scheme) => crate::f2_merged_hadamard::lagrange_alpha(scheme, alpha),
+            None => Vec::new(),
+        };
+        if let Some((gamma_h, operand_cols, eq_inner, _)) = merged_phase.as_ref() {
+            let _g = zinc_utils::prof::scope("uair:merged_group");
+            let zero_inner_g = *BinaryFieldGF128::zero().inner();
+            let folded: Vec<
+                DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>,
+            > = cfg_iter!(operand_cols)
+                .map(|col| {
+                    let proj =
+                        zinc_poly::univariate::binary_gf128::project_column_with_powers::<D>(
+                            &col.evaluations,
+                            &merged_lag_alpha,
+                        );
+                    DenseMultilinearExtension::from_evaluations_vec(
+                        col.num_vars,
+                        proj.iter().map(|x| *x.inner()).collect(),
+                        zero_inner_g,
+                    )
+                })
+                .collect();
+            groups.push(crate::f2_merged_hadamard::merged_hadamard_group(
+                eq_inner.clone(),
+                folded,
+                *gamma_h,
+            ));
+        }
 
         let (sumcheck_proof, prover_states) =
             MultiDegreeSumcheck::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
-                vec![group],
+                groups,
                 num_vars,
                 &field_cfg,
             );
@@ -1681,6 +2283,44 @@ where
             transcript.absorb_random_field(v, &mut buf);
         }
 
+        // -- Step 4m': merged-Hadamard end claims at r* ------------
+        // Lagrange-weight pair evals `ψ_{L(α)}(col↓Δ)(r*)` for the AND pairs
+        // (each referenced col projected once, `pair_evals_dedup`) + trusted
+        // adder operand parents — read off the merged group's residual
+        // sumcheck state for free (the folded MLEs ARE the operand evals at
+        // r*). Both absorbed before any downstream (multipoint / open)
+        // challenges. The verifier derives the AND operand parents from the
+        // pair evals and checks the merged group's closing evaluation.
+        let (merged_pair_evals, merged_adder_parents, merged_pairs) = if has_merged {
+            let _g = zinc_utils::prof::scope("uair:merged_end_claims");
+            let pairs = crate::f2_hadamard::distinct_pairs(merged_and_specs);
+            let pair_evals = crate::f2_merged_hadamard::pair_evals_dedup::<D>(
+                &extended_binary_poly,
+                &pairs,
+                &merged_lag_alpha,
+                &sumcheck_point,
+            );
+            let r_last = *prover_states[1]
+                .randomness
+                .last()
+                .expect("sumcheck ran at least one round");
+            let operand_evals = crate::f2_merged_hadamard::residual_evals(
+                &prover_states[1].mles[1..],
+                r_last,
+            );
+            let adder_parents =
+                operand_evals[merged_and_specs.len().saturating_mul(3)..].to_vec();
+            for v in &pair_evals {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            for v in &adder_parents {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            (pair_evals, adder_parents, pairs)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+
         // Split: first `num_primary` are committed; the rest are
         // virtual. The verifier reconstructs the virtual side from
         // the primary side and `virtual_specs`.
@@ -1692,7 +2332,7 @@ where
             primary_column_evals: primary_evals.to_vec(),
             virtual_column_evals: virtual_evals.to_vec(),
             hadamard_rstar,
-            hadamard_pairs,
+            hadamard_pairs: if has_merged { merged_pairs } else { hadamard_pairs },
         };
 
         // Convert `projected_trace` from `DenseMLE<BinaryFieldGF128>`
@@ -1739,8 +2379,17 @@ where
                 gamma,
                 column_evals_at_rstar: all_col_evals,
                 hadamard_proof,
-                hadamard_pair_evals,
-                hadamard_adder_parents,
+                hadamard_pair_evals: if has_merged {
+                    merged_pair_evals
+                } else {
+                    hadamard_pair_evals
+                },
+                hadamard_adder_parents: if has_merged {
+                    merged_adder_parents
+                } else {
+                    hadamard_adder_parents
+                },
+                merged_hadamard_msg: merged_phase.map(|(_, _, _, m)| m).unwrap_or_default(),
             },
             subclaim,
             projected_trace_inner,
@@ -1779,6 +2428,8 @@ where
             virtual_specs,
             &[],
             &[],
+            &[],
+            &[],
             num_vars,
             num_primary_columns,
             project_ideal,
@@ -1802,6 +2453,8 @@ where
         virtual_specs: &[F2VirtualBpSpec],
         hadamard_specs: &[crate::f2_hadamard::F2HadamardSpec],
         adder_specs: &[crate::f2_hadamard::F2AdderSpec],
+        merged_and_specs: &[crate::f2_hadamard::F2HadamardSpec],
+        merged_adder_specs: &[crate::f2_hadamard::F2AdderSpec],
         num_vars: usize,
         num_primary_columns: usize,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
@@ -1810,6 +2463,11 @@ where
         IdealOverF: zinc_uair::ideal::Ideal
             + zinc_uair::ideal::IdealCheck<DynamicPolynomialF<BinaryFieldGF128>>,
     {
+        let has_merged = !merged_and_specs.is_empty() || !merged_adder_specs.is_empty();
+        assert!(
+            !(has_merged && (!hadamard_specs.is_empty() || !adder_specs.is_empty())),
+            "fused and merged Hadamard discharges cannot run together",
+        );
         let num_constraints = count_constraints::<U>();
         let field_cfg = ();
         let num_total = num_primary_columns + virtual_specs.len();
@@ -1825,6 +2483,34 @@ where
             )
             .map_err(F2VerifyError::IdealCheck)?;
         let ic_evaluation_point = ic_subclaim.evaluation_point;
+
+        // -- Step 2.5M mirror: merged-Hadamard Phase-1 -------------
+        // Draw γ_h, length-check + absorb the shipped extension-domain evals
+        // of R₀ (before α, mirroring the prover). The claimed-sum check
+        // against `r0_at(msg, α)` happens after the sumcheck verify below.
+        let merged_scheme: Option<zinc_poly::univariate::oblong_and_gf8::Gf8Scheme> =
+            if has_merged {
+                Some(zinc_poly::univariate::oblong_and_gf8::Gf8Scheme::new())
+            } else {
+                None
+            };
+        let merged_gamma_h: BinaryFieldGF128 = if has_merged {
+            let gamma_h = transcript.get_field_challenge(&field_cfg);
+            if proof.merged_hadamard_msg.len() != D {
+                return Err(F2VerifyError::MergedHadamardMsgLength {
+                    got: proof.merged_hadamard_msg.len(),
+                    expected: D,
+                });
+            }
+            let mut buf = vec![0u8; <<BinaryFieldGF128 as crypto_primitives::Field>::Inner
+                as zinc_transcript::traits::ConstTranscribable>::NUM_BYTES];
+            for v in &proof.merged_hadamard_msg {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            gamma_h
+        } else {
+            BinaryFieldGF128::zero()
+        };
 
         // -- Step 2.5: Hadamard zerocheck verify (Wiring R) -------
         // Mirrors the prover: runs before α. No-op when empty.
@@ -1925,11 +2611,33 @@ where
         )
         .map_err(F2VerifyError::Sumcheck)?;
 
-        if md_subclaims.expected_evaluations().len() != 1 {
+        let expected_groups = if has_merged { 2 } else { 1 };
+        if md_subclaims.expected_evaluations().len() != expected_groups {
             return Err(F2VerifyError::GroupCountMismatch {
-                expected: 1,
+                expected: expected_groups,
                 actual: md_subclaims.expected_evaluations().len(),
             });
+        }
+
+        // Merged-Hadamard claimed sum: the group-1 total must equal R₀(α)
+        // reconstructed from the Phase-1 message (zero on the base domain by
+        // construction — the ⟨Z_H⟩ membership — extension half = the shipped
+        // evals, over the scheme's embed(H₈) subspace). A corrupt AND makes
+        // the true sum differ from any vanishing R₀ at a random α, so the
+        // sumcheck then cannot close.
+        if let Some(scheme) = merged_scheme.as_ref() {
+            let claimed = proof.sumcheck_proof.claimed_sums()[1];
+            let reconstructed = crate::f2_merged_hadamard::r0_at(
+                scheme,
+                &proof.merged_hadamard_msg,
+                proof.alpha,
+            );
+            if claimed != reconstructed {
+                return Err(F2VerifyError::MergedClaimedSumMismatch {
+                    claimed,
+                    reconstructed,
+                });
+            }
         }
 
         let sumcheck_point = md_subclaims.point().to_vec();
@@ -1975,6 +2683,70 @@ where
             transcript.absorb_random_field(v, &mut buf);
         }
 
+        // -- Step 4m' mirror: merged-Hadamard closing checks -------
+        // Absorb the Lagrange-weight pair evals + trusted adder parents
+        // (mirror of the prover's post-sumcheck absorb), derive the AND
+        // operand parents (`ψ_{L(α)}` is F_2-linear, so XOR/shift/complement
+        // recombine exactly as ψ_α does), and check the merged group's
+        // closing evaluation `eq(r*, r_had)·Σ_k γ_h^k·(U_k·V_k + W_k)`.
+        let merged_pairs: Vec<(usize, usize)> = if let Some(scheme) = merged_scheme.as_ref() {
+            let pairs = crate::f2_hadamard::distinct_pairs(merged_and_specs);
+            if proof.hadamard_pair_evals.len() != pairs.len() {
+                return Err(F2VerifyError::HadamardParentEvalCountMismatch {
+                    got: proof.hadamard_pair_evals.len(),
+                    expected: pairs.len(),
+                });
+            }
+            let expected_adder_parents = merged_adder_specs.len().saturating_mul(3);
+            if proof.hadamard_adder_parents.len() != expected_adder_parents {
+                return Err(F2VerifyError::HadamardAdderParentCountMismatch {
+                    got: proof.hadamard_adder_parents.len(),
+                    expected: expected_adder_parents,
+                });
+            }
+            for v in &proof.hadamard_pair_evals {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            for v in &proof.hadamard_adder_parents {
+                transcript.absorb_random_field(v, &mut buf);
+            }
+            let lag_alpha = crate::f2_merged_hadamard::lagrange_alpha(scheme, alpha);
+            let mut operand_parents = crate::f2_hadamard::derive_operand_parents(
+                merged_and_specs,
+                &pairs,
+                &proof.hadamard_pair_evals,
+                &lag_alpha,
+            );
+            operand_parents.extend_from_slice(&proof.hadamard_adder_parents);
+            // The merged group's eq factor lives at the HYBRID point r_had,
+            // not the IC point (the eq-split's deterministic small prefix).
+            let r_had = crate::f2_merged_hadamard::merged_eq_point(
+                scheme,
+                &ic_evaluation_point,
+            );
+            let eq_at_rstar_rhad = zinc_poly::utils::eq_eval(
+                &sumcheck_point,
+                &r_had,
+                one,
+            )
+            .expect("matching length (num_vars) by construction");
+            let expected_merged = md_subclaims.expected_evaluations()[1];
+            let got = crate::f2_merged_hadamard::merged_expected_evaluation(
+                eq_at_rstar_rhad,
+                &operand_parents,
+                merged_gamma_h,
+            );
+            if got != expected_merged {
+                return Err(F2VerifyError::MergedGroupEvalMismatch {
+                    expected: expected_merged,
+                    got,
+                });
+            }
+            pairs
+        } else {
+            Vec::new()
+        };
+
         let (primary_evals, virtual_evals_from_proof) =
             proof.column_evals_at_rstar.split_at(num_primary_columns);
         let primary_evals = primary_evals.to_vec();
@@ -2005,7 +2777,7 @@ where
             primary_column_evals: primary_evals,
             virtual_column_evals: virtual_evals_derived,
             hadamard_rstar,
-            hadamard_pairs,
+            hadamard_pairs: if has_merged { merged_pairs } else { hadamard_pairs },
         })
     }
 
@@ -3453,6 +4225,8 @@ where
                 virtual_specs,
                 hadamard_specs,
                 adder_specs,
+                &[],
+                &[],
                 num_vars,
                 project_scalar,
             )?;
@@ -3772,6 +4546,8 @@ where
             virtual_specs,
             hadamard_specs,
             adder_specs,
+            &[],
+            &[],
             num_vars,
             num_primary_columns,
             project_ideal,
@@ -4056,6 +4832,37 @@ pub struct F2OblongHadamardProof<const D: usize> {
     pub adder_parents: Vec<BinaryFieldGF128>,
 }
 
+/// Proof of the full F_2 pipeline with the **merged (inline) Hadamard
+/// discharge** ([`crate::f2_merged_hadamard`]). Vs
+/// [`F2OblongHadamardProof`]: no standalone oblong zerocheck proof (the
+/// Phase-1 message + Lagrange-weight pair evals / trusted adder parents live
+/// inside `uair` — [`F2Proof::merged_hadamard_msg`],
+/// [`F2Proof::hadamard_pair_evals`], [`F2Proof::hadamard_adder_parents`]), no
+/// `z_up_evals` over all witness cols (only the AND-referenced cols join the
+/// multipoint), and a single transcript point `r*` for every end claim.
+#[derive(Clone, Debug)]
+pub struct F2MergedHadamardProof<const D: usize> {
+    pub commitment: ZipPlusCommitment,
+    pub uair: F2Proof,
+    /// Multipoint-eval folding the `ψ_α` column claims at `r*` AND the merged
+    /// `ψ_{L(α)}(col↓Δ)(r*)` AND-pair claims (appended W-cols, pointed-shifts
+    /// at `r*`) into the single open point `r_0`.
+    pub multipoint_eval: MultipointEvalProof<BinaryFieldGF128>,
+    /// `ψ_α(col)(r_0)` for every column (primary then virtual) — the standard
+    /// open evals.
+    pub alpha_r0_evals: Vec<BinaryFieldGF128>,
+    /// `ψ_{L(α)}(col)(r*)` for the **AND-referenced** witness cols only (the
+    /// multipoint up-claims of the appended W-cols), in sorted distinct-col
+    /// order.
+    pub w_up_evals: Vec<BinaryFieldGF128>,
+    /// `ψ_{L(α)}(col)(r_0)` for **all witness primary cols** (the open's
+    /// γ-batch): referenced cols are pinned by the multipoint reduction, and
+    /// the whole vector is pinned by the W-binding
+    /// `gf128poly_project(a', L_b(α)) == Σ_g γ_g·lag_r0_evals[g]`.
+    pub lag_r0_evals: Vec<BinaryFieldGF128>,
+    pub open: F2OpenProof<D>,
+}
+
 /// Errors emitted by [`ZincPlusPiopF2::verify_f2_full`].
 #[derive(Debug, thiserror::Error)]
 pub enum F2FullVerifyError<U: Uair, IdealOverF>
@@ -4108,6 +4915,12 @@ where
     PsiZBinding {
         computed: BinaryFieldGF128,
         expected: BinaryFieldGF128,
+    },
+    #[error("merged-hadamard proof segment `{what}` has length {got}, expected {expected}")]
+    MergedEvalsLengthMismatch {
+        what: &'static str,
+        got: usize,
+        expected: usize,
     },
 }
 
@@ -4393,6 +5206,7 @@ mod tests {
             hadamard_proof: None,
             hadamard_pair_evals: Vec::new(),
             hadamard_adder_parents: Vec::new(),
+            merged_hadamard_msg: Vec::new(),
         })
     }
 
@@ -4723,6 +5537,8 @@ mod tests {
                 &[],
                 &specs,
                 &[],
+                &[],
+                &[],
                 num_vars,
                 project_scalar,
             )
@@ -4735,6 +5551,8 @@ mod tests {
             &proof,
             &[],
             &specs,
+            &[],
+            &[],
             &[],
             num_vars,
             /* num_primary_columns */ 3,
@@ -4758,6 +5576,8 @@ mod tests {
                 &[],
                 &specs,
                 &[],
+                &[],
+                &[],
                 num_vars,
                 project_scalar,
             )
@@ -4770,6 +5590,8 @@ mod tests {
             &proof_bad,
             &[],
             &specs,
+            &[],
+            &[],
             &[],
             num_vars,
             3,
@@ -6610,6 +7432,582 @@ mod tests {
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
         .expect("honest masked SHA adders proof must verify");
+    }
+
+    /// End-to-end **merged (inline) Hadamard discharge**
+    /// (`prove/verify_f2_full_with_merged_hadamard`): one AND relation
+    /// `U ⊙ V = W` on a 3-column trace. The Hadamard rides the main
+    /// pipeline — `⟨Z_H⟩` Phase-1 message, the degree-3 group in the
+    /// Step-4 sumcheck with claimed sum `R₀(α)`, Lagrange-weight pair
+    /// evals at `r*` folded through the single multipoint, and the
+    /// `ψ_{L(α)}(a')` binding. Tamper arms cover each new check.
+    #[test]
+    fn prove_then_verify_f2_full_with_merged_hadamard_roundtrips() {
+        const D: usize = 32;
+        let num_vars: usize = 6;
+        let row_len: usize = 8;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        fn project_scalar(scalar: &BinaryPoly<32>) -> DynamicPolynomialF<BinaryFieldGF128> {
+            DynamicPolynomialF {
+                coeffs: scalar
+                    .iter()
+                    .map(|b| {
+                        if b.into_inner() {
+                            BinaryFieldGF128::one()
+                        } else {
+                            BinaryFieldGF128::zero()
+                        }
+                    })
+                    .collect(),
+            }
+        }
+
+        let mut rng_local = rng();
+        let u_words: Vec<u32> = (0..poly_size).map(|_| rng_local.random::<u32>()).collect();
+        let v_words: Vec<u32> = (0..poly_size).map(|_| rng_local.random::<u32>()).collect();
+        let w_words: Vec<u32> = u_words.iter().zip(&v_words).map(|(a, b)| a & b).collect();
+        let mk = |words: &[u32]| {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                words.iter().map(|&x| BinaryPoly::<D>::from(x)).collect(),
+                BinaryPoly::default(),
+            )
+        };
+        let make_trace =
+            |w: &[u32]| -> UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> {
+                UairTrace {
+                    binary_poly: vec![mk(&u_words), mk(&v_words), mk(w)].into(),
+                    arbitrary_poly: vec![].into(),
+                    int: vec![].into(),
+                }
+            };
+        let trace = make_trace(&w_words);
+        let specs = [crate::f2_hadamard::F2HadamardSpec::plain(0, 1, 2)];
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let prove = |trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
+            let mut pt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::prove_f2_full_with_merged_hadamard(
+                &mut pt,
+                &pp,
+                trace,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &specs,
+                /* adder_specs */ &[],
+                num_vars,
+                project_scalar,
+                /* num_column_openings */ 4,
+            )
+            .expect("prove_f2_full_with_merged_hadamard should succeed")
+        };
+        let verify = |proof: &F2MergedHadamardProof<D>| {
+            let mut vt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, HadF2Uair, D>::verify_f2_full_with_merged_hadamard::<
+                ImpossibleIdeal,
+            >(
+                &mut vt,
+                &pp,
+                proof,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &specs,
+                /* adder_specs */ &[],
+                /* public_binary_trace */ &[],
+                num_vars,
+                /* num_primary_columns */ 3,
+                |_ideal| ImpossibleIdeal,
+            )
+        };
+
+        // -- honest round-trip --
+        let proof = prove(&trace);
+        // plain(0,1,2): 3 distinct (col,Δ=0) AND pairs, all 3 cols referenced.
+        assert_eq!(proof.uair.hadamard_pair_evals.len(), 3);
+        assert_eq!(proof.uair.merged_hadamard_msg.len(), D);
+        assert_eq!(proof.w_up_evals.len(), 3);
+        assert_eq!(proof.lag_r0_evals.len(), 3);
+        verify(&proof).expect("honest merged-discharge proof must verify");
+
+        // -- corrupt W bit: the true group sum no longer matches any
+        //    base-vanishing R₀, so the claimed-sum check rejects --
+        let mut w_bad = w_words.clone();
+        w_bad[0] ^= 1;
+        let proof_bad_w = prove(&make_trace(&w_bad));
+        assert!(
+            matches!(
+                verify(&proof_bad_w),
+                Err(F2FullVerifyError::Uair(
+                    F2VerifyError::MergedClaimedSumMismatch { .. }
+                ))
+            ),
+            "flipped W must be rejected by the ⟨Z_H⟩ claimed-sum check",
+        );
+
+        // -- tampered Phase-1 message: the absorbed message diverges the
+        //    transcript, so α already mismatches (AlphaMismatch); a prover
+        //    crafting its own transcript instead hits the claimed-sum check
+        //    (covered by the corrupt-W arm above) --
+        let one = BinaryFieldGF128::one();
+        let mut proof_bad_msg = proof.clone();
+        proof_bad_msg.uair.merged_hadamard_msg[0] += &one;
+        assert!(
+            verify(&proof_bad_msg).is_err(),
+            "a tampered Phase-1 message must be rejected",
+        );
+
+        // -- tampered pair eval: the merged closing-eval check rejects --
+        let mut proof_bad_pair = proof.clone();
+        proof_bad_pair.uair.hadamard_pair_evals[0] += &one;
+        assert!(
+            matches!(
+                verify(&proof_bad_pair),
+                Err(F2FullVerifyError::Uair(
+                    F2VerifyError::MergedGroupEvalMismatch { .. }
+                ))
+            ),
+            "a tampered pair eval must be rejected by the closing-eval check",
+        );
+
+        // -- tampered lag_r0 eval: the W-binding (or the multipoint, for a
+        //    referenced col) rejects --
+        let mut proof_bad_lag = proof.clone();
+        proof_bad_lag.lag_r0_evals[0] += &one;
+        assert!(
+            verify(&proof_bad_lag).is_err(),
+            "a tampered lag_r0 eval must be rejected (W-binding or multipoint)",
+        );
+
+        // -- tampered W up-eval: the multipoint rejects --
+        let mut proof_bad_up = proof.clone();
+        proof_bad_up.w_up_evals[0] += &one;
+        assert!(
+            verify(&proof_bad_up).is_err(),
+            "a tampered W up-eval must be rejected by the multipoint",
+        );
+    }
+
+    /// Merged discharge with the Phase-B **operand** features (row-shift /
+    /// complement / XOR combo) — the same three relations as
+    /// `prove_then_verify_f2_full_with_operand_hadamards_roundtrips`, driven
+    /// through `prove/verify_f2_full_with_merged_hadamard`. Exercises the
+    /// `Δ ≠ 0` pointed-shifts at `r*` and the Lagrange complement constant
+    /// (`Σ_b L_b(α) = 1`, the interpolation of the all-ones word).
+    #[test]
+    fn prove_then_verify_f2_full_with_merged_operand_hadamards_roundtrips() {
+        const D: usize = 32;
+        let num_vars: usize = 6;
+        let row_len: usize = 8;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+        let n = poly_size;
+        assert_eq!(num_rows * row_len, poly_size);
+
+        fn project_scalar(scalar: &BinaryPoly<32>) -> DynamicPolynomialF<BinaryFieldGF128> {
+            DynamicPolynomialF {
+                coeffs: scalar
+                    .iter()
+                    .map(|b| {
+                        if b.into_inner() {
+                            BinaryFieldGF128::one()
+                        } else {
+                            BinaryFieldGF128::zero()
+                        }
+                    })
+                    .collect(),
+            }
+        }
+
+        let mut rng_local = rng();
+        let a: Vec<u32> = (0..n).map(|_| rng_local.random::<u32>()).collect();
+        let b: Vec<u32> = (0..n).map(|_| rng_local.random::<u32>()).collect();
+        let sh = |arr: &[u32], d: usize, t: usize| if t + d < n { arr[t + d] } else { 0 };
+        let mask = u32::MAX;
+        let col1: Vec<u32> = (0..n).map(|t| a[t] & sh(&a, 1, t)).collect();
+        let col3: Vec<u32> = (0..n).map(|t| ((!a[t]) & mask) & b[t]).collect();
+        let col4: Vec<u32> = (0..n)
+            .map(|t| {
+                let u = a[t] ^ sh(&a, 2, t);
+                let v = sh(&a, 1, t) ^ sh(&a, 2, t);
+                (u & v) ^ sh(&a, 2, t)
+            })
+            .collect();
+
+        let mk = |words: &[u32]| {
+            DenseMultilinearExtension::from_evaluations_vec(
+                num_vars,
+                words.iter().map(|&x| BinaryPoly::<D>::from(x)).collect(),
+                BinaryPoly::default(),
+            )
+        };
+        let make_trace = |c1: &[u32]| -> UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D> {
+            UairTrace {
+                binary_poly: vec![mk(&a), mk(c1), mk(&b), mk(&col3), mk(&col4)].into(),
+                arbitrary_poly: vec![].into(),
+                int: vec![].into(),
+            }
+        };
+        let trace = make_trace(&col1);
+
+        use crate::f2_hadamard::{F2HadamardSpec, F2Operand, F2OperandTerm};
+        let specs = [
+            F2HadamardSpec {
+                u: F2Operand::col(0),
+                v: F2Operand::shifted(0, 1),
+                w: F2Operand::col(1),
+            },
+            F2HadamardSpec {
+                u: F2Operand::col(0).complemented(),
+                v: F2Operand::col(2),
+                w: F2Operand::col(3),
+            },
+            F2HadamardSpec {
+                u: F2Operand::xor(vec![
+                    F2OperandTerm { col: 0, row_shift: 0 },
+                    F2OperandTerm { col: 0, row_shift: 2 },
+                ]),
+                v: F2Operand::xor(vec![
+                    F2OperandTerm { col: 0, row_shift: 1 },
+                    F2OperandTerm { col: 0, row_shift: 2 },
+                ]),
+                w: F2Operand::xor(vec![
+                    F2OperandTerm { col: 4, row_shift: 0 },
+                    F2OperandTerm { col: 0, row_shift: 2 },
+                ]),
+            },
+        ];
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let prove = |trace: &UairTrace<'static, BinaryPoly<D>, BinaryPoly<D>, D>| {
+            let mut pt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, HadOpF2Uair, D>::prove_f2_full_with_merged_hadamard(
+                &mut pt, &pp, trace, &[], &[], &specs, &[], num_vars, project_scalar, 4,
+            )
+            .expect("merged prove should succeed")
+        };
+        let verify = |proof: &F2MergedHadamardProof<D>| {
+            let mut vt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, HadOpF2Uair, D>::verify_f2_full_with_merged_hadamard::<
+                ImpossibleIdeal,
+            >(
+                &mut vt, &pp, proof, &[], &[], &specs, &[], &[], num_vars, 5, |_ideal| ImpossibleIdeal,
+            )
+        };
+
+        // -- honest round-trip --
+        let proof = prove(&trace);
+        // Distinct pairs: (0,0),(0,1),(0,2),(1,0),(2,0),(3,0),(4,0) = 7;
+        // distinct referenced cols: 0..=4 = 5.
+        assert_eq!(proof.uair.hadamard_pair_evals.len(), 7);
+        assert_eq!(proof.w_up_evals.len(), 5);
+        verify(&proof).expect("honest merged operand-discharge proof must verify");
+
+        // -- corrupt col1 (R1's W): the ⟨Z_H⟩ claimed-sum check rejects --
+        let mut col1_bad = col1.clone();
+        col1_bad[0] ^= 1;
+        let proof_bad = prove(&make_trace(&col1_bad));
+        assert!(
+            matches!(
+                verify(&proof_bad),
+                Err(F2FullVerifyError::Uair(
+                    F2VerifyError::MergedClaimedSumMismatch { .. }
+                ))
+            ),
+            "a flipped W bit must be rejected by the ⟨Z_H⟩ claimed-sum check",
+        );
+    }
+
+    /// All **14** SHA-256 Hadamard relations (2 ANDs + 12 adders) on the real
+    /// `sha256_f2` trace through the **merged (inline) discharge** —
+    /// `prove/verify_f2_full_with_merged_hadamard`. Arm-C parity: AND pair
+    /// evals are bound (multipoint + `ψ_{L(α)}(a')`), adder parents trusted.
+    /// Exercises the unreferenced-witness-col branch of `lag_r0_evals` (the
+    /// AND pairs reference a strict subset of the ~20 witness cols) and the
+    /// public-col path (`pa_*` columns).
+    #[test]
+    fn sha256_f2_merged_hadamard_roundtrips() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = 9;
+        let row_len: usize = 32;
+        let poly_size = 1usize << num_vars;
+        let num_rows = poly_size / row_len;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        assert_eq!(and_specs.len(), 3);
+        assert_eq!(adder_specs.len(), 13);
+
+        let mut pt = Blake3Transcript::new();
+        let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            /* virtual_specs */ &[],
+            /* bit_op_specs  */ &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            /* num_column_openings */ 4,
+        )
+        .expect("merged prove on all 14 SHA relations should succeed");
+        assert_eq!(proof.uair.merged_hadamard_msg.len(), D);
+        assert_eq!(
+            proof.uair.hadamard_adder_parents.len(),
+            adder_specs.len() * 3
+        );
+        // The AND pairs reference a strict subset of the witness cols, so the
+        // multipoint appends fewer W-cols than the witness count — the rest
+        // ride the binding equation only.
+        assert!(proof.w_up_evals.len() < proof.lag_r0_evals.len());
+
+        let verify = |proof: &F2MergedHadamardProof<D>| {
+            let mut vt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_merged_hadamard::<
+                Sha256F2Ideal,
+            >(
+                &mut vt,
+                &pp,
+                proof,
+                /* virtual_specs */ &[],
+                /* bit_op_specs  */ &[],
+                &and_specs,
+                &adder_specs,
+                &trace.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+        };
+        verify(&proof).expect("honest merged all-14 SHA proof must verify");
+
+        // Tamper an UNREFERENCED col's lag_r0 eval. Protocol-level it is
+        // pinned by the W-binding equation; in an after-the-fact tamper the
+        // absorbed eval diverges the transcript first, so the open (whose
+        // challenges derive from it) rejects — either way the proof dies
+        // (mirrors the oblong test's z_r0 tamper arm).
+        let one = BinaryFieldGF128::one();
+        let pairs = crate::f2_hadamard::distinct_pairs(&and_specs);
+        let dcols = crate::f2_merged_hadamard::distinct_pair_cols(&pairs);
+        let num_pub = cols::NUM_BIN_PUB;
+        let unreferenced = (0..proof.lag_r0_evals.len())
+            .find(|gw| dcols.binary_search(&(num_pub + gw)).is_err())
+            .expect("SHA has unreferenced witness cols");
+        let mut proof_bad = proof.clone();
+        proof_bad.lag_r0_evals[unreferenced] += &one;
+        assert!(
+            verify(&proof_bad).is_err(),
+            "a tampered unreferenced lag_r0 eval must be rejected (W-binding or open)",
+        );
+    }
+
+    /// A/B prover+verifier timing: fused (A) vs production oblong-GF8 (C) vs
+    /// the merged inline-⟨Z_H⟩ discharge (E), all 14 SHA relations with
+    /// trusted adders (like-for-like arms). `AB_NVARS` selects the scale
+    /// (default 12); add `OBLONG_PROFILE=1` for the per-phase tree.
+    ///
+    /// ```bash
+    /// AB_NVARS=16 cargo test --release -p zinc-protocol \
+    ///   --features parallel,simd,unchecked \
+    ///   sha256_f2_merged_ab_timing -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn sha256_f2_merged_ab_timing() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use std::time::Instant;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        let num_vars: usize = std::env::var("AB_NVARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let poly_size = 1usize << num_vars;
+        // Square-ish PCS shape.
+        let num_rows = 1usize << (num_vars / 2);
+        let row_len = poly_size / num_rows;
+
+        let mut rng_local = rng();
+        let trace = U::generate_random_trace(num_vars, &mut rng_local);
+        let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+        let pp: ZipPlusParams<
+            <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+            <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+        > = ZipPlusParams::new(num_vars, num_rows, lc);
+        let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+        eprintln!("A/B @ nvars={num_vars} (rows {num_rows} x len {row_len})");
+
+        let mut time_runs = |label: &str, f: &mut dyn FnMut()| {
+            f(); // warmup
+            zinc_utils::prof::dump_and_reset("ab");
+            let mut times = Vec::new();
+            for _ in 0..3 {
+                let t0 = Instant::now();
+                f();
+                times.push(t0.elapsed().as_secs_f64() * 1e3);
+                zinc_utils::prof::dump_and_reset("ab");
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!("{label}: median {:.1} ms  (runs: {:?})", times[1], times);
+        };
+
+        // Arm A: the fused (ψ_α bit-slice) discharge, 14 relations.
+        time_runs("A  Hadamard-16 (fused, trusted adders) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("arm A prove");
+        });
+
+        // Arm C: the production oblong-GF8 discharge, 14 relations.
+        time_runs("C  Oblong-GF8-16 (trusted adders) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, 32>::prove_f2_full_with_oblong_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("arm C prove");
+        });
+
+        // Arm E: the merged inline-⟨Z_H⟩ discharge, 14 relations.
+        time_runs("E  Merged-16 (inline ⟨Z_H⟩, trusted adders) prove", &mut || {
+            let mut pt = Blake3Transcript::new();
+            let _ = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .expect("arm E prove");
+        });
+
+        // Verifier times (once each).
+        let mut pt = Blake3Transcript::new();
+        let proof_c = ZincPlusPiopF2::<F2Types<D>, U, 32>::prove_f2_full_with_oblong_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+        )
+        .expect("prove C");
+        let t0 = Instant::now();
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, 32>::verify_f2_full_with_oblong_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof_c,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify C");
+        eprintln!("C  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+
+        let mut pt = Blake3Transcript::new();
+        let proof_e = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+            &mut pt,
+            &pp,
+            &trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            num_vars,
+            sha256_f2_project_scalar::<R>,
+            4,
+        )
+        .expect("prove E");
+        let t0 = Instant::now();
+        let mut vt = Blake3Transcript::new();
+        ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_merged_hadamard::<Sha256F2Ideal>(
+            &mut vt,
+            &pp,
+            &proof_e,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            &trace.binary_poly[..cols::NUM_BIN_PUB],
+            num_vars,
+            cols::NUM_BIN,
+            |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+        )
+        .expect("verify E");
+        eprintln!("E  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
     }
 
 }

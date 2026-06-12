@@ -29,7 +29,6 @@
 //! with the ledger's Issue 1; honest-prover-first per plan §6).
 
 use crypto_primitives::Field;
-use crypto_primitives::boolean::Boolean;
 use zinc_piop::lookup::hadamard::{
     HadamardError, HadamardTriple, finalize_hadamard_prover, finalize_hadamard_verifier,
     prepare_hadamard_group_with_fast, prepare_hadamard_verifier,
@@ -331,8 +330,9 @@ fn shifted_cell<const D: usize>(
 /// Build a `BinaryPoly<D>` cell from the low `D` bits of `m`.
 #[inline]
 fn cell_from_mask<const D: usize>(m: u64) -> BinaryPoly<D> {
-    let coeffs: [Boolean; D] = std::array::from_fn(|i| Boolean::new((m >> i) & 1 != 0));
-    BinaryPoly::<D>::new(coeffs)
+    // Single masked store under `simd`; bit loop on the reference type.
+    use zinc_poly::univariate::F2PackU64;
+    <BinaryPoly<D> as F2PackU64>::unpack_u64(m)
 }
 
 /// Build the three packed operand columns `[U, V, W]` of an adder relation
@@ -455,13 +455,17 @@ fn pair_index(pairs: &[(usize, usize)], col: usize, row_shift: usize) -> usize {
 #[inline]
 #[allow(clippy::arithmetic_side_effects)]
 pub(crate) fn cell_mask<const D: usize>(bp: &BinaryPoly<D>) -> u64 {
-    let mut out: u64 = 0;
-    for (i, c) in bp.iter().enumerate() {
-        if c.into_inner() {
-            out |= 1u64 << i;
-        }
-    }
-    out
+    // Single field read under `simd` (`BinaryU64Poly` stores the bit pattern
+    // as a `u64`); bit loop on the reference type. The type invariant keeps
+    // bits ≥ D zero (constructors mask), mirroring `f2_native_ic::bp_to_u64`.
+    use zinc_poly::univariate::F2PackU64;
+    let bits = bp.pack_u64();
+    debug_assert!(
+        D == 64 || bits >> D == 0,
+        "BinaryPoly<{D}> cell has bits above position {}",
+        D - 1,
+    );
+    bits
 }
 
 /// All-ones mask over the low `D` bits (the bitwise-complement constant).
