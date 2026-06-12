@@ -227,6 +227,197 @@ fn run_basefold(
     }
 }
 
+/// One Zip++ configuration: chain modulus `C`, chain depth `depth`, fold
+/// rounds `R <= depth`, witnesses as given. Commit once, sweep R, return
+/// the zstd-best row.
+#[allow(clippy::too_many_arguments)]
+fn run_basefold_cfg<C: crate::basefold::chain::ChainConfig>(
+    witnesses: &[Vec<Int<BF_ND>>],
+    num_vars: usize,
+    rep: usize,
+    q: usize,
+    depth: usize,
+    cfg: &<F as PrimeField>::Config,
+    point: &[F],
+) -> Option<(usize, Row, String)> {
+    use crate::basefold::{arity8::Arity8Params, chain8::Radix8Chain, protocol_glue::BF_P};
+    let chain = Radix8Chain::<C>::new(1usize << num_vars, rep, depth).ok()?;
+    let mut params = Arity8Params::new(chain, BF_P, 1, q)
+        .ok()?
+        .with_witness_mag_exp(64);
+    let batch = witnesses.len();
+    let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
+
+    let t0 = Instant::now();
+    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, true>(&params, witnesses).unwrap();
+    let commit_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut best: Option<(usize, Row)> = None;
+    for r in 1..=depth {
+        params.num_rounds = r;
+        let mut pt = PcsProverTranscript::new_from_commitments(std::iter::empty());
+        pt.fs_transcript.absorb_slice(&comm.root.0);
+        let t0 = Instant::now();
+        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+            &params,
+            witnesses,
+            &weights,
+            None,
+            &hint,
+            point,
+            cfg,
+            &mut pt.fs_transcript,
+        )
+        .unwrap();
+        write_arity8_proof(&mut pt, &params, &proof).unwrap();
+        let open_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let bytes = pt.stream.get_ref().clone();
+        let (raw, zs) = (bytes.len(), zstd_len(&bytes));
+
+        let mut vt = pt.into_verification_transcript();
+        vt.fs_transcript.absorb_slice(&comm.root.0);
+        let t0 = Instant::now();
+        let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
+        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+            &params,
+            &comm,
+            &proof_v,
+            &weights,
+            None,
+            point,
+            &eval,
+            cfg,
+            &mut vt.fs_transcript,
+        )
+        .unwrap();
+        let verify_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let row = Row {
+            raw,
+            zstd: zs,
+            commit_ms,
+            open_ms,
+            verify_ms,
+            eval,
+        };
+        if best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+            best = Some((r, row));
+        }
+    }
+    let (best_r, row) = best?;
+    params.num_rounds = best_r;
+    let profile = profile_string(&params, batch, q);
+    Some((best_r, row, profile))
+}
+
+/// Envelope study for "swept Zip++ never exceeds Zip+": the Zip+-shaped
+/// corner of the configuration space is R = 1 with the witness SPLIT into B
+/// columns (one fold round of effective arity 8B = Ligero rows, the tail =
+/// the combined row) and a SHALLOW chain (Zip+ itself uses depth-1..3 IPRS;
+/// deep chains buy polylog verification, not small proofs). Sweep
+/// (B, depth, R) at fixed total data and compare best-vs-best.
+#[test]
+#[ignore = "envelope study; run with --release --ignored --nocapture"]
+fn envelope_study() {
+    eprintln!(
+        "envelope study: total data T of 64-bit entries; zip+ best (row_len; rate 1/8\n\
+         Q=100) vs zip++ best over B x depth x R (rate 1/8 Q=100, dense base <= 2^11)."
+    );
+    for log_t in [12usize, 14, 16, 19] {
+        let total = 1usize << log_t;
+        let mut rng = StdRng::seed_from_u64(7 + log_t as u64);
+        let data = random_witness(&mut rng, total);
+
+        // Zip+ reference: one poly of the full data, row_len swept.
+        let poly = DenseMultilinearExtension {
+            num_vars: log_t,
+            evaluations: data.clone(),
+        };
+        let (cfg, point) = shared_cfg_point(log_t);
+        let half = log_t.div_ceil(2);
+        let mut zip_best: Option<(usize, Row)> = None;
+        for rl_log in half.saturating_sub(1)..=(half + 5).min(13) {
+            let row_len = 1usize << rl_log;
+            if !(64..=(1 << 13)).contains(&row_len) || row_len > total {
+                continue;
+            }
+            let row =
+                run_zip::<StudyZt8, 8>(std::slice::from_ref(&poly), log_t, row_len, &cfg, &point);
+            if zip_best.as_ref().is_none_or(|(_, b)| row.zstd < b.zstd) {
+                zip_best = Some((rl_log, row));
+            }
+        }
+        let (zip_rl, zip) = zip_best.expect("no feasible zip config");
+
+        // Zip++: sweep split factor B, chain depth, fold rounds.
+        let mut bf_best: Option<(String, Row, String)> = None;
+        for log_b in 0..=5usize {
+            if log_b >= log_t {
+                break;
+            }
+            let batch = 1usize << log_b;
+            let num_vars = log_t - log_b;
+            let ell = 1usize << num_vars;
+            let witnesses: Vec<Vec<Int<BF_ND>>> = (0..batch)
+                .map(|j| {
+                    data[j * ell..(j + 1) * ell]
+                        .iter()
+                        .map(|x| x.resize::<BF_ND>())
+                        .collect()
+                })
+                .collect();
+            let (cfg_b, point_b) = shared_cfg_point(num_vars);
+            let full = (num_vars / 3).max(1);
+            // Modulus ladder: the smallest NTT prime whose two-adicity
+            // covers n = 2^(num_vars + 3); an oversized q wastes ~5-11
+            // bits of norm growth per level.
+            let adicity = num_vars + 3;
+            for depth in 1..=full {
+                // Dense-base guard: prover pays ~m * msg_len_at(depth) in
+                // the base block.
+                if depth < full && (num_vars - 3 * depth) > 11 {
+                    continue;
+                }
+                use crate::basefold::chain::{
+                    ChainConfigF65537, ChainConfigF7340033, ChainConfigF167772161,
+                };
+                let result = if adicity <= 16 {
+                    run_basefold_cfg::<ChainConfigF65537>(
+                        &witnesses, num_vars, 8, 100, depth, &cfg_b, &point_b,
+                    )
+                } else if adicity <= 20 {
+                    run_basefold_cfg::<ChainConfigF7340033>(
+                        &witnesses, num_vars, 8, 100, depth, &cfg_b, &point_b,
+                    )
+                } else {
+                    run_basefold_cfg::<ChainConfigF167772161>(
+                        &witnesses, num_vars, 8, 100, depth, &cfg_b, &point_b,
+                    )
+                };
+                if let Some((r, row, profile)) = result {
+                    let tag = format!("B={batch} depth={depth} R={r} q=2^{adicity}-rung");
+                    if bf_best.as_ref().is_none_or(|(_, b, _)| row.zstd < b.zstd) {
+                        bf_best = Some((tag, row, profile));
+                    }
+                }
+            }
+        }
+        let (bf_tag, bf, bf_profile) = bf_best.expect("no feasible zip++ config");
+
+        let verdict = if bf.zstd <= zip.zstd { "zip++ <= zip+" } else { "zip+ wins" };
+        eprintln!(
+            "T=2^{log_t}: zip+  raw {:8} zstd {:8} | commit {:8.1} open {:7.1} verify {:6.1} ms (rl=2^{zip_rl})",
+            zip.raw, zip.zstd, zip.commit_ms, zip.open_ms, zip.verify_ms,
+        );
+        eprintln!(
+            "         zip++ raw {:8} zstd {:8} | commit {:8.1} open {:7.1} verify {:6.1} ms ({bf_tag})  => {verdict}",
+            bf.raw, bf.zstd, bf.commit_ms, bf.open_ms, bf.verify_ms,
+        );
+        eprintln!("         zip++ bytes: {bf_profile}");
+    }
+}
+
 /// Commit once (R-independent with the full-depth chain), then sweep the
 /// fold-round count and return the zstd-smallest configuration.
 fn run_basefold_sweep(
@@ -317,10 +508,8 @@ fn run_basefold_sweep(
 }
 
 /// Raw-byte budget of the proof stream by component, for the best config.
-fn profile_string(
-    params: &crate::basefold::arity8::Arity8Params<
-        crate::basefold::chain::ChainConfigF167772161,
-    >,
+fn profile_string<C: crate::basefold::chain::ChainConfig>(
+    params: &crate::basefold::arity8::Arity8Params<C>,
     batch: usize,
     q: usize,
 ) -> String {

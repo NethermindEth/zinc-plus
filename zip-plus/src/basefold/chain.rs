@@ -68,6 +68,37 @@ impl ChainConfig for ChainConfigF65537 {
     }
 }
 
+mod f7340033 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "7340033"]
+    #[generator = "3"]
+    pub struct Config;
+
+    pub type Backend = MontBackend<Config, 1>;
+    pub type Field = Fp64<Backend>;
+
+    #[allow(clippy::cast_possible_truncation)] // modulus is 23 bits
+    pub const MODULUS: u32 = Config::MODULUS.0[0] as u32;
+}
+
+/// Chain configuration over `F_{7 * 2^20 + 1}` (two-adicity 20); supports
+/// codeword lengths up to `2^20` with ~23-bit twiddle lifts. The middle
+/// rung of the modulus ladder: `n | q - 1` forces `q > n`, and an oversized
+/// `q` wastes ~5 bits of norm growth per level versus this rung.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainConfigF7340033;
+
+impl ChainConfig for ChainConfigF7340033 {
+    type Field = f7340033::Field;
+    const FIELD_MODULUS: u32 = f7340033::MODULUS;
+
+    fn field_to_int_centered(x: Self::Field) -> TwiddleInt {
+        normalize_field_element(x.into_bigint().0[0], Self::FIELD_MODULUS)
+    }
+}
+
 mod f167772161 {
     #![allow(non_local_definitions)]
     use ark_ff::{Fp64, MontBackend, MontConfig};
