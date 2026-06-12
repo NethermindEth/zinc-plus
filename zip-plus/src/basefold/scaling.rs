@@ -54,6 +54,10 @@ impl crate::pcs::structs::ZipTypes for StudyZt8 {
 // 147 (rate 1/4 production count).
 type Zt = TestZipTypes<2, 3, 5>;
 
+/// Overflow-guard toggle for the basefold runs, mirroring the protocol's
+/// `unchecked` feature so timing comparisons are apples-to-apples.
+const STUDY_CHECK: bool = !cfg!(feature = "unchecked");
+
 fn zstd_len(bytes: &[u8]) -> usize {
     zstd::stream::encode_all(bytes, 3).unwrap().len()
 }
@@ -175,14 +179,14 @@ fn run_basefold(
     let batch = witnesses.len();
 
     let t0 = Instant::now();
-    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, true>(&params, witnesses).unwrap();
+    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, STUDY_CHECK>(&params, witnesses).unwrap();
     let commit_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let mut pt = PcsProverTranscript::new_from_commitments(std::iter::empty());
     pt.fs_transcript.absorb_slice(&comm.root.0);
     let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
     let t0 = Instant::now();
-    let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+    let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
         &params,
         witnesses,
         &weights,
@@ -203,7 +207,7 @@ fn run_basefold(
     vt.fs_transcript.absorb_slice(&comm.root.0);
     let t0 = Instant::now();
     let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
-    verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+    verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
         &params,
         &comm,
         &proof_v,
@@ -249,7 +253,7 @@ fn run_basefold_cfg<C: crate::basefold::chain::ChainConfig>(
     let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
 
     let t0 = Instant::now();
-    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, true>(&params, witnesses).unwrap();
+    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, STUDY_CHECK>(&params, witnesses).unwrap();
     let commit_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let mut best: Option<(usize, Row)> = None;
@@ -258,7 +262,7 @@ fn run_basefold_cfg<C: crate::basefold::chain::ChainConfig>(
         let mut pt = PcsProverTranscript::new_from_commitments(std::iter::empty());
         pt.fs_transcript.absorb_slice(&comm.root.0);
         let t0 = Instant::now();
-        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
             &params,
             witnesses,
             &weights,
@@ -279,7 +283,7 @@ fn run_basefold_cfg<C: crate::basefold::chain::ChainConfig>(
         vt.fs_transcript.absorb_slice(&comm.root.0);
         let t0 = Instant::now();
         let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
-        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
             &params,
             &comm,
             &proof_v,
@@ -533,7 +537,7 @@ fn run_basefold_sweep(
     let weights: Vec<F> = (0..batch).map(|_| F::one_with_cfg(cfg)).collect();
 
     let t0 = Instant::now();
-    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, true>(&params, witnesses).unwrap();
+    let (comm, hint) = commit_batch::<_, BF_ND, BF_NK, STUDY_CHECK>(&params, witnesses).unwrap();
     let commit_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let mut best: Option<(usize, Row)> = None;
@@ -543,7 +547,7 @@ fn run_basefold_sweep(
         let mut pt = PcsProverTranscript::new_from_commitments(std::iter::empty());
         pt.fs_transcript.absorb_slice(&comm.root.0);
         let t0 = Instant::now();
-        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+        let (proof, eval) = prove_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
             &params,
             witnesses,
             &weights,
@@ -564,7 +568,7 @@ fn run_basefold_sweep(
         vt.fs_transcript.absorb_slice(&comm.root.0);
         let t0 = Instant::now();
         let proof_v = read_arity8_proof::<F, _>(&mut vt, &params, batch, cfg).unwrap();
-        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
+        verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, STUDY_CHECK>(
             &params,
             &comm,
             &proof_v,

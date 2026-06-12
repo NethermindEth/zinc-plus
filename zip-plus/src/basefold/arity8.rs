@@ -29,7 +29,7 @@ use super::{
 };
 use crate::merkle::{MerkleProof, MerkleTree, MtHash};
 use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_int::Int};
-use num_traits::ConstZero;
+use num_traits::{ConstOne, ConstZero};
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, mul_by_scalar::MulByScalar, sub};
 
@@ -211,10 +211,11 @@ where
         }
         check_digit_range(witness, params.p, "witness")?;
     }
+    let mag = add!(params.witness_mag_exp, 1u32);
     let encode = |witness: &Vec<Int<ND>>| {
         params
             .chain
-            .encode_at_level::<Int<ND>, Int<NK>, CHECK>(0, witness)
+            .encode_staged::<ND, NK, CHECK>(0, witness, mag)
     };
     #[cfg(feature = "parallel")]
     let codewords = {
@@ -473,8 +474,15 @@ where
 
         // 3. Fold all classes, re-decompose, commit or send tail. Round 1
         // folds raw witness columns, so its limb count follows the declared
-        // witness magnitude rather than the generic digit bound.
-        let folded = fold_classes::<ND, NW, CHECK>(&cur_limbs, &challenges);
+        // witness magnitude rather than the generic digit bound. The fold
+        // accumulates at 320 bits: `k * 8 * 2^128 * 2^131` stays under
+        // `2^263 * k`, far below the container, and the narrower
+        // multiplications halve the fold cost versus the NW accumulator.
+        let challenges_narrow: Vec<[Int<5>; ARITY]> = challenges
+            .iter()
+            .map(|a| std::array::from_fn(|i| a[i].resize::<5>()))
+            .collect();
+        let folded = fold_classes::<ND, 5, CHECK>(&cur_limbs, &challenges_narrow);
         let mag = if r == 1 {
             params.witness_mag_exp
         } else {
@@ -487,13 +495,11 @@ where
             LOG_ARITY,
             mag,
         );
-        let new_limbs = decompose_balanced::<NW, ND>(&folded, params.p, k_next)?;
+        let new_limbs = decompose_balanced::<5, ND>(&folded, params.p, k_next)?;
 
         if r < r_max {
             let encode = |limb: &Vec<Int<ND>>| {
-                params
-                    .chain
-                    .encode_at_level::<Int<ND>, Int<NK>, CHECK>(r, limb)
+                params.chain.encode_staged::<ND, NK, CHECK>(r, limb, params.p)
             };
             #[cfg(feature = "parallel")]
             let codewords: Vec<Vec<Int<NK>>> = {
@@ -770,9 +776,7 @@ where
                     cfg,
                 )?);
                 tail_codewords.push(
-                    params
-                        .chain
-                        .encode_at_level::<Int<ND>, Int<NK>, CHECK>(r_max, limb),
+                    params.chain.encode_staged::<ND, NK, CHECK>(r_max, limb, params.p),
                 );
             }
             claims
@@ -824,27 +828,8 @@ where
             let n_r = params.chain.codeword_len_at(r);
             let j = s & sub!(n_r, 1usize);
             let challenges = &all_challenges[sub!(r, 1usize)];
-            let (d, zs) = params
-                .chain
-                .solve_scaled::<NW>(sub!(r, 1usize), j, challenges)?;
 
-            // RHS: sum over limbs of z_t^T c_t (coset values, c-major order).
             let parent = &openings[sub!(r, 1usize)];
-            let mut rhs = Int::<NW>::ZERO;
-            for (t, z) in zs.iter().enumerate() {
-                for (c, z_c) in z.iter().enumerate() {
-                    let val = parent.values[add!(mul!(t, ARITY), c)].resize::<NW>();
-                    let term = val
-                        .mul_by_scalar::<CHECK>(z_c)
-                        .ok_or(BasefoldError::ConsistencyCheckFailed {
-                            round: r,
-                            position: j,
-                        })?;
-                    rhs = add!(rhs, term);
-                }
-            }
-
-            // LHS: d * sum_j' 2^{p(j'-1)} child_{j'}[j].
             let child_at_j: Vec<Int<NK>> = if r < r_max {
                 let h = params.chain.codeword_len_at(add!(r, 1usize));
                 // h is a power of two (codeword lengths).
@@ -856,27 +841,132 @@ where
             } else {
                 tail_codewords.iter().map(|cw| cw[j]).collect()
             };
-            let mut w = Int::<NW>::ZERO;
-            #[allow(clippy::arithmetic_side_effects)] // shl overflow-checked
-            for v in child_at_j.iter().rev() {
-                w = add!(w << params.p, v.resize::<NW>());
-            }
-            let lhs = w
-                .mul_by_scalar::<CHECK>(&d)
-                .ok_or(BasefoldError::ConsistencyCheckFailed {
-                    round: r,
-                    position: j,
-                })?;
 
-            if lhs != rhs {
-                return Err(BasefoldError::ConsistencyCheckFailed {
-                    round: r,
-                    position: j,
-                });
-            }
+            consistency_check_f::<C, F, NK, NW>(
+                params,
+                r,
+                j,
+                challenges,
+                &parent.values,
+                &child_at_j,
+                cfg,
+            )?;
         }
     }
 
+    Ok(())
+}
+
+/// Fold-consistency check at one queried position, mod `q0`: solve
+/// `M_j^T z = alpha` over `F` (division-free elimination, one batched
+/// inversion) and verify `sum_t 2^{p t} child_t[j] == sum_t z_t^T c_t`.
+///
+/// Sound because `q0` is sampled AFTER the commitments and the opened
+/// values are bounded by their serialization widths: the corresponding
+/// integer identity has magnitude below `~2^750`, so a nonzero mismatch
+/// survives a random `~2^128`-prime `q0` with negligible probability —
+/// the same argument the linear claim tracking already relies on. If the
+/// block is singular mod `q0` (`q0 | det M_j`, probability `~2^-112` over
+/// the prime draw; `det != 0` over `Z`), the check reports failure.
+#[allow(clippy::arithmetic_side_effects)] // fixed 8x(8+L) elimination over F
+fn consistency_check_f<C, F, const NK: usize, const NW: usize>(
+    params: &Arity8Params<C>,
+    round: usize,
+    j: usize,
+    challenges: &[[Int<NW>; ARITY]],
+    parent_values: &[Int<NK>],
+    child_at_j: &[Int<NK>],
+    cfg: &F::Config,
+) -> Result<(), BasefoldError>
+where
+    C: ChainConfig,
+    F: InnerTransparentField + for<'a> FromWithConfig<&'a Int<NW>> + Clone + PartialEq,
+{
+    let fail = || BasefoldError::ConsistencyCheckFailed { round, position: j };
+    let mat = params.chain.twiddle_matrix(round - 1, j);
+    let zero = F::zero_with_cfg(cfg);
+    let n_alpha = challenges.len();
+    let cols = ARITY + n_alpha;
+    let from_nk = |v: &Int<NK>| F::from_with_cfg(&v.resize::<NW>(), cfg);
+
+    // Augmented [M^T | alpha_1 | ...] over F.
+    let mut a: Vec<Vec<F>> = (0..ARITY)
+        .map(|r| {
+            let mut row: Vec<F> = (0..ARITY)
+                .map(|c| {
+                    let tw = Int::<NW>::ONE
+                        .mul_by_scalar::<true>(&mat[c][r])
+                        .expect("twiddle fits the working width");
+                    F::from_with_cfg(&tw, cfg)
+                })
+                .collect();
+            for alpha in challenges {
+                row.push(F::from_with_cfg(&alpha[r], cfg));
+            }
+            row
+        })
+        .collect();
+
+    // Division-free forward elimination (entries stay single field
+    // elements; no Bareiss divisions needed over F).
+    for k in 0..ARITY {
+        if a[k][k] == zero {
+            let Some(l) = (k + 1..ARITY).find(|&l| a[l][k] != zero) else {
+                return Err(fail());
+            };
+            a.swap(k, l);
+        }
+        for i in k + 1..ARITY {
+            for col in k + 1..cols {
+                a[i][col] = a[k][k].clone() * a[i][col].clone()
+                    - a[i][k].clone() * a[k][col].clone();
+            }
+            a[i][k] = zero.clone();
+        }
+    }
+
+    // Batch-invert the pivots (one division), then back-substitute.
+    let mut prefix = Vec::with_capacity(ARITY);
+    let mut acc = F::one_with_cfg(cfg);
+    for k in 0..ARITY {
+        prefix.push(acc.clone());
+        acc *= a[k][k].clone();
+    }
+    if acc == zero {
+        return Err(fail());
+    }
+    let mut suffix_inv = F::one_with_cfg(cfg) / acc;
+    let mut pivot_inv = vec![zero.clone(); ARITY];
+    for k in (0..ARITY).rev() {
+        pivot_inv[k] = suffix_inv.clone() * prefix[k].clone();
+        suffix_inv *= a[k][k].clone();
+    }
+
+    let mut rhs_total = F::zero_with_cfg(cfg);
+    for (t, _) in challenges.iter().enumerate() {
+        let rhs_col = ARITY + t;
+        let mut z = vec![zero.clone(); ARITY];
+        for i in (0..ARITY).rev() {
+            let mut num = a[i][rhs_col].clone();
+            for l in i + 1..ARITY {
+                num = num - a[i][l].clone() * z[l].clone();
+            }
+            z[i] = num * pivot_inv[i].clone();
+        }
+        for (c, z_c) in z.iter().enumerate() {
+            rhs_total += z_c.clone() * from_nk(&parent_values[add!(mul!(t, ARITY), c)]);
+        }
+    }
+
+    // LHS: sum_t 2^{p t} * child_t[j].
+    let mut lhs = F::zero_with_cfg(cfg);
+    for (t, v) in child_at_j.iter().enumerate() {
+        lhs += two_pow::<F, NW>(mul_u32(params.p, t), cfg) * from_nk(v);
+    }
+
+    if lhs != rhs_total {
+        return Err(fail());
+    }
     Ok(())
 }
 

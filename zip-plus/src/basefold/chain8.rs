@@ -246,6 +246,62 @@ impl<C: ChainConfig> Radix8Chain<C> {
         out
     }
 
+    /// Staged-width encode: any subtree whose codeword bound fits the
+    /// narrow `Int<ND>` container (with a safety margin) runs its whole
+    /// recursion narrow and widens once at the boundary; the levels above
+    /// combine at the full width. Butterfly values only reach
+    /// `msg_mag + ~29/level` bits, so on a typical chain most levels run at
+    /// half width, saving ~1.5x of the encode work. `msg_mag_bits` is the
+    /// strict magnitude bound of the message entries (`|x| < 2^bits`).
+    #[allow(clippy::arithmetic_side_effects)] // level/index arithmetic bounded
+    pub fn encode_staged<const ND: usize, const NK: usize, const CHECK: bool>(
+        &self,
+        level: usize,
+        msg: &[Int<ND>],
+        msg_mag_bits: u32,
+    ) -> Vec<Int<NK>> {
+        let narrow_capacity = (ND as u32) * 64 - 4;
+        if self.codeword_mag_bits(level, msg_mag_bits) <= narrow_capacity {
+            let narrow: Vec<Int<ND>> = self.encode_at_level::<Int<ND>, Int<ND>, CHECK>(level, msg);
+            return narrow.iter().map(|v| v.resize::<NK>()).collect();
+        }
+        if level == self.num_levels {
+            return self.encode_at_level::<Int<ND>, Int<NK>, CHECK>(level, msg);
+        }
+
+        let classes: Vec<Vec<Int<ND>>> = (0..ARITY)
+            .map(|i| msg.iter().skip(i).step_by(ARITY).cloned().collect())
+            .collect();
+        let recurse =
+            |cls: &Vec<Int<ND>>| self.encode_staged::<ND, NK, CHECK>(level + 1, cls, msg_mag_bits);
+        #[cfg(feature = "parallel")]
+        let subs: Vec<Vec<Int<NK>>> = if msg.len() >= (1 << 12) {
+            use rayon::prelude::*;
+            classes.par_iter().map(recurse).collect()
+        } else {
+            classes.iter().map(recurse).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let subs: Vec<Vec<Int<NK>>> = classes.iter().map(recurse).collect();
+
+        let h = self.codeword_len_at(level + 1);
+        let mut out = vec![Int::<NK>::ZERO; self.codeword_len_at(level)];
+        for j in 0..h {
+            let mat = &self.twiddle_mats[level][j];
+            for (c, row) in mat.iter().enumerate() {
+                let mut acc = Int::<NK>::ZERO;
+                for (i, tw) in row.iter().enumerate() {
+                    let term = subs[i][j]
+                        .mul_by_scalar::<CHECK>(tw)
+                        .expect("butterfly twiddle multiplication overflow");
+                    acc = add!(acc, term, "butterfly accumulation overflow");
+                }
+                out[j + c * h] = acc;
+            }
+        }
+        out
+    }
+
     /// Solve `M_j^T z = alpha` for each given `alpha`, fraction-free.
     ///
     /// Returns `(d, zs)` with `d = +-det(M_j) != 0` and integer vectors
