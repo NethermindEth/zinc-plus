@@ -137,9 +137,18 @@ pub fn int_lane_params(
     let msg_len = 1usize
         .checked_shl(u32::try_from(num_vars_ext).unwrap_or(u32::MAX))
         .ok_or_else(|| ZipError::InvalidPcsParam("num_vars too large".to_owned()))?;
-    let num_rounds = (num_vars_ext / 3).max(1);
+    let full = (num_vars_ext / 3).max(1);
+    // Fold-round policy from the scaling studies: fold until the tail is
+    // ~2^10 entries (every extra round costs Q * k * 8 opened leaf values),
+    // and build the chain two levels past the fold horizon so the tail
+    // encodes through butterflies at modest value width.
+    let num_rounds = num_vars_ext
+        .saturating_sub(10)
+        .div_ceil(3)
+        .clamp(1, full);
+    let depth = add!(num_rounds, 2usize).min(full);
     let chain =
-        Radix8Chain::<ChainConfigF167772161>::new(msg_len, rep, num_rounds).map_err(bf_zip_err)?;
+        Radix8Chain::<ChainConfigF167772161>::new(msg_len, rep, depth).map_err(bf_zip_err)?;
     Ok(Arity8Params::new(chain, BF_P, num_rounds, num_queries)
         .map_err(bf_zip_err)?
         .with_witness_mag_exp(witness_mag_exp))
