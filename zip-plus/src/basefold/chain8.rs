@@ -173,16 +173,20 @@ impl<C: ChainConfig> Radix8Chain<C> {
     }
 
     /// Encode a message under the level-`level` code of the chain.
+    /// With the `parallel` feature, large sub-encodes (recursion and the
+    /// dense base block) fan out across threads.
     #[allow(clippy::arithmetic_side_effects)] // level/index arithmetic bounded
     pub fn encode_at_level<In, Out, const CHECK: bool>(&self, level: usize, msg: &[In]) -> Vec<Out>
     where
-        In: for<'a> MulByScalar<&'a TwiddleInt, Out> + Clone + Debug,
+        In: for<'a> MulByScalar<&'a TwiddleInt, Out> + Clone + Debug + Send + Sync,
         Out: for<'a> MulByScalar<&'a TwiddleInt>
             + CheckedAdd
             + CheckedSub
             + ConstZero
             + Clone
-            + Debug,
+            + Debug
+            + Send
+            + Sync,
     {
         assert!(level <= self.num_levels, "level out of range");
         assert_eq!(
@@ -192,28 +196,37 @@ impl<C: ChainConfig> Radix8Chain<C> {
         );
 
         if level == self.num_levels {
-            return self
-                .base_matrix
-                .iter()
-                .map(|row| {
-                    row.iter().zip(msg).fold(Out::ZERO, |acc, (tw, x)| {
-                        let term = x
-                            .mul_by_scalar::<CHECK>(tw)
-                            .expect("base-case twiddle multiplication overflow");
-                        add!(acc, term, "base-case accumulation overflow")
-                    })
+            let base_row = |row: &Vec<TwiddleInt>| {
+                row.iter().zip(msg).fold(Out::ZERO, |acc, (tw, x)| {
+                    let term = x
+                        .mul_by_scalar::<CHECK>(tw)
+                        .expect("base-case twiddle multiplication overflow");
+                    add!(acc, term, "base-case accumulation overflow")
                 })
-                .collect();
+            };
+            #[cfg(feature = "parallel")]
+            if self.base_matrix.len().saturating_mul(msg.len()) >= (1 << 16) {
+                use rayon::prelude::*;
+                return self.base_matrix.par_iter().map(base_row).collect();
+            }
+            return self.base_matrix.iter().map(base_row).collect();
         }
 
         // Split into the 8 residue classes mod 8 and recurse.
         let classes: Vec<Vec<In>> = (0..ARITY)
             .map(|i| msg.iter().skip(i).step_by(ARITY).cloned().collect())
             .collect();
-        let subs: Vec<Vec<Out>> = classes
-            .iter()
-            .map(|cls| self.encode_at_level::<In, Out, CHECK>(level + 1, cls))
-            .collect();
+        let recurse =
+            |cls: &Vec<In>| self.encode_at_level::<In, Out, CHECK>(level + 1, cls);
+        #[cfg(feature = "parallel")]
+        let subs: Vec<Vec<Out>> = if msg.len() >= (1 << 12) {
+            use rayon::prelude::*;
+            classes.par_iter().map(recurse).collect()
+        } else {
+            classes.iter().map(recurse).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let subs: Vec<Vec<Out>> = classes.iter().map(recurse).collect();
 
         let h = self.codeword_len_at(level + 1);
         let mut out = vec![Out::ZERO; self.codeword_len_at(level)];
@@ -238,8 +251,37 @@ impl<C: ChainConfig> Radix8Chain<C> {
     /// Returns `(d, zs)` with `d = +-det(M_j) != 0` and integer vectors
     /// `zs[t] = d * M_j^{-T} alphas[t]`, so that for any opened coset `c`:
     /// `sum_i alphas[t][i] * (M_j^{-1} c)[i] = zs[t]^T c / d`.
-    #[allow(clippy::arithmetic_side_effects)] // fixed 8x(8+L) elimination
+    ///
+    /// The elimination runs at 576 bits regardless of `NW`: Bareiss
+    /// intermediates for 27-bit twiddles and 128-bit challenge columns stay
+    /// under `2^566` (products of an 8x8 minor with a challenge-column
+    /// minor), and narrower multiplications make the lazy per-position
+    /// solve ~2x cheaper for the verifier.
     pub fn solve_scaled<const NW: usize>(
+        &self,
+        level: usize,
+        j: usize,
+        alphas: &[[Int<NW>; ARITY]],
+    ) -> Result<(Int<NW>, Vec<[Int<NW>; ARITY]>), BasefoldError> {
+        const NS: usize = 9;
+        if NW >= NS {
+            let alphas_n: Vec<[Int<NS>; ARITY]> = alphas
+                .iter()
+                .map(|a| std::array::from_fn(|i| a[i].resize::<NS>()))
+                .collect();
+            let (d, zs) = self.solve_scaled_at::<NS>(level, j, &alphas_n)?;
+            return Ok((
+                d.resize::<NW>(),
+                zs.iter()
+                    .map(|z| std::array::from_fn(|i| z[i].resize::<NW>()))
+                    .collect(),
+            ));
+        }
+        self.solve_scaled_at::<NW>(level, j, alphas)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)] // fixed 8x(8+L) elimination
+    fn solve_scaled_at<const NW: usize>(
         &self,
         level: usize,
         j: usize,

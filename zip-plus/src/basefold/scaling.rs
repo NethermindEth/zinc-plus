@@ -464,7 +464,10 @@ fn falcon_shape_study() {
                 let adic = if rep == 8 { adicity } else { adicity - 1 };
                 let mut best: Option<(String, Row, String)> = None;
                 for depth in 1..=full {
-                    if depth < full && (num_vars - 3 * depth) > 11 {
+                    // Keep the dense base tiny: the prover (and the
+                    // verifier's tail re-encode) pay ~msg_len_at(depth) per
+                    // entry through it.
+                    if depth < full && (num_vars - 3 * depth) > 7 {
                         continue;
                     }
                     let result = if adic <= 16 {
@@ -482,6 +485,10 @@ fn falcon_shape_study() {
                     };
                     if let Some((r, row, profile)) = result {
                         let tag = format!("rate 1/{rep} Q={q} depth={depth} R={r}");
+                        eprintln!(
+                            "  nu={nu} {label} cfg: raw {:8} zstd {:8} | commit {:8.1} open {:7.1} verify {:7.1} ms ({tag})",
+                            row.raw, row.zstd, row.commit_ms, row.open_ms, row.verify_ms,
+                        );
                         if best.as_ref().is_none_or(|(_, b, _)| row.zstd < b.zstd) {
                             best = Some((tag, row, profile));
                         }

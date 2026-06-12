@@ -211,14 +211,18 @@ where
         }
         check_digit_range(witness, params.p, "witness")?;
     }
-    let codewords = witnesses
-        .iter()
-        .map(|witness| {
-            params
-                .chain
-                .encode_at_level::<Int<ND>, Int<NK>, CHECK>(0, witness)
-        })
-        .collect::<Vec<_>>();
+    let encode = |witness: &Vec<Int<ND>>| {
+        params
+            .chain
+            .encode_at_level::<Int<ND>, Int<NK>, CHECK>(0, witness)
+    };
+    #[cfg(feature = "parallel")]
+    let codewords = {
+        use rayon::prelude::*;
+        witnesses.par_iter().map(encode).collect::<Vec<_>>()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let codewords = witnesses.iter().map(encode).collect::<Vec<_>>();
     let tree = build_round_tree(&codewords);
     Ok((
         Arity8Commitment { root: tree.root() },
@@ -486,14 +490,18 @@ where
         let new_limbs = decompose_balanced::<NW, ND>(&folded, params.p, k_next)?;
 
         if r < r_max {
-            let codewords: Vec<Vec<Int<NK>>> = new_limbs
-                .iter()
-                .map(|limb| {
-                    params
-                        .chain
-                        .encode_at_level::<Int<ND>, Int<NK>, CHECK>(r, limb)
-                })
-                .collect();
+            let encode = |limb: &Vec<Int<ND>>| {
+                params
+                    .chain
+                    .encode_at_level::<Int<ND>, Int<NK>, CHECK>(r, limb)
+            };
+            #[cfg(feature = "parallel")]
+            let codewords: Vec<Vec<Int<NK>>> = {
+                use rayon::prelude::*;
+                new_limbs.par_iter().map(encode).collect()
+            };
+            #[cfg(not(feature = "parallel"))]
+            let codewords: Vec<Vec<Int<NK>>> = new_limbs.iter().map(encode).collect();
             let tree = build_round_tree(&codewords);
             let root = tree.root();
             transcript.absorb_slice(&root.0);
