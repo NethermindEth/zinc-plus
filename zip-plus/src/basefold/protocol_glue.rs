@@ -17,11 +17,12 @@ use super::{
 };
 use crate::{
     ZipError,
-    merkle::MtHash,
+    merkle::{MerkleProof, MtHash},
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
 };
 use crypto_primitives::{PrimeField, crypto_bigint_int::Int};
-use zinc_transcript::traits::Transcribable;
+use std::io::{Read, Write};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{add, mul, sub};
 
 /// Integer widths and digit parameters of the int-lane instantiation.
@@ -36,6 +37,12 @@ pub const BF_NW: usize = 12;
 pub const BF_NCU: usize = 2;
 /// Balanced digit width (`lambda + LOG_ARITY + 1`).
 pub const BF_P: u32 = 132;
+/// Declared witness-entry magnitude (bits) of the int lane (64-bit column
+/// quarters) for the tight round-0 leaf serialization.
+pub const BF_INT_WITNESS_MAG: u32 = 64;
+/// Declared witness-entry magnitude (bits) of the binary lane (flattened
+/// bits).
+pub const BF_BIN_WITNESS_MAG: u32 = 1;
 
 pub fn bf_zip_err(e: BasefoldError) -> ZipError {
     ZipError::InvalidSnark(format!("basefold: {e}"))
@@ -74,6 +81,30 @@ pub fn flatten_binary_columns<const D: usize>(
             out
         })
         .collect())
+}
+
+/// Consolidate a batch into one column (the Zip++ analogue of folded Zip):
+/// interleave `cols` (each of equal power-of-two length) into a single
+/// column of `2^t` times the length, `t = ceil(log2(cols.len()))`, with the
+/// column index in the low `t` bits; missing columns are zero. The all-ones
+/// batch claim becomes `2^t * F~(1/2,...,1/2, point)` on the result, since
+/// the Lagrange weights at 1/2-coordinates are uniform (see
+/// `arity8::tests::consolidation_all_ones_is_point_extension`).
+pub fn interleave_columns(cols: &[Vec<Int<BF_ND>>]) -> (Vec<Int<BF_ND>>, usize) {
+    use num_traits::ConstZero;
+    let t = cols
+        .len()
+        .next_power_of_two()
+        .trailing_zeros() as usize;
+    let width = 1usize << t;
+    let len = cols.first().map_or(0, Vec::len);
+    let mut flat = vec![Int::<BF_ND>::ZERO; mul!(len, width)];
+    for (j, col) in cols.iter().enumerate() {
+        for (i, v) in col.iter().enumerate() {
+            flat[add!(mul!(i, width), j)] = *v;
+        }
+    }
+    (flat, t)
 }
 
 /// Convert per-poly challenge vectors into the field weight vectors of the
@@ -124,15 +155,97 @@ fn limb_schedule<C: super::chain::ChainConfig>(
     ks
 }
 
-/// Write the proof into the PCS stream (no transcript absorption).
-pub fn write_arity8_proof<F>(
+/// Scratch size covering any `Int<N>` this module serializes.
+const TIGHT_SCRATCH: usize = 96;
+
+fn bytes_for_bits(bits: u32) -> usize {
+    (bits as usize).div_ceil(8)
+}
+
+/// Two's-complement little-endian at an explicit byte width; the value must
+/// lie in `[-2^(8*width-1), 2^(8*width-1))`.
+fn write_int_tight<const N: usize>(
     transcript: &mut PcsProverTranscript,
+    v: &Int<N>,
+    width: usize,
+) -> Result<(), ZipError> {
+    let nb = <Int<N> as ConstTranscribable>::NUM_BYTES;
+    debug_assert!(width > 0 && width <= nb && nb <= TIGHT_SCRATCH);
+    let mut full = [0u8; TIGHT_SCRATCH];
+    v.write_transcription_bytes_exact(&mut full[..nb]);
+    // The dropped high bytes must be the sign fill, or the width is wrong.
+    let fill = if full[sub!(width, 1usize)] & 0x80 != 0 {
+        0xFF
+    } else {
+        0x00
+    };
+    if full[width..nb].iter().any(|&b| b != fill) {
+        return Err(ZipError::InvalidPcsParam(
+            "value exceeds its tight serialization width".to_owned(),
+        ));
+    }
+    transcript.stream.write_all(&full[..width])?;
+    Ok(())
+}
+
+fn read_int_tight<const N: usize>(
+    transcript: &mut PcsVerifierTranscript,
+    width: usize,
+) -> Result<Int<N>, ZipError> {
+    let nb = <Int<N> as ConstTranscribable>::NUM_BYTES;
+    debug_assert!(width > 0 && width <= nb && nb <= TIGHT_SCRATCH);
+    let mut full = [0u8; TIGHT_SCRATCH];
+    transcript.stream.read_exact(&mut full[..width])?;
+    let fill = if full[sub!(width, 1usize)] & 0x80 != 0 {
+        0xFF
+    } else {
+        0x00
+    };
+    full[width..nb].fill(fill);
+    Ok(Int::<N>::read_transcription_bytes_exact(&full[..nb]))
+}
+
+/// Byte widths of the tight proof stream, derived from public data only
+/// (prover and verifier must agree): round-`r` leaf values are level-`r`
+/// codeword entries of `p`-balanced-digit limbs (round 0: of the witness,
+/// whose entry magnitude the caller declares), tail entries are balanced
+/// digits.
+pub struct TightWidths {
+    pub leaf: Vec<usize>,
+    pub tail: usize,
+}
+
+pub fn tight_widths<C: super::chain::ChainConfig>(
+    params: &Arity8Params<C>,
+    witness_mag_bits: u32,
+) -> TightWidths {
+    let leaf = (0..params.num_rounds)
+        .map(|r| {
+            let msg_bits = if r == 0 { witness_mag_bits } else { params.p };
+            let mag = params.chain.codeword_mag_bits(r, msg_bits);
+            bytes_for_bits(add!(mag, 1u32)).min(<Int<BF_NK> as ConstTranscribable>::NUM_BYTES)
+        })
+        .collect();
+    TightWidths {
+        leaf,
+        tail: bytes_for_bits(params.p).min(<Int<BF_ND> as ConstTranscribable>::NUM_BYTES),
+    }
+}
+
+/// Write the proof into the PCS stream (no transcript absorption). Leaf
+/// values, tail digits, and Merkle openings use tight widths derived from
+/// `(params, witness_mag_bits)`; see [`tight_widths`].
+pub fn write_arity8_proof<F, C: super::chain::ChainConfig>(
+    transcript: &mut PcsProverTranscript,
+    params: &Arity8Params<C>,
+    witness_mag_bits: u32,
     proof: &Arity8Proof<F, BF_ND, BF_NK>,
 ) -> Result<(), ZipError>
 where
     F: PrimeField,
     F::Inner: Transcribable,
 {
+    let widths = tight_widths(params, witness_mag_bits);
     for e in &proof.initial_claims {
         transcript.write(e.inner())?;
     }
@@ -152,23 +265,34 @@ where
         }
     }
     for limb in &proof.tail {
-        transcript.write_const_many(limb)?;
+        for v in limb {
+            write_int_tight::<BF_ND>(transcript, v, widths.tail)?;
+        }
     }
     for query in &proof.queries {
-        for opening in query {
-            transcript.write_const_many(&opening.values)?;
-            transcript.write_merkle_proof(&opening.proof)?;
+        for (r, opening) in query.iter().enumerate() {
+            for v in &opening.values {
+                write_int_tight::<BF_NK>(transcript, v, widths.leaf[r])?;
+            }
+            // Tight Merkle opening: the index in 4 bytes, then the path;
+            // leaf count and path length are public (round-r tree has
+            // `codeword_len_at(r + 1)` leaves).
+            let idx = u32::try_from(opening.proof.leaf_index)
+                .map_err(|_| ZipError::InvalidPcsParam("leaf index too large".to_owned()))?;
+            transcript.stream.write_all(&idx.to_le_bytes())?;
+            transcript.write_const_many(&opening.proof.siblings)?;
         }
     }
     Ok(())
 }
 
 /// Read the proof back from the PCS stream; all shapes are determined by
-/// `(params, batch_size)`.
+/// `(params, batch_size, witness_mag_bits)`.
 pub fn read_arity8_proof<F, C: super::chain::ChainConfig>(
     transcript: &mut PcsVerifierTranscript,
     params: &Arity8Params<C>,
     batch_size: usize,
+    witness_mag_bits: u32,
     cfg: &F::Config,
 ) -> Result<Arity8Proof<F, BF_ND, BF_NK>, ZipError>
 where
@@ -177,6 +301,7 @@ where
 {
     let r_max = params.num_rounds;
     let ks = limb_schedule(params, batch_size);
+    let widths = tight_widths(params, witness_mag_bits);
 
     let read_f = |t: &mut PcsVerifierTranscript| -> Result<F, ZipError> {
         let inner: F::Inner = t.read()?;
@@ -218,15 +343,32 @@ where
     let tail_len = params.chain.msg_len_at(r_max);
     let mut tail = Vec::with_capacity(ks[r_max]);
     for _ in 0..ks[r_max] {
-        tail.push(transcript.read_const_many::<Int<BF_ND>>(tail_len)?);
+        let mut limb = Vec::with_capacity(tail_len);
+        for _ in 0..tail_len {
+            limb.push(read_int_tight::<BF_ND>(transcript, widths.tail)?);
+        }
+        tail.push(limb);
     }
     let mut queries = Vec::with_capacity(params.num_queries);
     for _ in 0..params.num_queries {
         let mut openings = Vec::with_capacity(r_max);
-        for &k_r in &ks[..r_max] {
-            let values =
-                transcript.read_const_many::<Int<BF_NK>>(mul!(k_r, ARITY))?;
-            let proof = transcript.read_merkle_proof()?;
+        for (r, &k_r) in ks[..r_max].iter().enumerate() {
+            let mut values = Vec::with_capacity(mul!(k_r, ARITY));
+            for _ in 0..mul!(k_r, ARITY) {
+                values.push(read_int_tight::<BF_NK>(transcript, widths.leaf[r])?);
+            }
+            let leaf_count = params.chain.codeword_len_at(add!(r, 1usize));
+            let mut idx_bytes = [0u8; 4];
+            transcript.stream.read_exact(&mut idx_bytes)?;
+            let leaf_index = u32::from_le_bytes(idx_bytes) as usize;
+            if leaf_index >= leaf_count {
+                return Err(ZipError::InvalidSnark(
+                    "merkle leaf index out of range".to_owned(),
+                ));
+            }
+            let depth = leaf_count.trailing_zeros() as usize;
+            let siblings = transcript.read_const_many::<MtHash>(depth)?;
+            let proof = MerkleProof::new(leaf_index, leaf_count, siblings);
             openings.push(Leaf8Opening { values, proof });
         }
         queries.push(openings);
@@ -301,7 +443,7 @@ mod tests {
             &mut pt.fs_transcript,
         )
         .unwrap();
-        write_arity8_proof(&mut pt, &proof).unwrap();
+        write_arity8_proof(&mut pt, &params, 64, &proof).unwrap();
 
         // Verifier side: fresh fs, same stream.
         let mut vt = pt.into_verification_transcript();
@@ -311,7 +453,7 @@ mod tests {
             .get_random_field_cfg::<F, crypto_primitives::crypto_bigint_uint::Uint<4>, MillerRabin>();
         let point_v: Vec<F> = vt.fs_transcript.get_field_challenges(num_vars_ext, &cfg_v);
         let proof_v =
-            read_arity8_proof::<F, _>(&mut vt, &params, batch, &cfg_v).unwrap();
+            read_arity8_proof::<F, _>(&mut vt, &params, batch, 64, &cfg_v).unwrap();
         let weights_v: Vec<F> = (0..batch).map(|_| F::one_with_cfg(&cfg_v)).collect();
         verify_batch::<_, F, BF_ND, BF_NK, BF_NW, BF_NCU, true>(
             &params,

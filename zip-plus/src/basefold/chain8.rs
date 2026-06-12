@@ -143,6 +143,35 @@ impl<C: ChainConfig> Radix8Chain<C> {
         &self.twiddle_mats[level][j]
     }
 
+    /// Magnitude bound, in bits, of level-`level` codeword entries when the
+    /// encoded message has entries of magnitude below `2^msg_mag_bits`:
+    /// every butterfly level multiplies the bound by its worst absolute
+    /// row sum, and the recursion bottoms out in the dense base block.
+    /// Used to size the tight proof-stream serialization.
+    #[allow(clippy::arithmetic_side_effects)] // u64 row sums of < 2^27 twiddles
+    pub fn codeword_mag_bits(&self, level: usize, msg_mag_bits: u32) -> u32 {
+        debug_assert!(level <= self.num_levels);
+        let bits_of = |sum: u64| u64::BITS - sum.leading_zeros();
+        let row_sum = |row: &[TwiddleInt]| row.iter().map(|t| t.unsigned_abs()).sum::<u64>();
+
+        let base = self
+            .base_matrix
+            .iter()
+            .map(|row| row_sum(row))
+            .max()
+            .unwrap_or(0);
+        let mut bits = msg_mag_bits + bits_of(base);
+        for lvl in level..self.num_levels {
+            let factor = self.twiddle_mats[lvl]
+                .iter()
+                .flat_map(|mat| mat.iter().map(|row| row_sum(row)))
+                .max()
+                .unwrap_or(0);
+            bits += bits_of(factor);
+        }
+        bits
+    }
+
     /// Encode a message under the level-`level` code of the chain.
     #[allow(clippy::arithmetic_side_effects)] // level/index arithmetic bounded
     pub fn encode_at_level<In, Out, const CHECK: bool>(&self, level: usize, msg: &[In]) -> Vec<Out>

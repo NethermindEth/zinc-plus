@@ -2604,8 +2604,8 @@ where
     #[cfg(feature = "basefold-bin")]
     if proof.commitments.0.batch_size > 0 {
         use zip_plus::basefold::protocol_glue::{
-            BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err, int_lane_params,
-            read_arity8_proof,
+            BF_BIN_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, alphas_to_coeff_weights, bf_zip_err,
+            int_lane_params, read_arity8_proof,
         };
         let b = proof.commitments.0.batch_size;
         let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
@@ -2622,8 +2622,14 @@ where
             <ZtF::BinaryZt as ZipTypes>::NUM_COLUMN_OPENINGS,
         )
         .map_err(|e| ProtocolError::PcsVerification(0, e))?;
-        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, b, &field_cfg)
-            .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        let bf_proof = read_arity8_proof::<F, _>(
+            &mut pcs_transcript,
+            &bf_params,
+            b,
+            BF_BIN_WITNESS_MAG,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(0, e))?;
         let weights = vec![F::one_with_cfg(&field_cfg); b];
         zip_plus::basefold::arity8::verify_batch::<
             _,
@@ -2653,22 +2659,40 @@ where
     if proof.commitments.2.batch_size > 0 {
         use num_traits::ConstOne;
         use zip_plus::basefold::protocol_glue::{
-            BF_NCU, BF_NK, BF_NW, bf_zip_err, int_lane_params, read_arity8_proof,
+            BF_INT_WITNESS_MAG, BF_NCU, BF_NK, BF_NW, bf_zip_err, int_lane_params,
+            read_arity8_proof,
         };
         let b = proof.commitments.2.batch_size;
         let ones_alphas: Vec<Vec<<ZtF::IntZt as ZipTypes>::Chal>> =
             vec![vec![<ZtF::IntZt as ZipTypes>::Chal::ONE]; b];
         let eval_f = int_eval_f(&ones_alphas);
+        // Consolidated lane: the prover committed ONE interleaved column of
+        // 2^t times the length; sum of columns = 2^t * F~(1/2,..,1/2, r0_ext).
+        let bf_t = b.next_power_of_two().trailing_zeros() as usize;
         let rep = <ZtF::IntLc as zip_plus::code::LinearCode<ZtF::IntZt>>::REPETITION_FACTOR;
         let bf_params = int_lane_params(
-            r0_ext.len(),
+            add!(r0_ext.len(), bf_t),
             rep,
             <ZtF::IntZt as ZipTypes>::NUM_COLUMN_OPENINGS,
         )
         .map_err(|e| ProtocolError::PcsVerification(2, e))?;
-        let bf_proof = read_arity8_proof::<F, _>(&mut pcs_transcript, &bf_params, b, &field_cfg)
-            .map_err(|e| ProtocolError::PcsVerification(2, e))?;
-        let weights = vec![F::one_with_cfg(&field_cfg); b];
+        let bf_proof = read_arity8_proof::<F, _>(
+            &mut pcs_transcript,
+            &bf_params,
+            1,
+            BF_INT_WITNESS_MAG,
+            &field_cfg,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(2, e))?;
+        let one = F::one_with_cfg(&field_cfg);
+        let mut scale = one.clone();
+        for _ in 0..bf_t {
+            scale = scale.clone() + scale;
+        }
+        let weights = vec![scale];
+        let half = one.clone() / (one.clone() + one);
+        let mut bf_point = vec![half; bf_t];
+        bf_point.extend_from_slice(&r0_ext);
         zip_plus::basefold::arity8::verify_batch::<
             _,
             F,
@@ -2685,7 +2709,7 @@ where
             &bf_proof,
             &weights,
             None,
-            &r0_ext,
+            &bf_point,
             &eval_f,
             &field_cfg,
             &mut pcs_transcript.fs_transcript,
