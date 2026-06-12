@@ -35,7 +35,6 @@ use crate::{
     sumcheck::{MLSumcheck, SumCheckError, SumcheckProof, verifier::Subclaim as SumcheckSubclaim},
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use num_traits::Zero;
 use std::marker::PhantomData;
 use thiserror::Error;
 use zinc_poly::{
@@ -115,7 +114,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     /// Multi-point evaluation protocol prover.

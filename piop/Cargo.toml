@@ -11,6 +11,7 @@ bench = false
 
 [dependencies]
 ahash = { workspace = true }
+ark-ff = { workspace = true }
 crypto-primitives = { workspace = true }
 
 derive_more = { workspace = true }

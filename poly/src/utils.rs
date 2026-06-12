@@ -1,5 +1,4 @@
 use crypto_primitives::{Field, PrimeField, Semiring};
-use num_traits::Zero;
 use thiserror::Error;
 use zinc_utils::{cfg_iter_mut, inner_transparent_field::InnerTransparentField, sub};
 
@@ -112,7 +111,6 @@ pub fn build_eq_x_r_inner<F>(
 ) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
 where
     F: PrimeField,
-    F::Inner: Zero,
 {
     let evals = build_eq_x_r_inner_vec(r, cfg)?;
     let mle = DenseMultilinearExtension {
@@ -133,7 +131,6 @@ where
 fn build_eq_x_r_inner_vec<F>(r: &[F], cfg: &F::Config) -> Result<Vec<F::Inner>, ArithErrors>
 where
     F: PrimeField,
-    F::Inner: Zero,
 {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
@@ -162,7 +159,6 @@ fn build_eq_x_r_inner_helper<F>(
 ) -> Result<(), ArithErrors>
 where
     F: PrimeField,
-    F::Inner: Zero,
 {
     let one = F::one_with_cfg(cfg);
     if r.is_empty() {
@@ -179,7 +175,7 @@ where
         // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
         // if x_0 = 1:   r0 * [b_1, ..., b_k]
 
-        let mut res = vec![F::Inner::zero(); buf.len() << 1];
+        let mut res = vec![F::zero_with_cfg(cfg).into_inner(); buf.len() << 1];
         cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
             let bi = F::new_unchecked_with_cfg(buf[i >> 1].clone(), cfg);
             let tmp = r[0].clone() * &bi;
@@ -211,7 +207,6 @@ pub fn build_next_c_r_mle<F>(
 ) -> Result<DenseMultilinearExtension<F::Inner>, ArithErrors>
 where
     F: PrimeField,
-    F::Inner: Zero,
 {
     let num_vars = r.len();
     let n = 1 << num_vars;
@@ -364,7 +359,7 @@ pub fn next_mle_eval<R: Semiring>(u: &[R], v: &[R], zero: R, one: R) -> R {
 mod tests {
     use crypto_bigint::{U128, const_monty_params};
     use crypto_primitives::{IntoWithConfig, crypto_bigint_const_monty::ConstMontyField};
-    use num_traits::One;
+    use num_traits::{One, Zero};
     use proptest::{prelude::*, proptest};
 
     use crate::mle::MultilinearExtensionWithConfig;

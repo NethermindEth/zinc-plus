@@ -77,7 +77,7 @@ pub fn build_bit_op_mles<F, const D: usize>(
 ) -> Vec<DenseMultilinearExtension<F::Inner>>
 where
     F: InnerTransparentField,
-    F::Inner: Zero + Default + Clone,
+    F::Inner: Default + Clone,
 {
     let zero = F::zero_with_cfg(field_cfg);
     let one = F::one_with_cfg(field_cfg);

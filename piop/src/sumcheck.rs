@@ -12,7 +12,6 @@ use crate::sumcheck::{
     verifier::VerifierState,
 };
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use num_traits::Zero;
 use prover::ProverState;
 use std::{marker::PhantomData, slice};
 use thiserror::Error;
@@ -176,7 +175,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F: InnerTransparentField,
-        F::Inner: Transcribable + Zero,
+        F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         if nvars == 0 {
@@ -242,7 +241,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F: InnerTransparentField,
-        F::Inner: Transcribable + Zero,
+        F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         if nvars == 0 {
@@ -360,7 +359,7 @@ impl<F: FromPrimitiveWithConfig> MLSumcheck<F> {
     ) -> (SumcheckProof<F>, ProverState<F>)
     where
         F: InnerTransparentField,
-        F::Inner: Transcribable + Zero,
+        F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         if nvars == 0 {

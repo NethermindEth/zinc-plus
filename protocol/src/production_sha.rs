@@ -1609,7 +1609,7 @@ where
         + Sync
         + 'static
         + ShaLinearAccumulatorField,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
     P: ProductionShaFoldedPcsOpen<Zt, F, D>,
@@ -1686,7 +1686,7 @@ where
         + Sync
         + 'static
         + ShaLinearAccumulatorField,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
     P: ProductionShaFoldedPcsOpen<Zt, F, D>,
@@ -1917,7 +1917,7 @@ where
         + Sync
         + 'static
         + ShaLinearAccumulatorField,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -2146,7 +2146,7 @@ where
         + Sync
         + 'static
         + ShaLinearAccumulatorField,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaPackedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -2368,7 +2368,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -2493,7 +2493,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaPackedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -3135,7 +3135,6 @@ fn build_sumfold_quadratic_prefix_accumulator_phase<F>(
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     build_sha_sumfold_quadratic_prefix_accumulator(
         traces,
@@ -3179,7 +3178,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Zero,
 {
     let (linear_accumulator, quadratic_prefix_accumulator) = cfg_join!(
         build_sumfold_linear_accumulator_phase(traces, publics, linear_weight_plan, field_cfg),
@@ -3241,7 +3239,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Send + Sync,
+    F::Inner: Transcribable + Send + Sync,
     F::Modulus: Transcribable,
 {
     prove_optimized_sha_sumfold_with_weights(
@@ -3275,7 +3273,6 @@ fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
 where
     Zt: ZincTypes<D>,
     F: InnerTransparentField + DelayedFieldProductSum + ShaBinaryFoldField + Send + Sync + 'static,
-    F::Inner: Zero,
     P: ZincPCSTypes<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
@@ -3359,7 +3356,6 @@ fn prove_mixed_hyrax_fold_after_sumfold_phase<C, Zt, F, const D: usize>(
 where
     Zt: ZincTypes<D>,
     F: InnerTransparentField + DelayedFieldProductSum + ShaBinaryFoldField + Send + Sync + 'static,
-    F::Inner: Zero,
     F: HyraxFieldBridge<C>,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -3443,7 +3439,6 @@ fn prove_packed_hyrax_fold_after_sumfold_phase<C, Zt, F, const D: usize>(
 where
     Zt: ZincTypes<D>,
     F: InnerTransparentField + DelayedFieldProductSum + ShaBinaryFoldField + Send + Sync + 'static,
-    F::Inner: Zero,
     F: HyraxFieldBridge<C>,
     C: ProductionShaPackedHyraxPcs<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
@@ -3520,7 +3515,6 @@ fn production_sha_folded_row_sum_fast<F>(
 ) -> Result<F, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     #[cfg(debug_assertions)]
     validate_projected_trace(trace)?;
@@ -3856,7 +3850,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let (combined_sumcheck, row_output) =
@@ -3903,7 +3897,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     #[cfg(not(debug_assertions))]
@@ -4379,7 +4373,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
     P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
@@ -4699,7 +4693,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     let verified_sumfold =
@@ -4756,7 +4750,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     verify_folded_row_sumcheck(transcript, proof, final_round_sumcheck_claim, field_cfg)
@@ -4807,7 +4801,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
 {
@@ -4879,7 +4873,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     absorb_sha_resolver_proof(transcript, &proof.resolver, field_cfg);
@@ -4950,7 +4944,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     absorb_sha_resolver_proof(transcript, &proof.resolver, field_cfg);
@@ -7055,7 +7049,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let claims = zinc_piop::neutron_nova::LinearInstanceClaims::new(fresh_targets.to_vec())?;
@@ -7090,7 +7084,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     require_single_sumcheck_group(proof, "SHA SumFold")?;
@@ -7139,7 +7133,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let group = build_dense_sha_sumfold_group(
@@ -7224,7 +7218,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let beta_eq_weights = build_eq_x_r_vec(beta, field_cfg)?;
@@ -7303,7 +7297,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let (proof, states, expected_evaluations) =
@@ -7370,7 +7364,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     require_single_sumcheck_group(proof, "SHA SumFold")?;
@@ -7619,7 +7613,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let claimed = folded_row_integrand_sum(row_integrand_values, field_cfg)?;
@@ -7933,7 +7927,6 @@ fn build_production_sha_row_expression_sumcheck_group<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
     build_production_sha_row_expression_sumcheck_group_with_row_weights(
@@ -7963,7 +7956,6 @@ fn build_production_sha_row_expression_sumcheck_group_with_row_weights<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     let a_powers = build_sha_residual_eval_powers(a, field_cfg);
     let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
@@ -7993,7 +7985,6 @@ fn build_production_sha_row_expression_sumcheck_group_with_vectors<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     if row_weights.len() != SHA_ROW_COUNT {
         return Err(ProductionShaError::LengthMismatch {
@@ -8381,7 +8372,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let claimed = zinc_piop::neutron_nova::expression_folded_row_sum(
@@ -8433,7 +8424,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let r_ic_eq_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
@@ -8475,7 +8466,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     let a_powers = build_sha_residual_eval_powers(a, field_cfg);
@@ -8589,7 +8580,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     #[cfg(not(debug_assertions))]
@@ -8708,7 +8699,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero,
+    F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
     require_single_sumcheck_group(proof, "folded row sumcheck")?;
@@ -9010,7 +9001,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     let row_weights = build_eq_x_r_vec(r_star, field_cfg)?;
@@ -9045,7 +9036,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     if row_weights.len() != SHA_ROW_COUNT {
@@ -9152,7 +9143,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     validate_sha_endpoint_layout(endpoint_evals)?;
@@ -9201,7 +9192,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     Ok(MultipointEval::verify_subclaim(
@@ -10361,6 +10352,7 @@ mod tests {
     };
 
     type F = BoxedMontyField;
+    type ArkF = crypto_primitives::ark_ff_fp::Fp<ark_ff::MontBackend<ark_bn254::FrConfig, 4>, 4>;
     type ShaInt = Int<EC_FP_INT_LIMBS>;
     const TEST_DEGREE_PLUS_ONE: usize = 32;
     const TEST_REP: usize = 4;
@@ -10374,6 +10366,42 @@ mod tests {
 
     fn f(value: u64) -> F {
         F::from_with_cfg(value, &cfg())
+    }
+
+    /// Field conversions the projection adapter needs beyond `PrimeField`.
+    ///
+    /// `FromWithConfig<&ShaInt>` cannot be implemented for the arkworks-backed
+    /// field (both trait and type are foreign to this crate), so int-witness
+    /// projection routes through this local seam instead.
+    trait TestShaField: PrimeField + FromPrimitiveWithConfig {
+        fn from_sha_int(value: &ShaInt, field_cfg: &Self::Config) -> Self;
+    }
+
+    impl TestShaField for BoxedMontyField {
+        fn from_sha_int(value: &ShaInt, field_cfg: &Self::Config) -> Self {
+            Self::from_with_cfg(value, field_cfg)
+        }
+    }
+
+    impl TestShaField for ArkF {
+        fn from_sha_int(value: &ShaInt, _field_cfg: &Self::Config) -> Self {
+            use crypto_primitives::IntRing;
+            let (abs, is_negative) = if value.is_negative() {
+                (
+                    value.checked_abs().expect("test int fits absolute value"),
+                    true,
+                )
+            } else {
+                (*value, false)
+            };
+            let mut bytes =
+                Vec::with_capacity(EC_FP_INT_LIMBS * core::mem::size_of::<crypto_bigint::Word>());
+            for word in abs.as_uint().as_words() {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            let magnitude = ArkF::new(ark_ff::PrimeField::from_le_bytes_mod_order(&bytes));
+            if is_negative { -magnitude } else { magnitude }
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -10467,7 +10495,7 @@ mod tests {
         type IntLc = IprsCode<Self::IntZt, PnttConfigF65537, TEST_REP, TEST_CHECKED>;
     }
 
-    fn sha_binary_col<'a>(
+    fn sha_binary_col<'a, F: PrimeField>(
         public_trace: &'a UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
         witness_trace: &'a UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
         flat_col: usize,
@@ -10497,7 +10525,7 @@ mod tests {
         }
     }
 
-    fn sha_int_col<'a>(
+    fn sha_int_col<'a, F: PrimeField>(
         public_trace: &'a UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
         witness_trace: &'a UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
         flat_col: usize,
@@ -10524,7 +10552,7 @@ mod tests {
         }
     }
 
-    fn project_binary_source(
+    fn project_binary_source<F: PrimeField>(
         col: &DenseMultilinearExtension<BinaryPoly<TEST_DEGREE_PLUS_ONE>>,
         field_cfg: &<F as PrimeField>::Config,
     ) -> Result<Vec<Vec<F>>, ProductionShaError<F>> {
@@ -10554,7 +10582,7 @@ mod tests {
             .collect())
     }
 
-    fn project_int_source(
+    fn project_int_source<F: TestShaField>(
         col: &DenseMultilinearExtension<ShaInt>,
         field_cfg: &<F as PrimeField>::Config,
     ) -> Result<Vec<F>, ProductionShaError<F>> {
@@ -10569,11 +10597,11 @@ mod tests {
             .evaluations
             .iter()
             .take(SHA_ROW_COUNT)
-            .map(|value| F::from_with_cfg(value, field_cfg))
+            .map(|value| F::from_sha_int(value, field_cfg))
             .collect())
     }
 
-    fn truncate_sha_row_domain<Eval: Clone>(
+    fn truncate_sha_row_domain<Eval: Clone, F: PrimeField>(
         col: &DenseMultilinearExtension<Eval>,
         label: &'static str,
     ) -> Result<DenseMultilinearExtension<Eval>, ProductionShaError<F>> {
@@ -10590,7 +10618,7 @@ mod tests {
         })
     }
 
-    fn word_scalar_at_two(bits: &[F], field_cfg: &<F as PrimeField>::Config) -> F {
+    fn word_scalar_at_two<F: PrimeField>(bits: &[F], field_cfg: &<F as PrimeField>::Config) -> F {
         let two = F::one_with_cfg(field_cfg) + F::one_with_cfg(field_cfg);
         let mut power = F::one_with_cfg(field_cfg);
         let mut value = F::zero_with_cfg(field_cfg);
@@ -10625,7 +10653,7 @@ mod tests {
         mle_table_from_columns(flattened)
     }
 
-    fn scalarize_bit_slices_plain(
+    fn scalarize_bit_slices_plain<F: PrimeField>(
         bit_slices: &MleTable<F>,
         a: &F,
         field_cfg: &<F as PrimeField>::Config,
@@ -10657,7 +10685,7 @@ mod tests {
         Ok(mle_table_from_columns(words))
     }
 
-    fn projected_public_from_sources(
+    fn projected_public_from_sources<F: PrimeField + FromPrimitiveWithConfig>(
         pa_a: &[Vec<F>],
         pa_e: &[Vec<F>],
         message: &[Vec<F>],
@@ -10690,7 +10718,7 @@ mod tests {
         mle_table_from_columns(columns)
     }
 
-    impl ProductionShaProjectionAdapter<TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>
+    impl<F: TestShaField> ProductionShaProjectionAdapter<TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>
         for Sha256CompressionSliceUair<ShaInt>
     {
         fn project_production_sha_public(
@@ -11001,12 +11029,13 @@ mod tests {
         .expect("Hyrax test setup must be valid")
     }
 
-    fn all_hyrax_test_pcs_params<C>() -> (
+    fn all_hyrax_test_pcs_params<C, F>() -> (
         PCSParams<AllHyraxPCSTypes<C>, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>,
         PCSVerifierParams<AllHyraxPCSTypes<C>, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>,
     )
     where
         C: AffineRepr,
+        F: PrimeField + HyraxFieldBridge<C>,
         AllHyraxPCSTypes<C>: ZincPCSTypes<
                 TestShaZincTypes,
                 F,
@@ -11034,7 +11063,7 @@ mod tests {
         )
     }
 
-    fn packed_hyrax_test_pcs_params<C>(
+    fn packed_hyrax_test_pcs_params<C, F>(
         width: usize,
     ) -> (
         PCSParams<AllHyraxPCSTypes<C>, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>,
@@ -11042,6 +11071,7 @@ mod tests {
     )
     where
         C: AffineRepr,
+        F: PrimeField + HyraxFieldBridge<C>,
         AllHyraxPCSTypes<C>: ZincPCSTypes<
                 TestShaZincTypes,
                 F,
@@ -11100,8 +11130,13 @@ mod tests {
         )
         .unwrap();
         let (_, _, witness_polys) =
-            U::project_production_sha_witness(&shape, &public_trace, &witness_trace, &field_cfg)
-                .unwrap();
+            <U as ProductionShaProjectionAdapter<TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>>::project_production_sha_witness(
+                &shape,
+                &public_trace,
+                &witness_trace,
+                &field_cfg,
+            )
+            .unwrap();
         witness_polys
     }
 
@@ -11269,10 +11304,11 @@ mod tests {
     #[test]
     fn packed_hyrax_linear_ideal_fold_proves_and_verifies_selected_widths() {
         type C = ark_bn254::G1Affine;
+        type F = ArkF;
         type P = AllHyraxPCSTypes<C>;
         type U = Sha256CompressionSliceUair<ShaInt>;
 
-        let field_cfg = fixed_prime::field_cfg_from_curve_scalar::<F, Uint<TEST_FIELD_LIMBS>, C>();
+        let field_cfg = ();
         let witnesses = sha_chain_witnesses_for_test::<8>();
         let shape = UairShape::<U>::new(SHA_ROW_VARS);
         let prepared =
@@ -11283,7 +11319,7 @@ mod tests {
 
         for width in [35usize, 275, 549, 8784, 70_272] {
             let layout = packed_sha_layout::<F>(width).unwrap();
-            let (pcs_params, pcs_verifier_params) = packed_hyrax_test_pcs_params::<C>(width);
+            let (pcs_params, pcs_verifier_params) = packed_hyrax_test_pcs_params::<C, F>(width);
             let pp =
                 LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
                     pcs_params,
@@ -11339,10 +11375,11 @@ mod tests {
     #[test]
     fn linear_ideal_fold_proves_and_verifies_eight_sha_instances_with_hyrax() {
         type C = ark_bn254::G1Affine;
+        type F = ArkF;
         type P = AllHyraxPCSTypes<C>;
         type U = Sha256CompressionSliceUair<ShaInt>;
 
-        let field_cfg = fixed_prime::field_cfg_from_curve_scalar::<F, Uint<TEST_FIELD_LIMBS>, C>();
+        let field_cfg = ();
         let initial_state = SHA256_INITIAL_STATE;
         let message = vec!["hello world"; 40].join(" ");
         let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
@@ -11351,7 +11388,7 @@ mod tests {
             synthesize_sha256_chain_witnesses::<ShaInt, 8>(initial_state, message_blocks)
                 .expect("SHA-256 UAIR witnesses synthesize");
         let shape = UairShape::<U>::new(SHA_ROW_VARS);
-        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C>();
+        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C, F>();
         let pp =
             LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
                 pcs_params,
@@ -11389,10 +11426,11 @@ mod tests {
     #[test]
     fn mixed_hyrax_linear_ideal_fold_proves_and_verifies_eight_sha_instances() {
         type C = ark_bn254::G1Affine;
+        type F = ArkF;
         type P = AllHyraxPCSTypes<C>;
         type U = Sha256CompressionSliceUair<ShaInt>;
 
-        let field_cfg = fixed_prime::field_cfg_from_curve_scalar::<F, Uint<TEST_FIELD_LIMBS>, C>();
+        let field_cfg = ();
         let initial_state = SHA256_INITIAL_STATE;
         let message = vec!["hello world"; 40].join(" ");
         let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
@@ -11406,7 +11444,7 @@ mod tests {
                 &shape, &witnesses, &field_cfg,
             )
             .expect("production SHA witnesses prepare");
-        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C>();
+        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C, F>();
         let pp =
             LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
                 pcs_params,

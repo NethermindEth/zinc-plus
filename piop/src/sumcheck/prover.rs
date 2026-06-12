@@ -290,7 +290,6 @@ pub(crate) struct EqualityFactorizedProver<F: PrimeField, C> {
 impl<F, C> EqualityFactorizedProver<F, C>
 where
     F: FromPrimitiveWithConfig + InnerTransparentField,
-    F::Inner: num_traits::Zero,
     C: Fn(&[F]) -> F + Send + Sync,
 {
     pub fn new(

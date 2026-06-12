@@ -14,9 +14,10 @@ use crate::{
     CombFn,
     sumcheck::multi_degree::{MultiDegreeSumcheckGroup, PrefixFastPath, PrefixRoundOutput},
 };
+use ark_ff::{MontBackend, MontConfig};
 use crypto_primitives::{
-    PrimeField, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_monty::MontyField,
-    crypto_bigint_uint::Uint,
+    PrimeField, ark_ff_fp::Fp as ArkFp, crypto_bigint_boxed_monty::BoxedMontyField,
+    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use num_traits::{ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -75,6 +76,20 @@ impl ShaBinaryFoldField for MontyField<4> {
 }
 
 impl ShaBinaryFoldField for BoxedMontyField {
+    fn fold_binary_mle_tables(
+        kind: &'static str,
+        tables: &[&MleTable<Self>],
+        theta: &[Self],
+        field_cfg: &Self::Config,
+    ) -> Result<MleTable<Self>, ShaProjectionError> {
+        fold_binary_mle_tables_generic(kind, tables, theta, field_cfg)
+    }
+}
+
+impl<M, const N: usize> ShaBinaryFoldField for ArkFp<MontBackend<M, N>, N>
+where
+    M: MontConfig<N>,
+{
     fn fold_binary_mle_tables(
         kind: &'static str,
         tables: &[&MleTable<Self>],
@@ -741,6 +756,26 @@ impl ShaLinearAccumulatorField for MontyField<4> {
 }
 
 impl ShaLinearAccumulatorField for BoxedMontyField {
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
+        plan: &ShaLinearResidualWeightPlan<Self>,
+        field_cfg: &Self::Config,
+    ) -> Result<Vec<Self>, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<Self>> + Sync,
+        Public: Borrow<ProjectedPublic<Self>> + Sync,
+    {
+        build_sha_sumfold_linear_accumulator_direct_with_weights_generic(
+            traces, publics, plan, field_cfg,
+        )
+    }
+}
+
+impl<M, const N: usize> ShaLinearAccumulatorField for ArkFp<MontBackend<M, N>, N>
+where
+    M: MontConfig<N>,
+{
     fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
         traces: &[Trace],
         publics: &[Public],
@@ -1695,7 +1730,6 @@ pub fn folded_row_integrand_values<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     validate_trace(trace)?;
     validate_public(public)?;
@@ -1727,7 +1761,6 @@ pub fn folded_row_integrand_values_with_row_weights<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     let lambda_powers = build_sha_lambda_powers(lambda, field_cfg);
     let a_powers = build_sha_residual_eval_powers(a, field_cfg);
@@ -1757,7 +1790,6 @@ pub fn folded_row_integrand_values_with_vectors<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     validate_trace(trace)?;
     validate_public(public)?;
@@ -1838,7 +1870,6 @@ pub fn build_folded_row_sumcheck_group<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     if row_integrand_values.len() != SHA_ROW_COUNT {
         return Err(ShaProjectionError::ColumnRowCount {
@@ -2587,7 +2618,6 @@ struct TernaryCoeffPlan {
 impl<F> RelationSumFoldPrefixFastPath<F>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     #[allow(clippy::too_many_arguments)]
     fn new<Trace, Public>(
@@ -3012,7 +3042,6 @@ where
 impl<F> PrefixFastPath<F> for RelationSumFoldPrefixFastPath<F>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     fn prefix_len(&self) -> usize {
         self.total_prefix_vars
@@ -3094,7 +3123,6 @@ pub fn build_dense_sha_sumfold_group<F, Trace, Public>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -3131,7 +3159,6 @@ pub fn build_dense_sha_sumfold_group_with_weights<F, Trace, Public>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -3192,7 +3219,6 @@ fn build_dense_sha_sumfold_group_from_accumulators<F, Trace>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
@@ -3302,7 +3328,6 @@ pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F, Trace>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
@@ -3394,7 +3419,6 @@ pub fn build_production_sha_sumfold_group<F, Trace, Public>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -3469,7 +3493,6 @@ pub fn build_production_sha_sumfold_group_with_linear_cache<F, Trace, Public>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -3512,7 +3535,6 @@ pub fn build_production_sha_sumfold_group_with_linear_cache_and_weights<F, Trace
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -3609,7 +3631,6 @@ fn build_dense_sha_sumfold_group_with_linear_cache_and_weights<F, Trace>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     if beta_eq_weights.len() != traces.len() {
@@ -3659,7 +3680,6 @@ pub fn build_production_sha_sumfold_group_owned<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     let ell = validate_sha_sumfold_inputs(&traces, publics, beta)?;
     if prefix_vars > ell {
@@ -4778,7 +4798,6 @@ pub fn build_expression_folded_row_sumcheck_group<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
     build_expression_folded_row_sumcheck_group_with_row_weights(
@@ -4808,7 +4827,6 @@ pub fn build_expression_folded_row_sumcheck_group_with_row_weights<F>(
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: Zero,
 {
     validate_trace(trace)?;
     validate_public(public)?;
@@ -4915,7 +4933,6 @@ pub fn expression_folded_row_sum<F>(
 ) -> Result<F, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     let values = folded_row_integrand_values(
         trace,
@@ -4947,7 +4964,6 @@ pub fn expression_folded_row_sum_with_row_weights<F>(
 ) -> Result<F, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     let values = folded_row_integrand_values_with_row_weights(
         trace,
@@ -4976,7 +4992,6 @@ pub fn expression_folded_row_sum_with_vectors<F>(
 ) -> Result<F, ShaProjectionError>
 where
     F: InnerTransparentField + DelayedFieldProductSum,
-    F::Inner: Zero,
 {
     let values = folded_row_integrand_values_with_vectors(
         trace,

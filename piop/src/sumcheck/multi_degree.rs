@@ -14,7 +14,6 @@
 //! 3. Each group produces a subclaim at the shared point r = (r_1, ..., r_n)
 
 use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
-use num_traits::Zero;
 use std::marker::PhantomData;
 use zinc_poly::{
     EvaluatablePolynomial, mle::DenseMultilinearExtension,
@@ -147,7 +146,6 @@ struct EqFactorizedPrefixFastPath<F: PrimeField> {
 impl<F> EqFactorizedPrefixFastPath<F>
 where
     F: FromPrimitiveWithConfig + InnerTransparentField,
-    F::Inner: Zero,
 {
     fn new(
         beta: Vec<F>,
@@ -164,7 +162,6 @@ where
 impl<F> PrefixFastPath<F> for EqFactorizedPrefixFastPath<F>
 where
     F: FromPrimitiveWithConfig + InnerTransparentField + Send + Sync,
-    F::Inner: Zero,
 {
     fn prefix_len(&self) -> usize {
         self.inner.prefix_len()
@@ -271,7 +268,6 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
     ) -> Self
     where
         F: FromPrimitiveWithConfig + InnerTransparentField + Send + Sync + 'static,
-        F::Inner: Zero,
     {
         Self {
             degree: h_degree + 1,
@@ -500,7 +496,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ) -> (MultiDegreeSumcheckProof<F>, Vec<SumcheckProverState<F>>)
     where
         F: InnerTransparentField + Send + Sync,
-        F::Inner: Transcribable + Zero,
+        F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         let (proof, states, _) = Self::prove_as_subprotocol_with_expected_evaluations(
@@ -524,7 +520,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     )
     where
         F: InnerTransparentField + Send + Sync,
-        F::Inner: Transcribable + Zero,
+        F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
         assert!(

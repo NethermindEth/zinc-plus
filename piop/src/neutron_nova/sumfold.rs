@@ -207,7 +207,6 @@ struct LinearSumFoldPrefixFastPath<F: PrimeField> {
 impl<F> LinearSumFoldPrefixFastPath<F>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: num_traits::Zero,
 {
     fn new(
         instance_claims: LinearInstanceClaims<F>,
@@ -283,7 +282,6 @@ where
 impl<F> PrefixFastPath<F> for LinearSumFoldPrefixFastPath<F>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: num_traits::Zero,
 {
     fn prefix_len(&self) -> usize {
         self.ell0
@@ -323,7 +321,6 @@ where
 impl<F> LinearInstanceClaims<F>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
-    F::Inner: num_traits::Zero,
 {
     pub fn build_full_sumcheck_group(
         &self,

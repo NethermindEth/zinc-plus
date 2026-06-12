@@ -327,7 +327,6 @@ pub fn build_linear_cpr_prefix_bound_tail_table<F, PolyCoeff, Int, const D: usiz
 ) -> Result<DenseMultilinearExtension<F::Inner>, LinearCprAccumulatorError>
 where
     F: InnerTransparentField + FromPrimitiveWithConfig,
-    F::Inner: Zero,
     PolyCoeff: Clone,
     Int: Clone,
 {
@@ -443,7 +442,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Zero,
     PolyCoeff: Clone + Send + Sync + 'static,
     Int: Clone + Send + Sync + 'static,
 {
@@ -544,7 +542,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Zero,
     PolyCoeff: Clone + Send + Sync + 'static,
     Int: Clone + Send + Sync + 'static,
 {
@@ -608,7 +605,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Zero,
     PolyCoeff: Clone + Send + Sync + 'static,
     Int: Clone + Send + Sync + 'static,
 {

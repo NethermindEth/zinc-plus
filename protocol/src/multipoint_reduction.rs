@@ -1,5 +1,4 @@
 use crypto_primitives::FromPrimitiveWithConfig;
-use num_traits::Zero;
 use zinc_piop::multipoint_eval::{
     MultipointEval, MultipointEvalError, Proof as MultipointEvalProof,
     Subclaim as MultipointSubclaim,
@@ -27,7 +26,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     let (proof, state) = MultipointEval::prove_as_subprotocol(
@@ -53,7 +52,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Inner: Transcribable + Zero + Default + Send + Sync,
+    F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
     MultipointEval::verify_as_subprotocol(
