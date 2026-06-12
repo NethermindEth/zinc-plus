@@ -127,6 +127,13 @@ pub struct VerifierIdealChecked<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
+    /// $F_{q_{i-1}}[X]$), kept for the next step's shared `fq-unify` $\psi$
+    /// projecting element.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^*$ in `all_field_cfgs`, computed once in step 2 and
+    /// threaded forward so step 3 can recover `q_star_cfg` by indexing.
+    q_star_idx: usize,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
 
     // Proof leftovers
@@ -153,8 +160,18 @@ pub struct VerifierEvalProjected<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
+    /// $F_{q_{i-1}}[X]$), kept for later per-prime CPR/MP/PCS phases.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^*$ in `all_field_cfgs`, kept for later phases that need
+    /// to re-sample shared challenges in $[0, q^*)$.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    q_star_idx: usize,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
-    projecting_element_f: F,
+    /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
+    /// and projected onto each of `all_field_cfgs`.
+    projecting_elements: Vec<F>,
     projected_scalars_f: ProjectedScalars<U::Scalar, F>,
 
     // Proof leftovers
@@ -180,7 +197,9 @@ pub struct VerifierSumchecked<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
-    projecting_element_f: F,
+    /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
+    /// and projected onto each of `all_field_cfgs`.
+    projecting_elements: Vec<F>,
     /// CPR subclaim's evaluation point ($r^\star$)
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
@@ -218,7 +237,9 @@ pub struct VerifierMultipointEvaled<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
-    projecting_element_f: F,
+    /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
+    /// and projected onto each of `all_field_cfgs`.
+    projecting_elements: Vec<F>,
     // See VerifierSumchecked::alpha_prime_f
     alpha_prime_f: Option<F>,
     mp_subclaim: multipoint_eval::Subclaim<F>,
@@ -446,7 +467,8 @@ where
         // prover does. Branch 0 = Q[X] (random sampled prime); branches
         // i >= 1 = declared primes in `primes()` order.
         let all_field_cfgs = build_all_cfgs::<F>(&self.base.uair_signature, self.field_cfg.clone());
-        let q_star_cfg = shared_challenge::compute_q_star::<F>(&all_field_cfgs);
+        let q_star_idx = shared_challenge::compute_q_star_idx::<F>(&all_field_cfgs);
+        let q_star_cfg = &all_field_cfgs[q_star_idx];
         let shared_eval_points: Vec<Vec<F>> = shared_challenge::sample_shared_field_challenges::<F>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.base.num_vars,
@@ -498,6 +520,8 @@ where
         Ok(VerifierIdealChecked {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs,
+            q_star_idx,
             ic_subclaim,
             proof_commitments: self.proof_commitments,
             proof_cpr: self.proof_cpr,
@@ -526,23 +550,33 @@ where
     IdealOverF: Ideal,
 {
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
+    ///
+    /// **`fq-unify` projecting element.** Mirrors the prover: sample a
+    /// shared integer $a \in [0, q^*)$ and lift it into each branch's
+    /// field. The $Q[X]$ branch consumes `projecting_elements[0]`.
     pub fn step3_eval_projection(
         mut self,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
     ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
-        let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
+        let projecting_elements: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            q_star_cfg,
+            &self.all_field_cfgs,
+        );
 
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &self.field_cfg));
         let projected_scalars_f =
-            project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+            project_scalars_to_field(projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
         Ok(VerifierEvalProjected {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
             ic_subclaim: self.ic_subclaim,
-            projecting_element_f,
+            projecting_elements,
             projected_scalars_f,
             proof_commitments: self.proof_commitments,
             proof_cpr: self.proof_cpr,
@@ -596,7 +630,7 @@ where
             /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
-            &self.projecting_element_f,
+            &self.projecting_elements[0],
             &self.field_cfg,
         )?;
 
@@ -697,7 +731,7 @@ where
         Ok(VerifierSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
-            projecting_element_f: self.projecting_element_f,
+            projecting_elements: self.projecting_elements,
             cpr_eval_point,
             cpr_up_evals: cpr_subclaim.up_evals,
             cpr_down_evals: cpr_subclaim.down_evals,
@@ -765,7 +799,7 @@ where
         Ok(VerifierMultipointEvaled {
             base: self.base,
             field_cfg: self.field_cfg,
-            projecting_element_f: self.projecting_element_f,
+            projecting_elements: self.projecting_elements,
             alpha_prime_f: self.alpha_prime_f,
             mp_subclaim,
             proof_commitments: self.proof_commitments,
@@ -798,8 +832,8 @@ where
     /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
     ///
     /// All columns are projected at the original $\psi_a$
-    /// `projecting_element_f` (so shifts continue to be bound through the
-    /// $\psi_a$ chain). When the booleanity argument ran, additional
+    /// `projecting_elements[0]` (so shifts continue to be bound through
+    /// the $\psi_a$ chain). When the booleanity argument ran, additional
     /// $\alpha'$-projected `open_evals` are appended for the witness
     /// binary-poly columns; these match the appended `up_evals` from
     /// step 5 and close the Schwartz-Zippel bridge to the bit-slice claims.
@@ -848,7 +882,7 @@ where
         // Shifts continue to consume the \psi_a-projected open_evals.
         let mut open_evals: Vec<F> = all_lifted_evals
             .iter()
-            .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_element_f))
+            .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_elements[0]))
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProtocolError::LiftedEvalProjection)?;
 
@@ -1136,7 +1170,7 @@ pub mod test_helpers {
         U: Uair,
     {
         pub fn projecting_element_f(&self) -> &F {
-            &self.projecting_element_f
+            &self.projecting_elements[0]
         }
 
         pub fn field_cfg(&self) -> &F::Config {

@@ -17,22 +17,25 @@
 use crypto_primitives::PrimeField;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-/// Compute $q^* := \min$ of the moduli across all declared branches.
+/// Compute the index of $q^* := \min$ in `prime_cfgs` (the branch whose
+/// modulus is smallest).
 ///
 /// `prime_cfgs[0]` is $q_0$ ($Q[X]$ branch); `prime_cfgs[1..=n]` are $q_i$
-/// ($F_q[X]$ branches). The result is the minimum modulus.
+/// ($F_q[X]$ branches).
 ///
 /// # Panics
 /// Panics if `prime_cfgs` is empty.
 #[inline]
-pub fn compute_q_star<F>(prime_cfgs: &[F::Config]) -> &F::Config
+pub fn compute_q_star_idx<F>(prime_cfgs: &[F::Config]) -> usize
 where
     F: PrimeField,
     F::Integer: Ord,
 {
     prime_cfgs
         .iter()
-        .min_by_key(|cfg| F::modulus(cfg))
+        .enumerate()
+        .min_by_key(|(_, cfg)| F::modulus(cfg))
+        .map(|(i, _)| i)
         .expect("prime_cfgs must be non-empty")
 }
 
@@ -130,7 +133,9 @@ mod tests {
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFAD),
             cfg_from_u64(0xFFFF_FFFF_FFFF_F9C5),
         ];
-        let q_star = F::modulus(compute_q_star::<F>(&cfgs));
+        let idx = compute_q_star_idx::<F>(&cfgs);
+        assert_eq!(idx, 2);
+        let q_star = F::modulus(&cfgs[idx]);
         let expected = FMod::from(0xFFFF_FFFF_FFFF_F9C5_u64);
         assert_eq!(q_star, expected);
     }
@@ -141,7 +146,7 @@ mod tests {
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFC5),
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFAD),
         ];
-        let q_star = compute_q_star::<F>(&cfgs);
+        let q_star = &cfgs[compute_q_star_idx::<F>(&cfgs)];
         let mut transcript = Blake3Transcript::new();
 
         let per_branch = sample_shared_field_challenge::<F>(&mut transcript, q_star, &cfgs);
@@ -173,7 +178,7 @@ mod tests {
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFC5),
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFAD),
         ];
-        let q_star = compute_q_star::<F>(&cfgs);
+        let q_star = &cfgs[compute_q_star_idx::<F>(&cfgs)];
         let n = 5;
 
         // Batched sampling.

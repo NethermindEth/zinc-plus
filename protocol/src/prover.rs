@@ -110,6 +110,8 @@ pub struct ProverProjectedCombined<
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
     all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
+    q_star_idx: usize,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ projections (one entry per prime in
     /// `UairSignature::primes()`), pre-staged in step 2 so step 3's per-prime
     /// ideal check can read them. Empty for legacy UAIRs.
@@ -139,6 +141,8 @@ pub struct ProverProjectedMleFirst<
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
     all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
+    q_star_idx: usize,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ projections, column-major layout
     /// counterpart of [`ProverProjectedCombined::fq_staging`].
     fq_staging: Vec<FqProjStagingColumnMajor<U, F>>,
@@ -173,6 +177,12 @@ pub struct ProverIdealChecked<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
+    /// Field configs for all constraint branches, starting with randomly
+    /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
+    /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
+    q_star_idx: usize,
     projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
 
@@ -204,6 +214,17 @@ pub struct ProverEvalProjected<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs, kept for the per-prime CPR/sumcheck/MP
+    /// chain in later phases. `[0]` = $Q[X]$ branch.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    q_star_idx: usize,
+    /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
+    /// and projected onto each of `all_field_cfgs`.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    projecting_elements: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     ic_eval_point: Vec<F>,
@@ -498,12 +519,15 @@ impl_with_type_bounds!(ProverCommitted
             });
         }
 
+        let q_star_idx = shared_challenge::compute_q_star_idx::<F>(&all_field_cfgs);
+
         Ok(ProverProjectedCombined {
             base: self,
             field_cfg,
             projected_trace,
             projected_scalars_fx,
             all_field_cfgs,
+            q_star_idx,
             fq_staging,
         })
     }
@@ -532,12 +556,15 @@ impl_with_type_bounds!(ProverCommitted
             });
         }
 
+        let q_star_idx = shared_challenge::compute_q_star_idx::<F>(&all_field_cfgs);
+
         Ok(ProverProjectedMleFirst {
             base: self,
             field_cfg,
             projected_trace,
             projected_scalars_fx,
             all_field_cfgs,
+            q_star_idx,
             fq_staging,
         })
     }
@@ -574,7 +601,7 @@ impl_with_type_bounds!(ProverProjectedCombined
 
         // `fq-unify`: sample one shared evaluation point in `[0, q*)^mu`
         // up-front and lift it into each branch's field.
-        let q_star_cfg = shared_challenge::compute_q_star::<F>(&self.all_field_cfgs);
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
             shared_challenge::sample_shared_field_challenges::<F>(
                 &mut self.base.pcs_transcript.fs_transcript,
@@ -622,6 +649,8 @@ impl_with_type_bounds!(ProverProjectedCombined
         Ok(ProverIdealChecked {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
             projected_trace: ProjectedTrace::RowMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
             ic_proof,
@@ -652,7 +681,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 
         // `fq-unify`: shared evaluation point in `[0, q*)^mu`, lifted per
         // branch. Mirror of the row-major variant.
-        let q_star_cfg = shared_challenge::compute_q_star::<F>(&self.all_field_cfgs);
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
             shared_challenge::sample_shared_field_challenges::<F>(
                 &mut self.base.pcs_transcript.fs_transcript,
@@ -702,6 +731,8 @@ impl_with_type_bounds!(ProverProjectedMleFirst
         Ok(ProverIdealChecked {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
             projected_trace: ProjectedTrace::ColumnMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
             ic_proof,
@@ -713,24 +744,36 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 
 impl_with_type_bounds!(ProverIdealChecked
 {
-    /// Step 4: Evaluation projection (`\psi_a`: `F_q[X] -> F_q`). Samples
-    /// `a in F_q`, evaluates polynomials at `X = a`.
+    /// Step 4: Evaluation projection ($\psi_a$: $F_q[X] \to F_q$).
+    ///
+    /// **`fq-unify` projecting element.** Sample one shared integer
+    /// $a \in [0, q^*)$ once via [`shared_challenge::sample_shared_field_challenge`]
+    /// and lift it into each branch's field. The $Q[X]$ branch consumes
+    /// `projecting_elements[0]`; per-prime branches (Phase F+) will read
+    /// `projecting_elements[i + 1]` directly.
     pub fn step4_eval_projection(
         mut self,
     ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
-        let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
+        let projecting_elements: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            q_star_cfg,
+            &self.all_field_cfgs,
+        );
 
         let projected_trace_f =
-            evaluate_trace_to_column_mles(&self.projected_trace, &projecting_element_f);
+            evaluate_trace_to_column_mles(&self.projected_trace, &projecting_elements[0]);
 
         let projected_scalars_f =
-            project_scalars_to_field(self.projected_scalars_fx, &projecting_element_f)
+            project_scalars_to_field(self.projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
         Ok(ProverEvalProjected {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
+            projecting_elements,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_eval_point: self.ic_eval_point,
