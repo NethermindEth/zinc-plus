@@ -418,6 +418,87 @@ fn envelope_study() {
     }
 }
 
+/// Falcon arb-lane shape study: what Zip++ would charge the Falcon
+/// verification bench (branch `falcon`). The arb-folded witness lane is 80
+/// committed columns (s1/s2/u = 48 limb-columns + s3 = 32) of degree-8
+/// cells over ~36-bit coefficients; on Zip++ each column flattens to
+/// `2^(nu+5)` integers (coefficient index in the low 3 bits, the lane's
+/// per-poly psi-alphas consumed by round 1 -- proof bytes identical to a
+/// plain batch). Two contracts:
+///  - "B=80": today's per-limb alphas (limbs cannot consolidate);
+///  - "B=5": tensor-structured alphas, one per logical polynomial, with
+///    geometric limb weights folded as point coordinates (s1, s2, u as
+///    16-limb groups, s3 as two), a protocol-level change.
+#[test]
+#[ignore = "falcon shape study; run with --release --ignored --nocapture"]
+fn falcon_shape_study() {
+    use crate::basefold::chain::{
+        ChainConfigF65537, ChainConfigF7340033, ChainConfigF167772161,
+    };
+    let mag_witness = |rng: &mut StdRng, len: usize| -> Vec<Int<BF_ND>> {
+        (0..len)
+            .map(|_| {
+                let mut words = [0u64; BF_ND];
+                words[0] = rng.random::<u64>() & ((1u64 << 36) - 1);
+                let v = Int::<BF_ND>::new(crypto_bigint::Int::from_words(words));
+                if rng.random::<bool>() { -v } else { v }
+            })
+            .collect()
+    };
+    eprintln!(
+        "falcon arb-lane shape on zip++ (36-bit coefficients, all-ones batch shape;\n\
+         psi-alpha weights do not change proof bytes). depth/R/rung swept."
+    );
+    for nu in [4usize, 10] {
+        for (label, batch, num_vars) in
+            [("B=80 (today)", 80usize, nu + 5), ("B=5 (tensor-alpha)", 5, nu + 9)]
+        {
+            let mut rng = StdRng::seed_from_u64(1024 + nu as u64);
+            let witnesses: Vec<Vec<Int<BF_ND>>> = (0..batch)
+                .map(|_| mag_witness(&mut rng, 1usize << num_vars))
+                .collect();
+            let (cfg, point) = shared_cfg_point(num_vars);
+            let adicity = num_vars + 3;
+            let full = (num_vars / 3).max(1);
+            for (rep, q) in [(8usize, 100usize), (4, 147)] {
+                let adic = if rep == 8 { adicity } else { adicity - 1 };
+                let mut best: Option<(String, Row, String)> = None;
+                for depth in 1..=full {
+                    if depth < full && (num_vars - 3 * depth) > 11 {
+                        continue;
+                    }
+                    let result = if adic <= 16 {
+                        run_basefold_cfg::<ChainConfigF65537>(
+                            &witnesses, num_vars, rep, q, depth, &cfg, &point,
+                        )
+                    } else if adic <= 20 {
+                        run_basefold_cfg::<ChainConfigF7340033>(
+                            &witnesses, num_vars, rep, q, depth, &cfg, &point,
+                        )
+                    } else {
+                        run_basefold_cfg::<ChainConfigF167772161>(
+                            &witnesses, num_vars, rep, q, depth, &cfg, &point,
+                        )
+                    };
+                    if let Some((r, row, profile)) = result {
+                        let tag = format!("rate 1/{rep} Q={q} depth={depth} R={r}");
+                        if best.as_ref().is_none_or(|(_, b, _)| row.zstd < b.zstd) {
+                            best = Some((tag, row, profile));
+                        }
+                    }
+                }
+                if let Some((tag, row, profile)) = best {
+                    eprintln!(
+                        "nu={nu} {label}: zip++ raw {:8} zstd {:8} | commit {:8.1} open {:7.1} verify {:7.1} ms ({tag})",
+                        row.raw, row.zstd, row.commit_ms, row.open_ms, row.verify_ms,
+                    );
+                    eprintln!("            bytes: {profile}");
+                }
+            }
+        }
+    }
+}
+
 /// Commit once (R-independent with the full-depth chain), then sweep the
 /// fold-round count and return the zstd-smallest configuration.
 fn run_basefold_sweep(
