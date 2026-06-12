@@ -191,7 +191,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // Check 2: <w, q_1> == <s, b>
         // Ensures b and w are derived from the same underlying rows w'_j.
         // NOTE: CombR entries (Int<M>) can exceed the field's bit-width, so the
-        // CombR→F lift must reduce mod p before truncating limbs.
+        // CombR->F lift must reduce mod p before truncating limbs.
         // MontyField's FromWithConfig does this; BoxedMontyField's does not and will
         // panic.
         let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;

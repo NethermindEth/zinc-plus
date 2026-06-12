@@ -1364,8 +1364,8 @@ mod tests {
                 sig.total_cols().num_binary_poly_cols() - sig.public_cols().num_binary_poly_cols();
             let transcript = v3.fs_transcript_mut();
 
+            let folding_challenge: F = transcript.get_field_challenge(&cfg);
             CombinedPolyResolver::<F>::prepare_verifier::<BigLinearUair<ZtInt>>(
-                transcript,
                 &proof_cpr,
                 claimed_sums[0].clone(),
                 &ic_subclaim,
@@ -1373,6 +1373,7 @@ mod tests {
                 num_constraints.q,
                 nv,
                 &a,
+                &folding_challenge,
                 &cfg,
             )
             .expect("CPR prepare_verifier");

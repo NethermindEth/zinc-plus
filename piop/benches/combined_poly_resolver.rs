@@ -94,9 +94,9 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
+        let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
         let (cpr_group, cpr_ancillary) =
             CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
-                transcript,
                 trace_f,
                 Vec::new(),
                 &ic_prover_state.evaluation_point,
@@ -105,6 +105,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 num_constraints.q,
                 num_vars,
                 max_degree,
+                &folding_challenge,
                 field_cfg,
             )
             .expect("CPR prepare failed");
@@ -180,6 +181,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let verifier_projecting_element: F<FIELD_LIMBS> =
             verifier_transcript.get_field_challenge(&field_cfg);
+        let verifier_folding_challenge: F<FIELD_LIMBS> =
+            verifier_transcript.get_field_challenge(&field_cfg);
 
         bench.iter_batched(
             || {
@@ -192,7 +195,6 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             |(proof, subclaim, mut transcript)| {
                 let ancillary =
                     CombinedPolyResolver::prepare_verifier::<TestUairNoMultiplication<_>>(
-                        &mut transcript,
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
@@ -200,6 +202,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         num_constraints.q,
                         num_vars,
                         &verifier_projecting_element,
+                        &verifier_folding_challenge,
                         &field_cfg,
                     )
                     .expect("CPR prepare_verifier failed");
@@ -289,10 +292,10 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
             .expect("failed to project scalars to field");
 
+        let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<
             TestUairSimpleMultiplication<Int<INT_LIMBS>>,
         >(
-            transcript,
             trace_f,
             Vec::new(),
             &ic_prover_state.evaluation_point,
@@ -301,6 +304,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             num_constraints.q,
             num_vars,
             max_degree,
+            &folding_challenge,
             field_cfg,
         )
         .expect("CPR prepare failed");
@@ -377,6 +381,8 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
             let verifier_projecting_element: F<FIELD_LIMBS> =
                 verifier_transcript.get_field_challenge(&field_cfg);
+            let verifier_folding_challenge: F<FIELD_LIMBS> =
+                verifier_transcript.get_field_challenge(&field_cfg);
 
             bench.iter_batched(
                 || {
@@ -390,7 +396,6 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     let ancillary = CombinedPolyResolver::prepare_verifier::<
                         TestUairSimpleMultiplication<Int<INT_LIMBS>>,
                     >(
-                        &mut transcript,
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
@@ -398,6 +403,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         num_constraints.q,
                         num_vars,
                         &verifier_projecting_element,
+                        &verifier_folding_challenge,
                         &field_cfg,
                     )
                     .expect("CPR prepare_verifier failed");

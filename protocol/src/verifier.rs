@@ -197,9 +197,20 @@ pub struct VerifierSumchecked<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (carried for later `fq-unify` phases).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^*$ in `all_field_cfgs` (carried for later phases).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    q_star_idx: usize,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
     projecting_elements: Vec<F>,
+    /// Per-branch CPR batching challenges $\alpha$: `[0]` was consumed by
+    /// the Q[X] CPR verifier; `[i >= 1]` will drive the per-prime CPRs in
+    /// Phase F+.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    folding_challenges: Vec<F>,
     /// CPR subclaim's evaluation point ($r^\star$)
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
@@ -621,9 +632,19 @@ where
         // pipeline.
         let num_constraints = count_constraints::<U>();
 
-        // CPR pre-sumcheck: squeezes folding challenge \alpha.
-        let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
+        // `fq-unify`: mirror the prover by sampling one shared CPR
+        // batching challenge $\alpha$ in $[0, q^*)$ before invoking
+        // `prepare_verifier`. Q[X] consumes `folding_challenges[0]`.
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
+        let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
             &mut self.base.pcs_transcript.fs_transcript,
+            q_star_cfg,
+            &self.all_field_cfgs,
+        );
+
+        // CPR pre-sumcheck: $\alpha$ is now supplied; this call no longer
+        // touches the transcript.
+        let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaim,
@@ -631,6 +652,7 @@ where
             num_constraints.q,
             self.base.num_vars,
             &self.projecting_elements[0],
+            &folding_challenges[0],
             &self.field_cfg,
         )?;
 
@@ -731,7 +753,10 @@ where
         Ok(VerifierSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
             projecting_elements: self.projecting_elements,
+            folding_challenges,
             cpr_eval_point,
             cpr_up_evals: cpr_subclaim.up_evals,
             cpr_down_evals: cpr_subclaim.down_evals,

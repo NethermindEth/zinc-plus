@@ -248,6 +248,16 @@ pub struct ProverSumchecked<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (carried for later `fq-unify` phases).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
+    /// Index of $q^*$ in `all_field_cfgs` (carried for later phases).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    q_star_idx: usize,
+    /// Per-branch CPR batching challenges $\alpha$: `[0]` was consumed by
+    /// the Q[X] CPR; `[i >= 1]` will drive the per-prime CPRs in Phase F+.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    folding_challenges: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
@@ -819,12 +829,22 @@ impl_with_type_bounds!(ProverEvalProjected
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
+        // `fq-unify`: sample one shared CPR batching challenge $\alpha$ in
+        // $[0, q^*)$ and lift it into each branch's field. The Q[X] branch
+        // consumes `folding_challenges[0]`; per-prime branches (Phase F+)
+        // will read `folding_challenges[i + 1]`.
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
+        let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
+            &mut self.base.pcs_transcript.fs_transcript,
+            q_star_cfg,
+            &self.all_field_cfgs,
+        );
+
         // TODO(#185): once protocol-level prover materializes bit-op virtual
         // MLEs, pass them here. For now no UAIR on `main` declares
         // `bit_op_specs`, so passing an empty vec keeps behaviour identical.
         let bit_op_down_mles = Vec::new();
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
-            &mut self.base.pcs_transcript.fs_transcript,
             self.projected_trace_f.clone(),
             bit_op_down_mles,
             &self.ic_eval_point,
@@ -833,6 +853,7 @@ impl_with_type_bounds!(ProverEvalProjected
             num_constraints.q,
             self.base.num_vars,
             max_degree,
+            &folding_challenges[0],
             &self.field_cfg,
         )?;
 
@@ -913,6 +934,9 @@ impl_with_type_bounds!(ProverEvalProjected
         Ok(ProverSumchecked {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
+            q_star_idx: self.q_star_idx,
+            folding_challenges,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
