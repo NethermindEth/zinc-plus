@@ -4,7 +4,11 @@
 //! `Proof`: production ProjectionFold has a different transcript order and
 //! derives folded commitments only after SumFold fixes the instance-axis point.
 
-use std::{borrow::Cow, io::Cursor, marker::PhantomData};
+use std::{
+    borrow::{Borrow, Cow},
+    io::Cursor,
+    marker::PhantomData,
+};
 
 use crate::{
     ZincTypes,
@@ -77,7 +81,7 @@ use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
-    UNCHECKED, cfg_into_iter, cfg_iter, delayed_reduction::DelayedFieldProductSum,
+    UNCHECKED, cfg_into_iter, cfg_iter, cfg_join, delayed_reduction::DelayedFieldProductSum,
     inner_product::FieldFieldInnerProduct, inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField,
 };
@@ -574,7 +578,7 @@ pub struct FoldedLinearIdealWitness<Witness> {
     pub witness: Witness,
 }
 
-type ProductionShaFreshArtifacts<P, Zt, F, const D: usize> = (
+type ProductionShaFreshArtifacts<'a, P, Zt, F, const D: usize> = (
     Vec<
         UairInstance<
             'static,
@@ -586,12 +590,12 @@ type ProductionShaFreshArtifacts<P, Zt, F, const D: usize> = (
     >,
     Vec<PCSCommitments<P, Zt, F, D>>,
     Vec<PCSProverData<P, Zt, F, D>>,
-    Vec<ProjectedTrace<F>>,
-    Vec<ProjectedPublic<F>>,
+    Vec<&'a ProjectedTrace<F>>,
+    Vec<&'a ProjectedPublic<F>>,
 );
 
 #[allow(type_alias_bounds)]
-type ProductionShaMixedHyraxFreshArtifacts<C: AffineRepr, Zt, F, const D: usize> = (
+type ProductionShaMixedHyraxFreshArtifacts<'a, C: AffineRepr, Zt, F, const D: usize> = (
     Vec<
         UairInstance<
             'static,
@@ -603,12 +607,12 @@ type ProductionShaMixedHyraxFreshArtifacts<C: AffineRepr, Zt, F, const D: usize>
     >,
     Vec<HyraxMixedCommitment<C>>,
     Vec<HyraxMixedProverData<C>>,
-    Vec<ProjectedTrace<F>>,
-    Vec<ProjectedPublic<F>>,
+    Vec<&'a ProjectedTrace<F>>,
+    Vec<&'a ProjectedPublic<F>>,
 );
 
 #[allow(type_alias_bounds)]
-type ProductionShaPackedHyraxFreshArtifacts<C: AffineRepr, Zt, F, const D: usize> = (
+type ProductionShaPackedHyraxFreshArtifacts<'a, C: AffineRepr, Zt, F, const D: usize> = (
     Vec<
         UairInstance<
             'static,
@@ -620,8 +624,8 @@ type ProductionShaPackedHyraxFreshArtifacts<C: AffineRepr, Zt, F, const D: usize
     >,
     Vec<HyraxCommitment<C>>,
     Vec<HyraxProverData<C>>,
-    Vec<ProjectedTrace<F>>,
-    Vec<ProjectedPublic<F>>,
+    Vec<&'a ProjectedTrace<F>>,
+    Vec<&'a ProjectedPublic<F>>,
 );
 
 type ProductionShaSumfoldAccumulators<F> = (Vec<F>, Vec<F>, MultiDegreeSumcheckGroup<F>);
@@ -857,14 +861,15 @@ pub enum ProductionShaError<F: PrimeField> {
     PolyEval(#[from] EvaluationError),
 }
 
-pub fn absorb_projected_sha_publics<F>(
+pub fn absorb_projected_sha_publics<F, Public>(
     transcript: &mut impl Transcript,
-    publics: &[zinc_piop::neutron_nova::ProjectedPublic<F>],
+    publics: &[Public],
     field_cfg: &F::Config,
 ) where
     F: PrimeField,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
+    Public: Borrow<zinc_piop::neutron_nova::ProjectedPublic<F>>,
 {
     let mut field_buf = runtime_field_transcript_buf::<F>(field_cfg);
     let mut encoded = Vec::with_capacity(
@@ -900,6 +905,7 @@ pub fn absorb_projected_sha_publics<F>(
     push_u64(&mut encoded, ShaPublicWordCol::COUNT);
     push_u64(&mut encoded, SHA_ROW_COUNT);
     for (instance_idx, public) in publics.iter().enumerate() {
+        let public = public.borrow();
         push_u64(&mut encoded, instance_idx);
         push_u64(&mut encoded, public.columns.len());
         match &public.bit_slices {
@@ -1763,16 +1769,15 @@ where
     )?;
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
-    let linear_accumulator =
-        build_sumfold_linear_accumulator_phase(&traces, &publics, &linear_weight_plan, field_cfg)?;
 
     let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
         build_sumfold_accumulators_phase(
             &traces,
+            &publics,
             &beta,
             &beta_eq_weights,
             &r_ic_eq_weights,
-            &linear_accumulator,
+            &linear_weight_plan,
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
@@ -1993,16 +1998,15 @@ where
     )?;
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
-    let linear_accumulator =
-        build_sumfold_linear_accumulator_phase(&traces, &publics, &linear_weight_plan, field_cfg)?;
 
     let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
         build_sumfold_accumulators_phase(
             &traces,
+            &publics,
             &beta,
             &beta_eq_weights,
             &r_ic_eq_weights,
-            &linear_accumulator,
+            &linear_weight_plan,
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
@@ -2224,16 +2228,15 @@ where
     )?;
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
-    let linear_accumulator =
-        build_sumfold_linear_accumulator_phase(&traces, &publics, &linear_weight_plan, field_cfg)?;
 
     let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
         build_sumfold_accumulators_phase(
             &traces,
+            &publics,
             &beta,
             &beta_eq_weights,
             &r_ic_eq_weights,
-            &linear_accumulator,
+            &linear_weight_plan,
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
@@ -2429,9 +2432,16 @@ where
         field_cfg,
     )?;
 
-    let folded_public =
-        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
-
+    let (folded_public, folded_commitment) = cfg_join!(
+        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg),
+        verify_mixed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
+            &proof.instance_commitments,
+            sumfold_output.eq_instance_weights(),
+            field_cfg,
+        ),
+    );
+    let folded_public = folded_public?;
+    let folded_commitment = folded_commitment?;
     let subclaim = verify_mixed_hyrax_endpoint_multipoint_phase(
         transcript,
         proof,
@@ -2443,12 +2453,6 @@ where
         &rho,
         &xi,
         &booleanity_sources,
-        field_cfg,
-    )?;
-
-    let folded_commitment = verify_mixed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
-        &proof.instance_commitments,
-        sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
     verify_mixed_hyrax_pcs_phase::<C, Zt, F, D>(
@@ -2554,9 +2558,16 @@ where
         field_cfg,
     )?;
 
-    let folded_public =
-        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
-
+    let (folded_public, folded_commitment) = cfg_join!(
+        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg),
+        verify_packed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
+            &proof.instance_commitments,
+            sumfold_output.eq_instance_weights(),
+            field_cfg,
+        ),
+    );
+    let folded_public = folded_public?;
+    let folded_commitment = folded_commitment?;
     let subclaim = verify_packed_hyrax_endpoint_multipoint_phase(
         transcript,
         proof,
@@ -2568,12 +2579,6 @@ where
         &rho,
         &xi,
         &booleanity_sources,
-        field_cfg,
-    )?;
-
-    let folded_commitment = verify_packed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
-        &proof.instance_commitments,
-        sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
     verify_packed_hyrax_pcs_phase::<C, Zt, F, D>(
@@ -2602,12 +2607,12 @@ where
     fields(side = "prove", phase = "fresh_instances", instances = prepared_instances.len())
 )]
 #[allow(clippy::too_many_arguments)]
-fn prove_prepared_fresh_instances_phase<P, Zt, F, const D: usize>(
+fn prove_prepared_fresh_instances_phase<'a, P, Zt, F, const D: usize>(
     pcs_params: &PCSParams<P, Zt, F, D>,
-    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    prepared_instances: &'a [PreparedProductionShaProverInstance<Zt, F, D>],
     transcript: &mut impl Transcript,
     _field_cfg: &F::Config,
-) -> Result<ProductionShaFreshArtifacts<P, Zt, F, D>, ProductionShaError<F>>
+) -> Result<ProductionShaFreshArtifacts<'a, P, Zt, F, D>, ProductionShaError<F>>
 where
     Zt: ZincTypes<D>,
     F: PrimeField,
@@ -2654,8 +2659,8 @@ where
                 },
                 commitment,
                 data,
-                prepared.instance.trace.clone(),
-                prepared.instance.public.clone(),
+                &prepared.instance.trace,
+                &prepared.instance.public,
             ))
         })
         .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
@@ -2879,12 +2884,12 @@ fn ceil_log2(n: usize) -> usize {
     skip_all,
     fields(side = "prove", phase = "fresh_instances", instances = prepared_instances.len())
 )]
-fn prove_prepared_mixed_hyrax_fresh_instances_phase<C, Zt, F, const D: usize>(
+fn prove_prepared_mixed_hyrax_fresh_instances_phase<'a, C, Zt, F, const D: usize>(
     pcs_params: &PCSParams<AllHyraxPCSTypes<C>, Zt, F, D>,
-    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    prepared_instances: &'a [PreparedProductionShaProverInstance<Zt, F, D>],
     transcript: &mut impl Transcript,
     _field_cfg: &F::Config,
-) -> Result<ProductionShaMixedHyraxFreshArtifacts<C, Zt, F, D>, ProductionShaError<F>>
+) -> Result<ProductionShaMixedHyraxFreshArtifacts<'a, C, Zt, F, D>, ProductionShaError<F>>
 where
     Zt: ZincTypes<D>,
     F: PrimeField,
@@ -2930,8 +2935,8 @@ where
                 },
                 commitment,
                 data,
-                prepared.instance.trace.clone(),
-                prepared.instance.public.clone(),
+                &prepared.instance.trace,
+                &prepared.instance.public,
             ))
         })
         .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
@@ -2965,12 +2970,12 @@ where
     skip_all,
     fields(side = "prove", phase = "fresh_instances", instances = prepared_instances.len())
 )]
-fn prove_prepared_packed_hyrax_fresh_instances_phase<C, Zt, F, const D: usize>(
+fn prove_prepared_packed_hyrax_fresh_instances_phase<'a, C, Zt, F, const D: usize>(
     pcs_params: &PCSParams<AllHyraxPCSTypes<C>, Zt, F, D>,
-    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    prepared_instances: &'a [PreparedProductionShaProverInstance<Zt, F, D>],
     transcript: &mut impl Transcript,
     _field_cfg: &F::Config,
-) -> Result<ProductionShaPackedHyraxFreshArtifacts<C, Zt, F, D>, ProductionShaError<F>>
+) -> Result<ProductionShaPackedHyraxFreshArtifacts<'a, C, Zt, F, D>, ProductionShaError<F>>
 where
     Zt: ZincTypes<D>,
     F: PrimeField + HyraxFieldBridge<C>,
@@ -3017,8 +3022,8 @@ where
                 },
                 commitment,
                 data,
-                prepared.instance.trace.clone(),
-                prepared.instance.public.clone(),
+                &prepared.instance.trace,
+                &prepared.instance.public,
             ))
         })
         .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
@@ -3053,8 +3058,8 @@ where
     fields(side = "prove", phase = "aggregate_ideal", instances = traces.len())
 )]
 fn prove_aggregate_ideal_phase<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     aggregate_weight_plan: &ShaAggregateIdealWeightPlan<F>,
     transcript: &mut impl Transcript,
     field_cfg: &F::Config,
@@ -3092,8 +3097,8 @@ where
     fields(side = "prove", phase = "sumfold_linear_accumulator", instances = traces.len())
 )]
 fn build_sumfold_linear_accumulator_phase<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     linear_weight_plan: &ShaLinearResidualWeightPlan<F>,
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>>
@@ -3115,6 +3120,40 @@ where
     skip_all,
     fields(
         side = "prove",
+        phase = "sumfold_quadratic_prefix_accumulator",
+        instances = traces.len(),
+        prefix_vars,
+    )
+)]
+fn build_sumfold_quadratic_prefix_accumulator_phase<F>(
+    traces: &[&ProjectedTrace<F>],
+    r_ic_eq_weights: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ProductionShaError<F>>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F::Inner: Zero,
+{
+    build_sha_sumfold_quadratic_prefix_accumulator(
+        traces,
+        booleanity_sources,
+        prefix_vars,
+        r_ic_eq_weights,
+        booleanity_weights,
+        field_cfg,
+    )
+    .map_err(ProductionShaError::from)
+}
+
+#[tracing::instrument(
+    target = "zinc_protocol::production_sha",
+    level = "info",
+    skip_all,
+    fields(
+        side = "prove",
         phase = "sumfold_accumulators",
         instances = traces.len(),
         prefix_vars,
@@ -3122,36 +3161,39 @@ where
 )]
 #[allow(clippy::too_many_arguments)]
 fn build_sumfold_accumulators_phase<F>(
-    traces: &[ProjectedTrace<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     beta: &[F],
     beta_eq_weights: &[F],
     r_ic_eq_weights: &[F],
-    linear_accumulator: &[F],
+    linear_weight_plan: &ShaLinearResidualWeightPlan<F>,
     booleanity_weights: &[F],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
     field_cfg: &F::Config,
 ) -> Result<ProductionShaSumfoldAccumulators<F>, ProductionShaError<F>>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaLinearAccumulatorField
+        + Send
+        + Sync
+        + 'static,
     F::Inner: Zero,
 {
-    let quadratic_prefix_accumulator = tracing::info_span!(
-        target: "zinc_protocol::production_sha",
-        "sumfold_quadratic_prefix_accumulator",
-        side = "prove",
-        phase = "sumfold_quadratic_prefix_accumulator",
-    )
-    .in_scope(|| {
-        build_sha_sumfold_quadratic_prefix_accumulator(
+    let (linear_accumulator, quadratic_prefix_accumulator) = cfg_join!(
+        build_sumfold_linear_accumulator_phase(traces, publics, linear_weight_plan, field_cfg),
+        build_sumfold_quadratic_prefix_accumulator_phase(
             traces,
-            booleanity_sources,
-            prefix_vars,
             r_ic_eq_weights,
             booleanity_weights,
+            booleanity_sources,
+            prefix_vars,
             field_cfg,
-        )
-    })?;
+        ),
+    );
+    let linear_accumulator = linear_accumulator?;
+    let quadratic_prefix_accumulator = quadratic_prefix_accumulator?;
     let sumfold_group = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "sumfold_group",
@@ -3164,7 +3206,7 @@ where
             beta,
             beta_eq_weights,
             r_ic_eq_weights,
-            linear_accumulator,
+            &linear_accumulator,
             &quadratic_prefix_accumulator,
             booleanity_weights,
             booleanity_sources,
@@ -3173,7 +3215,7 @@ where
         )
     })?;
     Ok((
-        linear_accumulator.to_vec(),
+        linear_accumulator,
         quadratic_prefix_accumulator,
         sumfold_group,
     ))
@@ -3219,8 +3261,8 @@ where
 )]
 #[allow(clippy::too_many_arguments)]
 fn prove_fold_after_sumfold_phase<P, Zt, F, const D: usize>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     sumfold_output: InstanceFoldClaim<F>,
     _r_ic_eq_weights: &[F],
     _a_powers: &[F],
@@ -3303,8 +3345,8 @@ where
 )]
 #[allow(clippy::too_many_arguments)]
 fn prove_mixed_hyrax_fold_after_sumfold_phase<C, Zt, F, const D: usize>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     sumfold_output: InstanceFoldClaim<F>,
     _r_ic_eq_weights: &[F],
     _a_powers: &[F],
@@ -3387,8 +3429,8 @@ where
 )]
 #[allow(clippy::too_many_arguments)]
 fn prove_packed_hyrax_fold_after_sumfold_phase<C, Zt, F, const D: usize>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+    traces: &[&ProjectedTrace<F>],
+    publics: &[&ProjectedPublic<F>],
     sumfold_output: InstanceFoldClaim<F>,
     _r_ic_eq_weights: &[F],
     _a_powers: &[F],
@@ -4401,9 +4443,16 @@ where
         field_cfg,
     )?;
 
-    let folded_public =
-        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
-
+    let (folded_public, folded_commitments) = cfg_join!(
+        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg),
+        verify_fold_commitments_phase::<P, Zt, F, D>(
+            &proof.instance_commitments,
+            sumfold_output.eq_instance_weights(),
+            field_cfg,
+        ),
+    );
+    let folded_public = folded_public?;
+    let folded_commitments = folded_commitments?;
     let subclaim = verify_endpoint_multipoint_phase(
         transcript,
         proof,
@@ -4415,12 +4464,6 @@ where
         &rho,
         &xi,
         &booleanity_sources,
-        field_cfg,
-    )?;
-
-    let folded_commitments = verify_fold_commitments_phase::<P, Zt, F, D>(
-        &proof.instance_commitments,
-        sumfold_output.eq_instance_weights(),
         field_cfg,
     )?;
     verify_pcs_phase::<P, Zt, F, D>(
@@ -6415,14 +6458,16 @@ where
     })
 }
 
-fn validate_production_sha_publics<F>(
-    publics: &[ProjectedPublic<F>],
+fn validate_production_sha_publics<F, Public>(
+    publics: &[Public],
     field_cfg: &F::Config,
 ) -> Result<(), ProductionShaError<F>>
 where
     F: PrimeField + FromPrimitiveWithConfig,
+    Public: Borrow<ProjectedPublic<F>>,
 {
     for public in publics {
+        let public = public.borrow();
         if public.columns.len() != ShaPublicCol::COUNT {
             return Err(ProductionShaError::LengthMismatch {
                 label: "SHA public column count",
@@ -8084,17 +8129,64 @@ where
     let shift5_weights = shift_weights(5);
     let shift8_weights = shift_weights(8);
     let shift9_weights = shift_weights(9);
+    let add3_weights = |a: &[F], b: &[F], c: &[F]| {
+        debug_assert_eq!(a.len(), b.len());
+        debug_assert_eq!(a.len(), c.len());
+        a.iter()
+            .zip(b)
+            .zip(c)
+            .map(|((a, b), c)| a.clone() + b + c)
+            .collect::<Vec<_>>()
+    };
+    let scaled_diff_weights = |low: &[F], low_coeff: &F, high: &[F], high_coeff: &F| {
+        debug_assert_eq!(low.len(), high.len());
+        low.iter()
+            .zip(high)
+            .map(|(low, high)| low.clone() * low_coeff - high.clone() * high_coeff)
+            .collect::<Vec<_>>()
+    };
     let lambda_powers = lambda_powers.to_vec();
     let booleanity_weights = booleanity_weights.to_vec();
     let booleanity_sources = booleanity_sources.to_vec();
     let one = F::one_with_cfg(field_cfg);
-    let two = one.clone() + &one;
     let rho_sig0 = a_powers[10].clone() + &a_powers[19] + &a_powers[30];
     let rho_sig1 = a_powers[7].clone() + &a_powers[21] + &a_powers[26];
     let low_mu_coeff = production_sha_pow_two(32, field_cfg);
     let high_mu_w_coeff = production_sha_pow_two(34, field_cfg);
     let high_mu_3_bit_coeff = production_sha_pow_two(35, field_cfg);
     let high_mu_1_bit_coeff = production_sha_pow_two(33, field_cfg);
+    let w_small_sigma0_weights = add3_weights(&rot25_weights, &rot14_weights, &shift3_weights);
+    let w_small_sigma1_weights = add3_weights(&rot15_weights, &rot13_weights, &shift10_weights);
+    let mu_w_weights = scaled_diff_weights(
+        &shift0_weights,
+        &low_mu_coeff,
+        &shift2_weights,
+        &high_mu_w_coeff,
+    );
+    let mu_a_weights = scaled_diff_weights(
+        &shift2_weights,
+        &low_mu_coeff,
+        &shift5_weights,
+        &high_mu_3_bit_coeff,
+    );
+    let mu_e_weights = scaled_diff_weights(
+        &shift5_weights,
+        &low_mu_coeff,
+        &shift8_weights,
+        &high_mu_3_bit_coeff,
+    );
+    let mu_ff_a_weights = scaled_diff_weights(
+        &shift8_weights,
+        &low_mu_coeff,
+        &shift9_weights,
+        &high_mu_1_bit_coeff,
+    );
+    let mu_ff_e_weights = scaled_diff_weights(
+        &shift9_weights,
+        &low_mu_coeff,
+        &shift10_weights,
+        &high_mu_1_bit_coeff,
+    );
 
     Ok(MultiDegreeSumcheckGroup::new(
         3,
@@ -8103,12 +8195,10 @@ where
             let zero = zero.clone();
             let dot = |lhs: &[F], rhs: &[F]| {
                 debug_assert_eq!(lhs.len(), rhs.len());
-                lhs.iter()
-                    .zip(rhs.iter())
-                    .fold(zero.clone(), |acc, (left, right)| {
-                        acc + left.clone() * right
-                    })
+                FieldFieldInnerProduct::inner_product::<UNCHECKED>(lhs, rhs, zero.clone())
+                    .expect("row expression dot product lengths match")
             };
+            let double = |value: &F| value.clone() + value;
             let word_source_idx = |col: ShaWordCol, shift: usize| {
                 let idx = offsets.word[col.index()][shift];
                 debug_assert_ne!(idx, ROW_EXPR_MISSING_SOURCE);
@@ -8157,30 +8247,14 @@ where
             let ov_small_sigma0 = word_eval(ShaWordCol::OvSmallSigma0, 0);
             let ov_small_sigma1 = word_eval(ShaWordCol::OvSmallSigma1, 0);
 
-            let mu_packed_shift0 = word_eval_with(ShaWordCol::MuPacked, 0, &shift0_weights);
-            let mu_packed_shift2 = word_eval_with(ShaWordCol::MuPacked, 0, &shift2_weights);
-            let mu_packed_shift5 = word_eval_with(ShaWordCol::MuPacked, 0, &shift5_weights);
-            let mu_packed_shift8 = word_eval_with(ShaWordCol::MuPacked, 0, &shift8_weights);
-            let mu_packed_shift9 = word_eval_with(ShaWordCol::MuPacked, 0, &shift9_weights);
-            let mu_packed_shift10 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights);
+            let mu_w = word_eval_with(ShaWordCol::MuPacked, 0, &mu_w_weights);
+            let mu_a = word_eval_with(ShaWordCol::MuPacked, 0, &mu_a_weights);
+            let mu_e = word_eval_with(ShaWordCol::MuPacked, 0, &mu_e_weights);
+            let mu_ff_a = word_eval_with(ShaWordCol::MuPacked, 0, &mu_ff_a_weights);
+            let mu_ff_e = word_eval_with(ShaWordCol::MuPacked, 0, &mu_ff_e_weights);
 
-            let mu_w =
-                mu_packed_shift0 * &low_mu_coeff - mu_packed_shift2.clone() * &high_mu_w_coeff;
-            let mu_a =
-                mu_packed_shift2 * &low_mu_coeff - mu_packed_shift5.clone() * &high_mu_3_bit_coeff;
-            let mu_e =
-                mu_packed_shift5 * &low_mu_coeff - mu_packed_shift8.clone() * &high_mu_3_bit_coeff;
-            let mu_ff_a =
-                mu_packed_shift8 * &low_mu_coeff - mu_packed_shift9.clone() * &high_mu_1_bit_coeff;
-            let mu_ff_e =
-                mu_packed_shift9 * &low_mu_coeff - mu_packed_shift10.clone() * &high_mu_1_bit_coeff;
-
-            let w_rot25 = word_eval_with(ShaWordCol::W, 0, &rot25_weights);
-            let w_rot14 = word_eval_with(ShaWordCol::W, 0, &rot14_weights);
-            let w_shift3 = word_eval_with(ShaWordCol::W, 0, &shift3_weights);
-            let w_rot15 = word_eval_with(ShaWordCol::W, 0, &rot15_weights);
-            let w_rot13 = word_eval_with(ShaWordCol::W, 0, &rot13_weights);
-            let w_shift10 = word_eval_with(ShaWordCol::W, 0, &shift10_weights);
+            let w_small_sigma0 = word_eval_with(ShaWordCol::W, 0, &w_small_sigma0_weights);
+            let w_small_sigma1 = word_eval_with(ShaWordCol::W, 0, &w_small_sigma1_weights);
             let w_shift16 = word_eval(ShaWordCol::W, 16);
             let w_shift9 = word_eval(ShaWordCol::W, 9);
             let small_sigma0_shift1 = word_eval(ShaWordCol::SmallSigma0, 1);
@@ -8194,10 +8268,10 @@ where
             let maj_shift3 = word_eval(ShaWordCol::Maj, 3);
             let public_k_shift3 = public_scalar(ShaPublicCol::K, 3);
 
-            let r0 = a_word.clone() * &rho_sig0 - &sigma0 - two.clone() * &ov_sigma0;
-            let r1 = e_word.clone() * &rho_sig1 - &sigma1 - two.clone() * &ov_sigma1;
-            let r2 = w_rot25 + w_rot14 + w_shift3 - &small_sigma0 - two.clone() * &ov_small_sigma0;
-            let r3 = w_rot15 + w_rot13 + w_shift10 - &small_sigma1 - two.clone() * &ov_small_sigma1;
+            let r0 = a_word.clone() * &rho_sig0 - &sigma0 - double(&ov_sigma0);
+            let r1 = e_word.clone() * &rho_sig1 - &sigma1 - double(&ov_sigma1);
+            let r2 = w_small_sigma0 - &small_sigma0 - double(&ov_small_sigma0);
+            let r3 = w_small_sigma1 - &small_sigma1 - double(&ov_small_sigma1);
             let r4 = w_shift16 - &w - small_sigma0_shift1 - w_shift9 - small_sigma1_shift14
                 + &mu_w
                 + int_value(ShaIntCol::CompSchedule);
@@ -8246,7 +8320,7 @@ where
             let r14 = int_value(ShaIntCol::CompUpdateE) * &s_upd;
             let r15 = int_value(ShaIntCol::CompFeedForwardA) * &s_ff;
             let r16 = int_value(ShaIntCol::CompFeedForwardE) * &s_ff;
-            let r17 = mu_packed_shift10;
+            let r17 = word_eval_with(ShaWordCol::MuPacked, 0, &shift10_weights);
             let residuals = [
                 r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
             ];
@@ -8263,22 +8337,22 @@ where
                     ShaBooleanitySource::WordBit { col, bit } => word_bit(col, 0, bit),
                     ShaBooleanitySource::VirtualCh1 { bit: bit_idx } => {
                         word_bit(ShaWordCol::E, 2, bit_idx) + &word_bit(ShaWordCol::E, 1, bit_idx)
-                            - two.clone() * word_bit(ShaWordCol::Uef, 2, bit_idx)
+                            - double(&word_bit(ShaWordCol::Uef, 2, bit_idx))
                     }
                     ShaBooleanitySource::VirtualCh2 { bit: bit_idx } => {
                         word_bit(ShaWordCol::E, 2, bit_idx) - &word_bit(ShaWordCol::E, 0, bit_idx)
-                            + two.clone() * word_bit(ShaWordCol::UNegEg, 2, bit_idx)
-                            + two.clone() * word_bit(ShaWordCol::Ch2Comp, 0, bit_idx)
+                            + double(&word_bit(ShaWordCol::UNegEg, 2, bit_idx))
+                            + double(&word_bit(ShaWordCol::Ch2Comp, 0, bit_idx))
                     }
                     ShaBooleanitySource::VirtualMaj { bit: bit_idx } => {
                         word_bit(ShaWordCol::A, 0, bit_idx)
                             + &word_bit(ShaWordCol::A, 1, bit_idx)
                             + &word_bit(ShaWordCol::A, 2, bit_idx)
-                            - two.clone() * word_bit(ShaWordCol::Maj, 2, bit_idx)
-                            - two.clone() * word_bit(ShaWordCol::MajComp, 0, bit_idx)
+                            - double(&word_bit(ShaWordCol::Maj, 2, bit_idx))
+                            - double(&word_bit(ShaWordCol::MajComp, 0, bit_idx))
                     }
                 };
-                bool_sum += weight.clone() * (d.clone() * (d - one.clone()));
+                bool_sum += weight.clone() * (d.clone() * (d - &one));
             }
 
             values[0].clone() * (linear + bool_sum)
@@ -8772,24 +8846,30 @@ where
     }
     #[cfg(debug_assertions)]
     validate_projected_trace(trace)?;
-    let mut sources = Vec::new();
-    for (col, shift) in production_sha_endpoint_word_sources() {
-        let bits =
-            sha_endpoint_word_bits_with_row_weights(trace, col, shift, row_weights, field_cfg)?;
-        sources.push(ShaSourceEndpointEval {
-            col,
-            shift,
-            scalarized: scalarize_sha_endpoint_bits(&bits, a, field_cfg),
-            bits,
-        });
-    }
-    let mut int_sources = Vec::new();
-    for col in production_sha_endpoint_int_sources() {
-        int_sources.push(ShaIntEndpointEval {
-            col,
-            scalar: sha_endpoint_int_with_row_weights(trace, col, row_weights, field_cfg)?,
-        });
-    }
+    let word_sources = production_sha_endpoint_word_sources();
+    let sources = cfg_into_iter!(0..word_sources.len())
+        .map(|idx| {
+            let (col, shift) = word_sources[idx];
+            let bits =
+                sha_endpoint_word_bits_with_row_weights(trace, col, shift, row_weights, field_cfg)?;
+            Ok(ShaSourceEndpointEval {
+                col,
+                shift,
+                scalarized: scalarize_sha_endpoint_bits(&bits, a, field_cfg),
+                bits,
+            })
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+    let int_source_cols = production_sha_endpoint_int_sources();
+    let int_sources = cfg_into_iter!(0..int_source_cols.len())
+        .map(|idx| {
+            let col = int_source_cols[idx];
+            Ok(ShaIntEndpointEval {
+                col,
+                scalar: sha_endpoint_int_with_row_weights(trace, col, row_weights, field_cfg)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
     Ok(ShaEndpointEvals {
         sources,
         int_sources,
@@ -8813,7 +8893,7 @@ where
     let weights = &row_weights[..active_len];
     let values_start = shift;
     let values_end = shift + active_len;
-    let bits = cfg_into_iter!(0..SHA_WORD_BITS)
+    let bits = (0..SHA_WORD_BITS)
         .map(|bit| {
             let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
             let column =
@@ -9286,9 +9366,10 @@ where
         field_cfg,
     )?;
 
+    let virtuals = reconstruct_virtual_ch_maj_endpoint(endpoint_evals, field_cfg)?;
     let mut bool_terms = Vec::with_capacity(booleanity_sources.len());
     for source in booleanity_sources {
-        let d = booleanity_endpoint_value(endpoint_evals, source, field_cfg)?;
+        let d = booleanity_endpoint_value_with_virtuals(endpoint_evals, &virtuals, source)?;
         bool_terms.push(d.clone() * (d - F::one_with_cfg(field_cfg)));
     }
     let bool_sum = FieldFieldInnerProduct::inner_product::<UNCHECKED>(
@@ -9399,6 +9480,29 @@ pub fn booleanity_endpoint_value<F>(
 where
     F: PrimeField,
 {
+    if let ShaBooleanitySource::WordBit { col, bit } = source {
+        return Ok(source_bits(endpoint_evals, *col, 0)?
+            .get(*bit)
+            .cloned()
+            .ok_or(ProductionShaError::LengthMismatch {
+                label: "endpoint bit",
+                got: *bit,
+                expected: SHA_WORD_BITS,
+            })?);
+    }
+
+    let virtuals = reconstruct_virtual_ch_maj_endpoint(endpoint_evals, field_cfg)?;
+    booleanity_endpoint_value_with_virtuals(endpoint_evals, &virtuals, source)
+}
+
+fn booleanity_endpoint_value_with_virtuals<F>(
+    endpoint_evals: &ShaEndpointEvals<F>,
+    virtuals: &VirtualChMajEndpoint<F>,
+    source: &ShaBooleanitySource,
+) -> Result<F, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
     match source {
         ShaBooleanitySource::WordBit { col, bit } => Ok(source_bits(endpoint_evals, *col, 0)?
             .get(*bit)
@@ -9408,42 +9512,39 @@ where
                 got: *bit,
                 expected: 32,
             })?),
-        ShaBooleanitySource::VirtualCh1 { bit } => Ok(reconstruct_virtual_ch_maj_endpoint(
-            endpoint_evals,
-            field_cfg,
-        )?
-        .ch1
-        .get(*bit)
-        .cloned()
-        .ok_or(ProductionShaError::LengthMismatch {
-            label: "virtual Ch1 bit",
-            got: *bit,
-            expected: 32,
-        })?),
-        ShaBooleanitySource::VirtualCh2 { bit } => Ok(reconstruct_virtual_ch_maj_endpoint(
-            endpoint_evals,
-            field_cfg,
-        )?
-        .ch2
-        .get(*bit)
-        .cloned()
-        .ok_or(ProductionShaError::LengthMismatch {
-            label: "virtual Ch2 bit",
-            got: *bit,
-            expected: 32,
-        })?),
-        ShaBooleanitySource::VirtualMaj { bit } => Ok(reconstruct_virtual_ch_maj_endpoint(
-            endpoint_evals,
-            field_cfg,
-        )?
-        .maj
-        .get(*bit)
-        .cloned()
-        .ok_or(ProductionShaError::LengthMismatch {
-            label: "virtual Maj bit",
-            got: *bit,
-            expected: 32,
-        })?),
+        ShaBooleanitySource::VirtualCh1 { bit } => {
+            Ok(virtuals
+                .ch1
+                .get(*bit)
+                .cloned()
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "virtual Ch1 bit",
+                    got: *bit,
+                    expected: 32,
+                })?)
+        }
+        ShaBooleanitySource::VirtualCh2 { bit } => {
+            Ok(virtuals
+                .ch2
+                .get(*bit)
+                .cloned()
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "virtual Ch2 bit",
+                    got: *bit,
+                    expected: 32,
+                })?)
+        }
+        ShaBooleanitySource::VirtualMaj { bit } => {
+            Ok(virtuals
+                .maj
+                .get(*bit)
+                .cloned()
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "virtual Maj bit",
+                    got: *bit,
+                    expected: 32,
+                })?)
+        }
     }
 }
 

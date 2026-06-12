@@ -6,6 +6,8 @@
 //! fresh ideal checks -> SumFold over instances -> post-SumFold folding ->
 //! folded row check over the 128-row SHA domain.
 
+use std::borrow::Borrow;
+
 use crate::ideal_check::batched_ideal_check;
 use crate::neutron_nova::SumFoldError;
 use crate::{
@@ -454,14 +456,16 @@ where
     }
 }
 
-pub fn beta_aggregate_nonzero_ideal_polys_direct_with_weights<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn beta_aggregate_nonzero_ideal_polys_direct_with_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     plan: &ShaAggregateIdealWeightPlan<F>,
     field_cfg: &F::Config,
 ) -> Result<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError>
 where
     F: PrimeField + Send + Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -483,8 +487,8 @@ where
             .zip(publics.iter())
             .zip(plan.beta_row_weights.iter())
         {
-            validate_trace(trace)?;
-            validate_public(public)?;
+            validate_trace(trace.borrow())?;
+            validate_public(public.borrow())?;
             if beta_row_weights.len() != SHA_ROW_COUNT {
                 return Err(ShaProjectionError::ColumnRowCount {
                     kind: "beta_row_weights",
@@ -513,8 +517,8 @@ where
     let tasks = sha_direct_row_tasks(traces.len(), SHA_ROW_COUNT);
     let partials = cfg_iter!(&tasks)
         .map(|&(instance_idx, row_start, row_end)| {
-            let trace = &traces[instance_idx];
-            let public = &publics[instance_idx];
+            let trace = traces[instance_idx].borrow();
+            let public = publics[instance_idx].borrow();
             let beta_row_weights = &plan.beta_row_weights[instance_idx];
             let mut acc = NonzeroResidualCoeffAccumulator::new(field_cfg);
             for row in row_start..row_end {
@@ -693,34 +697,43 @@ where
     }
 }
 
-pub fn build_sha_sumfold_linear_accumulator_direct_with_weights<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_sha_sumfold_linear_accumulator_direct_with_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     plan: &ShaLinearResidualWeightPlan<F>,
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: ShaLinearAccumulatorField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     F::build_sha_sumfold_linear_accumulator_direct_with_weights(traces, publics, plan, field_cfg)
 }
 
 pub trait ShaLinearAccumulatorField: DelayedFieldProductSum + Send + Sync + Sized {
-    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
-        traces: &[ProjectedTrace<Self>],
-        publics: &[ProjectedPublic<Self>],
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
         plan: &ShaLinearResidualWeightPlan<Self>,
         field_cfg: &Self::Config,
-    ) -> Result<Vec<Self>, ShaProjectionError>;
+    ) -> Result<Vec<Self>, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<Self>> + Sync,
+        Public: Borrow<ProjectedPublic<Self>> + Sync;
 }
 
 impl ShaLinearAccumulatorField for MontyField<4> {
-    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
-        traces: &[ProjectedTrace<Self>],
-        publics: &[ProjectedPublic<Self>],
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
         plan: &ShaLinearResidualWeightPlan<Self>,
         field_cfg: &Self::Config,
-    ) -> Result<Vec<Self>, ShaProjectionError> {
+    ) -> Result<Vec<Self>, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<Self>> + Sync,
+        Public: Borrow<ProjectedPublic<Self>> + Sync,
+    {
         build_sha_sumfold_linear_accumulator_direct_with_weights_dmr(
             traces, publics, plan, field_cfg,
         )
@@ -728,26 +741,32 @@ impl ShaLinearAccumulatorField for MontyField<4> {
 }
 
 impl ShaLinearAccumulatorField for BoxedMontyField {
-    fn build_sha_sumfold_linear_accumulator_direct_with_weights(
-        traces: &[ProjectedTrace<Self>],
-        publics: &[ProjectedPublic<Self>],
+    fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
         plan: &ShaLinearResidualWeightPlan<Self>,
         field_cfg: &Self::Config,
-    ) -> Result<Vec<Self>, ShaProjectionError> {
+    ) -> Result<Vec<Self>, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<Self>> + Sync,
+        Public: Borrow<ProjectedPublic<Self>> + Sync,
+    {
         build_sha_sumfold_linear_accumulator_direct_with_weights_generic(
             traces, publics, plan, field_cfg,
         )
     }
 }
 
-fn build_sha_sumfold_linear_accumulator_direct_with_weights_generic<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+fn build_sha_sumfold_linear_accumulator_direct_with_weights_generic<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     plan: &ShaLinearResidualWeightPlan<F>,
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: DelayedFieldProductSum + Send + Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -758,16 +777,16 @@ where
     #[cfg(debug_assertions)]
     {
         for (trace, public) in traces.iter().zip(publics.iter()) {
-            validate_trace(trace)?;
-            validate_public(public)?;
+            validate_trace(trace.borrow())?;
+            validate_public(public.borrow())?;
         }
     }
     let tasks = sha_direct_row_tasks(traces.len(), plan.row_weights.len());
     let partials = cfg_iter!(&tasks)
         .map(|&(instance_idx, row_start, row_end)| {
             sha_linear_residual_partial_sum_with_weights(
-                &traces[instance_idx],
-                &publics[instance_idx],
+                traces[instance_idx].borrow(),
+                publics[instance_idx].borrow(),
                 &plan.row_weights,
                 row_start,
                 row_end,
@@ -786,14 +805,16 @@ where
     Ok(out)
 }
 
-fn build_sha_sumfold_linear_accumulator_direct_with_weights_dmr<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+fn build_sha_sumfold_linear_accumulator_direct_with_weights_dmr<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     plan: &ShaLinearResidualWeightPlan<F>,
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -806,16 +827,16 @@ where
     #[cfg(debug_assertions)]
     {
         for (trace, public) in traces.iter().zip(publics.iter()) {
-            validate_trace(trace)?;
-            validate_public(public)?;
+            validate_trace(trace.borrow())?;
+            validate_public(public.borrow())?;
         }
     }
     let tasks = sha_direct_row_tasks(traces.len(), plan.row_weights.len());
     let partials = cfg_iter!(&tasks)
         .map(|&(instance_idx, row_start, row_end)| {
             sha_linear_residual_partial_sum_with_plan_dmr(
-                &traces[instance_idx],
-                &publics[instance_idx],
+                traces[instance_idx].borrow(),
+                publics[instance_idx].borrow(),
                 &plan.row_weights,
                 row_start,
                 row_end,
@@ -1167,27 +1188,31 @@ where
     })
 }
 
-pub fn build_linear_residual_coeff_tables<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_linear_residual_coeff_tables<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     r_ic: &[F; SHA_ROW_VARS],
     field_cfg: &F::Config,
 ) -> Result<Vec<LinearResidualCoeffTable<F>>, ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
     build_linear_residual_coeff_tables_with_row_weights(traces, publics, &row_weights, field_cfg)
 }
 
-pub fn build_linear_residual_coeff_tables_with_row_weights<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_linear_residual_coeff_tables_with_row_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     row_weights: &[F],
     field_cfg: &F::Config,
 ) -> Result<Vec<LinearResidualCoeffTable<F>>, ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -1207,6 +1232,8 @@ where
     cfg_iter!(traces)
         .zip(cfg_iter!(publics))
         .map(|(trace, public)| {
+            let trace = trace.borrow();
+            let public = public.borrow();
             #[cfg(debug_assertions)]
             {
                 validate_trace(trace)?;
@@ -1347,14 +1374,16 @@ where
     })
 }
 
-pub fn fold_projected_traces<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn fold_projected_traces<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     sumfold: &InstanceFoldClaim<F>,
     field_cfg: &F::Config,
 ) -> Result<(ProjectionFoldWitness<F>, ProjectedPublic<F>), ShaProjectionError>
 where
     F: ShaBinaryFoldField,
+    Trace: Borrow<ProjectedTrace<F>>,
+    Public: Borrow<ProjectedPublic<F>>,
 {
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -1371,35 +1400,35 @@ where
     #[cfg(debug_assertions)]
     {
         for trace in traces {
-            validate_trace(trace)?;
+            validate_trace(trace.borrow())?;
         }
         for public in publics {
-            validate_public(public)?;
+            validate_public(public.borrow())?;
         }
     }
 
     let folded_public_columns = fold_mle_tables(
         "public.columns",
-        publics.iter().map(|public| &public.columns),
+        publics.iter().map(|public| &public.borrow().columns),
         &sumfold.eq_instance_weights,
         field_cfg,
     )?;
     let folded_trace = ProjectedTrace {
         bit_slices: fold_binary_mle_tables(
             "bit_slices",
-            traces.iter().map(|trace| &trace.bit_slices),
+            traces.iter().map(|trace| &trace.borrow().bit_slices),
             &sumfold.eq_instance_weights,
             field_cfg,
         )?,
         scalarized: fold_mle_tables(
             "scalarized",
-            traces.iter().map(|trace| &trace.scalarized),
+            traces.iter().map(|trace| &trace.borrow().scalarized),
             &sumfold.eq_instance_weights,
             field_cfg,
         )?,
         int_columns: fold_mle_tables(
             "int_columns",
-            traces.iter().map(|trace| &trace.int_columns),
+            traces.iter().map(|trace| &trace.borrow().int_columns),
             &sumfold.eq_instance_weights,
             field_cfg,
         )?,
@@ -1409,7 +1438,9 @@ where
         columns: folded_public_columns,
         bit_slices: fold_optional_binary_mle_tables(
             "public.bit_slices",
-            publics.iter().map(|public| public.bit_slices.as_ref()),
+            publics
+                .iter()
+                .map(|public| public.borrow().bit_slices.as_ref()),
             &sumfold.eq_instance_weights,
             field_cfg,
         )?,
@@ -2559,9 +2590,9 @@ where
     F::Inner: Zero,
 {
     #[allow(clippy::too_many_arguments)]
-    fn new(
-        traces: &[ProjectedTrace<F>],
-        publics: &[ProjectedPublic<F>],
+    fn new<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
         beta: &[F],
         r_ic: &[F; SHA_ROW_VARS],
         a: &F,
@@ -2571,7 +2602,11 @@ where
         booleanity_sources: &[ShaBooleanitySource],
         prefix_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<Self, ShaProjectionError> {
+    ) -> Result<Self, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<F>> + Sync,
+        Public: Borrow<ProjectedPublic<F>> + Sync,
+    {
         let coeff_tables = build_linear_residual_coeff_tables(traces, publics, r_ic, field_cfg)?;
         let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
         Self::new_with_linear_cache(
@@ -2625,9 +2660,9 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_linear_cache(
-        traces: &[ProjectedTrace<F>],
-        publics: &[ProjectedPublic<F>],
+    fn new_with_linear_cache<Trace, Public>(
+        traces: &[Trace],
+        publics: &[Public],
         beta: &[F],
         _r_ic: &[F; SHA_ROW_VARS],
         row_weights: &[F],
@@ -2639,7 +2674,11 @@ where
         prefix_vars: usize,
         coeff_tables: &[LinearResidualCoeffTable<F>],
         field_cfg: &F::Config,
-    ) -> Result<Self, ShaProjectionError> {
+    ) -> Result<Self, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<F>> + Sync,
+        Public: Borrow<ProjectedPublic<F>> + Sync,
+    {
         let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
         if prefix_vars == 0 || prefix_vars > ell {
             return Err(SumFoldError::Ell0TooLarge {
@@ -2766,15 +2805,18 @@ where
         )
     }
 
-    fn new_with_accumulators(
-        traces: &[ProjectedTrace<F>],
+    fn new_with_accumulators<Trace>(
+        traces: &[Trace],
         beta: &[F],
         linear_values: &[F],
         quadratic_values: &[F],
         booleanity_sources: &[ShaBooleanitySource],
         prefix_vars: usize,
         field_cfg: &F::Config,
-    ) -> Result<Self, ShaProjectionError> {
+    ) -> Result<Self, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<F>> + Sync,
+    {
         let ell = validate_sha_sumfold_traces(traces, beta)?;
         if prefix_vars == 0 || prefix_vars > ell {
             return Err(SumFoldError::Ell0TooLarge {
@@ -2815,7 +2857,13 @@ where
         let tail_traces = if tail_vars == 0 {
             None
         } else {
-            Some(traces.to_vec().into_boxed_slice())
+            Some(
+                traces
+                    .iter()
+                    .map(|trace| trace.borrow().clone())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
         };
 
         Ok(Self {
@@ -3032,9 +3080,9 @@ where
 /// booleanity part is evaluated from source MLEs, so the terminal at `r_b`
 /// is the folded booleanity expression.
 #[allow(clippy::too_many_arguments)]
-pub fn build_dense_sha_sumfold_group<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_dense_sha_sumfold_group<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     beta: &[F],
     r_ic: &[F; SHA_ROW_VARS],
     a: &F,
@@ -3047,6 +3095,8 @@ pub fn build_dense_sha_sumfold_group<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(beta, field_cfg)?;
@@ -3066,9 +3116,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_dense_sha_sumfold_group_with_weights<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_dense_sha_sumfold_group_with_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     beta: &[F],
     beta_eq_weights: &[F],
     row_weights: &[F],
@@ -3082,6 +3132,8 @@ pub fn build_dense_sha_sumfold_group_with_weights<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let _ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
     if beta_eq_weights.len() != traces.len() {
@@ -3106,8 +3158,8 @@ where
         .zip(publics.iter())
         .map(|(trace, public)| {
             sha_linear_residual_sum_with_weights(
-                trace,
-                public,
+                trace.borrow(),
+                public.borrow(),
                 &row_weights,
                 &a_powers,
                 &lambda_powers,
@@ -3128,8 +3180,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_dense_sha_sumfold_group_from_accumulators<F>(
-    traces: &[ProjectedTrace<F>],
+fn build_dense_sha_sumfold_group_from_accumulators<F, Trace>(
+    traces: &[Trace],
     beta: &[F],
     beta_eq_weights: &[F],
     row_weights: &[F],
@@ -3141,6 +3193,7 @@ fn build_dense_sha_sumfold_group_from_accumulators<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
     if beta_eq_weights.len() != traces.len() {
@@ -3199,7 +3252,7 @@ where
         let virtuals_by_trace = if need_virtuals {
             traces
                 .iter()
-                .map(|trace| reconstruct_virtual_ch_maj_at_row(trace, row, field_cfg))
+                .map(|trace| reconstruct_virtual_ch_maj_at_row(trace.borrow(), row, field_cfg))
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             Vec::new()
@@ -3209,7 +3262,11 @@ where
             for (source_idx, source) in booleanity_sources.iter().enumerate() {
                 source_values[source_idx * SHA_ROW_COUNT + row].push(
                     booleanity_source_value_at_row_with_virtuals(
-                        trace, row, source, virtuals, field_cfg,
+                        trace.borrow(),
+                        row,
+                        source,
+                        virtuals,
+                        field_cfg,
                     )?,
                 );
             }
@@ -3231,8 +3288,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F>(
-    traces: &[ProjectedTrace<F>],
+pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F, Trace>(
+    traces: &[Trace],
     beta: &[F],
     beta_eq_weights: &[F],
     row_weights: &[F],
@@ -3246,6 +3303,7 @@ pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
     if beta_eq_weights.len() != traces.len() {
@@ -3321,9 +3379,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_production_sha_sumfold_group<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_production_sha_sumfold_group<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     beta: &[F],
     r_ic: &[F; SHA_ROW_VARS],
     a: &F,
@@ -3337,6 +3395,8 @@ pub fn build_production_sha_sumfold_group<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
     if prefix_vars > ell {
@@ -3393,9 +3453,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_production_sha_sumfold_group_with_linear_cache<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_production_sha_sumfold_group_with_linear_cache<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     linear_cache: &[LinearResidualCoeffTable<F>],
     beta: &[F],
     r_ic: &[F; SHA_ROW_VARS],
@@ -3410,6 +3470,8 @@ pub fn build_production_sha_sumfold_group_with_linear_cache<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let row_weights = build_eq_x_r_vec(r_ic, field_cfg)?;
     let beta_eq_weights = build_eq_x_r_vec(beta, field_cfg)?;
@@ -3432,9 +3494,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_production_sha_sumfold_group_with_linear_cache_and_weights<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+pub fn build_production_sha_sumfold_group_with_linear_cache_and_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     linear_cache: &[LinearResidualCoeffTable<F>],
     beta: &[F],
     beta_eq_weights: &[F],
@@ -3451,6 +3513,8 @@ pub fn build_production_sha_sumfold_group_with_linear_cache_and_weights<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>> + Sync,
 {
     let ell = validate_sha_sumfold_inputs(traces, publics, beta)?;
     if linear_cache.len() != traces.len() {
@@ -3530,8 +3594,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_dense_sha_sumfold_group_with_linear_cache_and_weights<F>(
-    traces: &[ProjectedTrace<F>],
+fn build_dense_sha_sumfold_group_with_linear_cache_and_weights<F, Trace>(
+    traces: &[Trace],
     linear_cache: &[LinearResidualCoeffTable<F>],
     beta: &[F],
     beta_eq_weights: &[F],
@@ -3546,6 +3610,7 @@ fn build_dense_sha_sumfold_group_with_linear_cache_and_weights<F>(
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
     F::Inner: Zero,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     if beta_eq_weights.len() != traces.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
@@ -3693,11 +3758,16 @@ where
     })
 }
 
-fn validate_sha_sumfold_inputs<F>(
-    traces: &[ProjectedTrace<F>],
-    publics: &[ProjectedPublic<F>],
+fn validate_sha_sumfold_inputs<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
     beta: &[F],
-) -> Result<usize, ShaProjectionError> {
+) -> Result<usize, ShaProjectionError>
+where
+    F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>>,
+    Public: Borrow<ProjectedPublic<F>>,
+{
     if traces.is_empty() {
         return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
     }
@@ -3718,10 +3788,10 @@ fn validate_sha_sumfold_inputs<F>(
         });
     }
     for trace in traces {
-        validate_trace(trace)?;
+        validate_trace(trace.borrow())?;
     }
     for public in publics {
-        validate_public(public)?;
+        validate_public(public.borrow())?;
     }
     Ok(ell)
 }
@@ -3761,10 +3831,14 @@ where
     x.clone() * beta + (one.clone() - x) * (one - beta)
 }
 
-fn validate_sha_sumfold_traces<F>(
-    traces: &[ProjectedTrace<F>],
+fn validate_sha_sumfold_traces<F, Trace>(
+    traces: &[Trace],
     beta: &[F],
-) -> Result<usize, ShaProjectionError> {
+) -> Result<usize, ShaProjectionError>
+where
+    F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>>,
+{
     if traces.is_empty() {
         return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
     }
@@ -3781,15 +3855,15 @@ fn validate_sha_sumfold_traces<F>(
     #[cfg(debug_assertions)]
     {
         for trace in traces {
-            validate_trace(trace)?;
+            validate_trace(trace.borrow())?;
         }
     }
     Ok(ell)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_sha_sumfold_quadratic_prefix_accumulator<F>(
-    traces: &[ProjectedTrace<F>],
+pub fn build_sha_sumfold_quadratic_prefix_accumulator<F, Trace>(
+    traces: &[Trace],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
     row_weights: &[F],
@@ -3798,6 +3872,7 @@ pub fn build_sha_sumfold_quadratic_prefix_accumulator<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     if traces.is_empty() {
         return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
@@ -3832,7 +3907,7 @@ where
     #[cfg(debug_assertions)]
     {
         for trace in traces {
-            validate_trace(trace)?;
+            validate_trace(trace.borrow())?;
         }
     }
     if prefix_vars == 0 {
@@ -3852,8 +3927,8 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn build_sha_booleanity_prefix_tail_table<F>(
-    traces: &[ProjectedTrace<F>],
+fn build_sha_booleanity_prefix_tail_table<F, Trace>(
+    traces: &[Trace],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
     tail_len: usize,
@@ -3863,6 +3938,7 @@ fn build_sha_booleanity_prefix_tail_table<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let prefix_len = binary_len(prefix_vars);
     let ternary_len = checked_ternary_len(prefix_vars)?;
@@ -4062,8 +4138,8 @@ fn is_canonical_production_booleanity_sources(booleanity_sources: &[ShaBooleanit
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn build_sha_booleanity_prefix_tail_table_production_fast<F>(
-    traces: &[ProjectedTrace<F>],
+fn build_sha_booleanity_prefix_tail_table_production_fast<F, Trace>(
+    traces: &[Trace],
     prefix_vars: usize,
     tail_len: usize,
     row_weights: &[F],
@@ -4072,6 +4148,7 @@ fn build_sha_booleanity_prefix_tail_table_production_fast<F>(
 ) -> Result<Vec<F>, ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let prefix_len = binary_len(prefix_vars);
     let ternary_len = checked_ternary_len(prefix_vars)?;
@@ -4132,7 +4209,7 @@ where
                     for prefix in 0..prefix_len {
                         let instance_idx = prefix + (tail << prefix_vars);
                         virtuals_by_prefix.push(reconstruct_virtual_ch_maj_at_row_unchecked(
-                            &traces[instance_idx],
+                            traces[instance_idx].borrow(),
                             row,
                             field_cfg,
                         )?);
@@ -4278,8 +4355,8 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn booleanity_table_prefix_mask<F>(
-    traces: &[ProjectedTrace<F>],
+fn booleanity_table_prefix_mask<F, Trace>(
+    traces: &[Trace],
     table_idx: usize,
     prefix_vars: usize,
     prefix_len: usize,
@@ -4288,14 +4365,16 @@ fn booleanity_table_prefix_mask<F>(
 ) -> usize
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>>,
 {
     let mut value_mask = 0usize;
     for prefix in 0..prefix_len {
         let instance_idx = prefix + (tail << prefix_vars);
+        let trace = traces[instance_idx].borrow();
         debug_assert!(instance_idx < traces.len());
-        debug_assert!(table_idx < traces[instance_idx].bit_slices.len());
-        debug_assert!(row < traces[instance_idx].bit_slices[table_idx].evaluations.len());
-        if !F::is_zero(&traces[instance_idx].bit_slices[table_idx].evaluations[row]) {
+        debug_assert!(table_idx < trace.bit_slices.len());
+        debug_assert!(row < trace.bit_slices[table_idx].evaluations.len());
+        if !F::is_zero(&trace.bit_slices[table_idx].evaluations[row]) {
             value_mask |= 1usize << prefix;
         }
     }
@@ -4337,8 +4416,8 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn booleanity_word_bit_prefix_mask<F>(
-    traces: &[ProjectedTrace<F>],
+fn booleanity_word_bit_prefix_mask<F, Trace>(
+    traces: &[Trace],
     col: ShaWordCol,
     bit: usize,
     prefix_vars: usize,
@@ -4348,12 +4427,13 @@ fn booleanity_word_bit_prefix_mask<F>(
 ) -> u8
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>>,
 {
     let prefix_len = binary_len(prefix_vars);
     let mut value_mask = 0u8;
     for prefix in 0..prefix_len {
         let instance_idx = prefix + (tail << prefix_vars);
-        let trace = &traces[instance_idx];
+        let trace = traces[instance_idx].borrow();
         if !F::is_zero(&bit_at_shifted_or_zero_fast(
             trace, col, row, 0, bit, field_cfg,
         )) {
@@ -4415,8 +4495,8 @@ where
 }
 
 #[allow(clippy::arithmetic_side_effects)]
-fn fill_booleanity_source_prefix_values<F>(
-    traces: &[ProjectedTrace<F>],
+fn fill_booleanity_source_prefix_values<F, Trace>(
+    traces: &[Trace],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
     tail: usize,
@@ -4427,6 +4507,7 @@ fn fill_booleanity_source_prefix_values<F>(
 ) -> Result<(), ShaProjectionError>
 where
     F: PrimeField,
+    Trace: Borrow<ProjectedTrace<F>>,
 {
     let prefix_len = binary_len(prefix_vars);
     let source_count = booleanity_sources.len();
@@ -4434,7 +4515,7 @@ where
 
     for prefix in 0..prefix_len {
         let instance_idx = prefix + (tail << prefix_vars);
-        let trace = &traces[instance_idx];
+        let trace = traces[instance_idx].borrow();
         let virtuals = if needs_virtuals {
             Some(reconstruct_virtual_ch_maj_at_row_unchecked(
                 trace, row, field_cfg,
