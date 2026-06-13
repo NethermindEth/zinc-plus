@@ -1,0 +1,116 @@
+\section{Anatomy of the shift handling}
+\label{sec:shifts}
+
+SHA-256's shifts and rotations are the structure that most cleanly
+separates the two systems, and they are also the most common source of
+confusion, because two different ``shifts'' live on two different axes.
+We separate them, then show how each system handles each, and pin down
+which one actually causes \binius{}'s linear verifier. (It is not the one
+usually blamed.)
+
+\begin{definition}[Two shift axes]
+\label{def:two-shifts}
+The \emph{entry-wise word shift} acts \emph{within} a word: the
+$\Sigma/\sigma$ rotations and the logical shifts of SHA-256
+($\ROTR$, $\SHR$ by fixed amounts on the $\wbit$ bits of one cell). The
+\emph{cross-entry (wiring) shift} acts \emph{across} words: which
+committed word supplies an operand, i.e. the dataflow between trace
+positions.
+\end{definition}
+
+\subsection{\binius{}: the shift indicator and the monster sweep}
+\label{sec:shifts-binius}
+
+\binius{}'s Shift reduction realises both axes in one protocol, and it is
+worth reading the verifier's final check to see exactly where the cost
+lands. After the BitAnd reduction the verifier holds evaluation claims on
+the operand multilinears $A,B,C$ at a random point. The Shift reduction
+discharges them in two sumchecks and a product check.
+
+\paragraph{The entry-wise shift is a constant-size indicator.}
+The intra-word shift is captured by a \emph{shift indicator}
+$\mathrm{shift\_ind}(i,j,s)$, the multilinear extension over the
+constant-size $\log_2\wbit$-bit subcube of the Boolean predicate ``output
+bit $i$ reads source bit $j$ under shift amount $s$.'' Its semantics are
+the integer relations
+\[
+  \text{srl: } i+s=j, \quad
+  \text{sll: } j+s=i, \quad
+  \text{sra: } \min(i+s,\wbit{-}1)=j, \quad
+  \text{rotr: } (i+s)\bmod\wbit = j,
+\]
+(plus $32$-bit lane variants), and it is evaluated in $O(\wbit)$ by short
+$\sigma/\varphi$ recurrences contracted against the subspace-Lagrange
+weights of the bit challenge. There are eight variants, so the per-output
+work is a fixed $\mathrm{SHIFT\_VARIANT\_COUNT}\times\wbit = 8\times 64 =
+512$-slot reduction. \emph{This is the entry-wise shift, and it is
+$O(1)$ in $N$.}
+
+\paragraph{The cross-entry wiring is the $O(N)$ ``monster.''}
+The expensive part is the multilinear that encodes \emph{which committed
+word feeds which operand}. The verifier evaluates it by sweeping over all
+$N$ constraints: for each constraint, for each operand term, it
+accumulates $\eq(r_{x'},\text{constraint})\cdot\eq(r_y,\text{word index})$
+into the $512$ shift-variant slots. The two sumchecks reduce the bit and
+shift-amount axes (constant size) and the word-index axis ($\log$ of the
+word count) and collapse the witness side to a \emph{single} evaluation;
+the final check is
+\[
+  \mathrm{eval} \;\stackrel{?}{=}\; \mathrm{witness\_eval}\cdot\mathrm{monster\_eval},
+\]
+where $\mathrm{monster\_eval}$ is purely public --- the $O(\wbit)$ shift
+indicators times the $O(N)$ wiring sweep. The wiring sweep is the
+verifier's hot loop; measured, it is $97$--$99.7\%$ of verify time
+(\Cref{sec:results}).
+
+\begin{observation}[It is the wiring, not the shifts]
+\label{obs:wiring-not-shifts}
+\binius{}'s linear verifier is caused by the cross-entry wiring sweep, not
+by the entry-wise shifts. The shift \emph{operation} is succinct: the
+indicator is $O(\wbit)$, evaluated once. The sweep is $O(N)$ only because
+the per-constraint source-word selection is arbitrary public data with no
+closed form. A common intuition --- ``shifts are why the verifier is
+linear'' --- is contradicted by \zinc{}, which handles the identical
+SHA-256 rotations with a succinct verifier (\Cref{sec:shifts-zinc}).
+\end{observation}
+
+\subsection{\zinc{}: shifts as free functional read-offs}
+\label{sec:shifts-zinc}
+
+In \zinc{}'s cell ring the entry-wise word shift is multiplication by a
+fixed monomial $X^c$, and the key point is what this does at the
+commitment layer. A committed cell exposes, as $\Ftwo$-linear read-offs,
+\emph{any} linear functional of its bits; in particular it exposes both
+projections $\psia$ (evaluate the bit-polynomial at $\alpha$) and $\psiz$
+(the subspace-Lagrange weights of the oblong discharge) from one bound
+object $a'$. A shift composes with these: $\psia(\SHR^c\, v)$ is a fixed
+($X^c$-twisted) closed-form function of $\psia(v)$ up to a boundary
+correction, folded into the $O(\log N)$ multipoint-evaluation step. So
+the entry-wise shift costs the verifier nothing beyond reading a second
+functional off the object it already opened, and the cross-entry dataflow
+is the AIR's fixed next-row shift, checked in $O(\log N)$. There is no
+per-constraint sweep to perform.
+
+\subsection{The representational layer underneath}
+\label{sec:shifts-repr}
+
+\Cref{obs:wiring-not-shifts} says uniformity, not the shift itself, sets
+verifier complexity. A second, finer point concerns \emph{how cheaply}
+the entry-wise shift is realised, and it is a property of the word
+representation rather than of uniformity:
+\begin{itemize}
+  \item \emph{$\Ftwo[X]$ cell ring} (\zinc{}): a shift is one scalar
+  (monomial) multiply on the bound evaluation --- the cheapest form.
+  \item \emph{bit-decomposed columns} (prime-field STARKs): a rotation is
+  a free re-indexing of bit columns, at $\wbit$-fold trace width.
+  \item \emph{packed flat-bit multilinear} (\binius{}): a shift is a
+  hypercube-index transform handled by a constant-size shift reduction
+  --- $O(1)$ per term, but not a single scalar multiply.
+\end{itemize}
+The asymptotics are the same in all three (a uniform shift touches only
+the constant intra-word subcube), so a uniform AIR over any of these
+representations has a succinct verifier. What differs is the
+\emph{prover-side} cost of the entry-wise shift, and that is where the
+$\Ftwo[X]$ representation has a structural advantage we quantify next:
+in \binius{} the entry-wise shift is paid for by a sizeable Shift
+reduction \emph{prover}, whereas in \zinc{} it is a free read-off.

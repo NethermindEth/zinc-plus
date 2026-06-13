@@ -1,0 +1,112 @@
+\section{Where each wins, and why}
+\label{sec:analysis}
+
+\subsection{The mechanism behind each gap}
+
+\begin{itemize}
+  \item \textbf{Proof size --- recursion.} FRI recursively folds the
+  codeword ($\log N$ halvings, a few hashes per round), giving a
+  $\polylog$ proof. Brakedown opens $t\approx987$ full columns flat (no
+  recursion on a random RAA code), giving $t\cdot\sqrt N$ with a large
+  $t$-floor. \zinc{} bought a linear-time encoder; the price is the flat,
+  large proof.
+  \item \textbf{Verifier --- who reads the circuit.} \binius{}'s verifier
+  evaluates the wiring multilinear in the clear, $O(N)$
+  (\Cref{sec:shifts}). \zinc{}'s uniform AIR makes the structure an
+  $O(\log N)$ formula, so its verifier pays only the $\sqrt N$ proximity
+  test.
+  \item \textbf{Memory / large $N$ --- reduction field.} \binius{}'s
+  $\mathrm{GF}(2^{128})$ tensors plus a rate-$\tfrac12$ codeword spill
+  cache super-linearly; \zinc{}'s base-field, bit-packed discharge streams
+  $16$--$32\times$ fewer bytes and scales sub-linearly.
+  \item \textbf{Prover --- a tie.} Both discharge the same $\AND$ content
+  with cheap encoders; the word-level versus bit-sliced asymmetry roughly
+  cancels (\Cref{sec:res-phases}).
+\end{itemize}
+
+\subsection{Could \binius{} take an AIR to make its verifier succinct?}
+\label{sec:ana-air}
+
+The natural counterfactual: since \binius{}'s verifier is $O(N)$ only
+because of its arithmetization, could it adopt a uniform AIR on the SHA
+path and recover a succinct verifier? The answer is \emph{yes for SHA in
+isolation} --- the result is a binary-field STARK --- but with caveats
+that explain why \binius{} does not.
+
+\paragraph{What is actually $O(N)$.} Crucially, \binius{}'s
+\emph{commitment} verification is already $\polylog$ (FRI). The $O(N)$
+cost is entirely the structure/wiring check (the monster sweep,
+$\sim$$99.7\%$ of verify at $2^{22}$). So a verifier fix is a
+structure-check fix; the FRI commitment can stay. A uniform AIR collapses
+the structure check two ways: cross-step dataflow becomes a fixed
+next-row shift ($O(\log N)$), and within-word rotations become fixed
+virtual columns ($O(\wbit)$, via the same shift indicator). The
+combination ``binary commitment $+$ sumcheck $+$ uniform AIR $+$ FRI'' is
+coherent --- it is a binary STARK --- and would be succinct on the
+verifier and small on the proof.
+
+\paragraph{Quantified estimate.} Decomposing the measured numbers (not a
+built implementation): removing the monster sweep leaves the FRI residual,
+so verify would be $\sim$$0.5$--$1$\,ms at $2^{20}$ rising only to
+$\sim$$2$--$3$\,ms at $2^{24}$ (near-flat, $\polylog$) --- a $\sim$$25\times$
+to $\sim$$1000\times$ win over current \binius{}, and faster than \zinc{}'s
+$\sqrt N$ verify at scale. The prover stays a tie (the AIR removes the
+shift/wiring prover but adds a wider padded trace and selector columns;
+neither dominates --- and there is no prover speedup, consistent with the
+prover and verifier being decoupled). The proof stays small (FRI is kept).
+
+\paragraph{Why \binius{} does not.} (i) \emph{Generality}: \binius{} is a
+general non-deterministic word-circuit framework; an AIR only covers
+uniform computations, so the rewrite abandons the framework's reason for
+being. (ii) The general verifier fix is therefore not an AIR but a
+\emph{holographic / Spark} structure commitment \cite{spartan,lasso} ---
+commit the wiring once, prove its evaluations via a sparse polynomial
+commitment in $O(\log N)$, keeping the general circuit. (iii) An AIR
+re-introduces a rigid power-of-two grid and selector columns for SHA's
+irregular parts (the once-per-block feed-forward add, the
+first-$16$-vs-last-$48$ message-schedule split, the padding/length
+binding \binius{} proves in-circuit), and a wider committed trace than its
+lean non-deterministic witness.
+
+\begin{remark}[The same shifts, succinctly]
+A uniform AIR makes the entry-wise shift succinct \emph{on the verifier}
+regardless of word representation, because a uniform shift touches only
+the constant intra-word subcube. But to get \zinc{}-clean shift handling
+\emph{on the prover} as well (a monomial read-off rather than a shift
+reduction), one needs the $\Ftwo[X]$ cell ring or a bit-decomposed layout
+--- i.e. ``\binius{} done well on the prover'' converges toward \zinc{}'s
+arithmetization (\Cref{sec:shifts-repr}).
+\end{remark}
+
+\subsection{Could a well-optimised \zinc{} win the prover outright?}
+\label{sec:ana-prover}
+
+\zinc{} has four structural prover advantages, all flowing from the
+$\Ftwo[X]$ representation doing less algebraic work per gate: (i) the
+entry-wise shift is a free $\psi$ read-off rather than a shift-reduction
+sumcheck; (ii) a linear-time RAA encoder (no NTT); (iii) one commitment
+serving both $\psia$ and $\psiz$; (iv) base-field discharge with a
+bit-packed witness, giving the memory/scaling edge. Advantage (iv) is the
+strongest and already wins large $N$.
+
+The honest scoreboard, however, is a regime split rather than a clean
+sweep:
+\begin{itemize}
+  \item At moderate $N$ on adequate RAM, \binius{} is $\sim$$1.05$--$1.13\times$
+  faster --- its mature word-level prover and cheaper commit outweigh
+  \zinc{}'s advantages, which are partly cancelled by the
+  $\times\wbit$-vs-word-level asymmetry.
+  \item At large $N$, \zinc{}'s lower per-compression floor
+  ($\sim$$0.078$--$0.083$ vs $\sim$$0.090$\,ms) and sub-linear scaling pull
+  it ahead; the crossover is around $2^{21}$--$2^{22}$.
+\end{itemize}
+There is one real blocker to stating ``\zinc{} wins the prover'' flatly:
+the soundness asymmetry (\Cref{sec:cmp-soundness}). A fair, both-sound
+comparison must add \zinc{}'s sound-adder cost, which is prover time
+\zinc{} has not yet paid. \emph{If} that cost is roughly prover-neutral
+(plausible --- the lookup adder removes $12$ Hadamards while adding one
+grand product, but it is an open A/B), then a well-optimised, fully sound
+\zinc{} edges \binius{} at scale and ties at moderate $N$ --- a scaling
+win, not a universal one. The cleanest experiment is to ship the
+soundness fix and the residual word-level optimisation and run both
+provers fully sound, back-to-back, on a host with adequate RAM.

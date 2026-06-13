@@ -23,7 +23,7 @@ Challenge / evaluation field $\K$ & $\mathrm{GF}(2^{128})$, $P=X^{128}+X^7+X^2+X
 Commitment code & $\Ftwo$-RAA, rate $1/\mathrm{REP}=1/4$ \\
 Column openings $t$ & $987$ (calibrated for $2^{-100}$-class proximity) \\
 Bit-skip dimension $\mu=\log_2\wbit$ & $5$ (the oblong univariate skip) \\
-Hadamard relations $K_H$ & $16$ ($3$ $\AND$ $+$ $13$ adder carries) \\
+Hadamard relations $K_H$ & $14$ ($2$ $\AND$ $+$ $12$ adder carries) \\
 Chained compressions & $7$ at the smallest trace height \\
 Rows per compression & $68$ ($64$ rounds $+$ schedule/boundary) \\
 \bottomrule
@@ -50,9 +50,10 @@ of \Cref{sec:air}:
     packed LSB-compensator column, and a few $\{0,1\}$ selectors --- about
     eight columns.
   \item \emph{Primary witness} (committed): the state columns
-    $\col{A},\col{E},\col{W}$, the four mixing outputs, the three $\AND$
-    product columns, the round intermediates, and the chained-addition
-    intermediate sums --- about twenty columns.
+    $\col{A},\col{E},\col{W}$, the four mixing outputs, the two $\AND$
+    product columns ($\bp{u}_{\mathrm{ch}}$ and $\Maj$), the round
+    intermediates, and the chained-addition intermediate sums --- about
+    eighteen columns.
   \item \emph{Virtual} (reconstructed): the $\SHR$ extractions used by
     $\sigma_0,\sigma_1$ and the per-step compensator --- about twelve
     columns, none committed.
@@ -61,7 +62,7 @@ Committed columns are stored two trace cells to a $64$-bit word (the
 cell-pairing optimization of the companion note), so the Merkle tree
 carries roughly ten packed columns. Every constraint of the running SHA-256 is one
 of the four families of \Cref{sec:air}, and the entire nonlinear content is
-the $K_H=16$ Hadamard relations of \Cref{sec:had-oblig}.
+the $K_H=14$ Hadamard relations of \Cref{sec:had-oblig}.
 
 \subsection{The Hadamard discharge, measured}
 \label{sec:impl-discharge}

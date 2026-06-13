@@ -209,18 +209,21 @@ the linear commitment cannot absorb. We do not encode it as an AIR
 identity; instead it is declared as a \emph{column Hadamard relation}
 $\bp{w} = \bp{u}\had\bp{v}$ between committed columns and discharged by
 the dedicated argument of \Cref{sec:hadamard}. The two SHA-256 nonlinear
-functions reduce to a handful of such relations:
+functions each reduce to a \emph{single} such relation:
 \begin{align*}
-  \Ch(e,f,g) &= \underbrace{(e\AND f)}_{\bp{u}_{ef}} \oplus \underbrace{(\NOT e \AND g)}_{\bp{u}_{\bar e g}},
-  & &\text{two $\AND$ columns, combined by free $\XOR$;}\\
+  \Ch(e,f,g) &= g \oplus \underbrace{\bigl(e\AND(f\oplus g)\bigr)}_{\bp{u}_{\mathrm{ch}}},
+  & &\text{one $\AND$ column, combined by free $\XOR$;}\\
   \Maj(a,b,c) &= \bigl((a\oplus c)\AND(b\oplus c)\bigr)\oplus c,
   & &\text{one $\AND$ column (using $\NOT$, $\oplus$ free).}
 \end{align*}
-The $\Maj$ rewrite uses the identity $(x\oplus z)(y\oplus z) =
-\Maj(x,y,z)\oplus z$ to spend a single Hadamard instead of three. Thus
-each round needs three Hadamard product columns ($\bp{u}_{ef}$,
-$\bp{u}_{\bar e g}$, and the $\Maj$ product), the rest of $\Ch$ and $\Maj$
-being free $\XOR$/$\NOT$.
+Both rewrites spend a single Hadamard product where the textbook form
+would spend more. The $\Ch$ identity $\Ch(e,f,g) = g \oplus
+\bigl(e\AND(f\oplus g)\bigr)$ (verified by $g \oplus e(f\oplus g) =
+(e\AND f)\oplus(\NOT e\AND g)$, the Binius64 form) replaces the two-$\AND$
+decomposition $(e\AND f)\oplus(\NOT e\AND g)$ with one product; the $\Maj$
+rewrite uses $(x\oplus z)(y\oplus z) = \Maj(x,y,z)\oplus z$. Thus each
+round needs only two Hadamard product columns ($\bp{u}_{\mathrm{ch}}$ and
+the $\Maj$ product), the rest of $\Ch$ and $\Maj$ being free $\XOR$/$\NOT$.
 
 \begin{remark}[Hadamard descends to $\Fshift$, not $\Frot$]
 \label{rem:had-descend}
@@ -254,7 +257,8 @@ column $\col{W}$.
   \item \emph{Primary witness} (committed): the state columns
     $\col{A},\col{E},\col{W}$; the mixing outputs
     $\widehat{\Sigma_0},\widehat{\Sigma_1},\widehat{\sigma_0},\widehat{\sigma_1}$;
-    the three $\AND$ product columns; the round intermediates $T_1,T_2$;
+    the two $\AND$ product columns ($\bp{u}_{\mathrm{ch}}$ for $\Ch$ and the
+    $\Maj$ product); the round intermediates $T_1,T_2$;
     and the intermediate-sum columns of the chained additions.
   \item \emph{Virtual} (reconstructed): the $\SHR$ columns inside
     $\sigma_0,\sigma_1$ and the per-step compensator extractions, declared
@@ -280,7 +284,7 @@ Families (a) and (d) are linear ideal-membership constraints; the bit-$0$
 parts of (b) are linear; only the Hadamard parts of (b) and all of (c)
 are nonlinear. Collecting them, the nonlinearity of an entire SHA-256
 compression round is a fixed, small number of column Hadamard products:
-the carry Hadamards of the adds plus the three $\AND$ products. In the
+the carry Hadamards of the adds plus the two $\AND$ products. In the
 deployed layout these total a handful of relations per round, all of the
 single form $\bp{u}\had\bp{v}=\bp{w}$, which is exactly what
 \Cref{sec:hadamard} discharges in one batched argument.

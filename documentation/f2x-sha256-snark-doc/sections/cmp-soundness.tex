@@ -1,0 +1,46 @@
+\section{The soundness asymmetry}
+\label{sec:cmp-soundness}
+
+A fair comparison must record that the two systems are not at the same
+soundness status. \binius{} is fully sound at its $96$-bit target. \zinc{}
+is sound for the $\AND$ relations and the entire linear part, but its
+modular-addition carries are presently \emph{trusted} --- the one
+documented gap, ``Issue-1.''
+
+\paragraph{What is and is not bound.} \zinc{} discharges all Hadamard
+relations by the oblong zerocheck, then binds the discharge's operand
+evaluations to the commitment by a $\psiz$ projection. This binding
+reaches operands that decompose into row-shift pair-evaluations of
+committed columns --- which the $\Ch$/$\Maj$ ($\AND$) operands do, so they
+are bound and unconditionally sound. The Binius adder carry operands do
+not: the carry word involves a committed carry-out bit and an intra-word
+$\SHR$, which the bit-axis projection $\psiz$ removes, so they do not
+reduce to row-shift pair-evals of primary columns. Their $\psiz$ parents
+are therefore supplied trusted (honest-prover-supplied) and folded
+directly into the tie. Concretely, $12$ of the $14$ deployed Hadamards
+(the modular-add carries) are honest-prover-only at the AIR layer;
+end-to-end soundness holds unconditionally for the $\AND$ and linear
+parts but only ``assuming honest adder parents'' for the additions.
+
+\paragraph{Closing it: the grand-product lookup adder.} The recommended
+fix replaces the $12$ carry Hadamards with one multiset-membership lookup
+against a public addition table. It is \emph{sound by construction} (a
+prover cannot fake a lookup), so it closes Issue-1 for free while also
+removing the $\times\wbit$ bit-slice discharge cost for additions. A
+characteristic-two subtlety is essential here: the lookup must use a
+\emph{multiplicative} grand product $\prod(\alpha - a_i) = \prod(\alpha -
+t)^{m_t}$, not additive log-derivative (LogUp). Over a field of
+characteristic two the additive form $\sum_i 1/(\alpha - a_i)$ is
+\emph{unsound} --- even multiplicities cancel, since $1/(\alpha-a) +
+1/(\alpha-a) = 0$ --- so a cheater could use an off-table value an even
+number of times for free. The multiplicative product has no such
+cancellation and is sound over $\mathrm{GF}(2^{128})$.
+
+\paragraph{Bearing on the comparison.} Because closing Issue-1 costs
+\zinc{} prover time it has not yet paid, the current prover tie includes a
+small soundness discount in \zinc{}'s favour (it proves slightly less,
+unconditionally). Whether the discount survives a fully sound comparison
+turns on whether the lookup adder is roughly prover-neutral --- the open
+question flagged in \Cref{sec:ana-prover}. \binius{} carries no such debt:
+it is faster \emph{and} fully sound today, and any ``who is ahead on the
+prover'' claim must fold this in.

@@ -1,0 +1,71 @@
+\section{Cross-pollination and outlook}
+\label{sec:cmp-outlook}
+
+The two systems' gaps are not fundamental to characteristic two; each is
+the price of a design choice the other made differently, and each has a
+known lever.
+
+\paragraph{Levers for \zinc{}.}
+\begin{itemize}
+  \item \emph{Proof size $\to$ WHIR.} The flat Brakedown proof is the
+  cost of the linear-time encoder. A WHIR-style recursive proximity test
+  \cite{whir} over the same code would make the proof $\polylog$,
+  closing the structural proof-size gap independently of everything else.
+  As a bonus it decouples proof size from the code rate, which would let
+  \zinc{} raise the rate for a cheaper commit without paying in proof.
+  \item \emph{Soundness $\to$ lookup adder.} The grand-product lookup
+  adder (\Cref{sec:cmp-soundness}) closes Issue-1 and simultaneously removes
+  the $12$ adder-carry Hadamards from the discharge --- one change that
+  fixes soundness and trims the prover.
+  \item \emph{Residual word-level discharge.} The big word-level win (the
+  bit-axis univariate skip) is already in the oblong discharge; the
+  residual is a row-axis eq-split worth $\sim$$5$--$8\%$ of the prover. It
+  is protocol-visible (a fresh soundness argument), so research-grade, not
+  a drop-in.
+\end{itemize}
+
+\paragraph{Levers for \binius{}.}
+\begin{itemize}
+  \item \emph{Verifier $\to$ holographic structure commitment.} The only
+  way to make the $O(N)$ monster sweep succinct \emph{while keeping the
+  general circuit} is a Spark/holographic commitment to the wiring
+  \cite{spartan,lasso}, giving an $O(\log N)$ verifier. (A uniform AIR
+  also does it, but only for uniform computations --- \Cref{sec:ana-air}.)
+  A rayon parallelisation of the monster sweep is a measured but
+  non-structural band-aid: it narrows the verify gap a constant factor
+  without changing the $O(N)$ asymptotic.
+  \item \emph{Prover $\to$ \zinc{}'s entry-wise shift.} Porting the free
+  $\psi$ read-off of shifts would remove the Shift reduction that is
+  $\sim$$49\%$ of \binius{}'s prover --- but doing so cleanly means
+  adopting an $\Ftwo[X]$-style cell ring, i.e. converging toward \zinc{}.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\zinc{} and \binius{} agree on the hard decision --- prove SHA-256 in
+characteristic two, refusing the prime-field witness blow-up --- and
+disagree on three orthogonal downstream choices, each of which decides
+one outcome. The uniform-AIR-versus-word-circuit choice decides the
+verifier; the flat-versus-recursive proximity choice decides the proof;
+the base-field-versus-$\mathrm{GF}(2^{128})$ reduction decides memory and
+scaling. The prover, dominated by content both share, is a tie.
+Measured on one machine: \zinc{} wins the verifier ($5.8\times$ to
+$77\times$, structural and widening) and memory ($\sim$$2\times$);
+\binius{} wins the proof ($3.8\times$ to $5.6\times$, structural and
+widening) and is fully sound where \zinc{}'s adders are trusted; the
+prover is a near-tie that tips to \zinc{} at scale.
+
+Three observations resist the usual summaries and are worth carrying.
+First, \binius{}'s linear verifier is caused by the \emph{cross-entry
+wiring}, not the shifts: the entry-wise shift is succinct in both
+systems, and the wiring is succinct only under a uniform arithmetization.
+Second, the verifier and the prover are \emph{decoupled} in this family:
+a succinct verifier costs the prover nothing to keep, and confers nothing
+on it --- so neither ``slow the verifier to speed the prover'' (in either
+system) nor ``an AIR makes \binius{}'s prover faster'' holds. Third, the
+levers each system needs to close its gap point toward the other:
+\zinc{}'s proof wants FRI-style recursion, and \binius{}'s prover wants
+\zinc{}'s free shift --- the convergent endpoint is a binary-field STARK
+with an $\Ftwo[X]$ cell ring, a uniform AIR, a base-field discharge, a
+sound lookup adder, and a recursive proximity test.

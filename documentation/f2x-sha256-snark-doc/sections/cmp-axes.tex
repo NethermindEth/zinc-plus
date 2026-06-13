@@ -1,0 +1,107 @@
+\section{Three orthogonal design axes}
+\label{sec:axes}
+
+The cleanest way to read the comparison is that each system makes an
+independent choice on three axes, and each axis decides exactly one of
+the outcomes a user observes. \Cref{tab:axes} is the whole comparison in
+one table; the rest of the note justifies it.
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}lXXl@{}}
+\toprule
+\textbf{Axis} & \textbf{\binius{}} & \textbf{\zinc{}} & \textbf{Decides} \\
+\midrule
+Arithmetization &
+  unrolled word \emph{circuit} (arbitrary wiring) &
+  uniform \emph{AIR} over $\Ftwo[X]$ (structured wiring) &
+  \textbf{verifier} \\
+Commitment / proximity &
+  Reed--Solomon $+$ recursive FRI/BaseFold &
+  linear $\Ftwo$-RAA $+$ flat Brakedown &
+  \textbf{proof size} \\
+Reduction field &
+  sumcheck tensors in $\mathrm{GF}(2^{128})$ &
+  discharge kept in $\Ftwo/\mathrm{GF}(2^8)$ &
+  \textbf{memory / large $N$} \\
+\bottomrule
+\end{tabularx}
+\caption{The three design axes. Each system picks a different point on
+each axis, and each axis decides one headline outcome. The prover is a
+near-tie because it is dominated by content both systems share (the
+$\AND$ discharge and the commitment encode), not by any single axis.}
+\label{tab:axes}
+\end{table}
+
+\subsection{Arithmetization decides the verifier}
+\label{sec:axis-arith}
+
+A verifier is succinct exactly when the constraint system's structure ---
+its ``wiring,'' the map from each constraint to the witness positions it
+reads --- is \emph{succinctly evaluable}: computable at a random point in
+$\polylog(N)$ without a commitment. This is a property of the
+arithmetization, not the commitment.
+
+\begin{itemize}
+  \item A \emph{uniform AIR} has structured wiring: the same transition
+  relation at every row, with inter-row references that are fixed shifts
+  of the trace domain and intra-word references that are fixed monomials.
+  The verifier evaluates one fixed relation at a random point --- an
+  $O(\log N)$ formula --- and never reads the per-row structure.
+
+  \item A \emph{word circuit} has arbitrary wiring: each gate may draw any
+  committed word, shifted any way. There is no formula for ``which word
+  feeds gate $j$''; it is data --- the circuit description. To evaluate
+  the wiring at a random point the verifier sums over all $N$ gates, in
+  the clear. This is \binius{}'s $O(N)$ verifier
+  (\Cref{sec:shifts,sec:results} make it concrete and measured).
+\end{itemize}
+
+SHA-256 happens to be uniform (64 identical rounds plus a uniform message
+schedule), which is why \zinc{} can use an AIR and why prime-field STARKs
+do too. \binius{} pays an $O(N)$ verifier as the deliberate price of a
+\emph{general} circuit model that also handles non-uniform computations.
+We return in \Cref{sec:analysis} to whether \binius{} could take an AIR on
+the SHA path specifically, and what it would cost.
+
+\subsection{Commitment decides proof size}
+\label{sec:axis-commit}
+
+The proximity test is independent of the arithmetization. \zinc{} buys a
+\emph{linear-time} encoder (an $\Ftwo$-RAA code, no NTT) and pays for it
+with a \emph{flat} proof: a Brakedown-style test opens $t \approx 987$
+full columns, so the proof grows as $t\cdot\sqrt{N}$ with a large
+$t$-floor. \binius{} buys a \emph{small, recursive} proof (FRI folds the
+Reed--Solomon codeword in $\log N$ halvings, a few hashes per round) and
+pays for it with an NTT encoder. The proof-size axis is therefore the
+flat-versus-recursive proximity choice, and it is the gap that
+\Cref{sec:results} shows \binius{} winning, widening with $N$. The fix on
+the \zinc{} side is a WHIR-style recursive proximity test
+\cite{whir}, independent of everything else.
+
+\subsection{Reduction field decides memory and scaling}
+\label{sec:axis-field}
+
+The third axis is the field in which the nonlinearity is reduced.
+\binius{}'s BitAnd and Shift reductions build $O(N)$ tensors in
+$\mathrm{GF}(2^{128})$; together with a rate-$\tfrac12$ Reed--Solomon
+codeword, the working set spills cache super-linearly at large $N$.
+\zinc{} keeps the witness bit-packed and runs the oblong discharge in the
+base field $\Ftwo/\mathrm{GF}(2^8)$, lifting to $\mathrm{GF}(2^{128})$
+only at the $\psi$ projections --- roughly $16$--$32\times$ fewer bytes
+streamed. The consequence is memory: at the largest matched instance
+\zinc{} uses about half the footprint, and its prover scales sub-linearly
+where \binius{}'s goes super-linear on a memory-constrained host
+(\Cref{sec:results}).
+
+\subsection{Why the prover is a tie}
+
+No single axis decides the prover, because the prover is dominated by
+work both systems must do: discharge the same $\AND$ content and encode
+the witness for commitment. The word-level (one packed lane) versus
+bit-sliced ($\times\wbit$) asymmetry in how the two reach that content
+roughly cancels at the current optimisation level. The per-phase
+decomposition in \Cref{sec:results} shows this cancellation explicitly,
+and \Cref{sec:analysis} argues that at scale the cancellation tips
+slightly in \zinc{}'s favour.

@@ -14,6 +14,7 @@
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{tabularx}
+\usepackage{multirow}
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage[colorlinks=true,
@@ -32,6 +33,7 @@
 \declaretheorem[name=Proposition, sibling=theorem]{proposition}
 \declaretheorem[name=Corollary, sibling=theorem]{corollary}
 \declaretheorem[name=Claim, sibling=theorem]{claim}
+\declaretheorem[name=Observation, sibling=theorem]{observation}
 
 \theoremstyle{definition}
 \declaretheorem[name=Definition, sibling=theorem]{definition}
@@ -61,6 +63,7 @@
 \DeclareMathOperator{\img}{img}
 \DeclareMathOperator{\spanop}{span}
 \DeclareMathOperator{\Merk}{Merkle}
+\DeclareMathOperator{\polylog}{polylog}
 
 % --- Number systems --------------------------------------------------------
 \newcommand{\F}{\mathbb{F}}
@@ -69,6 +72,10 @@
 \newcommand{\Z}{\mathbb{Z}}
 \newcommand{\N}{\mathbb{N}}
 \newcommand{\bP}{\mathbb{P}}
+
+% System-name shorthands for the Binius64 comparison part.
+\newcommand{\binius}{Binius64}
+\newcommand{\zinc}{Zinc\texttt{+}}
 
 % Binary extension field K = GF(2^kappa); deployed at kappa = 128.
 \newcommand{\K}{\mathbb{K}}

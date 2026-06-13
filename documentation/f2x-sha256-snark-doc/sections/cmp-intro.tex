@@ -1,0 +1,73 @@
+\section{A comparison with Binius64}
+\label{sec:cmp}
+
+The preceding sections presented the all-$\Ftwo[X]$ argument as a
+self-contained construction. We now position it against the closest
+system in the literature, \binius{} \cite{binius64repo}, the SHA-256
+prover of the Binius line \cite{binius,fribinius}. The two are close
+cousins --- \zinc{} imports \binius{}'s per-step modular-addition carry
+identity (\Cref{sec:arith}) and its single-$\AND$ form of $\Ch$ --- and
+both work in characteristic two precisely to avoid the prime-field
+witness blow-up that bit-decomposing SHA-256 would incur. The comparison
+is instructive because the divergences are clean: a small number of
+orthogonal design choices propagate into the four numbers a user
+observes. The remainder of the paper makes those choices and their
+consequences precise, with same-machine measurements.
+
+\subsection{The comparison target}
+\label{sec:cmp-binius}
+
+\binius{} arithmetizes SHA-256 as an unrolled, non-deterministic $64$-bit
+\emph{word circuit}, in contrast to \zinc{}'s uniform AIR over the cell
+ring $\cellring$. Its committed witness is a vector of words (bit-packed);
+the constraint system has an $\AND$ constraint $A \had B = C$ and an
+integer-multiplication constraint (a no-op for SHA-256, which has no field
+multiplications). Each operand is \emph{virtual}: an exclusive-or of
+\emph{shifted} committed words,
+\[
+  A \;=\; \bigoplus_k \mathrm{shift}_{v_k,\,s_k}\!\big(\mathsf{word}_{\,i_k}\big),
+\]
+naming a committed word $i_k$, one of eight shift variants $v_k$
+(logical/arithmetic shift right, shift left, rotate right, each in
+$64$-bit and $32$-bit forms), and an amount $s_k$. Modular addition uses
+the same per-step carry identity \zinc{} imports. The prover discharges
+this system with sumcheck-based reductions over $\K=\mathrm{GF}(2^{128})$:
+a \emph{BitAnd} reduction for the products and a \emph{Shift} reduction
+that ties the virtual shifted operands back to the committed words
+(\Cref{sec:shifts}). The witness is committed under a Reed--Solomon code
+with a recursive FRI/BaseFold proximity test \cite{fri,basefold}, yielding
+a polylogarithmic proof and a polylogarithmic \emph{commitment} check.
+
+The defining property of \binius{}'s arithmetization is \emph{generality}:
+a word circuit with arbitrary operand wiring expresses any computation,
+not only SHA-256's uniform recurrence. As \Cref{sec:axes} explains, that
+generality is exactly what makes its verifier linear --- the price
+\zinc{}'s uniform AIR does not pay for SHA-256, at the cost of \zinc{}'s
+arithmetization being SHA-specific rather than a general circuit model.
+
+\subsection{What is shared, and the one structural difference}
+
+Both systems commit over a binary field and discharge the same $\AND$
+content with linear-time sumchecks; both keep the dominant rounds in a
+small field (\binius{} uses an $8$-bit subfield for its shift indicators
+and univariate skip; \zinc{} runs the oblong discharge of
+\Cref{sec:hadamard} in $\mathrm{GF}(2^8)$). The structural difference is
+the arithmetization: \binius{}'s is a \emph{non-uniform} word circuit with
+arbitrary operand wiring, while \zinc{}'s is a \emph{uniform} AIR whose
+inter-row structure is a fixed formula. \Cref{sec:axes} shows why this
+single difference decides verifier complexity and is orthogonal to the
+choices that decide proof size and memory.
+
+\begin{remark}[Measurement setup and caveats]
+\label{rem:cmp-setup}
+All figures in this part are on one Apple M4 (10-core, $4$P\,$+$\,$6$E,
+$16$\,GB), non-zero-knowledge, with the security parameters each system
+ships ($t=987$ openings for \zinc{}; $96$-bit for \binius{}). \zinc{} uses
+its Metal GPU commit path; \binius{} is CPU-only (rayon\,$+$\,SIMD), so a
+strictly pure-CPU prover comparison would differ. \binius{} proves a full
+padded preimage (length-binding in-circuit); \zinc{}'s harness proves
+chained compressions only --- slightly less work, which mildly flatters
+\zinc{}. Absolute times are thermally sensitive ($\sim$$10\%$ run-to-run
+on the prover); the ratios and the per-phase \emph{shapes} are far more
+stable, and it is those we lean on.
+\end{remark}

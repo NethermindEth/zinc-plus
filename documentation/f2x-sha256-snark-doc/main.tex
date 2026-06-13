@@ -3,7 +3,8 @@
 \input{preamble}
 
 \title{An All-$\Ftwo[X]$ SNARK for SHA-256:\\
-       Arithmetization, Binary-Field PIOP, and Bit-Sliced Commitment\\[4pt]
+       Arithmetization, Binary-Field PIOP, Bit-Sliced Commitment,\\
+       and a Comparison with Binius64\\[4pt]
        \large As realised in the Zinc\texorpdfstring{$+$}{+} reference
        codebase (\texttt{f2-clean})}
 \author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
@@ -48,7 +49,16 @@ both the evaluation claim (via $\psia$) and the Hadamard discharge
 operands (via $\psiz$) at no extra commitment cost. The construction is
 presented as an idealized design, with the deployed instantiation
 ($\wbit = 32$, $\K=\mathrm{GF}(2^{128})$, seven chained compressions)
-and its engineering choices given as remarks.
+and its engineering choices given as remarks. The final part of the paper
+positions the construction against \emph{Binius64}, the closest system in
+the literature: we organise the comparison around three orthogonal design
+axes (uniform AIR versus unrolled word circuit; linear $\Ftwo$-RAA with a
+flat Brakedown proximity test versus Reed--Solomon with recursive FRI;
+base-field versus $\mathrm{GF}(2^{128})$ reductions), each deciding one
+outcome, and report same-machine measurements: prover time is a tie, the
+$\Ftwo[X]$ verifier is $5.8$--$77\times$ faster and its memory roughly
+half, while Binius64's proof is $3.8$--$5.6\times$ smaller and it is fully
+sound where our adder carries are presently trusted.
 \end{abstract}
 
 \tableofcontents
@@ -61,5 +71,17 @@ and its engineering choices given as remarks.
 \input{sections/commitment}        % Stage 4
 \input{sections/soundness}         % Stage 4
 \input{sections/implementation}    % Stage 5
+
+% --- Comparison with Binius64 ---
+\input{sections/cmp-intro}
+\input{sections/cmp-axes}
+\input{sections/cmp-shifts}
+\input{sections/cmp-results}
+\input{sections/cmp-analysis}
+\input{sections/cmp-soundness}
+\input{sections/cmp-guidance}
+\input{sections/cmp-outlook}
+
+\input{sections/cmp-bibliography}
 
 \end{document}
