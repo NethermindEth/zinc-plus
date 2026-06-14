@@ -25,7 +25,7 @@
 //!     `S_MSG_INIT`                3 `{0,1}`-valued selectors (carried
 //!                                 as bit-polys, value 1 ↔ poly `1`)
 //!
-//! Committed witnesses (20):
+//! Committed witnesses (18):
 //!   - state (3):                  `W_A`, `W_E`, `W_W`
 //!   - rotation/shift outputs (4): `W_SIGMA0`, `W_SIGMA1`, `W_SIG0`,
 //!                                 `W_SIG1` (pinned by C1–C4)
@@ -36,19 +36,24 @@
 //!                                 row-shift + per-cell bit-op that
 //!                                 isn't shipped (cf. doc §3.3 and
 //!                                 `f2x-sha-todo.md`)
-//!   - AND-result (3):             `W_UEF`, `W_UNEG_E_G`, `W_MAJ`
+//!   - AND-result (2):             `W_UCH`, `W_MAJ`
 //!                                 (pinned by external Hadamard checks,
 //!                                 not by in-circuit constraints —
-//!                                 mechanism deferred per doc §3.4)
+//!                                 mechanism deferred per doc §3.4).
+//!                                 `W_UCH = e ∧ (f⊕g)` is the single
+//!                                 Ch AND product (the 2-AND Binius Ch
+//!                                 identity `Ch = g ⊕ (e ∧ (f⊕g))`);
+//!                                 `Ch` itself enters the T_1 chain as
+//!                                 the free XOR `g ⊕ W_UCH`.
 //!   - round intermediates (2):    `W_T1`, `W_T2`
-//!   - chained-Binius intermediate-sums (6):
+//!   - chained-Binius intermediate-sums (5):
 //!                                 `W_W_S1`, `W_W_S2` (W chain)
-//!                                 `W_T1_S1..4` (T_1 chain)
+//!                                 `W_T1_S1..3` (T_1 chain)
 //!                                 — per-row partial sums materialised
 //!                                 per doc §3.7 Definition 1.
 //!
-//! Bit-op virtual columns (12, declared in `signature()`):
-//!   `SHR^j(PA_C)` for `j ∈ {1..12}`, used to extract bit `j` of
+//! Bit-op virtual columns (11, declared in `signature()`):
+//!   `SHR^j(PA_C)` for `j ∈ {1..11}`, used to extract bit `j` of
 //!   `PA_C` as the per-step compensator `κ_j` in the LSB check.
 //!   `κ_0` is bit 0 of `PA_C` itself (no shift needed, no spec).
 //!
@@ -74,8 +79,8 @@
 //!     message-seed `W_W` to `PA_M`.
 //!
 //! Soundness gap (carried over from the prior CSA-flattened impl): the
-//! Hadamard halves of the 13 modular-add `BiniusAdd`s and the 3 AND
-//! relations (C12–C14) are NOT enforced at the AIR layer. They would
+//! Hadamard halves of the 12 modular-add `BiniusAdd`s and the 2 AND
+//! relations (C12–C13) are NOT enforced at the AIR layer. They would
 //! be discharged by a separate Hadamard-product check — see doc §3.4.
 //! The AIR-level LSB checks pin only bit 0 of each addition; bits
 //! 1..31 are honest-prover-only.
@@ -235,47 +240,46 @@ pub mod cols {
     // shift-then-bit-op, not bit-op-then-shift.
     pub const W_SHR3_W: usize = NUM_BIN_PUB + 7;
     pub const W_SHR10_W: usize = NUM_BIN_PUB + 8;
-    // AND results (3) — pinned by external Hadamard checks (deferred)
-    pub const W_UEF: usize = NUM_BIN_PUB + 9;
-    pub const W_UNEG_E_G: usize = NUM_BIN_PUB + 10;
-    pub const W_MAJ: usize = NUM_BIN_PUB + 11;
+    // AND results (2) — pinned by external Hadamard checks (deferred).
+    // `W_UCH = e ∧ (f⊕g)` is the single Ch AND product (2-AND Binius
+    // Ch identity); `W_MAJ` is the Maj AND product.
+    pub const W_UCH: usize = NUM_BIN_PUB + 9;
+    pub const W_MAJ: usize = NUM_BIN_PUB + 10;
     // Round intermediates (2)
-    pub const W_T1: usize = NUM_BIN_PUB + 12;
-    pub const W_T2: usize = NUM_BIN_PUB + 13;
-    // Chained-Binius intermediate-sum columns (6) — per doc §3.7
+    pub const W_T1: usize = NUM_BIN_PUB + 11;
+    pub const W_T2: usize = NUM_BIN_PUB + 12;
+    // Chained-Binius intermediate-sum columns (5) — per doc §3.7
     // Definition 1. Materialised at the chain anchor row k.
-    pub const W_W_S1: usize = NUM_BIN_PUB + 14; // s_2 of W chain (after 1 add)
-    pub const W_W_S2: usize = NUM_BIN_PUB + 15; // s_3 of W chain (after 2 adds)
-    pub const W_T1_S1: usize = NUM_BIN_PUB + 16; // s_2 of T_1 chain
-    pub const W_T1_S2: usize = NUM_BIN_PUB + 17; // s_3 of T_1 chain
-    pub const W_T1_S3: usize = NUM_BIN_PUB + 18; // s_4 of T_1 chain
-    pub const W_T1_S4: usize = NUM_BIN_PUB + 19; // s_5 of T_1 chain
+    pub const W_W_S1: usize = NUM_BIN_PUB + 13; // s_2 of W chain (after 1 add)
+    pub const W_W_S2: usize = NUM_BIN_PUB + 14; // s_3 of W chain (after 2 adds)
+    pub const W_T1_S1: usize = NUM_BIN_PUB + 15; // s_2 of T_1 chain
+    pub const W_T1_S2: usize = NUM_BIN_PUB + 16; // s_3 of T_1 chain
+    pub const W_T1_S3: usize = NUM_BIN_PUB + 17; // s_4 of T_1 chain
 
-    pub const NUM_BIN_WIT: usize = 20;
-    pub const NUM_BIN: usize = NUM_BIN_PUB + NUM_BIN_WIT; // 28
+    pub const NUM_BIN_WIT: usize = 18;
+    pub const NUM_BIN: usize = NUM_BIN_PUB + NUM_BIN_WIT; // 26
 
     // === PA_C bit-allocation (per doc §4.2 binius-packing remark) ===
     //
-    // Each binary step `k ∈ [0, 13)` claims bit `KAPPA_BIT_*` of
+    // Each binary step `k ∈ [0, 12)` claims bit `KAPPA_BIT_*` of
     // `PA_C[t]` as its LSB compensator `κ_k`. The constraint
     // expression accesses bit `j` of `PA_C` via the bit-op virtual
     // `SHR^j(PA_C)` (whose bit 0 = bit j of `PA_C`).
     pub const KAPPA_BIT_W_1: u32 = 0;     // W chain step 1
     pub const KAPPA_BIT_W_2: u32 = 1;     // W chain step 2
     pub const KAPPA_BIT_W_3: u32 = 2;     // W chain step 3
-    pub const KAPPA_BIT_T1_1: u32 = 3;    // T_1 chain step 1
-    pub const KAPPA_BIT_T1_2: u32 = 4;    // T_1 chain step 2
-    pub const KAPPA_BIT_T1_3: u32 = 5;    // T_1 chain step 3
-    pub const KAPPA_BIT_T1_4: u32 = 6;    // T_1 chain step 4
-    pub const KAPPA_BIT_T1_5: u32 = 7;    // T_1 chain step 5
-    pub const KAPPA_BIT_T2: u32 = 8;      // T_2 (single binary step)
-    pub const KAPPA_BIT_A: u32 = 9;       // a' (single binary step)
-    pub const KAPPA_BIT_E: u32 = 10;      // e' (single binary step)
-    pub const KAPPA_BIT_FF_A: u32 = 11;   // feed-forward-a
-    pub const KAPPA_BIT_FF_E: u32 = 12;   // feed-forward-e
+    pub const KAPPA_BIT_T1_1: u32 = 3;    // T_1 chain step 1 (h + Σ_1)
+    pub const KAPPA_BIT_T1_2: u32 = 4;    // T_1 chain step 2 (+ Ch)
+    pub const KAPPA_BIT_T1_3: u32 = 5;    // T_1 chain step 3 (+ K)
+    pub const KAPPA_BIT_T1_4: u32 = 6;    // T_1 chain step 4 (+ W)
+    pub const KAPPA_BIT_T2: u32 = 7;      // T_2 (single binary step)
+    pub const KAPPA_BIT_A: u32 = 8;       // a' (single binary step)
+    pub const KAPPA_BIT_E: u32 = 9;       // e' (single binary step)
+    pub const KAPPA_BIT_FF_A: u32 = 10;   // feed-forward-a
+    pub const KAPPA_BIT_FF_E: u32 = 11;   // feed-forward-e
 
     /// Total number of per-step compensator bits packed into `PA_C`.
-    pub const NUM_KAPPA: usize = 13;
+    pub const NUM_KAPPA: usize = 12;
 
     // === Chained-compression layout ===
     pub const ROWS_PER_COMP: usize = 68;
@@ -337,7 +341,9 @@ where
             ShiftSpec::new(cols::PA_K, 3),
             // W_A: shift 4 for a[t+1] in C8, C10.
             ShiftSpec::new(cols::W_A, 4),
-            // W_E: shift 4 for e[t+1] in C9, C11.
+            // W_E: shift 1 for g = e[t−2] in the C6 Ch step
+            // (Ch = g ⊕ u_ch); shift 4 for e[t+1] in C9, C11.
+            ShiftSpec::new(cols::W_E, 1),
             ShiftSpec::new(cols::W_E, 4),
             // W_W: 1, 3, 9, 14, 16 across C3, C4, C5, C6.
             ShiftSpec::new(cols::W_W, 1),
@@ -357,23 +363,23 @@ where
             ShiftSpec::new(cols::W_SHR3_W, 1),
             // W_SHR10_W: shift 14 for SHR^10(W[t-2]) on C4 RHS.
             ShiftSpec::new(cols::W_SHR10_W, 14),
-            // W_UEF, W_UNEG_E_G: shift 3 for Ch[t] = u_ef + u_neg in C6.
-            ShiftSpec::new(cols::W_UEF, 3),
-            ShiftSpec::new(cols::W_UNEG_E_G, 3),
+            // W_UCH: shift 3 for u_ch[t] in the C6 Ch step
+            // (Ch[t] = g ⊕ u_ch, with u_ch = e[t] & (e[t−1]⊕e[t−2])).
+            ShiftSpec::new(cols::W_UCH, 3),
             // W_T1: shift 3 for T_1[t] in C8, C9.
             ShiftSpec::new(cols::W_T1, 3),
             // W_T2: shift 3 for T_2[t] in C8.
             ShiftSpec::new(cols::W_T2, 3),
         ];
 
-        // Bit-op virtuals: `SHR^j(PA_C)` for j ∈ {1..12}, used to
+        // Bit-op virtuals: `SHR^j(PA_C)` for j ∈ {1..11}, used to
         // extract bit `j` of `PA_C` as the per-step κ compensator in
         // the LSB checks (C5–C11). `UairSignature::new` sorts by
         // (source_col, op_kind, c). PA_C = 4 < every witness col, so
-        // these bit-ops sort to `down.bit_op[0..12]` in shift-amount
+        // these bit-ops sort to `down.bit_op[0..11]` in shift-amount
         // ascending order (since they all share source PA_C and op
         // kind ShiftR).
-        let bit_op_specs: Vec<BitOpSpec> = (1u32..=12u32)
+        let bit_op_specs: Vec<BitOpSpec> = (1u32..=11u32)
             .map(|c| BitOpSpec::new(cols::PA_C, BitOp::shift_r(c)))
             .collect();
 
@@ -408,10 +414,11 @@ where
         let w_w = &bp[cols::W_W];
         let w_sigma0 = &bp[cols::W_SIGMA0];
         let w_sigma1 = &bp[cols::W_SIGMA1];
-        // W_UEF, W_UNEG_E_G are pinned by external Hadamards C12/C13
-        // (deferred); their up-row values don't enter any AIR-level
-        // constraint. The down-row shifted versions (`down_w_uef_3`,
-        // `down_w_uneg_e_g_3`) DO enter C6 as inputs.
+        // W_UCH (the single Ch AND product) is pinned by external
+        // Hadamard C12 (deferred); its up-row value doesn't enter any
+        // AIR-level constraint. The down-row shifted version
+        // (`down_w_uch_3`) DOES enter C6 as the Ch input, XORed with
+        // g = e[t−2] = `down_w_e_1`.
         let w_maj = &bp[cols::W_MAJ];
         let w_t2 = &bp[cols::W_T2];
         let w_w_s1 = &bp[cols::W_W_S1];
@@ -419,41 +426,40 @@ where
         let w_t1_s1 = &bp[cols::W_T1_S1];
         let w_t1_s2 = &bp[cols::W_T1_S2];
         let w_t1_s3 = &bp[cols::W_T1_S3];
-        let w_t1_s4 = &bp[cols::W_T1_S4];
 
         // Down-row shifts. Slot order = `signature()`'s ShiftSpec list
         // sorted by (source_col, shift_amount). Source-col order:
-        // PA_K(2), W_A(8), W_E(9), W_W(10), W_SIGMA1(12), W_SIG0(13),
-        // W_SIG1(14), W_SHR3_W(15), W_SHR10_W(16), W_UEF(17),
-        // W_UNEG_E_G(18), W_T1(19), W_T2(20).
+        // PA_K(2), W_A(8), W_E(9: shifts 1,4), W_W(10), W_SIGMA1(12),
+        // W_SIG0(13), W_SIG1(14), W_SHR3_W(15), W_SHR10_W(16),
+        // W_UCH(17), W_T1(19), W_T2(20).
         let down_pa_k_3 = &down.binary_poly[0];
         let down_w_a_4 = &down.binary_poly[1];
-        let down_w_e_4 = &down.binary_poly[2];
-        let down_w_w_1 = &down.binary_poly[3];
-        let down_w_w_3 = &down.binary_poly[4];
-        let down_w_w_9 = &down.binary_poly[5];
-        let down_w_w_14 = &down.binary_poly[6];
-        let down_w_w_16 = &down.binary_poly[7];
-        let down_w_sigma1_3 = &down.binary_poly[8];
-        let down_w_sig0_1 = &down.binary_poly[9];
-        let down_w_sig1_14 = &down.binary_poly[10];
-        let down_w_shr3_w_1 = &down.binary_poly[11];
-        let down_w_shr10_w_14 = &down.binary_poly[12];
-        let down_w_uef_3 = &down.binary_poly[13];
-        let down_w_uneg_e_g_3 = &down.binary_poly[14];
+        let down_w_e_1 = &down.binary_poly[2]; // g = e[t−2] for the Ch step
+        let down_w_e_4 = &down.binary_poly[3];
+        let down_w_w_1 = &down.binary_poly[4];
+        let down_w_w_3 = &down.binary_poly[5];
+        let down_w_w_9 = &down.binary_poly[6];
+        let down_w_w_14 = &down.binary_poly[7];
+        let down_w_w_16 = &down.binary_poly[8];
+        let down_w_sigma1_3 = &down.binary_poly[9];
+        let down_w_sig0_1 = &down.binary_poly[10];
+        let down_w_sig1_14 = &down.binary_poly[11];
+        let down_w_shr3_w_1 = &down.binary_poly[12];
+        let down_w_shr10_w_14 = &down.binary_poly[13];
+        let down_w_uch_3 = &down.binary_poly[14]; // u_ch[t] for the Ch step
         let down_w_t1_3 = &down.binary_poly[15];
         let down_w_t2_3 = &down.binary_poly[16];
 
-        // Bit-op virtuals: `SHR^j(PA_C)` for j ∈ {1..12}. Sort order
+        // Bit-op virtuals: `SHR^j(PA_C)` for j ∈ {1..11}. Sort order
         // (source_col=PA_C, op_kind=ShiftR, c ascending) ⇒
         // `down.bit_op[j-1] = SHR^j(PA_C)`. Bit 0 of `SHR^j(PA_C)` is
         // bit `j` of `PA_C` — the per-step κ_j compensator. For j=0
         // we use `pa_c` directly (no shift needed).
         let _ = &up.bit_op; // up.bit_op is always empty
         let kappa = |j: u32| -> &B::Expr {
-            // j ∈ {1..12} → down.bit_op[j-1]; j=0 unused (use pa_c
+            // j ∈ {1..11} → down.bit_op[j-1]; j=0 unused (use pa_c
             // directly at the call site).
-            debug_assert!((1..=12).contains(&j), "kappa(j): j out of range");
+            debug_assert!((1..=11).contains(&j), "kappa(j): j out of range");
             &down.bit_op[(j as usize) - 1]
         };
 
@@ -532,33 +538,30 @@ where
             &ideal_lsb,
         );
 
-        // C6 — T_1 chain (6-input, anchor t = t' − 3, 5 binary steps).
+        // C6 — T_1 chain (5-input, anchor t = t' − 3, 4 binary steps).
         // Inputs in chained order: h[t'] (= e[t] via shift-register),
-        // Σ_1(e[t]), u_ef[t'], u_{¬e,g}[t'], K[t'], W[t'].
+        // Σ_1(e[t]), Ch[t'], K[t'], W[t']. The 2-AND Ch identity makes
+        // Ch[t'] = g ⊕ u_ch a single free-XOR addend, with g = e[t'−2]
+        // = W_E^{↓1} and u_ch = W_UCH^{↓3}.
         //
         // C6a: W_{T_1}^{(1)} ≡ W_E + W_SIGMA1^{↓3}.
         b.assert_in_ideal(
             w_t1_s1.clone() + w_e + down_w_sigma1_3 + kappa(cols::KAPPA_BIT_T1_1),
             &ideal_lsb,
         );
-        // C6b: W_{T_1}^{(2)} ≡ W_{T_1}^{(1)} + W_UEF^{↓3}.
+        // C6b: W_{T_1}^{(2)} ≡ W_{T_1}^{(1)} + Ch, Ch = W_UCH^{↓3} ⊕ W_E^{↓1}.
         b.assert_in_ideal(
-            w_t1_s2.clone() + w_t1_s1 + down_w_uef_3 + kappa(cols::KAPPA_BIT_T1_2),
+            w_t1_s2.clone() + w_t1_s1 + down_w_uch_3 + down_w_e_1 + kappa(cols::KAPPA_BIT_T1_2),
             &ideal_lsb,
         );
-        // C6c: W_{T_1}^{(3)} ≡ W_{T_1}^{(2)} + W_UNEG_E_G^{↓3}.
+        // C6c: W_{T_1}^{(3)} ≡ W_{T_1}^{(2)} + PA_K^{↓3}.
         b.assert_in_ideal(
-            w_t1_s3.clone() + w_t1_s2 + down_w_uneg_e_g_3 + kappa(cols::KAPPA_BIT_T1_3),
+            w_t1_s3.clone() + w_t1_s2 + down_pa_k_3 + kappa(cols::KAPPA_BIT_T1_3),
             &ideal_lsb,
         );
-        // C6d: W_{T_1}^{(4)} ≡ W_{T_1}^{(3)} + PA_K^{↓3}.
+        // C6d: W_T1^{↓3} ≡ W_{T_1}^{(3)} + W_W^{↓3}.
         b.assert_in_ideal(
-            w_t1_s4.clone() + w_t1_s3 + down_pa_k_3 + kappa(cols::KAPPA_BIT_T1_4),
-            &ideal_lsb,
-        );
-        // C6e: W_T1^{↓3} ≡ W_{T_1}^{(4)} + W_W^{↓3}.
-        b.assert_in_ideal(
-            down_w_t1_3.clone() + w_t1_s4 + down_w_w_3 + kappa(cols::KAPPA_BIT_T1_5),
+            down_w_t1_3.clone() + w_t1_s3 + down_w_w_3 + kappa(cols::KAPPA_BIT_T1_4),
             &ideal_lsb,
         );
 
@@ -758,7 +761,6 @@ where
         let mut w_t1_s1_vals = vec![0u32; n]; // s_2 of T_1 chain
         let mut w_t1_s2_vals = vec![0u32; n]; // s_3 of T_1 chain
         let mut w_t1_s3_vals = vec![0u32; n]; // s_4 of T_1 chain
-        let mut w_t1_s4_vals = vec![0u32; n]; // s_5 of T_1 chain
 
         // T_1[t'], T_2[t'] at trace anchor row k = t' − 3.
         let mut t1_vals = vec![0u32; n];
@@ -844,30 +846,26 @@ where
                 let ch_t = ch(e_t, e_t1, e_t2);
                 let maj_t = maj(a_t, a_t1, a_t2);
 
-                // T_1 = h + Σ_1(e) + Ch + K + W (6 inputs).
-                // Ch decomposes as u_ef + u_neg_e_g (disjoint bit support).
+                // T_1 = h + Σ_1(e) + Ch + K + W (5 inputs).
+                // 2-AND Ch identity: Ch = g ⊕ u_ch, with
+                // u_ch = e ∧ (f⊕g) and g = e[t−2] (= e_t2).
                 let h_val = e_vals[k]; // h = e[t-3]
-                let u_ef = e_t & e_t1;
-                let u_neg = (!e_t) & e_t2;
-                debug_assert_eq!(u_ef ^ u_neg, ch_t);
+                // 2-AND Ch identity sanity: g ⊕ (e ∧ (f⊕g)) == Ch.
+                debug_assert_eq!(e_t2 ^ (e_t & (e_t1 ^ e_t2)), ch_t);
 
                 // Chained-Binius intermediates for T_1. Inputs in
-                // chain order: h, Σ_1(e), u_ef, u_neg, K, W. Per
-                // doc §3.7:
+                // chain order: h, Σ_1(e), Ch, K, W. Per doc §3.7:
                 //   s_2 = h + Σ_1(e)
-                //   s_3 = s_2 + u_ef
-                //   s_4 = s_3 + u_neg
-                //   s_5 = s_4 + K
-                //   t1  = s_5 + W
+                //   s_3 = s_2 + Ch
+                //   s_4 = s_3 + K
+                //   t1  = s_4 + W
                 let s2 = h_val.wrapping_add(sig1_e);
-                let s3 = s2.wrapping_add(u_ef);
-                let s4 = s3.wrapping_add(u_neg);
-                let s5 = s4.wrapping_add(k_vals[t]);
-                let t1 = s5.wrapping_add(w_vals[t]);
+                let s3 = s2.wrapping_add(ch_t);
+                let s4 = s3.wrapping_add(k_vals[t]);
+                let t1 = s4.wrapping_add(w_vals[t]);
                 let t1_sum: u64 = (h_val as u64)
                     + (sig1_e as u64)
-                    + (u_ef as u64)
-                    + (u_neg as u64)
+                    + (ch_t as u64)
                     + (k_vals[t] as u64)
                     + (w_vals[t] as u64);
                 debug_assert_eq!(t1 as u64, t1_sum & 0xFFFF_FFFF);
@@ -881,7 +879,6 @@ where
                 w_t1_s1_vals[k] = s2;
                 w_t1_s2_vals[k] = s3;
                 w_t1_s3_vals[k] = s4;
-                w_t1_s4_vals[k] = s5;
 
                 // T_2 = Σ_0(a) + Maj (single binary step, row-local at
                 // SHA round t = k+3).
@@ -960,11 +957,10 @@ where
         // Per-row Ch / Maj operands. We populate on every row (not
         // just SHA-active ones) to keep the trace honest; off-active
         // rows don't participate in any constraint.
-        let u_ef_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
-            .map(|t| if t >= 1 { e_vals[t] & e_vals[t - 1] } else { 0 })
-            .collect();
-        let u_neg_e_g_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
-            .map(|t| if t >= 2 { (!e_vals[t]) & e_vals[t - 2] } else { 0 })
+        // Single Ch AND product (2-AND Binius Ch identity):
+        // u_ch[t] = e[t] & (e[t−1] ⊕ e[t−2]); Ch = e[t−2] ⊕ u_ch.
+        let u_ch_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
+            .map(|t| if t >= 2 { e_vals[t] & (e_vals[t - 1] ^ e_vals[t - 2]) } else { 0 })
             .collect();
         let maj_vals: Vec<u32> = cfg_into_iter!(0..n, PAR_MIN_LEN)
             .map(|t| {
@@ -997,18 +993,20 @@ where
                     << cols::KAPPA_BIT_W_2;
                 v |= lsb(load(&w_vals, k + 16) ^ load(&w_w_s2_vals, k) ^ load(&sig1_vals, k + 14))
                     << cols::KAPPA_BIT_W_3;
-                // C6 — T_1 chain (5 steps).
+                // C6 — T_1 chain (4 steps). The Ch step's addend is the
+                // free XOR Ch = u_ch[k+3] ⊕ e[k+1] (g = e[t−2] = e[k+1]).
                 v |= lsb(load(&w_t1_s1_vals, k) ^ load(&e_vals, k) ^ load(&sigma1_vals, k + 3))
                     << cols::KAPPA_BIT_T1_1;
-                v |= lsb(load(&w_t1_s2_vals, k) ^ load(&w_t1_s1_vals, k) ^ load(&u_ef_vals, k + 3))
-                    << cols::KAPPA_BIT_T1_2;
                 v |= lsb(
-                    load(&w_t1_s3_vals, k) ^ load(&w_t1_s2_vals, k) ^ load(&u_neg_e_g_vals, k + 3),
-                ) << cols::KAPPA_BIT_T1_3;
-                v |= lsb(load(&w_t1_s4_vals, k) ^ load(&w_t1_s3_vals, k) ^ load(&k_vals, k + 3))
+                    load(&w_t1_s2_vals, k)
+                        ^ load(&w_t1_s1_vals, k)
+                        ^ load(&u_ch_vals, k + 3)
+                        ^ load(&e_vals, k + 1),
+                ) << cols::KAPPA_BIT_T1_2;
+                v |= lsb(load(&w_t1_s3_vals, k) ^ load(&w_t1_s2_vals, k) ^ load(&k_vals, k + 3))
+                    << cols::KAPPA_BIT_T1_3;
+                v |= lsb(load(&t1_vals, k + 3) ^ load(&w_t1_s3_vals, k) ^ load(&w_vals, k + 3))
                     << cols::KAPPA_BIT_T1_4;
-                v |= lsb(load(&t1_vals, k + 3) ^ load(&w_t1_s4_vals, k) ^ load(&w_vals, k + 3))
-                    << cols::KAPPA_BIT_T1_5;
                 // C7 — T_2 (row-local).
                 v |= lsb(load(&t2_vals, k) ^ load(&sigma0_vals, k) ^ load(&maj_vals, k))
                     << cols::KAPPA_BIT_T2;
@@ -1079,8 +1077,7 @@ where
             to_mle(to_bits(&sig1_vals)),     // W_SIG1
             to_mle(to_bits(&shr3_w_vals)),   // W_SHR3_W
             to_mle(to_bits(&shr10_w_vals)),  // W_SHR10_W
-            to_mle(to_bits(&u_ef_vals)),     // W_UEF
-            to_mle(to_bits(&u_neg_e_g_vals)),// W_UNEG_E_G
+            to_mle(to_bits(&u_ch_vals)),     // W_UCH
             to_mle(to_bits(&maj_vals)),      // W_MAJ
             to_mle(to_bits(&t1_vals)),       // W_T1
             to_mle(to_bits(&t2_vals)),       // W_T2
@@ -1089,7 +1086,6 @@ where
             to_mle(to_bits(&w_t1_s1_vals)),  // W_T1_S1
             to_mle(to_bits(&w_t1_s2_vals)),  // W_T1_S2
             to_mle(to_bits(&w_t1_s3_vals)),  // W_T1_S3
-            to_mle(to_bits(&w_t1_s4_vals)),  // W_T1_S4
         ];
 
         debug_assert_eq!(binary_poly.len(), cols::NUM_BIN);
@@ -1162,7 +1158,7 @@ mod tests {
     fn sha_f2_uair_signature_shape() {
         type U = Sha256F2Uair<Int<4>>;
         let sig = U::signature();
-        // 41 total bin-poly cols (14 public + 27 witness), 0 arb-poly,
+        // 26 total bin-poly cols (8 public + 18 witness), 0 arb-poly,
         // 0 int (the F_2 prove path requires an empty int lane).
         assert_eq!(sig.witness_cols().num_binary_poly_cols(), cols::NUM_BIN_WIT);
         assert_eq!(sig.public_cols().num_binary_poly_cols(), cols::NUM_BIN_PUB);

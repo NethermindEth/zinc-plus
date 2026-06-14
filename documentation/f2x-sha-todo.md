@@ -75,6 +75,34 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### 2-AND Ch arithmetization — K_H 16 → 14, witness 20 → 18 cols (2026-06-13)
+- **What**: replaced the two-AND Ch decomposition `Ch = (e∧f) ⊕ (¬e∧g)`
+  (committed columns `W_UEF`, `W_UNEG_E_G`) with the **single-AND Binius Ch
+  identity** `Ch(e,f,g) = g ⊕ (e ∧ (f⊕g))`. One committed AND product
+  `W_UCH = e ∧ (f⊕g)` (Hadamard `W_E^↓2 ⊙ (W_E^↓1 ⊕ W_E) = W_UCH^↓2`); `Ch`
+  enters the `T_1` chain as the free XOR `g ⊕ u_ch` (`g = W_E^↓1`). Files:
+  `test-uair/src/sha256_f2.rs` (cols, signature shifts, `constrain_general`
+  C6, trace gen, PA_C, MLE vec), `protocol/src/f2_hadamard.rs`
+  (`Sha256F2HadamardLayout` → 2 AND + 12 adders; new `F2AdderSpec.extra_y_terms`
+  XOR-fold so one modular add absorbs `g ⊕ u_ch`), `f2_prove.rs` + the
+  `f2_sha256` bench glue/asserts.
+- **Why**: bring the deployed arithmetization in line with the companion-note
+  Part I / Binius64 comparison (documentation/f2x-sha256-snark-doc, branch
+  `f2-clean-lookup`), which is written and measured at **K_H = 14** (2 AND +
+  12 adder carries, "12 of the 14 deployed Hadamards"). Also trims the
+  discharge: −1 AND Hadamard and −1 `T_1` adder step (chain 5 → 4 steps;
+  `W_T1_S4` removed), so −2 committed columns (20 → 18) and one fewer per-step
+  κ compensator (`NUM_KAPPA` 13 → 12, bit-op virtuals 12 → 11).
+- **Result**: correct end-to-end. `cargo test -p zinc-protocol
+  --features parallel,simd` — all 6 `sha256_f2_*` prove/verify roundtrips pass
+  (full 14-relation honest prove+verify, the 2 AND relations, the 12 adders,
+  merged + oblong arms) and all 29 `hadamard` unit tests pass (the new
+  `extra_y_terms` path is exercised by the SHA roundtrips; synthetic adder
+  round-trips unaffected). test-uair 4/4. Bench compiles. **Perf delta not yet
+  benchmarked** — expected small prover win (−1 AND zerocheck row-set, −1 adder
+  step); run `f2_sha256` "Hadamard" A/B to quantify. The trusted-adder-parent
+  soundness gap (ledger Issue 1) is unchanged — now 12 (was 13) carry Hadamards.
+
 ### Merged (inline) Hadamard discharge — the Lagrange-reinterpretation construction, end-to-end + optimized (2026-06-12)
 - **What**: a new prove/verify arm `prove/verify_f2_full_with_merged_hadamard`
   (`f2_prove.rs`) + the module **`protocol/src/f2_merged_hadamard.rs`** (module

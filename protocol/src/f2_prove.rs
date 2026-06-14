@@ -257,7 +257,7 @@ pub struct F2VirtualBpSpec {
 /// the encoding-consistency check at some sampled position.
 ///
 /// **What `BitOp` does NOT cover**: AND-style nonlinear ops
-/// (`W_UEF`, `W_UNEG_E_G`, `W_MAJ`) do not commute with the F_2-
+/// (`W_UCH`, `W_MAJ`) do not commute with the F_2-
 /// linear encoder; virtualising them needs a Hadamard-style
 /// product check on top, which is out of scope here.
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -802,7 +802,7 @@ where
     /// pipeline (commit + IC + α + sumcheck + multipoint-eval + the single
     /// α-open) AND, on the same transcript, the word-packed **oblong AND
     /// zerocheck** discharge ([`crate::f2_oblong_hadamard::prove_oblong_and_batch_gf8`],
-    /// the GF(2⁸) byte-lookup NTT over `ψ_z`) for the 16 SHA relations.
+    /// the GF(2⁸) byte-lookup NTT over `ψ_z`) for the 14 SHA relations.
     ///
     /// Purpose: measure the **e2e prove cost** of the oblong discharge — the
     /// handoff Gate, `Prove-NoHadamard + ~oblong-cost` vs the fused
@@ -7071,7 +7071,7 @@ mod tests {
     /// constants + `num_vars` — the single place the SHA column indices meet
     /// the production relation builder
     /// ([`crate::f2_hadamard::Sha256F2HadamardLayout`]). The relation
-    /// *topology* (the 16 specs + masks) lives in the builder; this glue is
+    /// *topology* (the 14 specs + masks) lives in the builder; this glue is
     /// just the column-index plumbing.
     fn sha256_f2_hadamard_layout(num_vars: usize) -> crate::f2_hadamard::Sha256F2HadamardLayout {
         use zinc_test_uair::sha256_f2::cols;
@@ -7090,8 +7090,7 @@ mod tests {
             w_sigma1: cols::W_SIGMA1,
             w_sig0: cols::W_SIG0,
             w_sig1: cols::W_SIG1,
-            w_uef: cols::W_UEF,
-            w_uneg_e_g: cols::W_UNEG_E_G,
+            w_uch: cols::W_UCH,
             w_maj: cols::W_MAJ,
             w_t1: cols::W_T1,
             w_t2: cols::W_T2,
@@ -7100,11 +7099,10 @@ mod tests {
             w_t1_s1: cols::W_T1_S1,
             w_t1_s2: cols::W_T1_S2,
             w_t1_s3: cols::W_T1_S3,
-            w_t1_s4: cols::W_T1_S4,
         }
     }
 
-    /// All **16** SHA-256 Hadamard relations (3 ANDs + 13 adders) discharged
+    /// All **14** SHA-256 Hadamard relations (2 ANDs + 12 adders) discharged
     /// end-to-end on the real `sha256_f2` trace via a **single**
     /// `prove/verify_f2_full_with_hadamard` call — the production path. The
     /// specs + active-row masks are derived from
@@ -7138,10 +7136,10 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // The 16 relations, derived from the SHA layout.
+        // The 14 relations, derived from the SHA layout.
         let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
-        assert_eq!(and_specs.len(), 3);
-        assert_eq!(adder_specs.len(), 13);
+        assert_eq!(and_specs.len(), 2);
+        assert_eq!(adder_specs.len(), 12);
 
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
@@ -7156,7 +7154,7 @@ mod tests {
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_hadamard on all 16 SHA relations should succeed");
+        .expect("prove_f2_full_with_hadamard on all 14 SHA relations should succeed");
         assert!(proof.uair.hadamard_proof.is_some());
 
         let mut vt = Blake3Transcript::new();
@@ -7173,23 +7171,22 @@ mod tests {
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
-        .expect("honest all-16 SHA Hadamard proof must verify");
+        .expect("honest all-14 SHA Hadamard proof must verify");
     }
 
-    /// The three SHA-256 **AND** Hadamard relations C12/C13/C14 discharged
+    /// The two SHA-256 **AND** Hadamard relations C12/C13 discharged
     /// end-to-end on the real `sha256_f2` trace (no `W_β`, no X·, columns
     /// already committed witness cols filled as correct ANDs):
-    ///   C12 `u_ef[t]   = e[t] & e[t−1]`,
-    ///   C13 `u_neg[t]  = (¬e[t]) & e[t−2]`,
-    ///   C14 `maj[t]    = Maj(a[t], a[t−1], a[t−2])`  (`sha256_f2.rs`).
+    ///   C12 `u_ch[t]   = e[t] & (e[t−1] ⊕ e[t−2])`  (single Ch AND),
+    ///   C13 `maj[t]    = Maj(a[t], a[t−1], a[t−2])`  (`sha256_f2.rs`).
     ///
     /// Registered in the codebase `↓Δ = row i → col[i+Δ]` convention
     /// (`ShiftSpec`, `build_shifted_bit_slice_mles`). The fills are written
     /// `i−Δ`, so each is re-expressed `i+Δ` (substitute `t → t+Δ_max`,
     /// shifting the result column up too):
-    ///   C12 ⇒ `W_E^↓1 ⊙ W_E = W_UEF^↓1`,
-    ///   C13 ⇒ `¬(W_E^↓2) ⊙ W_E = W_UNEG_E_G^↓2`,
-    ///   C14 ⇒ `(W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A)`
+    ///   C12 ⇒ `W_E^↓2 ⊙ (W_E^↓1 ⊕ W_E) = W_UCH^↓2`
+    ///         (the 2-AND Binius Ch identity `Ch = g ⊕ (e ∧ (f⊕g))`),
+    ///   C13 ⇒ `(W_A^↓2 ⊕ W_A) ⊙ (W_A^↓1 ⊕ W_A) = (W_MAJ^↓2 ⊕ W_A)`
     ///         (the Binius identity `(x⊕z)(y⊕z) = Maj(x,y,z) ⊕ z`).
     /// The complement/combo boundary (where the shifted column zero-pads,
     /// rows `t ≥ n−2`) lands in the zero slack region, so the honest
@@ -7225,10 +7222,10 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // C12/C13/C14 from the production builder.
+        // C12/C13 from the production builder.
         let specs = sha256_f2_hadamard_layout(num_vars).and_specs();
 
-        // Prove + verify the bundled flow with C12/C13/C14 registered.
+        // Prove + verify the bundled flow with C12/C13 registered.
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_hadamard(
             &mut pt,
@@ -7242,7 +7239,7 @@ mod tests {
             sha256_f2_project_scalar::<R>,
             /* num_column_openings */ 4,
         )
-        .expect("prove_f2_full_with_hadamard on SHA C12/C13/C14 should succeed");
+        .expect("prove_f2_full_with_hadamard on SHA C12/C13 should succeed");
         assert!(proof.uair.hadamard_proof.is_some());
 
         let mut vt = Blake3Transcript::new();
@@ -7259,7 +7256,7 @@ mod tests {
             cols::NUM_BIN,
             |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
         )
-        .expect("honest SHA C12/C13/C14 proof must verify");
+        .expect("honest SHA C12/C13 proof must verify");
     }
 
     /// DOCUMENTS the row-selectivity gap for the SHA-256 adders C5–C11.
@@ -7307,7 +7304,7 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // All 13 adders from the builder, but with the active-row masks
+        // All 12 adders from the builder, but with the active-row masks
         // CLEARED — a *uniform* registration the verifier must reject (the
         // adders are row-selective; `target = x+y` doesn't hold off-chain).
         let mut adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
@@ -7367,7 +7364,7 @@ mod tests {
     ///   - C7 (target `W_T2` is unshifted, row-local at `t=k+3`):
     ///         `[start+3, start+67)`
     ///   - C10 / C11 (digest feed-forward):               `[start+64, start+68)`
-    /// Completes the 16 SHA Hadamard relations (3 ANDs + 13 adders).
+    /// Completes the 14 SHA Hadamard relations (2 ANDs + 12 adders).
     /// (Adder parents are trusted — honest-prover; a sound discharge for the
     /// row/bit-shifts is the ledger's Issue-1 follow-up.)
     #[test]
@@ -7397,9 +7394,9 @@ mod tests {
             <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
-        // The 13 adders (with masks) from the production builder.
+        // The 12 adders (with masks) from the production builder.
         let adders = sha256_f2_hadamard_layout(num_vars).adder_specs();
-        assert_eq!(adders.len(), 13);
+        assert_eq!(adders.len(), 12);
         let sel: &[crate::f2_hadamard::F2AdderSpec] = &adders;
 
         let mut pt = Blake3Transcript::new();
@@ -7765,8 +7762,8 @@ mod tests {
         > = ZipPlusParams::new(num_vars, num_rows, lc);
 
         let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
-        assert_eq!(and_specs.len(), 3);
-        assert_eq!(adder_specs.len(), 13);
+        assert_eq!(and_specs.len(), 2);
+        assert_eq!(adder_specs.len(), 12);
 
         let mut pt = Blake3Transcript::new();
         let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(

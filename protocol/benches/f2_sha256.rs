@@ -2166,8 +2166,7 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
         w_sigma1: cols::W_SIGMA1,
         w_sig0: cols::W_SIG0,
         w_sig1: cols::W_SIG1,
-        w_uef: cols::W_UEF,
-        w_uneg_e_g: cols::W_UNEG_E_G,
+        w_uch: cols::W_UCH,
         w_maj: cols::W_MAJ,
         w_t1: cols::W_T1,
         w_t2: cols::W_T2,
@@ -2176,13 +2175,12 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
         w_t1_s1: cols::W_T1_S1,
         w_t1_s2: cols::W_T1_S2,
         w_t1_s3: cols::W_T1_S3,
-        w_t1_s4: cols::W_T1_S4,
     }
 }
 
 /// A/B the Approach-B Hadamard discharge cost: the same `prove_f2_full*`
-/// / `verify_f2_full*` family run **with** the 16 SHA-256 Hadamard
-/// relations (3 ANDs + 13 adders, from `Sha256F2HadamardLayout`) vs
+/// / `verify_f2_full*` family run **with** the 14 SHA-256 Hadamard
+/// relations (2 ANDs + 12 adders, from `Sha256F2HadamardLayout`) vs
 /// **without** (the `&[]` specs the rest of the bench uses). The delta
 /// between the `*-Hadamard` and `*-NoHadamard` cases is the discharge
 /// overhead — on the prover: the per-relation Hadamard zerocheck plus the
@@ -2196,8 +2194,8 @@ fn sha256_f2_hadamard_layout(num_vars: usize) -> zinc_protocol::f2_hadamard::Sha
 /// touch higher than the e2e `Prove` headline (which amortises pairing).
 fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &ProverFixture) {
     let (and_specs, adder_specs) = sha256_f2_hadamard_layout(fx.num_vars).relations();
-    assert_eq!(and_specs.len(), 3, "expected 3 AND relations (C12–C14)");
-    assert_eq!(adder_specs.len(), 13, "expected 13 adder relations (C5–C11)");
+    assert_eq!(and_specs.len(), 2, "expected 2 AND relations (C12–C13)");
+    assert_eq!(adder_specs.len(), 12, "expected 12 adder relations (C5–C11)");
 
     let bit_ops = sha_f2_bit_op_virtuals();
     let public_cols = &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB];
