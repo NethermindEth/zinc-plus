@@ -2437,6 +2437,155 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
     prove --max-len-bytes 61632 --exact-len --log-inv-rate {1,2}` (binius64 clone;
     build needs sandbox off — writes its own target/).
 
+### Adopt "Blaze" (from `~/bolt-rs`) as the F_2[X] PCS instead of Zip+ over F_2[X] (investigated 2026-06-14 — REJECTED, no win + breaks the dual read-off)
+- **Question**: `~/bolt-rs` (impl of *Bolt: Faster SNARKs from Sketched Codes*,
+  ePrint 2026/310) has fast binary-field code-commitment machinery. Could we drop
+  in "Blaze" (the interleaved-RAA Brakedown PCS, ePrint 2024/1609) in place of our
+  bit-sliced Zip+ over `F_2[X]`?
+- **What's actually in the folder**: `src/raa.rs` is a Blaze-style RAA encoder
+  (repeat → π₁ → prefix-XOR → π₂ → prefix-XOR) but over **GF(2³²)**
+  (`ColMajorMatrix<BinaryElem32>`), `src/sketch_code.rs` is Bolt's expander+RS
+  "sketched" code, and the only *complete* PCS open/verify is **Ligerito**
+  (recursive Basefold-style, `src/ligerito_recursive.rs`). There is **no complete
+  Blaze prover/verifier** — "Blaze" appears only as a proof-size *estimate* comment
+  (`src/bin/code_queries.rs:408`). The RAA path is an encode + Merkle-commit
+  *benchmark*, tuned for **2³⁰** polys (Metal GPU + SIMD + CLMUL + HW-SHA).
+- **Why it's not a replacement (structural)**: Zip+ over `F_2[X]` *already is* a
+  Blaze-style RAA-Brakedown commitment — `RaaF2Code` (`zip-plus/src/code/raa_f2.rs`)
+  is precisely the Blaze RAA construction specialized to an **`F_2` XOR accumulator
+  with no codeword widening** (cells stay `BinaryPoly<D>`). The load-bearing part of
+  our PCS is **not the code** — it's the **bit-sliced opening that binds one object
+  `a'` and reads off BOTH `ψ_α` (linear) and `ψ_z` (Hadamard discharge) with no 2nd
+  opening** (the un-lifted-`GF128[X]<D>` open; see Shipped entry `7827683` etc.).
+  That dual read-off *depends* on the `F_2`-linearity / no-widening property. Blaze
+  and Ligerito give a single-evaluation opening over a widened field (GF(2³²)/RS) —
+  adopting either means re-engineering the exact bit-slice + dual-projection layer on
+  top of it, i.e. rebuilding Zip+ over `F_2[X]`. Widening the cells to GF(2³²) to
+  match bolt-rs's representation would *destroy* the no-widening property the AND/adder
+  discharge rides on.
+- **Why it wouldn't even help (performance)**: bolt-rs's whole value is a fast
+  *encoder* at 2³⁰. But our commit is **~90% Blake3 Merkle, encode is ~1.2 ms
+  (negligible)** — see the "Commit is the ONLY phase Binius64 beats us on" entry
+  above. We already have a Metal GPU `F_2`-RAA encoder
+  (`zip-plus/src/metal_gpu/shaders/raa_f2_encode.metal`) and Metal Blake3 Merkle. At
+  SHA scale (ν=9..16) the bottleneck was the discharge, not commit; bolt-rs's 2³⁰
+  regime is irrelevant. At the bit level bolt-rs's GF(2³²) RAA XOR is *identical* to
+  our `BinaryPoly<32>` XOR, so the kernel is transplantable in principle — but it
+  buys nothing the existing encoder doesn't, and the encode isn't the cost.
+- **The one genuinely interesting harvest (different question)**: bolt-rs's
+  **Ligerito** (recursive Basefold) is in the WHIR family the note already flags as
+  the way to shrink our Brakedown-style proof (t=987 openings, ~1.1 MiB). That's a
+  *proof-size* lever, not a "replace the PCS" one, and it still wouldn't subsume the
+  `ψ_α`/`ψ_z` dual read-off — it would sit *under* it. Tracked as future work; see
+  the implementation.tex outlook ("WHIR-style proximity test").
+- **Proof-size estimate at nv16 (the follow-up question 2026-06-14)**: modelled
+  Blaze's proof (RAA level-0 proximity + inner Basefold tail) for the SHA-256 nv16
+  witness (26 cols × 2¹⁶ × 32b ≈ 2²⁰·⁷ GF(2³²) elems) using bolt-rs's exact
+  `proof_size_{brakedown,ligerito}` formulas + our calibrated q=987 (RAA rate 1/4).
+  **Model validated**: the Brakedown/our-family path reproduces the deployed ~1.1 MiB
+  at n_rows≈2⁸ (1.18 MiB computed). **Blaze ≈ 0.3–0.5 MiB** (best tall-skinny shape
+  n_rows=2⁴: ~495 KB = 62 KB L0 openings + **241 KB L0 Merkle paths** + ~193 KB
+  Basefold tail). **Only ~2–3× smaller than our 1.1 MiB, NOT the ~5× you'd hope.**
+  Root cause: Blaze shares our RAA code ⇒ inherits q≈987, and 987-query Merkle
+  authentication (~240 KB at depth ~19) is a floor recursion can't remove. The real
+  proof-size lever is the **code's distance/query-count, not the opening structure**:
+  an RS/FRI/Basefold inner code uses q≈241 (1−δ/2 at δ=0.5) and lands ~200–250 KB —
+  e.g. Ligerito@2²⁰ computes to **~201 KB**, and Binius64 measures **~249 KiB** on the
+  same SHA workload. ⇒ for proof size, the WHIR/Basefold-over-RS direction
+  (implementation.tex outlook) beats Blaze; Blaze's RAA only matches our prover-speed
+  story, not a size win. (Estimate, not Blaze's paper figure — eprint behind Cloudflare;
+  the ~240 KB RAA-Merkle floor is the robust part, independent of tail modelling.)
+- **Verdict**: no — Zip+ over `F_2[X]` already is the Blaze code plus the
+  dual-projection opening the SHA PIOP needs, and bolt-rs optimizes a phase (encode)
+  and a scale (2³⁰) that aren't our bottleneck. Even on proof size (Blaze's one
+  plausible edge) it's only ~2–3× and floored by the shared RAA query count. Not pursued.
+- **UPDATE (2026-06-14): the code-switching *idea* IS being pursued, via our own
+  Zip++ basefold — not Blaze-as-drop-in (none exists; see search below).** User
+  confirmed proof size is a priority. Searched for a Blaze impl: no public standalone
+  one exists (GitHub empty; bcc-research = the bolt-rs authors, no `blaze` repo; bolt-rs
+  ships RAA + Ligerito as *separate* benchmarks, never the code-switching composition).
+  **Correction to the estimate above:** ~0.3–0.5 MiB modelled a Brakedown-with-RAA
+  opening (987 direct column openings); Blaze's actual code-switching has an O(log²n)
+  verifier, so it does *not* open 987 columns — the Ligerito **~150–250 KB** is the
+  right proxy (4–7× shrink, not 2–3×).
+
+### Code-switching opening (Blaze-style) via the Zip++ binary basefold lane — proof-size plan (scoped 2026-06-14, NOT yet implemented)
+- **Goal**: cut the SHA-256 proof from ~1.1 MiB to **~150–250 KB** + give an O(log²n)
+  verifier, by replacing the Brakedown-style `prove_f2_open` (combined_row' ~5500×7
+  words + t=987 column openings, both O(√N)) with a code-switch onto a binary
+  Basefold/WHIR inner IOPP. **Prover stays unchanged** (commit keeps `RaaF2Code`); this
+  is a size/verifier win only.
+- **Vehicle (user-chosen)**: reuse the Zip++ basefold infra
+  (`.claude/worktrees/zip-plus-basefold`, module `zip-plus/src/basefold/`), NOT a from-
+  scratch Blaze port. **Key simplification**: Zip++'s limb machinery (balanced base-2^p
+  decomposition, carry rebalance, mod-q0 claim projection) exists only because folding
+  over ℤ widens entries; **over GF(2^128) folding doesn't widen** ⇒ the binary lane is
+  the *classic* arity-2 fold, k=1, claims in K — strictly simpler than the integer lane.
+- **Phases**: (1) binary foldable chain over `GF(2^128)[X]` from our additive-NTT /
+  subspace-Lagrange primitives (`oblong_and`), replacing `chain.rs`'s prime
+  `ChainConfigF167772161`; strip limbs in `iopp.rs`; reuse `compiled.rs`
+  (Merkle/FS/Q-spot-checks/`size_bytes`) verbatim; checkpoint = standalone binary IOPP
+  proving one MLE eval over K, confirms the KB target. (2) code-switch RAA→IPRS-chain in
+  `prove_f2_open`/`verify_f2_open`. (3) **dual ψ_α/ψ_z read-off through the fold — the
+  load-bearing design**: `a'=Σ eq_x(r_0)w(x)` is F_2-linear, both functionals are inner
+  products against the IOPP's folded `a'`; re-derive the 4 opening checks recursively;
+  paper-validate BEFORE Phase 2. Fallback: run the IOPP twice (per functional) — a 2nd
+  opening, loses "AND for free", still shrinks the proof. (4) soundness: fold proximity
+  + per-round IOPP error into FS/BCS; ψ_z-binding gap stays orthogonal. (5) measure +
+  update `implementation.tex` (its "WHIR-style proximity" outlook).
+- **Risks**: Phase 3 (does the dual read-off survive code-switching) is the real unknown;
+  Phase 1 binary additive-NTT chain is real but buildable from existing primitives.
+  Logistics: `zip-plus-basefold` (off `main-beta`) and `f2-clean` must converge in one
+  worktree before Phase 2.
+- **PHASE 3 DONE — CLEARS (paper-validation, 2026-06-14): `documentation/f2-codeswitch-dual-readoff-design.md`.**
+  The read-off survives. Reason: `a'` (the bit-slice fold, `lifted_claim`, a *single
+  un-collapsed* `K[X]_{<w}` poly — commitment.tex Rem. lines 73-84, f2_prove.rs:3198)
+  and both projections are checks (2)+`ψ_z`-binding = **local linear functionals of
+  `a'`, decoupled from proximity** (checks 1,3,4). Basefold replaces only (1),(3),(4);
+  `ψ_α`/`ψ_z` are applied to the folded object *after*, unchanged. The fold axis (ν
+  rows, eq(r_0)) is orthogonal to the width axis (w=32 cell bits / X); eq-fold, the
+  code, and every Basefold round op are K-linear *coordinate-wise on X*, so the final
+  claim emerges as the full width-`w` `a'`. **Single invariant**: X is passive shared
+  width — never folded/batched/projected inside the recursion; fold challenges,
+  positions, twiddles are X-independent K-scalars. Enforced at 4 type-level points (see
+  note §5); the natural impl satisfies it automatically. **Phase-1 API obligation**:
+  oracle/claim type = `K[X]_{<w}` (width-w), NOT scalar K (the one substantive
+  generalization of the Zip++ lane; *limbs drop out* — no widening over K). **Design
+  refinement (note §6)**: Phase-3 verdict is independent of code-switch-vs-direct — so
+  prefer **(3b) commit directly with the foldable IPRS chain (no code-switch)** over
+  (3a) RAA+code-switch, since encode is negligible (~1.2 ms; commit is ~90% Merkle) and
+  3b removes a soundness term + a collapse risk. Decide 3a/3b at the Phase-1 checkpoint
+  by measuring foldable-chain commit cost. **Fallback** if a future variant breaks the
+  invariant: run the IOPP twice (per functional) — still < 1.1 MiB, clean degradation.
+  Soundness (Phase 4): `ε_open ≤ ε_prox^{WHIR} + O(1/|K|) (+ε_switch under 3a)`;
+  `ψ_z`-operand binding gap stays orthogonal.
+- **PHASE 1 — sourcing decided + foldable-chain substrate SHIPPED & TESTED (2026-06-14).**
+  *Sourcing question (use binius64/bolt-rs RS?)*: **No — build on our in-house
+  `binary_subspace` additive-NTT over our own `BinaryFieldGF128`.** Three reasons:
+  (i) **field nativeness** — the IOPP claims/`a'`/`ψ_α`/`ψ_z`/Blake3 transcript all
+  live in our K; bolt-rs's `BinaryElem128` and binius64's tower-GF(2^128) are *different
+  representations*, forcing an F_2-iso bridge at every claim + the FS boundary; (ii) the
+  **Zip++ integer chain does not port** — its butterfly `even ± tw·odd` collapses in
+  char 2 (`+=−`); the correct binary butterfly is the *additive* NTT (Lin–Chung–Han),
+  which `binary_subspace` (+ `oblong_and`) already realises over K; (iii) the **ledger
+  says encode isn't the bottleneck** (~1.2 ms; commit ~90% Merkle), so bolt's SIMD
+  encode (its fast path is BinaryElem32, N/A to GF128) / binius's packed NTT buy nothing
+  at Phase-1 (correctness-first). Revisit binius64's NTT *only* as an optimization
+  reference later if encode ever measures hot at large ν (it won't for SHA shapes).
+  *Shipped*: `poly/src/univariate/binary_foldable_chain.rs` — `rs_encode` (subspace
+  eval) + `fold_codeword` (the additive-NTT FRI fold `c'[i] = c[i] + (y_i+α)·(c[i]+
+  c[i+half])/b`, folded domain = `span{ŝ_b(b_j)}`, `ŝ_b(x)=x(x+b)`). **3 tests pass
+  under `--features simd`**: `fold_maps_rs_to_smaller_rs` (non-circular: one fold maps
+  RS[k,K]→RS[k-1,K-1], checked across 5 (k,r) settings), `fold_of_constant_is_constant`,
+  `full_descent_reaches_constant`. Fold formula derived from first principles
+  (`P(x)=E(ŝ_b(x))+x·O(ŝ_b(x))`) and **empirically validated**. NOTE: `binary_gf192`
+  (deprecated) fails to compile under default features (pre-existing, `BinaryPoly` alias
+  is `BinaryRefPoly` vs `BinaryU64Poly`); the poly crate's tests run under `simd`.
+  *Next (Phase 1b/c)*: width-`w` lift (oracle/claim type `[K; w]` per §5 invariant);
+  multilinear claim-tracking rounds `(1−z_r)e^e + z_r e^o = e_{r-1}` over `K[X]_{<w}`;
+  Merkle/FS/Q-spot-check compile (port `compiled.rs`) + `size_bytes` checkpoint to
+  confirm the ~150–250 KB target and decide 3a vs 3b.
+
 ### The linear PIOP is the under-optimized third of the prover (identified 2026-06-13)
 - **Context**: per-phase at nv16 warm CPU (~93 ms): discharge ~20 ms (heavily
   optimized — fused→oblong→GF8→merged, parallel, eq-trick), commit ~19 ms
