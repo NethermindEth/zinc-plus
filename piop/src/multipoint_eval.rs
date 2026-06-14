@@ -47,7 +47,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::ShiftSpec;
-use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
+use zinc_utils::{cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField};
 
 //
 // Data structures
@@ -331,18 +331,21 @@ where
 
         // eq_r at the up point; each pointed shift's selector at its own point.
         let eq_r = build_eq_x_r_inner(eval_point, field_cfg)?;
-        let (next_mles, down_cols): (Vec<_>, Vec<_>) = pointed_shifts
-            .iter()
-            .map(|spec| {
-                let next = build_next_c_r_mle(&spec.point, spec.shift, field_cfg)?;
-                let col = trace_mles[spec.source_col].clone();
-                Ok((next, col))
-            })
-            .collect::<Result<Vec<_>, ArithErrors>>()?
-            .into_iter()
-            .unzip();
+        let (next_mles, down_cols): (Vec<_>, Vec<_>) = {
+            let _g = zinc_utils::prof::scope("mp:next_mle");
+            cfg_iter!(pointed_shifts)
+                .map(|spec| {
+                    let next = build_next_c_r_mle(&spec.point, spec.shift, field_cfg)?;
+                    let col = trace_mles[spec.source_col].clone();
+                    Ok((next, col))
+                })
+                .collect::<Result<Vec<_>, ArithErrors>>()?
+                .into_iter()
+                .unzip()
+        };
 
         let precombined = {
+            let _g = zinc_utils::prof::scope("mp:precombine");
             let evaluations: Vec<_> = cfg_into_iter!(0..1 << num_vars)
                 .map(|b| {
                     gammas
@@ -367,6 +370,7 @@ where
         mles.push(precombined);
         mles.extend(down_cols);
 
+        let _sc_g = zinc_utils::prof::scope("mp:sumcheck");
         let (sumcheck_proof, sumcheck_prover_state) = MLSumcheck::prove_as_subprotocol(
             transcript,
             mles,
@@ -386,6 +390,7 @@ where
             },
             field_cfg,
         );
+        drop(_sc_g);
 
         debug_assert_eq!(
             sumcheck_proof.claimed_sum,
