@@ -57,9 +57,9 @@ contributes no soundness error.
     cell-polynomial vanish at $\alpha$ (probability $\le(\wbit-1)/|\K|$ per
     family, by \Cref{lem:linear-survives}); the row-point and the sumcheck
     add $O(\nu/|\K|)$. Total: $O(N_{\mathrm{con}}\wbit/|\K| + \nu/|\K|)$.
-  \item \emph{Hadamard discharge} (\Cref{lem:psi-z-sound,sec:oblong}).
-    The $\psiz$ bit-recombination, the relation batch, the zerocheck, and the
-    univariate skip contribute $\frac{2(\wbit-1)+K_H+\nu}{|\K|}$.
+  \item \emph{Hadamard discharge} (\Cref{lem:psi-z-sound}).
+    The $\langle Z_H\rangle$ membership check at $\alpha$, the relation batch,
+    and the shared row sumcheck contribute $\frac{2(\wbit-1)+K_H+\nu}{|\K|}$.
   \item \emph{Multipoint evaluation} (\Cref{sec:multipoint}). A sumcheck
     reducing the claims at $r^*$ and the pointed shifts to $r_0$: $O(\nu/|\K|)$.
   \item \emph{Opening} (\Cref{sec:pcs-checks}). $\epsilon_{\mathrm{open}}\le
@@ -78,8 +78,8 @@ sound} (RBR-KS): on a transcript prefix that is ``doomed'' (no witness can
 explain it), the next verifier challenge keeps it doomed except with the
 stage's error. The Zinc\texttt{+} compiler is designed so that composing
 RBR-KS reductions preserves RBR-KS, with errors adding. Hence the whole
-chain --- commit, ideal check, $\psia$, sumcheck, oblong discharge,
-multipoint eval, open --- is RBR-KS with the summed error of
+chain --- commit, ideal check, $\psia$, sumcheck (carrying the Hadamard
+group), multipoint eval, open --- is RBR-KS with the summed error of
 \Cref{sec:per-stage}.
 
 The extractor runs bottom-up. The opening's extractor (companion note)

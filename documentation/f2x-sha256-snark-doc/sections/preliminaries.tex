@@ -143,10 +143,11 @@ Two instances drive the whole system:
     quotient). This is the projection of \Cref{sec:piop} that reduces the
     linear constraints to $\K$.
   \item The \emph{Hadamard-discharge projection} $\psiz$, with
-    subspace-Lagrange weights $\xi_b = L_b(z)$ for a transcript point $z$,
-    where $\{L_b\}$ is the Lagrange basis of an $\Ftwo$-linear evaluation
-    domain. This projection (\Cref{sec:hadamard}) reads the operands of a
-    Hadamard product off the committed bit slices.
+    subspace-Lagrange weights $\xi_b = L_b(\alpha)$ --- read at the
+    \emph{same} transcript point $\alpha$ as $\psia$, where $\{L_b\}$ is the
+    Lagrange basis of an $\Ftwo$-linear evaluation domain. This projection
+    (\Cref{sec:hadamard}) reads the operands of a Hadamard product off the
+    committed bit slices.
 \end{itemize}
 Both are special cases of \Cref{def:projection}; the only structural
 difference is the weight vector. The commitment of \Cref{sec:commitment}

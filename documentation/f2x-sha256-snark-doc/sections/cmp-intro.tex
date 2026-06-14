@@ -50,7 +50,7 @@ arithmetization being SHA-specific rather than a general circuit model.
 Both systems commit over a binary field and discharge the same $\AND$
 content with linear-time sumchecks; both keep the dominant rounds in a
 small field (\binius{} uses an $8$-bit subfield for its shift indicators
-and univariate skip; \zinc{} runs the oblong discharge of
+and univariate skip; \zinc{} runs the Hadamard discharge of
 \Cref{sec:hadamard} in $\mathrm{GF}(2^8)$). The structural difference is
 the arithmetization: \binius{}'s is a \emph{non-uniform} word circuit with
 arbitrary operand wiring, while \zinc{}'s is a \emph{uniform} AIR whose
@@ -61,13 +61,16 @@ choices that decide proof size and memory.
 \begin{remark}[Measurement setup and caveats]
 \label{rem:cmp-setup}
 All figures in this part are on one Apple M4 (10-core, $4$P\,$+$\,$6$E,
-$16$\,GB), non-zero-knowledge, with the security parameters each system
-ships ($t=987$ openings for \zinc{}; $96$-bit for \binius{}). \zinc{} uses
-its Metal GPU commit path; \binius{} is CPU-only (rayon\,$+$\,SIMD), so a
-strictly pure-CPU prover comparison would differ. \binius{} proves a full
-padded preimage (length-binding in-circuit); \zinc{}'s harness proves
-chained compressions only --- slightly less work, which mildly flatters
-\zinc{}. Absolute times are thermally sensitive ($\sim$$10\%$ run-to-run
-on the prover); the ratios and the per-phase \emph{shapes} are far more
-stable, and it is those we lean on.
+$16$\,GB), non-zero-knowledge, at the matched commitment rate $1/4$ and
+with the security parameters each system ships ($t=987$ openings for
+\zinc{}; $96$-bit for \binius{}). Both provers are measured \emph{CPU-only}
+(rayon\,$+$\,SIMD), so the prover comparison is core-for-core; \zinc{}'s
+optional Metal GPU commit path offloads the commit phase but shows no net
+prover-latency win at the measured scales (\Cref{tab:scaling-gpu}), so the
+CPU basis is the like-for-like one.
+\binius{} proves a full padded preimage (length-binding in-circuit);
+\zinc{}'s harness proves chained compressions only --- slightly less work,
+which mildly flatters \zinc{}. Absolute times are thermally sensitive
+($\sim$$10\%$ run-to-run on the prover); the ratios and the per-phase
+\emph{shapes} are far more stable, and it is those we lean on.
 \end{remark}

@@ -8,7 +8,7 @@ modular-addition carries are presently \emph{trusted} --- the one
 documented gap, ``Issue-1.''
 
 \paragraph{What is and is not bound.} \zinc{} discharges all Hadamard
-relations by the oblong zerocheck, then binds the discharge's operand
+relations by the ideal-membership check, then binds the discharge's operand
 evaluations to the commitment by a $\psiz$ projection. This binding
 reaches operands that decompose into row-shift pair-evaluations of
 committed columns --- which the $\Ch$/$\Maj$ ($\AND$) operands do, so they
@@ -17,7 +17,7 @@ not: the carry word involves a committed carry-out bit and an intra-word
 $\SHR$, which the bit-axis projection $\psiz$ removes, so they do not
 reduce to row-shift pair-evals of primary columns. Their $\psiz$ parents
 are therefore supplied trusted (honest-prover-supplied) and folded
-directly into the tie. Concretely, $12$ of the $14$ deployed Hadamards
+directly into the binding. Concretely, $12$ of the $14$ deployed Hadamards
 (the modular-add carries) are honest-prover-only at the AIR layer;
 end-to-end soundness holds unconditionally for the $\AND$ and linear
 parts but only ``assuming honest adder parents'' for the additions.
@@ -37,10 +37,12 @@ number of times for free. The multiplicative product has no such
 cancellation and is sound over $\mathrm{GF}(2^{128})$.
 
 \paragraph{Bearing on the comparison.} Because closing Issue-1 costs
-\zinc{} prover time it has not yet paid, the current prover tie includes a
-small soundness discount in \zinc{}'s favour (it proves slightly less,
-unconditionally). Whether the discount survives a fully sound comparison
-turns on whether the lookup adder is roughly prover-neutral --- the open
-question flagged in \Cref{sec:ana-prover}. \binius{} carries no such debt:
-it is faster \emph{and} fully sound today, and any ``who is ahead on the
-prover'' claim must fold this in.
+\zinc{} prover time it has not yet paid, \zinc{}'s moderate-$N$ prover edge
+at the matched rate includes a small soundness discount in its favour (it
+proves slightly less, unconditionally). Whether the edge survives a fully
+sound comparison turns on whether the lookup adder is roughly
+prover-neutral --- the open question flagged in \Cref{sec:ana-prover}.
+\binius{} carries no such debt: it is fully sound today, so any ``who is
+ahead on the prover'' claim must fold this in. The asymptotic
+($\sim$$2\times$, scaling) win is more robust to the discount than the
+moderate-$N$ touch.

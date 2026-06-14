@@ -29,8 +29,9 @@ The reduction runs on one Fiat--Shamir transcript through the stages
   \;\to\;
   \underbrace{\text{open}}_{\text{Step 7}},
 \]
-with the Hadamard discharge of \Cref{sec:hadamard} running alongside Steps
-2--4 and folding into the multipoint eval. \emph{Step 1 is empty:} the
+with the Hadamard discharge of \Cref{sec:hadamard} riding Steps 2--4 ---
+it is one more ideal-membership family --- and folding into the multipoint
+eval. \emph{Step 1 is empty:} the
 general Zinc\texttt{+} compiler begins by projecting $\Q[X]$ or $\Z[X]$ to
 a prime field $\F_{q_0}[X]$, but the trace here is already over
 $\Ftwo[X]\subset\K[X]$, so there is no prime to sample and no projection
@@ -70,7 +71,7 @@ family, the combined polynomial
 \]
 (an element of $\K[X]$ once the $\eq$-weights are drawn from $\K$),
 together with the obligation $E_\ell\in\ideal{g_\ell}$. Because $\ideal{g_\ell}$
-is an $\K[X]$-submodule, honest data --- with every $Q_\ell(T_i)\in\ideal{g_\ell}$
+is a $\K[X]$-submodule, honest data --- with every $Q_\ell(T_i)\in\ideal{g_\ell}$
 --- yields $E_\ell\in\ideal{g_\ell}$; a single cheating row is caught, with
 the usual MLE soundness, by the random $\rho$.
 
@@ -135,10 +136,11 @@ an algebra map for the \emph{polynomial} product, but the Hadamard product
 is coefficient-wise, and $\psia(\bp{u}\had\bp{v}) = \sum_b u_b v_b\alpha^b$
 is not $\psia(\bp{u})\cdot\psia(\bp{v}) = \sum_{b,b'} u_b v_{b'}\alpha^{b+b'}$.
 A product of projections is not the projection of a Hadamard product. This
-is precisely why the Hadamard constraints cannot ride this pipeline and
-need the separate argument of \Cref{sec:hadamard}, which projects with a
-\emph{different} functional $\psiz$ chosen so that the bit-product
-structure is exposed rather than scrambled.
+is precisely why the Hadamard constraints are not equalities under $\psia$;
+\Cref{sec:hadamard} reads them through a \emph{different} functional $\psiz$
+--- at the same point $\alpha$ --- under which they become an
+ideal-membership claim discharged by this same ideal check and sumcheck,
+with the bit-product structure exposed rather than scrambled.
 \end{remark}
 
 \subsection{Step 4: the sumcheck}
@@ -160,8 +162,14 @@ single evaluation point $r^*\in\K^{\nu}$ together with the per-column claims
   a_g \;=\; \mle{\psia(w_g)}(r^*)\;\in\;\K,
   \qquad g = 1,\dots,K.
 \]
-The first round runs over the $\Ftwo$-valued (projected-from-$\{0,1\}$)
-data on a fast path; later rounds are ordinary $\K$ arithmetic.
+The prover forms each round's message with the weight $\eq(\cdot;\rho)$
+\emph{factored out}: it enters only through its multilinear closed form at the
+round's evaluation points, so the per-slot work is a product against the
+batched column $\mle{C}$ alone. The opening round additionally exploits that
+the projected data is $\Ftwo$-valued (the columns are projected from
+$\{0,1\}$ cells). The Hadamard discharge of \Cref{sec:hadamard} adds one
+further (degree-$3$) group to this same sumcheck, reduced to the same point
+$r^*$ and formed the same way.
 
 \subsection{Multipoint evaluation: a single point $r_0$}
 \label{sec:multipoint}
@@ -171,7 +179,7 @@ rows (the shift-register layout of \Cref{sec:air}), so the verifier also
 owes \emph{pointed-shift} claims: evaluations of a source column at a point
 shifted by a row offset $\Delta$. And --- looking ahead --- the Hadamard
 discharge of \Cref{sec:hadamard} produces its own claims, the
-$\psiz$-projections of the operand columns at its row point. A multipoint
+$\psiz$-projections of the operand columns at the same sumcheck point $r^*$. A multipoint
 evaluation argument collects all of these and reduces them to one point.
 Formally, given claims at $r^*$ and a list of pointed-shift claims
 $\{(\text{point},\Delta,\text{source})\}$, a single sumcheck produces a

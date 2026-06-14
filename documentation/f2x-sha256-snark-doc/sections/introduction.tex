@@ -20,7 +20,7 @@ treats $32$-bit words as opaque field elements must re-derive bit-level
 structure with range checks and bit decompositions at every step.
 
 \paragraph{The all-$\Ftwo[X]$ approach.} This note develops, end to end,
-an argument that keeps the computation in its native algebra. We
+an argument that keeps the computation in its native algebra \albert{$\Ftwo[X]$ is not really the native algebra, $\mathbb{Z}[X]$ is}. We
 represent each $\wbit$-bit word as a \emph{bit-polynomial} in the cell
 ring
 \[
@@ -49,7 +49,7 @@ ring operations, not emulations:
   \item \textbf{$\AND$ is a Hadamard product.} Coefficient-wise
     multiplication of two bit-polynomials --- the one genuinely nonlinear
     primitive --- is the only operation that does not commute with the
-    linear commitment, and it is the technical heart of the system.
+    linear commitment, and it is the technical heart of the system. \albert{Change wording because we deal with AND and Hadamard not that differently from Binius. Only the merging of Lagrange and monomial basis evaluations may be new (to be checked)}
 \end{itemize}
 The upshot is an algebraic intermediate representation (AIR) of SHA-256
 in which every constraint is linear except for the Hadamard products
@@ -71,10 +71,12 @@ Because the trace already lives in $\Ftwo[X]$, the prime-projection step
 of the general Zinc\texttt{+} compiler is vacuous; the reduction is an
 ideal check, an evaluation projection $\psia$ that substitutes the cell
 variable $X=\alpha$ for a random $\alpha\in\K=\mathrm{GF}(2^{128})$, and a
-sumcheck over $\K$. The nonlinear Hadamard constraints are discharged by
-a dedicated \emph{oblong} zerocheck whose output is bound to the
-commitment through a second projection $\psiz$. Everything reduces to a
-batch of multilinear-extension evaluation claims at a common point.
+sumcheck over $\K$. The nonlinear Hadamard constraints are read as a
+polynomial ideal-membership claim and discharged on the \emph{same}
+pipeline --- the same ideal check, the same $\alpha$, the same sumcheck ---
+with their operands read off through a second weighting $\psiz$ of the cell.
+Everything reduces to a batch of multilinear-extension evaluation claims at
+a common point.
 
 \emph{(3) The commitment} (\Cref{sec:commitment}). The claims are settled
 by a hash-based polynomial commitment over $\Ftwo[X]$ whose opening is
@@ -91,7 +93,7 @@ idea ties the layers together. Both the evaluation projection $\psia$ and
 the Hadamard discharge $\psiz$ are $\Ftwo$-linear maps
 $\cellring \to \K$ of the form $w \mapsto \sum_b w_b\,\xi_b$ for a weight
 vector $(\xi_b)$ --- monomial powers $\xi_b=\alpha^b$ for $\psia$,
-subspace-Lagrange values $\xi_b = L_b(z)$ for $\psiz$. The commitment
+subspace-Lagrange values $\xi_b = L_b(\alpha)$ for $\psiz$ --- both read at the one point $\alpha$. The commitment
 binds the full bit-slice fold, so any such functional is a length-$\wbit$
 inner product against the one bound object $a'$. The arithmetization is
 designed so that its linear constraints survive $\psia$ and its nonlinear
@@ -109,9 +111,10 @@ construction:
   \item commits every trace column natively in $\cellring$, with $\XOR$
     free, shifts/rotations virtual, and modular addition reduced to one
     committed carry bit per row plus linear identities;
-  \item isolates all nonlinearity into column Hadamard products and
-    discharges them by an oblong zerocheck bound to the commitment via
-    $\psiz$, with no second opening;
+  \item isolates all nonlinearity into column Hadamard products, recasts
+    them as a polynomial ideal-membership claim discharged on the same
+    pipeline, and binds them to the commitment via $\psiz$, with no second
+    opening and no second point;
   \item runs the entire proof over $\K=\mathrm{GF}(2^{128})$ with no
     prime projection, the cell ring never widening through encoding; and
   \item settles all evaluation claims with a bit-sliced opening whose
@@ -138,7 +141,7 @@ trace model, multilinear extensions, and the two $\Ftwo$-linear
 projections.
 \Cref{sec:arith} develops the SHA-256 $\Ftwo[X]$ arithmetization.
 \Cref{sec:piop} gives the binary-field PIOP (commit, ideal check,
-$\psia$, sumcheck) and \Cref{sec:hadamard} the oblong Hadamard discharge.
+$\psia$, sumcheck) and \Cref{sec:hadamard} the Hadamard discharge.
 \Cref{sec:commitment} summarises the bit-sliced commitment and how the
 claims are settled.
 \Cref{sec:soundness} composes the soundness of the layers under

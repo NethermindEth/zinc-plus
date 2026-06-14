@@ -55,15 +55,19 @@ the literature: we organise the comparison around three orthogonal design
 axes (uniform AIR versus unrolled word circuit; linear $\Ftwo$-RAA with a
 flat Brakedown proximity test versus Reed--Solomon with recursive FRI;
 base-field versus $\mathrm{GF}(2^{128})$ reductions), each deciding one
-outcome, and report same-machine measurements: prover time is a tie, the
-$\Ftwo[X]$ verifier is $5.8$--$77\times$ faster and its memory roughly
-half, while Binius64's proof is $3.8$--$5.6\times$ smaller and it is fully
-sound where our adder carries are presently trusted.
+outcome, and report same-machine measurements at the matched commitment
+rate: the $\Ftwo[X]$ prover leads (a touch at moderate scale, widening to
+$\sim$$2\times$ as Binius64's $O(N)$ circuit build walls), its verifier
+runs from near-parity to over $11\times$ faster ($\sqrt N$ versus $O(N)$),
+its preprocessing is $O(1)$ versus $O(N)$, and its memory is roughly half
+--- while Binius64's proof is $4$--$7\times$ smaller and it is fully sound
+where our adder carries are presently trusted.
 \end{abstract}
 
 \tableofcontents
 
 \input{sections/introduction}
+\input{sections/overview}
 \input{sections/preliminaries}
 \input{sections/arithmetization}   % Stage 2
 \input{sections/piop}              % Stage 3
@@ -72,15 +76,17 @@ sound where our adder carries are presently trusted.
 \input{sections/soundness}         % Stage 4
 \input{sections/implementation}    % Stage 5
 
-% --- Comparison with Binius64 ---
-\input{sections/cmp-intro}
-\input{sections/cmp-axes}
-\input{sections/cmp-shifts}
-\input{sections/cmp-results}
-\input{sections/cmp-analysis}
-\input{sections/cmp-soundness}
-\input{sections/cmp-guidance}
-\input{sections/cmp-outlook}
+% --- Comparison with Binius64 (condensed; full detail in the appendices) ---
+\input{sections/comparison}
+
+% =============================== Appendices ===============================
+% Not counted toward the main-body page budget.
+\appendix
+\input{sections/appendix-measurements}  % A: detailed sweeps + per-phase (moved from sec:impl)
+\input{sections/cmp-shifts}             % B: anatomy of the shift handling
+\input{sections/cmp-analysis}           % C: where each wins; the AIR counterfactual
+\input{sections/cmp-guidance}           % D: deployment guidance (full)
+\input{sections/cmp-outlook}            % E: cross-pollination levers
 
 \input{sections/cmp-bibliography}
 

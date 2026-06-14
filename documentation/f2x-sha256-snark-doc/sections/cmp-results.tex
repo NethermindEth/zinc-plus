@@ -1,162 +1,139 @@
 \section{Measured comparison}
 \label{sec:results}
 
-All figures below are on one Apple M4 (10-core, 16\,GB), non-zero-knowledge.
-Both provers are run \emph{multithreaded}, so the prover comparison is
-core-for-core: \zinc{} with its \texttt{parallel}\,$+$\,\texttt{simd}
-build, and \binius{} with its prover parallelised across cores
-(rayon\,$+$\,SIMD). \binius{}'s verifier figures, by contrast, are
-single-threaded (\Cref{sec:res-scaling}).
-\zinc{} instances are indexed by $\nu = \log_2(\text{trace rows})$ with
-$\mathrm{compressions}(\nu) = (2^{\nu}-4)/68$, giving $\nu{=}16
-\Rightarrow 963$ and $\nu{=}20 \Rightarrow 15{,}420$ compressions;
-\binius{} instances are indexed by SHA-256 block count, matched to
-\zinc{}'s compression count (block $\approx$ $2^{20}$ at $\nu{=}16$ and
-$2^{24}$ at $\nu{=}20$).
+All figures are on one Apple~M4 (10-core, $16$\,GB), non-zero-knowledge,
+provers multithreaded, at the matched commitment rate $1/4$. \zinc{} instances
+are indexed by $\nu=\log_2(\text{trace rows})$ with
+$\mathrm{compressions}(\nu)=(2^\nu-4)/68$; \binius{} by SHA-256 block count,
+matched to \zinc{}'s compression count. The detailed sweeps --- prover,
+verifier, proof, and the per-phase decompositions --- live in \Cref{sec:impl}
+(\Cref{tab:scaling,tab:perphase,tab:perphase-b64}); this section reads off the
+comparison they imply. Absolute times are thermally variable
+($\sim$$10$--$20\%$ run-to-run), so we lean on ratios and per-phase
+\emph{shapes}, which are stable. The Zinc\texttt{+} figures here are CPU-only
+(no GPU commit), so the prover comparison is core-for-core; \binius{}'s
+verifier carries a parallelised public-input sweep (a constant-factor patch on
+an $O(N)$ algorithm).
 
-\subsection{Headline: the four numbers}
+\subsection{Headline}
 \label{sec:res-headline}
 
 \begin{table}[t]
 \centering
 \renewcommand{\arraystretch}{1.2}
-\begin{tabular}{@{}llrrr@{}}
+\begin{tabular}{@{}llrrl@{}}
 \toprule
 & & \binius{} & \zinc{} & winner \\
 \midrule
-\multirow{3}{*}{$\approx$\,963 blk ($2^{20}$)}
-  & Prove   & $87.5$\,ms  & $98.4$\,ms  & \binius{} $1.13\times$ \\
-  & Verify  & $25.9$\,ms  & $4.46$\,ms  & \zinc{} $5.8\times$ \\
-  & Proof   & $304$\,KiB  & $1.12$\,MiB & \binius{} $3.8\times$ \\
+\multirow{3}{*}{$\sim$$1000$ comp}
+  & Prove   & $84$\,ms    & $75$\,ms    & \zinc{} $1.1\times$ \\
+  & Verify  & $14$\,ms    & $12$\,ms    & \zinc{} $1.2\times$ \\
+  & Proof   & $249$\,KiB  & $1.12$\,MiB & \binius{} $4.6\times$ \\
 \midrule
-\multirow{4}{*}{$15{,}420$ blk ($2^{24}$)}
-  & Prove   & $2.51$\,s   & $1.277$\,s  & \zinc{} $1.97\times^{\ast}$ \\
-  & Verify  & $2.39$\,s   & $31.0$\,ms  & \zinc{} $77\times$ \\
-  & Proof   & $457$\,KiB  & $2.57$\,MiB & \binius{} $5.6\times$ \\
-  & Peak mem& $27.2$\,GB  & $\sim$$13$\,GB & \zinc{} $\sim$$2\times$ \\
+\multirow{3}{*}{$\sim$$8000$ comp}
+  & Prove   & $1.22$\,s   & $0.58$\,s   & \zinc{} $2.1\times$ \\
+  & Verify  & $493$\,ms   & $45$\,ms    & \zinc{} $11\times$ \\
+  & Proof   & $299$\,KiB  & $\sim$$2.0$\,MiB & \binius{} $\sim$$7\times$ \\
 \bottomrule
 \end{tabular}
-\caption{Matched-instance comparison. $^{\ast}$The $\nu{=}20$ prover win
-is substantially a \emph{memory} win: \binius{} at $2^{24}$ needs
-$\sim$$27$\,GB and is memory-starved on a $16$\,GB host (super-linear);
-extrapolating its clean $0.090$\,ms/blk rate to adequate RAM gives
-$\sim$$1.4$\,s, i.e. a near-tie. The honest prover verdict is a tie that
-\zinc{} wins on memory-constrained hardware.}
+\caption{Matched rate $1/4$, CPU, at two scales (full curves:
+\Cref{tab:scaling}). At moderate $N$ the prover is close ---
+\zinc{} a touch ahead at the matched rate (the GPU commit tracks the CPU
+prover without a net latency win at this scale, \Cref{tab:scaling-gpu});
+at scale the gaps open. The prover divergence is
+\binius{}'s super-linearity (\Cref{tab:perphase-b64}) against \zinc{}'s linear
+scaling (\Cref{tab:perphase}); the verifier divergence is $O(N)$ vs $\sqrt N$;
+the proof runs the other way (recursive FRI vs the flat bit-sliced opening).
+Representative single runs.}
 \label{tab:headline}
 \end{table}
 
-\Cref{tab:headline} is the comparison in four numbers.\footnote{These
-\zinc{} prover figures use the Metal GPU commit path and a fresh
-same-session sweep, so the $\nu{=}16$ prove ($98.4$\,ms) is the GPU-commit
-number; the CPU-commit oblong prove reported in \Cref{sec:impl} is
-$\approx 136$\,ms. The $\nu{=}16$ verifier ($4.46$\,ms) is a fresher
-measurement that refines the conservative $\approx 11$\,ms quoted in
-\Cref{sec:impl}; both are dominated by the same $t$-column proximity test.}
-The prover is a
-tie ($\binius{}$ $1.13\times$ at $\sim$$950$ blocks; \zinc{} ahead at
-$2^{24}$ but mostly on footprint). The two structural gaps are
-\zinc{}'s verifier ($5.8\times$, widening to $77\times$) and \binius{}'s
-proof ($3.8\times$, widening to $5.6\times$); both widen with $N$ because
-one is $\sqrt N$ against $O(N)$ and the other is $\polylog$ against
-$\sqrt N$. \zinc{}'s full curve for reference: $\nu{=}9$
-$8.03$\,ms\,/\,$1.34$\,ms\,/\,$802$\,KiB; $\nu{=}16$
-$98.4$\,ms\,/\,$4.46$\,ms\,/\,$1.12$\,MiB; $\nu{=}20$
-$1.277$\,s\,/\,$31.0$\,ms\,/\,$2.57$\,MiB. \binius{}'s curve:
-$944$\,blk $87.6$\,/\,$27.1$\,ms\,/\,$304$\,KiB; $4016$\,blk
-$362.9$\,/\,$354.7$\,ms\,/\,$404$\,KiB; $15{,}420$\,blk
-$2.51$\,s\,/\,$2.39$\,s\,/\,$457$\,KiB.
+\Cref{tab:headline} is the comparison in two regimes. At a matched
+$\sim$$1000$ compressions all three numbers are close-to-modest: \zinc{}'s
+prover is a touch ahead at rate $1/4$ (its GPU commit tracks the CPU prover
+without a net latency win at this scale, \Cref{tab:scaling-gpu}), the
+verifiers are within $\sim$$1.2\times$, and \binius{}'s proof is several
+times smaller. The interesting content is how they \emph{scale}. \zinc{}'s
+prover is linear and \binius{}'s is super-linear, so the prover gap opens to
+$\sim$$2\times$ by $8000$ compressions and then becomes unbounded: \binius{}'s
+$O(N)$ circuit \emph{build} exceeds one minute beyond $\sim$$8000$
+compressions, where \zinc{} still proves $15{,}420$ in $\approx 1.2$\,s. The
+verifier and proof move in opposite directions with $N$, for the structural
+reasons of \Cref{sec:axes}.
 
-\subsection{Per-phase decomposition of the prover}
+\subsection{Per-phase: a net of offsetting differences}
 \label{sec:res-phases}
 
-The prover tie is a \emph{net} of large, offsetting per-phase
-differences, not a phase-by-phase tie. \Cref{tab:phases} decomposes both
-provers at the matched $\sim$$950$-block instance.
+The prover comparison is a \emph{net} of large, offsetting per-phase
+differences, not a uniform gap. \Cref{tab:perphase,tab:perphase-b64} give the
+two decompositions; reading them against each other at the matched instance:
 
-\begin{table}[t]
-\centering
-\renewcommand{\arraystretch}{1.2}
-\begin{tabular}{@{}lr@{\quad}lr@{}}
-\toprule
-\multicolumn{2}{c}{\binius{} ($944$\,blk, $87.6$\,ms)} &
-\multicolumn{2}{c}{\zinc{} ($\nu{=}16$, $98.4$\,ms)} \\
-\midrule
-Commit (RS encode\,+\,Merkle) & $7.1$  & Commit$^{\dagger}$       & $28.0$ \\
-IntMul (no-op for SHA)        & $1.0$  & Discharge (oblong $\AND$) & $32.1$ \\
-BitAnd reduction              & $24.9$ & UAIR-linear              & $15.4$ \\
-Shift reduction               & $43.3$ & Multipoint-eval          & $11.2$ \\
-\quad ($\hookrightarrow$ wiring scatter & $27.3$) & Open (PCS)    & $7.6$  \\
-PCS open (FRI/BaseFold)       & $10.3$ & z-block                  & $2.8$  \\
-\bottomrule
-\end{tabular}
-\caption{Per-phase prover times (ms). $^{\dagger}$The \zinc{} commit
-figure is the \emph{after-prove / repeated-proving} cost; the warm
-commit floor is $\sim$$15.5$\,ms --- the $28$\,ms reflects a $\sim$$10$\,ms
-cold-cache penalty when the commit fires after a full prove
-(\Cref{sec:res-commit}). The single largest \binius{} phase is the Shift
-reduction ($49\%$), of which the wiring scatter (\texttt{build\_g\_parts})
-alone is $31\%$.}
-\label{tab:phases}
-\end{table}
-
-Reading \Cref{tab:phases} bucket by bucket:
 \begin{itemize}
-  \item \textbf{Nonlinearity discharge.} \zinc{}'s oblong discharge
-  ($32.1$\,ms) is about $2.1\times$ cheaper than \binius{}'s BitAnd $+$
-  Shift reductions ($68.2$\,ms). The dominant \binius{} phase is the
-  \emph{Shift reduction} ($43.3$\,ms, $49\%$) --- precisely the
-  entry-wise-shift handling that \zinc{} gets for free via $\psi$
-  read-offs (\Cref{sec:shifts}). This is the per-phase signature of the
-  representational advantage.
-  \item \textbf{Commit.} \binius{}'s commit ($7.1$\,ms) is cheaper than
-  \zinc{}'s ($28.0$\,ms after-prove; $\sim$$15.5$\,ms warm) --- \zinc{}'s
-  rate-$1/4$ codeword (vs \binius{}'s rate-$1/2$) and bit-sliced layout
-  cost more even on GPU, and the linear encoder does not fully
-  compensate. This is the phase that gives \binius{} its moderate-$N$
-  prover edge.
-  \item \textbf{Open.} \zinc{}'s flat open ($7.6$\,ms) is \emph{cheaper}
-  in time than \binius{}'s FRI open ($10.3$\,ms), even though \zinc{}'s
-  opening is far larger in bytes --- the flat-versus-recursive tradeoff
-  is time-versus-size, and the proof-size cost of \zinc{}'s opening is not
-  a prover-time cost.
-  \item \textbf{Plumbing.} \zinc{} carries $\sim$$29$\,ms of dual-projection
-  machinery (UAIR-linear, multipoint-eval, z-block) for which \binius{}
-  has no analogue (its IntMul is a $1$\,ms no-op).
+  \item \textbf{Nonlinearity discharge.} \zinc{}'s Hadamard discharge
+  ($\sim$$19$\,ms at $\nu{=}16$) is cheaper than \binius{}'s BitAnd $+$ Shift
+  reductions ($\sim$$85$\,ms at $\sim$$1000$ comp) --- and it scales better.
+  \binius{}'s \emph{Shift reduction} dominates at small $N$ (the entry-wise
+  shift handling that \zinc{} gets for free via the $\psi$ read-offs,
+  \Cref{sec:shifts}), but at scale the \emph{BitAnd reduction} overtakes it and
+  drives the super-linearity (its witness build alone is a quarter of the
+  \binius{} prover). \zinc{}'s discharge stays a flat $\sim$$22\%$.
+  \item \textbf{Commit.} \binius{}'s FRI commit is cheaper at moderate $N$;
+  \zinc{}'s rate-$1/4$ codeword $+$ bit-sliced Merkle cost more (the largest
+  \zinc{} phase at scale, $7\%\!\to\!30\%$ of the prover) and is the phase the
+  GPU commit most relieves.
+  \item \textbf{Open.} \zinc{}'s flat open is \emph{cheaper in time} than
+  \binius{}'s FRI open, despite being far larger in \emph{bytes} --- the
+  flat-versus-recursive tradeoff is time-versus-size, and \zinc{}'s open scales
+  sub-linearly (its $t=987$ openings are a fixed count).
+  \item \textbf{Plumbing.} \zinc{} carries the linear PIOP and multipoint
+  machinery for which \binius{} has no analogue (its IntMul is a $\le\!1$\,ms
+  no-op for SHA).
 \end{itemize}
-Bucketed, \binius{} wins the commit phase by $\sim$$21$\,ms; \zinc{} wins
-the proving core and the open by $\sim$$10$\,ms together; net \binius{}
-$+11$\,ms, the measured gap.
 
-\subsection{The verifier and proof scale apart}
+\subsection{Verifier, proof, and preprocessing scale apart}
 \label{sec:res-scaling}
 
-\binius{}'s verifier is essentially the in-the-clear monster sweep
-(\Cref{sec:shifts}): measured at $92\%$, $97.5\%$, $99.6\%$ of verify time
-at $2^{18}$, $2^{20}$, $2^{22}$, going $6.3 \to 26.5 \to 392$\,ms. The
-$26.5\to392$\,ms jump (a $\sim$$15\times$ growth for $4\times$ work) is
-super-linear: single-threaded, and at $2^{22}$ the constraint-index
-tensor and the multi-million-constraint sweep blow past cache. \zinc{}'s
-verifier is $\sqrt N$-bound by its $t$-column proximity test
-($4.46 \to 31.0$\,ms from $\nu{=}16$ to $\nu{=}20$, $\sim$$6.9\times$ for
-$16\times$ rows). The result is a verifier ratio that grows from
-$5.8\times$ to $77\times$. The proof moves the other way: \binius{}'s
-FRI proof is $\polylog$ ($304\to404\to457$\,KiB) against \zinc{}'s
-$\sqrt N$ flat proof ($0.80\to1.12\to2.57$\,MiB), so the proof ratio
-grows from $3.8\times$ to $5.6\times$.
+Three quantities diverge with $N$, all for the structural reasons of
+\Cref{sec:axes}.
 
-\subsection{A correction the measurement forced}
+\paragraph{Verifier ($O(N)$ vs $\sqrt N$).} \binius{}'s verifier is dominated
+by the in-the-clear public-input ``monster'' sweep (\Cref{sec:shifts}): even
+with its parallelised verifier it goes $14 \to 493$\,ms from $\sim$$1000$ to
+$\sim$$8000$ compressions ($\sim$$35\times$ for $8\times$ work --- super-linear,
+as the constraint-index tensor outgrows cache), and is $99\%$ of verify at
+scale. \zinc{}'s verifier is $\sqrt N$-bound by its $t$-column proximity test
+($12 \to 83$\,ms from $\nu{=}16$ to $\nu{=}20$). The ratio is near-parity at
+moderate $N$ and grows past $11\times$ by $8000$ compressions, widening
+without bound thereafter.
+
+\paragraph{Proof (recursive vs flat).} The proof moves the other way:
+\binius{}'s recursive FRI proof grows slowly ($123\!\to\!299$\,KiB over
+$16\!\to\!8192$ compressions), while \zinc{}'s flat bit-sliced opening is
+$\sqrt N$ and several megabytes ($0.80\!\to\!2.57$\,MiB at $\nu{=}9\!\to\!20$).
+\binius{} wins proof size by $4$--$7\times$, widening with $N$.
+
+\paragraph{Preprocessing ($O(N)$ vs $O(1)$).} The starkest difference is the
+circuit description each system must hold (and the verifier must, in effect,
+read). \binius{} is a non-uniform word circuit: its constraint system plus
+shift/wiring key-collection grow $O(N)$ --- $54.7 / 218 / 873$\,MB at
+$256 / 1024 / 4096$ compressions (\Cref{sec:impl-perphase}), the
+$\ge\!16{,}384$ build exceeding a minute. \zinc{}'s uniform AIR has $O(1)$
+preprocessing: a fixed UAIR specification plus the RAA code's seeds,
+kilobyte-scale and independent of the compression count. This
+$O(N)$-versus-$O(1)$ gap is the common root of \binius{}'s linear verifier
+\emph{and} its circuit-build wall.
+
+\subsection{A correction the measurements forced}
 \label{sec:res-commit}
 
-A careful re-measurement of the \zinc{} commit, isolated, gives a
-\emph{warm} floor of $\sim$$15.5$\,ms at $\nu{=}16$ --- the
-$\sim$$28$\,ms figure that appears in the per-phase profile is the
-after-prove commit, inflated by a $\sim$$10$\,ms cold-cache penalty (the
-prior prove's $\sim$$32$\,MB proof and discharge working set evict the
-commit's encode/scatter buffers). We verified that this penalty is
-\emph{not} GPU-dispatch warmth (a warm-up dispatch yields no compensating
-speedup) and \emph{not} reallocation (the commit slab is process-cached);
-it is cold memory. The practical consequences: \zinc{}'s warm commit is
-$\sim$$2.2\times$ \binius{}'s $7.1$\,ms (not the $4\times$ the raw profile
-suggests), and the $\sim$$10$\,ms penalty falls mostly on
-\emph{repeated/throughput proving} (and on the benchmark loop, where each
-prove follows the last) rather than on a single cold proof.
+Two earlier figures did not survive a careful re-measurement, and we record the
+corrections. First, the \zinc{} verifier at $\nu{=}16$ is $\approx 12$\,ms (the
+$t$-column proximity test), not the $\approx 4.5$\,ms an under-opened
+configuration suggested; the matched-$N$ verifier is therefore near-parity with
+\binius{}'s, and the \zinc{} advantage is \emph{asymptotic} (the $O(N)$ vs
+$\sqrt N$ split), not a moderate-$N$ headline. Second, the \zinc{} commit has a
+\emph{warm} floor of $\sim$$15.5$\,ms at $\nu{=}16$ but reads $\sim$$18$\,ms in
+the after-prove profile: a cold-cache penalty (the prior prove's working set
+evicts the commit's encode/scatter buffers), not GPU-dispatch warmth or
+reallocation. The penalty falls on repeated/throughput proving, not on a single
+cold proof.

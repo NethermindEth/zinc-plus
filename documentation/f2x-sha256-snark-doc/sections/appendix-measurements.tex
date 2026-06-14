@@ -1,0 +1,279 @@
+%% Detailed measurements (moved out of the deployed-instantiation section for length).
+\section{Detailed measurements}
+\label{app:meas}
+
+This appendix expands the headline of \Cref{sec:results} with the full prover,
+verifier, and proof sweeps, the per-phase decomposition, the beyond-RAM
+behaviour, and the head-to-head comparison with \binius{}. All figures use the
+setup of \Cref{sec:results} (one Apple~M4, matched rate $1/4$, CPU unless noted).
+
+\subsection{Comparison to Binius64 at a matched commitment rate}
+\label{sec:impl-binius}
+
+Binius64 is the closest relative of this construction: another
+characteristic-$2$ SHA-256 prover that refuses the prime-field witness
+blow-up, and the source of the per-step full-adder carry identity and the
+one-$\AND$ Boolean forms used in \Cref{sec:arith}. The two systems commit
+differently --- Binius64 over a Reed--Solomon code with a recursive FRI
+proximity test, the deployed instantiation here over the linear $\Ftwo$-RAA
+code with a flat Brakedown opening (\Cref{sec:commitment}) --- but they
+share one tunable dial, the code rate, which trades commit work against
+query count, hence proof size. Binius64 runs at rate $1/2$ by default; the
+deployed instantiation runs at rate $1/4$ (\Cref{sec:impl-params}). A
+\emph{prover} comparison is therefore only meaningful at a fixed rate.
+\Cref{tab:binius-rate} reports both systems on a matched workload of
+$\approx\!963$ compressions ($\nu=16$): at rate $1/4$, and --- for Binius64
+--- at its native rate $1/2$. All figures are CPU-only medians on one
+machine, each system at its deployed soundness query count (here $t=987$
+column openings of \Cref{sec:impl-params}; Binius64's test-query count is
+fixed automatically from its $96$-bit target). The comparison is CPU-only
+on both sides; enabling the Metal GPU commit of \Cref{sec:commitment}
+offloads the commit phase to the GPU but, at this scale, shows no net
+prover-latency win over the CPU commit (\Cref{tab:scaling-gpu}).
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l r r r}
+\toprule
+System (rate) & Prove & Verify & Proof \\
+\midrule
+Zinc\texttt{+} (rate $1/4$) & $\sim\!93$ ms & $\sim\!12$ ms & $\sim\!1.1$ MiB \\
+Binius64 (rate $1/4$) & $\sim\!104$ ms & $\sim\!15$ ms & $\sim\!249$ KiB \\
+Binius64 (rate $1/2$, default) & $\sim\!95$ ms & $\sim\!14$ ms & $\sim\!304$ KiB \\
+\bottomrule
+\end{tabular}
+\caption{SHA-256 at $\nu=16$ ($\approx\!963$ compressions), CPU-only,
+representative medians. At a matched rate $1/4$ the $\Ftwo[X]$ prover is
+$\sim\!1.1\times$ faster than Binius64, and is no slower than Binius64 at
+its cheaper native rate $1/2$. Raising Binius64 to rate $1/4$ adds $\approx\!8$ ms to its prover ---
+a $2\times$ larger codeword to commit and fold --- while shrinking its
+proof, since its $\AND$/shift sum-checks are rate-independent and only the
+commitment scales with the rate.}
+\label{tab:binius-rate}
+\end{table}
+
+\begin{remark}[Reading the comparison]
+\label{rem:binius-read}
+At equal rate the linear-time RAA encoder and the base-field Hadamard
+discharge (\Cref{rem:cost-structure}) make the $\Ftwo[X]$ prover the faster
+of the two; Binius64's recursive FRI in turn keeps its proof several times
+smaller, and the two verifiers are comparable at this scale. Two
+asymmetries temper the prover figure: Binius64 is fully sound and proves a
+length-padded preimage, whereas the deployed adder Hadamards here are
+supplied trusted (\Cref{rem:adder-trusted}) --- closing that gap is
+expected to be near prover-neutral but is not yet paid; and the Binius64
+build measured here carries a parallelized verifier. As elsewhere, the
+ratios are steadier than the absolute milliseconds.
+\end{remark}
+
+\subsection{Scaling: prover, verifier, and proof}
+\label{sec:impl-scaling}\label{sec:res-scaling}
+
+\Cref{tab:scaling} sweeps both systems across trace sizes at the matched rate
+$1/4$ --- Binius64 by compression count, Zinc\texttt{+} by trace height $\nu$
+($\approx(2^\nu-4)/68$ compressions). The Zinc\texttt{+} figures are CPU-only
+(no GPU commit) on a cooled machine; Binius64 is its own example at
+\texttt{--log-inv-rate 2}. Two divergences stand out. The Zinc\texttt{+}
+prover stays ahead and the gap \emph{widens} --- from $\sim\!1.1\times$ at
+$10^3$ compressions to $\sim\!2\times$ at $10^4$. And the verifiers split
+qualitatively: Binius64's grows with $N$ (its public-input check is $O(N)$,
+reaching $\sim\!0.5$ s at $8000$ compressions), while Zinc\texttt{+}'s ---
+dominated by the $t$ column openings --- grows like $\sqrt N$ and stays in the
+tens of milliseconds. Binius64's example also walls above $\sim\!8000$
+compressions: its $O(N)$ circuit \emph{build} exceeds one minute, where
+Zinc\texttt{+} still proves $15{,}420$ compressions in $\approx 1.2$ s. The
+Metal GPU commit configuration tracks the same curve without a net latency
+win at these scales (\Cref{tab:scaling-gpu}).
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r r r r r}
+\toprule
+ & \multicolumn{2}{c}{Binius64 (rate $1/4$)} & \multicolumn{2}{c}{Zinc\texttt{+} (CPU)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+$\approx$compressions & prove & verify & prove & verify \\
+\midrule
+$\sim\!60$    & $33.7$ ms & $3.1$ ms  & $10.1$ ms & $4.8$ ms \\
+$\sim\!250$   & $41.6$ ms & $4.6$ ms  & $23.3$ ms & $9.3$ ms \\
+$\sim\!1000$  & $84.1$ ms & $14.0$ ms & $75.0$ ms & $17.9$ ms \\
+$\sim\!2000$  & $155$ ms  & $27.5$ ms & $148$ ms  & $19.8$ ms \\
+$\sim\!8000$  & $1.22$ s  & $493$ ms  & $581$ ms  & $45$ ms \\
+$\sim\!15{,}400$ & \multicolumn{2}{c}{(build $>1$ min)} & $1.19$ s & $83$ ms \\
+\bottomrule
+\end{tabular}
+\caption{SHA-256 scaling at rate $1/4$, CPU, representative single runs.
+\emph{Proof sizes} over the same range: Binius64 $123\!\to\!299$ KiB
+($16\!\to\!8192$ compressions; recursive FRI grows slowly); Zinc\texttt{+}
+$0.80/1.12/2.57$ MiB at $\approx\!7/963/15{,}420$ compressions (the flat
+bit-sliced opening, dominated by the $t=987$ column openings). Verify figures
+are single-run and indicative (the $\nu{=}16$ median is the $\approx\!12$ ms
+of \Cref{tab:binius-rate}); the $O(N)$-vs-$\sqrt N$ verifier split is the
+robust signal. Binius64 cannot go below $16$ compressions (its example's fixed
+$1024$-byte message).}
+\label{tab:scaling}
+\end{table}
+
+\Cref{tab:scaling-gpu} reports the same Zinc\texttt{+} prover with the Metal
+GPU commit enabled, swept across the deployed trace heights.
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r r r}
+\toprule
+$\nu$ & $\approx$compressions & prove (GPU commit) \\
+\midrule
+$9$  & $7$        & $9.8$ ms \\
+$12$ & $60$       & $19.2$ ms \\
+$14$ & $240$      & $38.8$ ms \\
+$16$ & $963$      & $107$ ms \\
+$18$ & $3855$     & $403$ ms \\
+$20$ & $15{,}420$ & $1.71$ s \\
+\bottomrule
+\end{tabular}
+\caption{Zinc\texttt{+} prover with the Metal GPU commit enabled
+(\Cref{sec:commitment}), three-run medians via the discharge timing harness.
+The curve is linear in $N$ (each $+1$ in $\nu$ doubles the compression count
+and $\approx$doubles the prover), matching the shape of the CPU prover of
+\Cref{tab:scaling}. The absolutes track the \emph{warm} CPU median of
+\Cref{tab:binius-rate} ($\nu{=}16$: $107$ vs $93$ ms) and run above the
+\emph{cooled} CPU sweep of \Cref{tab:scaling} --- so once thermal state is
+matched, offloading the commit to the GPU yields no net end-to-end latency
+win: its value is throughput and freeing the CPU, not reduced prove latency.
+(This harness rebuilds the $\mathrm{GF}(2^8)$ lookup tables per verify call,
+inflating its verify above the deployed $\approx\!12$ ms; the prover figure
+is unaffected.)}
+\label{tab:scaling-gpu}
+\end{table}
+
+\paragraph{Beyond RAM.} \Cref{tab:scaling-bigmem} pushes the Zinc\texttt{+}
+prover past the point where the trace exceeds the host's $16$\,GB of memory.
+Two regimes are visible. While the trace fits in RAM (through $\nu{=}20$,
+$\approx\!13$\,GB), the prover is \emph{cleanly linear} --- $2.0\times$ per
+doubling of $N$. From $\nu{=}21$ ($\approx\!26$\,GB) the working set exceeds
+physical memory and the prover turns super-linear ($2.3$--$3.1\times$ per
+doubling) as memory compression and SSD swap absorb the overflow. This knee
+measures \emph{this host's memory wall}, not the algorithm, whose compute
+stays $O(N)$; on a machine with adequate RAM the linear regime simply extends.
+The salient point for the comparison is that Zinc\texttt{+} still
+\emph{completes} $123{,}361$ compressions --- a $\approx\!104$\,GB working set,
+entirely via swap --- where Binius64's $O(N)$ circuit \emph{build} already walls
+at $\approx\!16{,}000$ (\Cref{tab:scaling}); the all-$\Ftwo[X]$ prover stays
+tractable an order of magnitude further in $N$, even on memory-constrained
+hardware.
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r r r r l}
+\toprule
+$\nu$ & $\approx$comp & prove & verify & working set \\
+\midrule
+$19$ & $7{,}710$   & $0.59$ s  & $45$ ms  & fits \\
+$20$ & $15{,}420$  & $1.18$ s  & $96$ ms  & $\sim\!13$ GB, fits \\
+\midrule
+$21$ & $30{,}840$  & $3.51$ s  & $126$ ms & $\sim\!26$ GB (swap) \\
+$22$ & $61{,}680$  & $8.02$ s  & $313$ ms & $\sim\!52$ GB (swap) \\
+$23$ & $123{,}361$ & $25.2$ s  & $663$ ms & $\sim\!104$ GB (swap) \\
+\bottomrule
+\end{tabular}
+\caption{Zinc\texttt{+} prover beyond RAM (one Apple~M4, $16$\,GB; CPU, merged
+discharge, $t=987$, same-session warm medians). Above the rule the trace fits
+memory and the prover is linear ($2.0\times$ per doubling); below it the working
+set exceeds $16$\,GB and the prover turns super-linear ($2.3$--$3.1\times$),
+from memory compression and SSD swap --- a property of the host, not the $O(N)$
+algorithm. Zinc\texttt{+} nonetheless completes all the way to $123{,}361$
+compressions, where Binius64's circuit build has long since walled
+(\Cref{tab:scaling}). The verifier continues its $\sqrt N$ growth (tens to
+hundreds of ms) across the whole range.}
+\label{tab:scaling-bigmem}
+\end{table}
+
+\subsection{Per-phase scaling}
+\label{sec:impl-perphase}\label{sec:res-phases}
+
+\Cref{tab:perphase} decomposes the Zinc\texttt{+} prover by phase across trace
+heights. Every phase scales near-linearly --- each grows $\approx\!4\times$ per
+$4\times$ compressions, and the total tracks $N^{0.97}$ --- so the prover is
+linear-time with no super-linear term, the property that lets it run past the
+size where a non-uniform circuit's $O(N)$ build stalls. The ends differ: the
+\emph{commit} (rate-$1/4$ codeword $+$ Merkle) scales steepest and its share
+grows from $7\%$ to $30\%$ --- it is the large-$N$ centre of gravity, and the
+phase the GPU commit most relieves --- while the \emph{open} scales shallowest
+(its $t=987$ column openings are a \emph{fixed} count), its share shrinking
+from $17\%$ to $9\%$.
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l r r r c}
+\toprule
+Phase & $\nu{=}10$ & $\nu{=}16$ & $\nu{=}20$ & per $4\times$ \\
+      & ($15$c) & ($963$c) & ($15{,}420$c) & comp \\
+\midrule
+Commit (encode $+$ Merkle)          & $0.4$ & $18.0$ & $337.9$ & $4.3\times$ \\
+Linear PIOP (IC, $\psia$, sumcheck) & $1.9$ & $17.8$ & $255.3$ & $3.8\times$ \\
+Hadamard discharge                  & $1.2$ & $19.0$ & $287.6$ & $3.9\times$ \\
+Multipoint eval                     & $1.1$ & $11.2$ & $146.0$ & $3.6\times$ \\
+Open                                & $0.9$ & $9.6$  & $102.7$ & $3.3\times$ \\
+\midrule
+Total                               & $5.3$ & $75.6$ & $1129$  & $3.9\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Zinc\texttt{+} merged prover by phase (ms), CPU, $t=987$, across trace
+height $\nu$. Near-linear throughout ($4\times$ per $4\times$ compressions is
+exactly linear); commit scales steepest, open shallowest. Single profile runs;
+the per-phase \emph{shares} are stable across thermal state.}
+\label{tab:perphase}
+\end{table}
+
+\medskip
+\noindent\textbf{Binius64, for contrast.} The same sweep on Binius64
+(\Cref{tab:perphase-b64}) scales differently. Its prover is
+\emph{super-linear} and worsening --- $\sim\!4.6\times$ per $4\times$
+compressions around $10^3$, steepening past $6\times$ by $8000$ (versus
+Zinc\texttt{+}'s flat $\sim\!3.9\times$) --- because the BitAnd and Shift
+reductions build $\mathrm{GF}(2^{128})$ tensors whose working set spills
+cache. The Shift reduction dominates at small $N$ but its share falls
+($62\%\!\to\!32\%$); the BitAnd reduction rises to dominate
+($14\%\!\to\!41\%$, its witness build alone a quarter of the prover) and
+drives the super-linear growth, while the FRI commit grows with the codeword.
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l r r r r}
+\toprule
+Phase & $64$c & $1024$c & $4096$c & $8192$c \\
+\midrule
+Commit (FRI)        & $1.8$  & $15.9$ & $86.3$  & $144.7$ \\
+BitAnd reduction    & $4.0$  & $32.7$ & $219.4$ & $557.1$ \\
+Shift reduction     & $16.5$ & $51.9$ & $171.2$ & $434.7$ \\
+PCS opening         & $3.9$  & $13.4$ & $45.9$  & $212.7$ \\
+\midrule
+Total prove         & $27.3$ & $116$  & $532$   & $1370$ \\
+\bottomrule
+\end{tabular}
+\caption{Binius64 prover by phase (ms), rate $1/4$. The BitAnd reduction
+overtakes the Shift reduction at large $N$ and drives super-linear growth.
+IntMul is a $\le\!1$ ms no-op for SHA.}
+\label{tab:perphase-b64}
+\end{table}
+
+\medskip
+\noindent\textbf{Preprocessing data.} The starkest structural difference is
+not in any timed phase but in the \emph{preprocessing} --- the circuit
+description the system holds (and that the verifier in effect must read).
+Binius64 is a non-uniform word circuit, so its constraint system plus the
+shift/wiring key-collection grow $O(N)$: measured at rate $1/4$,
+$3.7 / 14.4 / 54.7 / 218 / 873$ MB at $16 / 64 / 256 / 1024 / 4096$
+compressions (almost exactly $\times4$ per $\times4$), and the
+$\ge\!16{,}384$-compression build exceeds one minute. Zinc\texttt{+} is a
+\emph{uniform} AIR: the constraint description is the same for any trace
+height, so its preprocessing is $O(1)$ --- a fixed UAIR specification plus the
+RAA code's permutation seeds, kilobyte-scale and independent of the
+compression count. This $O(N)$-versus-$O(1)$ preprocessing gap is the root of
+both Binius64's $O(N)$ verifier and its circuit-build wall.
+

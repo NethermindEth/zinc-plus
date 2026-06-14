@@ -1,0 +1,236 @@
+\section{Technical Overview}
+\label{sec:overview}
+
+This section is a self-contained tour of the construction: a reader who
+reads only the introduction and this overview will understand how the
+argument works end to end, while the sections that follow supply the
+definitions, lemmas, and proofs the tour forward-references. The spine has
+four moves and one unifying property. The arithmetization makes every
+constraint linear except a handful of column products
+(\Cref{sec:overview-rep}); a binary-field polynomial IOP discharges the
+linear constraints (\Cref{sec:overview-linear}); a single change of reading
+lets the products ride that \emph{same} IOP (\Cref{sec:overview-crux}); and
+a bit-sliced commitment settles everything with one opening
+(\Cref{sec:overview-open}). What ties the four together is that every map
+used to collapse a cell to the field is $\Ftwo$-linear
+(\Cref{sec:overview-thread}).
+
+\subsection{The representation: every primitive but $\AND$ is linear}
+\label{sec:overview-rep}
+
+Represent a $\wbit$-bit word as a bit-polynomial $\bp{u}=\sum_b u_b X^b$ in
+the cell ring $\cellring=\Ftwo[X]/(X^{\wbit})$, the coefficient of $X^b$
+being bit $b$ (\Cref{sec:arith}). In this encoding the bitwise primitives
+of SHA-256 are ring operations rather than emulations:
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{$\XOR$ is addition} ($1+1=0$). A column that is an
+    $\Ftwo$-linear combination of others is never committed; the verifier
+    forms the combination of the committed columns' projections when needed.
+    The dozens of $\XOR$s in SHA-256 cost nothing.
+  \item \textbf{Shifts and rotations are monomial multiplication} by $X^c$
+    (in the shift quotient $\Fshift$ or rotation quotient $\Frot$), hence
+    $\Ftwo$-linear; a shifted column is \emph{virtual} --- reconstructed
+    from its source, not committed.
+  \item \textbf{Modular addition is the Binius carry identity.} For a binary
+    step $\bp{s}\equiv\bp{a}+\bp{b}\pmod{2^{\wbit}}$, the carry word is
+    $\bp{c}=\SHR^{1}(\bp{s}+\bp{a}+\bp{b})$ \albert{There is an incosistency with how $\bp{c}$ is used below right? (It should not be multiplied by $X$?) Also, I think there is an error here. If the carry word was this one, then we would not need to commit to any bit at all. Also, this is an important technical contribution of ours (With Binius64, committing to only one bit is not possible, or is it?) so let's make sure we state this. Please increase the detail of this part} --- a free combination, so only
+    its top bit $\beta$ is committed. The addition is then a \emph{linear}
+    bit-$0$ identity together with one full-adder product, \albert{Emphasize what modulo ideal these operations are in. }
+    \[
+      \bp{s}=\bp{a}+\bp{b}+X\bp{c},
+      \qquad
+      (\bp{a}+X\bp{c})\had(\bp{b}+X\bp{c}) = \bp{c}+X\bp{c}
+    \]
+    (\Cref{lem:binius}): one committed bit per addition, no $\wbit$-bit
+    overflow witness.
+\end{itemize}
+The lone nonlinear primitive is bitwise $\AND$, the coefficient-wise
+\emph{Hadamard} product $\bp{u}\had\bp{v}$ (\Cref{lem:and}); $\Ch$ and
+$\Maj$ each rewrite to a single such product. The arithmetization therefore
+produces an AIR in which \emph{every constraint is a linear
+ideal-membership relation except a small fixed number of column Hadamard
+products} --- in the deployed layout $K_H=14$ of them ($2$ for the $\AND$s,
+$12$ for the addition carries). The rest of the proof has exactly two jobs:
+the linear constraints, and the Hadamard products.
+
+\subsection{The linear part: ideal check, the projection $\psia$, sumcheck}
+\label{sec:overview-linear}
+
+The prover commits the primary witness columns natively in $\cellring$ with
+a hash-based commitment whose $\Ftwo$-linear code \emph{does not widen} the
+cell ring (\Cref{sec:commitment}). Because the trace already lives in
+$\Ftwo[X]\subset\K[X]$, the prime-field projection that opens the general
+$\zinc$ compiler is vacuous --- the first concrete saving of working in
+characteristic two.
+
+The linear constraints are ideal-membership assertions
+$Q_\ell(T)\in\ideal{g_\ell}$ with generators
+$g_\ell\in\{0,\,X,\,X^{\wbit}-1\}$ (equality/boundary, the addition LSB,
+rotation). The \emph{ideal check} (\Cref{sec:ideal-check}) batches all of
+them --- across families and across all rows --- into combined polynomials
+$E_\ell\in\K[X]$ carrying the obligation $E_\ell\in\ideal{g_\ell}$. The
+\emph{evaluation projection} $\psia$ then substitutes the cell variable
+$X=\alpha$ for a transcript-fresh $\alpha\in\K$. Linear constraints
+\emph{survive} this projection: since $\psia$ is $\Ftwo$-linear and
+evaluation is multiplicative,
+\[
+  \psia\bigl(Q(T)\bigr)=Q\bigl(\psia(T)\bigr),
+  \qquad
+  Q(T)\in\ideal{g}\ \Longrightarrow\ \psia\bigl(Q(T)\bigr)=g(\alpha)\cdot u
+\]
+(\Cref{lem:linear-survives}), so a linear identity among cells becomes a
+linear identity among the projected columns, and membership becomes a plain
+$\K$-identity once $\alpha$ is fixed. A standard degree-$2$ sumcheck
+(\Cref{sec:sumcheck}) reduces the resulting zerocheck over the $2^{\nu}$
+rows to per-column evaluation claims $\mle{\psia(w_g)}(r^*)$ at a single
+point $r^*$.
+
+\subsection{The crux: $\AND$ rides the same pipeline through a second reading $\psiz$}
+\label{sec:overview-crux}
+
+The Hadamard products cannot ride $\psia$, because evaluation does not
+respect the coefficient-wise product:
+\[
+  \psia(\bp{u}\had\bp{v}) = \sum_b u_b v_b\,\alpha^{b}
+  \;\neq\;
+  \psia(\bp{u})\,\psia(\bp{v}) = \sum_{b,b'} u_b v_{b'}\,\alpha^{b+b'},
+\]
+the cross-terms $b\neq b'$ scrambling the bit-products
+(\Cref{rem:and-not-survive}). The resolution is to read the \emph{same}
+committed bits under a \emph{different} weighting. Identify the $\wbit$ bit
+positions with an $\Ftwo$-affine subspace $H\subset\K$ and read a cell's
+bits as the \emph{Lagrange} coefficients $L(\bp{u})=\sum_b u_b L_b$ of a
+univariate over $H$, rather than as monomial coefficients. Then
+\[
+  \bp{u}\had\bp{v}=\bp{w}
+  \quad\Longleftrightarrow\quad
+  L(\bp{u})\,L(\bp{v})-L(\bp{w}) \in \ideal{Z_H},
+  \qquad Z_H=\textstyle\prod_{h\in H}(X-h)
+\]
+(\Cref{eq:had-ideal}): the product is correct on every bit exactly when
+this polynomial vanishes on $H$. That is an \emph{ideal-membership claim}
+--- the very shape the linear part already discharges, now with the extra
+generator $Z_H$. So the nonlinearity rides the same machinery: the same
+ideal check (the prover ships only the $\wbit-1$ off-subspace values of the
+combined product polynomial, which vanish on $H$ for honest data), the same
+point $\alpha$ --- read now through the second projection
+\[
+  \psiz(\bp{w}) = L(\bp{w})(\alpha) = \sum_b L_b(\alpha)\,w_b,
+\]
+the subspace-Lagrange weighting $\xi_b=L_b(\alpha)$ --- and one extra
+degree-$3$ group in the \emph{same} sumcheck, reduced to the \emph{same}
+point $r^*$ (\Cref{sec:hadamard}). The Lagrange reading keeps the
+bit-products $u_bv_b$ separated by position, so the verifier's closing check
+is a genuine per-position product rather than the scrambled cross-terms
+$\psia(\bp{u}\had\bp{v})$ would give. The two projections $\psia$ and
+$\psiz$ are the same kind of object --- an $\Ftwo$-linear map
+$\cellring\to\K$ determined by a weight vector, $\alpha^b$ versus
+$L_b(\alpha)$ --- read at the one point $\alpha$; the $\mu=\log_2\wbit$ bit
+positions are folded once, by the Lagrange reading, and never become
+sumcheck variables.
+
+\subsection{One opening answers both readings}
+\label{sec:overview-open}
+
+After the sumcheck and a multipoint-evaluation step (\Cref{sec:multipoint}),
+both halves have reduced to multilinear-evaluation claims at one common
+point $r_0$: the linear claims are $\psia$-images of the committed columns,
+the discharge claims their $\psiz$-images. The commitment settles both from
+a single object. Its opening binds, per column, the \emph{bit-slice fold}
+\[
+  a'_g=\sum_{b}a'_{g,b}\,X^b\in\K[X]_{<\wbit},
+  \qquad
+  a'_{g,b}=\sum_{x\in\{0,1\}^{\nu}}\eq_x(r_0)\,(w_g)_b(x),
+\]
+a degree-$<\wbit$ polynomial over $\K$ whose $b$-th coefficient is the
+$b$-th bit slice of the column, folded along $\eq(\cdot;r_0)$. Because every
+cell projection is the inner product of the coefficient vector with its
+weights, \emph{any} projected evaluation at $r_0$ is a single
+length-$\wbit$ read-off of $a'_g$:
+\[
+  \psia(a'_g)=\mle{\psia(w_g)}(r_0)\ \ (\text{linear claim}),
+  \qquad
+  \psiz(a'_g)=\mle{\psiz(w_g)}(r_0)\ \ (\text{discharge claim}).
+\]
+One bound object answers both readings, so the nonlinear constraints cost
+\emph{no second opening and no second point} (\Cref{sec:commitment}). The
+opening itself is a flat Brakedown/Ligero-style proximity test over the
+$\Ftwo$-RAA code, with knowledge-soundness error
+$\epsilon_{\mathrm{prox}}(t,\delta)+O(1/|\K|)$ dominated by its $t$ column
+queries.
+
+\subsection{Provenance and the proof-size lever: Blaze and code-switching}
+\label{sec:overview-blaze}
+
+The $\Ftwo$-RAA commitment used above
+(\Cref{sec:overview-open,sec:commitment}) sits in the family introduced by
+\emph{Blaze} \cite{blaze}, a hash-based multilinear polynomial commitment
+over binary fields. Blaze's commit is dominated by the XOR-only encoding of
+an interleaved Repeat--Accumulate--Accumulate code and a single Merkle tree
+--- the same linear-time, non-widening code our opening rests on --- which
+it then opens not by a flat proximity test but by \emph{code-switching}: the
+evaluation/proximity claim on the RAA codeword is reduced to a claim on a
+Reed--Solomon codeword and discharged by an inner foldable IOP of proximity
+(BaseFold/WHIR) \cite{basefold,whir}, yielding a polylogarithmic verifier.
+Our construction shares Blaze's code and its linear-time prover; what it adds
+is the \emph{bit-sliced} opening (\Cref{sec:overview-open}): Blaze, like the
+IOPPs it composes, settles a single evaluation, whereas binding the
+width-$\wbit$ fold $a'$ lets the two $\Ftwo$-linear readings $\psia$ and
+$\psiz$ share \emph{one} opening, so the Hadamard constraints ride the linear
+part at no extra commitment cost. That dual read-off is the feature this
+paper contributes on top of the Blaze code; it has no analogue in a
+single-evaluation MLPCS.
+
+The two designs differ only in how the opening is \emph{settled}. We deploy
+the \emph{flat} Brakedown/Ligero proximity test \cite{brakedown}, whose $t$
+column queries dominate proof size (\Cref{sec:overview-open}) and account for
+the bulk of the $4$--$7\times$ proof-size gap to Binius64's recursive scheme
+(\Cref{sec:cmp}); Blaze's code-switching is exactly the route from that flat
+test to a recursive one over the \emph{same} fast code --- the proof-size
+lever already sketched in \Cref{sec:cmp-outlook}. Crucially, this lever is
+compatible with the bit-sliced reading. The fold axis (the $\nu$ row
+variables, weighted by $\eq(\cdot;r_0)$) is orthogonal to the cell axis (the
+$\wbit$ bit positions of $X$), and the $\eq$-fold, the code, and every
+BaseFold/WHIR round operation are $\Ftwo$- (resp.\ $\K$-) linear
+\emph{coordinate-wise on the cell axis}. A recursive opening therefore still
+certifies the full width-$\wbit$ object $a'\in\Kpoly$ rather than a single
+collapsed value, provided the cell axis is carried as passive shared width
+--- never folded, batched, or projected inside the recursion --- so that
+$\psia(a')$ and $\psiz(a')$ are read off afterward exactly as in
+\Cref{sec:overview-open}. The one-opening-answers-both property is thus
+independent of whether the proximity test is flat or recursive: a
+code-switched opening would shrink the proof toward the recursive class and
+give an $O(\polylog)$ verifier while preserving the $\psia/\psiz$ sharing.
+The deployed system uses the flat test; this is recorded as the concrete
+direction for closing the proof-size gap.
+
+\subsection{The thread, the guarantee, and the scope}
+\label{sec:overview-thread}
+
+One property runs through all four moves: every projection $\psi_\xi$ is an
+$\Ftwo$-linear map $\cellring\to\K$, $\sum_b w_b X^b\mapsto\sum_b
+w_b\,\xi_b$, and the commitment's code is $\Ftwo$-linear and does not widen
+$\cellring$. Hence projections commute through encoding, $\XOR$ of columns
+commutes with projection, shift and rotation virtuals commute with both,
+the random projection may be applied \emph{after} committing, and one
+committed object answers many functionals (\Cref{rem:linearity-thread}).
+That single fact is what makes $\XOR$ free, shifts virtual, and the
+$\psia$/$\psiz$ pair share an opening.
+
+Composed under Fiat--Shamir, the argument is a knowledge-sound SNARK for the
+SHA-256 chained-compression relation, with error
+\[
+  \epsilon \;\le\; \epsilon_{\mathrm{prox}}(t,\delta)
+  + O\!\Bigl(\tfrac{N_{\mathrm{con}}\,\wbit + K_H + \nu}{|\K|}\Bigr)
+\]
+(\Cref{thm:e2e}), the proximity term dominating. Two honest caveats remain
+(\Cref{sec:caveats}): the construction is not zero-knowledge, and the
+modular-addition carries are presently bound by a trusted reading rather
+than to the commitment --- the $\AND$ relations and the entire linear part
+are unconditional, and closing the adder gap is a localized, recorded
+follow-up. The final part of the paper (\Cref{sec:cmp}) places the
+construction against Binius64, the closest system: on one machine at a
+matched commitment rate the $\Ftwo[X]$ prover leads and the lead widens with
+input size, its verifier runs from near-parity to an order of magnitude
+faster ($\sqrt N$ versus $O(N)$), while Binius64's recursive proof is
+several times smaller.

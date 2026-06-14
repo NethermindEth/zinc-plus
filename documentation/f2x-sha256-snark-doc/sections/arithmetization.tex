@@ -274,7 +274,7 @@ column $\col{W}$.
     identity \eqref{eq:add-linear} plus the Hadamard \eqref{eq:add-had}
     (\Cref{lem:binius}), covering the message schedule, the two round
     additions, and the feed-forward;
-  \item \emph{$\AND$ Hadamard} relations declaring the three product
+  \item \emph{$\AND$ Hadamard} relations declaring the two product
     columns per round (\Cref{lem:and});
   \item \emph{Boundary} constraints pinning the initial state $H_0$, the
     chaining of $H_i$ between compressions, and the public final digest
@@ -322,9 +322,9 @@ and the next sections handle each:
   \item \emph{Hadamard constraints} (the carry Hadamards of (b) and the
     $\AND$ relations of (c)). These do \emph{not} pass through $\psia$ as
     equalities --- a product of projections is not the projection of a
-    product --- and are discharged by the oblong argument of
-    \Cref{sec:hadamard}, whose operands are bound to the commitment
-    through the second projection $\psiz$.
+    product --- and are instead recast as a polynomial ideal-membership
+    claim and discharged on the same pipeline (\Cref{sec:hadamard}), their
+    operands bound to the commitment through the second projection $\psiz$.
 \end{itemize}
 This linear/Hadamard split is the seam along which the whole proof system
 is organized, and it is a direct consequence of the arithmetization

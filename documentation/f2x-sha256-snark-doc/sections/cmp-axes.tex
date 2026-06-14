@@ -28,9 +28,11 @@ Reduction field &
 \bottomrule
 \end{tabularx}
 \caption{The three design axes. Each system picks a different point on
-each axis, and each axis decides one headline outcome. The prover is a
-near-tie because it is dominated by content both systems share (the
-$\AND$ discharge and the commitment encode), not by any single axis.}
+each axis, and each axis decides one headline outcome. No single axis
+decides the prover --- it is dominated by content both systems share (the
+$\AND$ discharge and the commitment encode); at the matched rate the net
+of offsetting per-phase gaps leaves \zinc{} a touch ahead and widening
+with $N$.}
 \label{tab:axes}
 \end{table}
 
@@ -65,6 +67,15 @@ do too. \binius{} pays an $O(N)$ verifier as the deliberate price of a
 We return in \Cref{sec:analysis} to whether \binius{} could take an AIR on
 the SHA path specifically, and what it would cost.
 
+The same axis decides \emph{preprocessing}. A word circuit's wiring is
+data, so its constraint-system and key description grow $O(N)$ --- the
+hundreds of megabytes \Cref{sec:res-scaling} records, and the cause of
+\binius{}'s circuit-build wall. A uniform AIR's structure is a fixed
+formula, so \zinc{}'s preprocessing is $O(1)$ (a UAIR specification plus
+the code seeds, kilobyte-scale and independent of the compression count).
+The $O(N)$-versus-$O(1)$ preprocessing gap and the linear-versus-$\sqrt N$
+verifier are two faces of the same arithmetization choice.
+
 \subsection{Commitment decides proof size}
 \label{sec:axis-commit}
 
@@ -87,7 +98,7 @@ The third axis is the field in which the nonlinearity is reduced.
 \binius{}'s BitAnd and Shift reductions build $O(N)$ tensors in
 $\mathrm{GF}(2^{128})$; together with a rate-$\tfrac12$ Reed--Solomon
 codeword, the working set spills cache super-linearly at large $N$.
-\zinc{} keeps the witness bit-packed and runs the oblong discharge in the
+\zinc{} keeps the witness bit-packed and runs the Hadamard discharge in the
 base field $\Ftwo/\mathrm{GF}(2^8)$, lifting to $\mathrm{GF}(2^{128})$
 only at the $\psi$ projections --- roughly $16$--$32\times$ fewer bytes
 streamed. The consequence is memory: at the largest matched instance
@@ -95,13 +106,16 @@ streamed. The consequence is memory: at the largest matched instance
 where \binius{}'s goes super-linear on a memory-constrained host
 (\Cref{sec:results}).
 
-\subsection{Why the prover is a tie}
+\subsection{Why no single axis decides the prover}
 
 No single axis decides the prover, because the prover is dominated by
 work both systems must do: discharge the same $\AND$ content and encode
 the witness for commitment. The word-level (one packed lane) versus
 bit-sliced ($\times\wbit$) asymmetry in how the two reach that content
-roughly cancels at the current optimisation level. The per-phase
-decomposition in \Cref{sec:results} shows this cancellation explicitly,
-and \Cref{sec:analysis} argues that at scale the cancellation tips
-slightly in \zinc{}'s favour.
+roughly cancels at the current optimisation level, so the prover is a
+\emph{net} of large offsetting per-phase gaps rather than a single
+dominant difference. At the matched commitment rate $1/4$ that net leaves
+\zinc{} a touch ahead at moderate $N$; because \zinc{} scales linearly and
+\binius{} super-linearly, the gap widens to $\sim$$2\times$ at scale. The
+per-phase decomposition in \Cref{sec:results} shows the offsetting gaps
+explicitly, and \Cref{sec:analysis} traces how they net out with $N$.

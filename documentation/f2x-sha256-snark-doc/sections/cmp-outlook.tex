@@ -18,7 +18,7 @@ known lever.
   the $12$ adder-carry Hadamards from the discharge --- one change that
   fixes soundness and trims the prover.
   \item \emph{Residual word-level discharge.} The big word-level win (the
-  bit-axis univariate skip) is already in the oblong discharge; the
+  bit-axis fold at $\alpha$) is already in the Hadamard discharge; the
   residual is a row-axis eq-split worth $\sim$$5$--$8\%$ of the prover. It
   is protocol-visible (a fresh soundness argument), so research-grade, not
   a drop-in.
@@ -40,32 +40,3 @@ known lever.
   adopting an $\Ftwo[X]$-style cell ring, i.e. converging toward \zinc{}.
 \end{itemize}
 
-\section{Conclusion}
-\label{sec:conclusion}
-
-\zinc{} and \binius{} agree on the hard decision --- prove SHA-256 in
-characteristic two, refusing the prime-field witness blow-up --- and
-disagree on three orthogonal downstream choices, each of which decides
-one outcome. The uniform-AIR-versus-word-circuit choice decides the
-verifier; the flat-versus-recursive proximity choice decides the proof;
-the base-field-versus-$\mathrm{GF}(2^{128})$ reduction decides memory and
-scaling. The prover, dominated by content both share, is a tie.
-Measured on one machine: \zinc{} wins the verifier ($5.8\times$ to
-$77\times$, structural and widening) and memory ($\sim$$2\times$);
-\binius{} wins the proof ($3.8\times$ to $5.6\times$, structural and
-widening) and is fully sound where \zinc{}'s adders are trusted; the
-prover is a near-tie that tips to \zinc{} at scale.
-
-Three observations resist the usual summaries and are worth carrying.
-First, \binius{}'s linear verifier is caused by the \emph{cross-entry
-wiring}, not the shifts: the entry-wise shift is succinct in both
-systems, and the wiring is succinct only under a uniform arithmetization.
-Second, the verifier and the prover are \emph{decoupled} in this family:
-a succinct verifier costs the prover nothing to keep, and confers nothing
-on it --- so neither ``slow the verifier to speed the prover'' (in either
-system) nor ``an AIR makes \binius{}'s prover faster'' holds. Third, the
-levers each system needs to close its gap point toward the other:
-\zinc{}'s proof wants FRI-style recursion, and \binius{}'s prover wants
-\zinc{}'s free shift --- the convergent endpoint is a binary-field STARK
-with an $\Ftwo[X]$ cell ring, a uniform AIR, a base-field discharge, a
-sound lookup adder, and a recursive proximity test.
