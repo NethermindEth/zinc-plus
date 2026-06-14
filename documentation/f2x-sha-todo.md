@@ -75,7 +75,263 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
-### 2-AND Ch arithmetization — K_H 16 → 14, witness 20 → 18 cols (2026-06-13)
+### Fix merged exact-tiling verify bug (ν ≡ 2 mod 8) — `num_compressions` 2-row guard (2026-06-14, working tree)
+- **What**: `cols::num_compressions` (`test-uair/src/sha256_f2.rs`) now reserves
+  `(2^nv − 6)/68` (was `−4`): the 4-row output anchor **plus 2 trailing
+  zero-guard rows**. Added regression test
+  `sha256_f2_merged_exact_tiling_verifies` (`protocol/src/f2_prove.rs`, nv9/10/11,
+  asserts honest merged prove+verify and the ≥2-trailing-zero invariant).
+- **Why**: the unmasked Ch/Maj AND relations (C12/C13) read a `↓2` *forward*
+  shift, so the relation at the last rows reads `t+1, t+2`. C13 (Maj) has
+  `U = W_A↓2 ⊕ W_A`, whose unshifted term leaves `U = a[n−2]` *nonzero* at row
+  `n−2` while the `↓2`/`maj` reads clamp to 0 → the Maj identity fails there
+  whenever `a[n−2] ≠ 0`. On an **exact-tiling** trace (`(2^nv−4) % 68 == 0` ⟺
+  ν ≡ 2 mod 8: nv = 10, 18, 26, …) the nonzero output anchor lands in the last
+  rows, so base-domain `R₀` doesn't vanish, and the merged discharge's msg-only
+  (extension-half) shipping drops it → `MergedClaimedSumMismatch`. (C12/Ch is
+  safe: its `U = W_E↓2` is a single shifted term → 0 at OOB.) Root cause pinned
+  via an `F2_MERGED_DEBUG` per-row `U⊙V==W` check: nv9 0 violations, nv10 exactly
+  1 at (rel=C13, row=n−2). The 2-row guard keeps the anchor out of the last two
+  rows so those rows are zero and the relation holds trivially.
+- **Result**: nv10 + nv18 now verify (were the only failing measured shapes);
+  full protocol f2 suite **46/0**, test-uair **27/0**. Only ν ≡ 2 mod 8 counts
+  change (drop 1 compression); deployed nv9 (7 comp) and all paper shapes
+  nv16/17/19/20/21/22/23 are byte-identical. Paper formula updated `−4`→`−6`;
+  GPU-table nv18 3855→3854 comp (within noise). Adder relations were already
+  immune (row-masked via `active_rows`); only the unmasked ANDs needed the guard.
+
+### Scaling extended to nv21/22/23 + the in-RAM→over-RAM knee (2026-06-14, working tree)
+- **What**: extended the Zinc+ CPU scaling sweep past nv20 to nv21/22/23 (the
+  user asked for 2^21/2^22/2^23 rows). Added `implementation.tex §7`
+  `tab:scaling-bigmem` + a "Beyond RAM" paragraph. PDF builds clean.
+- **Measured** (same-session, CPU, merged, `AB_MERGED_ONLY=1 AB_OPENINGS=987`,
+  warm, t=987) — prove / verify / per-doubling:
+  - nv16(963) 80.1 / 18.7 ms · nv18(3855) 299.2 / **FAILS** · nv19(7710)
+    589.5 / 45.0 · nv20(15,420) 1178.1 / 96.3 — **in-RAM, cleanly LINEAR**
+    (nv18→19 1.97×, nv19→20 2.00×).
+  - nv21(30,840) **3509.5** / 125.6 (×2.98) · nv22(61,680) **8020.9** / 313.3
+    (×2.29) · nv23(123,361) **25,219.5** / 663.0 (×3.14) — **over-RAM,
+    SUPER-LINEAR**.
+- **Finding — the knee is the 16 GB RAM wall, sharp at nv20→21**: trace ~13 GB
+  at nv20 (fits) → ~26 GB at nv21 (1.6× RAM). Below the wall the prover is
+  exactly linear (2.0×/doubling); above it, memory compression + SSD swap make
+  it super-linear (2.3–3.1×/doubling). This is the HOST's wall, not the O(N)
+  compute — on adequate RAM the linear regime extends. **Key comparison point**:
+  Zinc+ still *completes* nv23 = 123,361 comp (~104 GB working set, all via swap,
+  25 s prove, 133 s total incl. warmup) where Binius64's O(N) circuit *build*
+  walls at ~16,000 comp (2^14). So Zinc+ stays tractable ~8× further in N even
+  memory-starved. (M4 16 GB, 205 GB free SSD for swap; `ps` is sandbox-blocked
+  so peak RSS estimated from the doubling rule + compressor occupancy ~20 GB
+  observed at nv21.) Verify keeps its √N growth (45→663 ms over nv19→23).
+- **NOTE**: this surfaced the merged-verify exact-tiling bug (nv ≡ 2 mod 8 ⇒
+  nv10, nv18 fail `MergedClaimedSumMismatch`) — see the ⚠ entry under "Open
+  questions". Prove timings are unaffected (prove always succeeds); only the
+  nv18 verify is missing above.
+
+### Per-phase scaling (both systems) + Binius64 preprocessing size recorded (2026-06-14, working tree)
+- **What**: added `implementation.tex §7` `tab:perphase` (Zinc+ merged prover by
+  phase across nv) + `tab:perphase-b64` (Binius64 prover by phase) + a
+  preprocessing-size paragraph. PDF builds clean.
+- **Zinc+ per-phase** (ms, CPU, t=987, `OBLONG_PROFILE`, merged): at nv16
+  commit 18.0 / linear-PIOP 17.8 / discharge 19.0 / multipoint 11.2 / open 9.6;
+  every phase grows ~4× per 4× comp (total ~N^0.97 — LINEAR). commit steepest
+  (×4.3, share 7→30%), open shallowest (×3.3, fixed t openings, share 17→9%).
+- **Binius64 per-phase** (ms, rate 1/4, prove tree spans Commit-Witness/FRI,
+  IntMul, BitAnd, Shift, PCS-Opening): 64c 27.3 / 1024c 116 / 4096c 532 / 8192c
+  1370. **SUPER-LINEAR** (×4.6 per ×4 at ~1k, steepening past ×6 by 8k ≈ N^1.36
+  at scale) — the **BitAnd reduction** overtakes Shift to dominate (14→41%, its
+  "Build BitAnd witness" alone ~1/4 of the prover); GF(2^128) tensors spill cache.
+  (Shift reduction dominates at small N, 62→32%.)
+- **Binius64 PREPROCESSING (cs + key-collection), via the `save` subcommand**:
+  3.7 / 14.4 / 54.7 / **218** / **873** MB at 16/64/256/1024/4096 comp — exactly
+  **O(N)** (×4 per ×4); ≥16,384 build >90 s (killed). Measured with
+  `./sha256 save --max-len-bytes B --exact-len --cs-path ... --key-collection-path ...`
+  then `stat -f%z`. **Zinc+ preprocessing is O(1)** (uniform UAIR + RAA seeds,
+  KB-scale, compression-count-independent) — the structural root of b64's O(N)
+  verifier + circuit-build wall. Great comparison point.
+- **b64 prover sub-span names** (this build): `Prepare/Commit Witness`,
+  `FRI Commit`, `[phase] IntMul/BitAnd/Shift Reduction` (Shift has
+  `prover_phase_1`/`prove_phase_2`), `[phase] PCS Opening`; verify =
+  `Verify Public Input` ($O(N)$, ~99% of verify at scale) + `Verify PCS Opening`.
+
+### Compression scaling sweep (Binius64 vs Zinc+) recorded in the paper (2026-06-14, working tree)
+- **What**: added `implementation.tex §7` scaling subsection + `tab:scaling` —
+  prove + verify across compression counts, Binius64 (rate 1/4) vs Zinc+ (CPU,
+  no-metal, favorable thermal), with proof sizes in the caption. PDF builds clean.
+- **Measured** (Apple M-series, CPU, rate 1/4; b64 `--log-inv-rate 2`, kill at
+  >70 s/run; Zinc+ merged, `AB_MERGED_ONLY=1`, 6-min cooldown):
+  - **b64** prove/verify/proof at $2^k$ comp: $2^4$(16) 27.6 ms/1.6 ms/123 KiB ·
+    $2^6$(64) 33.7/3.1/175 · $2^8$(256) 41.6/4.6/187 · $2^{10}$(1024)
+    84.1/14.0/249 · $2^{11}$(2048) 155/27.5/264 · $2^{12}$(4096) 480/229/280 ·
+    $2^{13}$(8192) 1.22 s/493 ms/299 KiB · **$2^{14}$+ KILLED** (the $O(N)$ circuit
+    *build* exceeds 1 min — NOT the prove). b64 can't go below $2^4$ (its example's
+    fixed 1024-byte message).
+  - **Zinc+** merged prove/verify (CPU, cool), nv→comp: nv12(60) 10.1/4.8 ·
+    nv14(240) 23.3/9.3 · nv16(963) 75.0/17.9 · nv17(1927) 148/19.8 · nv19(7710)
+    581/45.2 · nv20(15420) 1186/82.9 ms. Proof ≈0.80/1.12/2.57 MiB at nv9/16/20.
+  - **Findings**: at matched rate 1/4, the Zinc+ prover is faster and the gap
+    WIDENS (~1.1× @1k comp → ~2× @8k); the verifier split is qualitative — b64
+    $O(N)$ (3→493 ms), Zinc+ $\sqrt N$ (stays tens of ms; ~11× faster at 8k comp);
+    b64 walls at $2^{14}$ where Zinc+ still proves 15,420 comp in ~1.2 s.
+- **Tooling**: added `AB_MERGED_ONLY=1` to `sha256_f2_merged_ab_timing` (skips the
+  slow fused/oblong arms for a fast, cool scaling sweep). The b64 sweep used a
+  `perl -e 'alarm N; exec @ARGV'` timeout (macOS has no `timeout`).
+- **Metal arm DONE (2026-06-14): GPU commit gives NO net prover-latency win**
+  (corrects the prior "GPU ≈1.25× the CPU prover" claim — now DELETED from the
+  paper everywhere). User ran the metal_gpu sweep (`AB_MERGED_ONLY=1 ...
+  --features ...,metal_gpu`); 3-run medians land **at or above** the cooled CPU
+  sweep at *every* scale: nv16 GPU 107 ms (best 97) vs CPU 75 cooled / 93 warm;
+  nv20 GPU 1708 vs CPU 1190. Commit is a minority phase and GPU dispatch/transfer
+  overhead swamps the offload at these sizes — the GPU's value is throughput /
+  freeing the CPU, not latency. Full GPU prove sweep (ms): nv9 9.8 · nv10 12.0 ·
+  nv11 16.2 · nv12 19.2 · nv13 27.6 · nv14 38.8 · nv15 68.7 · nv16 107.3 · nv17
+  203.1 · nv18 402.5 · nv19 784.0 · nv20 1708.3 — clean **LINEAR in N** (~2×/nv,
+  ~2.2× at the nv19→20 top). Recorded as `tab:scaling-gpu` in §7; the "1.25×
+  with GPU" line removed from `tab:binius-rate` + Part II
+  (`cmp-{results,analysis,intro}`). (Harness verify is LUT-rebuild-inflated:
+  nv16 23.6 ms ≠ the deployed ~12 ms criterion verify; prover figure unaffected.)
+- **Sandbox note**: the agent sandbox blocks GPU (`Device::system_default()` →
+  None in-sandbox; works sandbox-off), so the user runs the metal sweep in their
+  own terminal.
+
+### Main sumcheck rounds 2..n eq-factored — `uair:sumcheck` ~7.4 → ~6.0 ms at the merged arm (2026-06-14, working tree)
+- **What**: group-0 of the main GF(2^128) `MultiDegreeSumcheck` — the pure
+  `eq(·;r)·weighted_col` degree-2 zerocheck — had only its **round 1**
+  eq-factored (`F2EqColRound1FastPath`); rounds 2..n fell back to the generic
+  per-point comb gather (~5 GF(2^128) mults/slot). Added `F2EqColRoundEvaluator`
+  (`protocol/src/f2_prove.rs`), a `RoundPolyEvaluator` attached via
+  `.with_round_evaluator`, that reuses the round-1 algebra every round: the
+  framework-folded eq table still factors as `eq[2b']=(1+r_j)·E[b']`,
+  `eq[2b'+1]=r_j·E[b']` with `E[b']=eq[2b']+eq[2b'+1]` (char-2) and
+  `r_j = ic_eval_point[round−1]`, so `S_A=Σ E·col[2b']`, `S_B=Σ E·col[2b'+1]`
+  give `M(0)=(1+r_j)·S_A`, `M(1)=r_j·S_B`,
+  `M(2)=eq(2,r_j)·((1+2)·S_A+2·S_B)` — ~2 mults/slot. **Byte-identical** (same
+  `[M(0),M(1),M(2)]` at `{0,1,X}`), so the verifier is untouched.
+- **Why**: the ledger's "linear PIOP is the under-optimized third" lever (1) —
+  rounds 2..n of the main sumcheck were the last un-eq-factored degree-2 block
+  after the round-1 fast path and the merged group-1 evaluator shipped. Port
+  source is this tree's own round-1 fast path (and `oblong_and.rs`'s
+  `QuadraticMleCheckProver`), NOT the lookup branch's `eq_factored.rs` (wrong
+  degree / GKR-shaped) — see the cross-branch UPDATE under that "Identified"
+  entry.
+- **Result**: clean same-binary A/B (`F2_NO_EQCOL_EV=1` toggles the evaluator
+  off) at nv16 / t=987, merged arm, warm: `uair:sumcheck` **~7.4 → ~6.0 ms**
+  (OFF [7.89, 7.40, 6.56] vs ON [5.90, 6.11, 5.99] — non-overlapping clusters,
+  ≈ −1.4 ms / −19% of the scope). End-to-end merged prove ~76 ms either way
+  (the −1.4 ms is within total-time noise; group-0 is the small piece, as
+  predicted — the big sumcheck scopes are now `mp:sumcheck` ≈5-6 ms and the
+  already-fused merged group-1). Tests: new
+  `f2_eq_col_round_evaluator_matches_generic` cross-check (evaluator ==
+  definitional round poly at every round j=1..n on framework-folded state) +
+  all 45 protocol f2 prove/verify roundtrips (merged / oblong / tamper arms)
+  green.
+- **Toggle kept**: `F2_NO_EQCOL_EV=1` (runtime, like `OBLONG_NO_EQSPLIT`) for
+  future A/B and as a safety fallback.
+- **Next on this block**: the linear-PIOP eq-factoring lever is now fully
+  spent (round 1 + rounds 2..n on group-0; group-1 already fused). `mp:sumcheck`
+  is the largest remaining sumcheck scope but its comb is mixed
+  (`eq_r·precombined` + Σ selector·data) ⇒ a binius-style shift-eval rewrite,
+  flagged low-ROI. Commit-side (rate 1/2, Σ/σ virtualization) is the next real
+  lever.
+
+### Hadamard bench group defaults to measuring only `Prove-Hadamard-Merged` (2026-06-14, working tree)
+- **What**: `bench_hadamard_compare` in `protocol/benches/f2_sha256.rs` now
+  registers `Prove-Hadamard-Merged` first, then early-returns unless `HAD_ALL` is
+  set in the env. So the plain
+  `cargo bench -p zinc-protocol --bench f2_sha256 --features parallel,simd,unchecked,metal_gpu -- "Zinc\+ F_2 SHA-256 Hadamard"`
+  command measures **only** the deployed merged-discharge prove arm.
+- **Why**: the group otherwise registered 11 arms (4 prove: NoHadamard / Hadamard
+  / Oblong / Merged; 3 discharge-only: Fused / Oblong / Oblong-GF8; 4 verify) and
+  *also* built 3 extra full proofs (no-had / had / oblong) purely to feed the
+  verify arms — all of that ran on every default invocation, which is slow when
+  you're iterating on the merged prover alone (esp. at nv=20/21).
+- **Result**: default run does just `Prove-Hadamard-Merged` and skips the three
+  extra proof builds. `HAD_ALL=1` restores the full A/B suite (verify arms,
+  discharge-only A/B, proof-size report). Composes with the existing `HAD_NVARS`
+  env filter. Pure bench-harness ergonomics — no prover/verifier code touched.
+  (The pre-existing unused-import warning for `F2LinearOpener` is unrelated.)
+
+### Companion note rewritten to the merged discharge + clean re-measure (2026-06-14, working tree)
+- **What**: rewrote `documentation/f2x-sha256-snark-doc/` so the Hadamard
+  discharge reads as the **merged (inline ⟨Z_H⟩)** construction "as if always" —
+  no trace of the prior oblong framing. The narrative: reading cell bits as
+  Lagrange coefficients makes $\AND$ the ideal-membership claim
+  `L(u)L(v) ≡ L(w) mod Z_H`, discharged by the SAME ideal-check + $\psi_\alpha$ +
+  Step-4 sumcheck as the linear part, at the shared point $\alpha$ (so $\psi_z$ is
+  the Lagrange weighting read at $z=\alpha$), bound by one extra projection of the
+  same $a'$. Removed: separate $z$, standalone zerocheck, Phase-1/Phase-2, $r_H$,
+  z-block, second transcript point. `hadamard.tex` fully rewritten (title
+  "Hadamard as Ideal Membership"; new `eq:had-ideal`; kept externally-referenced
+  labels `lem:psi-z-sound`, `sec:had-binding`, `eq:psi-z-binding`, `rem:gf8`,
+  `rem:adder-trusted`; renamed `sec:oblong`→`sec:had-pipeline`). Consistency edits
+  in `introduction/preliminaries/arithmetization/piop/commitment/soundness/
+  implementation` + the Part II `cmp-*.tex`. The "two projections $\psi_\alpha,
+  \psi_z$ / dual read-off of one $a'$" through-line survives intact (it is
+  strengthened — both now live at $\alpha$). PDF builds clean (latexmk EXIT=0, 0
+  undefined refs).
+- **Clean re-measure** (criterion, nv16, no-metal, proper 10-sample medians,
+  machine back at the paper's thermal scale — fused 494.6 ≈ the note's prior 487):
+  linear-only **55.3** / fused **494.6** / oblong **112.2** / merged **100.4** ms
+  prove; merged **verify 11.5** ms. **Deployed (merged) discharge ≈ 4.9× faster
+  than fused**, adds ≈45 ms over the linear part. `implementation.tex §7` table +
+  e2e prose updated to these; the stale cmp footnote `136`→`100` ms fixed.
+- **Caveat (recorded, not done)**: the Part II per-phase table (`cmp-results.tex`,
+  `tab:phases`) is a **GPU-commit** measurement (98.4 ms total, with the oblong
+  per-phase split incl. the 2.8 ms z-block). I swapped its terminology to merged
+  (Discharge=Hadamard, z-block→Binding) but did NOT re-measure its GPU per-phase
+  numbers — the sandbox has no Metal (`Device::system_default()` → None). A GPU
+  re-measure would refine the merged per-phase split (merged discharge ≈20 ms vs
+  the table's 32.1; no z-block); flagged for a machine with Metal access.
+
+### Merged-group fused round evaluator — uair:sumcheck ~11 → ~6.6 ms (2026-06-14, working tree)
+- **What**: the merged Hadamard group-1 (degree-3, `eq·Σ_k γ_h^k(ZU_k·ZV_k + ZW_k)`,
+  `1+3·k_rel` ≈ 43–49 operand MLEs) ran the generic `MultiDegreeSumcheck`
+  per-point value-array gather over ALL operand MLEs every round (no
+  `round_1_fast`, no `round_evaluator`). Added `MergedHadamardRoundEvaluator`
+  (`protocol/src/f2_merged_hadamard.rs`) attached via `.with_round_evaluator`,
+  mirroring the standalone discharge's `HadamardRoundEvaluator`: relation-outer /
+  point-inner streaming, coefficient-space Karatsuba for `ZU·ZV` (3 muls), `eq`
+  applied in a second pass, chunked + rayon. **Byte-identical** — same cubic round
+  message evaluated at `{0,1,X,X+1}`.
+- **Why**: instrumented uair-self (nv16, t=987) — `uair:sumcheck` = ~11 ms, the
+  largest linear-PIOP block; the bulk is group-1 (NOT group-0's 2-MLE `eq·col`),
+  which had no fused evaluator. ψ_α projection was only ~2.6 ms (GPU-projection
+  lever dropped).
+- **Result**: **`uair:sumcheck` ~11 → ~6.6 ms (−4.4 ms, robust same-scope)**;
+  merged total ~76 ms this run. Tests: 44 protocol f2 (incl. merged/oblong
+  roundtrips + tamper arms) + 60 piop, all green.
+- **Session linear-PIOP total**: this + the multipoint next_mle parallelization
+  (−3.7 ms) = **~8 ms (~9%) off the ~93 ms prover**, both byte-identical/bit-
+  identical, both validated.
+- **Next on this block**: group-0 `eq·col` is now the small remaining piece; a
+  Round1FastPath already covers its round 1. W-bar-precombine (49→34 MLEs,
+  protocol-visible) and a round-1 fast path for the merged group remain
+  identified. Σ/σ virtualization (commit ↓) still queued — now cheaper to
+  evaluate given the lower per-shift multipoint cost.
+
+### Multipoint-eval: parallelize the next-MLE / down-col build (~3.7 ms off the prover, 2026-06-13, working tree)
+- **What**: `MultipointEval::prove_as_subprotocol_with_pointed_shifts`
+  (`piop/src/multipoint_eval.rs`) built the per-pointed-shift `next_c_r` selector
+  MLEs and cloned the source down-columns in a **serial** `.iter().map()`. Swapped
+  to `cfg_iter!` (rayon under `parallel`). Order-preserving `collect` ⇒ bit-identical.
+- **Why**: instrumented the multipoint internals (`mp:next_mle / mp:precombine /
+  mp:sumcheck` prof scopes) at nv16/t=987 — the ~12 ms multipoint split as
+  **sumcheck ~4.5 + next_mle ~4.7 + precombine ~2.0 ms**, and next_mle was serial
+  (the precombine, long assumed the bulk, is the smallest).
+- **Result**: **mp:next_mle ~4.7 → ~1.0 ms** (clean same-scope A/B; ~3.7 ms is the
+  robust figure — arm totals also fell E 92.8→82.1 / C 93.5→85.5 but that's partly
+  thermal). Multipoint ~12 → ~7.5 ms. Generic piop win — helps any pointed-shift
+  multipoint incl. the integer pipeline. Tests: 17 piop multipoint + 4 protocol
+  F_2 roundtrips green; ab_timing C+E prove+verify roundtrips pass.
+- **Tooling**: added `mp:*` prof scopes (kept) and an `AB_OPENINGS` env knob to
+  `sha256_f2_merged_ab_timing` (default 4; use 987 for deployed-shape timing).
+- **Next multipoint levers (Tier-1, not yet done)**: (a) eq-factor `mp:sumcheck`
+  — its main term is `eq_r·precombined`, eq-factorable like the round-1 fast path
+  (~4.5 ms, ~1–2 ms headroom); (b) avoid the down-col clones (the sumcheck owns
+  clones of `trace_mles` cols — needs a borrow-API). The main UAIR sumcheck rounds
+  2..n also still lack eq-factoring — see the linear-PIOP entry under "Identified".
+
+### 2-AND Ch arithmetization — K_H 16 → 14, witness 20 → 18 cols (2026-06-13, working tree)
 - **What**: replaced the two-AND Ch decomposition `Ch = (e∧f) ⊕ (¬e∧g)`
   (committed columns `W_UEF`, `W_UNEG_E_G`) with the **single-AND Binius Ch
   identity** `Ch(e,f,g) = g ⊕ (e ∧ (f⊕g))`. One committed AND product
@@ -177,6 +433,55 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 - **Provenance**: designed + first implemented on `f2-clean-lookup` (where the
   A/B also ran against the lookup arms), then ported here as its home branch
   per review; the lookup branch keeps no copy (its ledger entry points here).
+- **Reproduction / measurement caveat (2026-06-13)**: a fresh same-run A/B on
+  Apple M-series (release, `parallel,simd,unchecked`, no `metal_gpu`) did **not**
+  reproduce the "E ~9% faster prove" headline — it landed within run-to-run
+  noise: nu=9 prove E 4.4 ≈ C 4.4 ms (tied); nu=16 prove **E 102.1 vs C 98.2 ms
+  (E marginally *slower* this run; E's 3rd run 136.7 ms is the thermal tail)**.
+  The merged arm's *reliable* win is **verify** (nu=9 E 0.6 vs C 0.9 ms; nu=16
+  E 4.3 vs C 4.5 ms) and the structural collapse (single point r*, ψ_z=ψ_α at
+  z=α, one open, no oblong Phase-2 / no all-cols z-block), **not** prove time.
+  Treat merged-vs-oblong *prove* as a wash at the deployed nu=9; sell the merge
+  on verify + soundness/structure. Always A/B in one process
+  (`sha256_f2_merged_ab_timing`, `AB_NVARS=`), never across `cargo bench` runs.
+- **Criterion `Prove-/Verify-Hadamard-Merged` arms ADDED (2026-06-13, working
+  tree `protocol/benches/f2_sha256.rs`).** Before this, commit `39c00b6` did not
+  touch the bench, so `cargo bench -- "Zinc+ F_2 SHA-256 Hadamard"` measured only
+  the old `Prove-/Verify-{NoHadamard,Hadamard(fused),Hadamard-Oblong}` +
+  `Discharge-*` arms and **could not** show the merge — the merged path was
+  exercised only by the `#[ignore]` test `sha256_f2_merged_ab_timing`. The new
+  arms call `prove/verify_f2_full_with_merged_hadamard` at `BENCH_NUM_OPENINGS`
+  (987). **Bit-ops caveat**: the merged *verify* does not thread bit-op virtuals
+  (signature only, unused in the body), so the merged arms pass `&[]` bit-ops and
+  commit the 2 SHR cols the oblong arm virtualises (~few-% heavier commit). Wiring
+  bit-op virtuals through the merged verify/open is a clean follow-up that would
+  make the arm strictly apples-to-apples with oblong.
+  - **Measured (criterion, no `metal_gpu`, same run, save-baseline
+    `merged-nometal`, Apple M-series):** nv9 prove — Oblong 4.60 vs Merged 4.72 ms
+    (Merged ~2.6% slower, incl. the 2 extra committed cols); nv16 prove — Oblong
+    113.6 vs Merged 110.8 ms (Merged ~2.4% faster); verify nv9 1.63 vs 1.66 ms,
+    nv16 12.4 vs 12.6 ms — **tied** (full verify is dominated by the 987
+    column-opening checks, NOT the discharge; the ab_timing test's "merged verify
+    ~2× faster" used only 4 openings, which isolates the discharge but is not the
+    deployed shape). **Bottom line: at the deployed 987-opening shape merged ≈
+    oblong on both prove and verify** — the merge is a structural / single-point /
+    one-open / soundness simplification, not a prover speedup. Sell it as such.
+  - The e2e `Prove`/`Steps` groups still run the `&[]`-spec no-Hadamard path, so
+    the discharge is not in the headline e2e number at all — wiring the merged
+    discharge into e2e is a separate decision.
+- **GOTCHA — cross-run nv16 "regressions" in this bench are THERMAL, not code.**
+  A 2026-06-13 run recorded criterion `change` ≈ **+25–41% at nv16 on every arm
+  — including `Prove-NoHadamard` (+26.7%), which has zero Hadamard/projection
+  work** — while nv9 prove arms were flat (±0–3%). A projection merge cannot
+  slow the no-Hadamard pipeline; the uniform nv16 shift is the machine heating
+  across heavy back-to-back arms (worse with `metal_gpu`) vs a cooler saved
+  baseline. nv20/21 additionally swap on a 16 GB box (~13/26 GB). Use same-run
+  A/B for signal; ignore this bench's cross-invocation absolutes.
+- **GOTCHA — `sha256_f2_merged_ab_timing` panics under `--features metal_gpu`**:
+  `Device::system_default()` returns `None` in the test binary
+  (`zip-plus/src/metal_gpu/mod.rs:143`, "No Metal device found"). Run the A/B
+  test **without** `metal_gpu` (`--features parallel,simd,unchecked`); the
+  criterion bench is unaffected.
 
 ### Prover-path parallelization sweep — Prove-Hadamard-Oblong 154 → ~100 ms (commits `d8cfe4b`, `1a69adc`, `7ea7dff`)
 - **What**: a sweep for *serial code on a parallel machine* across the sound-oblong
@@ -2050,6 +2355,175 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
+### Commit is the ONLY phase Binius64 beats us on — and it's Merkle-bound, not encode-bound (investigated 2026-06-13)
+- **Question**: "Zinc+ should have a faster prover than Binius64 — why doesn't it
+  look that way at nv16?" Investigated with fresh per-phase measurement.
+- **Measured warm per-phase** (`sha256_f2_merged_ab_timing` + `OBLONG_PROFILE=1`,
+  AB_NVARS=16, release, **no metal**, Apple M-series, merged arm E ≈ 87.9 ms total):
+  commit **19.4 (22%)**; uair *self* = ψ_α-projection + main sumcheck **19.4 (22%)**;
+  discharge (merged_phase1 12.5 + group 5.0 + end 1.4 + w_block 1.3) **≈20 (23%)**;
+  multipoint_eval **12.1 (14%)**; uair:ic (linear) **6.0 (7%)**; open+open_evals
+  **10.2 (11%)**. **This warm total (87.9 ms) already ≈ Binius64's 87.6 ms (CPU).**
+  vs b64 per-phase (Commit 7.1 / IntMul 1.0 / BitAnd 24.9 / Shift 43.3 / PCS-open
+  10.3): **Zinc+ wins the discharge ~3.4×** (20 vs b64 BitAnd+Shift 68) **and the
+  open**; **loses ONLY commit** (19.4 vs 7.1). Commit is the entire gap.
+- **Commit decomposition** (`Micro/Commit*`, nv16, no metal): Pair 0.42 ms ·
+  **Encode (RAA rate-1/4 expansion) 1.20 ms** · EncodeTranspose 10.2 · **Merkle-only
+  17.4** · Commit-Fused 20.5 · Commit 24.7 · Commit-AfterPrevProve (cold) 27.0.
+  **⇒ commit is ~90% Blake3 Merkle; the linear-time RAA encode is negligible (1.2
+  ms).** The rate-1/4 codeword does NOT cost via encode — it costs via Merkle
+  (codeword_len = row_len·REP ⇒ REP=4 hashes 4× the leaves of an uncoded commit,
+  2× that of b64's rate-1/2). The **cold-cache penalty is small in the no-metal
+  path (~2.3 ms, 24.7→27.0)** — NOT the big lever (corrects the earlier hunch).
+- **Why criterion shows ~110 ms (no metal) / ~102 (metal) not 88**: per-iteration
+  large-proof cache pressure (×32 combined_row + 987 openings built+dropped each
+  iter) inflates ALL phases ~20%, plus thermal — distributed, not localized to
+  commit. **Use warm same-run A/B for phase truth, not criterion absolutes.**
+- **Levers to make the prover decisively win (ranked by commit impact)**:
+  1. ⭐ **RAA rate 1/4 → 1/2** (`RaaF2Code` REP 4→2): codeword halves ⇒ Merkle
+     leaves halve ⇒ commit ~19→~11 ms (~8 ms). Biggest single lever. **Blocked on
+     proximity recalibration** — `recommended_num_column_openings` only calibrates
+     REP=4 (`raa_f2.rs:72`); REP=2 needs the first-moment distance analysis (the
+     `rma` crate / `calibrate.py`). Costs proof size + verify (more openings t),
+     but b64 is ALSO rate 1/2 — so this is the apples-to-apples commitment-rate
+     match, after which Zinc+'s linear encoder + base-field discharge win the prover.
+  2. **Virtualize Σ0/Σ1/σ0/σ1** (cols 11–14, committed today; each is an
+     XOR-of-3-rotations of committed sources W_A/W_E/W_W per C1–C4): 4 of ~20
+     committed cols ⇒ ~20% fewer Merkle leaves+encode ⇒ ~3–4 ms off commit. Needs
+     the virtual-spec mechanism extended from single-`BitOp` to XOR-of-BitOps
+     (verifier reconstructs the eval as a sum of pointed-rotation evals). The
+     `sha_f2_bit_op_virtuals()` comment (`f2_sha256.rs:~149`) already flags this.
+  3. **metal_gpu Merkle (deployed)**: the ~17 ms CPU Merkle is exactly what the GPU
+     leaf-hash offloads (warm GPU commit ~15.5 ms, scales with N) — so the no-metal
+     numbers UNDERSTATE the deployed commit. With GPU + warm, Zinc+ already < b64.
+- **Bottom line**: the prior is right. **Warm + GPU, Zinc+ already has the faster
+  prover; CPU-to-CPU it's a tie that the commit rate (1/4 vs 1/2) explains entirely.**
+  Closing it is a rate recalibration + Σ/σ virtualization, both localized to the
+  commit, neither touching the discharge/PIOP (which already win). Crossover with
+  b64 widens in Zinc+'s favour with N (base-field discharge + linear encode).
+- **RATE-MATCHED head-to-head (measured 2026-06-13): at equal commitment rate
+  1/4, Zinc+ WINS the prover.** Rather than recalibrate Zinc+ down to rate 1/2,
+  raised Binius64 UP to rate 1/4 (`--log-inv-rate 2`; `calculate_n_test_queries`
+  auto-adjusts queries so 96-bit holds) — the apples-to-apples commitment-rate
+  comparison. b64 sha256 example, nv16-matched (`--max-len-bytes 61632
+  --exact-len`), Apple M-series CPU, median of 3 (this clone has the parallel-
+  verifier patch, so its verify is ~14–15 ms not the 25.9 ms serial):
+  - **b64 rate 1/2 (its default)**: prove **95.5 ms**, verify 14.0 ms, proof 304 KiB.
+  - **b64 rate 1/4**: prove **103.7 ms** (+8.6%), verify 15.5 ms, proof **249 KiB**
+    (−18%). Raising the rate adds ~8 ms to b64's prover (2× codeword ⇒ more FRI
+    commit+fold) and SHRINKS its proof (fewer queries). The AND/shift sumchecks are
+    rate-independent, so the prover rises only via commit/FRI.
+  - **Zinc+ rate 1/4 (its native rate), DEPLOYED t=987, warm**: prove **~93 ms**
+    CPU (merged 92.8 / oblong 93.5; ~83 with metal_gpu), verify ~12 ms (criterion
+    median; consistent with the note's ~11 ms), proof ~1.1 MiB.
+  - **CORRECTION (supersedes a first pass that said 87.9 ms / 1.18×)**: that used
+    the ab_timing default of **t=4** column openings, not the deployed 987.
+    Verified the prover is **nearly t-INSENSITIVE**: t=4→987 adds only ~4 ms to
+    prove (89.0→92.8 merged; the open's `combined_row`/`b_vector` dominate, path
+    gathering is cheap), whereas verify IS t-bound (~4→~20 ms single-run). So the
+    warm number was close but the precise deployed figure is ~93 ms, not 88.
+    Added an `AB_OPENINGS` env knob to `sha256_f2_merged_ab_timing` (default 4;
+    use `AB_OPENINGS=987`). The skill's "verify 4.46 ms / 5.8×" is the t=4-class
+    number; at deployed t=987 verify is ~12 ms.
+  - **⇒ matched rate 1/4: Zinc+ prover ~93 vs b64 103.7 ms = Zinc+ ~1.12× faster
+    (CPU), ~1.25× with metal_gpu. And Zinc+ at 1/4 (~93) even edges b64 at its
+    native rate 1/2 (~95.5).** Verify comparable at this scale (~12 vs ~15 ms);
+    proof b64 4–5× smaller. The
+    rate-1/2 "prover tie" was b64 running at a cheaper rate; equalize the rate and
+    Zinc+'s linear encoder + base-field discharge win the prover outright. Note the
+    rate dial is a tradeoff: matching it to 1/4 also GROWS b64's proof-size edge
+    (304→249 KiB), so it strengthens BOTH Zinc+'s prover story and b64's size story.
+  - Repro: `RUSTFLAGS=-Ctarget-cpu=native cargo run --release --example sha256 --
+    prove --max-len-bytes 61632 --exact-len --log-inv-rate {1,2}` (binius64 clone;
+    build needs sandbox off — writes its own target/).
+
+### The linear PIOP is the under-optimized third of the prover (identified 2026-06-13)
+- **Context**: per-phase at nv16 warm CPU (~93 ms): discharge ~20 ms (heavily
+  optimized — fused→oblong→GF8→merged, parallel, eq-trick), commit ~19 ms
+  (GPU+fused+slab; Merkle-bound, see the commit entry above), **linear PIOP ~31 ms
+  = ψ_α projection + main GF(2^128) `MultiDegreeSumcheck` (~19 incl. ic) +
+  multipoint-eval (~12)**, open ~7 ms. The discharge and commit have been squeezed;
+  the linear PIOP never received the discharge's two big wins. Impact figures below
+  are HYPOTHESES from an Explore pass — MEASURE before building.
+- **(1) Main sumcheck rounds 2..n have no eq-factoring.** ✅ **DONE
+  (2026-06-14, working tree)** — `F2EqColRoundEvaluator` (`f2_prove.rs`), a
+  `RoundPolyEvaluator` mirroring the round-1 fast path's eq-factoring into
+  rounds 2..n, byte-identical, `uair:sumcheck` ~7.4 → ~6.0 ms at the merged
+  arm (−1.4 ms / −19% of the scope; end-to-end neutral within noise — group-0
+  is the small piece). `F2_NO_EQCOL_EV=1` toggles it off. See the Shipped-work
+  entry. *Original note:* only round 1 had the `F2EqColRound1FastPath`; rounds
+  2..n fell back to the generic fold (`piop/src/sumcheck/prover.rs`); the
+  analogous round-2..n specialization had shipped for the *Hadamard* discharge
+  (−24.5%, commits `9505876`+`7a27606`) but not the LINEAR sumcheck.
+- **(2) multipoint-eval is a whole SECOND GF(2^128) sumcheck (~12 ms)** just to fold
+  the ψ_α + pointed-shift (+ψ_z) claims to one point r_0. Possibly fusable into the
+  main sumcheck, or collapsible (cf. the open question "Multipoint-eval as
+  degenerate γ-rerandomization, down_evals=[]"). Impact: potentially large (up to
+  ~12 ms); effort: med-high (protocol-visible). The single highest-value unexplored
+  block — profile its internals first.
+- **(3) GPU α-projection is used for only the main UAIR projection**, not the
+  merged-Hadamard W-block / unreferenced-lag projection sites (CPU-bound). Reuse
+  `project_columns_with_powers_gpu_batched`. Impact: small-med; effort: med.
+- **(4) Small-field (GF(2^8)) accumulation à la the discharge is likely NOT
+  portable to the linear path** — ψ_α is a genuine monomial eval at α∈GF(2^128);
+  the discharge's GF(2^8) lane works only because ψ_z uses subspace-Lagrange
+  weights. Recorded as "tempting but blocked by the ψ_α monomial structure" so it
+  isn't re-attempted the wrong way.
+- **Recommendation**: start at the multipoint-eval (is it truly a second full
+  sumcheck? can it fuse with the main one / go degenerate?), then A/B eq-factoring
+  the main sumcheck rounds 2..n. Commit-side levers (rate 1/2, Σ/σ virtualization
+  via the multi-source-XOR `F2BitOpVirtualSpec` generalization) remain the answer to
+  the Binius64 commit gap but are already catalogued.
+- **UPDATE 2026-06-13 — measured the linear-PIOP sub-split (nv16, t=987, warm),
+  which redirects the priorities:**
+  - **uair:sumcheck (main `MultiDegreeSumcheck`) = ~11 ms** — the single largest
+    linear-PIOP block, 2.4× the multipoint sumcheck (~4.5 ms). Its group-0 is a
+    PURE `eq·weighted_col` zerocheck with only ROUND 1 eq-factored
+    (`F2EqColRound1FastPath`); rounds 2..n use the generic fold. **This is the real
+    eq-factoring prize** — extend a Gruen eq-factored degree-2 prover to rounds
+    2..n for group-0 (the discharge already runs exactly this via its
+    `QuadraticMleCheckProver`/`oblong_and.rs`; port the technique to the linear
+    eq·col group). Medium-high effort, soundness-sensitive (add a binius-style
+    first-round-vs-next-round cross-check test). ✅ **DONE 2026-06-14**
+    (`F2EqColRoundEvaluator` + `f2_eq_col_round_evaluator_matches_generic`
+    cross-check); the ~11 ms quote was a stale pre-merged-evaluator figure — at
+    the deployed merged arm the realised scope is `uair:sumcheck` ~7.4 → ~6.0 ms
+    (the group-0 slice is small once group-1 is fused). See Shipped-work.
+  - **uair:alpha_project = only ~2.6 ms** ⇒ lever (3) "GPU projection for all
+    sites" is NOT worth it. DROP it.
+  - **multipoint eq-factoring is the WRONG lever-#1 target**: its comb is mixed
+    (`eq_r·precombined` + Σ `next_k·down_k`, all selector·data) so eq-factoring it
+    is a binius-style shift-eval-sumcheck reimplementation for only ~4.5 ms, vs the
+    main sumcheck's clean pure-eq ~11 ms. The cheap multipoint win (parallelize
+    next_mle, ~3.7 ms) is SHIPPED (see Shipped-work); further multipoint gains are
+    low-ROI relative to the main sumcheck.
+  - **Revised order**: ~~(1) eq-factor the main sumcheck rounds 2..n~~ ✅ DONE
+    2026-06-14 (−1.4 ms `uair:sumcheck`); (2) Σ/σ virtualization (commit ↓ but
+    watch the multipoint pointed-shift growth, now cheaper per-shift after the
+    next_mle win); (3) commit rate 1/2. **Now (2)/(3) are the live levers; the
+    linear-sumcheck eq-factoring is fully spent.**
+- **UPDATE 2026-06-14 — cross-branch check: is there a portable eq-factor win on
+  `f2-clean-lookup`?** Audited every perf commit on `f2-clean-lookup` (the sound
+  lookup-adder branch) against `f2-clean`. The *only* shared-infra artifact unique
+  to the lookup branch is `piop/src/sumcheck/eq_factored.rs` — a generalized Gruen
+  eq-factored driver for the degree-3 shape `Σ_t eq(·;q_t)·Σ_i L_{t,i}·R_{t,i}`
+  (suffix-tensor no-fold + the char-2 affine-flat free 4th node). It is a clean,
+  conflict-free, *additive* module (the other `sumcheck/*.rs` blobs are
+  byte-identical across the two branches), BUT (a) it is referenced only by
+  lookup-only callers (`gkr_product.rs`, `f2_lookup_binding.rs`) that don't exist
+  on `f2-clean`, and (b) its technique is already in this tree three times over —
+  `oblong_and.rs::QuadraticMleCheckProver` (degree-2, Gruen, no eq fold, char-2
+  cheap fold `out[i]=tbl[2i]+tbl[2i+1]`), the fused discharge round-≥2 evaluator
+  (commits `9505876`+`7a27606`, −24.5%), and the working-tree
+  `MergedHadamardRoundEvaluator` (Karatsuba 3-mul coefficient form, eq second
+  pass). **Conclusion: nothing to cherry-pick for a free speed win.** Lever (1)
+  above (main sumcheck rounds 2..n) stands as the real prize, and its port source
+  remains f2-clean's OWN degree-2 `oblong_and.rs` — `eq_factored.rs` is the wrong
+  degree (3, eq·L·R) and bakes in the GKR/binding group shape, so it is at most a
+  secondary reference, not a drop-in. (The lookup branch's headline *feature* — the
+  sound adder — is a soundness upgrade, not an optimization, and is *slower*: ~179
+  ms sound vs the trusted-adder merged path; see the f2-lookup-adder ledger.)
+
 ### Small-value / multi-round-skip prover for the Hadamard zerocheck (BUILT in full, A/B-DISCONFIRMED at 40–74× SLOWER, then REMOVED from the tree — record kept so the approach isn't re-attempted the same way; see the A/B RESULT + REMOVED bullet)
 - **Source**: Dao–DeStefano–Bagad–Domb–Thaler, "Speeding Up Sum-Check
   Proving" (cs.nyu.edu/~zd2131/papers/26-587.pdf, Mar 2026), §3 (tower-field
@@ -3175,6 +3649,46 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Open questions / hypotheses to test
+
+### ✅ RESOLVED (2026-06-14): merged verify `MergedClaimedSumMismatch` when filler rows == 0 (ν ≡ 2 mod 8)
+- **Fix**: `cols::num_compressions` now reserves `4 + 2` rows (`−6`, was `−4`):
+  the 4-row output anchor **plus 2 trailing zero-guard rows** so the unmasked
+  `↓2` Ch/Maj AND relations read zeros (not the anchor) at the tail. Only
+  ν ≡ 2 mod 8 shapes change (drop 1 compression); nv9/16/17/19/20/21/22/23
+  counts are identical. Regression test
+  `sha256_f2_merged_exact_tiling_verifies` (nv9/10/11). Verified: nv10+nv18
+  now verify; full f2 suite 46/0, test-uair 27/0. See the Shipped entry
+  "Fix merged exact-tiling verify bug". Root-cause analysis kept below.
+- **Symptom**: `verify_f2_full_with_merged_hadamard` returns
+  `Uair(MergedClaimedSumMismatch { claimed, reconstructed })` — prove always
+  succeeds, but the emitted proof fails its own verify. **Deterministic by
+  *shape*** (different random claimed/reconstructed values each run — RNG is
+  entropy-seeded — but it fails 100% of the time at the affected ν).
+- **Exact trigger**: fails iff `(2^ν − 4) % 68 == 0`, i.e. the SHA compressions
+  *exactly tile* the trace with **zero filler/padding rows**.
+  `num_compressions(ν) = (2^ν−4)/68`; this is integer-with-zero-remainder iff
+  **ν ≡ 2 (mod 8)** → ν = 10, 18, 26, … Confirmed failing: **nv10** (15 comp)
+  and **nv18** (3855 comp). Confirmed *passing*: nv9 (deployed), nv16, nv17,
+  nv19, nv20, nv21, nv22, nv23 (all have ≥1 filler row). Independently
+  corroborated by the user's metal_gpu sweep, which silently produced **no
+  verify line at nv10 and nv18** (same failure, swallowed).
+- **Likely culprit**: the merged claimed-sum *reconstruction* on the verifier
+  (the `r0_at` / `merged_eq_point` hybrid-eq path, and/or the zero-padding
+  witness-forest term) degenerates when the padding-row count is exactly zero —
+  a sum/term that normally ranges over ≥1 filler row becomes empty, so the
+  verifier's reconstruction diverges from the prover's claimed sum. The prover
+  doesn't notice (it computes the claim directly); only the verifier's
+  independent reconstruction hits the empty-range edge case.
+- **Impact**: latent — the **deployed shape (nv9) is unaffected** (it has 32
+  filler rows). But it is a real correctness gap on the merged path at the
+  exact-tiling shapes, and it means the merged arm is not safe to deploy at an
+  arbitrary ν without the fix.
+- **Repro**: `AB_NVARS=10 AB_MERGED_ONLY=1 AB_OPENINGS=987 <test-bin>
+  sha256_f2_merged_ab_timing --ignored --nocapture` (or nv18). **Fix plan**:
+  audit the verifier's claimed-sum reconstruction for an implicit
+  "≥1 padding row" assumption (empty-product → should be the multiplicative
+  identity, empty-sum → 0); add a regression test that sweeps ν over a full
+  residue class mod 8 (must include a ν ≡ 2 mod 8) at the merged arm.
 
 ### Why is `Commit-AfterPrevProve` still ~47 ms slower than `Commit` (isolated)?
 - After the slab-reuse fix the gap dropped from 215 ms to ~47 ms

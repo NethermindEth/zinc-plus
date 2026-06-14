@@ -54,6 +54,7 @@ use zinc_piop::{
             MultiDegreeSumcheck, MultiDegreeSumcheckGroup,
             MultiDegreeSumcheckProof, Round1FastPath, Round1Output,
         },
+        prover::RoundPolyEvaluator,
     },
 };
 use zinc_uair::ideal_collector::IdealOrZero;
@@ -785,6 +786,107 @@ impl Round1FastPath<BinaryFieldGF128> for F2EqColRound1FastPath {
                 zero_inner,
             ),
         ]
+    }
+}
+
+/// Rounds-2..n fused evaluator for the γ-batched `eq · weighted_col` group —
+/// the companion to [`F2EqColRound1FastPath`] (which covers round 1).
+///
+/// The generic [`MultiDegreeSumcheck`] path forms the degree-2 round
+/// polynomial with ~5 GF(2^128) multiplications per slot (two product
+/// `comb_fn` calls plus boundary extrapolation of *both* MLEs). This evaluator
+/// reproduces the **exact same** `[M(0), M(1), M(2)]` with ~2 multiplications
+/// per slot by reusing the round-1 fast path's eq-factoring in every round.
+///
+/// After the framework has folded the prior rounds' challenges, the eq MLE
+/// `mles[0]` still carries the genuine eq factorisation. Writing
+/// `E[b'] = eq[2b'] + eq[2b'+1]` (the char-2 collapse of the difference
+/// identity, which also absorbs the already-bound prefix scalar), the folded
+/// table satisfies `eq[2b'] = (1 + r_j)·E[b']` and `eq[2b'+1] = r_j·E[b']`,
+/// where `r_j = eq_point[round − 1]` is the IC evaluation point's coordinate
+/// for the variable bound this round. So — identically to round 1, with
+/// `r_0 → r_j` over the folded tables:
+///
+/// ```text
+///   S_A = Σ E[b']·col[2b'],   S_B = Σ E[b']·col[2b'+1]
+///   M(0) = (1 + r_j)·S_A
+///   M(1) =      r_j ·S_B
+///   M(2) = eq(2, r_j)·((1 + 2)·S_A + 2·S_B)
+/// ```
+///
+/// Exact field algebra ⇒ **byte-identical** to the generic path (so the
+/// existing verifier is unchanged); validated by
+/// `f2_eq_col_round_evaluator_matches_generic` plus every prove/verify
+/// roundtrip. Only runs for rounds ≥ 2 — round 1 is the
+/// [`F2EqColRound1FastPath`].
+pub struct F2EqColRoundEvaluator {
+    /// The IC evaluation point `r`; round `j` reads coordinate `r[j − 1]`.
+    pub eq_point: Vec<BinaryFieldGF128>,
+}
+
+impl RoundPolyEvaluator<BinaryFieldGF128> for F2EqColRoundEvaluator {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn round_evals(
+        &self,
+        mles: &[DenseMultilinearExtension<<BinaryFieldGF128 as Field>::Inner>],
+        round: usize,
+        num_vars: usize,
+        degree: usize,
+        config: &<BinaryFieldGF128 as PrimeField>::Config,
+    ) -> Vec<BinaryFieldGF128> {
+        debug_assert_eq!(degree, 2, "eq·weighted_col group is degree 2");
+        debug_assert_eq!(mles.len(), 2, "expected [eq, weighted_col]");
+        let half = 1usize << (num_vars - round);
+        let eq_tab = &mles[0].evaluations;
+        let col_tab = &mles[1].evaluations;
+        debug_assert_eq!(eq_tab.len(), 2 * half);
+        debug_assert_eq!(col_tab.len(), 2 * half);
+
+        // E[b'] = eq[2b'] + eq[2b'+1] (char-2 identity); S_A = Σ E·col[2b'],
+        // S_B = Σ E·col[2b'+1]. Mirrors `F2EqColRound1FastPath::round_1_message`,
+        // reading the framework-folded tables in place of the raw ones.
+        let row_indices: Vec<usize> = (0..half).collect();
+        let (s_a, s_b) = cfg_iter!(row_indices)
+            .map(|&b_prime| {
+                let eq_lo = BinaryFieldGF128::new_unchecked_with_cfg(
+                    eq_tab[2 * b_prime].clone(),
+                    config,
+                );
+                let eq_hi = BinaryFieldGF128::new_unchecked_with_cfg(
+                    eq_tab[2 * b_prime + 1].clone(),
+                    config,
+                );
+                let e = eq_lo + eq_hi;
+                let a = BinaryFieldGF128::new_unchecked_with_cfg(
+                    col_tab[2 * b_prime].clone(),
+                    config,
+                );
+                let b = BinaryFieldGF128::new_unchecked_with_cfg(
+                    col_tab[2 * b_prime + 1].clone(),
+                    config,
+                );
+                (e * a, e * b)
+            })
+            .reduce(
+                || (BinaryFieldGF128::zero(), BinaryFieldGF128::zero()),
+                |acc, x| (acc.0 + x.0, acc.1 + x.1),
+            );
+
+        let one = BinaryFieldGF128::one();
+        // F::from(2) is the field element "X" (bit-pattern convention), NOT
+        // the integer 2 (= 0 in char 2). Same boundary node the generic path
+        // uses for the degree-2 group's third evaluation.
+        let two = BinaryFieldGF128::from_with_cfg(2u64, config);
+        let r = self.eq_point[round - 1].clone();
+
+        let m_at_0 = (one.clone() + r.clone()) * s_a.clone();
+        let m_at_1 = r.clone() * s_b.clone();
+        // eq(2, r) = 1 + 2 + r; weighted_col(2, ·) aggregates to (1+2)·S_A + 2·S_B.
+        let eq_at_2 = one.clone() + two.clone() + r;
+        let s_col_at_2 = (one + two.clone()) * s_a + two * s_b;
+        let m_at_2 = eq_at_2 * s_col_at_2;
+
+        vec![m_at_0, m_at_1, m_at_2]
     }
 }
 
@@ -2082,6 +2184,7 @@ where
         // kernel time. The batched-dispatch variant collapses those
         // 50 round-trips into one.
         let projected_trace: Vec<DenseMultilinearExtension<BinaryFieldGF128>> = {
+            let _g = zinc_utils::prof::scope("uair:alpha_project");
             #[cfg(all(feature = "metal_gpu", target_os = "macos"))]
             {
                 let column_inputs: Vec<&[BinaryPoly<D>]> = extended_binary_poly
@@ -2144,7 +2247,10 @@ where
         let eq_r =
             zinc_poly::utils::build_eq_x_r_inner(&ic_state.evaluation_point, &field_cfg)
                 .expect("eq table construction must succeed for valid IC point");
-        let weighted_col = build_gamma_weighted_col(&projected_trace, &gamma);
+        let weighted_col = {
+            let _g = zinc_utils::prof::scope("uair:weighted_col");
+            build_gamma_weighted_col(&projected_trace, &gamma)
+        };
 
         // Round-1 fast path: skips ~60% of round-1's per-slot work
         // by exploiting eq's char-2 factoring (`E[b'] = eq[2b'] +
@@ -2171,6 +2277,18 @@ where
             Box::new(|v: &[BinaryFieldGF128]| v[0] * v[1]),
             fast_path,
         );
+        // Rounds 2..n reuse the round-1 eq-factoring via the fused
+        // [`F2EqColRoundEvaluator`] (~2 mults/slot instead of the generic
+        // ~5), byte-identical to the generic path. Round 1 stays on the
+        // [`F2EqColRound1FastPath`] above. `F2_NO_EQCOL_EV=1` falls back to
+        // the generic rounds-≥2 fold for same-binary A/B timing.
+        let group = if std::env::var_os("F2_NO_EQCOL_EV").is_some() {
+            group
+        } else {
+            group.with_round_evaluator(Box::new(F2EqColRoundEvaluator {
+                eq_point: ic_state.evaluation_point.clone(),
+            }))
+        };
         let mut groups = vec![group];
 
         // -- Step 4m: the merged-Hadamard group rides the SAME sumcheck. --
@@ -2208,6 +2326,7 @@ where
             ));
         }
 
+        let _sc_g = zinc_utils::prof::scope("uair:sumcheck");
         let (sumcheck_proof, prover_states) =
             MultiDegreeSumcheck::<BinaryFieldGF128>::prove_as_subprotocol(
                 transcript,
@@ -2215,6 +2334,7 @@ where
                 num_vars,
                 &field_cfg,
             );
+        drop(_sc_g);
 
         // -- Derive the prover-side subclaim --------------------
         let sumcheck_point = prover_states[0].randomness.clone();
@@ -4974,6 +5094,86 @@ mod tests {
         }
     }
 
+    /// Cross-check that [`F2EqColRoundEvaluator`] reproduces the generic
+    /// degree-2 round polynomial `[M(0), M(1), M(2)]` **exactly**, for every
+    /// round `j = 1..=num_vars`, on a genuine `eq(·;r)·weighted_col` group.
+    ///
+    /// The evaluator's eq-factoring assumes the framework-folded `mles[0]` is
+    /// still a true `eq(·;r)` table; this test pins that assumption against the
+    /// definitional round polynomial `M(c) = Σ_{b'} eq(c,b')·col(c,b')` at the
+    /// three nodes `{0, 1, X}`, computed independently — the same values the
+    /// generic [`MultiDegreeSumcheck`] path emits. Folding uses the framework's
+    /// own `fix_variables_with_config`, so the simulated round-`j` state is
+    /// bit-for-bit what the prover sees. This is the round-1-vs-rounds-≥2
+    /// soundness guard for the eq-factored prover.
+    #[test]
+    fn f2_eq_col_round_evaluator_matches_generic() {
+        type Inner = <BinaryFieldGF128 as Field>::Inner;
+        let field_cfg = ();
+        let mut t = Blake3Transcript::new();
+        let mut sample = || -> BinaryFieldGF128 { t.get_field_challenge(&field_cfg) };
+
+        let num_vars = 7usize;
+        let n = 1usize << num_vars;
+
+        // Random eq point r and random weighted_col over {0,1}^num_vars.
+        let r_pt: Vec<BinaryFieldGF128> = (0..num_vars).map(|_| sample()).collect();
+        let eq_full = zinc_poly::utils::build_eq_x_r_inner(&r_pt, &field_cfg)
+            .expect("build_eq_x_r_inner");
+        let col_vals: Vec<Inner> = (0..n).map(|_| sample().into_inner()).collect();
+        let col_full = DenseMultilinearExtension::from_evaluations_vec(
+            num_vars,
+            col_vals,
+            *BinaryFieldGF128::zero().inner(),
+        );
+
+        let ev = F2EqColRoundEvaluator { eq_point: r_pt.clone() };
+        let two = BinaryFieldGF128::from_with_cfg(2u64, &field_cfg);
+
+        // Definitional degree-2 round poly over the (folded) tables: the exact
+        // values the generic prover forms via `comb_fn = v[0]*v[1]` at
+        // `{0, 1, F::from(2)}` with linear-MLE boundary extrapolation.
+        let direct = |eq: &DenseMultilinearExtension<Inner>,
+                      col: &DenseMultilinearExtension<Inner>|
+         -> Vec<BinaryFieldGF128> {
+            let half = eq.evaluations.len() / 2;
+            let lift =
+                |v: &Inner| BinaryFieldGF128::new_unchecked_with_cfg(v.clone(), &field_cfg);
+            let mut m0 = BinaryFieldGF128::zero();
+            let mut m1 = BinaryFieldGF128::zero();
+            let mut m2 = BinaryFieldGF128::zero();
+            for b in 0..half {
+                let e0 = lift(&eq.evaluations[2 * b]);
+                let e1 = lift(&eq.evaluations[2 * b + 1]);
+                let c0 = lift(&col.evaluations[2 * b]);
+                let c1 = lift(&col.evaluations[2 * b + 1]);
+                m0 = m0 + e0.clone() * c0.clone();
+                m1 = m1 + e1.clone() * c1.clone();
+                // value at X = F::from(2): v0 + 2·(v1 − v0); char-2: − = +.
+                let e2 = e0.clone() + two.clone() * (e1 + e0);
+                let c2 = c0.clone() + two.clone() * (c1 + c0);
+                m2 = m2 + e2 * c2;
+            }
+            vec![m0, m1, m2]
+        };
+
+        // Walk the rounds, folding the low variable each time (exactly as the
+        // framework does between rounds) and comparing at every round.
+        let mut eq_state = eq_full;
+        let mut col_state = col_full;
+        for round in 1..=num_vars {
+            let mles = vec![eq_state.clone(), col_state.clone()];
+            let got = ev.round_evals(&mles, round, num_vars, 2, &field_cfg);
+            let want = direct(&eq_state, &col_state);
+            assert_eq!(got, want, "round {round}: eq-factored ≠ definitional round poly");
+            if round < num_vars {
+                let rho = sample();
+                eq_state.fix_variables_with_config(std::slice::from_ref(&rho), &field_cfg);
+                col_state.fix_variables_with_config(std::slice::from_ref(&rho), &field_cfg);
+            }
+        }
+    }
+
     /// End-to-end: build a satisfied all-`F_2` trace, run the
     /// F_2 prove path, and assert the resulting proof has the
     /// expected shape (`num_constraints` IC entries, `num_vars`
@@ -7727,6 +7927,80 @@ mod tests {
         );
     }
 
+    /// Regression: the merged discharge must verify at **exact-tiling** trace
+    /// shapes (`nv ≡ 2 mod 8`, where compressions would tile `2^nv` with zero
+    /// filler rows). Before `num_compressions` reserved a 2-row guard, nv=10
+    /// left the nonzero output anchor in the last two rows, so C13 (Maj)'s
+    /// `↓2` forward read at row `n−2` broke base-domain `R₀` vanishing and the
+    /// merged claimed-sum check rejected a valid trace
+    /// (`MergedClaimedSumMismatch`). nv=9/11 are non-tiling controls.
+    #[test]
+    fn sha256_f2_merged_exact_tiling_verifies() {
+        use crypto_primitives::crypto_bigint_int::Int;
+        use zinc_test_uair::sha256_f2::cols;
+        use zinc_test_uair::{
+            GenerateRandomTrace, Sha256F2Ideal, Sha256F2Uair, sha256_f2_project_ideal,
+            sha256_f2_project_scalar,
+        };
+        const D: usize = 32;
+        type R = Int<4>;
+        type U = Sha256F2Uair<R>;
+
+        // nv=10 is the smallest exact-tiling shape (nv ≡ 2 mod 8); nv=9/11
+        // are non-tiling controls.
+        for num_vars in [9usize, 10, 11] {
+            // The guard the fix guarantees: ≥2 trailing zero rows so the ↓2
+            // Ch/Maj AND relations read zeros (not the anchor) at the tail.
+            assert!(
+                cols::active_rows(num_vars) + 2 <= (1usize << num_vars),
+                "nv={num_vars}: num_compressions must reserve ≥2 trailing zero rows",
+            );
+
+            let mut rng_local = rng();
+            let trace = U::generate_random_trace(num_vars, &mut rng_local);
+            let poly_size = 1usize << num_vars;
+            let num_rows = 1usize << (num_vars / 2);
+            let row_len = poly_size / num_rows;
+            let lc = <F2Types<D> as F2ZincTypes<D>>::BinaryLc::new(row_len);
+            let pp: ZipPlusParams<
+                <F2Types<D> as F2ZincTypes<D>>::BinaryZt,
+                <F2Types<D> as F2ZincTypes<D>>::BinaryLc,
+            > = ZipPlusParams::new(num_vars, num_rows, lc);
+            let (and_specs, adder_specs) = sha256_f2_hadamard_layout(num_vars).relations();
+
+            let mut pt = Blake3Transcript::new();
+            let proof = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+                &mut pt,
+                &pp,
+                &trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                num_vars,
+                sha256_f2_project_scalar::<R>,
+                4,
+            )
+            .unwrap_or_else(|e| panic!("nv={num_vars}: merged prove failed: {e:?}"));
+
+            let mut vt = Blake3Transcript::new();
+            ZincPlusPiopF2::<F2Types<D>, U, D>::verify_f2_full_with_merged_hadamard::<Sha256F2Ideal>(
+                &mut vt,
+                &pp,
+                &proof,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                &trace.binary_poly[..cols::NUM_BIN_PUB],
+                num_vars,
+                cols::NUM_BIN,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+            .unwrap_or_else(|e| panic!("nv={num_vars}: merged verify must succeed, got {e:?}"));
+        }
+    }
+
     /// All **14** SHA-256 Hadamard relations (2 ANDs + 12 adders) on the real
     /// `sha256_f2` trace through the **merged (inline) discharge** —
     /// `prove/verify_f2_full_with_merged_hadamard`. Arm-C parity: AND pair
@@ -7858,6 +8132,16 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12);
+        // Number of column openings t. Historically hard-coded to 4 (cheap, not
+        // the deployed soundness shape). Set `AB_OPENINGS=987` to time the prover
+        // at the deployed RAA-1/4 proximity count for a fair Binius64 comparison.
+        let ab_openings: usize = std::env::var("AB_OPENINGS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        // Set `AB_MERGED_ONLY=1` to time only the merged (E) arm — skips the
+        // slow fused (A) and oblong (C) arms, for a fast/cool scaling sweep.
+        let merged_only: bool = std::env::var("AB_MERGED_ONLY").is_ok();
         let poly_size = 1usize << num_vars;
         // Square-ish PCS shape.
         let num_rows = 1usize << (num_vars / 2);
@@ -7887,6 +8171,7 @@ mod tests {
             eprintln!("{label}: median {:.1} ms  (runs: {:?})", times[1], times);
         };
 
+        if !merged_only {
         // Arm A: the fused (ψ_α bit-slice) discharge, 14 relations.
         time_runs("A  Hadamard-16 (fused, trusted adders) prove", &mut || {
             let mut pt = Blake3Transcript::new();
@@ -7900,7 +8185,7 @@ mod tests {
                 &adder_specs,
                 num_vars,
                 sha256_f2_project_scalar::<R>,
-                4,
+                ab_openings,
             )
             .expect("arm A prove");
         });
@@ -7918,10 +8203,11 @@ mod tests {
                 &adder_specs,
                 num_vars,
                 sha256_f2_project_scalar::<R>,
-                4,
+                ab_openings,
             )
             .expect("arm C prove");
         });
+        }
 
         // Arm E: the merged inline-⟨Z_H⟩ discharge, 14 relations.
         time_runs("E  Merged-16 (inline ⟨Z_H⟩, trusted adders) prove", &mut || {
@@ -7936,12 +8222,13 @@ mod tests {
                 &adder_specs,
                 num_vars,
                 sha256_f2_project_scalar::<R>,
-                4,
+                ab_openings,
             )
             .expect("arm E prove");
         });
 
         // Verifier times (once each).
+        if !merged_only {
         let mut pt = Blake3Transcript::new();
         let proof_c = ZincPlusPiopF2::<F2Types<D>, U, 32>::prove_f2_full_with_oblong_hadamard(
             &mut pt,
@@ -7953,7 +8240,7 @@ mod tests {
             &adder_specs,
             num_vars,
             sha256_f2_project_scalar::<R>,
-            4,
+            ab_openings,
         )
         .expect("prove C");
         let t0 = Instant::now();
@@ -7973,6 +8260,7 @@ mod tests {
         )
         .expect("verify C");
         eprintln!("C  verify: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        }
 
         let mut pt = Blake3Transcript::new();
         let proof_e = ZincPlusPiopF2::<F2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
@@ -7985,7 +8273,7 @@ mod tests {
             &adder_specs,
             num_vars,
             sha256_f2_project_scalar::<R>,
-            4,
+            ab_openings,
         )
         .expect("prove E");
         let t0 = Instant::now();

@@ -435,6 +435,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &[] as &[F2VirtualBpSpec],
                         &[],
                         &[],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -462,6 +464,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         &[],
                         &[],
@@ -1434,6 +1438,8 @@ fn bench_micro_prover_uair(
                         &[] as &[F2VirtualBpSpec],
                         &[],
                         &[],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -1487,6 +1493,8 @@ fn bench_micro_prover_open(
             ::prove_f2_uair_with_groups(
                 &mut t,
                 &fx.trace,
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -1784,6 +1792,8 @@ fn bench_micro_prover_open(
                     ::prove_f2_uair_with_groups(
                         &mut t,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         &[],
                         &[],

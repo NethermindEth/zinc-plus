@@ -452,6 +452,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                         &[] as &[F2VirtualBpSpec],
                         &[],
                         &[],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -479,6 +481,8 @@ fn bench_prover_steps(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &Prove
                     ::prove_f2_uair_with_groups(
                         &mut transcript,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         &[],
                         &[],
@@ -1475,6 +1479,8 @@ fn bench_micro_prover_uair(
                         &[] as &[F2VirtualBpSpec],
                         &[],
                         &[],
+                        &[],
+                        &[],
                         fx.num_vars,
                         sha256_f2_project_scalar::<R>,
                     )
@@ -1528,6 +1534,8 @@ fn bench_micro_prover_open(
             ::prove_f2_uair_with_groups(
                 &mut t,
                 &fx.trace,
+                &[],
+                &[],
                 &[],
                 &[],
                 &[],
@@ -1825,6 +1833,8 @@ fn bench_micro_prover_open(
                     ::prove_f2_uair_with_groups(
                         &mut t,
                         &fx.trace,
+                        &[],
+                        &[],
                         &[],
                         &[],
                         &[],
@@ -2197,6 +2207,47 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
     assert_eq!(and_specs.len(), 2, "expected 2 AND relations (C12–C13)");
     assert_eq!(adder_specs.len(), 12, "expected 12 adder relations (C5–C11)");
 
+    // The MERGED (inline ⟨Z_H⟩) discharge — the ψ_z=ψ_α-at-z=α unification: the
+    // AND relations ride the main ideal-check + ψ_α + sumcheck pipeline (no
+    // standalone oblong zerocheck, no second transcript point, no z-block); the
+    // binding is one extra weight-vector projection of the same opened a'. Delta
+    // to `Prove-Hadamard-Oblong` is the merge's net prover effect.
+    //
+    // NOTE on fairness: the merged *verify* does not yet thread bit-op virtuals,
+    // so this arm passes `&[]` bit-ops (it commits the 2 SHR cols the oblong arm
+    // virtualises) — a few-% heavier commit. For the strictly-fair *discharge*
+    // A/B (all arms `&[]`, same process, interleaved), use the
+    // `sha256_f2_merged_ab_timing` test. See documentation/f2x-sha-todo.md.
+    group.bench_function(BenchmarkId::new("Prove-Hadamard-Merged", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            let proof = ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+                &mut transcript,
+                &fx.pp,
+                &fx.trace,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                fx.num_vars,
+                sha256_f2_project_scalar::<R>,
+                BENCH_NUM_OPENINGS,
+            )
+            .expect("prove (merged hadamard) should succeed");
+            black_box(proof);
+        });
+    });
+
+    // By default only the merged-discharge arm above is measured. The remaining
+    // arms — the Prove A/B (NoHadamard / Hadamard / Oblong), the discharge-only
+    // A/B, the three extra proofs built solely for the Verify benches, and every
+    // Verify arm — are opt-in: set HAD_ALL=1 to register them. This keeps the
+    // default `--bench f2_sha256 -- "Zinc+ F_2 SHA-256 Hadamard"` run measuring
+    // just Prove-Hadamard-Merged (and skips building the three extra proofs).
+    if std::env::var_os("HAD_ALL").is_none() {
+        return;
+    }
+
     let bit_ops = sha_f2_bit_op_virtuals();
     let public_cols = &fx.trace.binary_poly[..zinc_test_uair::sha256_f2::cols::NUM_BIN_PUB];
 
@@ -2364,6 +2415,22 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
         )
         .expect("prove (oblong hadamard) for verify bench")
     };
+    let proof_merged = {
+        let mut t = Blake3Transcript::new();
+        ZincPlusPiopF2::<BenchF2Types<D>, U, D>::prove_f2_full_with_merged_hadamard(
+            &mut t,
+            &fx.pp,
+            &fx.trace,
+            &[],
+            &[],
+            &and_specs,
+            &adder_specs,
+            fx.num_vars,
+            sha256_f2_project_scalar::<R>,
+            BENCH_NUM_OPENINGS,
+        )
+        .expect("prove (merged hadamard) for verify bench")
+    };
     // Proof-size impact of the discharge (raw + zstd-3), printed once.
     eprint_f2_proof_size(&format!("{id} NoHadamard"), &proof_no_had);
     eprint_f2_proof_size(&format!("{id} Hadamard"), &proof_had);
@@ -2434,6 +2501,31 @@ fn bench_hadamard_compare(group: &mut BenchmarkGroup<WallTime>, id: &str, fx: &P
             .expect("verify (oblong hadamard) should succeed");
         });
     });
+
+    // The merged-discharge verify: the AND closing-eval + ⟨Z_H⟩ claimed sum are
+    // checked inside the main UAIR verify, then one open at r* with the ψ_z=ψ_α
+    // binding — no oblong Phase-2, no z-block. A/B vs `Verify-Hadamard-Oblong`.
+    group.bench_function(BenchmarkId::new("Verify-Hadamard-Merged", id), |bench| {
+        bench.iter(|| {
+            let mut transcript = Blake3Transcript::new();
+            ZincPlusPiopF2::<BenchF2Types<D>, U, D>::verify_f2_full_with_merged_hadamard::<
+                Sha256F2Ideal,
+            >(
+                &mut transcript,
+                &fx.pp,
+                &proof_merged,
+                &[],
+                &[],
+                &and_specs,
+                &adder_specs,
+                public_cols,
+                fx.num_vars,
+                fx.num_primary,
+                |ideal: &IdealOrZero<Sha256F2Ideal>| sha256_f2_project_ideal(ideal),
+            )
+            .expect("verify (merged hadamard) should succeed");
+        });
+    });
 }
 
 fn hadamard_benches(c: &mut Criterion) {
@@ -2453,7 +2545,7 @@ fn hadamard_benches(c: &mut Criterion) {
             .filter_map(|x| x.trim().parse::<usize>().ok())
             .collect()
     });
-    for &num_vars in &[9usize, 16, 20, 21] {
+    for &num_vars in &[9usize, 11, 13, 15, 16, 20, 21] {
         if let Some(only) = &only {
             if !only.contains(&num_vars) {
                 continue;

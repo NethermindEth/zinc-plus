@@ -291,10 +291,23 @@ pub mod cols {
     /// init-prefix anchor, and zero-pads the rest. Scales with
     /// `num_vars` so the bench's effective workload tracks the trace
     /// size; at the minimum (`MIN_NUM_VARS = 9`) this evaluates to 7.
+    ///
+    /// The reservation is `4 + 2` rows, not just the 4-row anchor: the
+    /// unmasked Ch/Maj AND relations (C12/C13) read a `↓2` *forward*
+    /// shift, so the relation at row `t` touches rows `t+1`, `t+2`. For
+    /// it to hold at the trace tail the last **two** rows must be zero
+    /// (then `U⊙V = 0 = W`). Reserving only 4 rows lets the nonzero
+    /// output anchor land in those last two rows on an *exact-tiling*
+    /// trace (`(2^nv − 4) % 68 == 0`, i.e. `nv ≡ 2 mod 8`: nv = 10, 18,
+    /// 26, …), where C13's `U = W_A↓2 ⊕ W_A = a[t]` stays nonzero while
+    /// its `↓2` reads clamp to zero — so the merged discharge's
+    /// base-domain `R₀` fails to vanish and verification rejects a valid
+    /// trace. The extra 2-row guard removes that exact-tiling edge case.
     #[inline]
     pub const fn num_compressions(num_vars: usize) -> usize {
-        // `((2^nv) − 4) / 68`: largest `N` with `N·ROWS_PER_COMP + 4 ≤ 2^nv`.
-        ((1usize << num_vars) - 4) / ROWS_PER_COMP
+        // `((2^nv) − 6) / 68`: largest `N` with `N·ROWS_PER_COMP + 4 ≤ 2^nv − 2`
+        // (4-row anchor + 2 trailing zero-guard rows for the `↓2` AND relations).
+        ((1usize << num_vars) - 6) / ROWS_PER_COMP
     }
 
     /// Number of rows actually written by the witness generator at

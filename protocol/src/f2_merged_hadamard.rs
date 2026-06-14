@@ -58,8 +58,14 @@
 //! ledger: `documentation/f2x-sha-todo.md`, "Merged (inline ⟨Z_H⟩) Hadamard
 //! discharge" (2026-06-12).
 
-use crypto_primitives::{Field, PrimeField};
+use crypto_primitives::{Field, FromPrimitiveWithConfig, PrimeField};
+use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheckGroup;
+use zinc_piop::sumcheck::prover::RoundPolyEvaluator;
+use zinc_utils::cfg_into_iter;
+use zinc_utils::inner_transparent_field::InnerTransparentField;
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::binary::BinaryPoly;
 use zinc_poly::univariate::binary_gf128::BinaryFieldGF128;
@@ -216,6 +222,132 @@ pub fn lagrange_alpha(scheme: &Gf8Scheme, alpha: Gf) -> Vec<Gf> {
 /// expects), comb `eq · Σ_k γ_h^k·(ZU_k·ZV_k + ZW_k)` (char 2: `− = +`). Its
 /// claimed sum is `R₀(α)`.
 #[allow(clippy::arithmetic_side_effects)]
+/// Fused round-polynomial evaluator for the merged degree-3 Hadamard group,
+/// used for **every round** in place of the generic per-point value-array
+/// gather (see [`RoundPolyEvaluator`]). The generic path rebuilds a
+/// `1 + 3·k_rel`-element value array per hypercube point — a scatter across
+/// all operand MLEs that dominates the main-pipeline sumcheck. This evaluator
+/// instead loops **relation-outer, point-inner**, streaming each relation's
+/// three folded operands `ZU_k, ZV_k, ZW_k` in coefficient space (Karatsuba
+/// for `ZU·ZV`), weights by `γ_h^k`, then applies the common `eq` factor in a
+/// second pass. Mirrors the standalone discharge's `HadamardRoundEvaluator`
+/// but over folded operands (no per-bit inner loop). Same arithmetic,
+/// exact-field order-independent sum ⇒ the round message is **byte-identical**
+/// to the comb below.
+struct MergedHadamardRoundEvaluator<F: PrimeField> {
+    k_rel: usize,
+    /// `gamma_pows[k] = γ_h^k`.
+    gamma_pows: Vec<F>,
+}
+
+impl<F> RoundPolyEvaluator<F> for MergedHadamardRoundEvaluator<F>
+where
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync,
+    F::Inner: Send + Sync + Zero + Clone,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn round_evals(
+        &self,
+        mles: &[DenseMultilinearExtension<F::Inner>],
+        round: usize,
+        num_vars: usize,
+        degree: usize,
+        config: &F::Config,
+    ) -> Vec<F> {
+        debug_assert_eq!(degree, 3, "merged Hadamard group is degree 3");
+        debug_assert_eq!(mles.len(), 1 + self.k_rel * 3);
+        let zero = F::zero_with_cfg(config);
+        let half = 1usize << (num_vars - round); // number of point-pairs
+
+        let eq = &mles[0].evaluations;
+        let ops = &mles[1..]; // 3·k_rel folded operands, relation-major
+        let weights = &self.gamma_pows;
+
+        const CHUNK: usize = 512;
+        let n_chunks = half.div_ceil(CHUNK).max(1);
+
+        // Each chunk returns its partial of M's coeffs [m0, m1, m2, m3]; the
+        // round poly is cubic (linear `eq` × degree-2 `Σ_k γ^k(ZU·ZV+ZW)`).
+        let partials: Vec<[F; 4]> = cfg_into_iter!(0..n_chunks)
+            .map(|c| {
+                let lo = c * CHUNK;
+                let hi = ((c + 1) * CHUNK).min(half);
+                if lo >= hi {
+                    return [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+                }
+                let clen = hi - lo;
+                // Pass 1: G_pt coeffs (g0, g1, g2) in three contiguous bands.
+                let mut g = vec![zero.clone(); 3 * clen];
+                for k in 0..self.k_rel {
+                    let w = &weights[k];
+                    let u = &ops[3 * k].evaluations;
+                    let v = &ops[3 * k + 1].evaluations;
+                    let ws = &ops[3 * k + 2].evaluations;
+                    for pt in lo..hi {
+                        let li = pt - lo;
+                        let u0 = F::new_unchecked_with_cfg(u[2 * pt].clone(), config);
+                        let u1 = F::new_unchecked_with_cfg(u[2 * pt + 1].clone(), config);
+                        let v0 = F::new_unchecked_with_cfg(v[2 * pt].clone(), config);
+                        let v1 = F::new_unchecked_with_cfg(v[2 * pt + 1].clone(), config);
+                        let w0 = F::new_unchecked_with_cfg(ws[2 * pt].clone(), config);
+                        let dw = F::new_unchecked_with_cfg(ws[2 * pt + 1].clone(), config)
+                            - w0.clone();
+                        // (ZU·ZV) coeffs via Karatsuba (3 muls): X² coeff Δu·Δv,
+                        // X⁰ coeff u0·v0, X¹ coeff u1·v1 − p0 − p2.
+                        let p0 = u0.clone() * v0.clone();
+                        let p2 = (u1.clone() - u0) * (v1.clone() - v0);
+                        let p1 = u1 * v1 - p0.clone() - p2.clone();
+                        // term = ZU·ZV + ZW (char 2: + ≡ −); W = w0 + Δw·X.
+                        let t0 = p0 + w0;
+                        let t1 = p1 + dw;
+                        let t2 = p2;
+                        g[li] += w.clone() * t0;
+                        g[clen + li] += w.clone() * t1;
+                        g[2 * clen + li] += w.clone() * t2;
+                    }
+                }
+                // Pass 2: M_pt = eq_pt·G_pt; accumulate M's coeffs over the chunk.
+                let mut m = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+                for pt in lo..hi {
+                    let li = pt - lo;
+                    let e0 = F::new_unchecked_with_cfg(eq[2 * pt].clone(), config);
+                    let de = F::new_unchecked_with_cfg(eq[2 * pt + 1].clone(), config) - e0.clone();
+                    let g0 = g[li].clone();
+                    let g1 = g[clen + li].clone();
+                    let g2 = g[2 * clen + li].clone();
+                    m[0] += e0.clone() * g0.clone();
+                    m[1] += e0.clone() * g1.clone() + de.clone() * g0;
+                    m[2] += e0.clone() * g2.clone() + de.clone() * g1;
+                    m[3] += de * g2;
+                }
+                m
+            })
+            .collect();
+
+        let mut m = [zero.clone(), zero.clone(), zero.clone(), zero.clone()];
+        for p in &partials {
+            for (x, mc) in m.iter_mut().enumerate() {
+                *mc += p[x].clone();
+            }
+        }
+
+        // Evaluate the cubic M at {0, 1, X, X+1} — same boundary convention as
+        // the generic path ⇒ byte-identical round message.
+        let horner = |t: &F| -> F {
+            m[0].clone()
+                + t.clone() * (m[1].clone() + t.clone() * (m[2].clone() + t.clone() * m[3].clone()))
+        };
+        let bp2 = F::from_with_cfg(2, config);
+        let bp3 = F::from_with_cfg(3, config);
+        vec![
+            m[0].clone(),
+            m[0].clone() + m[1].clone() + m[2].clone() + m[3].clone(),
+            horner(&bp2),
+            horner(&bp3),
+        ]
+    }
+}
+
 pub fn merged_hadamard_group(
     eq_mle: DenseMultilinearExtension<Inner>,
     folded_operands: Vec<DenseMultilinearExtension<Inner>>,
@@ -232,6 +364,14 @@ pub fn merged_hadamard_group(
         gamma_pows.push(w);
         w *= &gamma_h;
     }
+    // Fused rounds evaluator (byte-identical to the comb below; streams the 3
+    // folded operands per relation in coefficient space). The generic path
+    // scatter-gathers all 1+3·k_rel operand MLEs per hypercube point, which is
+    // the bulk of the main-pipeline sumcheck cost.
+    let evaluator: Box<dyn RoundPolyEvaluator<Gf>> = Box::new(MergedHadamardRoundEvaluator {
+        k_rel,
+        gamma_pows: gamma_pows.clone(),
+    });
     MultiDegreeSumcheckGroup::new(
         3,
         polys,
@@ -244,6 +384,7 @@ pub fn merged_hadamard_group(
             v[0] * s
         }),
     )
+    .with_round_evaluator(evaluator)
 }
 
 /// The verifier's expected merged-group evaluation at `r*`:
