@@ -332,6 +332,16 @@ pub trait Transcript {
     /// current transcript state, updating it.
     fn get_challenge<T: ConstTranscribable>(&mut self) -> T;
 
+    /// Fills `buf` with pseudorandom challenge bytes based on the current
+    /// transcript state. Transcript implementations can override this to
+    /// squeeze and absorb the whole buffer in one step.
+    fn fill_challenge_bytes(&mut self, buf: &mut [u8]) {
+        for chunk in buf.chunks_mut(u64::NUM_BYTES) {
+            let word = self.get_challenge::<u64>();
+            chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+        }
+    }
+
     fn get_field_challenge<F: PrimeField>(&mut self, cfg: &F::Config) -> F
     where
         F::Inner: ConstTranscribable,

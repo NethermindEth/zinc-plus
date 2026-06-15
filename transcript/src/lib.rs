@@ -54,6 +54,16 @@ impl Transcript for Blake3Transcript {
         T::read_transcription_bytes_exact(&buf)
     }
 
+    fn fill_challenge_bytes(&mut self, buf: &mut [u8]) {
+        if buf.is_empty() {
+            return;
+        }
+        self.fill_with_random_bytes(buf);
+        self.hasher.update(&[0x12]);
+        self.hasher.update(buf);
+        self.hasher.update(&[0x34]);
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     fn get_prime<R: ConstIntSemiring + ConstTranscribable, T: PrimalityTest<R>>(&mut self) -> R {
         let buf = &mut vec![0u8; R::NUM_BYTES];

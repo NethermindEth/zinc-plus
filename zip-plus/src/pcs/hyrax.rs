@@ -112,7 +112,7 @@ where
             .iter()
             .map(|value| F::scalar_to_field(value, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
-        transcript.write_field_elements(&b_f)?;
+        write_hyrax_field_elements::<C, F>(transcript, &b_f, field_cfg)?;
 
         let row_coeffs = if prover_data.num_rows == 1 {
             vec![C::ScalarField::from(1u64)]
@@ -227,7 +227,7 @@ where
         }
 
         let b = F::delayed_sum_of_products(&combined_row, &q1, F::zero_with_cfg(field_cfg));
-        transcript.write_field_elements(&[b])?;
+        write_hyrax_field_elements::<C, F>(transcript, &[b], field_cfg)?;
 
         let combined_scalars = combined_row
             .iter()
@@ -329,7 +329,7 @@ where
         }
 
         let b = F::delayed_sum_of_products(&combined_row, &q1, F::zero_with_cfg(field_cfg));
-        transcript.write_field_elements(&[b])?;
+        write_hyrax_field_elements::<C, F>(transcript, &[b], field_cfg)?;
 
         let combined_scalars = combined_row
             .iter()
@@ -441,8 +441,7 @@ where
             fold_weights.len(),
             "Hyrax folded opening commitment shape mismatch",
         )?;
-        let original_stream =
-            std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
+        let mut proof_stream = Cursor::new(opening_proof);
         let result = (|| {
             if commitment_a.blinding_mode != vk_a.blinding_mode
                 || commitment_b.blinding_mode != vk_b.blinding_mode
@@ -490,7 +489,12 @@ where
             let alphas =
                 sample_scalars::<C>(&mut transcript.fs_transcript, alpha_count_a + alpha_count_b);
 
-            let b_f = transcript.read_field_elements::<F>(1)?;
+            let b_f = read_hyrax_field_elements::<C, F, _>(
+                &mut proof_stream,
+                &mut transcript.fs_transcript,
+                1,
+                field_cfg,
+            )?;
             let mut expected_eval = F::zero_with_cfg(field_cfg);
             for (poly_idx, lifted_eval) in lifted_evals_a.iter().enumerate() {
                 for lane in 0..commitment_a.num_lanes {
@@ -519,9 +523,16 @@ where
             }
 
             let b_scalar = F::field_to_scalar(&b_f[0])?;
-            let combined_row = read_scalars::<C>(transcript, vk_a.num_cols)?;
+            let combined_row = read_scalars_from::<C, _>(
+                &mut proof_stream,
+                &mut transcript.fs_transcript,
+                vk_a.num_cols,
+            )?;
             let rho_star = if vk_a.blinding_mode.is_blinded() {
-                Some(read_scalar::<C>(transcript)?)
+                Some(read_scalar_from::<C, _>(
+                    &mut proof_stream,
+                    &mut transcript.fs_transcript,
+                )?)
             } else {
                 None
             };
@@ -581,8 +592,7 @@ where
 
             Ok(())
         })();
-        let consumed = transcript.stream.position() == opening_proof.len() as u64;
-        transcript.stream = original_stream;
+        let consumed = proof_stream.position() == opening_proof.len() as u64;
         result?;
         if !consumed {
             return Err(ZipError::InvalidPcsOpen(
@@ -632,7 +642,7 @@ where
             .iter()
             .map(|value| F::scalar_to_field(value, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
-        transcript.write_field_elements(&b_f)?;
+        write_hyrax_field_elements::<C, F>(transcript, &b_f, field_cfg)?;
 
         let row_coeffs = if prover_data.num_rows == 1 {
             vec![C::ScalarField::from(1u64)]
@@ -719,12 +729,16 @@ where
                 fold_weights.len(),
                 "Hyrax folded opening commitment shape mismatch",
             )?;
-        let original_stream =
-            std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
+        let mut proof_stream = Cursor::new(opening_proof);
         let result = (|| {
             validate_scalar_field_linear_form_commitment::<C, D>(vk, commitment, q0, q1)?;
 
-            let b_f = transcript.read_field_elements::<F>(commitment.num_rows)?;
+            let b_f = read_hyrax_field_elements::<C, F, _>(
+                &mut proof_stream,
+                &mut transcript.fs_transcript,
+                commitment.num_rows,
+                field_cfg,
+            )?;
             let mut expected = F::zero_with_cfg(field_cfg);
             for (weight, b) in q0.iter().zip(b_f.iter()) {
                 expected += weight.clone() * b;
@@ -749,9 +763,16 @@ where
                 sample_scalars::<C>(&mut transcript.fs_transcript, commitment.num_rows)
             };
 
-            let combined_row = read_scalars::<C>(transcript, vk.num_cols)?;
+            let combined_row = read_scalars_from::<C, _>(
+                &mut proof_stream,
+                &mut transcript.fs_transcript,
+                vk.num_cols,
+            )?;
             let rho_star = if vk.blinding_mode.is_blinded() {
-                Some(read_scalar::<C>(transcript)?)
+                Some(read_scalar_from::<C, _>(
+                    &mut proof_stream,
+                    &mut transcript.fs_transcript,
+                )?)
             } else {
                 None
             };
@@ -798,8 +819,7 @@ where
 
             Ok(())
         })();
-        let consumed = transcript.stream.position() == opening_proof.len() as u64;
-        transcript.stream = original_stream;
+        let consumed = proof_stream.position() == opening_proof.len() as u64;
         result?;
         if !consumed {
             return Err(ZipError::InvalidPcsOpen(
@@ -2010,7 +2030,7 @@ where
                 .iter()
                 .map(|value| F::scalar_to_field(value, field_cfg))
                 .collect::<Result<Vec<_>, _>>()?;
-            transcript.write_field_elements(&b_f)?;
+            write_hyrax_field_elements::<C, F>(transcript, &b_f, field_cfg)?;
 
             let row_coeffs =
                 sample_scalars::<C>(&mut transcript.fs_transcript, prover_data.num_rows);
@@ -2060,7 +2080,7 @@ where
                 .iter()
                 .map(|value| F::scalar_to_field(value, field_cfg))
                 .collect::<Result<Vec<_>, _>>()?;
-            transcript.write_field_elements(&b_f)?;
+            write_hyrax_field_elements::<C, F>(transcript, &b_f, field_cfg)?;
         }
 
         write_scalars::<C>(transcript, &combined_row)?;
@@ -2093,19 +2113,17 @@ where
     {
         let _ = CHECK_FOR_OVERFLOW;
         if !opening_proof.is_empty() {
-            let original_stream =
-                std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.clone()));
-            let result = <Self as PCS<F, Eval, D>>::verify_open::<CHECK_FOR_OVERFLOW>(
-                transcript,
+            let mut proof_stream = Cursor::new(opening_proof.as_slice());
+            let result = verify_hyrax_open_from_reader::<C, Lanes, Eval, F, D, _>(
+                &mut transcript.fs_transcript,
+                &mut proof_stream,
                 vk,
                 commitment,
                 point,
                 lifted_evals,
-                &Vec::new(),
                 field_cfg,
             );
-            let consumed = transcript.stream.position() == opening_proof.len() as u64;
-            transcript.stream = original_stream;
+            let consumed = proof_stream.position() == opening_proof.len() as u64;
             result?;
             if !consumed {
                 return Err(ZipError::InvalidPcsOpen(
@@ -2115,138 +2133,170 @@ where
             return Ok(());
         }
 
-        if commitment.blinding_mode != vk.blinding_mode {
-            return Err(ZipError::InvalidPcsParam(
-                "Hyrax commitment blinding mode mismatch".to_string(),
-            ));
-        }
-        validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
-        if lifted_evals.len() != commitment.batch_size {
-            return Err(ZipError::InvalidPcsParam(format!(
-                "Hyrax verifier expected {} lifted evals, got {}",
-                commitment.batch_size,
-                lifted_evals.len()
-            )));
-        }
-        if commitment.batch_size == 0 {
-            if commitment.num_rows != 0 {
-                return Err(ZipError::InvalidPcsParam(
-                    "Hyrax empty batch must use the canonical empty commitment".to_string(),
-                ));
-            }
-            return Ok(());
-        }
-
-        let n = 1usize << point.len();
-        let expected_rows = num_rows(n, vk.num_cols)?;
-        if expected_rows != commitment.num_rows {
-            return Err(ZipError::InvalidPcsParam(format!(
-                "Hyrax verifier expected {expected_rows} rows from point, commitment has {}",
-                commitment.num_rows
-            )));
-        }
-
-        let (column_point, row_point) = split_column_row_point(point, commitment.num_rows);
-        let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
-        let column_point_scalar = column_point
-            .iter()
-            .map(F::field_to_scalar)
-            .collect::<Result<Vec<_>, _>>()?;
-        let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
-        let alphas = sample_scalars::<C>(
+        verify_hyrax_open_from_reader::<C, Lanes, Eval, F, D, _>(
             &mut transcript.fs_transcript,
-            commitment.batch_size * commitment.num_lanes,
-        );
-
-        let b_f = transcript.read_field_elements::<F>(commitment.num_rows)?;
-        if b_f.len() != q0_f.len() {
-            return Err(ZipError::InvalidPcsOpen(
-                "Hyrax b vector shape mismatch".to_string(),
-            ));
-        }
-
-        let mut expected_eval = F::zero_with_cfg(field_cfg);
-        for (poly_idx, lifted_eval) in lifted_evals.iter().enumerate() {
-            for lane in 0..commitment.num_lanes {
-                let alpha = F::scalar_to_field(
-                    &alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)],
-                    field_cfg,
-                )?;
-                let mut term = Lanes::lifted_eval::<F>(lifted_eval, lane, field_cfg)?;
-                term *= &alpha;
-                expected_eval += &term;
-            }
-        }
-
-        let mut b_eval = F::zero_with_cfg(field_cfg);
-        for (weight, b) in q0_f.iter().zip(b_f.iter()) {
-            let mut term = weight.clone();
-            term *= b;
-            b_eval += &term;
-        }
-        if b_eval != expected_eval {
-            return Err(ZipError::InvalidPcsOpen(
-                "Hyrax evaluation consistency failure".to_string(),
-            ));
-        }
-
-        let b_scalar = b_f
-            .iter()
-            .map(F::field_to_scalar)
-            .collect::<Result<Vec<_>, _>>()?;
-        let row_coeffs = if commitment.num_rows == 1 {
-            vec![C::ScalarField::from(1u64)]
-        } else {
-            sample_scalars::<C>(&mut transcript.fs_transcript, commitment.num_rows)
-        };
-
-        let combined_row = read_scalars::<C>(transcript, vk.num_cols)?;
-        let rho_star = if vk.blinding_mode.is_blinded() {
-            Some(read_scalar::<C>(transcript)?)
-        } else {
-            None
-        };
-
-        let mut lhs = C::ScalarField::zero();
-        for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
-            lhs += *value * weight;
-        }
-        let mut rhs = C::ScalarField::zero();
-        for (coeff, b) in row_coeffs.iter().zip(b_scalar.iter()) {
-            rhs += *coeff * b;
-        }
-        if lhs != rhs {
-            return Err(ZipError::InvalidPcsOpen(
-                "Hyrax row coherence failure".to_string(),
-            ));
-        }
-
-        let comm_lc = if commitment.num_rows == 1 {
-            msm_unchecked::<C>(&commitment.comm_affine, &alphas)?
-        } else {
-            let mut comm_lc_scalars = Vec::with_capacity(commitment.comm.len());
-            for poly_idx in 0..commitment.batch_size {
-                for lane in 0..commitment.num_lanes {
-                    let alpha = alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)];
-                    comm_lc_scalars.extend(row_coeffs.iter().map(|row_coeff| alpha * row_coeff));
-                }
-            }
-            msm_unchecked::<C>(&commitment.comm_affine, &comm_lc_scalars)?
-        };
-
-        let mut expected = verifier_base_msm::<C>(vk, &combined_row)?;
-        if let Some(rho_star) = rho_star {
-            expected += vk.h * rho_star;
-        }
-
-        if comm_lc != expected {
-            return Err(ZipError::InvalidPcsOpen(
-                "Hyrax commitment opening failure".to_string(),
-            ));
-        }
-
-        Ok(())
+            &mut transcript.stream,
+            vk,
+            commitment,
+            point,
+            lifted_evals,
+            field_cfg,
+        )
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_hyrax_open_from_reader<C, Lanes, Eval, F, const D: usize, R>(
+    fs_transcript: &mut impl Transcript,
+    proof_stream: &mut R,
+    vk: &HyraxVerifierKey<C>,
+    commitment: &HyraxCommitment<C>,
+    point: &[F],
+    lifted_evals: &[DynamicPolynomialF<F>],
+    field_cfg: &F::Config,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+    F: HyraxFieldBridge<C>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    Eval: Clone + Debug + Send + Sync,
+    Lanes: HyraxLanes<C, Eval, D>,
+    R: Read,
+{
+    if commitment.blinding_mode != vk.blinding_mode {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax commitment blinding mode mismatch".to_string(),
+        ));
+    }
+    validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
+    if lifted_evals.len() != commitment.batch_size {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax verifier expected {} lifted evals, got {}",
+            commitment.batch_size,
+            lifted_evals.len()
+        )));
+    }
+    if commitment.batch_size == 0 {
+        if commitment.num_rows != 0 {
+            return Err(ZipError::InvalidPcsParam(
+                "Hyrax empty batch must use the canonical empty commitment".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let n = 1usize << point.len();
+    let expected_rows = num_rows(n, vk.num_cols)?;
+    if expected_rows != commitment.num_rows {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax verifier expected {expected_rows} rows from point, commitment has {}",
+            commitment.num_rows
+        )));
+    }
+
+    let (column_point, row_point) = split_column_row_point(point, commitment.num_rows);
+    let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
+    let column_point_scalar = column_point
+        .iter()
+        .map(F::field_to_scalar)
+        .collect::<Result<Vec<_>, _>>()?;
+    let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
+    let alphas = sample_scalars::<C>(fs_transcript, commitment.batch_size * commitment.num_lanes);
+
+    let b_f = read_hyrax_field_elements::<C, F, _>(
+        proof_stream,
+        fs_transcript,
+        commitment.num_rows,
+        field_cfg,
+    )?;
+    if b_f.len() != q0_f.len() {
+        return Err(ZipError::InvalidPcsOpen(
+            "Hyrax b vector shape mismatch".to_string(),
+        ));
+    }
+
+    let mut expected_eval = F::zero_with_cfg(field_cfg);
+    for (poly_idx, lifted_eval) in lifted_evals.iter().enumerate() {
+        for lane in 0..commitment.num_lanes {
+            let alpha = F::scalar_to_field(
+                &alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)],
+                field_cfg,
+            )?;
+            let mut term = Lanes::lifted_eval::<F>(lifted_eval, lane, field_cfg)?;
+            term *= &alpha;
+            expected_eval += &term;
+        }
+    }
+
+    let mut b_eval = F::zero_with_cfg(field_cfg);
+    for (weight, b) in q0_f.iter().zip(b_f.iter()) {
+        let mut term = weight.clone();
+        term *= b;
+        b_eval += &term;
+    }
+    if b_eval != expected_eval {
+        return Err(ZipError::InvalidPcsOpen(
+            "Hyrax evaluation consistency failure".to_string(),
+        ));
+    }
+
+    let b_scalar = b_f
+        .iter()
+        .map(F::field_to_scalar)
+        .collect::<Result<Vec<_>, _>>()?;
+    let row_coeffs = if commitment.num_rows == 1 {
+        vec![C::ScalarField::from(1u64)]
+    } else {
+        sample_scalars::<C>(fs_transcript, commitment.num_rows)
+    };
+
+    let combined_row = read_scalars_from::<C, _>(proof_stream, fs_transcript, vk.num_cols)?;
+    let rho_star = if vk.blinding_mode.is_blinded() {
+        Some(read_scalar_from::<C, _>(proof_stream, fs_transcript)?)
+    } else {
+        None
+    };
+
+    let mut lhs = C::ScalarField::zero();
+    for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
+        lhs += *value * weight;
+    }
+    let mut rhs = C::ScalarField::zero();
+    for (coeff, b) in row_coeffs.iter().zip(b_scalar.iter()) {
+        rhs += *coeff * b;
+    }
+    if lhs != rhs {
+        return Err(ZipError::InvalidPcsOpen(
+            "Hyrax row coherence failure".to_string(),
+        ));
+    }
+
+    let comm_lc = if commitment.num_rows == 1 {
+        msm_unchecked::<C>(&commitment.comm_affine, &alphas)?
+    } else {
+        let mut comm_lc_scalars = Vec::with_capacity(commitment.comm.len());
+        for poly_idx in 0..commitment.batch_size {
+            for lane in 0..commitment.num_lanes {
+                let alpha = alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)];
+                comm_lc_scalars.extend(row_coeffs.iter().map(|row_coeff| alpha * row_coeff));
+            }
+        }
+        msm_unchecked::<C>(&commitment.comm_affine, &comm_lc_scalars)?
+    };
+
+    let mut expected = verifier_base_msm::<C>(vk, &combined_row)?;
+    if let Some(rho_star) = rho_star {
+        expected += vk.h * rho_star;
+    }
+
+    if comm_lc != expected {
+        return Err(ZipError::InvalidPcsOpen(
+            "Hyrax commitment opening failure".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 impl<F, C, Lanes, Eval, const D: usize> FoldablePCS<F, Eval, D> for HyraxPCS<C, Lanes>
@@ -3336,13 +3386,10 @@ fn sample_scalars<C: AffineRepr>(
     transcript: &mut impl Transcript,
     n: usize,
 ) -> Vec<C::ScalarField> {
+    let mut bytes = [0u8; 64];
     (0..n)
         .map(|_| {
-            let mut bytes = Vec::with_capacity(64);
-            for _ in 0..8 {
-                let word = transcript.get_challenge::<u64>();
-                bytes.extend_from_slice(&word.to_le_bytes());
-            }
+            transcript.fill_challenge_bytes(&mut bytes);
             C::ScalarField::from_le_bytes_mod_order(&bytes)
         })
         .collect()
@@ -3352,9 +3399,29 @@ fn write_scalars<C: AffineRepr>(
     transcript: &mut PcsProverTranscript,
     scalars: &[C::ScalarField],
 ) -> Result<(), ZipError> {
-    for scalar in scalars {
-        write_scalar::<C>(transcript, scalar)?;
+    if scalars.is_empty() {
+        return Ok(());
     }
+    let scalar_size = scalar_num_bytes::<C>();
+    let start = transcript.stream.position() as usize;
+    let byte_len = scalars.len().checked_mul(scalar_size).ok_or_else(|| {
+        ZipError::InvalidPcsParam("Hyrax scalar proof byte length overflow".to_string())
+    })?;
+    let end = start + byte_len;
+    {
+        let stream = transcript.stream.get_mut();
+        if stream.len() < end {
+            stream.resize(end, 0);
+        }
+        for (chunk, scalar) in stream[start..end].chunks_mut(scalar_size).zip(scalars) {
+            let mut writer = chunk;
+            scalar.serialize_compressed(&mut writer).map_err(ark_err)?;
+        }
+    }
+    transcript.stream.set_position(end as u64);
+    transcript
+        .fs_transcript
+        .absorb_slice(&transcript.stream.get_ref()[start..end]);
     Ok(())
 }
 
@@ -3362,33 +3429,162 @@ fn write_scalar<C: AffineRepr>(
     transcript: &mut PcsProverTranscript,
     scalar: &C::ScalarField,
 ) -> Result<(), ZipError> {
-    let bytes = scalar_bytes::<C>(scalar)?;
+    let mut bytes = vec![0u8; scalar_num_bytes::<C>()];
+    {
+        let mut writer = bytes.as_mut_slice();
+        scalar.serialize_compressed(&mut writer).map_err(ark_err)?;
+    }
     transcript.fs_transcript.absorb_slice(&bytes);
     transcript.stream.write_all(&bytes)?;
     Ok(())
 }
 
-fn read_scalars<C: AffineRepr>(
-    transcript: &mut PcsVerifierTranscript,
+fn read_scalars_from<C: AffineRepr, R: Read>(
+    stream: &mut R,
+    fs_transcript: &mut impl Transcript,
     n: usize,
 ) -> Result<Vec<C::ScalarField>, ZipError> {
-    (0..n).map(|_| read_scalar::<C>(transcript)).collect()
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let scalar_size = scalar_num_bytes::<C>();
+    let byte_len = n.checked_mul(scalar_size).ok_or_else(|| {
+        ZipError::InvalidPcsParam("Hyrax scalar proof byte length overflow".to_string())
+    })?;
+    let mut bytes = vec![0u8; byte_len];
+    stream.read_exact(&mut bytes)?;
+    fs_transcript.absorb_slice(&bytes);
+    bytes
+        .chunks_exact(scalar_size)
+        .map(|chunk| C::ScalarField::deserialize_compressed(chunk).map_err(ark_err))
+        .collect()
 }
 
-fn read_scalar<C: AffineRepr>(
-    transcript: &mut PcsVerifierTranscript,
+fn read_scalar_from<C: AffineRepr, R: Read>(
+    stream: &mut R,
+    fs_transcript: &mut impl Transcript,
 ) -> Result<C::ScalarField, ZipError> {
-    let size = C::ScalarField::zero().serialized_size(Compress::Yes);
-    let mut bytes = vec![0u8; size];
-    transcript.stream.read_exact(&mut bytes)?;
-    transcript.fs_transcript.absorb_slice(&bytes);
+    let mut bytes = vec![0u8; scalar_num_bytes::<C>()];
+    stream.read_exact(&mut bytes)?;
+    fs_transcript.absorb_slice(&bytes);
     C::ScalarField::deserialize_compressed(bytes.as_slice()).map_err(ark_err)
 }
 
-fn scalar_bytes<C: AffineRepr>(scalar: &C::ScalarField) -> Result<Vec<u8>, ZipError> {
-    let mut bytes = Vec::with_capacity(scalar.serialized_size(Compress::Yes));
-    scalar.serialize_compressed(&mut bytes).map_err(ark_err)?;
-    Ok(bytes)
+fn scalar_num_bytes<C: AffineRepr>() -> usize {
+    C::ScalarField::zero().serialized_size(Compress::Yes)
+}
+
+fn write_hyrax_field_elements<C, F>(
+    transcript: &mut PcsProverTranscript,
+    elems: &[F],
+    field_cfg: &F::Config,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+    F: HyraxFieldBridge<C>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+{
+    if elems.is_empty() {
+        return Ok(());
+    }
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let num_bytes = zero.inner().get_num_bytes();
+    let length_prefix_len = F::Inner::LENGTH_NUM_BYTES;
+    let length_bytes = num_bytes.to_le_bytes();
+    transcript
+        .stream
+        .write_all(&length_bytes[..length_prefix_len])?;
+
+    let start = transcript.stream.position() as usize;
+    let byte_len = elems.len().checked_mul(num_bytes).ok_or_else(|| {
+        ZipError::InvalidPcsParam("Hyrax field proof byte length overflow".to_string())
+    })?;
+    let end = start + byte_len;
+    {
+        let stream = transcript.stream.get_mut();
+        if stream.len() < end {
+            stream.resize(end, 0);
+        }
+        for (chunk, elem) in stream[start..end].chunks_mut(num_bytes).zip(elems) {
+            elem.inner().write_transcription_bytes_exact(chunk);
+        }
+    }
+    transcript.stream.set_position(end as u64);
+    absorb_hyrax_field_bytes::<F>(
+        &mut transcript.fs_transcript,
+        elems.len(),
+        num_bytes,
+        &zero.modulus(),
+        &transcript.stream.get_ref()[start..end],
+    );
+    Ok(())
+}
+
+fn read_hyrax_field_elements<C, F, R>(
+    stream: &mut R,
+    fs_transcript: &mut impl Transcript,
+    n: usize,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ZipError>
+where
+    C: AffineRepr,
+    F: HyraxFieldBridge<C>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    R: Read,
+{
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let expected_num_bytes = zero.inner().get_num_bytes();
+    let length_prefix_len = F::Inner::LENGTH_NUM_BYTES;
+    let num_bytes = if length_prefix_len == 0 {
+        expected_num_bytes
+    } else {
+        let mut length_bytes = vec![0u8; length_prefix_len];
+        stream.read_exact(&mut length_bytes)?;
+        F::Inner::read_num_bytes(&length_bytes)
+    };
+    if num_bytes != expected_num_bytes {
+        return Err(ZipError::InvalidPcsOpen(format!(
+            "Hyrax field element byte width mismatch: proof uses {num_bytes}, verifier expects {expected_num_bytes}"
+        )));
+    }
+
+    let byte_len = n.checked_mul(num_bytes).ok_or_else(|| {
+        ZipError::InvalidPcsParam("Hyrax field proof byte length overflow".to_string())
+    })?;
+    let mut bytes = vec![0u8; byte_len];
+    stream.read_exact(&mut bytes)?;
+    absorb_hyrax_field_bytes::<F>(fs_transcript, n, num_bytes, &zero.modulus(), &bytes);
+    Ok(bytes
+        .chunks_exact(num_bytes)
+        .map(F::Inner::read_transcription_bytes_exact)
+        .map(|inner| F::new_unchecked_with_cfg(inner, field_cfg))
+        .collect())
+}
+
+fn absorb_hyrax_field_bytes<F>(
+    transcript: &mut impl Transcript,
+    n: usize,
+    num_bytes: usize,
+    modulus: &F::Modulus,
+    bytes: &[u8],
+) where
+    F: PrimeField,
+    F::Modulus: Transcribable,
+{
+    transcript.absorb_slice(b"hyrax_field_elements_v1");
+    transcript.absorb_slice(&(n as u64).to_le_bytes());
+    transcript.absorb_slice(&(num_bytes as u64).to_le_bytes());
+    let mut modulus_bytes = vec![0u8; modulus.get_num_bytes()];
+    modulus.write_transcription_bytes_exact(&mut modulus_bytes);
+    transcript.absorb_slice(&modulus_bytes);
+    transcript.absorb_slice(bytes);
 }
 
 fn affine_bytes_into<C: AffineRepr>(affine: &C, bytes: &mut Vec<u8>) -> Result<(), ZipError> {
