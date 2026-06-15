@@ -1172,7 +1172,9 @@ where
     .expect("Hyrax benchmark setup must be valid")
 }
 
-fn projection_sha_hyrax_pcs_params<C, F>() -> (
+fn projection_sha_hyrax_pcs_params<C, F>(
+    width: usize,
+) -> (
     PCSParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
     PCSVerifierParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
 )
@@ -1180,7 +1182,6 @@ where
     C: AffineRepr,
     F: PrimeField + zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
 {
-    let width = SHA_ROW_COUNT;
     let (shared_ck, shared_vk) = projection_sha_hyrax_key_pair::<C, BinaryLanes>(width, 0);
     let (arbitrary_ck, arbitrary_vk) =
         projection_sha_hyrax_key_pair::<C, DensePolyScalarLanes>(width, 1_000);
@@ -1523,6 +1524,13 @@ where
     (valid, skipped)
 }
 
+fn mixed_width_candidates() -> Vec<(String, usize)> {
+    [128usize, 256, 512, 1024, 2048, 4096]
+        .into_iter()
+        .map(|width| (format!("mixed {width}"), width))
+        .collect()
+}
+
 fn finite_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
@@ -1746,7 +1754,14 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         .filter(|row| row.kind == "packed")
         .collect::<Vec<_>>();
     let og = rows.iter().find(|row| row.kind == "og_zip");
-    let mixed = rows.iter().find(|row| row.kind == "mixed_hyrax");
+    let fastest_mixed = rows
+        .iter()
+        .filter(|row| row.kind == "mixed_hyrax")
+        .min_by(|a, b| {
+            a.prover_ms
+                .partial_cmp(&b.prover_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
     let width_min = packed.iter().filter_map(|row| row.width).min().unwrap_or(1) as f64;
     let width_max = packed.iter().filter_map(|row| row.width).max().unwrap_or(2) as f64;
@@ -1757,7 +1772,8 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         packed
             .iter()
             .flat_map(|row| [row.prover_ms, row.verifier_ms])
-            .chain(og.iter().flat_map(|row| [row.prover_ms, row.verifier_ms])),
+            .chain(og.iter().flat_map(|row| [row.prover_ms, row.verifier_ms]))
+            .chain(fastest_mixed.iter().flat_map(|row| [row.prover_ms, row.verifier_ms])),
     );
     let ytime = |y: f64| 500.0 - ((y - time_min) / (time_max - time_min)) * 430.0;
     let prover_points = packed
@@ -1786,6 +1802,17 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         draw_png_dashed_hline(&mut png, ytime(row.prover_ms), PNG_PROVER);
         draw_png_dashed_hline(&mut png, ytime(row.verifier_ms), PNG_VERIFIER);
     }
+    if let Some(row) = fastest_mixed {
+        body.push_str(&format!(
+            r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="8 5"/><line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="2 5"/>"##,
+            ytime(row.prover_ms),
+            ytime(row.prover_ms),
+            ytime(row.verifier_ms),
+            ytime(row.verifier_ms)
+        ));
+        draw_png_dashed_hline(&mut png, ytime(row.prover_ms), PNG_MIXED);
+        draw_png_dashed_hline(&mut png, ytime(row.verifier_ms), PNG_MIXED);
+    }
     body.push_str(r##"<text x="720" y="92" font-family="sans-serif" font-size="14" fill="#0f766e">prover</text><text x="720" y="112" font-family="sans-serif" font-size="14" fill="#7c3aed">verifier</text>"##);
     write_svg(
         &out_dir.join("plot1_time_vs_width.svg"),
@@ -1804,7 +1831,7 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     let mut png = blank_png_canvas();
     draw_png_axes(&mut png);
     draw_png_polyline(&mut png, &proof_points, PNG_PROOF, &xlog, &yproof);
-    if let Some(row) = mixed {
+    if let Some(row) = fastest_mixed {
         body.push_str(&format!(
             r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="6 4"/>"##,
             yproof(row.proof_bytes as f64),
@@ -2038,6 +2065,10 @@ fn write_hyrax_width_sweep_report(
         .iter()
         .filter(|row| row.kind == "packed")
         .collect::<Vec<_>>();
+    let mixed_rows = rows
+        .iter()
+        .filter(|row| row.kind == "mixed_hyrax")
+        .collect::<Vec<_>>();
     let hyrax_rows = rows
         .iter()
         .filter(|row| row.kind != "og_zip")
@@ -2057,6 +2088,12 @@ fn write_hyrax_width_sweep_report(
     let packed_smallest_zstd = best_row_by(packed_rows.iter().copied(), |row| {
         row.proof_zstd_bytes as f64
     });
+    let mixed_fastest_prover = best_row_by(mixed_rows.iter().copied(), |row| row.prover_ms);
+    let mixed_fastest_verifier = best_row_by(mixed_rows.iter().copied(), |row| row.verifier_ms);
+    let mixed_smallest_proof =
+        best_row_by(mixed_rows.iter().copied(), |row| row.proof_bytes as f64);
+    let mixed_smallest_zstd =
+        best_row_by(mixed_rows.iter().copied(), |row| row.proof_zstd_bytes as f64);
     let packed_balanced = if packed_rows.is_empty() {
         None
     } else {
@@ -2085,6 +2122,10 @@ fn write_hyrax_width_sweep_report(
         packed_fastest_verifier,
         packed_smallest_proof,
         packed_smallest_zstd,
+        mixed_fastest_prover,
+        mixed_fastest_verifier,
+        mixed_smallest_proof,
+        mixed_smallest_zstd,
         packed_balanced,
     ]
     .into_iter()
@@ -2122,6 +2163,10 @@ fn write_hyrax_width_sweep_report(
 <li><strong>Fastest Hyrax verifier:</strong> {}</li>
 <li><strong>Smallest Hyrax raw proof:</strong> {}</li>
 <li><strong>Smallest Hyrax zstd proof:</strong> {}</li>
+<li><strong>Fastest mixed prover:</strong> {}</li>
+<li><strong>Fastest mixed verifier:</strong> {}</li>
+<li><strong>Smallest mixed raw proof:</strong> {}</li>
+<li><strong>Smallest mixed zstd proof:</strong> {}</li>
 <li><strong>Fastest packed prover:</strong> {}</li>
 <li><strong>Fastest packed verifier:</strong> {}</li>
 <li><strong>Smallest packed raw proof:</strong> {}</li>
@@ -2140,6 +2185,18 @@ fn write_hyrax_width_sweep_report(
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
         hyrax_smallest_zstd
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        mixed_fastest_prover
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        mixed_fastest_verifier
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        mixed_smallest_proof
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        mixed_smallest_zstd
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
         packed_fastest_prover
@@ -2162,10 +2219,11 @@ fn write_hyrax_width_sweep_report(
 
     let html = format!(
         r#"<!doctype html>
-<html><head><meta charset="utf-8"><title>Packed Hyrax Width Sweep</title>
+<html><head><meta charset="utf-8"><title>Hyrax Width Sweep</title>
 <style>body{{font-family:Inter,system-ui,sans-serif;margin:32px;color:#111827}}table{{border-collapse:collapse;width:100%;font-size:13px}}th,td{{border:1px solid #d1d5db;padding:6px 8px;text-align:right}}th:first-child,td:first-child{{text-align:left}}tr.winner{{background:#ecfdf5}}tr.winner td:first-child{{font-weight:700}}img{{max-width:100%;border:1px solid #e5e7eb;margin:16px 0}}</style>
-</head><body><h1>Packed Hyrax Width Sweep</h1>
+</head><body><h1>Hyrax Width Sweep</h1>
 <p>Values per instance: {PACKED_SHA_VALUES_PER_INSTANCE}. Widths below 549 use row-local source padding for separable packed openings, so actual ECC points may exceed ceil(values/width).</p>
+<p>Mixed Hyrax widths tune the row-domain commitment width for the specialized binary/int lane layout. The current mixed folded-opening path is single-row only, so this sweep starts at 128. Widths above 128 cannot reduce mixed ECC commitments below one row per source, but they test wider opening vectors and fixed-base MSM behavior.</p>
 <p>Timing mode: {HYRAX_WIDTH_SWEEP_WARMUP_RUNS} warmup runs per config, {HYRAX_WIDTH_SWEEP_TUNING_SAMPLES} recorded tuning samples per config, and {HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES} recorded confirmation samples for the top {HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K} Hyrax prover candidates. Headline times are medians.</p>
 {most_performant}
 {table}
@@ -2287,9 +2345,10 @@ pub fn run_hyrax_width_sweep_report() {
         "og_zip",
     ));
 
-    let measure_mixed_hyrax = |sample_count: usize| -> HyraxWidthSweepRow {
+    let measure_mixed_hyrax =
+        |label: String, width: usize, sample_count: usize| -> HyraxWidthSweepRow {
         let (mixed_pcs_params, mixed_verifier_params) =
-            projection_sha_hyrax_pcs_params::<C, HyraxF>();
+            projection_sha_hyrax_pcs_params::<C, HyraxF>(width);
         let mixed_pp = LinearIdealFoldProverParams::<
             P,
             U,
@@ -2355,8 +2414,8 @@ pub fn run_hyrax_width_sweep_report() {
             })
             .sum();
         hyrax_width_sweep_row(
-            "mixed Hyrax ArkFBn254".to_string(),
-            Some(SHA_ROW_COUNT),
+            label,
+            Some(width),
             Some(mixed_ecc),
             Some(mixed_fresh_ecc),
             mixed_prover_stats,
@@ -2366,7 +2425,15 @@ pub fn run_hyrax_width_sweep_report() {
             "mixed_hyrax",
         )
     };
-    rows.push(measure_mixed_hyrax(HYRAX_WIDTH_SWEEP_TUNING_SAMPLES));
+
+    let mixed_widths = mixed_width_candidates();
+    for (label, width) in &mixed_widths {
+        rows.push(measure_mixed_hyrax(
+            label.clone(),
+            *width,
+            HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
+        ));
+    }
 
     let (widths, skipped_widths) = packed_width_candidates::<HyraxF>();
     let measure_packed_hyrax = |label: String,
@@ -2456,7 +2523,11 @@ pub fn run_hyrax_width_sweep_report() {
     let confirmation_rows = confirmation_targets
         .into_iter()
         .map(|(_, kind, label, width)| match kind {
-            "mixed_hyrax" => measure_mixed_hyrax(HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES),
+            "mixed_hyrax" => measure_mixed_hyrax(
+                label,
+                width.expect("mixed confirmation target has a width"),
+                HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
+            ),
             "packed" => measure_packed_hyrax(
                 label,
                 width.expect("packed confirmation target has a width"),
@@ -3522,7 +3593,8 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
 
     let shape = UairShape::<U>::new(SHA_ROW_VARS);
     let field_cfg = F::curve_field_cfg::<C>();
-    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params::<C, F>();
+    let (pcs_params, pcs_verifier_params) =
+        projection_sha_hyrax_pcs_params::<C, F>(SHA_ROW_COUNT);
     let pp =
         LinearIdealFoldProverParams::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
             pcs_params,
