@@ -1238,11 +1238,102 @@ struct HyraxWidthSweepRow {
     width: Option<usize>,
     ecc_points_per_instance: Option<usize>,
     fresh_ecc_points: Option<usize>,
+    /// Headline prover time: median of the recorded warmed samples.
     prover_ms: f64,
+    prover_mean_ms: f64,
+    prover_min_ms: f64,
+    prover_max_ms: f64,
+    prover_samples: usize,
+    /// Headline verifier time: median of the recorded warmed samples.
     verifier_ms: f64,
+    verifier_mean_ms: f64,
+    verifier_min_ms: f64,
+    verifier_max_ms: f64,
+    verifier_samples: usize,
     proof_bytes: usize,
     proof_zstd_bytes: usize,
     kind: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct SkippedPackedWidth {
+    width: usize,
+    reason: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimingStats {
+    median_ms: f64,
+    mean_ms: f64,
+    min_ms: f64,
+    max_ms: f64,
+    samples: usize,
+}
+
+const HYRAX_WIDTH_SWEEP_WARMUP_RUNS: usize = 2;
+const HYRAX_WIDTH_SWEEP_TUNING_SAMPLES: usize = 5;
+const HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES: usize = 15;
+const HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K: usize = 3;
+
+impl TimingStats {
+    fn from_samples(samples: &[f64]) -> Self {
+        assert!(!samples.is_empty(), "timing stats require samples");
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let midpoint = sorted.len() / 2;
+        let median_ms = if sorted.len() % 2 == 0 {
+            (sorted[midpoint - 1] + sorted[midpoint]) * 0.5
+        } else {
+            sorted[midpoint]
+        };
+        let mean_ms = samples.iter().sum::<f64>() / samples.len() as f64;
+        let min_ms = samples
+            .iter()
+            .fold(f64::INFINITY, |min, value| min.min(*value));
+        let max_ms = samples
+            .iter()
+            .fold(f64::NEG_INFINITY, |max, value| max.max(*value));
+        Self {
+            median_ms,
+            mean_ms,
+            min_ms,
+            max_ms,
+            samples: samples.len(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hyrax_width_sweep_row(
+    label: String,
+    width: Option<usize>,
+    ecc_points_per_instance: Option<usize>,
+    fresh_ecc_points: Option<usize>,
+    prover: TimingStats,
+    verifier: TimingStats,
+    proof_bytes: usize,
+    proof_zstd_bytes: usize,
+    kind: &'static str,
+) -> HyraxWidthSweepRow {
+    HyraxWidthSweepRow {
+        label,
+        width,
+        ecc_points_per_instance,
+        fresh_ecc_points,
+        prover_ms: prover.median_ms,
+        prover_mean_ms: prover.mean_ms,
+        prover_min_ms: prover.min_ms,
+        prover_max_ms: prover.max_ms,
+        prover_samples: prover.samples,
+        verifier_ms: verifier.median_ms,
+        verifier_mean_ms: verifier.mean_ms,
+        verifier_min_ms: verifier.min_ms,
+        verifier_max_ms: verifier.max_ms,
+        verifier_samples: verifier.samples,
+        proof_bytes,
+        proof_zstd_bytes,
+        kind,
+    }
 }
 
 fn elapsed_ms(start: Instant) -> f64 {
@@ -1321,19 +1412,38 @@ where
     out
 }
 
-fn measure_once<T>(f: impl FnOnce() -> T) -> (T, f64) {
-    let start = Instant::now();
-    let value = f();
-    (value, elapsed_ms(start))
+fn measure_warmed<T>(
+    warmup_runs: usize,
+    sample_count: usize,
+    mut f: impl FnMut() -> T,
+) -> (T, TimingStats) {
+    assert!(sample_count > 0, "warmed measurement requires samples");
+    for _ in 0..warmup_runs {
+        black_box(f());
+    }
+
+    let mut samples = Vec::with_capacity(sample_count);
+    let mut last = None;
+    for _ in 0..sample_count {
+        let start = Instant::now();
+        let value = black_box(f());
+        samples.push(elapsed_ms(start));
+        last = Some(value);
+    }
+
+    (
+        last.expect("sample_count is non-zero"),
+        TimingStats::from_samples(&samples),
+    )
 }
 
 fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
     let mut csv = String::from(
-        "label,kind,width,ecc_points_per_instance,fresh_ecc_points,prover_ms,verifier_ms,proof_bytes,proof_zstd_bytes\n",
+        "label,kind,width,ecc_points_per_instance,fresh_ecc_points,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
         csv.push_str(&format!(
-            "{},{},{},{},{},{:.6},{:.6},{},{}\n",
+            "{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6},{:.6},{},{},{}\n",
             row.label,
             row.kind,
             row.width
@@ -1346,12 +1456,71 @@ fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "N/A".to_string()),
             row.prover_ms,
+            row.prover_mean_ms,
+            row.prover_min_ms,
+            row.prover_max_ms,
+            row.prover_samples,
             row.verifier_ms,
+            row.verifier_mean_ms,
+            row.verifier_min_ms,
+            row.verifier_max_ms,
+            row.verifier_samples,
             row.proof_bytes,
             row.proof_zstd_bytes
         ));
     }
     fs::write(path, csv).expect("write hyrax width sweep CSV");
+}
+
+fn write_hyrax_width_sweep_skipped_csv(path: &Path, skipped: &[SkippedPackedWidth]) {
+    let mut csv = String::from("width,reason\n");
+    for width in skipped {
+        csv.push_str(&format!("{},{}\n", width.width, width.reason));
+    }
+    fs::write(path, csv).expect("write skipped packed widths CSV");
+}
+
+fn packed_width_label(width: usize) -> String {
+    match width {
+        35 => "549/16".to_string(),
+        69 => "549/8".to_string(),
+        138 => "549/4".to_string(),
+        275 => "549/2".to_string(),
+        549 => "549".to_string(),
+        1098 => "549*2".to_string(),
+        2196 => "549*4".to_string(),
+        4392 => "549*8".to_string(),
+        8784 => "549*16".to_string(),
+        17568 => "549*32".to_string(),
+        35136 => "549*64".to_string(),
+        70272 => "549*128".to_string(),
+        _ => width.to_string(),
+    }
+}
+
+fn packed_width_candidates<F>() -> (Vec<(String, usize)>, Vec<SkippedPackedWidth>)
+where
+    F: PrimeField,
+{
+    let mut requested = vec![
+        18usize, 35, 36, 69, 70, 96, 137, 138, 139, 183, 274, 275, 276, 549, 1098, 2196, 4392,
+        8784, 17568, 35136, 70272,
+    ];
+    requested.sort_unstable();
+    requested.dedup();
+
+    let mut valid = Vec::new();
+    let mut skipped = Vec::new();
+    for width in requested {
+        match packed_sha_layout::<F>(width) {
+            Ok(_) => valid.push((packed_width_label(width), width)),
+            Err(error) => skipped.push(SkippedPackedWidth {
+                width,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    (valid, skipped)
 }
 
 fn finite_range(values: impl Iterator<Item = f64>) -> (f64, f64) {
@@ -1725,7 +1894,12 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     write_png(&out_dir.join("plot4_verifier_vs_ecc.png"), &png);
 }
 
-fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
+fn write_hyrax_width_sweep_report(
+    out_dir: &Path,
+    rows: &[HyraxWidthSweepRow],
+    confirmation_rows: &[HyraxWidthSweepRow],
+    skipped_widths: &[SkippedPackedWidth],
+) {
     fn best_row_by<'a>(
         rows: impl Iterator<Item = &'a HyraxWidthSweepRow>,
         metric: impl Fn(&HyraxWidthSweepRow) -> f64,
@@ -1758,7 +1932,7 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
 
     fn row_summary(row: &HyraxWidthSweepRow) -> String {
         format!(
-            "{}{}: prover {:.3} ms, verifier {:.3} ms, proof {} bytes",
+            "{}{}: prover median {:.3} ms, verifier median {:.3} ms, proof {} bytes, zstd {} bytes",
             row.label,
             row.width
                 .map(|width| format!(
@@ -1773,17 +1947,109 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
                 .unwrap_or_default(),
             row.prover_ms,
             row.verifier_ms,
-            row.proof_bytes
+            row.proof_bytes,
+            row.proof_zstd_bytes
         )
+    }
+
+    fn optional_usize(value: Option<usize>) -> String {
+        value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "N/A".to_string())
+    }
+
+    fn html_escape(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    fn dominates(a: &HyraxWidthSweepRow, b: &HyraxWidthSweepRow) -> bool {
+        let all_no_worse = a.prover_ms <= b.prover_ms
+            && a.verifier_ms <= b.verifier_ms
+            && a.proof_bytes <= b.proof_bytes
+            && a.proof_zstd_bytes <= b.proof_zstd_bytes;
+        let at_least_one_better = a.prover_ms < b.prover_ms
+            || a.verifier_ms < b.verifier_ms
+            || a.proof_bytes < b.proof_bytes
+            || a.proof_zstd_bytes < b.proof_zstd_bytes;
+        all_no_worse && at_least_one_better
+    }
+
+    fn pareto_frontier<'a>(rows: &[&'a HyraxWidthSweepRow]) -> Vec<&'a HyraxWidthSweepRow> {
+        let mut frontier = rows
+            .iter()
+            .copied()
+            .filter(|row| {
+                !rows.iter().copied().any(|other| {
+                    !std::ptr::eq::<HyraxWidthSweepRow>(other, *row) && dominates(other, row)
+                })
+            })
+            .collect::<Vec<_>>();
+        frontier.sort_by(|a, b| {
+            a.prover_ms
+                .partial_cmp(&b.prover_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        frontier
+    }
+
+    fn row_table(rows: &[&HyraxWidthSweepRow], winner_rows: &[&HyraxWidthSweepRow]) -> String {
+        let mut table = String::from(
+            "<table><thead><tr><th>label</th><th>kind</th><th>width</th><th>ECC points/inst</th><th>fresh ECC points</th><th>prover median ms</th><th>prover mean ms</th><th>prover min ms</th><th>prover max ms</th><th>verifier median ms</th><th>verifier mean ms</th><th>verifier min ms</th><th>verifier max ms</th><th>samples p/v</th><th>proof bytes</th><th>zstd bytes</th></tr></thead><tbody>",
+        );
+        for row in rows {
+            let row = *row;
+            let class = if winner_rows
+                .iter()
+                .any(|winner| std::ptr::eq::<HyraxWidthSweepRow>(*winner, row))
+            {
+                r#" class="winner""#
+            } else {
+                ""
+            };
+            table.push_str(&format!(
+                "<tr{class}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{}/{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&row.label),
+                row.kind,
+                optional_usize(row.width),
+                optional_usize(row.ecc_points_per_instance),
+                optional_usize(row.fresh_ecc_points),
+                row.prover_ms,
+                row.prover_mean_ms,
+                row.prover_min_ms,
+                row.prover_max_ms,
+                row.verifier_ms,
+                row.verifier_mean_ms,
+                row.verifier_min_ms,
+                row.verifier_max_ms,
+                row.prover_samples,
+                row.verifier_samples,
+                row.proof_bytes,
+                row.proof_zstd_bytes
+            ));
+        }
+        table.push_str("</tbody></table>");
+        table
     }
 
     let packed_rows = rows
         .iter()
         .filter(|row| row.kind == "packed")
         .collect::<Vec<_>>();
-    let overall_fastest_prover = best_row_by(rows.iter(), |row| row.prover_ms);
-    let overall_fastest_verifier = best_row_by(rows.iter(), |row| row.verifier_ms);
-    let overall_smallest_proof = best_row_by(rows.iter(), |row| row.proof_bytes as f64);
+    let hyrax_rows = rows
+        .iter()
+        .filter(|row| row.kind != "og_zip")
+        .collect::<Vec<_>>();
+    let og_zip = rows.iter().find(|row| row.kind == "og_zip");
+    let hyrax_fastest_prover = best_row_by(hyrax_rows.iter().copied(), |row| row.prover_ms);
+    let hyrax_fastest_verifier = best_row_by(hyrax_rows.iter().copied(), |row| row.verifier_ms);
+    let hyrax_smallest_proof =
+        best_row_by(hyrax_rows.iter().copied(), |row| row.proof_bytes as f64);
+    let hyrax_smallest_zstd = best_row_by(hyrax_rows.iter().copied(), |row| {
+        row.proof_zstd_bytes as f64
+    });
     let packed_fastest_prover = best_row_by(packed_rows.iter().copied(), |row| row.prover_ms);
     let packed_fastest_verifier = best_row_by(packed_rows.iter().copied(), |row| row.verifier_ms);
     let packed_smallest_proof =
@@ -1797,11 +2063,13 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         let (prover_min, prover_max) = metric_span(&packed_rows, |row| row.prover_ms);
         let (verifier_min, verifier_max) = metric_span(&packed_rows, |row| row.verifier_ms);
         let (proof_min, proof_max) = metric_span(&packed_rows, |row| row.proof_bytes as f64);
+        let (zstd_min, zstd_max) = metric_span(&packed_rows, |row| row.proof_zstd_bytes as f64);
         packed_rows.iter().copied().min_by(|a, b| {
             let score = |row: &HyraxWidthSweepRow| {
                 normalize(row.prover_ms, prover_min, prover_max)
                     + normalize(row.verifier_ms, verifier_min, verifier_max)
                     + normalize(row.proof_bytes as f64, proof_min, proof_max)
+                    + normalize(row.proof_zstd_bytes as f64, zstd_min, zstd_max)
             };
             score(a)
                 .partial_cmp(&score(b))
@@ -1809,9 +2077,10 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         })
     };
     let winner_rows = [
-        overall_fastest_prover,
-        overall_fastest_verifier,
-        overall_smallest_proof,
+        hyrax_fastest_prover,
+        hyrax_fastest_verifier,
+        hyrax_smallest_proof,
+        hyrax_smallest_zstd,
         packed_fastest_prover,
         packed_fastest_verifier,
         packed_smallest_proof,
@@ -1822,58 +2091,55 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     .flatten()
     .collect::<Vec<_>>();
 
-    let mut table = String::from(
-        "<table><thead><tr><th>label</th><th>width</th><th>ECC points/inst</th><th>fresh ECC points</th><th>prover ms</th><th>verifier ms</th><th>proof bytes</th><th>zstd bytes</th></tr></thead><tbody>",
-    );
-    for row in rows {
-        let class = if winner_rows
-            .iter()
-            .any(|winner| std::ptr::eq::<HyraxWidthSweepRow>(*winner, row))
-        {
-            r#" class="winner""#
-        } else {
-            ""
-        };
-        table.push_str(&format!(
-            "<tr{class}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td>{}</td><td>{}</td></tr>",
-            row.label,
-            row.width
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
-            row.ecc_points_per_instance
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
-            row.fresh_ecc_points
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
-            row.prover_ms,
-            row.verifier_ms,
-            row.proof_bytes,
-            row.proof_zstd_bytes
-        ));
-    }
-    table.push_str("</tbody></table>");
+    let all_rows = rows.iter().collect::<Vec<_>>();
+    let table = row_table(&all_rows, &winner_rows);
+    let pareto_rows = pareto_frontier(&hyrax_rows);
+    let pareto_table = row_table(&pareto_rows, &[]);
+    let confirmation_refs = confirmation_rows.iter().collect::<Vec<_>>();
+    let confirmation_table = row_table(&confirmation_refs, &[]);
+
+    let skipped_html = if skipped_widths.is_empty() {
+        String::new()
+    } else {
+        let mut skipped_table = String::from(
+            "<h2>Skipped Requested Widths</h2><table><thead><tr><th>width</th><th>reason</th></tr></thead><tbody>",
+        );
+        for skipped in skipped_widths {
+            skipped_table.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                skipped.width,
+                html_escape(&skipped.reason)
+            ));
+        }
+        skipped_table.push_str("</tbody></table>");
+        skipped_table
+    };
 
     let most_performant = format!(
         r#"<h2>Most performant</h2>
 <ul>
-<li><strong>Overall fastest prover:</strong> {}</li>
-<li><strong>Overall fastest verifier:</strong> {}</li>
-<li><strong>Overall smallest raw proof:</strong> {}</li>
-<li><strong>Packed fastest prover:</strong> {}</li>
-<li><strong>Packed fastest verifier:</strong> {}</li>
-<li><strong>Packed smallest raw proof:</strong> {}</li>
-<li><strong>Packed smallest zstd proof:</strong> {}</li>
-<li><strong>Best balanced packed width:</strong> {} <em>(min normalized prover + verifier + raw proof bytes)</em></li>
+<li><strong>Fastest Hyrax prover recommendation:</strong> {}</li>
+<li><strong>Fastest Hyrax verifier:</strong> {}</li>
+<li><strong>Smallest Hyrax raw proof:</strong> {}</li>
+<li><strong>Smallest Hyrax zstd proof:</strong> {}</li>
+<li><strong>Fastest packed prover:</strong> {}</li>
+<li><strong>Fastest packed verifier:</strong> {}</li>
+<li><strong>Smallest packed raw proof:</strong> {}</li>
+<li><strong>Smallest packed zstd proof:</strong> {}</li>
+<li><strong>Best balanced packed width:</strong> {} <em>(min normalized prover + verifier + raw proof + zstd proof)</em></li>
+<li><strong>OG Zinc+ hash baseline:</strong> {}</li>
 </ul>
-<p>Rows highlighted in the table are winners for at least one metric.</p>"#,
-        overall_fastest_prover
+<p>Rows highlighted in the main table are Hyrax winners for at least one metric. Timing values are warmed medians.</p>"#,
+        hyrax_fastest_prover
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        overall_fastest_verifier
+        hyrax_fastest_verifier
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        overall_smallest_proof
+        hyrax_smallest_proof
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        hyrax_smallest_zstd
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
         packed_fastest_prover
@@ -1890,7 +2156,8 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
             .unwrap_or_else(|| "N/A".to_string()),
         packed_balanced
             .map(row_summary)
-            .unwrap_or_else(|| "N/A".to_string())
+            .unwrap_or_else(|| "N/A".to_string()),
+        og_zip.map(row_summary).unwrap_or_else(|| "N/A".to_string())
     );
 
     let html = format!(
@@ -1899,13 +2166,20 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
 <style>body{{font-family:Inter,system-ui,sans-serif;margin:32px;color:#111827}}table{{border-collapse:collapse;width:100%;font-size:13px}}th,td{{border:1px solid #d1d5db;padding:6px 8px;text-align:right}}th:first-child,td:first-child{{text-align:left}}tr.winner{{background:#ecfdf5}}tr.winner td:first-child{{font-weight:700}}img{{max-width:100%;border:1px solid #e5e7eb;margin:16px 0}}</style>
 </head><body><h1>Packed Hyrax Width Sweep</h1>
 <p>Values per instance: {PACKED_SHA_VALUES_PER_INSTANCE}. Widths below 549 use row-local source padding for separable packed openings, so actual ECC points may exceed ceil(values/width).</p>
+<p>Timing mode: {HYRAX_WIDTH_SWEEP_WARMUP_RUNS} warmup runs per config, {HYRAX_WIDTH_SWEEP_TUNING_SAMPLES} recorded tuning samples per config, and {HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES} recorded confirmation samples for the top {HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K} Hyrax prover candidates. Headline times are medians.</p>
+{most_performant}
 {table}
+{skipped_html}
+<h2>Confirmation Pass</h2>
+{confirmation_table}
+<h2>Pareto Frontier</h2>
+<p>Non-dominated Hyrax rows across prover median, verifier median, raw proof bytes, and zstd proof bytes.</p>
+{pareto_table}
 <h2>Plots</h2>
 <img src="plot1_time_vs_width.svg" alt="time vs width">
 <img src="plot2_proof_size_vs_width.svg" alt="proof size vs width">
 <img src="plot3_pareto_scatter.svg" alt="pareto scatter">
 <img src="plot4_verifier_vs_ecc.svg" alt="verifier vs ecc">
-{most_performant}
 </body></html>"#
     );
     fs::write(out_dir.join("report.html"), html).expect("write hyrax width sweep HTML report");
@@ -1958,145 +2232,148 @@ pub fn run_hyrax_width_sweep_report() {
 
     let (zip_pp, zip_vp) = zip_pcs_params(REAL_SHA256_CHAIN_NUM_VARS);
     let trace = real_sha256_chain_trace(REAL_SHA256_CHAIN_NUM_VARS);
-    let (zip_proof, zip_prover_ms) = measure_once(|| {
-        ZincPlusPiop::<
-            RealEcdsaBenchZincTypes,
-            Sha256CompressionSliceUair<RealEcdsaInt>,
-            ZipF,
-            DEGREE_PLUS_ONE,
-        >::prove_with_pcs_and_field_cfg::<AllZipPCSTypes, false, PERFORM_CHECKS>(
-            &zip_pp,
-            &trace,
-            REAL_SHA256_CHAIN_NUM_VARS,
-            zinc_protocol::project_scalar_fn,
-            zip_field_cfg.clone(),
-        )
-        .expect("OG Zinc+ SHA prover failed")
-    });
+    let (zip_proof, zip_prover_stats) = measure_warmed(
+        HYRAX_WIDTH_SWEEP_WARMUP_RUNS,
+        HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
+        || {
+            ZincPlusPiop::<
+                RealEcdsaBenchZincTypes,
+                Sha256CompressionSliceUair<RealEcdsaInt>,
+                ZipF,
+                DEGREE_PLUS_ONE,
+            >::prove_with_pcs_and_field_cfg::<AllZipPCSTypes, false, PERFORM_CHECKS>(
+                &zip_pp,
+                &trace,
+                REAL_SHA256_CHAIN_NUM_VARS,
+                zinc_protocol::project_scalar_fn,
+                zip_field_cfg.clone(),
+            )
+            .expect("OG Zinc+ SHA prover failed")
+        },
+    );
     let public_trace = trace.public(&Sha256CompressionSliceUair::<RealEcdsaInt>::signature());
-    let (_, zip_verifier_ms) = measure_once(|| {
-        ZincPlusPiop::<
-            RealEcdsaBenchZincTypes,
-            Sha256CompressionSliceUair<RealEcdsaInt>,
-            ZipF,
-            DEGREE_PLUS_ONE,
-        >::verify_with_pcs_and_field_cfg::<AllZipPCSTypes, _, PERFORM_CHECKS>(
-            &zip_vp,
-            zip_proof.clone(),
-            &public_trace,
-            REAL_SHA256_CHAIN_NUM_VARS,
-            zinc_protocol::project_scalar_fn,
-            sha256_real_project_ideal,
-            zip_field_cfg.clone(),
-        )
-        .expect("OG Zinc+ SHA verifier failed")
-    });
+    let (_, zip_verifier_stats) = measure_warmed(
+        HYRAX_WIDTH_SWEEP_WARMUP_RUNS,
+        HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
+        || {
+            ZincPlusPiop::<
+                RealEcdsaBenchZincTypes,
+                Sha256CompressionSliceUair<RealEcdsaInt>,
+                ZipF,
+                DEGREE_PLUS_ONE,
+            >::verify_with_pcs_and_field_cfg::<AllZipPCSTypes, _, PERFORM_CHECKS>(
+                &zip_vp,
+                zip_proof.clone(),
+                &public_trace,
+                REAL_SHA256_CHAIN_NUM_VARS,
+                zinc_protocol::project_scalar_fn,
+                sha256_real_project_ideal,
+                zip_field_cfg.clone(),
+            )
+            .expect("OG Zinc+ SHA verifier failed")
+        },
+    );
     let zip_raw =
         generic_pcs_proof_raw_bytes::<AllZipPCSTypes, RealEcdsaBenchZincTypes>(&zip_proof);
-    rows.push(HyraxWidthSweepRow {
-        label: "OG Zinc+ hash PCS".to_string(),
-        width: None,
-        ecc_points_per_instance: None,
-        fresh_ecc_points: None,
-        prover_ms: zip_prover_ms,
-        verifier_ms: zip_verifier_ms,
-        proof_zstd_bytes: zstd_len(&zip_raw),
-        proof_bytes: zip_raw.len(),
-        kind: "og_zip",
-    });
+    rows.push(hyrax_width_sweep_row(
+        "OG Zinc+ hash PCS".to_string(),
+        None,
+        None,
+        None,
+        zip_prover_stats,
+        zip_verifier_stats,
+        zip_raw.len(),
+        zstd_len(&zip_raw),
+        "og_zip",
+    ));
 
-    let (mixed_pcs_params, mixed_verifier_params) =
-        projection_sha_hyrax_pcs_params::<C, HyraxF>();
-    let mixed_pp =
-        LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>::new(
-            mixed_pcs_params,
-            hyrax_field_cfg.clone(),
-            3,
-        );
-    let mixed_vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
-        C,
-        U,
-        RealEcdsaBenchZincTypes,
-        HyraxF,
-        DEGREE_PLUS_ONE,
-    >(
-        LinearIdealFoldVerifierParams::new(mixed_verifier_params, hyrax_field_cfg.clone()),
-        shape.clone(),
-    )
-    .expect("mixed Hyrax verifier setup succeeds");
-    let (mixed_output, mixed_prover_ms) = measure_once(|| {
-        let mut transcript = Blake3Transcript::new();
-        prove_prepared_linear_ideal_fold_mixed_hyrax::<
-            C,
+    let measure_mixed_hyrax = |sample_count: usize| -> HyraxWidthSweepRow {
+        let (mixed_pcs_params, mixed_verifier_params) =
+            projection_sha_hyrax_pcs_params::<C, HyraxF>();
+        let mixed_pp = LinearIdealFoldProverParams::<
+            P,
             U,
             RealEcdsaBenchZincTypes,
             HyraxF,
             DEGREE_PLUS_ONE,
-        >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
-        .expect("mixed Hyrax prover failed")
-    });
-    let (_, mixed_verifier_ms) = measure_once(|| {
-        let mut transcript = Blake3Transcript::new();
-        verify_linear_ideal_fold_mixed_hyrax::<
+        >::new(mixed_pcs_params, hyrax_field_cfg.clone(), 3);
+        let mixed_vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
             C,
             U,
             RealEcdsaBenchZincTypes,
             HyraxF,
             DEGREE_PLUS_ONE,
         >(
-            &mixed_vs,
-            &mixed_output.fresh_instances,
-            &mixed_output.proof,
-            &mut transcript,
+            LinearIdealFoldVerifierParams::new(mixed_verifier_params, hyrax_field_cfg.clone()),
+            shape.clone(),
         )
-        .expect("mixed Hyrax verifier failed")
-    });
-    let mixed_raw = production_mixed_hyrax_proof_raw_bytes(&mixed_output.proof);
-    let mixed_ecc = mixed_output
-        .proof
-        .instance_commitments
-        .first()
-        .map(|commitment| {
-            commitment.binary.group_point_count() + commitment.int.group_point_count()
-        })
-        .unwrap_or_default();
-    let mixed_fresh_ecc = mixed_output
-        .proof
-        .instance_commitments
-        .iter()
-        .map(|commitment| {
-            commitment.binary.group_point_count() + commitment.int.group_point_count()
-        })
-        .sum();
-    rows.push(HyraxWidthSweepRow {
-        label: "mixed Hyrax ArkFBn254".to_string(),
-        width: Some(SHA_ROW_COUNT),
-        ecc_points_per_instance: Some(mixed_ecc),
-        fresh_ecc_points: Some(mixed_fresh_ecc),
-        prover_ms: mixed_prover_ms,
-        verifier_ms: mixed_verifier_ms,
-        proof_zstd_bytes: zstd_len(&mixed_raw),
-        proof_bytes: mixed_raw.len(),
-        kind: "mixed_hyrax",
-    });
+        .expect("mixed Hyrax verifier setup succeeds");
+        let (mixed_output, mixed_prover_stats) =
+            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                let mut transcript = Blake3Transcript::new();
+                prove_prepared_linear_ideal_fold_mixed_hyrax::<
+                    C,
+                    U,
+                    RealEcdsaBenchZincTypes,
+                    HyraxF,
+                    DEGREE_PLUS_ONE,
+                >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
+                .expect("mixed Hyrax prover failed")
+            });
+        let (_, mixed_verifier_stats) =
+            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                let mut transcript = Blake3Transcript::new();
+                verify_linear_ideal_fold_mixed_hyrax::<
+                    C,
+                    U,
+                    RealEcdsaBenchZincTypes,
+                    HyraxF,
+                    DEGREE_PLUS_ONE,
+                >(
+                    &mixed_vs,
+                    &mixed_output.fresh_instances,
+                    &mixed_output.proof,
+                    &mut transcript,
+                )
+                .expect("mixed Hyrax verifier failed")
+            });
+        let mixed_raw = production_mixed_hyrax_proof_raw_bytes(&mixed_output.proof);
+        let mixed_ecc = mixed_output
+            .proof
+            .instance_commitments
+            .first()
+            .map(|commitment| {
+                commitment.binary.group_point_count() + commitment.int.group_point_count()
+            })
+            .unwrap_or_default();
+        let mixed_fresh_ecc = mixed_output
+            .proof
+            .instance_commitments
+            .iter()
+            .map(|commitment| {
+                commitment.binary.group_point_count() + commitment.int.group_point_count()
+            })
+            .sum();
+        hyrax_width_sweep_row(
+            "mixed Hyrax ArkFBn254".to_string(),
+            Some(SHA_ROW_COUNT),
+            Some(mixed_ecc),
+            Some(mixed_fresh_ecc),
+            mixed_prover_stats,
+            mixed_verifier_stats,
+            mixed_raw.len(),
+            zstd_len(&mixed_raw),
+            "mixed_hyrax",
+        )
+    };
+    rows.push(measure_mixed_hyrax(HYRAX_WIDTH_SWEEP_TUNING_SAMPLES));
 
-    let widths = [
-        ("549/16", 35usize),
-        ("549/8", 69),
-        ("549/4", 138),
-        ("549/2", 275),
-        ("549", 549),
-        ("549*2", 1098),
-        ("549*4", 2196),
-        ("549*8", 4392),
-        ("549*16", 8784),
-        ("549*32", 17568),
-        ("549*64", 35136),
-        ("549*128", 70272),
-    ];
-
-    for (label, width) in widths {
-        let layout = packed_sha_layout::<HyraxF>(width).expect("requested packed width is valid");
+    let (widths, skipped_widths) = packed_width_candidates::<HyraxF>();
+    let measure_packed_hyrax = |label: String,
+                                width: usize,
+                                sample_count: usize|
+     -> HyraxWidthSweepRow {
+        let layout = packed_sha_layout::<HyraxF>(width).expect("candidate packed width is valid");
         let (pcs_params, verifier_params) =
             projection_sha_packed_hyrax_pcs_params::<C, HyraxF>(width);
         let pp = LinearIdealFoldProverParams::<
@@ -2117,20 +2394,22 @@ pub fn run_hyrax_width_sweep_report() {
             shape.clone(),
         )
         .expect("packed Hyrax verifier setup succeeds");
-        let (output, prover_ms) = measure_once(|| {
-            let mut transcript = Blake3Transcript::new();
-            prove_prepared_linear_ideal_fold_packed_hyrax::<
-                C,
-                U,
-                RealEcdsaBenchZincTypes,
-                HyraxF,
-                DEGREE_PLUS_ONE,
-            >(&pp, &shape, &prepared_instances, &mut transcript)
-            .expect("packed Hyrax prover failed")
-        });
-        let (_, verifier_ms) = measure_once(|| {
-            let mut transcript = Blake3Transcript::new();
-            verify_linear_ideal_fold_packed_hyrax::<
+        let (output, prover_stats) =
+            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                let mut transcript = Blake3Transcript::new();
+                prove_prepared_linear_ideal_fold_packed_hyrax::<
+                    C,
+                    U,
+                    RealEcdsaBenchZincTypes,
+                    HyraxF,
+                    DEGREE_PLUS_ONE,
+                >(&pp, &shape, &prepared_instances, &mut transcript)
+                .expect("packed Hyrax prover failed")
+            });
+        let (_, verifier_stats) =
+            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                let mut transcript = Blake3Transcript::new();
+                verify_linear_ideal_fold_packed_hyrax::<
                     C,
                     U,
                     RealEcdsaBenchZincTypes,
@@ -2138,34 +2417,65 @@ pub fn run_hyrax_width_sweep_report() {
                     DEGREE_PLUS_ONE,
                 >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
                 .expect("packed Hyrax verifier failed")
-        });
+            });
         let raw = production_packed_hyrax_proof_raw_bytes(&output.proof);
-        rows.push(HyraxWidthSweepRow {
-            label: label.to_string(),
-            width: Some(width),
-            ecc_points_per_instance: Some(layout.ecc_points_per_instance()),
-            fresh_ecc_points: Some(
-                output
-                    .proof
-                    .instance_commitments
-                    .iter()
-                    .map(|commitment| commitment.group_point_count())
-                    .sum(),
-            ),
-            prover_ms,
-            verifier_ms,
-            proof_zstd_bytes: zstd_len(&raw),
-            proof_bytes: raw.len(),
-            kind: "packed",
-        });
+        let fresh_ecc = output
+            .proof
+            .instance_commitments
+            .iter()
+            .map(|commitment| commitment.group_point_count())
+            .sum();
+        hyrax_width_sweep_row(
+            label,
+            Some(width),
+            Some(layout.ecc_points_per_instance()),
+            Some(fresh_ecc),
+            prover_stats,
+            verifier_stats,
+            raw.len(),
+            zstd_len(&raw),
+            "packed",
+        )
+    };
+
+    for (label, width) in &widths {
+        rows.push(measure_packed_hyrax(
+            label.clone(),
+            *width,
+            HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
+        ));
     }
 
+    let mut confirmation_targets = rows
+        .iter()
+        .filter(|row| row.kind != "og_zip")
+        .map(|row| (row.prover_ms, row.kind, row.label.clone(), row.width))
+        .collect::<Vec<_>>();
+    confirmation_targets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    confirmation_targets.truncate(HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K);
+    let confirmation_rows = confirmation_targets
+        .into_iter()
+        .map(|(_, kind, label, width)| match kind {
+            "mixed_hyrax" => measure_mixed_hyrax(HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES),
+            "packed" => measure_packed_hyrax(
+                label,
+                width.expect("packed confirmation target has a width"),
+                HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
+            ),
+            _ => unreachable!("only Hyrax rows are selected for confirmation"),
+        })
+        .collect::<Vec<_>>();
+
     write_hyrax_width_sweep_csv(&out_dir.join("results.csv"), &rows);
+    write_hyrax_width_sweep_csv(&out_dir.join("confirmation.csv"), &confirmation_rows);
+    write_hyrax_width_sweep_skipped_csv(&out_dir.join("skipped_widths.csv"), &skipped_widths);
     write_hyrax_width_sweep_plots(&out_dir, &rows);
-    write_hyrax_width_sweep_report(&out_dir, &rows);
+    write_hyrax_width_sweep_report(&out_dir, &rows, &confirmation_rows, &skipped_widths);
     eprintln!(
-        "hyrax width sweep wrote {}, {}, and SVG/PNG plots",
+        "hyrax width sweep wrote {}, {}, {}, {}, and SVG/PNG plots",
         out_dir.join("results.csv").display(),
+        out_dir.join("confirmation.csv").display(),
+        out_dir.join("skipped_widths.csv").display(),
         out_dir.join("report.html").display()
     );
 }
