@@ -3072,7 +3072,14 @@ fn msm_unchecked<C: AffineRepr>(
             bases.len()
         )));
     }
-    if !scalars.iter().any(|scalar| scalar.is_zero()) {
+    let zero_count = scalars.iter().filter(|scalar| scalar.is_zero()).count();
+    if zero_count == 0 {
+        return Ok(<C::Group as VariableBaseMSM>::msm_unchecked(bases, scalars));
+    }
+    if zero_count == scalars.len() {
+        return Ok(C::Group::zero());
+    }
+    if zero_count.saturating_mul(4) < scalars.len() {
         return Ok(<C::Group as VariableBaseMSM>::msm_unchecked(bases, scalars));
     }
 
@@ -3351,43 +3358,51 @@ fn commitment_index_dynamic(
 }
 
 fn eq_tensor_f<F: PrimeField>(point: &[F], cfg: &F::Config) -> Vec<F> {
-    let mut tensor = vec![F::one_with_cfg(cfg)];
+    let mut tensor = Vec::with_capacity(eq_tensor_capacity(point.len()));
+    tensor.push(F::one_with_cfg(cfg));
     for r in point {
         let one_minus = {
             let mut value = F::one_with_cfg(cfg);
             value -= r;
             value
         };
-        let current = tensor.clone();
-        tensor.clear();
-        for value in &current {
+        let old_len = tensor.len();
+        tensor.resize_with(old_len * 2, || F::zero_with_cfg(cfg));
+        for idx in (0..old_len).rev() {
+            let value = tensor[idx].clone();
+            let mut hi = value.clone();
+            hi *= r;
+            tensor[idx + old_len] = hi;
             let mut lo = value.clone();
             lo *= &one_minus;
-            tensor.push(lo);
-        }
-        for value in current {
-            let mut hi = value;
-            hi *= r;
-            tensor.push(hi);
+            tensor[idx] = lo;
         }
     }
     tensor
 }
 
 fn eq_tensor_scalar<C: AffineRepr>(point: &[C::ScalarField]) -> Vec<C::ScalarField> {
-    let mut tensor = vec![C::ScalarField::from(1u64)];
+    let mut tensor = Vec::with_capacity(eq_tensor_capacity(point.len()));
+    tensor.push(C::ScalarField::from(1u64));
     for r in point {
         let one_minus = C::ScalarField::from(1u64) - r;
-        let current = tensor.clone();
-        tensor.clear();
-        for value in &current {
-            tensor.push(*value * one_minus);
-        }
-        for value in current {
-            tensor.push(value * r);
+        let old_len = tensor.len();
+        tensor.resize(old_len * 2, C::ScalarField::zero());
+        for idx in (0..old_len).rev() {
+            let value = tensor[idx];
+            tensor[idx + old_len] = value * r;
+            tensor[idx] = value * one_minus;
         }
     }
     tensor
+}
+
+fn eq_tensor_capacity(point_len: usize) -> usize {
+    if point_len < usize::BITS as usize {
+        1usize << point_len
+    } else {
+        0
+    }
 }
 
 fn sample_scalars<C: AffineRepr>(

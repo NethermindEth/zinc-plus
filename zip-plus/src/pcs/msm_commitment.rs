@@ -645,9 +645,13 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
         return Ok(C::Group::zero());
     }
 
+    let signed_values = values
+        .iter()
+        .map(signed_int_abs)
+        .collect::<Result<Vec<_>, _>>()?;
+
     let mut max_bits = 0usize;
-    for value in values {
-        let (abs, _) = signed_int_abs(value)?;
+    for (abs, _) in &signed_values {
         max_bits = max_bits.max(bit_len_from_words(abs.as_uint().as_words()));
     }
     if max_bits == 0 {
@@ -676,11 +680,10 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
         }
 
         let offset = segment * window_bits;
-        for (value, base) in values.iter().zip(bases.iter()) {
-            let (abs, is_negative) = signed_int_abs(value)?;
+        for ((abs, is_negative), base) in signed_values.iter().zip(bases.iter()) {
             let digit = window_value_from_words(abs.as_uint().as_words(), offset, window_bits);
             if digit != 0 {
-                if is_negative {
+                if *is_negative {
                     negative_buckets[digit - 1] += base;
                 } else {
                     positive_buckets[digit - 1] += base;
