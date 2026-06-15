@@ -46,10 +46,12 @@ use zinc_protocol::{
         LinearIdealFoldProverParams, LinearIdealFoldVerifierParams, PACKED_SHA_VALUES_PER_INSTANCE,
         ProductionShaError, ProductionShaMixedHyraxPcs, ProductionShaMixedHyraxProof,
         ProductionShaPackedHyraxProof, ProductionShaProjectionAdapter, ProductionShaWitnessPolys,
-        UairShape, packed_sha_layout,
-        prepare_linear_ideal_fold_witnesses, prove_prepared_linear_ideal_fold_mixed_hyrax,
-        prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold,
-        verify_linear_ideal_fold_mixed_hyrax, verify_linear_ideal_fold_packed_hyrax,
+        UairShape, packed_sha_layout, prepare_linear_ideal_fold_witnesses,
+        prove_prepared_linear_ideal_fold_mixed_hyrax,
+        prove_prepared_linear_ideal_fold_packed_hyrax,
+        setup_verify_linear_ideal_fold_mixed_hyrax,
+        setup_verify_linear_ideal_fold_packed_hyrax, verify_linear_ideal_fold_mixed_hyrax,
+        verify_linear_ideal_fold_packed_hyrax,
     },
 };
 use zinc_test_uair::{
@@ -1991,12 +1993,17 @@ pub fn run_hyrax_width_sweep_report() {
             field_cfg.clone(),
             3,
         );
-    let mixed_vs =
-        setup_verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-            LinearIdealFoldVerifierParams::new(mixed_verifier_params, field_cfg.clone()),
-            shape.clone(),
-        )
-        .expect("mixed Hyrax verifier setup succeeds");
+    let mixed_vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
+        C,
+        U,
+        RealEcdsaBenchZincTypes,
+        F,
+        DEGREE_PLUS_ONE,
+    >(
+        LinearIdealFoldVerifierParams::new(mixed_verifier_params, field_cfg.clone()),
+        shape.clone(),
+    )
+    .expect("mixed Hyrax verifier setup succeeds");
     let (mixed_output, mixed_prover_ms) = measure_once(|| {
         let mut transcript = Blake3Transcript::new();
         prove_prepared_linear_ideal_fold_mixed_hyrax::<
@@ -2071,12 +2078,17 @@ pub fn run_hyrax_width_sweep_report() {
                 field_cfg.clone(),
                 3,
             );
-        let vs =
-            setup_verify_linear_ideal_fold::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-                LinearIdealFoldVerifierParams::new(verifier_params, field_cfg.clone()),
-                shape.clone(),
-            )
-            .expect("packed Hyrax verifier setup succeeds");
+        let vs = setup_verify_linear_ideal_fold_packed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+        >(
+            LinearIdealFoldVerifierParams::new(verifier_params, field_cfg.clone()),
+            shape.clone(),
+        )
+        .expect("packed Hyrax verifier setup succeeds");
         let (output, prover_ms) = measure_once(|| {
             let mut transcript = Blake3Transcript::new();
             prove_prepared_linear_ideal_fold_packed_hyrax::<
@@ -3179,12 +3191,17 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
             field_cfg.clone(),
             3,
         );
-    let vs =
-        setup_verify_linear_ideal_fold::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-            LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
-            shape.clone(),
-        )
-        .expect("ProjectionFold SHA verifier setup succeeds");
+    let vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
+        C,
+        U,
+        RealEcdsaBenchZincTypes,
+        F,
+        DEGREE_PLUS_ONE,
+    >(
+        LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+        shape.clone(),
+    )
+    .expect("ProjectionFold SHA verifier setup succeeds");
 
     let params = format!("{label}/SHA256Chain8/row-vars={SHA_ROW_VARS}");
     let prepared_instances = prepare_linear_ideal_fold_witnesses::<

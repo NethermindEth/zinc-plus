@@ -2426,14 +2426,6 @@ where
             expected: instances.len(),
         });
     }
-    #[cfg(not(debug_assertions))]
-    {
-        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::precompute_vk(
-            &vs.pcs_params.binary,
-        );
-        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::precompute_vk(&vs.pcs_params.int);
-    }
-
     absorb_production_sha_statement_metadata(transcript);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
@@ -2546,13 +2538,6 @@ where
             got: proof.instance_commitments.len(),
             expected: instances.len(),
         });
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        <HyraxPCS<C, ScalarFieldLane> as PCS<F, C::ScalarField, D>>::precompute_vk(
-            &vs.pcs_params.binary,
-        );
     }
 
     absorb_production_sha_statement_metadata(transcript);
@@ -4399,6 +4384,103 @@ where
     P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     P::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
+    setup_verify_linear_ideal_fold_with_precompute(
+        params,
+        shape,
+        VerifierPcsPrecompute::AllNonempty,
+    )
+}
+
+pub fn setup_verify_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
+    params: LinearIdealFoldVerifierParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    shape: UairShape<U>,
+) -> Result<VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: PrimeField + FromPrimitiveWithConfig + HyraxFieldBridge<C>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    AllHyraxPCSTypes<C>: ZincPCSTypes<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS:
+        FoldablePCS<F, BinaryPoly<D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::ArbitraryPCS:
+        FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
+    setup_verify_linear_ideal_fold_with_precompute(
+        params,
+        shape,
+        VerifierPcsPrecompute::HyraxMixed,
+    )
+}
+
+pub fn setup_verify_linear_ideal_fold_packed_hyrax<C, U, Zt, F, const D: usize>(
+    params: LinearIdealFoldVerifierParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    shape: UairShape<U>,
+) -> Result<VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: PrimeField + FromPrimitiveWithConfig + HyraxFieldBridge<C>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    C: ProductionShaPackedHyraxPcs<Zt, F, D>,
+    AllHyraxPCSTypes<C>: ZincPCSTypes<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    ScalarFieldLane: HyraxLanes<C, C::ScalarField, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS:
+        FoldablePCS<F, BinaryPoly<D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::ArbitraryPCS:
+        FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
+    setup_verify_linear_ideal_fold_with_precompute(
+        params,
+        shape,
+        VerifierPcsPrecompute::HyraxPacked,
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum VerifierPcsPrecompute {
+    AllNonempty,
+    HyraxMixed,
+    HyraxPacked,
+}
+
+impl VerifierPcsPrecompute {
+    #[cfg(not(debug_assertions))]
+    fn includes_arbitrary(self) -> bool {
+        matches!(self, Self::AllNonempty)
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn includes_int(self) -> bool {
+        matches!(self, Self::AllNonempty | Self::HyraxMixed)
+    }
+}
+
+fn setup_verify_linear_ideal_fold_with_precompute<P, U, Zt, F, const D: usize>(
+    params: LinearIdealFoldVerifierParams<P, U, Zt, F, D>,
+    shape: UairShape<U>,
+    _precompute: VerifierPcsPrecompute,
+) -> Result<VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D>,
+    Zt: ZincTypes<D>,
+    F: PrimeField + FromPrimitiveWithConfig,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+    P: ZincPCSTypes<Zt, F, D>,
+    P::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
+    P::ArbitraryPCS: FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
+    P::IntPCS: FoldablePCS<F, Zt::Int, D>,
+{
     ensure_production_sha_word_degree::<F, D>()?;
     if shape.num_vars != SHA_ROW_VARS {
         return Err(ProductionShaError::LengthMismatch {
@@ -4410,6 +4492,20 @@ where
 
     let (binary, arbitrary, int) = U::production_sha_pcs_batch_sizes();
     validate_production_sha_batch_sizes::<F>(binary, arbitrary, int)?;
+    #[cfg(not(debug_assertions))]
+    {
+        if binary != 0 {
+            <P::BinaryPCS as PCS<F, BinaryPoly<D>, D>>::precompute_vk(&params.pcs_params.binary);
+        }
+        if _precompute.includes_arbitrary() && arbitrary != 0 {
+            <P::ArbitraryPCS as PCS<F, DensePolynomial<Zt::Int, D>, D>>::precompute_vk(
+                &params.pcs_params.arbitrary,
+            );
+        }
+        if _precompute.includes_int() && int != 0 {
+            <P::IntPCS as PCS<F, Zt::Int, D>>::precompute_vk(&params.pcs_params.int);
+        }
+    }
 
     Ok(VerifiedLinearIdealFoldSetup {
         pcs_params: params.pcs_params,
@@ -11378,12 +11474,17 @@ mod tests {
                     field_cfg.clone(),
                     3,
                 );
-            let vs =
-                setup_verify_linear_ideal_fold::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>(
-                    LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg.clone()),
-                    shape.clone(),
-                )
-                .expect("production SHA verifier setup succeeds");
+            let vs = setup_verify_linear_ideal_fold_packed_hyrax::<
+                C,
+                U,
+                TestShaZincTypes,
+                F,
+                TEST_DEGREE_PLUS_ONE,
+            >(
+                LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg.clone()),
+                shape.clone(),
+            )
+            .expect("production SHA verifier setup succeeds");
 
             let mut prover_transcript = Blake3Transcript::new();
             let output = prove_prepared_linear_ideal_fold_packed_hyrax::<
@@ -11447,7 +11548,13 @@ mod tests {
                 field_cfg.clone(),
                 3,
             );
-        let vs = setup_verify_linear_ideal_fold::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>(
+        let vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(
             LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
             shape.clone(),
         )
