@@ -32,6 +32,8 @@ where
 
     fn precompute_ck(_ck: &Self::CommitmentKey) {}
 
+    fn precompute_vk(_vk: &Self::VerifierKey) {}
+
     fn commit(
         ck: &Self::CommitmentKey,
         polys: &[DenseMultilinearExtension<Eval>],

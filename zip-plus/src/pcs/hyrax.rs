@@ -2,9 +2,10 @@
 
 use std::{
     collections::HashSet,
-    fmt::Debug,
+    fmt::{self, Debug},
     io::{Cursor, Read, Write},
     marker::PhantomData,
+    sync::{Arc, OnceLock},
 };
 
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
@@ -567,8 +568,7 @@ where
                 comm_lc
             };
 
-            let mut expected =
-                msm_unchecked::<C>(&vk_a.bases[..combined_row.len()], &combined_row)?;
+            let mut expected = verifier_base_msm::<C>(vk_a, &combined_row)?;
             if let Some(rho_star) = rho_star {
                 expected += vk_a.h * rho_star;
             }
@@ -786,8 +786,7 @@ where
                 };
                 folded_commitment_linear_combination::<C>(commitments, &fold_scalars, &row_coeffs)?
             };
-            let mut expected_commitment =
-                msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
+            let mut expected_commitment = verifier_base_msm::<C>(vk, &combined_row)?;
             if let Some(rho_star) = rho_star {
                 expected_commitment += vk.h * rho_star;
             }
@@ -849,6 +848,7 @@ pub struct HyraxVerifierKey<C: AffineRepr> {
     pub(crate) bases: Vec<C>,
     pub(crate) h: C::Group,
     pub(crate) blinding_mode: HyraxBlindingMode,
+    fixed_base_msm: Arc<OnceLock<FixedBaseScalarMsm<C>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -869,6 +869,110 @@ pub struct HyraxProverData<C: AffineRepr> {
     pub(crate) num_rows: usize,
     pub(crate) blinding_mode: HyraxBlindingMode,
     pub(crate) blinds: Vec<C::ScalarField>,
+}
+
+const HYRAX_VERIFIER_FIXED_BASE_WINDOW_BITS: usize = 8;
+
+struct FixedBaseScalarMsm<C: AffineRepr> {
+    window_bits: usize,
+    segments: usize,
+    abs_digit_count: usize,
+    entries: Vec<C>,
+}
+
+impl<C: AffineRepr> fmt::Debug for FixedBaseScalarMsm<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FixedBaseScalarMsm")
+            .field("window_bits", &self.window_bits)
+            .field("segments", &self.segments)
+            .field("abs_digit_count", &self.abs_digit_count)
+            .field("entries_len", &self.entries.len())
+            .finish()
+    }
+}
+
+impl<C: AffineRepr> FixedBaseScalarMsm<C> {
+    fn new(bases: &[C], window_bits: usize) -> Self {
+        debug_assert!(window_bits > 0);
+        debug_assert!(window_bits < usize::BITS as usize);
+
+        let segments = <usize as Integer>::div_ceil(
+            &(C::ScalarField::MODULUS_BIT_SIZE as usize),
+            &window_bits,
+        ) + 1;
+        let abs_digit_count = 1usize << (window_bits - 1);
+        const NORMALIZE_CHUNK_LEN: usize = 4096;
+        let total_entries = bases.len() * segments * abs_digit_count;
+        let mut entries = Vec::with_capacity(total_entries);
+        let mut projective_chunk = Vec::with_capacity(total_entries.min(NORMALIZE_CHUNK_LEN));
+        for &base in bases {
+            let mut shifted_base = base.into_group();
+            for _ in 0..segments {
+                let mut multiple = shifted_base;
+                for _ in 0..abs_digit_count {
+                    projective_chunk.push(multiple);
+                    if projective_chunk.len() == NORMALIZE_CHUNK_LEN {
+                        entries.extend(C::Group::normalize_batch(&projective_chunk));
+                        projective_chunk.clear();
+                    }
+                    multiple += shifted_base;
+                }
+                for _ in 0..window_bits {
+                    shifted_base.double_in_place();
+                }
+            }
+        }
+        if !projective_chunk.is_empty() {
+            entries.extend(C::Group::normalize_batch(&projective_chunk));
+        }
+
+        Self {
+            window_bits,
+            segments,
+            abs_digit_count,
+            entries,
+        }
+    }
+
+    fn msm(&self, scalars: &[C::ScalarField]) -> C::Group {
+        if scalars.is_empty() {
+            return C::Group::zero();
+        }
+
+        let mut acc = C::Group::zero();
+        let half_window = 1usize << (self.window_bits - 1);
+        let full_window = 1usize << self.window_bits;
+        for (base_idx, scalar) in scalars.iter().enumerate() {
+            if scalar.is_zero() {
+                continue;
+            }
+            let scalar = scalar.into_bigint();
+            let base_offset = base_idx * self.segments * self.abs_digit_count;
+            let mut carry = 0u8;
+            for segment in 0..self.segments {
+                let digit = signed_window_digit(
+                    scalar.as_ref(),
+                    segment * self.window_bits,
+                    self.window_bits,
+                    half_window,
+                    full_window,
+                    &mut carry,
+                );
+                if digit != 0 {
+                    let entry_idx = base_offset
+                        + segment * self.abs_digit_count
+                        + digit.unsigned_abs() as usize
+                        - 1;
+                    if digit > 0 {
+                        acc += self.entries[entry_idx];
+                    } else {
+                        acc -= self.entries[entry_idx];
+                    }
+                }
+            }
+        }
+        acc
+    }
 }
 
 impl<C> HyraxCommitmentKey<C>
@@ -894,6 +998,21 @@ where
 
     pub fn blinding_mode(&self) -> HyraxBlindingMode {
         self.blinding_mode
+    }
+
+    /// Builds and retains the fixed-base verifier MSM table for repeated openings.
+    ///
+    /// This is intentionally opt-in: it allocates a large table for `bases`, so
+    /// one-shot verification should use the default variable-base path.
+    pub fn precompute_fixed_base_msm(&self) {
+        self.fixed_base_msm.get_or_init(|| {
+            FixedBaseScalarMsm::new(&self.bases, HYRAX_VERIFIER_FIXED_BASE_WINDOW_BITS)
+        });
+    }
+
+    #[cfg(test)]
+    fn has_precomputed_fixed_base_msm(&self) -> bool {
+        self.fixed_base_msm.get().is_some()
     }
 }
 
@@ -1511,6 +1630,7 @@ impl<C: AffineRepr, Lanes> HyraxPCS<C, Lanes> {
                 bases,
                 h,
                 blinding_mode,
+                fixed_base_msm: Arc::new(OnceLock::new()),
             },
         ))
     }
@@ -1680,6 +1800,10 @@ where
 
     fn precompute_ck(ck: &Self::CommitmentKey) {
         Lanes::Strategy::precompute_ck(&ck.msm_ck);
+    }
+
+    fn precompute_vk(vk: &Self::VerifierKey) {
+        vk.precompute_fixed_base_msm();
     }
 
     fn commit(
@@ -2110,7 +2234,7 @@ where
             msm_unchecked::<C>(&commitment.comm_affine, &comm_lc_scalars)?
         };
 
-        let mut expected = msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
+        let mut expected = verifier_base_msm::<C>(vk, &combined_row)?;
         if let Some(rho_star) = rho_star {
             expected += vk.h * rho_star;
         }
@@ -2914,6 +3038,26 @@ fn msm_unchecked<C: AffineRepr>(
     ))
 }
 
+fn verifier_base_msm<C: AffineRepr>(
+    vk: &HyraxVerifierKey<C>,
+    scalars: &[C::ScalarField],
+) -> Result<C::Group, ZipError> {
+    if scalars.len() > vk.num_cols {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax verifier MSM row length must be at most {}, got {}",
+            vk.num_cols,
+            scalars.len()
+        )));
+    }
+    if scalars.is_empty() || scalars.iter().all(|scalar| scalar.is_zero()) {
+        return Ok(C::Group::zero());
+    }
+    if let Some(table) = vk.fixed_base_msm.get() {
+        return Ok(table.msm(scalars));
+    }
+    msm_unchecked::<C>(&vk.bases[..scalars.len()], scalars)
+}
+
 fn msm_shared_weight_commitments_unchecked<C: AffineRepr>(
     scalars: &[C::ScalarField],
     commitments: &[&HyraxCommitment<C>],
@@ -2987,15 +3131,14 @@ where
         let offset = segment * window_bits;
         let mut digits = Vec::with_capacity(general_scalars.len());
         for (idx, scalar) in general_scalars.iter().enumerate() {
-            let raw = window_value_from_limbs(scalar.as_ref(), offset, window_bits)
-                + usize::from(carries[idx]);
-            if raw >= half_window {
-                digits.push(-((full_window - raw) as i16));
-                carries[idx] = 1;
-            } else {
-                digits.push(raw as i16);
-                carries[idx] = 0;
-            }
+            digits.push(signed_window_digit(
+                scalar.as_ref(),
+                offset,
+                window_bits,
+                half_window,
+                full_window,
+                &mut carries[idx],
+            ));
         }
         signed_windows.push(digits);
     }
@@ -3100,6 +3243,24 @@ fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
             value
         }
     })
+}
+
+fn signed_window_digit(
+    limbs: &[u64],
+    offset: usize,
+    window_bits: usize,
+    half_window: usize,
+    full_window: usize,
+    carry: &mut u8,
+) -> i16 {
+    let raw = window_value_from_limbs(limbs, offset, window_bits) + usize::from(*carry);
+    if raw >= half_window {
+        *carry = 1;
+        -((full_window - raw) as i16)
+    } else {
+        *carry = 0;
+        raw as i16
+    }
 }
 
 fn split_column_row_point<T>(point: &[T], num_rows: usize) -> (&[T], &[T]) {
@@ -3712,6 +3873,57 @@ mod tests {
             &Vec::new(),
             &cfg,
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn hyrax_verifier_fixed_base_msm_matches_variable_msm() -> Result<(), ZipError> {
+        type C = ark_bn254::G1Affine;
+
+        let (_ck, vk) = HyraxPCS::<C, ScalarFieldLane>::setup(
+            12,
+            b"zinc-plus-hyrax-fixed-base-verifier-msm-test",
+            HyraxBlindingMode::Unblinded,
+        )?;
+        let scalars = vec![
+            <C as AffineRepr>::ScalarField::zero(),
+            <C as AffineRepr>::ScalarField::one(),
+            <C as AffineRepr>::ScalarField::from(2u64),
+            <C as AffineRepr>::ScalarField::from(17u64),
+            <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(&[0xA5; 48]),
+            <C as AffineRepr>::ScalarField::from(0x80u64),
+            <C as AffineRepr>::ScalarField::from(0xFF80u64),
+            -<C as AffineRepr>::ScalarField::from(3u64),
+            <C as AffineRepr>::ScalarField::from(1u64 << 20),
+            -<C as AffineRepr>::ScalarField::one(),
+            <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(&[0x5C; 48]),
+            <C as AffineRepr>::ScalarField::zero(),
+        ];
+
+        assert!(!vk.has_precomputed_fixed_base_msm());
+        assert_eq!(
+            verifier_base_msm::<C>(&vk, &[])?,
+            <C as AffineRepr>::Group::zero()
+        );
+        assert_eq!(
+            verifier_base_msm::<C>(&vk, &[<C as AffineRepr>::ScalarField::zero()])?,
+            <C as AffineRepr>::Group::zero()
+        );
+        assert!(!vk.has_precomputed_fixed_base_msm());
+
+        for len in [1usize, 2, 5, scalars.len()] {
+            let expected = msm_unchecked::<C>(&vk.bases[..len], &scalars[..len])?;
+            assert_eq!(verifier_base_msm::<C>(&vk, &scalars[..len])?, expected);
+        }
+        assert!(!vk.has_precomputed_fixed_base_msm());
+
+        vk.precompute_fixed_base_msm();
+        assert!(vk.has_precomputed_fixed_base_msm());
+        for len in [1usize, 2, 5, scalars.len()] {
+            let expected = msm_unchecked::<C>(&vk.bases[..len], &scalars[..len])?;
+            assert_eq!(verifier_base_msm::<C>(&vk, &scalars[..len])?, expected);
+        }
 
         Ok(())
     }

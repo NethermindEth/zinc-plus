@@ -2426,6 +2426,13 @@ where
             expected: instances.len(),
         });
     }
+    #[cfg(not(debug_assertions))]
+    {
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::precompute_vk(
+            &vs.pcs_params.binary,
+        );
+        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::precompute_vk(&vs.pcs_params.int);
+    }
 
     absorb_production_sha_statement_metadata(transcript);
     absorb_uair_shape_metadata(transcript, &vs.shape);
@@ -2539,6 +2546,13 @@ where
             got: proof.instance_commitments.len(),
             expected: instances.len(),
         });
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        <HyraxPCS<C, ScalarFieldLane> as PCS<F, C::ScalarField, D>>::precompute_vk(
+            &vs.pcs_params.binary,
+        );
     }
 
     absorb_production_sha_statement_metadata(transcript);
