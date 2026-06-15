@@ -110,12 +110,13 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             )
             .expect("CPR prepare failed");
 
-        let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
             transcript,
-            vec![cpr_group],
+            vec![(vec![cpr_group], field_cfg)],
             num_vars,
             field_cfg,
         );
+        let (md_proof, md_states) = sumcheck_outputs.pop().expect("single branch");
 
         let (cpr_proof, cpr_state) =
             CombinedPolyResolver::finalize_prover::<TestUairNoMultiplication<_>>(
@@ -207,13 +208,14 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     )
                     .expect("CPR prepare_verifier failed");
 
-                let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+                let mut md_subclaims_vec = MultiDegreeSumcheck::verify_as_subprotocol(
                     &mut transcript,
                     num_vars,
-                    &md_proof,
+                    &[(&md_proof, &field_cfg)],
                     &field_cfg,
                 )
                 .expect("MultiDegreeSumcheck verify failed");
+                let md_subclaims = md_subclaims_vec.pop().expect("single branch");
 
                 let _ = black_box(
                     CombinedPolyResolver::finalize_verifier::<TestUairNoMultiplication<_>>(
@@ -311,10 +313,12 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             transcript,
-            vec![cpr_group],
+            vec![(vec![cpr_group], field_cfg)],
             num_vars,
             field_cfg,
-        );
+        )
+        .pop()
+        .expect("single branch");
 
         let (cpr_proof, cpr_state) =
             CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
@@ -411,10 +415,11 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
                         &mut transcript,
                         num_vars,
-                        &md_proof,
+                        &[(&md_proof, &field_cfg)],
                         &field_cfg,
                     )
-                    .expect("MultiDegreeSumcheck verify failed");
+                    .expect("MultiDegreeSumcheck verify failed")
+                    .pop().expect("single branch");
 
                     let _ = black_box(
                         CombinedPolyResolver::finalize_verifier::<

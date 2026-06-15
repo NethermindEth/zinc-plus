@@ -762,8 +762,13 @@ mod tests {
         let (group, anc) =
             BooleanityChecker::<F>::prepare_sumcheck_group::<D>(&mut pt, cols, num_vars, cfg)
                 .expect("prepare_sumcheck_group failed");
-        let (md_proof, states) =
-            MultiDegreeSumcheck::<F>::prove_as_subprotocol(&mut pt, vec![group], num_vars, cfg);
+        let mut sumcheck_outputs = MultiDegreeSumcheck::<F>::prove_as_subprotocol(
+            &mut pt,
+            vec![(vec![group], cfg)],
+            num_vars,
+            cfg,
+        );
+        let (md_proof, states) = sumcheck_outputs.pop().expect("single branch");
         let state = states.into_iter().next().unwrap();
         let mut proof = BooleanityChecker::<F>::finalize_prover(&mut pt, state, anc, cfg)
             .expect("finalize prover");
@@ -780,9 +785,15 @@ mod tests {
             cfg,
         )
         .expect("prepare_verifier (claimed sum should be zero for honest input)");
-        let md_subclaims =
-            MultiDegreeSumcheck::<F>::verify_as_subprotocol(&mut vt, num_vars, &md_proof, cfg)
-                .expect("md verify");
+        let md_subclaims = MultiDegreeSumcheck::<F>::verify_as_subprotocol(
+            &mut vt,
+            num_vars,
+            &[(&md_proof, cfg)],
+            cfg,
+        )
+        .expect("md verify")
+        .pop()
+        .expect("single branch");
 
         let res = BooleanityChecker::<F>::finalize_verifier(
             &mut vt,

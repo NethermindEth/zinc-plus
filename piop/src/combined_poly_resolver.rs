@@ -678,12 +678,13 @@ mod tests {
         )
         .expect("CPR prepare failed");
 
-        let (md_proof, states) = MultiDegreeSumcheck::prove_as_subprotocol(
+        let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut prover_transcript,
-            vec![cpr_group],
+            vec![(vec![cpr_group], &test_config())],
             num_vars,
             &test_config(),
         );
+        let (md_proof, states) = sumcheck_outputs.pop().expect("single branch");
 
         let (proof, _) = CombinedPolyResolver::finalize_prover::<U>(
             &mut prover_transcript,
@@ -715,10 +716,12 @@ mod tests {
         let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut verifier_transcript,
             num_vars,
-            &md_proof,
+            &[(&md_proof, &test_config())],
             &test_config(),
         )
-        .expect("MultiDegreeSumcheck verify failed");
+        .expect("MultiDegreeSumcheck verify failed")
+        .pop()
+        .expect("single branch");
 
         assert!(
             CombinedPolyResolver::finalize_verifier::<U>(

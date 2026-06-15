@@ -688,13 +688,18 @@ where
             None
         };
 
+        // Single branch (Q[X]) for now; per-prime branches will join in
+        // `fq-unify` Phase F.2.
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.base.num_vars,
-            &self.proof_combined_sumcheck,
-            &self.field_cfg,
+            &[(&self.proof_combined_sumcheck, &self.field_cfg)],
+            q_star_cfg,
         )
-        .map_err(CombinedPolyResolverError::SumcheckError)?;
+        .map_err(CombinedPolyResolverError::SumcheckError)?
+        .pop()
+        .expect("exactly one branch was submitted");
 
         let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,

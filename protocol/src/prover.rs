@@ -522,7 +522,7 @@ impl_with_type_bounds!(ProverCommitted
         for cfg_q_i in fq_cfgs.iter() {
             let projected_trace_i =
                 project_trace_coeffs_row_major(self.original_trace, cfg_q_i);
-            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, &cfg_q_i));
+            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_q_i));
             fq_staging.push(FqProjStagingRowMajor {
                 projected_trace: projected_trace_i,
                 projected_scalars_fx: projected_scalars_i,
@@ -559,7 +559,7 @@ impl_with_type_bounds!(ProverCommitted
         for cfg_q_i in fq_cfgs.iter() {
             let projected_trace_i =
                 project_trace_coeffs_column_major(self.original_trace, cfg_q_i);
-            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, &cfg_q_i));
+            let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_q_i));
             fq_staging.push(FqProjStagingColumnMajor {
                 projected_trace: projected_trace_i,
                 projected_scalars_fx: projected_scalars_i,
@@ -727,7 +727,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
                 branch_idx,
                 num_constraints.for_prime(prime_idx),
                 &shared_eval_points[branch_idx],
-                &cfg_q_i,
+                cfg_q_i,
             )
             .map_err(|source| ProtocolError::FqIdealCheck {
                 prime_idx,
@@ -884,12 +884,17 @@ impl_with_type_bounds!(ProverEvalProjected
         //   - push triple into groups, collect pending proofs + metas
 
         // Multi-degree sumcheck over CPR (+ booleanity + lookup groups).
+        // Only the Q[X] branch participates in this round; per-prime
+        // branches will be added by the `fq-unify` Phase F.2 wiring.
+        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            groups,
+            vec![(groups, &self.field_cfg)],
             self.base.num_vars,
-            &self.field_cfg,
-        );
+            q_star_cfg,
+        )
+        .pop()
+        .expect("exactly one branch was submitted");
 
         let mut md_iter = md_states.into_iter();
 
