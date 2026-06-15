@@ -2392,10 +2392,7 @@ pub fn verify_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>],
     proof: &ProductionShaMixedHyraxProof<C, F>,
     transcript: &mut impl Transcript,
-) -> Result<
-    FoldedLinearIdealInstance<F, HyraxMixedCommitment<C>, ProjectedPublic<F>>,
-    LinearIdealFoldError<F>,
->
+) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
 where
     U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
@@ -2470,39 +2467,26 @@ where
         field_cfg,
     )?;
 
-    // Parallel error paths can advance the caller-owned transcript before a commitment-fold error
-    // is returned; accepted proofs and returned error precedence match the serial path.
-    let (folded_public, subclaim, folded_commitment) = verify_with_overlapped_commitment_fold!(
-        fold_publics: verify_fold_publics_phase(
-            &publics,
-            sumfold_output.eq_instance_weights(),
-            field_cfg,
-        ),
-        fold_commitments: verify_mixed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
-            &proof.instance_commitments,
-            sumfold_output.eq_instance_weights(),
-            field_cfg,
-        ),
-        endpoint: |folded_public| verify_mixed_hyrax_endpoint_multipoint_phase(
-            transcript,
-            proof,
-            &folded_public,
-            &row_output,
-            &r_ic,
-            &a,
-            &lambda,
-            &rho,
-            &xi,
-            &booleanity_sources,
-            field_cfg,
-        ),
-    );
+    let folded_public =
+        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
+    let subclaim = verify_mixed_hyrax_endpoint_multipoint_phase(
+        transcript,
+        proof,
+        &folded_public,
+        &row_output,
+        &r_ic,
+        &a,
+        &lambda,
+        &rho,
+        &xi,
+        &booleanity_sources,
+        field_cfg,
+    )?;
     verify_mixed_hyrax_pcs_phase::<C, Zt, F, D>(
         transcript,
         &vs.pcs_params,
         &proof.instance_commitments,
         sumfold_output.eq_instance_weights(),
-        &folded_commitment,
         &subclaim.sumcheck_subclaim.point,
         &proof.witness_lifted_evals,
         &proof.opening_proof,
@@ -2511,7 +2495,7 @@ where
 
     Ok(FoldedLinearIdealInstance {
         target: sumfold_output.final_round_sumcheck_claim().clone(),
-        commitments: folded_commitment,
+        commitments: (),
         public: folded_public,
     })
 }
@@ -2521,10 +2505,7 @@ pub fn verify_linear_ideal_fold_packed_hyrax<C, U, Zt, F, const D: usize>(
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxCommitment<C>, D>],
     proof: &ProductionShaPackedHyraxProof<C, F>,
     transcript: &mut impl Transcript,
-) -> Result<
-    FoldedLinearIdealInstance<F, HyraxCommitment<C>, ProjectedPublic<F>>,
-    LinearIdealFoldError<F>,
->
+) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
 where
     U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
@@ -2600,39 +2581,26 @@ where
         field_cfg,
     )?;
 
-    // Parallel error paths can advance the caller-owned transcript before a commitment-fold error
-    // is returned; accepted proofs and returned error precedence match the serial path.
-    let (folded_public, subclaim, folded_commitment) = verify_with_overlapped_commitment_fold!(
-        fold_publics: verify_fold_publics_phase(
-            &publics,
-            sumfold_output.eq_instance_weights(),
-            field_cfg,
-        ),
-        fold_commitments: verify_packed_hyrax_fold_commitments_phase::<C, Zt, F, D>(
-            &proof.instance_commitments,
-            sumfold_output.eq_instance_weights(),
-            field_cfg,
-        ),
-        endpoint: |folded_public| verify_packed_hyrax_endpoint_multipoint_phase(
-            transcript,
-            proof,
-            &folded_public,
-            &row_output,
-            &r_ic,
-            &a,
-            &lambda,
-            &rho,
-            &xi,
-            &booleanity_sources,
-            field_cfg,
-        ),
-    );
+    let folded_public =
+        verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
+    let subclaim = verify_packed_hyrax_endpoint_multipoint_phase(
+        transcript,
+        proof,
+        &folded_public,
+        &row_output,
+        &r_ic,
+        &a,
+        &lambda,
+        &rho,
+        &xi,
+        &booleanity_sources,
+        field_cfg,
+    )?;
     verify_packed_hyrax_pcs_phase::<C, Zt, F, D>(
         transcript,
         &vs.pcs_params,
         &proof.instance_commitments,
         sumfold_output.eq_instance_weights(),
-        &folded_commitment,
         &subclaim.sumcheck_subclaim.point,
         &proof.witness_lifted_evals,
         &proof.opening_proof,
@@ -2641,7 +2609,7 @@ where
 
     Ok(FoldedLinearIdealInstance {
         target: sumfold_output.final_round_sumcheck_claim().clone(),
-        commitments: folded_commitment,
+        commitments: (),
         public: folded_public,
     })
 }
@@ -5119,30 +5087,6 @@ where
     target = "zinc_protocol::production_sha",
     level = "info",
     skip_all,
-    fields(side = "verify", phase = "fold_after_sumfold", instances = commitments.len())
-)]
-fn verify_mixed_hyrax_fold_commitments_phase<C, Zt, F, const D: usize>(
-    commitments: &[HyraxMixedCommitment<C>],
-    weights: &[F],
-    field_cfg: &F::Config,
-) -> Result<HyraxMixedCommitment<C>, ProductionShaError<F>>
-where
-    Zt: ZincTypes<D>,
-    F: PrimeField,
-    F::Inner: Transcribable,
-    F::Modulus: Transcribable,
-    F: HyraxFieldBridge<C>,
-    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
-    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
-    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-{
-    fold_mixed_hyrax_commitments::<C, Zt, F, D>(commitments, weights, field_cfg)
-}
-
-#[tracing::instrument(
-    target = "zinc_protocol::production_sha",
-    level = "info",
-    skip_all,
     fields(side = "verify", phase = "pcs_verify")
 )]
 #[allow(clippy::too_many_arguments)]
@@ -5151,7 +5095,6 @@ fn verify_mixed_hyrax_pcs_phase<C, Zt, F, const D: usize>(
     pcs_params: &PCSVerifierParams<AllHyraxPCSTypes<C>, Zt, F, D>,
     instance_commitments: &[HyraxMixedCommitment<C>],
     fold_weights: &[F],
-    folded_commitment: &HyraxMixedCommitment<C>,
     point: &[F],
     witness_lifted_evals: &[DynamicPolynomialF<F>],
     opening_proof: &[u8],
@@ -5171,36 +5114,11 @@ where
         pcs_params,
         instance_commitments,
         fold_weights,
-        folded_commitment,
         point,
         witness_lifted_evals,
         opening_proof,
         field_cfg,
     )
-}
-
-#[tracing::instrument(
-    target = "zinc_protocol::production_sha",
-    level = "info",
-    skip_all,
-    fields(side = "verify", phase = "fold_after_sumfold", instances = commitments.len())
-)]
-fn verify_packed_hyrax_fold_commitments_phase<C, Zt, F, const D: usize>(
-    commitments: &[HyraxCommitment<C>],
-    weights: &[F],
-    field_cfg: &F::Config,
-) -> Result<HyraxCommitment<C>, ProductionShaError<F>>
-where
-    Zt: ZincTypes<D>,
-    F: PrimeField + HyraxFieldBridge<C>,
-    F::Inner: Transcribable,
-    F::Modulus: Transcribable,
-    C: ProductionShaPackedHyraxPcs<Zt, F, D>,
-    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
-    ScalarFieldLane: HyraxLanes<C, C::ScalarField, D>,
-    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-{
-    fold_packed_hyrax_commitments::<C, Zt, F, D>(commitments, weights, field_cfg)
 }
 
 #[tracing::instrument(
@@ -5215,7 +5133,6 @@ fn verify_packed_hyrax_pcs_phase<C, Zt, F, const D: usize>(
     pcs_params: &PCSVerifierParams<AllHyraxPCSTypes<C>, Zt, F, D>,
     instance_commitments: &[HyraxCommitment<C>],
     fold_weights: &[F],
-    folded_commitment: &HyraxCommitment<C>,
     point: &[F],
     witness_lifted_evals: &[DynamicPolynomialF<F>],
     opening_proof: &[u8],
@@ -5236,7 +5153,6 @@ where
         pcs_params,
         instance_commitments,
         fold_weights,
-        folded_commitment,
         point,
         witness_lifted_evals,
         opening_proof,
@@ -5500,7 +5416,7 @@ fn absorb_derived_pcs_commitment<Pcs, F, Eval, const D: usize>(
 fn absorb_derived_mixed_hyrax_pcs_commitment<C, F>(
     transcript: &mut impl Transcript,
     label: &'static [u8],
-    commitments: &[&HyraxMixedCommitment<C>],
+    commitments: &[HyraxMixedCommitment<C>],
     weights: &[F],
     field_cfg: &F::Config,
 ) where
@@ -5525,7 +5441,7 @@ fn absorb_derived_mixed_hyrax_pcs_commitment<C, F>(
 fn absorb_derived_packed_hyrax_pcs_commitment<C, F>(
     transcript: &mut impl Transcript,
     label: &'static [u8],
-    commitments: &[&HyraxCommitment<C>],
+    commitments: &[HyraxCommitment<C>],
     weights: &[F],
     field_cfg: &F::Config,
 ) where
@@ -5845,11 +5761,10 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    let commitments = instance_commitments.iter().collect::<Vec<_>>();
     absorb_derived_mixed_hyrax_pcs_commitment(
         &mut transcript.fs_transcript,
         b"production_sha_pcs_mixed_binary_int",
-        &commitments,
+        instance_commitments,
         fold_weights,
         field_cfg,
     );
@@ -5884,7 +5799,6 @@ fn verify_production_sha_mixed_hyrax_pcs_opening<C, Zt, F, const D: usize>(
     pcs_params: &PCSVerifierParams<AllHyraxPCSTypes<C>, Zt, F, D>,
     instance_commitments: &[HyraxMixedCommitment<C>],
     fold_weights: &[F],
-    folded_commitment: &HyraxMixedCommitment<C>,
     r_0: &[F],
     folded_lifted_evals: &[DynamicPolynomialF<F>],
     opening_proof: &[u8],
@@ -5900,12 +5814,20 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     ensure_production_sha_word_degree::<F, D>()?;
+    let first_commitment =
+        instance_commitments
+            .first()
+            .ok_or_else(|| ProductionShaError::LengthMismatch {
+                label: "mixed Hyrax commitments",
+                got: 0,
+                expected: 1,
+            })?;
     validate_production_sha_batch_sizes::<F>(
         <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::batch_size(
-            &folded_commitment.binary,
+            &first_commitment.binary,
         ),
         0,
-        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::batch_size(&folded_commitment.int),
+        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::batch_size(&first_commitment.int),
     )?;
     let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
 
@@ -5915,11 +5837,10 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    let commitments = instance_commitments.iter().collect::<Vec<_>>();
     absorb_derived_mixed_hyrax_pcs_commitment(
         &mut transcript.fs_transcript,
         b"production_sha_pcs_mixed_binary_int",
-        &commitments,
+        instance_commitments,
         fold_weights,
         field_cfg,
     );
@@ -5933,7 +5854,15 @@ where
         int_lifted,
         &mut transcription_buf,
     );
-    HyraxPCS::<C, BinaryLanes>::verify_open_two_field_lane_groups_single_row::<
+    let binary_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.binary)
+        .collect::<Vec<_>>();
+    let int_commitments = instance_commitments
+        .iter()
+        .map(|commitment| &commitment.int)
+        .collect::<Vec<_>>();
+    HyraxPCS::<C, BinaryLanes>::verify_open_two_field_lane_groups_single_row_folded::<
         F,
         BinaryPoly<D>,
         BinaryLanes,
@@ -5944,11 +5873,12 @@ where
     >(
         &mut transcript,
         &pcs_params.binary,
-        &folded_commitment.binary,
+        &binary_commitments,
         binary_lifted,
         &pcs_params.int,
-        &folded_commitment.int,
+        &int_commitments,
         int_lifted,
+        fold_weights,
         r_0,
         opening_proof,
         field_cfg,
@@ -5989,11 +5919,10 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    let commitments = instance_commitments.iter().collect::<Vec<_>>();
     absorb_derived_packed_hyrax_pcs_commitment(
         &mut transcript.fs_transcript,
         b"production_sha_pcs_packed_binary_int",
-        &commitments,
+        instance_commitments,
         fold_weights,
         field_cfg,
     );
@@ -6037,7 +5966,6 @@ fn verify_production_sha_packed_hyrax_pcs_opening<C, Zt, F, const D: usize>(
     pcs_params: &PCSVerifierParams<AllHyraxPCSTypes<C>, Zt, F, D>,
     instance_commitments: &[HyraxCommitment<C>],
     fold_weights: &[F],
-    folded_commitment: &HyraxCommitment<C>,
     r_0: &[F],
     folded_lifted_evals: &[DynamicPolynomialF<F>],
     opening_proof: &[u8],
@@ -6054,7 +5982,15 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     ensure_production_sha_word_degree::<F, D>()?;
-    if <HyraxPCS<C, ScalarFieldLane> as PCS<F, C::ScalarField, D>>::batch_size(folded_commitment)
+    let first_commitment =
+        instance_commitments
+            .first()
+            .ok_or_else(|| ProductionShaError::LengthMismatch {
+                label: "packed Hyrax commitments",
+                got: 0,
+                expected: 1,
+            })?;
+    if <HyraxPCS<C, ScalarFieldLane> as PCS<F, C::ScalarField, D>>::batch_size(first_commitment)
         != 1
     {
         return Err(ProductionShaError::UnsupportedProductionShaPcsShape(
@@ -6070,11 +6006,10 @@ where
     };
     let mut transcription_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
 
-    let commitments = instance_commitments.iter().collect::<Vec<_>>();
     absorb_derived_packed_hyrax_pcs_commitment(
         &mut transcript.fs_transcript,
         b"production_sha_pcs_packed_binary_int",
-        &commitments,
+        instance_commitments,
         fold_weights,
         field_cfg,
     );
@@ -6097,10 +6032,12 @@ where
         field_cfg,
     )?;
 
-    HyraxPCS::<C, ScalarFieldLane>::verify_open_scalar_field_linear_form::<F, true, D>(
+    let commitment_refs = instance_commitments.iter().collect::<Vec<_>>();
+    HyraxPCS::<C, ScalarFieldLane>::verify_open_scalar_field_linear_form_folded::<F, true, D>(
         &mut transcript,
         &pcs_params.binary,
-        folded_commitment,
+        &commitment_refs,
+        fold_weights,
         &q0,
         &q1,
         &claimed_eval,
@@ -7587,47 +7524,6 @@ where
     })
 }
 
-pub fn fold_mixed_hyrax_commitments<C, Zt, F, const D: usize>(
-    commitments: &[HyraxMixedCommitment<C>],
-    theta: &[F],
-    field_cfg: &F::Config,
-) -> Result<HyraxMixedCommitment<C>, ProductionShaError<F>>
-where
-    Zt: ZincTypes<D>,
-    F: PrimeField + Send + Sync,
-    F: HyraxFieldBridge<C>,
-    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
-    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
-    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-{
-    if commitments.len() != theta.len() {
-        return Err(ProductionShaError::LengthMismatch {
-            label: "mixed hyrax commitments/theta",
-            got: commitments.len(),
-            expected: theta.len(),
-        });
-    }
-    let binary = commitments
-        .iter()
-        .map(|commitment| &commitment.binary)
-        .collect::<Vec<_>>();
-    let int = commitments
-        .iter()
-        .map(|commitment| &commitment.int)
-        .collect::<Vec<_>>();
-    let (binary, int) = cfg_join!(
-        <HyraxPCS<C, BinaryLanes> as FoldablePCS<F, BinaryPoly<D>, D>>::fold_commitment_refs(
-            &binary, theta, field_cfg,
-        ),
-        <HyraxPCS<C, IntScalarLane> as FoldablePCS<F, Zt::Int, D>>::fold_commitment_refs(
-            &int, theta, field_cfg,
-        ),
-    );
-    let binary = binary?;
-    let int = int?;
-    HyraxMixedCommitment::from_parts(binary, int).map_err(Into::into)
-}
-
 pub fn fold_mixed_hyrax_prover_data<C, Zt, F, const D: usize>(
     prover_data: &[HyraxMixedProverData<C>],
     theta: &[F],
@@ -7664,33 +7560,6 @@ where
             &int, theta, field_cfg,
         )?,
     })
-}
-
-pub fn fold_packed_hyrax_commitments<C, Zt, F, const D: usize>(
-    commitments: &[HyraxCommitment<C>],
-    theta: &[F],
-    field_cfg: &F::Config,
-) -> Result<HyraxCommitment<C>, ProductionShaError<F>>
-where
-    Zt: ZincTypes<D>,
-    F: PrimeField + HyraxFieldBridge<C>,
-    C: ProductionShaPackedHyraxPcs<Zt, F, D>,
-    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
-    ScalarFieldLane: HyraxLanes<C, C::ScalarField, D>,
-    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-{
-    if commitments.len() != theta.len() {
-        return Err(ProductionShaError::LengthMismatch {
-            label: "packed hyrax commitments/theta",
-            got: commitments.len(),
-            expected: theta.len(),
-        });
-    }
-    let refs = commitments.iter().collect::<Vec<_>>();
-    <HyraxPCS<C, ScalarFieldLane> as FoldablePCS<F, C::ScalarField, D>>::fold_commitment_refs(
-        &refs, theta, field_cfg,
-    )
-    .map_err(Into::into)
 }
 
 pub fn fold_packed_hyrax_prover_data<C, Zt, F, const D: usize>(

@@ -9,8 +9,8 @@ use std::{
 
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{
-    AdditiveGroup, BigInteger, MontBackend, MontConfig, PrimeField as ArkPrimeField, UniformRand,
-    Zero,
+    AdditiveGroup, BigInteger, MontBackend, MontConfig, One, PrimeField as ArkPrimeField,
+    UniformRand, Zero,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use crypto_bigint::{BoxedUint, modular::BoxedMontyForm};
@@ -373,7 +373,73 @@ where
         LanesA: HyraxLanes<C, EvalA, D>,
         LanesB: HyraxLanes<C, EvalB, D>,
     {
+        let fold_weight = F::one_with_cfg(field_cfg);
+        Self::verify_open_two_field_lane_groups_single_row_folded::<
+            F,
+            EvalA,
+            LanesA,
+            EvalB,
+            LanesB,
+            CHECK_FOR_OVERFLOW,
+            D,
+        >(
+            transcript,
+            vk_a,
+            std::slice::from_ref(&commitment_a),
+            lifted_evals_a,
+            vk_b,
+            std::slice::from_ref(&commitment_b),
+            lifted_evals_b,
+            std::slice::from_ref(&fold_weight),
+            point,
+            opening_proof,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_open_two_field_lane_groups_single_row_folded<
+        F,
+        EvalA,
+        LanesA,
+        EvalB,
+        LanesB,
+        const CHECK_FOR_OVERFLOW: bool,
+        const D: usize,
+    >(
+        transcript: &mut PcsVerifierTranscript,
+        vk_a: &HyraxVerifierKey<C>,
+        commitments_a: &[&HyraxCommitment<C>],
+        lifted_evals_a: &[DynamicPolynomialF<F>],
+        vk_b: &HyraxVerifierKey<C>,
+        commitments_b: &[&HyraxCommitment<C>],
+        lifted_evals_b: &[DynamicPolynomialF<F>],
+        fold_weights: &[F],
+        point: &[F],
+        opening_proof: &[u8],
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+        EvalA: Clone + Debug + Send + Sync,
+        EvalB: Clone + Debug + Send + Sync,
+        LanesA: HyraxLanes<C, EvalA, D>,
+        LanesB: HyraxLanes<C, EvalB, D>,
+    {
         let _ = CHECK_FOR_OVERFLOW;
+        let commitment_a = validate_commitment_ref_fold_inputs::<C, LanesA, EvalA, D>(
+            commitments_a,
+            fold_weights.len(),
+            "Hyrax folded opening commitment shape mismatch",
+        )?;
+        let commitment_b = validate_commitment_ref_fold_inputs::<C, LanesB, EvalB, D>(
+            commitments_b,
+            fold_weights.len(),
+            "Hyrax folded opening commitment shape mismatch",
+        )?;
         let original_stream =
             std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
         let result = (|| {
@@ -384,8 +450,6 @@ where
                     "Hyrax commitment blinding mode mismatch".to_string(),
                 ));
             }
-            validate_commitment_shape::<C, LanesA, EvalA, D>(commitment_a)?;
-            validate_commitment_shape::<C, LanesB, EvalB, D>(commitment_b)?;
             validate_shared_verifier_keys(vk_a, vk_b)?;
             if lifted_evals_a.len() != commitment_a.batch_size {
                 return Err(ZipError::InvalidPcsParam(format!(
@@ -471,11 +535,37 @@ where
                 ));
             }
 
-            let mut comm_bases =
-                Vec::with_capacity(commitment_a.comm_affine.len() + commitment_b.comm_affine.len());
-            comm_bases.extend_from_slice(&commitment_a.comm_affine);
-            comm_bases.extend_from_slice(&commitment_b.comm_affine);
-            let comm_lc = msm_unchecked::<C>(&comm_bases, &alphas)?;
+            let unit_fold_scalar = match fold_weights {
+                [weight] => Some(F::field_to_scalar(weight)?),
+                _ => None,
+            };
+            let comm_lc = if unit_fold_scalar == Some(C::ScalarField::one()) {
+                let mut comm_bases = Vec::with_capacity(
+                    commitment_a.comm_affine.len() + commitment_b.comm_affine.len(),
+                );
+                comm_bases.extend_from_slice(&commitment_a.comm_affine);
+                comm_bases.extend_from_slice(&commitment_b.comm_affine);
+                msm_unchecked::<C>(&comm_bases, &alphas)?
+            } else {
+                let fold_scalars = match unit_fold_scalar {
+                    Some(scalar) => vec![scalar],
+                    None => fold_weights
+                        .iter()
+                        .map(F::field_to_scalar)
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                let mut comm_lc = folded_commitment_linear_combination::<C>(
+                    commitments_a,
+                    &fold_scalars,
+                    &alphas[..alpha_count_a],
+                )?;
+                comm_lc += folded_commitment_linear_combination::<C>(
+                    commitments_b,
+                    &fold_scalars,
+                    &alphas[alpha_count_a..],
+                )?;
+                comm_lc
+            };
 
             let mut expected =
                 msm_unchecked::<C>(&vk_a.bases[..combined_row.len()], &combined_row)?;
@@ -587,7 +677,48 @@ where
         F::Inner: Transcribable,
         F::Modulus: Transcribable,
     {
+        let fold_weight = F::one_with_cfg(field_cfg);
+        Self::verify_open_scalar_field_linear_form_folded::<F, CHECK_FOR_OVERFLOW, D>(
+            transcript,
+            vk,
+            std::slice::from_ref(&commitment),
+            std::slice::from_ref(&fold_weight),
+            q0,
+            q1,
+            claimed_eval,
+            opening_proof,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_open_scalar_field_linear_form_folded<
+        F,
+        const CHECK_FOR_OVERFLOW: bool,
+        const D: usize,
+    >(
+        transcript: &mut PcsVerifierTranscript,
+        vk: &HyraxVerifierKey<C>,
+        commitments: &[&HyraxCommitment<C>],
+        fold_weights: &[F],
+        q0: &[F],
+        q1: &[F],
+        claimed_eval: &F,
+        opening_proof: &[u8],
+        field_cfg: &F::Config,
+    ) -> Result<(), ZipError>
+    where
+        F: HyraxFieldBridge<C>,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
         let _ = CHECK_FOR_OVERFLOW;
+        let commitment =
+            validate_commitment_ref_fold_inputs::<C, ScalarFieldLane, C::ScalarField, D>(
+                commitments,
+                fold_weights.len(),
+                "Hyrax folded opening commitment shape mismatch",
+            )?;
         let original_stream =
             std::mem::replace(&mut transcript.stream, Cursor::new(opening_proof.to_vec()));
         let result = (|| {
@@ -639,7 +770,22 @@ where
                 ));
             }
 
-            let comm_lc = msm_unchecked::<C>(&commitment.comm_affine, &row_coeffs)?;
+            let unit_fold_scalar = match fold_weights {
+                [weight] => Some(F::field_to_scalar(weight)?),
+                _ => None,
+            };
+            let comm_lc = if unit_fold_scalar == Some(C::ScalarField::one()) {
+                msm_unchecked::<C>(&commitment.comm_affine, &row_coeffs)?
+            } else {
+                let fold_scalars = match unit_fold_scalar {
+                    Some(scalar) => vec![scalar],
+                    None => fold_weights
+                        .iter()
+                        .map(F::field_to_scalar)
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                folded_commitment_linear_combination::<C>(commitments, &fold_scalars, &row_coeffs)?
+            };
             let mut expected_commitment =
                 msm_unchecked::<C>(&vk.bases[..combined_row.len()], &combined_row)?;
             if let Some(rho_star) = rho_star {
@@ -2001,22 +2147,16 @@ where
         field_cfg: &F::Config,
     ) -> Result<Self::Commitment, ZipError> {
         let _ = field_cfg;
-        validate_fold_inputs(commitments, theta.len(), "commitments")?;
-        let first = commitments[0];
-        validate_commitment_shape::<C, Lanes, Eval, D>(first)?;
+        let first = validate_commitment_ref_fold_inputs::<C, Lanes, Eval, D>(
+            commitments,
+            theta.len(),
+            "Hyrax commitment fold shape mismatch",
+        )?;
 
         let scalars = theta
             .iter()
             .map(F::field_to_scalar)
             .collect::<Result<Vec<_>, _>>()?;
-        for &commitment in commitments {
-            validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
-            if !same_commitment_shape(first, commitment) {
-                return Err(ZipError::InvalidPcsParam(
-                    "Hyrax commitment fold shape mismatch".to_string(),
-                ));
-            }
-        }
         let folded = msm_shared_weight_commitments_unchecked::<C>(&scalars, commitments)?;
         let folded_affine = C::Group::normalize_batch(&folded);
         let folded_bytes = affine_points_bytes::<C>(&folded_affine)?;
@@ -2295,6 +2435,79 @@ fn same_commitment_shape<C: AffineRepr>(
         && lhs.comm.len() == rhs.comm.len()
         && lhs.comm_affine.len() == rhs.comm_affine.len()
         && lhs.comm_bytes.len() == rhs.comm_bytes.len()
+}
+
+fn validate_commitment_ref_fold_inputs<'a, C, Lanes, Eval, const D: usize>(
+    commitments: &[&'a HyraxCommitment<C>],
+    weight_len: usize,
+    shape_mismatch: &'static str,
+) -> Result<&'a HyraxCommitment<C>, ZipError>
+where
+    C: AffineRepr,
+    Eval: Clone + Debug + Send + Sync,
+    Lanes: HyraxLanes<C, Eval, D>,
+{
+    validate_fold_inputs(commitments, weight_len, "commitments")?;
+    let first = commitments[0];
+    validate_commitment_shape::<C, Lanes, Eval, D>(first)?;
+    for &commitment in commitments.iter().skip(1) {
+        validate_commitment_shape::<C, Lanes, Eval, D>(commitment)?;
+        if !same_commitment_shape(first, commitment) {
+            return Err(ZipError::InvalidPcsParam(shape_mismatch.to_string()));
+        }
+    }
+    Ok(first)
+}
+
+fn folded_commitment_linear_combination<C: AffineRepr>(
+    commitments: &[&HyraxCommitment<C>],
+    fold_scalars: &[C::ScalarField],
+    point_scalars: &[C::ScalarField],
+) -> Result<C::Group, ZipError> {
+    if commitments.is_empty() {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax folded opening expected at least one commitment".to_string(),
+        ));
+    }
+    if commitments.len() != fold_scalars.len() {
+        return Err(ZipError::InvalidPcsParam(format!(
+            "Hyrax folded opening expected {} fold scalars, got {}",
+            commitments.len(),
+            fold_scalars.len()
+        )));
+    }
+    if let Some(first) = commitments.first() {
+        if first.comm_affine.len() != point_scalars.len() {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Hyrax folded opening expected {} point scalars, got {}",
+                first.comm_affine.len(),
+                point_scalars.len()
+            )));
+        }
+    }
+
+    if commitments.len() == 1 && fold_scalars[0] == C::ScalarField::one() {
+        return msm_unchecked::<C>(&commitments[0].comm_affine, point_scalars);
+    }
+
+    let point_count = point_scalars.len();
+    let mut bases = Vec::with_capacity(commitments.len() * point_count);
+    let mut scalars = Vec::with_capacity(commitments.len() * point_count);
+    for (&commitment, fold_scalar) in commitments.iter().zip(fold_scalars.iter()) {
+        if commitment.comm_affine.len() != point_count {
+            return Err(ZipError::InvalidPcsParam(format!(
+                "Hyrax folded opening expected {point_count} commitment bases, got {}",
+                commitment.comm_affine.len()
+            )));
+        }
+        bases.extend_from_slice(&commitment.comm_affine);
+        scalars.extend(
+            point_scalars
+                .iter()
+                .map(|point_scalar| *fold_scalar * *point_scalar),
+        );
+    }
+    msm_unchecked::<C>(&bases, &scalars)
 }
 
 fn same_prover_data_shape<C: AffineRepr>(
@@ -3053,6 +3266,29 @@ mod tests {
             .expect("curve scalar modulus must be prime")
     }
 
+    fn absorb_folded_hyrax_sources<C, F>(
+        transcript: &mut impl Transcript,
+        commitments: &[&HyraxCommitment<C>],
+        weights: &[F],
+        field_cfg: &F::Config,
+    ) where
+        C: AffineRepr,
+        F: PrimeField,
+        F::Inner: Transcribable,
+        F::Modulus: Transcribable,
+    {
+        let mut field_buf = vec![0u8; F::zero_with_cfg(field_cfg).inner().get_num_bytes()];
+        transcript.absorb_slice(b"hyrax_test_folded_sources");
+        transcript.absorb_slice(&(commitments.len() as u64).to_le_bytes());
+        transcript.absorb_slice(&(weights.len() as u64).to_le_bytes());
+        transcript.absorb_random_field_slice(weights, &mut field_buf);
+        for (idx, commitment) in commitments.iter().enumerate() {
+            transcript.absorb_slice(&(idx as u64).to_le_bytes());
+            commitment.absorb(transcript);
+        }
+        transcript.absorb_slice(b"hyrax_test_folded_sources_end");
+    }
+
     fn assert_bridge_round_trip<C: AffineRepr>() -> Result<(), ZipError> {
         let cfg = cfg_from_curve::<C>();
         for value in [0u64, 1, 2, 17, 123, 1 << 20] {
@@ -3370,8 +3606,7 @@ mod tests {
             width,
             b"zinc-plus-hyrax-width-64-multi-row-test",
             HyraxBlindingMode::Unblinded,
-        )
-        ?;
+        )?;
 
         let polys = vec![
             DenseMultilinearExtension::from_evaluations_vec(
@@ -3455,8 +3690,7 @@ mod tests {
             &point,
             &prover_data,
             &cfg,
-        )
-        ?;
+        )?;
 
         let mut verifier_transcript = prover_transcript.into_verification_transcript();
         <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
@@ -3477,8 +3711,7 @@ mod tests {
             &lifted_evals,
             &Vec::new(),
             &cfg,
-        )
-        ?;
+        )?;
 
         Ok(())
     }
@@ -3498,7 +3731,9 @@ mod tests {
         }
 
         let large_values = [
-            <C as AffineRepr>::ScalarField::from(2u64).inverse().unwrap(),
+            <C as AffineRepr>::ScalarField::from(2u64)
+                .inverse()
+                .unwrap(),
             -<C as AffineRepr>::ScalarField::from(1u64),
             <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(&[0xA5; 64]),
         ];
@@ -3821,6 +4056,166 @@ mod tests {
             &cfg,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn folded_scalar_field_linear_form_verifies_directly_multi_row() -> Result<(), ZipError> {
+        type C = ark_bn254::G1Affine;
+        type F = ArkF;
+        const D: usize = 1;
+
+        let cfg = ();
+        let width = 4;
+        let n = 8;
+        let (ck, vk) = HyraxPCS::<C, ScalarFieldLane>::setup(
+            width,
+            b"zinc-plus-hyrax-direct-folded-linear-form-test",
+            HyraxBlindingMode::Unblinded,
+        )?;
+
+        let instance_values = [
+            (0..n)
+                .map(|idx| <C as AffineRepr>::ScalarField::from((idx * 17 + 3) as u64))
+                .collect::<Vec<_>>(),
+            (0..n)
+                .map(|idx| <C as AffineRepr>::ScalarField::from((idx * 29 + 11) as u64))
+                .collect::<Vec<_>>(),
+        ];
+        let polys = instance_values
+            .iter()
+            .map(|values| {
+                DenseMultilinearExtension::from_evaluations_vec(
+                    3,
+                    values.clone(),
+                    <C as AffineRepr>::ScalarField::zero(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut prover_data = Vec::new();
+        let mut commitments = Vec::new();
+        for poly in &polys {
+            let (data, commitment) = <HyraxPCS<C, ScalarFieldLane> as PCS<
+                F,
+                <C as AffineRepr>::ScalarField,
+                D,
+            >>::commit(&ck, std::slice::from_ref(poly))?;
+            prover_data.push(data);
+            commitments.push(commitment);
+        }
+        let commitment_refs = commitments.iter().collect::<Vec<_>>();
+
+        let theta = [F::from(3u64), F::from(5u64)];
+        let folded_data = <HyraxPCS<C, ScalarFieldLane> as FoldablePCS<
+            F,
+            <C as AffineRepr>::ScalarField,
+            D,
+        >>::fold_prover_data(&prover_data, &theta, &cfg)?;
+        let theta_scalar = theta
+            .iter()
+            .map(<F as HyraxFieldBridge<C>>::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        let folded_values = (0..n)
+            .map(|idx| {
+                instance_values.iter().zip(theta_scalar.iter()).fold(
+                    <C as AffineRepr>::ScalarField::zero(),
+                    |acc, (values, theta)| acc + values[idx] * theta,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let q0 = [F::from(7u64), F::from(11u64)];
+        let q1 = [
+            F::from(13u64),
+            F::from(17u64),
+            F::from(19u64),
+            F::from(23u64),
+        ];
+        let q1_scalar = q1
+            .iter()
+            .map(<F as HyraxFieldBridge<C>>::field_to_scalar)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut claimed_eval = F::zero_with_cfg(&cfg);
+        for (row_idx, row_weight) in q0.iter().enumerate() {
+            let lower = row_idx * width;
+            let row_eval = folded_values[lower..lower + width]
+                .iter()
+                .zip(q1_scalar.iter())
+                .fold(
+                    <C as AffineRepr>::ScalarField::zero(),
+                    |acc, (value, weight)| acc + *value * weight,
+                );
+            claimed_eval +=
+                *row_weight * <F as HyraxFieldBridge<C>>::scalar_to_field(&row_eval, &cfg)?;
+        }
+
+        let mut prover_transcript = PcsProverTranscript {
+            fs_transcript: Default::default(),
+            stream: Default::default(),
+        };
+        absorb_folded_hyrax_sources(
+            &mut prover_transcript.fs_transcript,
+            &commitment_refs,
+            &theta,
+            &cfg,
+        );
+        HyraxPCS::<C, ScalarFieldLane>::prove_open_scalar_field_linear_form::<F, true, D>(
+            &mut prover_transcript,
+            &ck,
+            &folded_values,
+            &q0,
+            &q1,
+            &folded_data,
+            &cfg,
+        )?;
+        let opening_proof = prover_transcript.stream.get_ref().clone();
+
+        let verify_with = |absorbed_commitments: &[&HyraxCommitment<C>],
+                           absorbed_weights: &[F],
+                           verify_commitments: &[&HyraxCommitment<C>],
+                           verify_weights: &[F]|
+         -> Result<(), ZipError> {
+            let mut verifier_transcript = PcsVerifierTranscript {
+                fs_transcript: Default::default(),
+                stream: Default::default(),
+            };
+            absorb_folded_hyrax_sources(
+                &mut verifier_transcript.fs_transcript,
+                absorbed_commitments,
+                absorbed_weights,
+                &cfg,
+            );
+            HyraxPCS::<C, ScalarFieldLane>::verify_open_scalar_field_linear_form_folded::<F, true, D>(
+                &mut verifier_transcript,
+                &vk,
+                verify_commitments,
+                verify_weights,
+                &q0,
+                &q1,
+                &claimed_eval,
+                &opening_proof,
+                &cfg,
+            )
+        };
+
+        verify_with(&commitment_refs, &theta, &commitment_refs, &theta)?;
+
+        let reversed_commitments = commitments.iter().rev().collect::<Vec<_>>();
+        assert!(verify_with(&commitment_refs, &theta, &reversed_commitments, &theta).is_err());
+
+        let wrong_theta = [theta[1], theta[0]];
+        assert!(
+            verify_with(
+                &commitment_refs,
+                &wrong_theta,
+                &commitment_refs,
+                &wrong_theta
+            )
+            .is_err()
+        );
+        assert!(verify_with(&reversed_commitments, &theta, &commitment_refs, &theta).is_err());
+
+        Ok(())
     }
 
     #[test]
