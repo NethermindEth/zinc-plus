@@ -1261,11 +1261,17 @@ fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn production_packed_hyrax_proof_raw_bytes<C>(
-    proof: &ProductionShaPackedHyraxProof<C, F>,
+fn production_packed_hyrax_proof_raw_bytes<C, Fp>(
+    proof: &ProductionShaPackedHyraxProof<C, Fp>,
 ) -> Vec<u8>
 where
     C: AffineRepr,
+    Fp: PrimeField,
+    zinc_piop::combined_poly_resolver::Proof<Fp>: Transcribable,
+    zinc_piop::ideal_check::Proof<Fp>: Transcribable,
+    zinc_piop::multipoint_eval::Proof<Fp>: Transcribable,
+    zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheckProof<Fp>: Transcribable,
+    DynamicPolyVecF<Fp>: Transcribable,
 {
     let mut out = Vec::new();
     out.extend_from_slice(&(proof.instance_commitments.len() as u64).to_le_bytes());
@@ -1285,9 +1291,17 @@ where
     out
 }
 
-fn production_mixed_hyrax_proof_raw_bytes<C>(proof: &ProductionShaMixedHyraxProof<C, F>) -> Vec<u8>
+fn production_mixed_hyrax_proof_raw_bytes<C, Fp>(
+    proof: &ProductionShaMixedHyraxProof<C, Fp>,
+) -> Vec<u8>
 where
     C: AffineRepr,
+    Fp: PrimeField,
+    zinc_piop::combined_poly_resolver::Proof<Fp>: Transcribable,
+    zinc_piop::ideal_check::Proof<Fp>: Transcribable,
+    zinc_piop::multipoint_eval::Proof<Fp>: Transcribable,
+    zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheckProof<Fp>: Transcribable,
+    DynamicPolyVecF<Fp>: Transcribable,
 {
     let mut out = Vec::new();
     out.extend_from_slice(&(proof.instance_commitments.len() as u64).to_le_bytes());
@@ -1899,6 +1913,8 @@ fn write_hyrax_width_sweep_report(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
 
 pub fn run_hyrax_width_sweep_report() {
     type C = ark_bn254::G1Affine;
+    type ZipF = MontyField<FIELD_LIMBS>;
+    type HyraxF = ArkFBn254;
     type P = AllHyraxPCSTypes<C>;
     type U = ProjectionShaBenchUair<RealEcdsaInt>;
 
@@ -1924,16 +1940,19 @@ pub fn run_hyrax_width_sweep_report() {
     assert_eq!(mono_final_state, projection_final_state);
 
     let shape = UairShape::<U>::new(SHA_ROW_VARS);
-    let field_cfg = field_cfg_from_curve_scalar::<
-        F,
+    let zip_field_cfg = field_cfg_from_curve_scalar::<
+        ZipF,
         <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
         C,
     >();
-    let prepared_instances =
-        prepare_linear_ideal_fold_witnesses::<U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
-            &shape, &witnesses, &field_cfg,
-        )
-        .expect("ProjectionFold SHA witness preparation should succeed");
+    let hyrax_field_cfg = HyraxF::curve_field_cfg::<C>();
+    let prepared_instances = prepare_linear_ideal_fold_witnesses::<
+        U,
+        RealEcdsaBenchZincTypes,
+        HyraxF,
+        DEGREE_PLUS_ONE,
+    >(&shape, &witnesses, &hyrax_field_cfg)
+    .expect("ProjectionFold SHA witness preparation should succeed");
 
     let mut rows = Vec::new();
 
@@ -1943,14 +1962,14 @@ pub fn run_hyrax_width_sweep_report() {
         ZincPlusPiop::<
             RealEcdsaBenchZincTypes,
             Sha256CompressionSliceUair<RealEcdsaInt>,
-            F,
+            ZipF,
             DEGREE_PLUS_ONE,
         >::prove_with_pcs_and_field_cfg::<AllZipPCSTypes, false, PERFORM_CHECKS>(
             &zip_pp,
             &trace,
             REAL_SHA256_CHAIN_NUM_VARS,
             zinc_protocol::project_scalar_fn,
-            field_cfg.clone(),
+            zip_field_cfg.clone(),
         )
         .expect("OG Zinc+ SHA prover failed")
     });
@@ -1959,7 +1978,7 @@ pub fn run_hyrax_width_sweep_report() {
         ZincPlusPiop::<
             RealEcdsaBenchZincTypes,
             Sha256CompressionSliceUair<RealEcdsaInt>,
-            F,
+            ZipF,
             DEGREE_PLUS_ONE,
         >::verify_with_pcs_and_field_cfg::<AllZipPCSTypes, _, PERFORM_CHECKS>(
             &zip_vp,
@@ -1968,7 +1987,7 @@ pub fn run_hyrax_width_sweep_report() {
             REAL_SHA256_CHAIN_NUM_VARS,
             zinc_protocol::project_scalar_fn,
             sha256_real_project_ideal,
-            field_cfg.clone(),
+            zip_field_cfg.clone(),
         )
         .expect("OG Zinc+ SHA verifier failed")
     });
@@ -1986,21 +2005,22 @@ pub fn run_hyrax_width_sweep_report() {
         kind: "og_zip",
     });
 
-    let (mixed_pcs_params, mixed_verifier_params) = projection_sha_hyrax_pcs_params::<C, F>();
+    let (mixed_pcs_params, mixed_verifier_params) =
+        projection_sha_hyrax_pcs_params::<C, HyraxF>();
     let mixed_pp =
-        LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
+        LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>::new(
             mixed_pcs_params,
-            field_cfg.clone(),
+            hyrax_field_cfg.clone(),
             3,
         );
     let mixed_vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
         C,
         U,
         RealEcdsaBenchZincTypes,
-        F,
+        HyraxF,
         DEGREE_PLUS_ONE,
     >(
-        LinearIdealFoldVerifierParams::new(mixed_verifier_params, field_cfg.clone()),
+        LinearIdealFoldVerifierParams::new(mixed_verifier_params, hyrax_field_cfg.clone()),
         shape.clone(),
     )
     .expect("mixed Hyrax verifier setup succeeds");
@@ -2010,14 +2030,20 @@ pub fn run_hyrax_width_sweep_report() {
             C,
             U,
             RealEcdsaBenchZincTypes,
-            F,
+            HyraxF,
             DEGREE_PLUS_ONE,
         >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
         .expect("mixed Hyrax prover failed")
     });
     let (_, mixed_verifier_ms) = measure_once(|| {
         let mut transcript = Blake3Transcript::new();
-        verify_linear_ideal_fold_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>(
+        verify_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >(
             &mixed_vs,
             &mixed_output.fresh_instances,
             &mixed_output.proof,
@@ -2043,7 +2069,7 @@ pub fn run_hyrax_width_sweep_report() {
         })
         .sum();
     rows.push(HyraxWidthSweepRow {
-        label: "current mixed Hyrax".to_string(),
+        label: "mixed Hyrax ArkFBn254".to_string(),
         width: Some(SHA_ROW_COUNT),
         ecc_points_per_instance: Some(mixed_ecc),
         fresh_ecc_points: Some(mixed_fresh_ecc),
@@ -2070,22 +2096,24 @@ pub fn run_hyrax_width_sweep_report() {
     ];
 
     for (label, width) in widths {
-        let layout = packed_sha_layout::<F>(width).expect("requested packed width is valid");
-        let (pcs_params, verifier_params) = projection_sha_packed_hyrax_pcs_params::<C, F>(width);
-        let pp =
-            LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
-                pcs_params,
-                field_cfg.clone(),
-                3,
-            );
+        let layout = packed_sha_layout::<HyraxF>(width).expect("requested packed width is valid");
+        let (pcs_params, verifier_params) =
+            projection_sha_packed_hyrax_pcs_params::<C, HyraxF>(width);
+        let pp = LinearIdealFoldProverParams::<
+            P,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >::new(pcs_params, hyrax_field_cfg.clone(), 3);
         let vs = setup_verify_linear_ideal_fold_packed_hyrax::<
             C,
             U,
             RealEcdsaBenchZincTypes,
-            F,
+            HyraxF,
             DEGREE_PLUS_ONE,
         >(
-            LinearIdealFoldVerifierParams::new(verifier_params, field_cfg.clone()),
+            LinearIdealFoldVerifierParams::new(verifier_params, hyrax_field_cfg.clone()),
             shape.clone(),
         )
         .expect("packed Hyrax verifier setup succeeds");
@@ -2095,7 +2123,7 @@ pub fn run_hyrax_width_sweep_report() {
                 C,
                 U,
                 RealEcdsaBenchZincTypes,
-                F,
+                HyraxF,
                 DEGREE_PLUS_ONE,
             >(&pp, &shape, &prepared_instances, &mut transcript)
             .expect("packed Hyrax prover failed")
@@ -2106,7 +2134,7 @@ pub fn run_hyrax_width_sweep_report() {
                     C,
                     U,
                     RealEcdsaBenchZincTypes,
-                    F,
+                    HyraxF,
                     DEGREE_PLUS_ONE,
                 >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
                 .expect("packed Hyrax verifier failed")
