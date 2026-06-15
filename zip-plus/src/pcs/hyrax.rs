@@ -79,13 +79,13 @@ where
         validate_scalar_lanes::<C>(ck, scalar_lanes, point.len(), prover_data)?;
 
         let n = scalar_lanes[0][0].len();
-        let point_scalar = point
+        let (column_point, row_point) = split_column_row_point(point, prover_data.num_rows);
+        let column_point_scalar = column_point
             .iter()
             .map(F::field_to_scalar)
             .collect::<Result<Vec<_>, _>>()?;
-        let row_vars = prover_data.num_rows.ilog2() as usize;
-        let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
-        let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
+        let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
+        let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
         let alphas = sample_scalars::<C>(
             &mut transcript.fs_transcript,
             scalar_lanes.len() * prover_data.num_lanes,
@@ -1677,13 +1677,13 @@ where
             )));
         }
 
-        let point_scalar = point
+        let (column_point, row_point) = split_column_row_point(point, prover_data.num_rows);
+        let column_point_scalar = column_point
             .iter()
             .map(F::field_to_scalar)
             .collect::<Result<Vec<_>, _>>()?;
-        let row_vars = prover_data.num_rows.ilog2() as usize;
-        let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
-        let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
+        let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
+        let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
         let alphas = sample_scalars::<C>(
             &mut transcript.fs_transcript,
             polys.len() * Lanes::NUM_LANES,
@@ -1876,13 +1876,13 @@ where
             )));
         }
 
-        let row_vars = commitment.num_rows.ilog2() as usize;
-        let q0_f = eq_tensor_f::<F>(&point[..row_vars], field_cfg);
-        let point_scalar = point
+        let (column_point, row_point) = split_column_row_point(point, commitment.num_rows);
+        let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
+        let column_point_scalar = column_point
             .iter()
             .map(F::field_to_scalar)
             .collect::<Result<Vec<_>, _>>()?;
-        let q1_scalar = eq_tensor_scalar::<C>(&point_scalar[row_vars..]);
+        let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
         let alphas = sample_scalars::<C>(
             &mut transcript.fs_transcript,
             commitment.batch_size * commitment.num_lanes,
@@ -2889,6 +2889,12 @@ fn window_value_from_limbs(limbs: &[u64], start: usize, width: usize) -> usize {
     })
 }
 
+fn split_column_row_point<T>(point: &[T], num_rows: usize) -> (&[T], &[T]) {
+    let row_vars = num_rows.ilog2() as usize;
+    let column_vars = point.len() - row_vars;
+    point.split_at(column_vars)
+}
+
 fn num_rows(n: usize, width: usize) -> Result<usize, ZipError> {
     if width == 0 {
         return Err(ZipError::InvalidPcsParam(
@@ -3345,6 +3351,136 @@ mod tests {
             HyraxBlindingMode::Unblinded,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn binary_hyrax_open_verify_width_64_multi_row_round_trip() -> Result<(), ZipError> {
+        type C = ark_bn254::G1Affine;
+        type F = MontyField<4>;
+        const D: usize = 32;
+
+        fn bp(bits: u32) -> BinaryPoly<D> {
+            BinaryPoly::<D>::from(bits)
+        }
+
+        let cfg = cfg_from_curve::<C>();
+        let width = 64;
+        let n = 128;
+        let (ck, vk) = HyraxPCS::<C, BinaryLanes>::setup(
+            width,
+            b"zinc-plus-hyrax-width-64-multi-row-test",
+            HyraxBlindingMode::Unblinded,
+        )
+        ?;
+
+        let polys = vec![
+            DenseMultilinearExtension::from_evaluations_vec(
+                7,
+                (0..n)
+                    .map(|idx| {
+                        let row = idx / width;
+                        let col = idx % width;
+                        bp(((col as u32) << 10) ^ ((row as u32) << 5) ^ 0x1357_9BDF)
+                    })
+                    .collect(),
+                bp(0),
+            ),
+            DenseMultilinearExtension::from_evaluations_vec(
+                7,
+                (0..n)
+                    .map(|idx| {
+                        let row = idx / width;
+                        let col = idx % width;
+                        bp(((col as u32).wrapping_mul(0x45D9_F3B))
+                            ^ ((row as u32).wrapping_mul(0x9E37_79B1)))
+                    })
+                    .collect(),
+                bp(0),
+            ),
+        ];
+        let (prover_data, commitment) =
+            <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::commit(&ck, &polys)?;
+        assert_eq!(prover_data.num_rows, 2);
+        assert_eq!(commitment.num_rows, 2);
+
+        let point = [
+            [0x10u8; 64],
+            [0x21u8; 64],
+            [0x32u8; 64],
+            [0x43u8; 64],
+            [0x54u8; 64],
+            [0x65u8; 64],
+            [0x76u8; 64],
+        ]
+        .iter()
+        .map(|bytes| {
+            let scalar = <C as AffineRepr>::ScalarField::from_le_bytes_mod_order(bytes);
+            <F as HyraxFieldBridge<C>>::scalar_to_field(&scalar, &cfg)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        let eq = eq_tensor_f::<F>(&point, &cfg);
+        let lifted_evals = polys
+            .iter()
+            .map(|poly| {
+                let mut coeffs = vec![F::zero_with_cfg(&cfg); D];
+                for (weight, eval) in eq.iter().zip(poly.evaluations.iter()) {
+                    for (lane, bit) in eval.iter().enumerate() {
+                        if bit.inner() {
+                            coeffs[lane] += weight;
+                        }
+                    }
+                }
+                DynamicPolynomialF::new_trimmed(coeffs)
+            })
+            .collect::<Vec<_>>();
+
+        let mut prover_transcript = PcsProverTranscript {
+            fs_transcript: Default::default(),
+            stream: Default::default(),
+        };
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
+            &mut prover_transcript.fs_transcript,
+            &commitment,
+        );
+        let mut transcription_buf = vec![0u8; <F as crypto_primitives::Field>::Inner::NUM_BYTES];
+        for lifted_eval in &lifted_evals {
+            prover_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&lifted_eval.coeffs, &mut transcription_buf);
+        }
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::prove_open::<true>(
+            &mut prover_transcript,
+            &ck,
+            &polys,
+            &point,
+            &prover_data,
+            &cfg,
+        )
+        ?;
+
+        let mut verifier_transcript = prover_transcript.into_verification_transcript();
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::absorb_commitment(
+            &mut verifier_transcript.fs_transcript,
+            &commitment,
+        );
+        let mut transcription_buf = vec![0u8; <F as crypto_primitives::Field>::Inner::NUM_BYTES];
+        for lifted_eval in &lifted_evals {
+            verifier_transcript
+                .fs_transcript
+                .absorb_random_field_slice(&lifted_eval.coeffs, &mut transcription_buf);
+        }
+        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::verify_open::<true>(
+            &mut verifier_transcript,
+            &vk,
+            &commitment,
+            &point,
+            &lifted_evals,
+            &Vec::new(),
+            &cfg,
+        )
+        ?;
+
+        Ok(())
     }
 
     type ArkF = crypto_primitives::ark_ff_fp::Fp<ark_ff::MontBackend<ark_bn254::FrConfig, 4>, 4>;
