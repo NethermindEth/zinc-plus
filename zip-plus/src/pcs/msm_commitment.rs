@@ -24,7 +24,7 @@ const DEFAULT_BOOL_WINDOW_BITS: usize = 6;
 #[derive(Clone, Debug)]
 pub struct MsmCommitmentKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
-    pub(crate) bases: Vec<C>,
+    pub(crate) bases: Arc<[C]>,
     pub(crate) h: C::Group,
     bool_tables_6: Arc<OnceLock<BoolWindowTable<C>>>,
 }
@@ -33,7 +33,7 @@ pub struct MsmCommitmentKey<C: AffineRepr> {
 #[allow(dead_code)]
 pub struct MsmVerifierKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
-    pub(crate) bases: Vec<C>,
+    pub(crate) bases: Arc<[C]>,
     pub(crate) h: C::Group,
 }
 
@@ -89,7 +89,7 @@ pub struct SignedIntPippengerMsm;
 
 #[derive(Clone, Debug)]
 struct BoolWindowTable<C: AffineRepr> {
-    tables: Vec<Vec<C::Group>>,
+    tables: Vec<Vec<C>>,
     lens: Vec<usize>,
 }
 
@@ -99,12 +99,13 @@ impl<C: AffineRepr> BoolWindowTable<C> {
             .map(|window| {
                 let len = window.len();
                 let table_len = 1usize << len;
-                let mut table = vec![C::Group::zero(); table_len];
+                let mut table_projective = vec![C::Group::zero(); table_len];
                 for mask in 1..table_len {
                     let bit = mask.trailing_zeros() as usize;
                     let previous = mask & !(1usize << bit);
-                    table[mask] = table[previous] + window[bit];
+                    table_projective[mask] = table_projective[previous] + window[bit];
                 }
+                let table = C::Group::normalize_batch(&table_projective);
                 (table, len)
             })
             .collect::<Vec<_>>();
@@ -132,7 +133,7 @@ impl<C: AffineRepr> BoolWindowTable<C> {
                         return C::Group::zero();
                     }
                     let end = (offset + len).min(values.len());
-                    self.tables[window_idx][bit_mask(&values[offset..end])]
+                    self.tables[window_idx][bit_mask(&values[offset..end])].into_group()
                 })
                 .reduce(C::Group::zero, |acc, point| acc + point);
         }
@@ -222,9 +223,10 @@ impl<C: AffineRepr> MsmCommitmentEngine<C> {
             });
         }
 
+        let bases: Arc<[C]> = Arc::from(bases.into_boxed_slice());
         let vk = MsmVerifierKey {
             num_cols: width,
-            bases: bases.clone(),
+            bases: Arc::clone(&bases),
             h,
         };
         let ck = MsmCommitmentKey {

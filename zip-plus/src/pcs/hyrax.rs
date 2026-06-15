@@ -38,8 +38,8 @@ use crate::{
     pcs::{
         generic::{FoldablePCS, PCS},
         msm_commitment::{
-            BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, MsmError, RowMsmStrategy,
-            ScalarPippengerMsm, SignedIntPippengerMsm,
+            BoolSubsetMsm, MsmCommitmentEngine, MsmCommitmentKey, MsmError, MsmVerifierKey,
+            RowMsmStrategy, ScalarPippengerMsm, SignedIntPippengerMsm,
         },
     },
     pcs_transcript::{PcsProverTranscript, PcsVerifierTranscript},
@@ -859,15 +859,17 @@ impl HyraxBlindingMode {
 pub struct HyraxCommitmentKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
     pub(crate) blinding_mode: HyraxBlindingMode,
+    setup_digest: [u8; 32],
     pub(crate) msm_ck: MsmCommitmentKey<C>,
 }
 
 #[derive(Clone, Debug)]
 pub struct HyraxVerifierKey<C: AffineRepr> {
     pub(crate) num_cols: usize,
-    pub(crate) bases: Vec<C>,
+    pub(crate) bases: Arc<[C]>,
     pub(crate) h: C::Group,
     pub(crate) blinding_mode: HyraxBlindingMode,
+    setup_digest: [u8; 32],
     fixed_base_msm: Arc<OnceLock<FixedBaseScalarMsm<C>>>,
 }
 
@@ -877,7 +879,6 @@ pub struct HyraxCommitment<C: AffineRepr> {
     pub(crate) num_lanes: usize,
     pub(crate) num_rows: usize,
     pub(crate) blinding_mode: HyraxBlindingMode,
-    pub(crate) comm: Vec<C::Group>,
     pub(crate) comm_affine: Vec<C>,
     pub(crate) comm_bytes: Vec<u8>,
 }
@@ -1053,7 +1054,7 @@ where
     }
 
     pub fn group_point_count(&self) -> usize {
-        self.comm.len()
+        self.comm_affine.len()
     }
 
     pub fn commitment_bytes_len(&self) -> usize {
@@ -1638,18 +1639,21 @@ impl<C: AffineRepr, Lanes> HyraxPCS<C, Lanes> {
         blinding_mode: HyraxBlindingMode,
     ) -> Result<(HyraxCommitmentKey<C>, HyraxVerifierKey<C>), ZipError> {
         validate_trusted_bases(width, &bases, &h)?;
-        let msm_ck = msm_key(width, bases.clone(), h)?;
+        let setup_digest = hyrax_setup_digest::<C>(width, &bases, &h)?;
+        let (msm_ck, msm_vk) = msm_keys(width, bases, h)?;
         Ok((
             HyraxCommitmentKey {
                 num_cols: width,
                 blinding_mode,
+                setup_digest,
                 msm_ck,
             },
             HyraxVerifierKey {
                 num_cols: width,
-                bases,
-                h,
+                bases: msm_vk.bases,
+                h: msm_vk.h,
                 blinding_mode,
+                setup_digest,
                 fixed_base_msm: Arc::new(OnceLock::new()),
             },
         ))
@@ -1762,7 +1766,6 @@ where
             num_lanes: <BinaryLanes as HyraxLanes<C, BinaryPoly<D>, D>>::NUM_LANES,
             num_rows,
             blinding_mode: binary_ck.blinding_mode,
-            comm: binary_comm,
             comm_affine: binary_affine.to_vec(),
             comm_bytes: binary_bytes.to_vec(),
         };
@@ -1771,7 +1774,6 @@ where
             num_lanes: <IntScalarLane as HyraxLanes<C, IntEval, D>>::NUM_LANES,
             num_rows,
             blinding_mode: int_ck.blinding_mode,
-            comm: int_comm,
             comm_affine: int_affine.to_vec(),
             comm_bytes: int_bytes.to_vec(),
         };
@@ -1844,7 +1846,6 @@ where
                     num_lanes: Lanes::NUM_LANES,
                     num_rows: 0,
                     blinding_mode: ck.blinding_mode,
-                    comm: Vec::new(),
                     comm_affine: Vec::new(),
                     comm_bytes: Vec::new(),
                 },
@@ -1889,7 +1890,6 @@ where
                 num_lanes: Lanes::NUM_LANES,
                 num_rows,
                 blinding_mode: ck.blinding_mode,
-                comm: all_comm,
                 comm_affine: all_affine,
                 comm_bytes: all_bytes,
             },
@@ -1908,7 +1908,7 @@ where
 
     fn commitment_num_bytes(commitment: &Self::Commitment) -> usize {
         let group_size = C::zero().serialized_size(Compress::Yes);
-        3 * core::mem::size_of::<u64>() + 1 + commitment.comm.len() * group_size
+        3 * core::mem::size_of::<u64>() + 1 + commitment.comm_affine.len() * group_size
     }
 
     fn write_commitment_bytes(commitment: &Self::Commitment, buf: &mut Vec<u8>) {
@@ -2275,7 +2275,7 @@ where
     let comm_lc = if commitment.num_rows == 1 {
         msm_unchecked::<C>(&commitment.comm_affine, &alphas)?
     } else {
-        let mut comm_lc_scalars = Vec::with_capacity(commitment.comm.len());
+        let mut comm_lc_scalars = Vec::with_capacity(commitment.comm_affine.len());
         for poly_idx in 0..commitment.batch_size {
             for lane in 0..commitment.num_lanes {
                 let alpha = alphas[alpha_index_dynamic(commitment.num_lanes, poly_idx, lane)];
@@ -2340,7 +2340,6 @@ where
             num_lanes: first.num_lanes,
             num_rows: first.num_rows,
             blinding_mode: first.blinding_mode,
-            comm: folded,
             comm_affine: folded_affine,
             comm_bytes: folded_bytes,
         })
@@ -2606,7 +2605,6 @@ fn same_commitment_shape<C: AffineRepr>(
         && lhs.num_lanes == rhs.num_lanes
         && lhs.num_rows == rhs.num_rows
         && lhs.blinding_mode == rhs.blinding_mode
-        && lhs.comm.len() == rhs.comm.len()
         && lhs.comm_affine.len() == rhs.comm_affine.len()
         && lhs.comm_bytes.len() == rhs.comm_bytes.len()
 }
@@ -2702,8 +2700,7 @@ fn validate_shared_commitment_keys<C: AffineRepr>(
     if lhs.num_cols != rhs.num_cols
         || lhs.blinding_mode != rhs.blinding_mode
         || lhs.msm_ck.num_cols != rhs.msm_ck.num_cols
-        || lhs.msm_ck.bases != rhs.msm_ck.bases
-        || lhs.msm_ck.h != rhs.msm_ck.h
+        || lhs.setup_digest != rhs.setup_digest
     {
         return Err(ZipError::InvalidPcsParam(
             "Hyrax mixed opening requires shared commitment bases".to_string(),
@@ -2718,8 +2715,7 @@ fn validate_shared_verifier_keys<C: AffineRepr>(
 ) -> Result<(), ZipError> {
     if lhs.num_cols != rhs.num_cols
         || lhs.blinding_mode != rhs.blinding_mode
-        || lhs.bases != rhs.bases
-        || lhs.h != rhs.h
+        || lhs.setup_digest != rhs.setup_digest
     {
         return Err(ZipError::InvalidPcsParam(
             "Hyrax mixed opening requires shared verifier bases".to_string(),
@@ -2821,12 +2817,6 @@ where
         )));
     }
     let expected = commitment.batch_size * commitment.num_lanes * commitment.num_rows;
-    if commitment.comm.len() != expected {
-        return Err(ZipError::InvalidPcsParam(format!(
-            "Hyrax commitment expected {expected} row commitments, got {}",
-            commitment.comm.len()
-        )));
-    }
     if commitment.comm_affine.len() != expected {
         return Err(ZipError::InvalidPcsParam(format!(
             "Hyrax commitment expected {expected} affine row commitments, got {}",
@@ -3043,14 +3033,32 @@ fn uint_from_le_bytes<const LIMBS: usize>(bytes: &[u8]) -> Uint<LIMBS> {
     Uint::<LIMBS>::read_transcription_bytes_exact(&padded)
 }
 
-fn msm_key<C: AffineRepr>(
+fn hyrax_setup_digest<C: AffineRepr>(
+    width: usize,
+    bases: &[C],
+    h: &C::Group,
+) -> Result<[u8; 32], ZipError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"hyrax_setup_digest_v1");
+    hasher.update(&(width as u64).to_le_bytes());
+    let mut bytes = Vec::new();
+    for base in bases {
+        bytes.clear();
+        affine_bytes_into::<C>(base, &mut bytes)?;
+        hasher.update(&bytes);
+    }
+    bytes.clear();
+    affine_bytes_into::<C>(&h.clone().into_affine(), &mut bytes)?;
+    hasher.update(&bytes);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn msm_keys<C: AffineRepr>(
     width: usize,
     bases: Vec<C>,
     h: C::Group,
-) -> Result<MsmCommitmentKey<C>, ZipError> {
-    MsmCommitmentEngine::<C>::setup_from_bases(width, bases, h)
-        .map(|(ck, _)| ck)
-        .map_err(msm_err)
+) -> Result<(MsmCommitmentKey<C>, MsmVerifierKey<C>), ZipError> {
+    MsmCommitmentEngine::<C>::setup_from_bases(width, bases, h).map_err(msm_err)
 }
 
 fn msm_unchecked<C: AffineRepr>(
@@ -4238,7 +4246,10 @@ mod tests {
 
         assert_eq!(prover_data.blinds.len(), 0);
         assert_eq!(commitment.num_rows, 2);
-        assert_eq!(commitment.comm, expected);
+        assert_eq!(
+            commitment.comm_affine,
+            <C as AffineRepr>::Group::normalize_batch(&expected)
+        );
     }
 
     #[test]
@@ -4269,8 +4280,8 @@ mod tests {
 
         assert_eq!(prover_data.num_rows, 1);
         assert_eq!(commitment.num_rows, 1);
-        assert_eq!(commitment.comm.len(), D);
-        for (lane, comm) in commitment.comm.iter().enumerate() {
+        assert_eq!(commitment.comm_affine.len(), D);
+        for (lane, comm) in commitment.comm_affine.iter().enumerate() {
             let values = polys[0]
                 .evaluations
                 .iter()
@@ -4281,7 +4292,7 @@ mod tests {
             } else {
                 <C as AffineRepr>::Group::zero()
             };
-            assert_eq!(*comm, expected);
+            assert_eq!(*comm, expected.into_affine());
         }
     }
 
@@ -4692,7 +4703,6 @@ mod tests {
             num_lanes: D,
             num_rows: 0,
             blinding_mode: HyraxBlindingMode::Unblinded,
-            comm: Vec::new(),
             comm_affine: Vec::new(),
             comm_bytes: Vec::new(),
         };
@@ -4736,7 +4746,6 @@ mod tests {
             num_lanes: D,
             num_rows: 1,
             blinding_mode: HyraxBlindingMode::Unblinded,
-            comm: Vec::new(),
             comm_affine: Vec::new(),
             comm_bytes: Vec::new(),
         };
