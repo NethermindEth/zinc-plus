@@ -1525,7 +1525,7 @@ where
 }
 
 fn mixed_width_candidates() -> Vec<(String, usize)> {
-    [128usize, 256, 512, 1024, 2048, 4096]
+    [8usize, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
         .into_iter()
         .map(|width| (format!("mixed {width}"), width))
         .collect()
@@ -2223,7 +2223,7 @@ fn write_hyrax_width_sweep_report(
 <style>body{{font-family:Inter,system-ui,sans-serif;margin:32px;color:#111827}}table{{border-collapse:collapse;width:100%;font-size:13px}}th,td{{border:1px solid #d1d5db;padding:6px 8px;text-align:right}}th:first-child,td:first-child{{text-align:left}}tr.winner{{background:#ecfdf5}}tr.winner td:first-child{{font-weight:700}}img{{max-width:100%;border:1px solid #e5e7eb;margin:16px 0}}</style>
 </head><body><h1>Hyrax Width Sweep</h1>
 <p>Values per instance: {PACKED_SHA_VALUES_PER_INSTANCE}. Widths below 549 use row-local source padding for separable packed openings, so actual ECC points may exceed ceil(values/width).</p>
-<p>Mixed Hyrax widths tune the row-domain commitment width for the specialized binary/int lane layout. The current mixed folded-opening path is single-row only, so this sweep starts at 128. Widths above 128 cannot reduce mixed ECC commitments below one row per source, but they test wider opening vectors and fixed-base MSM behavior.</p>
+<p>Mixed Hyrax widths tune the row-domain commitment width for the specialized binary/int lane layout. Widths below 128 increase the number of mixed commitment rows; widths above 128 cannot reduce mixed ECC commitments below one row per source, but they test wider opening vectors and fixed-base MSM behavior.</p>
 <p>Timing mode: {HYRAX_WIDTH_SWEEP_WARMUP_RUNS} warmup runs per config, {HYRAX_WIDTH_SWEEP_TUNING_SAMPLES} recorded tuning samples per config, and {HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES} recorded confirmation samples for the top {HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K} Hyrax prover candidates. Headline times are medians.</p>
 {most_performant}
 {table}

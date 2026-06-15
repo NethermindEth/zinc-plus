@@ -242,7 +242,7 @@ where
     }
 
     /// Open two folded Hyrax commitments that share the same row bases as one
-    /// mixed single-row proof.
+    /// mixed proof.
     #[allow(clippy::arithmetic_side_effects)]
     #[allow(clippy::too_many_arguments)]
     pub fn prove_open_two_field_lane_groups_single_row<F, const CHECK_FOR_OVERFLOW: bool>(
@@ -270,13 +270,14 @@ where
         validate_field_lanes::<C, F>(ck_a, field_lanes_a, point.len(), prover_data_a)?;
         validate_field_lanes::<C, F>(ck_b, field_lanes_b, point.len(), prover_data_b)?;
         validate_shared_commitment_keys(ck_a, ck_b)?;
-        if prover_data_a.num_rows != 1 || prover_data_b.num_rows != 1 {
+        if prover_data_a.num_rows != prover_data_b.num_rows {
             return Err(ZipError::InvalidPcsParam(
-                "Hyrax mixed field-lane opening requires a single row".to_string(),
+                "Hyrax mixed field-lane opening requires matching row counts".to_string(),
             ));
         }
 
-        let q1 = eq_tensor_f::<F>(point, field_cfg);
+        let (column_point, _row_point) = split_column_row_point(point, prover_data_a.num_rows);
+        let q1 = eq_tensor_f::<F>(column_point, field_cfg);
         let alpha_count_a = field_lanes_a.len() * prover_data_a.num_lanes;
         let alpha_count_b = field_lanes_b.len() * prover_data_b.num_lanes;
         let alphas =
@@ -286,50 +287,65 @@ where
             .map(|alpha| F::scalar_to_field(alpha, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut b = vec![F::zero_with_cfg(field_cfg); prover_data_a.num_rows];
+        accumulate_field_lane_b(
+            ck_a.num_cols,
+            prover_data_a.num_lanes,
+            field_lanes_a,
+            0,
+            &alpha_fields,
+            &q1,
+            &mut b,
+            field_cfg,
+        )?;
+        accumulate_field_lane_b(
+            ck_b.num_cols,
+            prover_data_b.num_lanes,
+            field_lanes_b,
+            alpha_count_a,
+            &alpha_fields,
+            &q1,
+            &mut b,
+            field_cfg,
+        )?;
+        write_hyrax_field_elements::<C, F>(transcript, &b, field_cfg)?;
+
+        let row_coeffs = if prover_data_a.num_rows == 1 {
+            vec![C::ScalarField::from(1u64)]
+        } else {
+            sample_scalars::<C>(&mut transcript.fs_transcript, prover_data_a.num_rows)
+        };
+        let row_coeff_fields = row_coeffs
+            .iter()
+            .map(|row_coeff| F::scalar_to_field(row_coeff, field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut combined_row = vec![F::zero_with_cfg(field_cfg); ck_a.num_cols];
         let mut rho_star = C::ScalarField::zero();
-        for (poly_idx, lanes) in field_lanes_a.iter().enumerate() {
-            for (lane, values) in lanes.iter().enumerate() {
-                let alpha_idx = alpha_index_dynamic(prover_data_a.num_lanes, poly_idx, lane);
-                let alpha = &alpha_fields[alpha_idx];
-                for (acc, value) in combined_row.iter_mut().zip(values.iter()) {
-                    *acc += value.clone() * alpha.clone();
-                }
-                if ck_a.blinding_mode.is_blinded() {
-                    let blind_idx = commitment_index_dynamic(
-                        prover_data_a.num_lanes,
-                        poly_idx,
-                        lane,
-                        0,
-                        prover_data_a.num_rows,
-                    );
-                    rho_star += alphas[alpha_idx] * prover_data_a.blinds[blind_idx];
-                }
-            }
-        }
-        for (poly_idx, lanes) in field_lanes_b.iter().enumerate() {
-            for (lane, values) in lanes.iter().enumerate() {
-                let local_alpha_idx = alpha_index_dynamic(prover_data_b.num_lanes, poly_idx, lane);
-                let alpha_idx = alpha_count_a + local_alpha_idx;
-                let alpha = &alpha_fields[alpha_idx];
-                for (acc, value) in combined_row.iter_mut().zip(values.iter()) {
-                    *acc += value.clone() * alpha.clone();
-                }
-                if ck_b.blinding_mode.is_blinded() {
-                    let blind_idx = commitment_index_dynamic(
-                        prover_data_b.num_lanes,
-                        poly_idx,
-                        lane,
-                        0,
-                        prover_data_b.num_rows,
-                    );
-                    rho_star += alphas[alpha_idx] * prover_data_b.blinds[blind_idx];
-                }
-            }
-        }
-
-        let b = F::delayed_sum_of_products(&combined_row, &q1, F::zero_with_cfg(field_cfg));
-        write_hyrax_field_elements::<C, F>(transcript, &[b], field_cfg)?;
+        accumulate_field_lane_combined_row(
+            ck_a,
+            field_lanes_a,
+            prover_data_a,
+            0,
+            &alphas,
+            &alpha_fields,
+            &row_coeffs,
+            &row_coeff_fields,
+            &mut combined_row,
+            &mut rho_star,
+        )?;
+        accumulate_field_lane_combined_row(
+            ck_b,
+            field_lanes_b,
+            prover_data_b,
+            alpha_count_a,
+            &alphas,
+            &alpha_fields,
+            &row_coeffs,
+            &row_coeff_fields,
+            &mut combined_row,
+            &mut rho_star,
+        )?;
 
         let combined_scalars = combined_row
             .iter()
@@ -473,17 +489,19 @@ where
 
             let n = 1usize << point.len();
             let expected_rows = num_rows(n, vk_a.num_cols)?;
-            if expected_rows != 1 || commitment_a.num_rows != 1 || commitment_b.num_rows != 1 {
+            if expected_rows != commitment_a.num_rows || expected_rows != commitment_b.num_rows {
                 return Err(ZipError::InvalidPcsParam(
-                    "Hyrax mixed opening verifier requires a single row".to_string(),
+                    "Hyrax mixed opening verifier row-count mismatch".to_string(),
                 ));
             }
 
-            let point_scalar = point
+            let (column_point, row_point) = split_column_row_point(point, commitment_a.num_rows);
+            let q0_f = eq_tensor_f::<F>(row_point, field_cfg);
+            let column_point_scalar = column_point
                 .iter()
                 .map(F::field_to_scalar)
                 .collect::<Result<Vec<_>, _>>()?;
-            let q1_scalar = eq_tensor_scalar::<C>(&point_scalar);
+            let q1_scalar = eq_tensor_scalar::<C>(&column_point_scalar);
             let alpha_count_a = commitment_a.batch_size * commitment_a.num_lanes;
             let alpha_count_b = commitment_b.batch_size * commitment_b.num_lanes;
             let alphas =
@@ -492,9 +510,14 @@ where
             let b_f = read_hyrax_field_elements::<C, F, _>(
                 &mut proof_stream,
                 &mut transcript.fs_transcript,
-                1,
+                commitment_a.num_rows,
                 field_cfg,
             )?;
+            if b_f.len() != q0_f.len() {
+                return Err(ZipError::InvalidPcsOpen(
+                    "Hyrax mixed b vector shape mismatch".to_string(),
+                ));
+            }
             let mut expected_eval = F::zero_with_cfg(field_cfg);
             for (poly_idx, lifted_eval) in lifted_evals_a.iter().enumerate() {
                 for lane in 0..commitment_a.num_lanes {
@@ -516,13 +539,26 @@ where
                     expected_eval += &term;
                 }
             }
-            if b_f[0] != expected_eval {
+            let mut b_eval = F::zero_with_cfg(field_cfg);
+            for (weight, b) in q0_f.iter().zip(b_f.iter()) {
+                b_eval += weight.clone() * b.clone();
+            }
+            if b_eval != expected_eval {
                 return Err(ZipError::InvalidPcsOpen(
                     "Hyrax mixed evaluation consistency failure".to_string(),
                 ));
             }
 
-            let b_scalar = F::field_to_scalar(&b_f[0])?;
+            let b_scalar = b_f
+                .iter()
+                .map(F::field_to_scalar)
+                .collect::<Result<Vec<_>, _>>()?;
+            let row_coeffs = if commitment_a.num_rows == 1 {
+                vec![C::ScalarField::from(1u64)]
+            } else {
+                sample_scalars::<C>(&mut transcript.fs_transcript, commitment_a.num_rows)
+            };
+
             let combined_row = read_scalars_from::<C, _>(
                 &mut proof_stream,
                 &mut transcript.fs_transcript,
@@ -541,7 +577,11 @@ where
             for (value, weight) in combined_row.iter().zip(q1_scalar.iter()) {
                 lhs += *value * weight;
             }
-            if lhs != b_scalar {
+            let mut rhs = C::ScalarField::zero();
+            for (coeff, b) in row_coeffs.iter().zip(b_scalar.iter()) {
+                rhs += *coeff * b;
+            }
+            if lhs != rhs {
                 return Err(ZipError::InvalidPcsOpen(
                     "Hyrax mixed row coherence failure".to_string(),
                 ));
@@ -551,13 +591,23 @@ where
                 [weight] => Some(F::field_to_scalar(weight)?),
                 _ => None,
             };
-            let comm_lc = if unit_fold_scalar == Some(C::ScalarField::one()) {
-                let mut comm_bases = Vec::with_capacity(
-                    commitment_a.comm_affine.len() + commitment_b.comm_affine.len(),
-                );
-                comm_bases.extend_from_slice(&commitment_a.comm_affine);
-                comm_bases.extend_from_slice(&commitment_b.comm_affine);
-                msm_unchecked::<C>(&comm_bases, &alphas)?
+            let point_scalars_a = row_weighted_alpha_scalars::<C>(
+                commitment_a.batch_size,
+                commitment_a.num_lanes,
+                &alphas[..alpha_count_a],
+                &row_coeffs,
+            );
+            let point_scalars_b = row_weighted_alpha_scalars::<C>(
+                commitment_b.batch_size,
+                commitment_b.num_lanes,
+                &alphas[alpha_count_a..],
+                &row_coeffs,
+            );
+            let (comm_lc_a, comm_lc_b) = if unit_fold_scalar == Some(C::ScalarField::one()) {
+                (
+                    msm_unchecked::<C>(&commitment_a.comm_affine, &point_scalars_a)?,
+                    msm_unchecked::<C>(&commitment_b.comm_affine, &point_scalars_b)?,
+                )
             } else {
                 let fold_scalars = match unit_fold_scalar {
                     Some(scalar) => vec![scalar],
@@ -566,18 +616,20 @@ where
                         .map(F::field_to_scalar)
                         .collect::<Result<Vec<_>, _>>()?,
                 };
-                let mut comm_lc = folded_commitment_linear_combination::<C>(
-                    commitments_a,
-                    &fold_scalars,
-                    &alphas[..alpha_count_a],
-                )?;
-                comm_lc += folded_commitment_linear_combination::<C>(
-                    commitments_b,
-                    &fold_scalars,
-                    &alphas[alpha_count_a..],
-                )?;
-                comm_lc
+                (
+                    folded_commitment_linear_combination::<C>(
+                        commitments_a,
+                        &fold_scalars,
+                        &point_scalars_a,
+                    )?,
+                    folded_commitment_linear_combination::<C>(
+                        commitments_b,
+                        &fold_scalars,
+                        &point_scalars_b,
+                    )?,
+                )
             };
+            let comm_lc = comm_lc_a + comm_lc_b;
 
             let mut expected = verifier_base_msm::<C>(vk_a, &combined_row)?;
             if let Some(rho_star) = rho_star {
@@ -3345,6 +3397,128 @@ fn num_rows(n: usize, width: usize) -> Result<usize, ZipError> {
 
 fn alpha_index_dynamic(num_lanes: usize, poly_idx: usize, lane: usize) -> usize {
     poly_idx * num_lanes + lane
+}
+
+fn accumulate_field_lane_b<F>(
+    num_cols: usize,
+    num_lanes: usize,
+    field_lanes: &[Vec<&[F]>],
+    alpha_offset: usize,
+    alpha_fields: &[F],
+    q1: &[F],
+    b: &mut [F],
+    field_cfg: &F::Config,
+) -> Result<(), ZipError>
+where
+    F: PrimeField + DelayedFieldProductSum,
+{
+    for (poly_idx, lanes) in field_lanes.iter().enumerate() {
+        for (lane, values) in lanes.iter().enumerate() {
+            let alpha_idx = alpha_offset + alpha_index_dynamic(num_lanes, poly_idx, lane);
+            let alpha = alpha_fields.get(alpha_idx).ok_or_else(|| {
+                ZipError::InvalidPcsParam("Hyrax field-lane alpha shape mismatch".to_string())
+            })?;
+            for (row_idx, row) in values.chunks(num_cols).enumerate() {
+                let row_acc = b.get_mut(row_idx).ok_or_else(|| {
+                    ZipError::InvalidPcsParam(
+                        "Hyrax field-lane row count shape mismatch".to_string(),
+                    )
+                })?;
+                let dot_len = row.len().min(q1.len());
+                let row_eval = F::delayed_sum_of_products(
+                    &row[..dot_len],
+                    &q1[..dot_len],
+                    F::zero_with_cfg(field_cfg),
+                );
+                *row_acc += row_eval * alpha.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_field_lane_combined_row<C, F>(
+    ck: &HyraxCommitmentKey<C>,
+    field_lanes: &[Vec<&[F]>],
+    prover_data: &HyraxProverData<C>,
+    alpha_offset: usize,
+    alphas: &[C::ScalarField],
+    alpha_fields: &[F],
+    row_coeffs: &[C::ScalarField],
+    row_coeff_fields: &[F],
+    combined_row: &mut [F],
+    rho_star: &mut C::ScalarField,
+) -> Result<(), ZipError>
+where
+    C: AffineRepr,
+    F: PrimeField,
+{
+    if combined_row.len() != ck.num_cols
+        || row_coeffs.len() != prover_data.num_rows
+        || row_coeff_fields.len() != prover_data.num_rows
+    {
+        return Err(ZipError::InvalidPcsParam(
+            "Hyrax field-lane combined-row shape mismatch".to_string(),
+        ));
+    }
+
+    for (poly_idx, lanes) in field_lanes.iter().enumerate() {
+        for (lane, values) in lanes.iter().enumerate() {
+            let alpha_idx =
+                alpha_offset + alpha_index_dynamic(prover_data.num_lanes, poly_idx, lane);
+            let alpha = alpha_fields.get(alpha_idx).ok_or_else(|| {
+                ZipError::InvalidPcsParam("Hyrax field-lane alpha shape mismatch".to_string())
+            })?;
+            let alpha_scalar = alphas.get(alpha_idx).ok_or_else(|| {
+                ZipError::InvalidPcsParam(
+                    "Hyrax field-lane scalar alpha shape mismatch".to_string(),
+                )
+            })?;
+            for (row_idx, row) in values.chunks(ck.num_cols).enumerate() {
+                let row_coeff = row_coeff_fields.get(row_idx).ok_or_else(|| {
+                    ZipError::InvalidPcsParam(
+                        "Hyrax field-lane row coefficient shape mismatch".to_string(),
+                    )
+                })?;
+                let coeff = alpha.clone() * row_coeff.clone();
+                for (acc, value) in combined_row.iter_mut().zip(row.iter()) {
+                    *acc += value.clone() * coeff.clone();
+                }
+                if ck.blinding_mode.is_blinded() {
+                    let blind_idx = commitment_index_dynamic(
+                        prover_data.num_lanes,
+                        poly_idx,
+                        lane,
+                        row_idx,
+                        prover_data.num_rows,
+                    );
+                    let blind = prover_data.blinds.get(blind_idx).ok_or_else(|| {
+                        ZipError::InvalidPcsParam(
+                            "Hyrax field-lane blind shape mismatch".to_string(),
+                        )
+                    })?;
+                    *rho_star += *alpha_scalar * row_coeffs[row_idx] * *blind;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn row_weighted_alpha_scalars<C: AffineRepr>(
+    batch_size: usize,
+    num_lanes: usize,
+    alphas: &[C::ScalarField],
+    row_coeffs: &[C::ScalarField],
+) -> Vec<C::ScalarField> {
+    let mut scalars = Vec::with_capacity(batch_size * num_lanes * row_coeffs.len());
+    for poly_idx in 0..batch_size {
+        for lane in 0..num_lanes {
+            let alpha = alphas[alpha_index_dynamic(num_lanes, poly_idx, lane)];
+            scalars.extend(row_coeffs.iter().map(|row_coeff| alpha * row_coeff));
+        }
+    }
+    scalars
 }
 
 fn commitment_index_dynamic(
