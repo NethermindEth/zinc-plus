@@ -2545,7 +2545,7 @@ fn hadamard_benches(c: &mut Criterion) {
             .filter_map(|x| x.trim().parse::<usize>().ok())
             .collect()
     });
-    for &num_vars in &[9usize, 11, 13, 15, 16, 20, 21] {
+    for &num_vars in &[16usize, 20, 21, 22, 23] {
         if let Some(only) = &only {
             if !only.contains(&num_vars) {
                 continue;
