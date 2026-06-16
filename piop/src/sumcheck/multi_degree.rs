@@ -131,6 +131,17 @@ impl<F> MultiDegreeSumcheckProof<F> {
     pub fn claimed_sums(&self) -> &[F] {
         &self.claimed_sums
     }
+
+    /// Per-group prover round messages. `group_messages()[g][round]` is the
+    /// round message for group `g` in the given `round`.
+    pub fn group_messages(&self) -> &[Vec<SumcheckProverMsg<F>>] {
+        &self.group_messages
+    }
+
+    #[cfg(test)]
+    pub fn group_messages_mut(&mut self) -> &mut [Vec<SumcheckProverMsg<F>>] {
+        &mut self.group_messages
+    }
 }
 
 impl<F: PrimeField> GenTranscribable for MultiDegreeSumcheckProof<F>

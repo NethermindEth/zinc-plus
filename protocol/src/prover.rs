@@ -5,7 +5,7 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{BooleanityChecker, BooleanityProof},
-    multipoint_eval::{MultipointEval, Proof as MultipointEvalProof},
+    multipoint_eval::{MultipointEval, MultipointEvalBranchInputs, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedScalars, ProjectedTrace, RowMajorTrace,
         evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
@@ -296,6 +296,11 @@ pub struct ProverSumchecked<
     /// the multipoint-eval inputs (and optionally append $\alpha'$-projected
     /// witness-bin MLEs as the Schwartz-Zippel bridge).
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Per-prime $\psi$-projected trace MLEs (one entry per declared
+    /// prime). Threaded forward from step 4 by `step5_sumcheck` so that
+    /// Phase G's lockstep multipoint-eval can build per-prime MP branches.
+    /// Empty for UAIRs with no declared fq primes.
+    projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 
     // New
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -306,9 +311,8 @@ pub struct ProverSumchecked<
     /// finalize. Empty for UAIRs with no declared fq primes.
     cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime CPR sumcheck endpoints `r^*_i`, lifted into each branch's
-    /// field. Empty for UAIRs with no declared fq primes. Carried forward
-    /// for Phase G (per-prime multipoint-eval).
-    #[allow(dead_code)] // Consumed by Phase G.
+    /// field. Empty for UAIRs with no declared fq primes. Consumed by
+    /// Phase G's lockstep multipoint-eval.
     cpr_eval_points_fq: Vec<Vec<F>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime).
     /// Empty for UAIRs with no declared fq primes.
@@ -338,6 +342,10 @@ pub struct ProverMultipointEvaled<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (carried for later phases that need the
+    /// per-prime cfgs, e.g. Phase H/I).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
@@ -353,6 +361,16 @@ pub struct ProverMultipointEvaled<
     // New
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
+    /// Per-prime multipoint-eval proofs (one per declared prime in
+    /// `UairSignature::primes()`), produced by Phase G's lockstep
+    /// multipoint-eval. Empty for UAIRs with no declared fq primes.
+    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
+    /// Per-prime sumcheck output points $r_0$ (one per declared prime,
+    /// lifted into each branch's field — the underlying integer is shared
+    /// with the Q-branch `r_0` thanks to the lockstep sumcheck). Empty for
+    /// UAIRs with no declared fq primes. Carried forward for Phase H/I.
+    #[allow(dead_code)] // Consumed by Phase H / I.
+    r_0_fq: Vec<Vec<F>>,
 }
 
 /// After step 7 (lift-and-project).
@@ -367,6 +385,9 @@ pub struct ProverLifted<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs.
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -377,6 +398,12 @@ pub struct ProverLifted<
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
+    /// Per-prime multipoint-eval proofs threaded forward from
+    /// `ProverMultipointEvaled`.
+    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
+    /// Per-prime sumcheck output points $r_0$ threaded forward.
+    #[allow(dead_code)] // Consumed by Phase H / I.
+    r_0_fq: Vec<Vec<F>>,
 
     // New
     lifted_evals: Vec<DynamicPolynomialF<F>>,
@@ -405,6 +432,8 @@ pub struct ProverPcsOpened<
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
+    /// Per-prime multipoint-eval proofs threaded forward.
+    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
     lifted_evals: Vec<DynamicPolynomialF<F>>,
 }
 
@@ -1088,6 +1117,7 @@ impl_with_type_bounds!(ProverEvalProjected
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             projected_trace_f: self.projected_trace_f,
+            projected_trace_f_fq: self.projected_trace_f_fq,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
@@ -1119,11 +1149,12 @@ impl_with_type_bounds!(ProverSumchecked
     /// continues to live at its original $\psi_a$-projected slot).
     /// See the module-level `BooleanityChecker` docs for the soundness
     /// argument (Schwartz-Zippel at $\alpha'$ + MP/PCS chain at $r_0$).
-    #[allow(clippy::arithmetic_side_effects)]
+    #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     pub fn step6_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        let (trace_mles, up_evals) = if let Some(alpha_prime) = &self.alpha_prime_f {
+        // --- Q[X] branch (booleanity-bridge applied iff alpha_prime present)
+        let (q_trace_mles, q_up_evals) = if let Some(alpha_prime) = &self.alpha_prime_f {
             let sig = &self.base.uair_signature;
             let num_pub_bin = sig.public_cols().num_binary_poly_cols();
             let num_total_bin = sig.total_cols().num_binary_poly_cols();
@@ -1160,19 +1191,73 @@ impl_with_type_bounds!(ProverSumchecked
             (self.projected_trace_f, self.cpr_proof.up_evals.clone())
         };
 
-        let (mp_proof, mp_prover_state) = MultipointEval::prove_as_subprotocol(
+        // --- Two lockstep multipoint-eval invocations -------------------
+        //
+        // The Q-branch and the per-prime branches generally carry **different
+        // column counts**: when booleanity runs, Q gets extra
+        // $\alpha'$-projected witness-bin columns appended; the per-prime
+        // branches never do (witness binaries live in $Q[X]$). Sharing
+        // batching coefficients $\gamma_j$ across mismatched column counts
+        // is not well-defined, so we run two separate lockstep invocations:
+        //
+        //   1. **Q-branch:** one single-branch run over $Q[X]$ (degenerate
+        //      lockstep — `q_star_cfg = field_cfg`). Uses the
+        //      booleanity-extended `q_trace_mles` / `q_up_evals` when
+        //      booleanity is active, otherwise the standard ones.
+        //   2. **Per-prime branches:** one $n$-branch run with shared
+        //      integer challenges in $[0, q^*)$. Skipped when `n_fq == 0`.
+        let n_fq = self.projected_trace_f_fq.len();
+        let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
+        let shifts = self.base.uair_signature.shifts();
+
+        // Q-branch standalone.
+        let mut q_outputs = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            &trace_mles,
-            &self.cpr_eval_point,
-            &up_evals,
-            &self.cpr_proof.down_evals,
-            self.base.uair_signature.shifts(),
+            vec![MultipointEvalBranchInputs {
+                trace_mles: &q_trace_mles,
+                eval_point: &self.cpr_eval_point,
+                up_evals: &q_up_evals,
+                down_evals: &self.cpr_proof.down_evals,
+                field_cfg: &self.field_cfg,
+            }],
+            shifts,
             &self.field_cfg,
         )?;
+        let (mp_proof_q, q_state) = q_outputs.pop().expect("single-branch Q output");
+        let r_0_q = q_state.eval_point;
+
+        // Per-prime branches (lockstep, n_fq branches, shared `q_star_cfg`).
+        let mut mp_proofs_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_fq);
+        let mut r_0_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        if n_fq > 0 {
+            let mut fq_branches: Vec<MultipointEvalBranchInputs<'_, F>> =
+                Vec::with_capacity(n_fq);
+            for prime_idx in 0..n_fq {
+                let branch_idx = add!(prime_idx, 1);
+                fq_branches.push(MultipointEvalBranchInputs {
+                    trace_mles: &self.projected_trace_f_fq[prime_idx],
+                    eval_point: &self.cpr_eval_points_fq[prime_idx],
+                    up_evals: &self.cpr_proofs_fq[prime_idx].up_evals,
+                    down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
+                    field_cfg: &self.all_field_cfgs[branch_idx],
+                });
+            }
+            let fq_outputs = MultipointEval::prove_as_subprotocol(
+                &mut self.base.pcs_transcript.fs_transcript,
+                fq_branches,
+                shifts,
+                &q_star_cfg,
+            )?;
+            for (proof_i, state_i) in fq_outputs {
+                mp_proofs_fq.push(proof_i);
+                r_0_fq.push(state_i.eval_point);
+            }
+        }
 
         Ok(ProverMultipointEvaled {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
@@ -1182,8 +1267,10 @@ impl_with_type_bounds!(ProverSumchecked
             combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
-            mp_proof,
-            r_0: mp_prover_state.eval_point,
+            mp_proof: mp_proof_q,
+            r_0: r_0_q,
+            mp_proofs_fq,
+            r_0_fq,
         })
     }
 });
@@ -1217,6 +1304,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
         Ok(ProverLifted {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
@@ -1227,6 +1315,8 @@ impl_with_type_bounds!(ProverMultipointEvaled
             booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
             r_0: self.r_0,
+            mp_proofs_fq: self.mp_proofs_fq,
+            r_0_fq: self.r_0_fq,
             lifted_evals,
         })
     }
@@ -1292,6 +1382,7 @@ impl_with_type_bounds!(ProverLifted
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
+            mp_proofs_fq: self.mp_proofs_fq,
             lifted_evals: self.lifted_evals,
         })
     }
@@ -1343,6 +1434,7 @@ impl_with_type_bounds!(ProverPcsOpened
             ideal_checks_fq: self.ic_proof_fq,
             cpr_proofs_fq: self.cpr_proofs_fq,
             combined_sumchecks_fq: self.combined_sumchecks_fq,
+            multipoint_evals_fq: self.mp_proofs_fq,
         })
     }
 });

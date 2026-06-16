@@ -6,7 +6,7 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::{self, IdealCheckProtocol},
     lookup::booleanity::{BooleanityChecker, BooleanityProof},
-    multipoint_eval::{self, MultipointEval},
+    multipoint_eval::{self, MultipointEval, MultipointEvalBranchInputs},
     projections::{
         ProjectedScalars, ProjectedTrace, project_scalars, project_scalars_to_field,
         project_trace_coeffs_row_major,
@@ -86,6 +86,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -115,6 +116,7 @@ pub struct VerifierPrimeProjected<
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
     proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -158,6 +160,8 @@ pub struct VerifierIdealChecked<
     proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime).
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    /// Per-prime multipoint-eval proofs (one per declared prime).
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -212,6 +216,9 @@ pub struct VerifierEvalProjected<
     /// Per-prime multi-degree sumcheck proofs (one per declared prime),
     /// consumed in step 4 by the lockstep verifier driver.
     proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    /// Per-prime multipoint-eval proofs (one per declared prime),
+    /// consumed in step 5 by the lockstep multipoint-eval verifier.
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -245,6 +252,14 @@ pub struct VerifierSumchecked<
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
     cpr_down_evals: Vec<F>,
+    /// Per-prime CPR subclaim evaluation points ($r^\star_i$, lifted into
+    /// each branch's field). Length `n_fq`. Empty for UAIRs with no
+    /// declared fq primes. Consumed by Phase G's lockstep multipoint-eval.
+    cpr_eval_points_fq: Vec<Vec<F>>,
+    /// Per-prime CPR subclaim `up_evals`. Length `n_fq`. Consumed by Phase G.
+    cpr_up_evals_fq: Vec<Vec<F>>,
+    /// Per-prime CPR subclaim `down_evals`. Length `n_fq`. Consumed by Phase G.
+    cpr_down_evals_fq: Vec<Vec<F>>,
     /// `bit_slice_evals` carried over from booleanity's `finalize_verifier`,
     /// to be collapsed into the appended `up_evals` entries
     /// $c_j = \sum_i b_{j,i}\,(\alpha')^i$.
@@ -261,6 +276,7 @@ pub struct VerifierSumchecked<
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_multipoint_eval: MultipointEvalProof<F>,
+    proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
@@ -278,12 +294,20 @@ pub struct VerifierMultipointEvaled<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
+    /// Per-branch field configs (carried for later phases).
+    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    all_field_cfgs: Vec<F::Config>,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
     projecting_elements: Vec<F>,
     // See VerifierSumchecked::alpha_prime_f
     alpha_prime_f: Option<F>,
     mp_subclaim: multipoint_eval::Subclaim<F>,
+    /// Per-prime multipoint-eval subclaims, one per declared prime, produced
+    /// by Phase G's lockstep multipoint-eval verifier. Empty for UAIRs with
+    /// no declared fq primes. Threaded forward for Phase H/I.
+    #[allow(dead_code)] // Consumed by Phase H / I.
+    mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -401,6 +425,7 @@ where
             proof_ideal_checks_fq: proof.ideal_checks_fq,
             proof_cpr_fq: proof.cpr_proofs_fq,
             proof_combined_sumchecks_fq: proof.combined_sumchecks_fq,
+            proof_multipoint_evals_fq: proof.multipoint_evals_fq,
             _phantom: PhantomData,
         })
     }
@@ -440,6 +465,7 @@ where
             proof_ideal_checks_fq: self.proof_ideal_checks_fq,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
+            proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
             _phantom: PhantomData,
         })
     }
@@ -582,6 +608,7 @@ where
             proof_booleanity: self.proof_booleanity,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
+            proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
             _phantom: PhantomData,
         })
     }
@@ -637,8 +664,7 @@ where
         for prime_idx in 0..n_fq {
             let branch_idx = add!(prime_idx, 1);
             let cfg_i = &self.all_field_cfgs[branch_idx];
-            let projected_scalars_fx_i =
-                project_scalars::<F, U>(|s| project_scalar(s, cfg_i));
+            let projected_scalars_fx_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_i));
             let projected_scalars_f_i =
                 project_scalars_to_field(projected_scalars_fx_i, &projecting_elements[branch_idx])
                     .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
@@ -663,6 +689,7 @@ where
             proof_booleanity: self.proof_booleanity,
             proof_cpr_fq: self.proof_cpr_fq,
             proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
+            proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
             _phantom: PhantomData,
         })
     }
@@ -698,9 +725,7 @@ where
 
         // Per-prime sub-proof length sanity check
         let n_fq = self.all_field_cfgs.len().saturating_sub(1);
-        if self.proof_cpr_fq.len() != n_fq
-            || self.proof_combined_sumchecks_fq.len() != n_fq
-        {
+        if self.proof_cpr_fq.len() != n_fq || self.proof_combined_sumchecks_fq.len() != n_fq {
             return Err(ProtocolError::FqIdealCheck {
                 prime_idx: self.proof_cpr_fq.len(),
                 q: "<fq sub-proof length mismatch>".to_owned(),
@@ -857,6 +882,12 @@ where
         // -------- Per-prime branch finalize ---------------------------
         // Mirror the prover's loop: pop next subclaim per branch, call
         // `finalize_verifier` under that branch's cfg + projected scalars.
+        // Capture per-branch CPR subclaims so step 5 (lockstep MP-eval)
+        // can feed them per branch.
+        let n_fq = self.all_field_cfgs.len().saturating_sub(1);
+        let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        let mut cpr_up_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        let mut cpr_down_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         for (prime_idx, (cpr_proof_i, cpr_ancillary_i)) in self
             .proof_cpr_fq
             .into_iter()
@@ -868,7 +899,7 @@ where
             let md_subclaims_i = subclaims_iter
                 .next()
                 .expect("per-prime sumcheck subclaim always present");
-            CombinedPolyResolver::finalize_verifier::<U>(
+            let cpr_subclaim_i = CombinedPolyResolver::finalize_verifier::<U>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 cpr_proof_i,
                 md_subclaims_i.point().to_vec(),
@@ -878,6 +909,9 @@ where
                 branch_idx,
                 cfg_i,
             )?;
+            cpr_eval_points_fq.push(cpr_subclaim_i.evaluation_point);
+            cpr_up_evals_fq.push(cpr_subclaim_i.up_evals);
+            cpr_down_evals_fq.push(cpr_subclaim_i.down_evals);
         }
 
         // Squeeze alpha_prime in the same transcript order as the prover.
@@ -902,10 +936,14 @@ where
             cpr_eval_point,
             cpr_up_evals: cpr_subclaim.up_evals,
             cpr_down_evals: cpr_subclaim.down_evals,
+            cpr_eval_points_fq,
+            cpr_up_evals_fq,
+            cpr_down_evals_fq,
             bool_bit_slice_evals,
             alpha_prime_f,
             proof_commitments: self.proof_commitments,
             proof_multipoint_eval: self.proof_multipoint_eval,
+            proof_multipoint_evals_fq: self.proof_multipoint_evals_fq,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
             _phantom: PhantomData,
@@ -934,7 +972,9 @@ where
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        let up_evals: Vec<F> = if let (Some(bit_slice_evals), Some(alpha_prime)) =
+        // --- Q[X] branch up_evals (with booleanity-bridge appended when
+        // alpha_prime is present) ---
+        let q_up_evals: Vec<F> = if let (Some(bit_slice_evals), Some(alpha_prime)) =
             (&self.bool_bit_slice_evals, &self.alpha_prime_f)
         {
             let sig = self.base.uair_signature.clone();
@@ -952,23 +992,77 @@ where
             self.cpr_up_evals.clone()
         };
 
-        let mp_subclaim = MultipointEval::verify_as_subprotocol(
+        // --- Length-mismatch guard (mirrors Phase F.2.c) ---
+        let n_fq = self.cpr_eval_points_fq.len();
+        if self.proof_multipoint_evals_fq.len() != n_fq {
+            return Err(ProtocolError::FqIdealCheck {
+                prime_idx: self.proof_multipoint_evals_fq.len(),
+                q: "<fq mp-eval sub-proof length mismatch>".to_owned(),
+                source: IdealCheckError::IdealCollectorError(
+                    ideal_check::BatchedIdealCheckError::LengthMismatch {
+                        num_ideals: n_fq,
+                        provided_values: self.proof_multipoint_evals_fq.len(),
+                    },
+                ),
+            });
+        }
+
+        let shifts = self.base.uair_signature.shifts();
+        let num_vars = self.base.num_vars;
+        let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
+
+        // --- Q-branch standalone (degenerate single-branch lockstep) ---
+        let mut q_subclaims = MultipointEval::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            self.proof_multipoint_eval,
-            &self.cpr_eval_point,
-            &up_evals,
-            &self.cpr_down_evals,
-            self.base.uair_signature.shifts(),
-            self.base.num_vars,
+            vec![self.proof_multipoint_eval],
+            vec![MultipointEvalBranchInputs {
+                trace_mles: &[],
+                eval_point: &self.cpr_eval_point,
+                up_evals: &q_up_evals,
+                down_evals: &self.cpr_down_evals,
+                field_cfg: &self.field_cfg,
+            }],
+            shifts,
+            num_vars,
             &self.field_cfg,
         )?;
+        assert_eq!(q_subclaims.len(), 1);
+        let mp_subclaim = q_subclaims.pop().expect("single Q-branch subclaim");
+
+        // --- Per-prime branches lockstep ---
+        let mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>> = if n_fq > 0 {
+            let fq_branches: Vec<MultipointEvalBranchInputs<'_, F>> = (0..n_fq)
+                .map(|prime_idx| {
+                    let branch_idx = add!(prime_idx, 1);
+                    MultipointEvalBranchInputs {
+                        trace_mles: &[],
+                        eval_point: &self.cpr_eval_points_fq[prime_idx],
+                        up_evals: &self.cpr_up_evals_fq[prime_idx],
+                        down_evals: &self.cpr_down_evals_fq[prime_idx],
+                        field_cfg: &self.all_field_cfgs[branch_idx],
+                    }
+                })
+                .collect();
+            MultipointEval::verify_as_subprotocol(
+                &mut self.base.pcs_transcript.fs_transcript,
+                self.proof_multipoint_evals_fq,
+                fq_branches,
+                shifts,
+                num_vars,
+                &q_star_cfg,
+            )?
+        } else {
+            Vec::new()
+        };
 
         Ok(VerifierMultipointEvaled {
             base: self.base,
             field_cfg: self.field_cfg,
+            all_field_cfgs: self.all_field_cfgs,
             projecting_elements: self.projecting_elements,
             alpha_prime_f: self.alpha_prime_f,
             mp_subclaim,
+            mp_subclaims_fq,
             proof_commitments: self.proof_commitments,
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
@@ -1007,7 +1101,7 @@ where
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
     ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
+        let r_0 = &self.mp_subclaim.r0;
 
         let pub_cols = self.base.uair_signature.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
@@ -1121,7 +1215,7 @@ where
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F>> {
-        let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
+        let r_0 = &self.mp_subclaim.r0;
         let commitments = &self.proof_commitments;
 
         let pub_cols = self.base.uair_signature.public_cols();

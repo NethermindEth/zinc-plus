@@ -108,13 +108,16 @@ pub struct Proof<F: PrimeField> {
     /// Per-prime multi-degree sumcheck proofs, one per declared prime,
     /// produced by the lockstep sumcheck driver in step 5. Empty for legacy
     /// UAIRs.
-    ///
-    /// TODO(fq-soundness): the per-prime CPR + sumcheck proofs land the
-    /// per-prime sumcheck endpoint in $\mathbb F_{q_i}$, but the
-    /// multipoint-eval and Zip+ PCS-open chain that ties those endpoints
-    /// back to the committed trace via $\phi_{q_i}(\hat f_0)$ is NYI
-    /// (Phases G–I).
     pub combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    /// Per-prime multipoint-eval proofs, one per declared prime, produced
+    /// by the lockstep multipoint-eval in Phase G (step 6). Empty for
+    /// legacy UAIRs.
+    ///
+    /// TODO(fq-soundness): the per-prime multipoint-eval lands the
+    /// $r_0$ point per branch, but the lift-to-$\mathbb{Z}$ check
+    /// (Phase H) and the $q''$-anchored PCS open (Phase I) that ties
+    /// these endpoints back to the committed trace are NYI.
+    pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -187,6 +190,16 @@ where
             bytes = rest;
         }
 
+        // multipoint_evals_fq: u32 count + length-prefixed entries.
+        let (n_mp_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_mp_fq = usize::try_from(n_mp_fq).expect("n_mp_fq must fit into usize");
+        let mut multipoint_evals_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_mp_fq);
+        for _ in 0..n_mp_fq {
+            let (mp, rest) = MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+            multipoint_evals_fq.push(mp);
+            bytes = rest;
+        }
+
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         assert!(bytes.is_empty(), "All bytes should be consumed");
@@ -204,6 +217,7 @@ where
             ideal_checks_fq,
             cpr_proofs_fq,
             combined_sumchecks_fq,
+            multipoint_evals_fq,
         }
     }
 
@@ -276,6 +290,15 @@ where
             buf = sumcheck.write_transcription_bytes_subset(buf);
         }
 
+        // multipoint_evals_fq: u32 count + length-prefixed entries.
+        let n_mp_fq = u32::try_from(self.multipoint_evals_fq.len())
+            .expect("multipoint_evals_fq length must fit into u32");
+        n_mp_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        for mp in &self.multipoint_evals_fq {
+            buf = mp.write_transcription_bytes_subset(buf);
+        }
+
         // TODO: serialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         let _ = buf;
@@ -309,6 +332,11 @@ where
             .iter()
             .map(|sc| MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES + sc.get_num_bytes())
             .sum();
+        let multipoint_evals_fq_bytes: usize = self
+            .multipoint_evals_fq
+            .iter()
+            .map(|mp| MultipointEvalProof::<F>::LENGTH_NUM_BYTES + mp.get_num_bytes())
+            .sum();
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -336,6 +364,9 @@ where
             // combined_sumchecks_fq: count + sum of (length-prefix + body) per entry
             + u32::NUM_BYTES
             + combined_sumchecks_fq_bytes
+            // multipoint_evals_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + multipoint_evals_fq_bytes
     }
 }
 
