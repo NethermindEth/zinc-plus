@@ -1,149 +1,204 @@
 \section{Introduction}
 \label{sec:intro}
 
-Most succinct arguments express a computation as polynomial constraints
-over a single finite field and then \emph{arithmetize} every operation
-into that field. For bit-oriented computation --- hash functions, block
-ciphers, the bitwise glue inside signature schemes --- this is a poor
-fit. A $32$-bit $\XOR$, a rotation, a modular addition: each is cheap on
-hardware but, forced into a large prime field $\F_q$, expands into many
-constraints and many witness elements, because the field has no native
-notion of ``the $i$-th bit'' or ``carry into position $j$''. The witness
-inflates by one or two orders of magnitude, and since prover cost tracks
-witness size, the encoding overhead dominates the proof.
+Most succinct arguments fix a single finite field and arithmetize every
+operation into it. For bit-oriented computation --- hash functions, block
+ciphers, the bitwise glue inside signature schemes --- this is a poor fit. A
+$32$-bit $\XOR$, a rotation, an addition modulo $2^{32}$: each is a handful of
+gates in hardware, but forced into a large prime field $\F_q$ it expands into
+many constraints and many witness elements, because $\F_q$ has no native
+notion of ``the $i$-th bit'' or ``the carry into position $j$''. The witness
+inflates by one to two orders of magnitude, and since prover cost tracks
+witness size, the encoding overhead dominates.
 
-SHA-256 is the canonical stress test. Its compression function is built
-almost entirely from three primitives on $32$-bit words --- bitwise
-$\XOR$, bitwise $\AND$ (inside $\Ch$ and $\Maj$), and addition modulo
-$2^{32}$ --- together with fixed rotations and shifts. A prover that
-treats $32$-bit words as opaque field elements must re-derive bit-level
-structure with range checks and bit decompositions at every step.
+SHA-256 is the canonical stress test. Its compression function is built almost
+entirely from three primitives on $32$-bit words --- bitwise $\XOR$, bitwise
+$\AND$ (inside $\Ch$ and $\Maj$), and addition modulo $2^{32}$ --- together
+with fixed rotations and shifts. A prover that treats a word as an opaque field
+element must re-derive its bit structure, with range checks and bit
+decompositions, at every step.
 
-\paragraph{The all-$\Ftwo[X]$ approach.} This note develops, end to end,
-an argument that keeps the computation in its native algebra \albert{$\Ftwo[X]$ is not really the native algebra, $\mathbb{Z}[X]$ is}. We
-represent each $\wbit$-bit word as a \emph{bit-polynomial} in the cell
-ring
+\paragraph{The all-$\Ftwo[X]$ approach.} The arithmetic SHA-256 actually
+performs is over the integers modulo $2^{32}$, and the general Zinc\texttt{+}
+pipeline \cite{zincplus} proves such computations by lifting them to $\Z[X]$.
+But SHA-256 is \emph{overwhelmingly bitwise}, and for a bitwise computation the
+productive proof-time algebra is characteristic two. We represent each
+$\wbit$-bit word ($\wbit = 32$) as a \emph{bit-polynomial} in the cell ring
 \[
   \cellring \;=\; \Ftwo[X]/(X^{\wbit}),
-  \qquad \wbit = 32,
 \]
-a degree-$<\wbit$ polynomial over $\Ftwo$ whose coefficient of $X^b$ is
-the word's $b$-th bit. In this representation the bitwise primitives are
-ring operations, not emulations:
+the degree-$<\wbit$ polynomial over $\Ftwo$ whose coefficient of $X^b$ is the
+word's $b$-th bit. In this representation the bitwise primitives are ring
+operations rather than emulations:
 \begin{itemize}[leftmargin=2em]
-  \item \textbf{$\XOR$ is addition} in $\cellring$ ($1+1=0$
-    coefficientwise). It costs nothing at the commitment layer: an
-    $\XOR$ of committed columns is a committed linear combination, never
-    materialised.
-  \item \textbf{Shifts and rotations are monomial maps.} $\SHR^c$ and
-    $\ROTR^c$ act on a cell as multiplication by $X^{\wbit-c}$ in the
-    shift quotient $\Fshift$ or the rotation quotient $\Frot$; they are
-    $\Ftwo$-linear, hence realisable as \emph{virtual columns} that are
-    not committed but reconstructed from their source.
-  \item \textbf{Modular addition is a Binius carry identity.} For a
-    binary step $\bp{s} \equiv \bp{a}+\bp{b}\pmod{2^{\wbit}}$, the carry
-    word is recovered from a free combination of committed columns, and
-    the addition is pinned by a linear identity together with the
-    full-adder Hadamard relation in $\Fshift$. Only one carry-out bit per
-    row is committed.
-  \item \textbf{$\AND$ is a Hadamard product.} Coefficient-wise
-    multiplication of two bit-polynomials --- the one genuinely nonlinear
-    primitive --- is the only operation that does not commute with the
-    linear commitment, and it is the technical heart of the system. \albert{Change wording because we deal with AND and Hadamard not that differently from Binius. Only the merging of Lagrange and monomial basis evaluations may be new (to be checked)}
+  \item \textbf{$\XOR$ is addition} in $\cellring$ ($1+1 = 0$ coefficientwise).
+    An $\XOR$ of committed columns is a committed linear combination, never
+    materialised --- free at the commitment layer.
+  \item \textbf{Shifts and rotations are monomial multiplication} by $X^c$
+    (in the shift quotient $\Fshift$ or rotation quotient $\Frot$), hence
+    $\Ftwo$-linear; a shifted column is \emph{virtual}, reconstructed from its
+    source rather than committed.
+  \item \textbf{Modular addition is the Binius full-adder identity} in
+    $\Fshift$, where multiplication by $X$ is a left shift and $X^{\wbit}=0$
+    discards the overflow. The cell ring makes it cheap: the carry word is a
+    free shift of committed data, so the prover commits only the \emph{one}
+    carry-out bit per addition that the shift cannot supply.
+  \item \textbf{$\AND$ is a Hadamard product} (hence so are $\Ch$ and $\Maj$):
+    the coefficient-wise product of bit-polynomials, the single genuinely
+    nonlinear primitive and the one the linear commitment cannot absorb.
 \end{itemize}
-The upshot is an algebraic intermediate representation (AIR) of SHA-256
-in which every constraint is linear except for the Hadamard products
-that encode $\AND$.
+The one price of working in characteristic two rather than over $\Z$ is modular
+addition, which is not a ring operation; the third bullet is how it is paid.
+The result is an AIR of SHA-256 in which \emph{every constraint is
+$\Ftwo$-linear except a small fixed number of column Hadamard products}.
 
-\paragraph{Three layers.} Turning this representation into a SNARK has
-three layers, and this paper treats all three.
+\paragraph{Three layers.} Turning this representation into a SNARK has three
+layers, and the paper treats all three.
+\emph{(1) Arithmetization} (\Cref{sec:arith}): the chained-compression AIR ---
+the column model, the linear identities for the message schedule, the
+$\Sigma/\sigma$ mixing, and modular addition, and the declaration of $\AND$ as
+a column Hadamard relation.
+\emph{(2) The binary-field PIOP} (\Cref{sec:piop,sec:hadamard}): the polynomial
+interactive oracle reduction that proves the AIR. Because the trace already
+lives in $\Ftwo[X]\subset\K[X]$, the prime-projection step of the general
+Zinc\texttt{+} compiler is vacuous; what remains is an ideal check, an
+\emph{evaluation projection} $\psia$ that substitutes $X = \alpha$ for a random
+$\alpha\in\K = \mathrm{GF}(2^{128})$, and a sumcheck over $\K$. The nonlinear
+Hadamard relations are recast as a polynomial ideal-membership claim and
+discharged on the \emph{same} pipeline.
+\emph{(3) The commitment} (\Cref{sec:commitment}): a hash-based $\Ftwo[X]$
+commitment whose opening is \emph{bit-sliced}, described next.
 
-\emph{(1) Arithmetization} (\Cref{sec:arith}). We lay out the
-chained-compression AIR: the column model, the linear identities for
-message schedule, $\Sigma$/$\sigma$ mixing, and modular addition, and the
-declaration of $\AND$ as a column-level Hadamard relation. The result is
-a constraint system over $\Ftwo[X]$ with ideal-membership constraints
-that capture rotation and word width.
-
-\emph{(2) The binary-field PIOP} (\Cref{sec:piop,sec:hadamard}). We
-describe the polynomial interactive oracle reduction that proves the AIR.
-Because the trace already lives in $\Ftwo[X]$, the prime-projection step
-of the general Zinc\texttt{+} compiler is vacuous; the reduction is an
-ideal check, an evaluation projection $\psia$ that substitutes the cell
-variable $X=\alpha$ for a random $\alpha\in\K=\mathrm{GF}(2^{128})$, and a
-sumcheck over $\K$. The nonlinear Hadamard constraints are read as a
-polynomial ideal-membership claim and discharged on the \emph{same}
-pipeline --- the same ideal check, the same $\alpha$, the same sumcheck ---
-with their operands read off through a second weighting $\psiz$ of the cell.
-Everything reduces to a batch of multilinear-extension evaluation claims at
-a common point.
-
-\emph{(3) The commitment} (\Cref{sec:commitment}). The claims are settled
-by a hash-based polynomial commitment over $\Ftwo[X]$ whose opening is
-\emph{bit-sliced}: it folds the $\{0,1\}$ bit slices of the committed
-cells against $\K$-valued evaluation weights to obtain, per column, a
-single degree-$<\wbit$ polynomial $a'\in\Kpoly$. The verifier reads the
-ordinary evaluation claim off $a'$ via $\psia$ (evaluation at $\alpha$),
-and --- crucially for layer (2) --- reads the Hadamard discharge operands
-off the \emph{same} $a'$ via $\psiz$ (a subspace-Lagrange projection), so
-the nonlinear constraints cost no additional opening.
-
-\paragraph{The unifying thread: $\Ftwo$-linear projections.} A single
-idea ties the layers together. Both the evaluation projection $\psia$ and
-the Hadamard discharge $\psiz$ are $\Ftwo$-linear maps
-$\cellring \to \K$ of the form $w \mapsto \sum_b w_b\,\xi_b$ for a weight
-vector $(\xi_b)$ --- monomial powers $\xi_b=\alpha^b$ for $\psia$,
-subspace-Lagrange values $\xi_b = L_b(\alpha)$ for $\psiz$ --- both read at the one point $\alpha$. The commitment
-binds the full bit-slice fold, so any such functional is a length-$\wbit$
-inner product against the one bound object $a'$. The arithmetization is
-designed so that its linear constraints survive $\psia$ and its nonlinear
-constraints reduce to a $\psiz$ read-off; the PIOP is the reduction that
-turns ``the constraints hold'' into ``these projections of $a'$ take
-these values''; and the commitment is what makes those projections
-checkable against committed data. The same $\Ftwo$-linearity that lets
-$\XOR$ be free and shifts be virtual is what lets the random projections
-commute through the linear code.
-
-\paragraph{Contributions.} Relative to a prime-field arithmetization of
-SHA-256 and to the integer ($\Z[X]$) Zinc\texttt{+} pipeline, the
-construction:
+\paragraph{Contributions.} Relative to a prime-field arithmetization and to the
+integer ($\Z[X]$) pipeline, the construction:
 \begin{enumerate}[leftmargin=2em]
-  \item commits every trace column natively in $\cellring$, with $\XOR$
-    free, shifts/rotations virtual, and modular addition reduced to one
-    committed carry bit per row plus linear identities;
-  \item isolates all nonlinearity into column Hadamard products, recasts
-    them as a polynomial ideal-membership claim discharged on the same
-    pipeline, and binds them to the commitment via $\psiz$, with no second
-    opening and no second point;
-  \item runs the entire proof over $\K=\mathrm{GF}(2^{128})$ with no
-    prime projection, the cell ring never widening through encoding; and
-  \item settles all evaluation claims with a bit-sliced opening whose
-    committed claim object has a fixed size of $\wbit$ field elements,
-    independent of the field extension degree, and which supports the
-    $\psia$ and $\psiz$ read-offs from a single bound polynomial.
+  \item \emph{settles the linear and the nonlinear constraints from one
+    commitment opening, at one point.} The opening binds, per column, a single
+    degree-$<\wbit$ object $a'$ --- the $\eq$-folded $\{0,1\}$ bit slices of the
+    committed cells. Both the evaluation $\psia$ (monomial reading, for the
+    linear constraints) and the \emph{Lagrange} reading $\psiz$ (for the $\AND$
+    relations) are length-$\wbit$ inner products against that \emph{one}
+    object, read at the \emph{same} point. So the nonlinear constraints cost no
+    second commitment and no second point, and the claim object has fixed size
+    $\wbit$, independent of $\log|\K|$. This dual read-off is the feature we
+    contribute on top of the underlying binary-field commitment.
+  \item \emph{commits one bit per modular addition.} The cell-ring
+    representation makes the carry word a free virtual shift, so only the single
+    carry-out bit the shift cannot supply is committed --- never a full
+    $\wbit$-bit carry word.
+  \item \emph{isolates all nonlinearity into column Hadamard products} and
+    discharges them, recast as ideal membership, on the same ideal check and
+    sumcheck as the linear part.
+  \item \emph{runs the whole proof over $\K = \mathrm{GF}(2^{128})$ with no
+    prime projection}, the cell ring never widening through encoding.
 \end{enumerate}
+What is \emph{not} new is worth stating plainly. The per-step full-adder
+identity for modular addition and the single-$\AND$ form of $\Ch$ are taken
+from Binius64 (\Cref{sec:cmp}), and reading bits as Lagrange coefficients to
+turn a coefficient-wise product into a polynomial identity is a standard move.
+The contribution is the \emph{composition} --- one bit-sliced opening serving
+both the monomial and the Lagrange reading --- and its consequence: the only
+nonlinear primitive rides the linear pipeline at no extra commitment cost.
 
-\paragraph{Scope and framing.} We present the construction as an
-idealized design over generic parameters --- a word width $\wbit$, a
-binary extension field $\K$, a linear code --- and record the deployed
-instantiation ($\wbit=32$, $\K=\mathrm{GF}(2^{128})$, seven chained
-SHA-256 compressions, a rate-$1/4$ $\Ftwo$-RAA code) and its engineering
-choices in remarks. The commitment layer is summarised here and
-developed in full in the companion note on the bit-sliced $\Ftwo[X]$
-opening; the present paper focuses on how arithmetization, PIOP, and
-commitment compose into a single argument. We do not treat
-zero-knowledge (a future addition) and we are explicit about the
-Brakedown-style proof size.
+\paragraph{Performance.} \Cref{tab:intro-sweep} previews the headline across a
+sweep of chained compressions, both systems at a matched commitment rate
+($1/4$, one Apple~M4, CPU). The $\Ftwo[X]$ prover leads at every size and the
+lead \emph{widens} with scale --- from near-parity at $10^3$ compressions to
+$\sim$$2\times$ at $10^4$ --- while the verifier grows as $\sqrt N$ here against
+$O(N)$ for Binius64, an order of magnitude by $8000$ compressions. A second,
+structural difference underlies both (\Cref{tab:intro-preproc}): this work is a
+\emph{uniform} AIR with $O(1)$ preprocessing, whereas Binius64's non-uniform
+word circuit carries an $O(N)$ circuit description that reaches hundreds of
+megabytes and whose build \emph{walls} near $16{,}000$ compressions --- where
+this work still proves in $\approx 1.2$\,s and stays tractable through
+$123{,}366$ compressions ($\nu = 23$). In the other direction, Binius64's
+recursive proof is several times smaller; \Cref{sec:cmp} and \Cref{app:meas}
+give the full comparison.
 
-\paragraph{Organisation.}
-\Cref{sec:prelim} fixes notation: the cell ring, the field, the AIR
-trace model, multilinear extensions, and the two $\Ftwo$-linear
-projections.
-\Cref{sec:arith} develops the SHA-256 $\Ftwo[X]$ arithmetization.
-\Cref{sec:piop} gives the binary-field PIOP (commit, ideal check,
-$\psia$, sumcheck) and \Cref{sec:hadamard} the Hadamard discharge.
-\Cref{sec:commitment} summarises the bit-sliced commitment and how the
-claims are settled.
-\Cref{sec:soundness} composes the soundness of the layers under
-Fiat--Shamir, and \Cref{sec:impl} reports the deployed instantiation and
-its costs.
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r r rr rr}
+\toprule
+ & & \multicolumn{2}{c}{prover} & \multicolumn{2}{c}{verifier} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+$\approx$comp. & message & this work & Binius64 & this work & Binius64 \\
+\midrule
+$60$         & $3.8$ KB  & $10.1$ ms          & $33.7$ ms     & $4.8$ ms            & $3.1$ ms \\
+$250$        & $16$ KB   & $23.3$ ms          & $41.6$ ms     & $9.3$ ms            & $4.6$ ms \\
+$1000$       & $64$ KB   & $75.0$ ms          & $84.1$ ms     & $17.9$ ms           & $14.0$ ms \\
+$2000$       & $128$ KB  & $148$ ms           & $155$ ms      & $19.8$ ms           & $27.5$ ms \\
+$8000$       & $512$ KB  & $581$ ms           & $1220$ ms     & $45$ ms             & $493$ ms \\
+$15{,}420$   & $0.99$ MB & $1190$ ms          & ---$^\dagger$ & $83$ ms             & ---$^\dagger$ \\
+\midrule
+$30{,}841$ \,($\nu{=}21$)  & $1.97$ MB & $1.35$ s           & ---$^\dagger$ & $117$ ms            & ---$^\dagger$ \\
+$61{,}683$ \,($\nu{=}22$)  & $3.95$ MB & $2.72$ s           & ---$^\dagger$ & $224$ ms            & ---$^\dagger$ \\
+$123{,}366$ \,($\nu{=}23$) & $7.9$ MB  & $7.0$ s$^\ddagger$ & ---$^\dagger$ & $383$ ms$^\ddagger$ & ---$^\dagger$ \\
+\bottomrule
+\end{tabular}
+\caption{SHA-256 prover and verifier across a sweep of chained compressions at
+matched rate $1/4$ on one Apple~M4 (CPU); each compression hashes one
+$512$-bit block, so message size $\approx 64\,\text{B}\times$\,compressions.
+\emph{Above the rule}: head-to-head
+against Binius64 (single runs, \Cref{tab:scaling}); the $\Ftwo[X]$ prover leads
+at every size, the lead widening from $\sim$$1.1\times$ at $10^3$ to
+$\sim$$2\times$ at $10^4$, and the verifier grows as $\sqrt N$ against $O(N)$,
+an order of magnitude by $8000$ compressions. \emph{Below the rule}: beyond
+Binius64's build wall, this work alone (deployed-sweep medians,
+\Cref{tab:zinc-scaling}), still proving $123{,}366$ compressions ($\nu = 23$).
+In return, Binius64's recursive proof is $4$--$7\times$ smaller; ratios are
+stabler than the absolute times. $^\dagger$Binius64's $O(N)$ circuit build
+exceeds a minute past $\sim$$16{,}000$ compressions. $^\ddagger$This work
+memory-bound by swap on the $16$\,GB host at $\nu = 23$; the compute stays
+$O(N)$.}
+\label{tab:intro-sweep}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{r l r}
+\toprule
+$\approx$comp. & this work & Binius64 \\
+\midrule
+$16$           & \multirow{6}{*}{$\sim$\,KB \ ($O(1)$)} & $3.7$ MB \\
+$64$           &                                        & $14.4$ MB \\
+$256$          &                                        & $54.7$ MB \\
+$1024$         &                                        & $218$ MB \\
+$4096$         &                                        & $873$ MB \\
+$\ge 16{,}384$ &                                        & build $> 1$ min \\
+\bottomrule
+\end{tabular}
+\caption{Preprocessing --- the circuit description the system holds, which the
+verifier in effect must read --- at matched rate $1/4$. This work is a
+\emph{uniform} AIR: one constraint description for any trace height, so
+preprocessing is $O(1)$ (a fixed UAIR specification plus the RAA permutation
+seeds, kilobyte-scale). Binius64 is a non-uniform word circuit, so its
+constraint system plus shift/wiring key-collection grow $O(N)$, the
+$\ge 16{,}384$-compression build exceeding a minute. This $O(N)$-vs-$O(1)$ gap
+is the root of both Binius64's $O(N)$ verifier and its build wall
+(\Cref{tab:intro-sweep}).}
+\label{tab:intro-preproc}
+\end{table}
+
+\paragraph{Scope and framing.} We present the construction over generic
+parameters --- a word width $\wbit$, a binary extension field $\K$, a linear
+code --- and record the deployed instantiation ($\wbit = 32$,
+$\K = \mathrm{GF}(2^{128})$, seven chained SHA-256 compressions, a rate-$1/4$
+$\Ftwo$-RAA code) in remarks and in \Cref{sec:impl}. The commitment is
+summarised in \Cref{sec:commitment} and developed in full in a companion note
+on the bit-sliced $\Ftwo[X]$ opening; the present paper focuses on how
+arithmetization, PIOP, and commitment compose into a single argument. We do not
+treat zero-knowledge, and we are explicit that the proof is Brakedown-sized and
+that the modular-addition carries are presently bound by a trusted reading
+rather than to the commitment (\Cref{sec:soundness}).
+
+\paragraph{Organisation.} \Cref{sec:overview} is a self-contained technical
+overview. \Cref{sec:prelim} fixes notation: the cell ring, the field, the trace
+model, multilinear extensions, and the two readings. \Cref{sec:arith} develops
+the arithmetization. \Cref{sec:piop} gives the binary-field PIOP for the linear
+constraints and \Cref{sec:hadamard} the Hadamard discharge. \Cref{sec:commitment}
+summarises the bit-sliced commitment. \Cref{sec:soundness} composes the
+soundness of the layers under Fiat--Shamir, and \Cref{sec:impl} reports the
+deployed instantiation and its costs. \Cref{sec:cmp} positions the construction
+against Binius64.

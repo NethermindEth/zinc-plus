@@ -75,6 +75,73 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Shipped work (chronological, most recent first)
 
+### Prover RAM measured per-region (new `f2_sha256_mem` bench + `prof` RSS column) (2026-06-15, working tree)
+- **What**: a dedicated peak-RAM harness `protocol/benches/f2_sha256_mem.rs`
+  (`harness=false`, own `main`, run one `nvars`/process so `ru_maxrss` stays a
+  clean per-process peak). It installs a **tracking global allocator** (live +
+  peak heap bytes) and reads process **peak RSS** via `getrusage`, then runs the
+  real deployed `prove_f2_full_with_merged_hadamard` once. Also instrumented
+  `utils/src/prof.rs`: a `set_rss_probe(fn()->u64)` hook lets a binary register a
+  peak-RSS reader so every existing `prof::scope` region (`commit`, `uair`,
+  `uair:alpha_project`, `uair:merged_group`, `multipoint_eval`, `open`, …) prints
+  a `Δrss` column = how much that region raised the process high-water. Hook keeps
+  `utils` dependency-free (no `libc`); **zero-cost / absent columns when no probe
+  registered**, so normal builds and the `OBLONG_PROFILE` timing path are
+  unchanged. Modes: `merged` (default, deployed), `oblong`, `linear`.
+- **Why**: RAM was only ever *estimated* (this doc's nv20/21 entry: "peak RSS
+  estimated from the doubling rule + compressor occupancy"; `ps` sandbox-blocked).
+  Wanted a faithful, reproducible, *per-region* attribution of where prover RAM
+  actually goes, on the real merged path (a hand-rolled phase replay diverges —
+  the merged path inlines its own multipoint/open, not a clean `prove_f2_open`).
+- **Result (M4 16 GB, parallel+simd+unchecked, merged, one prove/process)**: heap
+  peak (allocator — the true *demand*) is **dead-linear at 2.11 KB / trace row**,
+  unbroken nv9→nv23 (each point ≈2.0× per doubling, ≈4.0× per 4× rows):
+
+  | nv | rows | heap peak | RSS peak (`ru_maxrss`) | notes |
+  |----|------|-----------|------------------------|-------|
+  | 9 (deployed) | 512 | 1.4 MiB | 6 MiB | 7 compressions |
+  | 16 | 65 536 | 138 MiB | 232 MiB | RSS ≈ 1.7× heap |
+  | 18 | 262 144 | 549 MiB | 787 MiB | |
+  | 20 | 1 048 576 | 2.16 GiB | 2.37 GiB | RSS ≈ heap |
+  | 21 | 2 097 152 | 4.32 GiB | 4.63 GiB | fits, swap-free |
+  | 22 | 4 194 304 | 8.64 GiB | 6.55 GiB | **fits, swap-free**; compressor caps RSS *below* heap |
+  | 23 | 8 388 608 | 17.28 GiB | 8.63 GiB | **> 16 GB → compress/swap**; 29 s `sys` time |
+
+  Deployed nv9 is tiny (**6 MiB RSS**). RSS tracks heap below ~4 GiB; above it the
+  **macOS memory compressor** holds resident pages *below* the true heap demand
+  (nv22 RSS 6.55 < heap 8.64; nv23 RSS 8.63 ≪ heap 17.28), so **allocator
+  heap-peak is the metric to trust at scale** and the per-region `Δrss` saturates
+  to +0 once RSS hits the compression ceiling (reliable only at nv≤21).
+- **The real 16 GB wall is nv22→nv23, NOT nv20→21** (corrects the entry "Scaling
+  extended to nv21/22/23 + the in-RAM→over-RAM knee" below, whose memory figures
+  were *estimates*, `ps`-blocked): measured trace+pp at nv20 = **228 MiB** (that
+  entry guessed "~13 GB"); nv21 peak = **4.6 GiB** (guessed "~20–26 GB"); nv23
+  working set = **17.3 GiB** (guessed "~104 GB"). nv21 (4.3 GiB) and nv22 (8.6
+  GiB) both fit and run **swap-free** (free memory stayed 75–77%). The prove-*time*
+  super-linearity that entry saw at nv21+ is therefore **not swap** — nv23 is the
+  first point with a real paging penalty (29 s `sys` vs 51 s `user`); nv21→22
+  super-linearity is memory-bandwidth/cache + light compression while still
+  in-RAM. ⚠️ The **paper's wall location is right** — `appendix-measurements.tex`
+  (`tab:zinc-scaling`), `introduction.tex`, `comparison.tex` all say swap hits at
+  ν≥23, which matches (nv22 8.6 GiB fits, nv23 17.3 GiB exceeds). The lone wrong
+  paper figure is **"≈104 GB working set" at nv23** in `appendix-measurements.tex`
+  — real demand is **≈17.3 GiB**; **corrected 2026-06-15** (`104` GB → `17` GB,
+  `main.pdf` rebuilt + verified via `pdftotext`). (Only this doc's prior "Scaling
+  extended" entry had the wall itself in the wrong place.)
+- **Phase attribution (nv20, % of +2.10 GiB
+  transient)**: commit ~21%, **UAIR/discharge ~74%**, multipoint ~0%, open ~5%.
+  Inside UAIR the cost is the **GF(2¹²⁸) field-lift of the trace**
+  (`uair:merged_phase1` +333 MiB, `uair:alpha_project` +299 MiB), the merged
+  ⟨Z_H⟩ weighted-col group (`uair:merged_group` +496 MiB, the single largest
+  region), and the sumcheck tables (`uair:sumcheck` +298 MiB). **Key finding —
+  the *merged* discharge is memory-frugal**: at nv16 it adds only ~30 MiB heap
+  peak over `linear` (no discharge); `oblong` has the *same* heap peak as
+  `linear` (it virtualises the 2 SHR cols that merged commits). The historical
+  "discharge = memory-bandwidth-bound, 1536 GF(2¹²⁸) bit-slices" cost was the
+  **fused** predecessor; the current merged/oblong pipelines folded it away.
+  Driver in the file's module docs. Per-region heap (not just RSS) attribution
+  would need the probe to also carry an allocator-live hook — see Open questions.
+
 ### Fix merged exact-tiling verify bug (ν ≡ 2 mod 8) — `num_compressions` 2-row guard (2026-06-14, working tree)
 - **What**: `cols::num_compressions` (`test-uair/src/sha256_f2.rs`) now reserves
   `(2^nv − 6)/68` (was `−4`): the 4-row output anchor **plus 2 trailing
@@ -101,6 +168,13 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
   immune (row-masked via `active_rows`); only the unmasked ANDs needed the guard.
 
 ### Scaling extended to nv21/22/23 + the in-RAM→over-RAM knee (2026-06-14, working tree)
+- ⚠️ **MEMORY FIGURES CORRECTED 2026-06-15** — the "~13 GB trace at nv20",
+  "~26 GB at nv21", "~104 GB working set at nv23", and "wall sharp at nv20→21"
+  below were `ps`-blocked *estimates* and are **~50× too high / 2 doublings too
+  early**. Measured (see "Prover RAM measured per-region" above): nv20 trace+pp
+  228 MiB / peak 2.37 GiB; nv21 peak 4.6 GiB; nv22 8.6 GiB (both swap-free);
+  nv23 17.3 GiB demand — **the real 16 GB wall is nv22→nv23**. The *time* numbers
+  here are real measurements and stand; only the RAM/knee attribution was wrong.
 - **What**: extended the Zinc+ CPU scaling sweep past nv20 to nv21/22/23 (the
   user asked for 2^21/2^22/2^23 rows). Added `implementation.tex §7`
   `tab:scaling-bigmem` + a "Beyond RAM" paragraph. PDF builds clean.
@@ -2063,6 +2137,31 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Investigated, didn't help
 
+### Reduce the per-step full-adder Hadamard to a single (top) position — NOT sound (2026-06-14, paper review)
+- **Question**: since the carry word `c` is the *virtual* down-shift of `D = s+a+b`
+  (lower `w−1` bits `= SHR¹(D)` free, only the top bit `β` committed), could the
+  full-adder relation `(a+Xc)⊙(b+Xc) = c+Xc` be checked at only the last bit
+  position instead of all `w`?
+- **Why it fails**: expanding the position-`i` equation with `x²=x` gives the carry
+  recurrence `D[i+1] = Maj(a_i, b_i, D_i)` — each position pins one step of the chain
+  (`γ_0 = 0` from the bit-0 ⟨X⟩ identity, `γ_{i+1} = Maj(a_i,b_i,γ_i)`, with `γ_i = D_i`).
+  The committed sum `s` is an independent column (reused downstream), so `D = s+a+b` is
+  whatever `s` makes it; the Hadamard is *exactly* what forces `D` to be the honest carry
+  word. Defining `c` as the shift of `D` only renames bits of `D` — it does NOT assert `D`
+  is honest. Checking only the top position leaves the middle carries free, so a malicious
+  prover can commit a wrong `s` that satisfies just the top equation. All `w` positions
+  carry information.
+- **Already optimal here**: (a) only `β` is committed (the rest of `c` is the free `SHR¹`);
+  (b) the `w`-position product is NOT checked bit-by-bit — the ψ_z / oblong discharge
+  collapses it to one ideal-membership claim (`L(a+Xc)·L(b+Xc) − L(c+Xc) ∈ ⟨Z_H⟩`, tested
+  at the single α, SZ error ~`(w−1)/|K|`), shipping only the `w−1` off-subspace values. So
+  it is already ≈ one *randomized* check over a random combination of all positions — not
+  the (unsound) "last position only".
+- **The real lever to drop the per-bit carry relation**: the grand-product lookup adder
+  (multiset membership vs a public add table; sound by construction; removes the 12 carry
+  Hadamards and closes Issue-1), tracked on `f2-clean-lookup`. That, not a positional
+  reduction, is how to remove the per-bit recurrence.
+
 ### GPU discharge (offload the oblong word-fold to Metal) — measured SLOWER than parallel CPU at nvars=16 (NOT worth it)
 - **Hypothesis**: the discharge's Phase-1→Phase-2 word-fold (`fold_word_at`: project a
   bit-word at GF(2^128) weights → one GF128) is the *same op* as the α-projection that
@@ -2355,7 +2454,350 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 
 ## Identified but not implemented
 
-### Commit is the ONLY phase Binius64 beats us on — and it's Merkle-bound, not encode-bound (investigated 2026-06-13)
+### Peak-memory reduction levers (from the `f2_sha256_mem` per-region measurement, 2026-06-15)
+- **Measured peak composition** (nv21, 4.42 GiB heap; see Shipped "Prover RAM
+  measured per-region"): trace (packed F_2[X], 4 B/cell) ~456 MiB (10%); **commit
+  codewords + tree ~1065 MiB (24%)**; **GF(2¹²⁸) α-projected trace ~1440 MiB
+  (33%)** (`uair:alpha_project` + `uair:merged_phase1`, 16 B/cell); **merged_group
+  weighted cols ~1060 MiB (24%)**; sumcheck/eq/misc ~400 MiB (9%). The peak is the
+  *simultaneous* live set during UAIR; the field-lift blow-up (1 bit / 4 B packed
+  → 16 B GF(2¹²⁸)) and idle commit buffers dominate.
+- **Lever 1 — dedup the codeword copy in `ZipPlusHint` (≈−12% peak, near-pure
+  win)**. `zip-plus/src/pcs/structs.rs:114` keeps BOTH `cw_matrices` (row-major)
+  AND `cw_columns` (column-major mirror, "storage cost identical") = **2×
+  codewords** + tree. `cw_columns` exists only for the opener's sequential reads
+  (273→10 ms at nv16). Keep `cw_columns` (+ tree), drop `cw_matrices` after the
+  Merkle tree is built, and rewire `prove_f2_open` (`f2_prove.rs:3816` reads
+  `cw_matrices[m].data`) to read `cw_columns` via the documented index map. ~−530
+  MiB at nv21. Cost: one open-side gather rewrite; preserve the sequential-read
+  speedup. Risk: low.
+- **Lever 2 — don't hold codewords resident through the UAIR peak (≈−24%,
+  time/mem tradeoff — the single biggest lever)**. The `hint` is taken at commit
+  (`f2_prove.rs:1400`), **idle through UAIR + multipoint** (the peak), used only
+  at open (`:1575`). Options: (a) **re-encode at open** — drop the hint after
+  commit, recompute codewords from the (retained, ~456 MiB) trace at open (RAA
+  encode ≈ the ~1 s commit cost at nv21); or (b) **mmap-spill** `cw_columns`+tree
+  to a temp file during UAIR, map back at open (frees anon RAM deterministically).
+  Removes the codeword footprint from the global peak (UAIR), where it's pure dead
+  weight. Combine with Lever 1 (re-encode/spill only one layout).
+- **Lever 3 — fuse α-projection into sumcheck round 1; never materialize the full
+  GF(2¹²⁸) `projected_trace` (≈−9%)**. `f2_prove.rs:2186` builds the full 16-B/cell
+  lift of every column, held `alpha_project`→`multipoint_eval`. The main sumcheck's
+  round 1 folds 2ⁿ→2ⁿ⁻¹; project-and-fold in one streaming pass (read packed
+  4-B cells, project at α, fold with eq) so only the half-size folded table (~400
+  MiB) ever exists, not full+half. Precedent: the shipped "Round-1 fast path" for
+  the Hadamard zerocheck. **Blocker**: `projected_trace` is reused by
+  `multipoint_eval` (`trace_mles`) for the r₀ evals — fusing means multipoint must
+  re-derive column evals from packed cells (extra projection pass; verify it
+  doesn't just move the cost). Same blocker for computing `weighted_col`
+  (Σγᵍ·colᵍ) directly from packed cells.
+- **Lever 4 — stream/block `merged_group` (≈−24% region, the single largest)**.
+  Build the merged discharge's Step-4 weighted columns per-relation or in row-blocks
+  and fold into the sumcheck accumulator instead of materializing all at once.
+  Needs a read of the merged_group region; feasibility TBD.
+- **Lever 5 — GF(2⁸) (1 B) instead of GF(2¹²⁸) (16 B) for discharge base-domain
+  buffers (16× on those buffers)**. The oblong GF8 path (`oblong_and_gf8`) already
+  does this for speed; the merged path uses `Gf8Scheme` for `lag_alpha` only —
+  extend the byte-field representation to the bulk discharge buffers where the
+  algebra stays in the subfield.
+- **Lever 6 — higher-rate commit code (RAA 1/4 → 1/2) halves codeword memory**
+  (and commit time) at ~2× column openings ⇒ bigger proof + verify. A memory↔
+  proof-size knob; `f2_sha256_rs` already studies the opening-count side.
+- **Synergy + ranking**: Levers 1+2 attack the ~24% idle codeword block; Lever 3
+  the ~16% redundant full-lift. Doing 1+2+3 plausibly takes nv21 peak ~4.4 → ~2.8
+  GiB (~35%), pushing the 16 GB wall from nv23 toward ~nv24. The **Σ/σ
+  virtualisation** entry below also helps here (4/26 fewer committed cols ⇒ ~15%
+  less codeword memory) and composes with Levers 1–2. Lever 2's re-encode variant
+  is the cleanest big win if the extra encode time is acceptable.
+
+### Virtualise the Σ/σ mixing outputs — drop the 4 committed mixing columns + the ⟨X³²−1⟩ rotation ideal-check (paper review, 2026-06-14)
+- **Where**: `test-uair/src/sha256_f2.rs` commits 4 mixing-output columns
+  (`W_SIGMA0/1`, `W_SIG0/1`, part of `NUM_BIN=26`) and pins each to its source by a
+  ⟨X³²−1⟩ rotation ideal-constraint (C1–C4, e.g. `W_a·rho_sig0 − W_SIGMA0 ∈ (X³²−1)`).
+  Flagged as "engineering, not structural" in `arithmetization.tex` rem:deployed-shape.
+- **Idea**: Σ_i, σ_i are F_2-linear functionals of the source bits (sums of within-word
+  ROTR/SHR), and the bit-sliced commitment binds the full bit-slice fold `a'_{A/E/W}` from
+  which ANY F_2-linear functional is one length-`w` read-off. So instead of committing
+  `Σ̂/σ̂` + a rotation tie, inline them: read `ψ_α(Σ_0(a))` and `ψ_z(Σ_0(a))` directly off
+  `a'_A` with rotation-permuted weight vectors. The ⟨X³²−1⟩ rotation ideal-check then
+  disappears entirely — the read-off *is* the tie. Sound + unconditional (the read-off is
+  bound by the existing opening); no new commitments.
+- **Expected gain**: ~4 of ~18 committed witness columns removed (~20%) ⇒ ~20% less commit
+  (encode + Merkle), ~20% smaller Merkle leaves ⇒ ~20% smaller per-opening (**proof size**,
+  the weak axis), less witness-gen; and the entire family-(a) rotation constraint set goes
+  away (fewer ideal-check families).
+- **Cost / risk**: the round + message-schedule equations now reference rotated source
+  columns at shifted rows, so (a) the multipoint eval folds more functionals — but all on
+  `A/E/W`, off the already-bound `a'`, so **no new openings**; (b) per-slot
+  ideal-check/sumcheck work per operand rises (denser operand expressions) even as the
+  column count drops — the uncertain phase; (c) implementation = the composite "within-word
+  ROTR/SHR ∘ row-shift" virtual column (the remark's named gap; needed broadly because the
+  shift-register layout reads even `Σ̂` down-row, e.g. `W_SIGMA1^{↓3}` in C6a) — a
+  composition of two mechanisms the prover already has (pointed-shift for rows,
+  weight-vector read-off for within-word); (d) σ feeds the message-schedule adder operands,
+  which are the already-*trusted* adder parents (Issue-1) — this changes, does not worsen,
+  that reconstruction path.
+- **Verdict**: likely a net win for commit + open + proof-size + witness-gen, growing with
+  N (commit-dominated at large ν); roughly neutral-to-slightly-worse for linear-PIOP +
+  multipoint. A/B-measurable: weigh (commit + open + proof) savings against the
+  linear-PIOP + multipoint delta. Clearest standalone motivation = shrinking the proof.
+  Do Σ-only first if the composite-shift plumbing is the blocker, but note even Σ̂ is read
+  down-row here, so the row-shift composition is needed either way.
+- **Status (2026-06-14)**: implementation underway on branch `f2-virtual-mixing`
+  (worktree). Done: the multi-op virtual-column foundation — `BitOpSpec` (uair) and
+  `F2BitOpVirtualSpec` (f2_prove) now hold `ops: Vec<BitOp>` (XOR of within-word ops on
+  one source), `apply_bit_ops_xor_u32` helper, and the `piop` ideal-check made multi-op
+  (cell op, up-eval op, and the α-weight table accumulate over ops; single-op behaviour
+  preserved). Remaining for Part A: ~20 enumerated protocol-layer call sites
+  (`f2_prove.rs` materialize / open read-off / two construction helpers,
+  `f2_native_ic.rs` non-linear+linear IC) are mechanical XOR-over-ops conversions; then
+  virtualise `W_SIGMA0` (the one same-row-only mixing column) + re-index + e2e test.
+  Part B (row-shift composite via `PointedShiftClaim` bit-ops) virtualises the other 5
+  columns and is the larger half.
+- **Update (2026-06-14, branch `f2-virtual-mixing`)**: foundation DONE + validated —
+  multi-op `BitOpSpec`/`F2BitOpVirtualSpec` (`ops: Vec<BitOp>`); piop IC, protocol open,
+  and the verifier all XOR-over-ops; `cargo test -p zinc-piop -p zinc-protocol --features
+  parallel` green (60 + 67), behaviour-preserving. **KEY FINDING: the feared "row-shift ∘
+  bit-op composite" (Part B) already works** — the existing `W_SHR3_W`/`W_SHR10_W` are
+  *same-row* bit-op virtuals that are then row-shifted (`ShiftSpec(W_SHR3_W,1)` in C3),
+  and the tests pass. A bit-op virtual is a leaf-level same-row op; row-shifting the
+  *materialised* virtual column is the ordinary `ShiftSpec`/multipoint mechanism. So
+  multi-op XOR was the ONLY blocker for virtualising *all* of Σ/σ — there is no separate
+  hard Part B. `W_SIGMA0`=Σ_0(W_A), `W_SIGMA1`=Σ_1(W_E) now virtualised (multi-op `Rot`
+  specs added to `sha_f2_bit_op_virtuals`; C1/C2 removed); compiles across
+  lib+test-uair+bench, sha_f2 UAIR shape/trace tests green. TODO: (a) prove+verify
+  validation of the multi-op reconstruction (`cargo bench --bench f2_sha256`, or a fast
+  nv=9 dev roundtrip test); (b) fold σ_0/σ_1 (Rot⊕Rot⊕ShiftR of W_W) into multi-op and
+  drop `W_SHR3_W`/`W_SHR10_W` + C3/C4 (re-index) → all 6 mixing columns virtual.
+- **Validated (2026-06-14)**: both prove↔verify roundtrips pass at nv=9 — the linear+open
+  path (`prove/verify_f2_full_with_bit_ops`) AND the full deployed sound **oblong Hadamard
+  discharge** (`prove/verify_f2_full_with_oblong_hadamard` with the 14 SHA Hadamard
+  relations; Σ feeds the trusted adders, so this confirms the virtualization composes with
+  the discharge). Permanent regression test `protocol/tests/f2_sha256_virtual_roundtrip.rs`
+  (2 tests, warning-clean); scoped e2e bench (nv=9,16, LTO off) also green. So the
+  `W_SIGMA0`/`W_SIGMA1` virtualization is correct end-to-end through the deployed path; the
+  only remaining work is the σ fold (the other 4 columns) + an A/B baseline to quantify the
+  commit/proof win. Nothing committed yet (worktree).
+- **σ fold DONE + validated (2026-06-14)**: all four mixing outputs are now virtual
+  multi-op bit-op columns — `W_SIG0`=σ_0, `W_SIG1`=σ_1 = (ROTR⊕ROTR⊕SHR of W_W); C3/C4
+  removed; `W_SHR3_W`/`W_SHR10_W` dropped entirely (their SHR folded into σ_0/σ_1). Full
+  column re-index: `NUM_BIN` 26→24, the `down.binary_poly` slot table remapped, trace-gen
+  + ShiftSpec list updated, module-doc inventory refreshed. Both roundtrip tests (linear
+  + oblong-discharge) and the sha_f2 unit tests green; all benches compile (sibling
+  `f2_sha256_rs` updated to match; `f2_blake3` unaffected). **NET for the whole
+  Σ+σ workstream: committed witness columns 16→12 (Σ_0,Σ_1,σ_0,σ_1 virtualised), 2 aux
+  columns dropped, C1–C4 (4 ideal constraints) gone.** Mechanism: a bit-op virtual is a
+  same-row leaf-level op, and row-shifting the materialised virtual column is the ordinary
+  ShiftSpec/multipoint path — so the "composite" needed nothing beyond multi-op XOR.
+  Still uncommitted (worktree `f2-virtual-mixing`).
+- **A/B measured (2026-06-14, nv=16, `F2_ONLY=e2e`, LTO off, Apple M4, `parallel simd
+  unchecked`)**: two worktrees off the same fork `890f0c9` — clean baseline (16 committed
+  columns) vs `f2-virtual-mixing` (12 committed columns) — run sequentially (no parallel
+  run, to keep wall-clock honest). **Prove 61.26 ms → 53.63 ms (−12.5%, 1.14×)** from
+  dropping 4 column encode+Merkle passes and the C1–C4 ideal constraints. **Verify 12.64 ms
+  → 12.81 ms (≈unchanged, within thermal noise)** — as expected, verify is dominated by the
+  `t=987` column-opening proximity checks, which don't depend on committed-column count.
+  **Proof size**: `open.opened/values` **505,344 → 379,008 B (−25.0%, exactly 4/16 fewer
+  columns)**; `open.opened/merkle` unchanged (auth-path count is tied to `t` + tree depth,
+  not column count); `open.combined_row` unchanged at ~4.19 MB (it's ~80–85% of the proof
+  and column-count-*independent*), so **TOTAL 5,213,589 → 5,083,589 B (−2.5%)**. Takeaway:
+  the win is concentrated in prover time and the column-proportional `opened/values` term;
+  total proof size barely moves because `combined_row` dominates and is invariant.
+- **A/B at nv=20 (2026-06-14, same setup)**: the prover win *grows* with scale. **Prove
+  1.032 s → 0.797 s (−22.8%, 1.30×)** — and the sample ranges don't overlap (baseline
+  [0.96, 1.14] s, optimized [0.79, 0.81] s), so the win is robust despite the baseline's
+  high variance at 10×~1 s samples. It's nearly 2× the nv=16 percentage (−12.5%) because
+  commit (encode+Merkle of the codeword) is the phase that grows fastest with nv and is
+  exactly the phase the 4 dropped columns hit; the C1–C4 removal is the smaller, more
+  nv-flat part. **Verify 178.2 ms → 178.8 ms (unchanged)**. **Proof size**: `opened/values`
+  again **505,344 → 379,008 B (−25%)** — note this term is nv-*independent* (it's `t·cols`),
+  so the absolute saving is the same 126,336 B as at nv=16; meanwhile `combined_row` has
+  grown to 64 MiB (98.3% of the proof), so **TOTAL 68,254,757 → 68,124,757 B (−0.19%)**.
+  Net: relative proof-size win *shrinks* with nv (−2.5% → −0.19%) while the prover win
+  *grows* (−12.5% → −22.8%).
+- **Per-substep A/B (2026-06-14, `F2_ONLY=steps` bumped to nv=20, same two worktrees)** —
+  decomposes the linear prove path (Commit / UAIR / Open; the merged Hadamard discharge is
+  *not* in this group). Baseline → optimized medians: **1-Commit 440 → 328 ms (−25.5%,
+  −112 ms)** — the dominant saving, ≈ exactly the 4/16 fewer committed columns to encode +
+  Merkle; **2-UAIR 179 → 161 ms (−10.3%, −18 ms)** — C1–C4 ideal constraints gone + ψ_α
+  project / native IC over fewer columns; **3-Open 247 → 209 ms (−15.4%, −38 ms)** — the
+  column-dependent open sub-steps (per-column folds, combined-row *build*, assemble-opened)
+  shrink, though the combined-row *proof bytes* don't. Linear-path sum **866 → 698 ms
+  (−169 ms)**; the e2e Prove delta was −235 ms, so the extra ~66 ms sits in the discharge /
+  full-path (a difference of separately-measured runs — treat as approximate, not a clean
+  discharge delta). **Verify unmoved**: 2-VerifyOpen 135.7 → 134.6 ms (−0.8%, the t=987
+  proximity checks dominate and are column-count-independent); 1-VerifyUAIR is sub-ms either
+  way (134 → 84 µs). Takeaway: the win is overwhelmingly the **commit** substep, with
+  secondary gains in open-assembly and the ideal check. Remaining: commit the branch when
+  the user asks.
+- **Paper updated to the virtualized design (2026-06-14, `documentation/f2x-sha256-snark-doc/`)**:
+  brought the companion note in line with Σ/σ-as-virtual, written "as if always" (no
+  mid-stream-change framing). Edits across `arithmetization.tex` (mixing identities now
+  define virtual columns rather than ideal-pinned committed columns; the "Rotation/mixing"
+  constraint family removed → three families, renumbered; column inventory moves Σ/σ to
+  virtual; deployed-shape Rem. now says mixing is virtual, ~a dozen committed cols),
+  `piop.tex` + `overview.tex` (ideal-check generator set `{X^{w}-1, X, 0}` → `{X, 0}`;
+  dropped the rotation-generator examples in the ψ_α discussion), `preliminaries.tex`
+  (virtual-column def lists XOR-combinations/mixing; generator examples drop rotation-as-
+  constraint), `introduction.tex` + `implementation.tex` (counts: ~18→~12 committed,
+  ~10→~6 packed cols; "four families"→"three"). **Bonus**: this *resolves* the standing
+  `\albert` comment at `overview.tex` (the `⟨X^{32}-1⟩` rotation generator was the reason
+  the "we arithmetize over F_2[X]/(X^{32})" headline wasn't literally true; with mixing
+  virtual the ideal check stays in `F_2[X]/(X^{32})` and the headline holds). `K_H=14`
+  unchanged (the rotation ties were linear, not Hadamard). PDF rebuilds clean (41 pp, no
+  ref warnings). NB: paper now describes the `f2-virtual-mixing` (uncommitted) design, not
+  current `f2-clean` HEAD.
+- **Novelty-scoping pass on intro contributions + abstract (2026-06-14)**: rescoped the
+  claimed contributions to match what is actually new vs. Binius64. Headline contribution
+  reframed as the *single bit-slice commitment read many ways* — XOR/shift/rotation and
+  their F_2-linear combinations (incl. Σ/σ mixing) are free read-offs off the bound `a'`
+  (where Binius pays a dedicated Shift reduction), and the same `a'` answers both ψ_α
+  (linear) and ψ_z (Hadamard), so one opening at one point. Modular-addition bullet now
+  credits Binius for the carry identity *inline* and frames the one-committed-bit win as a
+  *corollary* of free shifts (not an independent novelty). Rationale (from a reviewer-style
+  exchange): the adder discharge = Binius's identity + standard Lagrange/ideal-check/
+  random-eval machinery, so it is reformulation, not a new primitive; the defensible novelty
+  is the free-read-off unification + the dual ψ_α/ψ_z read-off from one commitment. The two
+  projections are kept because no single F_2-linear functional is both an algebra hom (needed
+  for shifts/ideal-membership) and product-preserving (needed for AND) — but they share one
+  commitment/opening/pipeline (the merged discharge).
+- **Arithmetization detail tables added (2026-06-14, `arithmetization.tex`)**: §sec:air now
+  has `tab:columns` (full trace inventory: 8 public / 12 committed primary-witness / virtual
+  = 4 Σ/σ mixing + carry words + κ-extractions + the b,c,d,f,g,h row-shift register reads)
+  and `tab:constraints` (the three families with per-row counts: 12 Binius-add bit-0 ⟨X⟩
+  linear + 12 carry Hadamards + 2 AND Hadamards ⇒ K_H=14, + O(1) boundary ⟨0⟩). Sourced
+  from the virtualized `test-uair/src/sha256_f2.rs` cols module. **Also fixed a substantive
+  miscount**: the prose said the round T_1 sum has "six inputs → five steps"; the code shows
+  T_1 = h+Σ_1+Ch+K+W = **five inputs → four steps, three intermediate-sum columns**
+  (`W_T1_S1..3`; KAPPA_BIT_T1_1..4). Corrected. PDF 41→42 pp, clean.
+
+### `num_rows` proof-size-optimal matrix shape — IMPLEMENTED + measured (2026-06-14, branch `f2-virtual-mixing`, was: hardcoded 8 → O(N) proof)
+- **Where**: `protocol/benches/f2_sha256.rs:382` `setup_prover` hardcodes `num_rows = 8`
+  for every ν; `f2_prove.rs:7962,8147` use a *different* non-optimal heuristic
+  `num_rows = 2^(ν/2)` (square shape — over-corrects the other way). Two conflicting
+  conventions, neither proof-optimal.
+- **Why it matters**: proof size (zip-plus `phase_commit.rs:1177`) has two shape terms —
+  `combined_row = row_len·512 B` (scales as N/num_rows; 512 = w·|K|/8, the bit-slice object
+  `a'`) and column openings `= t·b·num_rows·8 B` (scales as num_rows; t=987, b=6 paired
+  committed cols). With num_rows pinned at 8, `combined_row` → 99.6% of the proof at nv=22
+  (the flat `opened/values`=379,008 B vs 257 MiB `combined_row` we measured in the sweep).
+- **The optimum**: balance the two ⇒ `num_rows_opt = round_pow2(√(N·s_m/(t·b·s_k)))`
+  ≈ √N/9.62 (s_m=512, s_k=8). Wide matrix (row_len ≈ 92× num_rows). Estimated proof-size
+  gains: **nv16 1.7× (5.08→~3.0 MiB), nv20 6.3× (68→~10.8 MiB), nv22 12.8× (269→~21 MiB)**.
+- **Caveats / not done**: (1) proof-size-optimal ≠ time-optimal (bigger num_rows shrinks the
+  Merkle tree/codeword → likely faster commit, but grows column-opening assembly + verifier
+  column checks — needs a timing A/B). (2) Correctness-sensitive: changes the sumcheck
+  row/col split (`split = point.len() − log2(num_rows)`), multiple call sites, the
+  power-of-two asserts at `f2_prove.rs:3507/3544/3619`. Derive `b,s_m` from deployment (b
+  just went 8→6 from the Σ/σ virtualization), don't bake constants.
+- **DONE (2026-06-14)**: added `pub fn optimal_num_rows(num_vars, combined_row_entry_bytes,
+  column_cell_bytes, num_openings, num_committed_cols)` in `f2_prove.rs` — picks the
+  power-of-two `num_rows ∈ [1,N]` minimising `row_len·s_row + t·b·num_rows·s_cell` (the two
+  dominant shape terms; the Merkle term is a smaller log correction that doesn't move the
+  optimum at deployed scales — verified). Wired into the bench `setup_prover` (s_row=512,
+  s_cell=8, b = paired committed cols, t = `recommended_num_column_openings(REP)`); the
+  roundtrip tests (`f2_sha256_virtual_roundtrip.rs`) now use it too and **pass at nv=9 →
+  num_rows=2** (linear+open and oblong-discharge both verify at a non-8 shape — confirming
+  the machinery is correct for arbitrary power-of-two `num_rows`, as expected since it just
+  reshapes the hypercube for the PCS). Chosen shapes: nv9→2, nv14→16, nv16→32, nv19→64,
+  nv20→128, nv21→128, nv22→256.
+- **Measured (full e2e sweep, optimal vs the old hardcoded 8; nv16/20/22)** — a STRICT win
+  on all three axes at scale, growing with N (the old `8` made `row_len` huge → huge
+  codeword/Merkle tree + huge combined row):
+  | metric | nv16 | nv20 | nv22 |
+  |---|---|---|---|
+  | proof size | 5.08→3.02 MB (**1.68×**) | 68.1→10.8 MB (**6.3×**) | 269.5→21.2 MB (**12.7×**) |
+  | prove | 50.5→46.6 ms (1.08×) | 770→667 ms (1.16×) | 5.31→2.72 s (**1.95×**) |
+  | verify | 12.1→8.7 ms (1.38×) | 176→64 ms (2.75×) | 714→224 ms (**3.19×**) |
+  Matches the fork's proof-size estimate (1.7×/6.3×/12.8×) and additionally the prove/verify
+  improved (the codeword/Merkle/combined-row shrink dominates the larger column-opening
+  count). At nv≤~13 the optimum is ≤8 (e.g. nv9→2), so tiny instances trade a sliver of
+  prove time for proof size; irrelevant for real workloads.
+- **Not changed**: the two square-shape (`2^(ν/2)`) test/timing harnesses at
+  `f2_prove.rs:7978` (exact-tiling roundtrip) and `:8163` (AB merged-timing) keep their
+  deliberate square shape; integrators pick `num_rows` via the new helper. Still uncommitted
+  (worktree).
+- **Sweep extended to nv23/24 + recorded in the paper (2026-06-14)**: full deployed-shape
+  (optimal `num_rows`) e2e sweep — nv9/14/16/19/20/21/22/23/24, proof TOTAL
+  0.55/1.62/2.88/7.41/10.33/14.36/20.21/28.23/39.93 MiB (clean O(√N), ~×√2 per ν), prove
+  2.2 ms→25.1 s, verify 1.2 ms→1.00 s. **nv23/24 are over the 16 GB RAM knee** (prove 7.0/25.1
+  s, super-linear/swapping; proof size unaffected). Added `tab:zinc-scaling` (ν | comp |
+  num_rows | prove | verify | proof) to `appendix-measurements.tex`. **Flagged + corrected a
+  stale paper figure**: `tab:scaling`'s caption claimed Zinc+ proof `0.80/1.12/2.57 MiB` at
+  nv7/16/20 and called it "flat, column-opening-dominated" — but with t=987,b=6 the proof
+  *minimum* over all shapes at nv16 is ~2.88 MiB (the two dominant terms' product is fixed,
+  so the sum ≥ 2√(product)), i.e. the old 1.12 MiB was below the achievable floor and is
+  stale. Corrected to `0.55/2.88/10.3 MiB`, O(√N). **NOT yet reconciled (flagged to user)**:
+  `tab:scaling`'s Zinc+ *prove/verify* columns and the Part II comparison prose still reflect
+  the pre-optimal-shape (and older-code) configuration — a full comparison refresh (incl.
+  fresh Binius64 + the missing nv12/17 points) is the follow-up.
+
+### Paper correctness pass: the `X·c` / ψ_z (⟨X^w⟩ vs ⟨Z_H⟩) adder-discharge issue + rotation-ideal removal (2026-06-14)
+- **Trigger (user, via fork)**: the adder full-adder Hadamard `(a+Xc)⊙(b+Xc)=c+Xc`
+  is discharged via ψ_z (⟨Z_H⟩), but `X·c` is multiply-by-X in `F_shift` (⟨X^w⟩) — "two
+  moduli can't mix." **Verdict**: not an active correctness bug (the relation is a
+  coefficient-wise bit-vector identity, well-defined, and the prover materializes the
+  operands directly), but the paper's *binding* presentation was wrong/over-claimed and
+  needed sharpening — it is exactly the recorded "adder operands trusted" gap, now explained.
+- **Root cause (now in the paper — SIMPLE framing, after a user push-back that the
+  "basis-mismatch" story was overcomplicated)**: `X·c = SHL¹(c)` is just a *within-cell
+  bit-shift*. A within-cell shift binds under ψ_z the same way a *row*-shift binds under the
+  multipoint eval — by reading the committed bit-slice fold `a'` with *shifted* weights
+  (`ψ_z(SHL¹c)=Σ_b L_{b+1}(α)·a'_b`), the cell-dimension analogue of a shifted eq-tensor. So
+  the adder operands are NOT structurally unbindable; the deployed prover simply doesn't do
+  the bit-shift read-off (and doesn't commit β), so it ships them trusted. (Avoid the
+  `ψ_z(Xc)≠α·ψ_z(c)` "basis-mismatch" framing — technically true but it makes a mundane
+  shifted-weights read-off sound like an obstruction.)
+- **Edits** (`hadamard.tex`): (1) operand-triples intro distinguishes AND operands
+  (committed cols + *row*-shifts) from adder operands (the within-cell bit-shift
+  `X·c=SHL¹(c)`), noting the discharge treats all operands as bit-vectors (no modulus
+  conflict). (2) `sec:had-binding` no longer claims *every* operand is an XOR of
+  committed-column row-shifts — carved out the adder operands (bound by shifted Lagrange
+  weights). (3) `rem:adder-trusted` rewritten simply: `X·c` is a shift not an algebraic
+  factor across ⟨Z_H⟩; the `X·c=D` restatement makes `a+Xc=s+b`, `b+Xc=s+a` plain XORs of
+  committed columns, so only `c+Xc=SHR¹(D)+D` (+ committed β) keeps a shift, bound by shifted
+  weights; deployed prover ships trusted (missing the bit-shift read-off + β commit) → the
+  whole gap is one operand + β, a small implementation TODO, not a structural obstruction.
+- **Rotation-ideal removal** (`arithmetization.tex` `lem:rot`): dropped the "iff
+  `v−X^{w-r}u ∈ ⟨X^{w}−1⟩`" ideal-membership framing (rotations are virtual now); kept
+  `F_rot` as the defining ring, added "never pinned by a constraint." (preliminaries / piop /
+  overview generator lists were already {0,X} from the Σ/σ virtualization pass.) Verified
+  `soundness.tex` ("The adder-carry binding"), the overview caveat, and `comparison.tex`
+  already carve out the adder gap correctly — no overclaim left. PDF rebuilds clean (43 pp).
+- **Still open**: the *implementation* sound fix (commit β + shifted-Lagrange bit-shift
+  binding for `c+Xc`) — multi-site, correctness-sensitive; the recorded follow-up.
+
+### Paper reframing: ψ_α and ψ_z are ONE projection (X←α) in two bases, not two projections (2026-06-14, user-driven)
+- **User insight**: "thinking of ψ_α and ψ_z is wrong — there's one projection where X is
+  replaced by a random α, and the witness is read in the monomial basis sometimes, the
+  Lagrange basis other times." Correct and cleaner: `ψ_α(w)=(Σw_b X^b)|_{X=α}=Σw_b α^b`
+  (monomial) and `ψ_z(w)=(Σw_b L_b(X))|_{X=α}=Σw_b L_b(α)` (Lagrange) are the *same*
+  substitution at the *same* α — the weight vectors are literally `X^b|_α` and `L_b(X)|_α`.
+  The basis is forced by the constraint: monomial respects mult-by-X (shifts) + the cell
+  ideals → linear part; Lagrange turns coefficient-wise product into pointwise-on-H → AND.
+- **Edits** (recast "two projections / second projection / second weighting" → "one
+  projection, two bases / readings", keeping `ψ_ξ` as the *general* F_2-linear functional the
+  commitment reads off): `preliminaries.tex` `def:projection` subsection rewritten ("one
+  evaluation, two bases"; "these are NOT two projections"); `overview.tex` crux (the "two
+  projections … weight vector" sentence → "one substitution, two bases"); `hadamard.tex`
+  ("differ only in their weight vector" → "same evaluation, two bases"; "the reason a second
+  weighting is needed" → "the reason the Lagrange basis is needed"; summary "second
+  functional" → "second basis"); one-liners in `introduction.tex` / `implementation.tex` /
+  `arithmetization.tex` ("second projection/weighting ψ_z" → "Lagrange reading ψ_z");
+  `commitment.tex` ("two projections"/"both projections" → "two readings"/"both readings").
+  Kept `ψ_ξ` (general functional, used in commitment's "any functional reads off a'"). PDF
+  clean (43 pp). This dovetails with the X·c fix: the adder shift is *also* just "read the
+  bits with shifted weights at α" — all one projection, different basis/weights.
+- **Notation retired (2026-06-14)**: per the user, dropped the `ψ_α`/`ψ_z` symbols entirely
+  in favour of explicit evaluation notation — monomial reading `ev^m_α` and Lagrange reading
+  `ev^L_α` (shared `ev_α`, the basis is the superscript). Done as a one-line preamble
+  redefine of the `\psia`/`\psiz` macros (→ `\operatorname{ev}^{\mathrm m}_{\alpha}` /
+  `…^{\mathrm L}_{\alpha}`), which propagates to all 154 occurrences atomically. Kept distinct:
+  `ψ_ξ` (the *general* F_2-linear cell functional / any weight vector, used for the
+  commitment's "one bound object serves any functional") and `ψ_2` (the integer reading
+  `ŵ(2)`, only for stating relations). Macro *names* `\psia/\psiz` kept in the source (now
+  rendering the ev form) with a preamble comment; a full source rename to `\evmon/\evlag` is
+  a trivial follow-up if wanted. PDF clean (43 pp).
 - **Question**: "Zinc+ should have a faster prover than Binius64 — why doesn't it
   look that way at nv16?" Investigated with fresh per-phase measurement.
 - **Measured warm per-phase** (`sha256_f2_merged_ab_timing` + `OBLONG_PROFILE=1`,
@@ -3798,6 +4240,24 @@ describe machinery that ran on `claude/gkr-virtual-cols` but is
 ---
 
 ## Open questions / hypotheses to test
+
+### Per-region *heap* (not just RSS) attribution for the RAM bench
+- **Context**: `f2_sha256_mem` (see Shipped "Prover RAM measured per-region")
+  gives per-region `Δrss` via the `prof` peak-RSS probe, plus *whole-prove* heap
+  live/peak from its tracking allocator. But per-region attribution is RSS-only:
+  `ru_maxrss` is monotonic, so a region that allocs-then-frees below an earlier
+  high-water shows `Δrss=0` and its transient is credited to whoever first set
+  the peak. The two big GF(2¹²⁸)-lift regions (`uair:alpha_project`,
+  `uair:merged_phase1`) almost certainly free their projected columns before
+  `open`, but RSS can't see that drop.
+- **Test plan**: extend `prof::set_rss_probe` to a second optional
+  `set_heap_probe(fn()->u64)` returning allocator *live* bytes; record live at
+  scope enter/exit too and print a `Δlive` column (net retained) alongside
+  `Δrss` (peak pushed). The bench already owns the allocator, so it just
+  registers `heap_live` as the probe. Would show retained-vs-transient per region
+  and pin the true working-set high-water to a region. ~15 lines in `prof.rs`,
+  zero-cost when unset (same hook pattern). Low priority — the whole-prove
+  live/peak split already answers the headline "retained vs transient" question.
 
 ### ✅ RESOLVED (2026-06-14): merged verify `MergedClaimedSumMismatch` when filler rows == 0 (ν ≡ 2 mod 8)
 - **Fix**: `cols::num_compressions` now reserves `4 + 2` rows (`−6`, was `−4`):

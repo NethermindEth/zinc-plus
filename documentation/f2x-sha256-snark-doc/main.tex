@@ -3,8 +3,7 @@
 \input{preamble}
 
 \title{An All-$\Ftwo[X]$ SNARK for SHA-256:\\
-       Arithmetization, Binary-Field PIOP, Bit-Sliced Commitment,\\
-       and a Comparison with Binius64\\[4pt]
+       Arithmetization, Binary-Field PIOP, and a Bit-Sliced Commitment\\[4pt]
        \large As realised in the Zinc\texorpdfstring{$+$}{+} reference
        codebase (\texttt{f2-clean})}
 \author{Albert Garreta \\[2pt] \normalsize Nethermind Research}
@@ -15,53 +14,38 @@
 \maketitle
 
 \begin{center}
-\textcolor{blue}{\textit{Companion note to the Zinc\texttt{+} paper. It
-describes the end-to-end all-$\Ftwo[X]$ proof system for SHA-256: the
-arithmetization, the binary-field polynomial interactive oracle
-reduction, and the bit-sliced polynomial commitment. Machine-assisted
-draft, under author revision.}}
+\textcolor{blue}{\textit{Companion note to the Zinc\texttt{+} paper: an
+end-to-end, all-$\Ftwo[X]$ proof system for SHA-256 --- the arithmetization,
+the binary-field polynomial IOP, and the bit-sliced commitment that ties
+them together. Under author revision.}}
 \end{center}
 \vspace{0.5em}
 
 \begin{abstract}
-We give a self-contained account of a succinct argument for SHA-256 that
-operates \emph{natively} over the polynomial ring $\Ftwo[X]$, never
-lifting the computation to the integers or to a large prime field. Each
-$32$-bit machine word is a bit-polynomial in the cell ring
-$\cellring = \Ftwo[X]/(X^{\wbit})$, and the three bitwise primitives of
-SHA-256 become ring operations: $\XOR$ is polynomial addition (free at
-the commitment layer); bit shifts and rotations are monomial
-multiplications, realised as linear ``virtual'' columns; and modular
-addition $\bmod\,2^{\wbit}$ is the Binius per-step full-adder identity in
-the quotient $\Fshift$. The single nonlinear primitive, $\AND$ (hence
-$\Ch$ and $\Maj$), is a coefficient-wise Hadamard product, which we
-discharge by an oblong zerocheck whose output is tied back to the
-commitment through a subspace-Lagrange projection. We then describe the
-binary-field polynomial interactive oracle reduction that proves the
-resulting constraint system --- ideal check, the evaluation projection
-$\psia$, and sumcheck over $\K = \mathrm{GF}(2^{128})$ --- and show how
-every constraint and every Hadamard discharge reduces to multilinear
-evaluation claims at a common point. These claims are settled by a
-hash-based polynomial commitment whose opening is \emph{bit-sliced}:
-the eq-folded $\{0,1\}$ bit slices of the committed cells form a single
-degree-$<\wbit$ polynomial over $\K$, from which the verifier reads off
-both the evaluation claim (via $\psia$) and the Hadamard discharge
-operands (via $\psiz$) at no extra commitment cost. The construction is
-presented as an idealized design, with the deployed instantiation
-($\wbit = 32$, $\K=\mathrm{GF}(2^{128})$, seven chained compressions)
-and its engineering choices given as remarks. The final part of the paper
-positions the construction against \emph{Binius64}, the closest system in
-the literature: we organise the comparison around three orthogonal design
-axes (uniform AIR versus unrolled word circuit; linear $\Ftwo$-RAA with a
-flat Brakedown proximity test versus Reed--Solomon with recursive FRI;
-base-field versus $\mathrm{GF}(2^{128})$ reductions), each deciding one
-outcome, and report same-machine measurements at the matched commitment
-rate: the $\Ftwo[X]$ prover leads (a touch at moderate scale, widening to
-$\sim$$2\times$ as Binius64's $O(N)$ circuit build walls), its verifier
-runs from near-parity to over $11\times$ faster ($\sqrt N$ versus $O(N)$),
-its preprocessing is $O(1)$ versus $O(N)$, and its memory is roughly half
---- while Binius64's proof is $4$--$7\times$ smaller and it is fully sound
-where our adder carries are presently trusted.
+We give a self-contained account of a succinct argument for SHA-256 that runs
+entirely in characteristic two, over the polynomial ring $\Ftwo[X]$, never
+lifting the computation to a large prime field. Each $32$-bit word is a
+\emph{bit-polynomial} in the cell ring $\cellring = \Ftwo[X]/(X^{\wbit})$, and
+the three bitwise primitives of SHA-256 become ring operations: $\XOR$ is
+addition (free at the commitment layer); shifts and rotations --- and their
+$\Ftwo$-linear combinations, the $\Sigma/\sigma$ mixing --- are monomial
+multiplications, realised as \emph{virtual} columns read off the commitment
+rather than committed; and modular addition is the Binius full-adder identity,
+for which the cell ring lets the prover commit a \emph{single carry bit} per
+addition. The one nonlinear primitive, $\AND$ (hence $\Ch$, $\Maj$), is a
+coefficient-wise Hadamard product. The feature we emphasise is how the
+nonlinear part is settled: a hash-based $\Ftwo[X]$ commitment whose opening
+binds, per column, a single degree-$<\wbit$ object --- the \emph{bit-slice
+fold} --- off which the verifier reads \emph{both} the evaluation that
+discharges the linear constraints (a monomial reading at a random point)
+\emph{and} the operands that discharge the $\AND$ relations (a Lagrange reading
+at the \emph{same} point). The two readings share one opening at one point, so
+the nonlinear constraints cost no second commitment. We compose the
+arithmetization, a binary-field polynomial IOP over $\K = \mathrm{GF}(2^{128})$,
+and the commitment into a knowledge-sound SNARK under Fiat--Shamir, present the
+deployed instantiation ($\wbit = 32$, seven chained compressions, a rate-$1/4$
+$\Ftwo$-RAA code), and briefly position the system against Binius64, from which
+the carry identity and the single-$\AND$ form of $\Ch$ are adopted.
 \end{abstract}
 
 \tableofcontents
@@ -69,25 +53,18 @@ where our adder carries are presently trusted.
 \input{sections/introduction}
 \input{sections/overview}
 \input{sections/preliminaries}
-\input{sections/arithmetization}   % Stage 2
-\input{sections/piop}              % Stage 3
-\input{sections/hadamard}          % Stage 3
-\input{sections/commitment}        % Stage 4
-\input{sections/soundness}         % Stage 4
-\input{sections/implementation}    % Stage 5
-
-% --- Comparison with Binius64 (condensed; full detail in the appendices) ---
+\input{sections/arithmetization}
+\input{sections/piop}
+\input{sections/hadamard}
+\input{sections/commitment}
+\input{sections/soundness}
+\input{sections/implementation}
 \input{sections/comparison}
 
-% =============================== Appendices ===============================
-% Not counted toward the main-body page budget.
+% =============================== Appendix ================================
 \appendix
-\input{sections/appendix-measurements}  % A: detailed sweeps + per-phase (moved from sec:impl)
-\input{sections/cmp-shifts}             % B: anatomy of the shift handling
-\input{sections/cmp-analysis}           % C: where each wins; the AIR counterfactual
-\input{sections/cmp-guidance}           % D: deployment guidance (full)
-\input{sections/cmp-outlook}            % E: cross-pollination levers
+\input{sections/appendix-measurements}
 
-\input{sections/cmp-bibliography}
+\input{sections/bibliography}
 
 \end{document}

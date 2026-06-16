@@ -74,6 +74,15 @@ harness = false
 required-features = ["parallel", "simd", "unchecked"]
 
 [[bench]]
+name = "f2_sha256_mem"
+harness = false
+# Peak-RAM measurement harness (not a criterion bench — own `main`). Same
+# perf-tuned feature set as `f2_sha256` so the measured footprint reflects the
+# deployable prover. Run via `--no-run` then invoke the built binary once per
+# `nvars` (ru_maxrss is per-process monotonic). See the file's module docs.
+required-features = ["parallel", "simd", "unchecked"]
+
+[[bench]]
 name = "f2_sha256_rs"
 harness = false
 # Reed-Solomon-equivalent variant of `f2_sha256`: same code path, but

@@ -1,0 +1,210 @@
+\section{Comparison with Binius64}
+\label{sec:cmp}
+
+We close by positioning the construction against \binius{}
+\cite{binius64repo}, the SHA-256 prover of the Binius line
+\cite{binius,fribinius} and the closest system in the literature. The two are
+close cousins: \zinc{} imports \binius{}'s per-step modular-addition carry
+identity (\Cref{sec:arith}) and its single-$\AND$ form of $\Ch$, and both work
+in characteristic two precisely to avoid the prime-field witness blow-up that
+bit-decomposing SHA-256 would incur. They differ in \emph{one} structural
+choice --- \binius{} arithmetizes SHA-256 as an unrolled, non-deterministic
+$64$-bit \emph{word circuit}, whereas \zinc{} uses a \emph{uniform} AIR over
+the cell ring $\cellring$ --- and that choice, together with two independent
+choices of commitment and reduction field, accounts cleanly for the four
+numbers a user observes. This section states the three axes and the measured
+outcome; the supporting anatomy (the shift handling, the AIR counterfactual,
+deployment guidance, and the full measurement sweeps) is deferred to the
+appendices.
+
+\subsection{Three orthogonal design axes}
+\label{sec:axes}
+
+The comparison is unusually clean: the systems make independent choices on
+three axes, and each axis decides exactly one observable outcome
+(\Cref{tab:axes}).
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}lXXl@{}}
+\toprule
+\textbf{Axis} & \textbf{\binius{}} & \textbf{\zinc{}} & \textbf{Decides} \\
+\midrule
+Arithmetization &
+  unrolled word \emph{circuit} (arbitrary wiring) &
+  uniform \emph{AIR} over $\Ftwo[X]$ (structured wiring) &
+  \textbf{verifier} \\
+Commitment / proximity &
+  Reed--Solomon $+$ recursive FRI/BaseFold &
+  linear $\Ftwo$-RAA $+$ flat Brakedown &
+  \textbf{proof size} \\
+Reduction field &
+  sumcheck tensors in $\mathrm{GF}(2^{128})$ &
+  discharge kept in $\Ftwo/\mathrm{GF}(2^8)$ &
+  \textbf{memory / large $N$} \\
+\bottomrule
+\end{tabularx}
+\caption{The three design axes. Each system picks a different point on each,
+and each axis decides one headline outcome. No single axis decides the prover:
+it is dominated by content both systems share (the $\AND$ discharge and the
+commitment encode), so the matched-rate prover is a net of offsetting per-phase
+gaps that leaves \zinc{} a touch ahead and widening with $N$.}
+\label{tab:axes}
+\end{table}
+
+\paragraph{Arithmetization decides the verifier.} A verifier is succinct
+exactly when the constraint system's wiring --- the map from each constraint to
+the witness positions it reads --- is succinctly evaluable at a random point.
+\zinc{}'s uniform AIR has \emph{structured} wiring: one fixed transition
+relation, evaluated as an $O(\log N)$ formula, with the verifier never reading
+the per-row structure. \binius{}'s word circuit has \emph{arbitrary} wiring:
+which committed word feeds which gate is data with no closed form, so the
+verifier sums over all $N$ gates in the clear --- its $O(N)$ verifier, and, by
+the same token, its $O(N)$ preprocessing against \zinc{}'s $O(1)$.
+Crucially, it is the cross-entry \emph{wiring}, not the entry-wise shifts, that
+is linear: the entry-wise shift is succinct in both systems
+(\Cref{sec:shifts}), and whether \binius{} could recover a succinct verifier by
+adopting an AIR is the counterfactual of \Cref{sec:ana-air}.
+
+\paragraph{Commitment decides proof size.} Independently of the
+arithmetization, \zinc{} buys a linear-time $\Ftwo$-RAA encoder and pays with a
+\emph{flat} proof --- a Brakedown test opening $t\approx 987$ full columns, so
+the proof grows as $t\cdot\sqrt{N}$ with a large floor --- while \binius{} buys
+a \emph{small, recursive} FRI proof and pays with an NTT encoder. A WHIR-style
+recursive proximity test would close this gap on the \zinc{} side
+(\Cref{sec:cmp-outlook}).
+
+\paragraph{Reduction field decides memory and scaling.} \binius{}'s BitAnd and
+Shift reductions build $\mathrm{GF}(2^{128})$ tensors that, with a
+rate-$\tfrac12$ codeword, spill cache super-linearly; \zinc{} keeps the witness
+bit-packed and runs the Hadamard discharge in the base field
+$\Ftwo/\mathrm{GF}(2^8)$, lifting to $\K$ only at the $\psi$ projections ---
+roughly $16$--$32\times$ fewer bytes streamed and about half the footprint at
+the largest matched instance.
+
+\paragraph{No single axis decides the prover.} The prover is dominated by work
+both systems must do --- discharge the same $\AND$ content, encode the witness
+--- and the word-level (one packed lane) versus bit-sliced ($\times\wbit$)
+asymmetry in how they reach it roughly cancels at the current optimisation
+level. The prover is thus a \emph{net} of large offsetting per-phase gaps
+(\Cref{app:meas}) rather than a single dominant difference; at the matched
+commitment rate it leaves \zinc{} a touch ahead, widening with $N$ as \zinc{}
+scales linearly and \binius{} super-linearly.
+
+\subsection{Measured comparison}
+\label{sec:results}
+\label{sec:res-headline}
+
+All figures are on one Apple~M4 ($10$-core, $16$\,GB), non-zero-knowledge,
+provers multithreaded, CPU-only, at the matched commitment rate $1/4$; \zinc{}
+is indexed by $\nu=\log_2(\text{rows})$ with ${\approx}(2^\nu-4)/68$
+compressions, and \binius{} by block count matched to it. Absolute times are thermally variable
+($\sim$$10$--$20\%$ run-to-run), so we read \emph{ratios} and per-phase
+\emph{shapes}, which are stable.
+
+\begin{table}[t]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+& & \binius{} & \zinc{} & winner \\
+\midrule
+\multirow{3}{*}{$\sim$$1000$ comp}
+  & Prove   & $84$\,ms    & $75$\,ms    & \zinc{} $1.1\times$ \\
+  & Verify  & $14$\,ms    & $12$\,ms    & \zinc{} $1.2\times$ \\
+  & Proof   & $249$\,KiB  & $1.12$\,MiB & \binius{} $4.6\times$ \\
+\midrule
+\multirow{3}{*}{$\sim$$8000$ comp}
+  & Prove   & $1.22$\,s   & $0.58$\,s   & \zinc{} $2.1\times$ \\
+  & Verify  & $493$\,ms   & $45$\,ms    & \zinc{} $11\times$ \\
+  & Proof   & $299$\,KiB  & $\sim$$2.0$\,MiB & \binius{} $\sim$$7\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Matched rate $1/4$, CPU, at two scales (full sweeps in
+\Cref{app:meas}). At moderate $N$ the systems are close on every axis but
+proof size; the content is how they \emph{scale}. Representative single runs.}
+\label{tab:headline}
+\end{table}
+
+\Cref{tab:headline} reads the comparison in two regimes. At $\sim$$1000$
+compressions the provers and verifiers are within $\sim$$1.2\times$ and only the
+proof differs materially. The structural content is the scaling. \zinc{}'s
+prover is linear and \binius{}'s super-linear, so the prover gap opens to
+$\sim$$2\times$ by $8000$ compressions and then becomes unbounded: \binius{}'s
+$O(N)$ circuit \emph{build} exceeds a minute beyond $\sim$$8000$, where \zinc{}
+still proves $15{,}420$ compressions in $\approx 1.2$\,s (and, via swap,
+$123{,}361$ on a $16$\,GB host). The verifier and proof move in opposite
+directions: \binius{}'s verifier is $O(N)$ --- its in-the-clear wiring sweep
+(\Cref{sec:shifts}) --- and \zinc{}'s is $\sqrt N$, dominated by the
+$t$-column proximity test, so the verifier ratio grows from near-parity to
+$11\times$ and beyond; the proof runs the other way, \binius{} smaller by
+$4$--$7\times$ and widening (recursive FRI versus the flat bit-sliced opening).
+The per-phase decomposition behind the prover figure, the full sweeps, and the
+$O(N)$-versus-$O(1)$ preprocessing data are in \Cref{app:meas}; the mechanism
+behind each gap, and when each system wins, in \Cref{sec:analysis,sec:guidance}.
+
+\subsection{The soundness asymmetry}
+\label{sec:cmp-soundness}
+
+A fair comparison must record that the two are not at equal soundness status.
+\binius{} is fully sound at its $96$-bit target. \zinc{} is unconditionally
+sound for the $\AND$ relations and the entire linear part, but its
+modular-addition carries are presently \emph{trusted}: the adder operands'
+$\psiz$ parents involve a committed carry-out bit and an intra-word $\SHR$ that
+do not reduce to row-shift pair-evaluations of committed columns, so $12$ of
+the $14$ deployed Hadamards are honest-prover-supplied at the AIR layer
+(\Cref{rem:adder-trusted}). The recommended fix replaces those $12$ carry
+Hadamards with one grand-product lookup against a public addition table ---
+sound by construction, and simultaneously removing the $\times\wbit$ bit-slice
+discharge cost for additions. A characteristic-two subtlety is essential: the
+lookup must use a \emph{multiplicative} grand product $\prod_i(\gamma-a_i) =
+\prod_t(\gamma-t)^{m_t}$, not an additive log-derivative, which is unsound over
+an $\Ftwo$-extension because $1/(\gamma-a)+1/(\gamma-a)=0$ lets even
+multiplicities cancel. Because closing the gap costs \zinc{} prover time it has
+not yet paid, its moderate-$N$ edge includes a small soundness discount; the
+asymptotic ($\sim$$2\times$, scaling) win is the more robust claim.
+
+\subsection{When to use which}
+\label{sec:guidance-brief}
+
+The three axes are \emph{hash-agnostic} --- they concern the arithmetization,
+the proximity test, and the reduction field, not SHA-256 specifically --- so
+they yield workload guidance. Hash-dominated work \emph{at scale} favours
+\zinc{} on prover throughput, memory, and verifier cost together; a hard
+\emph{small standalone proof} favours \binius{} (or a recursion layer wrapped
+over \zinc{}, whose $\sqrt N$ verifier is the cheaper inner argument to wrap);
+\emph{heterogeneous} statements that pair a hash with big-integer arithmetic
+(RSA, ECDSA) favour \zinc{}'s multi-ring composition in a unified limb domain;
+and at \emph{moderate} scale the systems are close enough that the binding
+output constraint decides. \Cref{sec:guidance} gives the full
+workload-by-workload analysis and a decision table.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\zinc{} and \binius{} agree on the hard decision --- prove SHA-256 in
+characteristic two, refusing the prime-field witness blow-up --- and disagree
+on three orthogonal downstream choices, each deciding one outcome: uniform AIR
+versus word circuit decides the verifier (and the $O(N)$-versus-$O(1)$
+preprocessing); flat versus recursive proximity decides the proof; the
+base-field versus $\mathrm{GF}(2^{128})$ reduction decides memory and scaling.
+The prover, dominated by shared content, is the closest of the four: at the
+matched rate $1/4$ on one machine, \zinc{} leads by a touch at moderate $N$,
+widening to $\sim$$2\times$ and then unbounded as \binius{}'s $O(N)$ build
+walls; its verifier runs from near-parity to past $11\times$ ($\sqrt N$ versus
+$O(N)$) on about half the memory, while \binius{}'s recursive proof stays
+$4$--$7\times$ smaller, and \binius{} is fully sound where \zinc{}'s adders are
+trusted.
+
+Three observations resist the usual summaries. First, \binius{}'s linear
+verifier is caused by the cross-entry \emph{wiring}, not the shifts: the
+entry-wise shift is succinct in both systems, and the wiring is succinct only
+under a uniform arithmetization. Second, the verifier and prover are
+\emph{decoupled} in this family --- a succinct verifier costs the prover
+nothing to keep and confers nothing on it. Third, the levers each system needs
+to close its gap point toward the other: \zinc{}'s proof wants FRI-style
+recursion and \binius{}'s prover wants \zinc{}'s free shift, the convergent
+endpoint being a binary-field STARK with an $\Ftwo[X]$ cell ring, a uniform
+AIR, a base-field discharge, a sound lookup adder, and a recursive proximity
+test.

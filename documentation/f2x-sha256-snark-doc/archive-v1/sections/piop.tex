@@ -1,0 +1,207 @@
+\section{The Binary-Field Polynomial IOP}
+\label{sec:piop}
+
+The arithmetization of \Cref{sec:arith} hands us a UAIR whose constraints
+split into a linear part (ideal-membership constraints) and a nonlinear
+part (column Hadamard products). This section proves the linear part. It
+is the binary-field specialisation of the Zinc\texttt{+} polynomial
+interactive oracle reduction: a commitment, an ideal check, an evaluation
+projection $\psia$, and a sumcheck, composing to reduce ``all
+ideal-membership constraints hold at all rows'' to a batch of
+multilinear-extension evaluation claims at a common point. The Hadamard
+part is deferred to \Cref{sec:hadamard}; both meet at the commitment in
+\Cref{sec:commitment}.
+
+\subsection{Pipeline}
+\label{sec:pipeline}
+
+The reduction runs on one Fiat--Shamir transcript through the stages
+\[
+  \underbrace{\text{commit}}_{\text{Step 0}}
+  \;\to\;
+  \underbrace{\text{ideal check}}_{\text{Step 2}}
+  \;\to\;
+  \underbrace{\psia}_{\text{Step 3}}
+  \;\to\;
+  \underbrace{\text{sumcheck}}_{\text{Step 4}}
+  \;\to\;
+  \underbrace{\text{multipoint eval}}_{\to\, r_0}
+  \;\to\;
+  \underbrace{\text{open}}_{\text{Step 7}},
+\]
+with the Hadamard discharge of \Cref{sec:hadamard} riding Steps 2--4 ---
+it is one more ideal-membership family --- and folding into the multipoint
+eval. \emph{Step 1 is empty:} the
+general Zinc\texttt{+} compiler begins by projecting $\Q[X]$ or $\Z[X]$ to
+a prime field $\F_{q_0}[X]$, but the trace here is already over
+$\Ftwo[X]\subset\K[X]$, so there is no prime to sample and no projection
+to perform. This vacancy is the first concrete saving of the all-$\Ftwo$
+choice: the per-row coefficient reduction that the integer pipeline pays
+at Step 1 simply does not occur.
+
+\subsection{Step 0: commitment, and Step 1's vacancy}
+\label{sec:commit-step}
+
+The prover commits to the primary witness columns with the hash-based
+$\Ftwo[X]$ commitment of \Cref{sec:commitment}: each column is arranged as
+a matrix, its rows encoded by an $\Ftwo$-linear code that does not widen
+$\cellring$, and the codewords Merkle-hashed into a single root that is
+absorbed into the transcript. Public columns are not committed (the
+verifier evaluates their MLEs locally); virtual columns are not committed
+(they are reconstructed from their sources). The commitment is binding;
+its evaluation argument is \Cref{sec:commitment}. For now it is a black
+box that will, at the end, certify the evaluation claims this section
+produces.
+
+\subsection{Step 2: the ideal check}
+\label{sec:ideal-check}
+
+The linear constraints are ideal-membership assertions: for each linear
+constraint family $\ell$ with generator $g_\ell\in\{X,\,0\}$
+(the Binius LSB and equality/boundary), and each row $i$, a fixed
+$\Ftwo[X]$-combination $Q_\ell(T_i)$ of cells and row-shifts must satisfy
+$Q_\ell(T_i)\in\ideal{g_\ell}$. The ideal check batches \emph{all} of
+these --- across families and across all $N_{\mathrm{rows}}$ rows --- into a
+single claim, following the ideal-batching stage of the Zinc\texttt{+}
+compiler. It draws a row-evaluation point $\rho\in\K^{\nu}$ and a
+constraint-batching randomness from the transcript, and forms, per
+family, the combined polynomial
+\[
+  E_\ell \;=\; \sum_{i\in\{0,1\}^{\nu}} \eq_i(\rho)\,Q_\ell(T_i)\;\in\;\K[X]
+\]
+(an element of $\K[X]$ once the $\eq$-weights are drawn from $\K$),
+together with the obligation $E_\ell\in\ideal{g_\ell}$. Because $\ideal{g_\ell}$
+is a $\K[X]$-submodule, honest data --- with every $Q_\ell(T_i)\in\ideal{g_\ell}$
+--- yields $E_\ell\in\ideal{g_\ell}$; a single cheating row is caught, with
+the usual MLE soundness, by the random $\rho$.
+
+\begin{remark}[The $\Ftwo$-native linear ideal check]
+\label{rem:native-ic}
+Every SHA-256 constraint is degree one in the trace cells, so the ideal
+check runs in its linear lane: the combined polynomials $E_\ell$ are
+$\Ftwo$-linear images of the committed cells, and the prover assembles
+them by evaluating each constraint's bit-MLEs at $\rho$ directly over $\K$,
+with no general polynomial-product machinery. The membership obligations
+specialise to: $E_\ell$ has zero constant term (for $g_\ell=X$), or
+$E_\ell=0$ outright (for $g_\ell=0$).
+\end{remark}
+
+\subsection{Step 3: the evaluation projection $\psia$}
+\label{sec:psi-alpha}
+
+The combined claim still lives in $\K[X]$ --- it speaks of the cell
+variable. The evaluation projection collapses it to $\K$. The prover draws
+$\alpha\in\K$ from the transcript and applies $\psia$ (\Cref{def:projection}
+with weights $\alpha^b$, i.e.\ substitution $X=\alpha$) to every cell of
+the trace, producing the projected columns
+$\mle{\psia(w_g)}\in\K[Y_1,\dots,Y_\nu]$, and likewise evaluates each
+combined polynomial $E_\ell$ at $\alpha$. The reason this is sound for the
+linear part is the following commutation, the formal content of
+``ideal-membership constraints survive $\psia$''.
+
+\begin{lemma}[Linear constraints survive $\psia$]
+\label{lem:linear-survives}
+Let $Q$ be a fixed $\Ftwo[X]$-linear combination of cells (and row-shifts)
+and $g\in\Ftwo[X]$. For any trace $T$ and any $\alpha\in\K$:
+\begin{enumerate}[leftmargin=2em,label=(\roman*)]
+  \item $\psia\bigl(Q(T)\bigr) = Q\bigl(\psia(T)\bigr)$, where on the right
+    $\psia$ is applied cellwise and $Q$ is read with its $\Ftwo$
+    coefficients in $\K$; and
+  \item if $Q(T)\in\ideal{g}$ then $\psia(Q(T)) = g(\alpha)\cdot u$ for
+    some $u\in\K$; in particular if $g(\alpha)=0$ then $\psia(Q(T))=0$.
+\end{enumerate}
+\end{lemma}
+
+\begin{proof}
+(i) $\psia$ is $\Ftwo$-linear (\Cref{def:projection}) and $Q$ has $\Ftwo$
+coefficients, so $\psia$ commutes with the linear combination; row-shifts
+are positional and unaffected. (ii) $Q(T)=g\cdot h$ for some $h\in\Ftwo[X]$,
+and $\psia$ is multiplicative on the relevant product (it is evaluation at
+$\alpha$), so $\psia(Q(T)) = g(\alpha)\,\psia(h)$.
+\end{proof}
+
+Part (i) is what makes the projected trace a faithful target for the
+sumcheck: the projection of a constraint among cells is the same
+constraint among the projected columns. Part (ii) is how the membership
+obligations are discharged downstream --- an
+LSB constraint ($g=X$) leaves a controlled $\alpha$-multiple, and an
+equality ($g=0$) becomes an exact $\K$-equality.
+
+\begin{remark}[Why $\AND$ does \emph{not} survive]
+\label{rem:and-not-survive}
+\Cref{lem:linear-survives}(i) fails for the Hadamard product: $\psia$ is
+an algebra map for the \emph{polynomial} product, but the Hadamard product
+is coefficient-wise, and $\psia(\bp{u}\had\bp{v}) = \sum_b u_b v_b\alpha^b$
+is not $\psia(\bp{u})\cdot\psia(\bp{v}) = \sum_{b,b'} u_b v_{b'}\alpha^{b+b'}$.
+A product of projections is not the projection of a Hadamard product. This
+is precisely why the Hadamard constraints are not equalities under $\psia$;
+\Cref{sec:hadamard} reads them through a \emph{different} functional $\psiz$
+--- at the same point $\alpha$ --- under which they become an
+ideal-membership claim discharged by this same ideal check and sumcheck,
+with the bit-product structure exposed rather than scrambled.
+\end{remark}
+
+\subsection{Step 4: the sumcheck}
+\label{sec:sumcheck}
+
+After projection the linear obligations are a zerocheck: a single batched
+constraint MLE must vanish on the hypercube, weighted by $\eq(\cdot;\rho)$.
+Concretely the prover batches the projected columns by a transcript
+challenge $\gamma\in\K$ into $\mle{C}(x)=\sum_g \gamma^{g}\,\mle{\psia(w_g)}(x)$
+(over primary and virtual columns), and the claim
+\[
+  \sum_{x\in\{0,1\}^{\nu}} \eq(x;\rho)\,\mle{C}(x) \;=\; 0
+\]
+encodes, by \Cref{lem:linear-survives}, that all batched linear
+constraints hold. This is a degree-$2$ statement (the product
+$\eq\cdot\mle{C}$), and a standard sumcheck reduces it in $\nu$ rounds to a
+single evaluation point $r^*\in\K^{\nu}$ together with the per-column claims
+\[
+  a_g \;=\; \mle{\psia(w_g)}(r^*)\;\in\;\K,
+  \qquad g = 1,\dots,K.
+\]
+The prover forms each round's message with the weight $\eq(\cdot;\rho)$
+\emph{factored out}: it enters only through its multilinear closed form at the
+round's evaluation points, so the per-slot work is a product against the
+batched column $\mle{C}$ alone. The opening round additionally exploits that
+the projected data is $\Ftwo$-valued (the columns are projected from
+$\{0,1\}$ cells). The Hadamard discharge of \Cref{sec:hadamard} adds one
+further (degree-$3$) group to this same sumcheck, reduced to the same point
+$r^*$ and formed the same way.
+
+\subsection{Multipoint evaluation: a single point $r_0$}
+\label{sec:multipoint}
+
+The sumcheck leaves claims at $r^*$, but the AIR reads several previous
+rows (the shift-register layout of \Cref{sec:air}), so the verifier also
+owes \emph{pointed-shift} claims: evaluations of a source column at a point
+shifted by a row offset $\Delta$. And --- looking ahead --- the Hadamard
+discharge of \Cref{sec:hadamard} produces its own claims, the
+$\psiz$-projections of the operand columns at the same sumcheck point $r^*$. A multipoint
+evaluation argument collects all of these and reduces them to one point.
+Formally, given claims at $r^*$ and a list of pointed-shift claims
+$\{(\text{point},\Delta,\text{source})\}$, a single sumcheck produces a
+common point $r_0\in\K^{\nu}$ at which every involved column (the
+$\psia$-projected trace and, for the Hadamard path, the $\psiz$-projected
+trace appended to it) carries one evaluation claim. The commitment then
+opens every column at the single $r_0$.
+
+\subsection{What the PIOP proves, and what is left}
+\label{sec:piop-handoff}
+
+At the end of Steps 2--4 and the multipoint eval, the verifier holds:
+\begin{itemize}[leftmargin=2em]
+  \item the commitment root and the projection point $\alpha$;
+  \item the common point $r_0$; and
+  \item evaluation claims at $r_0$ for each committed column, both its
+    $\psia$-image (the linear-constraint claims) and, when the Hadamard
+    path runs, its $\psiz$-image.
+\end{itemize}
+These are exactly the inputs the commitment's evaluation argument expects.
+By \Cref{lem:linear-survives}, certifying the $\psia$-claims against the
+commitment certifies the entire linear part of the UAIR --- the rotations,
+the message schedule, the modular-addition LSBs, and the boundaries. What
+remains uncertified is the nonlinear part: the $14$ column Hadamard
+products of \Cref{sec:air}. The next section proves those, and arranges its
+claims to be exactly the $\psiz$-images at $r_0$ that the same commitment
+opening will bind --- so the nonlinear part costs no second opening.

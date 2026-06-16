@@ -1,0 +1,171 @@
+\section{The Deployed Instantiation}
+\label{sec:impl}
+
+The construction is realised in the Zinc\texttt{+} reference codebase on the
+\texttt{f2-clean} branch. This section fixes the generic parameters of the
+preceding sections to their deployed values, records the concrete trace
+shape, and reports the measurements that motivated the design --- above all
+the Hadamard discharge of \Cref{sec:hadamard}, which is the part of
+the prover the instantiation most aggressively optimizes.
+
+\subsection{Parameters}
+\label{sec:impl-params}
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l l}
+\toprule
+Generic object & Deployed value \\
+\midrule
+Word width $\wbit$ (cell ring $\cellring=\Ftwo[X]/(X^{\wbit})$) & $32$ \\
+Challenge / evaluation field $\K$ & $\mathrm{GF}(2^{128})$, $P=X^{128}+X^7+X^2+X+1$ \\
+Commitment code & $\Ftwo$-RAA, rate $1/\mathrm{REP}=1/4$ \\
+Column openings $t$ & $987$ (calibrated for $2^{-100}$-class proximity) \\
+Bit-fold dimension $\mu=\log_2\wbit$ & $5$ (bit positions folded at $\alpha$) \\
+Hadamard relations $K_H$ & $14$ ($2$ $\AND$ $+$ $12$ adder carries) \\
+Chained compressions & $7$ at the smallest trace height \\
+Rows per compression & $68$ ($64$ rounds $+$ schedule/boundary) \\
+\bottomrule
+\end{tabular}
+\caption{The generic parameters of \Cref{sec:arith,sec:piop,sec:hadamard,sec:commitment}
+at their deployed values.}
+\end{table}
+
+The field width $\kappa=128$ (rather than a wider binary field) sets the
+soundness denominator $2^{128}$ and was chosen to minimise the carryless
+multiplication count; it enters \Cref{thm:e2e} only through that
+denominator. The trace height is a free parameter: $N$ chained compressions
+fit in $\approx 68N$ rows, so a taller trace proves a longer hash at the
+same per-row cost, and the benchmarks sweep $\nu\in\{9,14,16,19,20,21,22\}$.
+
+\subsection{Trace shape}
+\label{sec:impl-trace}
+
+At the smallest height ($\nu=9$, i.e.\ $512$ rows) the trace holds seven
+chained SHA-256 compressions. The column inventory realises the inventory
+of \Cref{sec:air}:
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Public} (not committed): round constants, message words, the
+    packed LSB-compensator column, and a few $\{0,1\}$ selectors --- about
+    eight columns.
+  \item \emph{Primary witness} (committed): the state columns
+    $\col{A},\col{E},\col{W}$, the two $\AND$ product columns
+    ($\bp{u}_{\mathrm{ch}}$ and $\Maj$), the round intermediates, and the
+    chained-addition intermediate sums --- about twelve columns.
+  \item \emph{Virtual} (reconstructed): the four $\Sigma/\sigma$ mixing
+    outputs (each an $\XOR$ of three rotations/shifts of one state
+    column), the $\SHR^{1}$ carry words of the additions, and the per-step
+    compensator --- none committed.
+\end{itemize}
+Committed columns are stored two trace cells to a $64$-bit word (the
+cell-pairing optimization of the companion note), so the Merkle tree
+carries roughly six packed columns. Every constraint of the running SHA-256 is one
+of the three families of \Cref{sec:air}, and the entire nonlinear content is
+the $K_H=14$ Hadamard relations of \Cref{sec:had-oblig}.
+
+\subsection{The Hadamard discharge, measured}
+\label{sec:impl-discharge}
+
+The empirical centre of gravity is the Hadamard discharge. In the
+fused-projection predecessor it consumed the overwhelming majority of the
+prover --- about $92\%$ at $\nu=16$ --- because it ran a bit-slice sumcheck
+for all $K_H\wbit$ bit equations in the full field $\K$. The discharge of
+\Cref{sec:hadamard} instead reads the bits as Lagrange coefficients and
+rides the main pipeline: the bit dimension is folded once at $\alpha$ (never
+a sumcheck variable), the base-domain accumulation stays in the base field,
+and the $\mathrm{GF}(2^8)$ variant (\Cref{rem:gf8}) pushes it into an
+embedded byte field. Wired end-to-end with the binding of
+\Cref{sec:had-binding}, the picture at $\nu=16$ (Apple~M-series,
+\texttt{parallel}\,$+$\,\texttt{simd}, CPU, medians) is:
+
+\begin{table}[h]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l r}
+\toprule
+Prover at $\nu=16$ & time \\
+\midrule
+Linear part only (no discharge) & $\approx 55$ ms \\
+Full prove, fused-predecessor discharge & $\approx 495$ ms \\
+Full prove, deployed discharge & $\approx 100$ ms \\
+\midrule
+Verifier & $\approx 11.5$ ms \\
+\bottomrule
+\end{tabular}
+\caption{End-to-end prover and verifier at $\nu=16$. The deployed discharge
+--- riding the main ideal check and sumcheck --- is $\approx 4.9\times$
+faster than the fused predecessor and adds $\approx 45$ ms over the linear
+part. The verifier is dominated by the $t$ column-opening proximity checks.
+These are representative medians on one machine; the \emph{ratios} are more
+stable than the absolute figures, which drift with thermal state.}
+\end{table}
+
+\begin{remark}[Prover cost structure]
+\label{rem:cost-structure}
+With the Hadamard discharge in place, the prover's remaining time is spread
+across the commit (encode $+$ Merkle), the linear PIOP (ideal check,
+projection, sumcheck), the discharge, and the opening. The dominant
+\emph{verifier} term, and the dominant \emph{proof-size} term, is the
+column-opening proximity test of \Cref{sec:pcs-checks}; the algebraic
+messages are comparatively small.
+\end{remark}
+
+\subsection{Prover kernels}
+\label{sec:impl-kernels}
+
+The two reductions that remain after the commit --- the Hadamard sum-check and
+the multi-point evaluation --- are computed by kernels that change only the
+memory-access pattern, not the messages, so the emitted proof is identical to
+the naive evaluation. The sum-check forms each round message by streaming the
+operands of one relation at a time in coefficient form, instead of reading
+every operand column at each evaluation point. The multi-point evaluation, in
+turn, builds its per-column selector polynomials in parallel rather than one
+after another. Both are pure prover speed-ups with a byte-identical transcript;
+they leave the soundness analysis of \Cref{sec:soundness} untouched.
+
+\medskip
+\noindent The detailed scaling sweeps (prover, verifier, and proof; the
+GPU-commit and beyond-RAM curves), the per-phase decomposition, and the
+head-to-head comparison with \binius{} are deferred to \Cref{app:meas}, keeping
+this section to the deployed instantiation itself.
+
+\subsection{Caveats of the instantiation}
+\label{sec:impl-caveats}
+
+The qualifications of \Cref{sec:caveats} are concrete here. The
+modular-addition Hadamards' $\psiz$ parents are supplied trusted
+(\Cref{rem:adder-trusted}), so the deployed prover is at fused-discharge
+soundness parity for the adders; the $\AND$ relations and the entire linear
+part are unconditional. The proof is not zero-knowledge and is large in the
+Brakedown sense, the column openings dominating. Some components were
+machine-assisted and are under author review. None of these touch the
+structural claims of \Cref{sec:arith,sec:piop,sec:hadamard}.
+
+\subsection{Outlook}
+\label{sec:outlook}
+
+The all-$\Ftwo[X]$ SHA-256 argument shows what a polynomial-ring
+arithmetization buys for a bit-oriented computation. Keeping words as
+bit-polynomials makes $\XOR$ free, shifts and rotations virtual, and
+modular addition a one-bit-per-add Binius identity, leaving the single
+nonlinear primitive $\AND$ as column Hadamard products. The proof system
+then organizes itself around the linear/Hadamard seam: a binary-field PIOP
+discharges the linear constraints through the evaluation projection
+$\psia$; the Hadamard products, read as an ideal-membership claim,
+discharge through the Lagrange reading $\psiz$ on the same pipeline; and one
+bit-sliced commitment opening binds the
+full bit-slice fold, serving both readings at once. The recurring
+mechanism is the $\Ftwo$-linearity of the cell projections and the code,
+which lets random projections commute through the linear machinery and lets
+a single committed object answer many functionals.
+
+Three directions remain. A sound binding for the adder carries would make
+\Cref{thm:e2e} unconditional. A recursive (WHIR-style) proximity test in
+place of the flat one would shrink the proof. And the verifier-visible
+word-level reshaping of the Hadamard discharge --- dropping the
+$\times\wbit$ bit-slice factor entirely, in the manner of Binius --- would
+compound the speedups reported above. None disturbs the arithmetization or
+the linear/Hadamard architecture; each is a localized improvement to a
+layer whose interface to the others is exactly the projected evaluation
+claims this paper has traced from SHA-256 down to the commitment.

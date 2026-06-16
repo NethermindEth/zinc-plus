@@ -1,0 +1,132 @@
+\section{Soundness and Fiat--Shamir}
+\label{sec:soundness}
+
+We assemble the per-stage guarantees of \Cref{sec:arith,sec:piop,sec:hadamard,sec:commitment}
+into a single statement about the whole argument, then note its compilation
+to a non-interactive SNARK. The treatment is at the level of error
+accounting and composition; each ingredient's bound was established in its
+own section.
+
+\subsection{The end-to-end guarantee}
+\label{sec:e2e}
+
+\begin{theorem}[Knowledge soundness, informal]
+\label{thm:e2e}
+The interactive argument of \Cref{sec:piop,sec:hadamard,sec:commitment} is a
+knowledge-sound argument for the SHA-256 chained-compression relation: there
+is an extractor that, from any prover making the verifier accept with
+non-negligible probability, recovers a satisfying SHA-256 witness (the
+message blocks chaining $H_0$ to the public digest $H_N$), except with
+probability at most
+\[
+  \epsilon \;\le\;
+  \epsilon_{\mathrm{prox}}(t,\delta)
+  \;+\;
+  O\!\left(\frac{N_{\mathrm{con}} \cdot \wbit + K_H + \nu}{|\K|}\right),
+\]
+where $\epsilon_{\mathrm{prox}}(t,\delta)$ is the commitment code's
+$t$-query proximity error, $N_{\mathrm{con}}$ the number of constraint
+families, $K_H$ the number of Hadamard relations, and $\nu$ the trace
+$\log$-height. The first term dominates.
+\end{theorem}
+
+The rest of this section sketches the proof: the arithmetization is an exact
+reduction, each protocol stage contributes a bounded error, and the stages
+compose round-by-round.
+
+\subsection{Arithmetization equivalence}
+\label{sec:arith-equiv}
+
+By construction (\Cref{sec:arith}), the UAIR instance is satisfiable by a
+trace $T$ if and only if there is a SHA-256 witness for the public
+$(H_0,H_N,\text{message})$: each linear identity and each Hadamard relation
+is, under the integer reading $\psi_2$, equivalent to the corresponding
+SHA-256 step (Lemmas~\ref{lem:rot}, \ref{lem:binius}, \ref{lem:and}), and the
+boundary constraints pin the chaining and the public digest. So extracting a
+satisfying trace is the same as extracting a SHA-256 witness; this step
+contributes no soundness error.
+
+\subsection{Per-stage errors}
+\label{sec:per-stage}
+
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Linear path} (\Cref{sec:ideal-check,sec:psi-alpha,sec:sumcheck}).
+    The ideal check's random row-point $\rho$, the projection $\psia$, and
+    the degree-$2$ sumcheck each contribute a Schwartz--Zippel term. A false
+    ideal-membership that survives $\psia$ must have its degree-$<\wbit$
+    cell-polynomial vanish at $\alpha$ (probability $\le(\wbit-1)/|\K|$ per
+    family, by \Cref{lem:linear-survives}); the row-point and the sumcheck
+    add $O(\nu/|\K|)$. Total: $O(N_{\mathrm{con}}\wbit/|\K| + \nu/|\K|)$.
+  \item \emph{Hadamard discharge} (\Cref{lem:psi-z-sound}).
+    The $\langle Z_H\rangle$ membership check at $\alpha$, the relation batch,
+    and the shared row sumcheck contribute $\frac{2(\wbit-1)+K_H+\nu}{|\K|}$.
+  \item \emph{Multipoint evaluation} (\Cref{sec:multipoint}). A sumcheck
+    reducing the claims at $r^*$ and the pointed shifts to $r_0$: $O(\nu/|\K|)$.
+  \item \emph{Opening} (\Cref{sec:pcs-checks}). $\epsilon_{\mathrm{open}}\le
+    \epsilon_{\mathrm{prox}}(t,\delta)+O(1/|\K|)$, the proximity term
+    dominating.
+  \item \emph{Binding} (\Cref{eq:psi-z-binding}). The single $\psiz$ check on
+    the bound $a'$: $O(1/|\K|)$.
+\end{itemize}
+Summing gives the bound of \Cref{thm:e2e}.
+
+\subsection{Composition and extraction}
+\label{sec:composition}
+
+Each stage is a public-coin reduction that is \emph{round-by-round knowledge
+sound} (RBR-KS): on a transcript prefix that is ``doomed'' (no witness can
+explain it), the next verifier challenge keeps it doomed except with the
+stage's error. The Zinc\texttt{+} compiler is designed so that composing
+RBR-KS reductions preserves RBR-KS, with errors adding. Hence the whole
+chain --- commit, ideal check, $\psia$, sumcheck (carrying the Hadamard
+group), multipoint eval, open --- is RBR-KS with the summed error of
+\Cref{sec:per-stage}.
+
+The extractor runs bottom-up. The opening's extractor (companion note)
+recovers committed columns $\widehat w_1,\dots,\widehat w_K$ from the
+commitment. On an accepting run, the opening certifies that the
+$\psia$- and $\psiz$-claims at $r_0$ are the true projected evaluations of
+the $\widehat w_g$ (\Cref{sec:pcs-certifies}); the linear-path and Hadamard
+soundness then certify that the $\widehat w_g$ satisfy every UAIR constraint;
+and the arithmetization equivalence yields the SHA-256 witness. No rewinding
+beyond the opening extractor is required, because every PIOP message is a
+value of a polynomial identity or a pre-committed datum, not a fresh
+commitment.
+
+\subsection{The non-interactive argument}
+\label{sec:fiat-shamir}
+
+The argument is public-coin, and every challenge is drawn from a transcript
+into which the data it tests has already been absorbed (the orderings fixed
+in \Cref{sec:pipeline,sec:had-binding}). It therefore compiles, under the
+Fiat--Shamir / BCS transform in the random-oracle model, to a non-interactive
+argument of knowledge with the same error up to the standard ROM loss
+(quadratic in the query budget). Instantiated with the codebase's hash and
+parameters, this is the deployed SNARK.
+
+\subsection{Caveats}
+\label{sec:caveats}
+
+Three honest qualifications, consistent with the construction's current
+state.
+
+\paragraph{The adder-carry binding.} As flagged in \Cref{rem:adder-trusted},
+the Binius adder operands' $\psiz$ parents are supplied trusted rather than
+bound to the commitment. \Cref{thm:e2e} is therefore unconditional for the
+$\AND$ relations and the linear part, but for the modular-addition Hadamards
+it holds at the same status as the predecessor fused discharge --- i.e.\
+assuming honest adder parents. Committing the carry-out bit and giving the
+carry a sound row/bit-shift binding closes this to an unconditional statement;
+it is a localized, recorded follow-up that does not affect the rest of the
+composition.
+
+\paragraph{Not zero-knowledge.} The construction proves knowledge but is not
+zero-knowledge: the opening reveals committed cells at the queried positions,
+and no masking is applied. Adding zero-knowledge (masking the codeword and the
+sumcheck) is future work and orthogonal to the structure here.
+
+\paragraph{Proof size.} As a Brakedown/Ligero-style IOPP, the proof is large
+--- the $t$ column openings of \Cref{sec:pcs-checks} dominate it --- and grows
+with the trace. The construction optimizes prover time and the linear/Hadamard
+sharing, not proof length; a recursive (WHIR-style) IOPP in place of the flat
+proximity test would shrink it and is independent of everything above.

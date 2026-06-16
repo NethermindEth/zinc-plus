@@ -1,0 +1,388 @@
+\section{The SHA-256 $\Ftwo[X]$ Arithmetization}
+\label{sec:arith}
+
+This section builds the constraint system. We recall SHA-256 only enough
+to fix notation, then arithmetize each primitive over $\Ftwo[X]$ and
+assemble the chained-compression AIR. The guiding principle is stated
+once and then applied uniformly: \emph{keep everything $\Ftwo$-linear,
+and isolate the single nonlinear primitive ($\AND$) into Hadamard
+products}. By the end every constraint is either an ideal-membership
+relation among committed and virtual columns (\Cref{sec:trace}) or a
+column Hadamard product.
+
+\subsection{SHA-256 and the words-as-polynomials dictionary}
+\label{sec:sha-recap}
+
+SHA-256 operates on $32$-bit words and is built from bitwise $\XOR$,
+bitwise $\AND$, fixed rotations $\ROTR^r$ and shifts $\SHR^r$, and
+addition modulo $2^{32}$. Its compression function maps an $8$-word
+state $(a,\dots,h)$ and a $512$-bit message block through a $64$-step
+message schedule
+\begin{equation}
+  \label{eq:msched}
+  W_t = \begin{cases}
+    M_t & 0 \le t < 16,\\
+    \sigma_1(W_{t-2}) + W_{t-7} + \sigma_0(W_{t-15}) + W_{t-16} \pmod{2^{32}}
+    & 16 \le t < 64,
+  \end{cases}
+\end{equation}
+and $64$ round updates driven by the mixing functions
+\begin{align*}
+  \Sigma_0(x) &= \ROTR^{2}x \oplus \ROTR^{13}x \oplus \ROTR^{22}x, &
+  \Sigma_1(x) &= \ROTR^{6}x \oplus \ROTR^{11}x \oplus \ROTR^{25}x,\\
+  \sigma_0(x) &= \ROTR^{7}x \oplus \ROTR^{18}x \oplus \SHR^{3}x, &
+  \sigma_1(x) &= \ROTR^{17}x \oplus \ROTR^{19}x \oplus \SHR^{10}x,
+\end{align*}
+together with the Boolean mixers
+\[
+  \Ch(x,y,z) = (x \AND y)\oplus(\NOT x \AND z),
+  \quad
+  \Maj(x,y,z) = (x \AND y)\oplus(x \AND z)\oplus(y \AND z),
+\]
+each round performing two modular additions ($T_1$ and the new $a,e$). A hash of a longer message \emph{chains} compressions, feeding
+each compression's feed-forward output as the next one's initial state;
+the final digest $H_N$ is the public boundary.
+
+\paragraph{The dictionary.} As in \Cref{sec:prelim}, a word
+$u\in\{0,\dots,2^{\wbit}-1\}$ ($\wbit = 32$) is the bit-polynomial
+$\bp{u} = \sum_b u_b X^b \in \cellring$. Two evaluation maps on
+$\cellring$ matter, and must be kept apart:
+\begin{itemize}[leftmargin=2em]
+  \item the \emph{integer reading} $\psi_2(\bp{u}) := \bp{u}(2) \in \Z$
+    (lift to $\Z[X]$, evaluate at $2$), a bijection
+    $\bitpoly{\wbit}\to\{0,\dots,2^{\wbit}-1\}$, used only to \emph{state}
+    the arithmetic relation; and
+  \item the \emph{field projections} $\psi_\xi:\cellring\to\K$ of
+    \Cref{def:projection}, used by the PIOP to \emph{prove} it.
+\end{itemize}
+Every constraint below is an identity in $\Ftwo[X]$ (or a fixed
+quotient), and is correct precisely because it is equivalent, under
+$\psi_2$, to the integer relation it encodes.
+
+\subsection{$\XOR$ is free addition}
+\label{sec:xor}
+
+Bitwise $\XOR$ of words is addition of bit-polynomials in $\cellring$:
+$\widehat{x\oplus y} = \bp{x}+\bp{y}$, with $1+1 = 0$ collapsing
+coincident bits automatically. Crucially, $\XOR$ is invisible to the
+commitment: a column defined as an $\Ftwo$-linear combination of other
+columns is never committed or constrained on its own; the verifier forms
+the combination of the committed columns' projections when needed
+(\Cref{rem:linearity-thread}). This is the first dividend of staying in
+$\Ftwo[X]$: the dozens of $\XOR$s in SHA-256 cost nothing.
+
+\subsection{Rotations and shifts}
+\label{sec:rot-shift}
+
+Rotations are exact ring operations in the rotation quotient.
+
+\begin{lemma}[Rotation is monomial multiplication in $\Frot$]
+\label{lem:rot}
+For $\bp{u}\in\bitpoly{\wbit}$ and $0\le r<\wbit$,
+$\;\ROTR^{r}(\bp{u}) = X^{\wbit-r}\cdot\bp{u}$ in the rotation quotient
+$\Frot$ --- a fixed relabeling of the $\wbit$ bit positions.
+\end{lemma}
+
+The cyclic wrap of a rotation is the reduction modulo $X^{\wbit}-1$ that
+defines $\Frot$, and the bit collisions it produces reduce mod $2$ for free
+in $\Ftwo[X]$ --- there is no integer overflow witness, in contrast to a
+$\Z[X]$ or $\Q[X]$ lift. A rotation is thus a fixed $\Ftwo$-linear map of
+$\bp{u}$, so it is realised as a \emph{virtual} column reconstructed from
+$\bp{u}$ (\Cref{sec:trace}) --- never committed, and \emph{never pinned by a
+constraint}: there is no rotation ideal-membership in the constraint system.
+Logical shifts are not ring operations (they drop bits off the boundary) but
+are still $\Ftwo$-linear:
+
+\begin{lemma}[Right shift is $\Ftwo$-linear]
+\label{lem:shr}
+For $0<r<\wbit$, the truncating map $\SHR^{r}:\cellring\to\cellring$,
+$(\SHR^r \bp{u})_b = u_{b+r}$, is $\Ftwo$-linear.
+\end{lemma}
+
+Both rotations and shifts are therefore \emph{virtual}: a column equal to
+$\ROTR^r$ or $\SHR^r$ of a committed source is determined by the source
+and need not be committed (it is reconstructed by the verifier; see
+\Cref{sec:trace,sec:commitment}). The same holds for any fixed
+$\Ftwo$-linear combination of such maps, since $\Ftwo$-linearity is closed
+under $\XOR$. In particular the $\Sigma$ and $\sigma$ mixing functions ---
+each an $\XOR$ of three rotations/shifts of a single state word --- are
+themselves virtual columns of that word. Writing the rotation multipliers
+\[
+  \rho_{0} = X^{30}+X^{19}+X^{10},\quad
+  \rho_{1} = X^{26}+X^{21}+X^{7},\quad
+  \rho_{\sigma_0} = X^{25}+X^{14},\quad
+  \rho_{\sigma_1} = X^{15}+X^{13},
+\]
+\Cref{lem:rot} (with \Cref{lem:shr} for the truncating terms) gives the
+mixing outputs directly as virtual columns of the committed inputs
+$\bp{a},\bp{W}$:
+\begin{align}
+  \widehat{\Sigma_0(a)} &= \bp{a}\cdot\rho_0 && (\text{in } \Frot),
+  \label{eq:Sigma}\\
+  \widehat{\sigma_0(W)} &= \bp{W}\cdot\rho_{\sigma_0} + \SHR^{3}(\bp{W}) && (\text{rotations in } \Frot,\ \SHR \text{ in } \Fshift),
+  \label{eq:sigma}
+\end{align}
+and analogously for $\Sigma_1,\sigma_1$. No mixing output is committed and
+no constraint is needed to relate it to its input: exactly like a bare
+rotation, it is materialised by the prover and recomputed by the verifier
+from the single committed source column (\Cref{sec:commitment}).
+
+\subsection{Modular addition: the Binius carry identity}
+\label{sec:add}
+
+Addition modulo $2^{\wbit}$ is the one arithmetic (as opposed to bitwise)
+primitive. We arithmetize it in the shift quotient $\Fshift$, where
+multiplication by $X$ \emph{is} $\SHL^{1}$ and the ideal $\ideal{X^{\wbit}}$
+discards the high overflow automatically. The mechanism is the Binius
+per-step full-adder identity, carrying the carry word \emph{virtually}.
+
+\begin{lemma}[Two-input modular addition with virtual carry]
+\label{lem:binius}
+Let $\bp{a},\bp{b},\bp{s}\in\bitpoly{\wbit}$. Then $\psi_2(\bp{s})\equiv
+\psi_2(\bp{a})+\psi_2(\bp{b})\pmod{2^{\wbit}}$ iff there is $\beta\in\Ftwo$
+such that, defining the carry word $\bp{c}$ by
+\begin{equation}
+  \label{eq:carry-virtual}
+  \bp{c}[i] := (\bp{s}+\bp{a}+\bp{b})[i+1] \ \ (0\le i<\wbit-1),
+  \qquad \bp{c}[\wbit-1] := \beta,
+\end{equation}
+the linear identity and the full-adder Hadamard both hold in $\Fshift$:
+\begin{align}
+  \bp{s} &= \bp{a}+\bp{b}+X\cdot\bp{c}, \label{eq:add-linear}\\
+  (\bp{a}+X\cdot\bp{c})\had(\bp{b}+X\cdot\bp{c}) &= \bp{c}+X\cdot\bp{c}. \label{eq:add-had}
+\end{align}
+Under \eqref{eq:carry-virtual} the linear identity \eqref{eq:add-linear}
+reduces to its bit-$0$ content alone,
+$(\bp{s}+\bp{a}+\bp{b})[0]=0$ (an $\ideal{X}$-membership), and the
+committed bit $\beta$ is the discarded carry-out of position $\wbit-1$.
+\end{lemma}
+
+\begin{proof}[Idea]
+Set $\bp{D}=\bp{s}+\bp{a}+\bp{b}$. The virtual definition
+\eqref{eq:carry-virtual} makes $X\cdot\bp{c}$ agree with $\bp{D}$ on bits
+$1,\dots,\wbit-1$, so \eqref{eq:add-linear} holds on those bits by
+construction and its only content is $\bp{D}[0]=0$. Expanding
+\eqref{eq:add-had} coefficientwise and using $x^2=x$ in $\Ftwo$ turns the
+position-$i$ equation into $\bp{D}[i+1]=\Maj(\bp{a}[i],\bp{b}[i],\bp{D}[i])$,
+which is exactly the honest carry recurrence; an induction from
+$\bp{D}[0]=0$ shows $\bp{s}$ equals the honest binary sum on every bit,
+and the top equation fixes $\beta$ as the honest carry-out. Conversely
+the honest carry word satisfies both identities.
+\end{proof}
+
+Two features make this cheap. The carry's lower $\wbit-1$ bits are
+$\SHR^{1}$ of the free combination $\bp{s}+\bp{a}+\bp{b}$ --- virtual, by
+\Cref{lem:shr} --- so \emph{only one bit} $\beta$ per addition is
+committed. And the constraint is \emph{locally complete}: the Hadamard
+\eqref{eq:add-had} propagates the carry recurrence at every bit, so it
+pins $\bp{s}$ to the honest modular sum on its own, with no appeal to a
+global boundary check.
+
+\paragraph{Multi-input sums.} An $n$-input modular sum is reduced to
+$n-1$ binary applications of \Cref{lem:binius} by introducing $n-2$
+intermediate-sum columns
+$\bp{s}^{(1)},\dots,\bp{s}^{(n-2)}$ with
+$\bp{s}^{(k)} \equiv \bp{s}^{(k-1)} + (\text{$k$-th addend})$. Each step
+contributes one committed carry bit and one Hadamard relation
+\eqref{eq:add-had}. The message-schedule sum \eqref{eq:msched} (four
+inputs) becomes three steps; the round's $T_1$ sum
+($h,\Sigma_1,\Ch,K,W$ --- five inputs) becomes four, with three
+intermediate-sum columns.
+
+\begin{remark}[The LSB compensator]
+\label{rem:lsb-comp}
+On rows where an addition is \emph{inactive} (padding, or steps outside a
+compression's active range) the bit-$0$ identity $(\bp{s}+\bp{a}+\bp{b})[0]=0$
+must still hold formally. The arithmetization carries a one-bit public
+compensator per binary step --- a single bit of a packed public column,
+exposed to the active row via a $\SHR$ virtual --- that absorbs the
+residue on inactive rows. This is the only public data an addition costs,
+versus a full $\wbit$-bit overflow witness in an integer lift.
+\end{remark}
+
+\subsection{$\AND$, $\Ch$, $\Maj$ as Hadamard products}
+\label{sec:and}
+
+Bitwise $\AND$ is the coefficient-wise (Hadamard) product of
+bit-polynomials.
+
+\begin{lemma}[$\AND$ is Hadamard]
+\label{lem:and}
+For $\bp{u},\bp{v}\in\bitpoly{\wbit}$, $\widehat{u\AND v} = \bp{u}\had\bp{v}$,
+where $(\bp{u}\had\bp{v})_b = u_b v_b$.
+\end{lemma}
+
+This is the only constraint that is not $\Ftwo$-linear, and the only one
+the linear commitment cannot absorb. We do not encode it as an AIR
+identity; instead it is declared as a \emph{column Hadamard relation}
+$\bp{w} = \bp{u}\had\bp{v}$ between committed columns and discharged by
+the dedicated argument of \Cref{sec:hadamard}. The two SHA-256 nonlinear
+functions each reduce to a \emph{single} such relation:
+\begin{align*}
+  \Ch(e,f,g) &= g \oplus \underbrace{\bigl(e\AND(f\oplus g)\bigr)}_{\bp{u}_{\mathrm{ch}}},
+  & &\text{one $\AND$ column, combined by free $\XOR$;}\\
+  \Maj(a,b,c) &= \bigl((a\oplus c)\AND(b\oplus c)\bigr)\oplus c,
+  & &\text{one $\AND$ column (using $\NOT$, $\oplus$ free).}
+\end{align*}
+Both rewrites spend a single Hadamard product where the textbook form
+would spend more. The $\Ch$ identity $\Ch(e,f,g) = g \oplus
+\bigl(e\AND(f\oplus g)\bigr)$ (verified by $g \oplus e(f\oplus g) =
+(e\AND f)\oplus(\NOT e\AND g)$, the Binius64 form) replaces the two-$\AND$
+decomposition $(e\AND f)\oplus(\NOT e\AND g)$ with one product; the $\Maj$
+rewrite uses $(x\oplus z)(y\oplus z) = \Maj(x,y,z)\oplus z$. Thus each
+round needs only two Hadamard product columns ($\bp{u}_{\mathrm{ch}}$ and
+the $\Maj$ product), the rest of $\Ch$ and $\Maj$ being free $\XOR$/$\NOT$.
+
+\begin{remark}[Hadamard descends to $\Fshift$, not $\Frot$]
+\label{rem:had-descend}
+The Hadamard product is coefficient-local, so it is well defined on
+$\Fshift=\Ftwo[X]/(X^{\wbit})$: any $\bp{p}\in\ideal{X^{\wbit}}$ has
+$\bp{p}\had\bp{y}\in\ideal{X^{\wbit}}$. Both the addition Hadamard
+\eqref{eq:add-had} and the $\AND$ relations are therefore unambiguous
+``in $\Fshift$''. It does \emph{not} descend to $\Frot$, which is why no
+Hadamard relation is ever posed in the rotation quotient.
+\end{remark}
+
+\subsection{The assembled AIR}
+\label{sec:air}
+
+We now place the primitives into a trace. The layout follows two economies.
+
+\paragraph{Shift-register state.} Of the eight working registers, only
+$a$ and $e$ are stored, as columns $\col{A},\col{E}$; the registers
+$b,c,d,f,g,h$ are past values of $a,e$ ($b_{t+1}=a_t$, $f_{t+1}=e_t$,
+etc.) and are read as \emph{row-shifted} accesses of $\col{A},\col{E}$.
+Transition constraints thus reference a few previous rows of two columns
+rather than eight columns. The message schedule lives in a third state
+column $\col{W}$.
+
+\paragraph{Column inventory.} \Cref{tab:columns} lists the trace columns,
+grouped by commitment status. Only the twelve primary-witness columns are
+committed; the public columns are evaluated locally by the verifier, and
+the virtual columns --- the $\Sigma/\sigma$ mixing outputs, the per-step
+carry words, the compensator-bit extractions, and the shift-register reads
+of the past registers --- are reconstructed from a committed or public
+source and never committed (\Cref{sec:trace,sec:commitment}).
+
+\begin{table}[ht]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\caption{Trace columns of the deployed SHA-256 AIR, grouped by commitment
+status; each is one bit-poly column over $\cellring=\Ftwo[X]/(X^{\wbit})$.
+The registers $b,c,d,f,g,h$ are past rows of $\col{A},\col{E}$, read as
+row-shifts rather than stored. Committed columns number twelve; the mixing
+outputs and the other virtual columns add no commitment cost.}
+\label{tab:columns}
+\begin{tabular}{@{}l l@{}}
+\toprule
+Column(s) & Contents \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{Public} --- not committed; evaluated by the verifier} \\
+$K,\;M$ & round constants $K_t$; message words $M_t$ \\
+$a_0,\;e_0$ & public initial state $H_0$ (boundary input) \\
+$\bp{\kappa}$ & packed LSB compensators, one bit per binary step (\Cref{rem:lsb-comp}) \\
+$s_{\mathrm{init}},s_{\mathrm{ff}},s_{\mathrm{msg}}$ & $\{0,1\}$ selectors: init / feed-forward / message rows \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{Primary witness} --- committed ($12$ columns)} \\
+$\col{A},\col{E}$ & working registers $a,e$ (shift-register state) \\
+$\col{W}$ & message-schedule word $W_t$ \\
+$\bp{u}_{\mathrm{ch}}$ & $\Ch$ product $e\AND(f\oplus g)$ \\
+$\bp{u}_{\mathrm{maj}}$ & $\Maj$ product $(a\oplus c)\AND(b\oplus c)$ \\
+$T_1,\;T_2$ & round temporaries \\
+$\col{W}^{(1)},\col{W}^{(2)}$ & message-schedule partial sums ($4$ inputs $\to 2$) \\
+$T_1^{(1)},T_1^{(2)},T_1^{(3)}$ & $T_1$ partial sums ($5$ inputs $\to 3$) \\
+\midrule
+\multicolumn{2}{@{}l}{\textbf{Virtual} --- reconstructed from a source, never committed} \\
+$\widehat{\Sigma_0},\widehat{\Sigma_1}$ & $\Sigma_0(a),\Sigma_1(e)$: rotation-$\XOR$ of $\col{A},\col{E}$ \\
+$\widehat{\sigma_0},\widehat{\sigma_1}$ & $\sigma_0(W),\sigma_1(W)$: rotation/shift-$\XOR$ of $\col{W}$ \\
+$\bp{c}^{(k)}$ & per-step carry words: $\SHR^{1}(\bp{s}+\bp{a}+\bp{b})$ \\
+$\kappa_1,\dots,\kappa_{11}$ & compensator bits: $\SHR^{j}(\bp{\kappa})$ \\
+$b,c,d,f,g,h$ & past registers: row-shifts of $\col{A},\col{E}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Constraint families.} The mixing outputs are virtual, so no
+constraint pins them; every remaining SHA-256 requirement is one of:
+\begin{enumerate}[leftmargin=2em,label=(\alph*)]
+  \item \emph{Binius adds}: per binary step, the $\ideal{X}$ bit-$0$
+    identity \eqref{eq:add-linear} plus the Hadamard \eqref{eq:add-had}
+    (\Cref{lem:binius}), covering the message schedule, the two round
+    additions, and the feed-forward;
+  \item \emph{$\AND$ Hadamard} relations declaring the two product
+    columns per round (\Cref{lem:and});
+  \item \emph{Boundary} constraints pinning the initial state $H_0$, the
+    chaining of $H_i$ between compressions, and the public final digest
+    $H_N$.
+\end{enumerate}
+Family (c) is a linear ideal-membership constraint; the bit-$0$
+parts of (a) are linear; only the Hadamard parts of (a) and all of (b)
+are nonlinear. Collecting them, the nonlinearity of an entire SHA-256
+compression round is a fixed, small number of column Hadamard products:
+the carry Hadamards of the adds plus the two $\AND$ products. In the
+deployed layout these total $K_H = 14$ relations in the per-row constraint
+unit ($12$ addition carries and $2$ $\AND$s; \Cref{tab:constraints}), all
+of the single form $\bp{u}\had\bp{v}=\bp{w}$, which is exactly what
+\Cref{sec:hadamard} discharges in one batched argument.
+
+\begin{table}[ht]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\caption{Constraint families of the assembled AIR. The linear families are
+batched by the ideal check and survive $\psia$ (\Cref{sec:piop}); the
+$K_H=14$ Hadamard relations are discharged by \Cref{sec:hadamard}. Counts
+are per trace row (the packed per-row unit; steps inactive on a given row
+are zeroed by the selectors and compensator $\bp{\kappa}$); boundary
+constraints are per compression.}
+\label{tab:constraints}
+\begin{tabular}{@{}l l l c@{}}
+\toprule
+Family & Relation (schematic) & Kind & Count \\
+\midrule
+Binius add, bit $0$ & $(\bp{s}+\bp{a}+\bp{b}+\kappa_k)[0]=0$ & linear, $\ideal{X}$ & $12$ \\
+Binius add, carry & $(\bp{a}+X\bp{c})\had(\bp{b}+X\bp{c})=\bp{c}+X\bp{c}$ & Hadamard, $\Fshift$ & $12$ \\
+$\AND$ ($\Ch,\Maj$) & $\bp{w}=\bp{u}\had\bp{v}$ & Hadamard, $\Fshift$ & $2$ \\
+Boundary & $\col{A}=a_0$ (init), $H_i$ chaining, digest $H_N$ & linear, $\ideal{0}$ & $O(1)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Chained compressions.} A trace holds $N$ compressions stacked
+in consecutive row-blocks; the feed-forward output of block $i$ is pinned,
+by boundary constraints, to equal the initial state read by block $i+1$,
+and only the first input $H_0$ and the last output $H_N$ are public. The
+number of compressions scales with the trace height, so a taller trace
+proves a longer hash at the same per-row constraint cost.
+
+\begin{remark}[Deployed shape]
+\label{rem:deployed-shape}
+The reference instantiation uses $\wbit=32$, around a dozen primary
+witness binary columns, a fixed small row-block per compression, and
+seven chained compressions at the smallest trace height. The four
+$\Sigma/\sigma$ mixing outputs are virtual, each reconstructed from one
+state column, so they cost nothing at the commitment layer and carry no
+pinning constraint. The concrete counts appear in \Cref{sec:impl}.
+\end{remark}
+
+\subsection{What the arithmetization hands to the PIOP}
+\label{sec:arith-handoff}
+
+The output is a UAIR instance whose satisfaction is equivalent to the
+SHA-256 chained-compression relation. Its constraints are of two kinds,
+and the next sections handle each:
+\begin{itemize}[leftmargin=2em]
+  \item \emph{Linear / ideal-membership constraints} (family (c) and
+    the bit-$0$ parts of (a)). These are stable under the evaluation
+    projection $\psia$: applying $\psia$ to a linear $\Ftwo[X]$ identity
+    among cells yields a linear identity in $\K$. \Cref{sec:piop} batches
+    and checks them by an ideal check and a sumcheck.
+  \item \emph{Hadamard constraints} (the carry Hadamards of (a) and the
+    $\AND$ relations of (b)). These do \emph{not} pass through $\psia$ as
+    equalities --- a product of projections is not the projection of a
+    product --- and are instead recast as a polynomial ideal-membership
+    claim and discharged on the same pipeline (\Cref{sec:hadamard}), their
+    operands bound to the commitment through the Lagrange reading $\psiz$.
+\end{itemize}
+This linear/Hadamard split is the seam along which the whole proof system
+is organized, and it is a direct consequence of the arithmetization
+having pushed all nonlinearity into Hadamard products.

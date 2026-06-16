@@ -1,49 +1,64 @@
 \section{Settling the Claims: The Bit-Sliced Commitment}
 \label{sec:commitment}
 
-Both halves of the proof --- the linear PIOP (\Cref{sec:piop}) and the
-Hadamard discharge (\Cref{sec:hadamard}) --- terminate in the same
-place: a batch of multilinear-extension evaluation claims at a common point
-$r_0$, asked of the committed witness columns under two projections,
-$\psia$ and $\psiz$. This section summarises the hash-based $\Ftwo[X]$
+Both halves of the proof --- the linear PIOP (\Cref{sec:piop}) and the Hadamard
+discharge (\Cref{sec:hadamard}) --- terminate in the same place: a batch of
+multilinear evaluation claims at a common point $r_0$, asked of the committed
+columns under the monomial and Lagrange readings $\psia,\psiz$ (one evaluation
+at $\alpha$, two bases). This section summarises the hash-based $\Ftwo[X]$
 commitment that certifies them. It is deliberately compact; the full
-construction, the four verifier checks, and their soundness proofs are
-developed in the companion note \emph{``A Hash-Based Polynomial Commitment
-Scheme over $\Ftwo[X]$: the bit-sliced opening''}, to which we refer for
-all details. What matters here is the one structural feature the previous
-two sections were built to exploit: a single bound object per column from
-which both projections are read off.
+construction, the four verifier checks, and their soundness proofs are developed
+in the companion note \emph{``A Hash-Based Polynomial Commitment Scheme over
+$\Ftwo[X]$: the bit-sliced opening''}. What matters here is the one feature the
+previous sections were built to exploit: a single bound object per column from
+which both readings are read off.
 
 \subsection{Interface}
 \label{sec:pcs-interface}
 
-The commitment is a Brakedown/Ligero-style interactive oracle proof of
-proximity (IOPP) compiled with a Merkle tree. Its interface is:
+The commitment is a Brakedown/Ligero-style interactive oracle proof of proximity
+(IOPP) compiled with a Merkle tree:
 \begin{itemize}[leftmargin=2em]
   \item \textsc{Commit}: given the primary witness columns
-    $w_1,\dots,w_K\in\cellring^{\,N_{\mathrm{rows}}}$, output a single hash
-    root (and retain the encoded data as opening hint).
-  \item \textsc{Open}: given a point $r_0$, a projection's weight vector,
-    and the claimed values, produce a proof that the committed columns'
-    projected MLEs take those values at $r_0$.
+    $w_1,\dots,w_K\in\cellring^{\,N_{\mathrm{rows}}}$, output one hash root (and
+    retain the encoded data as opening hint).
+  \item \textsc{Open}: given a point $r_0$, a reading's weight vector, and the
+    claimed values, prove that the committed columns' projected MLEs take those
+    values at $r_0$.
 \end{itemize}
-The host protocol calls \textsc{Open} once, at $r_0$, and reads off it both
-the $\psia$ claims (the linear part) and the $\psiz$ claims (the Hadamard
-discharge).
+The host protocol calls \textsc{Open} once, at $r_0$, and reads off it both the
+$\psia$ claims (linear part) and the $\psiz$ claims (Hadamard discharge).
 
 \subsection{Code and commitment}
 \label{sec:pcs-code}
 
 Each column is arranged as a matrix and its rows encoded by a rate-$1/\rho$
-$\Ftwo$-linear Repeat--Accumulate--Accumulate code. Two properties carry
-the construction (both proved in the companion note): the code \emph{does
-not widen} $\cellring$ --- codewords are again bit-polynomials, so the
-encoded matrix is committable without growth --- and its $\Ftwo$-linearity
-\emph{extends scalar-wise} to $\K$-coefficient rows, so the commit-time
-codewords double as the proximity oracle for the opening with no
-re-encoding. The codewords of all columns at a given position are hashed
-into one Merkle leaf, so a single authentication path reveals every
-column's value there. The root is the commitment.
+$\Ftwo$-linear Repeat--Accumulate--Accumulate code. Two properties carry the
+construction (both proved in the companion note): the code \emph{does not widen}
+$\cellring$ --- codewords are again bit-polynomials, committable without
+growth --- and its $\Ftwo$-linearity \emph{extends scalar-wise} to
+$\K$-coefficient rows, so the commit-time codewords double as the proximity
+oracle for the opening with no re-encoding. The codewords of all columns at a
+given position are hashed into one Merkle leaf, so a single authentication path
+reveals every column's value there. The root is the commitment.
+
+\begin{remark}[Provenance, and the proof-size lever]
+\label{rem:blaze}
+The $\Ftwo$-RAA code and its linear-time, non-widening commit are those of Blaze
+\cite{blaze}, a hash-based multilinear commitment over binary fields. What this
+paper adds on top is the \emph{bit-sliced} opening (\Cref{sec:bit-slice-fold}):
+where Blaze and the IOPPs it composes settle a single evaluation, binding the
+width-$\wbit$ fold $a'$ lets the two readings $\psia,\psiz$ share one opening.
+Blaze settles its opening not by a flat proximity test but by
+\emph{code-switching} to a Reed--Solomon codeword discharged by an inner
+foldable IOPP (BaseFold/WHIR) \cite{basefold,whir}, yielding a polylogarithmic
+verifier; the deployed system here uses the flat Brakedown test \cite{brakedown},
+whose $t$ column queries dominate proof size. That code-switch is orthogonal to
+the cell axis --- the $\wbit$ bit positions are carried as passive shared width,
+never folded inside the recursion --- so it would shrink the proof while
+preserving the dual read-off. This is the recorded direction for closing the
+proof-size gap.
+\end{remark}
 
 \subsection{The bit-slice fold, and the dual read-off}
 \label{sec:bit-slice-fold}
@@ -51,75 +66,68 @@ column's value there. The root is the commitment.
 The opening's central object is, per column, the \emph{bit-slice fold}: the
 degree-$<\wbit$ univariate over $\K$
 \[
-  a'_g \;=\; \sum_{b=0}^{\wbit-1} a'_{g,b}\,X^b \;\in\; \K[X]_{<\wbit},
+  a'_g = \sum_{b=0}^{\wbit-1} a'_{g,b}\,X^b \in \K[X]_{<\wbit},
   \qquad
-  a'_{g,b} \;=\; \sum_{x\in\{0,1\}^{\nu}} \eq_x(r_0)\,(w_{g})_b(x)\;\in\;\K,
+  a'_{g,b} = \sum_{x\in\{0,1\}^{\nu}} \eq_x(r_0)\,(w_{g})_b(x)\in\K,
 \]
 whose $b$-th coefficient is the $b$-th bit slice of column $g$, folded along
-$\eq(\cdot;r_0)$. Because every cell projection $\psi_\xi$ of
-\Cref{def:projection} is the inner product of the coefficient vector with
-its weights $\xi$, \emph{any} projected MLE evaluation at $r_0$ is a single
-length-$\wbit$ read-off of $a'_g$:
+$\eq(\cdot;r_0)$. Because every reading $\psi_\xi$ (\Cref{def:projection}) is the
+inner product of the coefficient vector with $\xi$, \emph{any} projected MLE
+evaluation at $r_0$ is a single length-$\wbit$ read-off of $a'_g$:
 \[
-  \psi_\xi(a'_g) \;=\; \sum_b a'_{g,b}\,\xi_b \;=\; \mle{\psi_\xi(w_g)}(r_0).
+  \psi_\xi(a'_g) = \sum_b a'_{g,b}\,\xi_b = \mle{\psi_\xi(w_g)}(r_0).
 \]
-In particular $\psia(a'_g)=\mle{\psia(w_g)}(r_0)$ recovers the linear-part
-claim and $\psiz(a'_g)=\mle{\psiz(w_g)}(r_0)$ recovers the Hadamard-discharge
-claim, from the \emph{one} object $a'_g$. This is exactly the dual read-off
-that \Cref{sec:had-binding} invoked: the opening binds the full bit-slice
-fold once, and the two projections are two length-$\wbit$ inner products
-against it.
+In particular $\psia(a'_g) = \mle{\psia(w_g)}(r_0)$ recovers the linear claim and
+$\psiz(a'_g) = \mle{\psiz(w_g)}(r_0)$ the discharge claim, from the \emph{one}
+object $a'_g$. This is exactly the dual read-off of \Cref{sec:had-binding}: the
+opening binds the full bit-slice fold once, and the two readings are two
+length-$\wbit$ inner products against it.
 
 \begin{remark}[Why ``bit-sliced'', and what it buys]
 \label{rem:why-bitsliced}
-The opening keeps the eq-weights in $\K$ and folds the $\{0,1\}$ bit slices,
+The opening keeps the $\eq$-weights in $\K$ and folds the $\{0,1\}$ bit slices,
 rather than lifting the weights into $\Ftwo[X]$ and folding cells. The bound
-claim is then a clean degree-$<\wbit$ polynomial over $\K$ --- of fixed size
-$\wbit$ field elements, independent of the extension degree $\log|\K|$ ---
-and, crucially, it retains \emph{all} bit slices rather than a single
-collapsed value. That is what makes one opening serve both $\psia$ and
-$\psiz$ (and any further $\Ftwo$-linear functional of the cells): the
-nonlinear constraints of \Cref{sec:hadamard} ride the linear part's opening
-at the cost of one extra projection.
+claim is then a clean degree-$<\wbit$ polynomial over $\K$ --- fixed size $\wbit$
+field elements, independent of $\log|\K|$ --- and retains \emph{all} bit slices
+rather than one collapsed value. That is what makes one opening serve both
+$\psia$ and $\psiz$ (and any further $\Ftwo$-linear functional of the cells): the
+nonlinear constraints ride the linear part's opening at the cost of one extra
+reading.
 \end{remark}
 
 \subsection{The opening, in brief}
 \label{sec:pcs-checks}
 
-To certify the $\gamma$-batched claim $a'=\sum_g\gamma_g a'_g$ against the
-commitment, the opening runs four checks (full statements and proofs in the
-companion note):
+To certify the $\gamma$-batched claim $a' = \sum_g\gamma_g a'_g$, the opening
+runs four checks (full statements and proofs in the companion note):
 \begin{enumerate}[leftmargin=2em]
-  \item \emph{Evaluation consistency} --- $a'$ is the $\eq(\cdot;r_0)$ fold of
-    the prover's row-fold vector;
+  \item \emph{Evaluation consistency} --- $a'$ is the $\eq(\cdot;r_0)$ fold of the
+    prover's row-fold vector;
   \item \emph{Projection discharge} --- $\psi_\xi(a')$ equals the
-    $\gamma$-batched claimed values (instantiated at $\xi=\alpha$ for the
-    linear part and, via the binding \eqref{eq:psi-z-binding}, at the
-    $\psiz$ weights for the discharge);
-  \item \emph{Coherence} --- the proximity-tested combined row is consistent
-    with the row-fold vector; and
-  \item \emph{Encoding consistency} --- at a transcript-chosen set of
-    $t$ codeword positions, the committed cells (revealed by Merkle paths)
-    encode the combined row.
+    $\gamma$-batched claimed values (at $\xi = \alpha$ for the linear part and,
+    via \eqref{eq:psi-z-binding}, at the $\psiz$ weights for the discharge);
+  \item \emph{Coherence} --- the proximity-tested combined row is consistent with
+    the row-fold vector; and
+  \item \emph{Encoding consistency} --- at $t$ transcript-chosen codeword
+    positions, the committed cells (revealed by Merkle paths) encode the combined
+    row.
 \end{enumerate}
-Check~(4) is the proximity test and dominates the cost and the soundness;
-checks~(1)--(3) are $\K[X]_{<\wbit}$-arithmetic identities binding $a'$ to
-the committed data. The opening's knowledge-soundness error is
+Check (4) is the proximity test and dominates the cost and the soundness; checks
+(1)--(3) are $\K[X]_{<\wbit}$-arithmetic identities binding $a'$ to the committed
+data. The opening's knowledge-soundness error is
 \[
-  \epsilon_{\mathrm{open}} \;\le\;
-  \epsilon_{\mathrm{prox}}(t,\delta) \;+\; O\!\left(\tfrac{1}{|\K|}\right),
+  \epsilon_{\mathrm{open}} \le
+  \epsilon_{\mathrm{prox}}(t,\delta) + O\!\left(\tfrac{1}{|\K|}\right),
 \]
-with $\epsilon_{\mathrm{prox}}(t,\delta)$ the code's $t$-query proximity
-error.
+with $\epsilon_{\mathrm{prox}}(t,\delta)$ the code's $t$-query proximity error.
 
 \subsection{What it certifies}
 \label{sec:pcs-certifies}
 
-An accepting opening extracts committed columns $\widehat w_1,\dots,\widehat
-w_K$ and certifies that the claimed $\psia$- and $\psiz$-evaluations at $r_0$
-are the true projected evaluations of those columns. Composed back through
-\Cref{sec:piop,sec:hadamard}, this certifies that the extracted witness
-satisfies the entire UAIR --- every linear constraint (via the $\psia$
-claims) and every Hadamard relation (via the $\psiz$ claims and the binding).
-The next section assembles these per-stage guarantees into the soundness of
-the whole argument.
+An accepting opening extracts committed columns $\widehat w_1,\dots,\widehat w_K$
+and certifies that the claimed $\psia$- and $\psiz$-evaluations at $r_0$ are the
+true projected evaluations of those columns. Composed back through
+\Cref{sec:piop,sec:hadamard}, this certifies that the extracted witness satisfies
+the entire UAIR --- every linear constraint (via the $\psia$ claims) and every
+Hadamard relation (via the $\psiz$ claims and the binding). The next section
+assembles these into the soundness of the whole argument.

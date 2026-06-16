@@ -40,6 +40,32 @@ fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("OBLONG_PROFILE").is_some())
 }
 
+/// Optional process-wide probe returning the current **peak** resident-set size
+/// in bytes (e.g. `getrusage(RUSAGE_SELF).ru_maxrss`). A measurement binary
+/// registers it via [`set_rss_probe`]; `utils` itself stays dependency-free (no
+/// `libc`). When no probe is registered the profiler behaves exactly as before
+/// — the memory columns are simply omitted from [`dump_and_reset`].
+static RSS_PROBE: OnceLock<fn() -> u64> = OnceLock::new();
+
+/// Register the peak-RSS probe used to annotate each timed region with the
+/// process high-water-mark growth it caused. Call once at program start, before
+/// the first [`scope`]. Idempotent; a second call is ignored.
+///
+/// Because `ru_maxrss` is monotonic, the per-region `Δrss` reported by
+/// [`dump_and_reset`] is *how much that region raised the process peak* (a
+/// nested region's figure includes its children, like inclusive time). Regions
+/// that allocate then free without exceeding an earlier high-water show `Δrss=0`
+/// — that transient is attributed to whichever region first set the peak.
+pub fn set_rss_probe(probe: fn() -> u64) {
+    let _ = RSS_PROBE.set(probe);
+}
+
+/// Read the registered peak-RSS probe, or `None` if memory profiling is off.
+#[inline]
+fn rss_now() -> Option<u64> {
+    RSS_PROBE.get().map(|f| f())
+}
+
 /// An open (not-yet-dropped) timing region on this thread's scope stack.
 struct Frame {
     label: &'static str,
@@ -50,6 +76,8 @@ struct Frame {
     depth: usize,
     /// Monotonic entry rank, for stable execution-order printing.
     order: u64,
+    /// Peak RSS (bytes) observed at scope entry, if a probe is registered.
+    rss_start: Option<u64>,
 }
 
 /// One row of the accumulated report.
@@ -62,6 +90,12 @@ struct Record {
     count: u64,
     depth: usize,
     order: u64,
+    /// Sum of per-entry peak-RSS growth (bytes) charged to this region.
+    rss_delta: u64,
+    /// Peak RSS (bytes) at the region's last exit.
+    rss_end: u64,
+    /// Whether any RSS sample was recorded (probe was registered).
+    has_rss: bool,
 }
 
 thread_local! {
@@ -91,6 +125,16 @@ impl Drop for Scope {
         };
         let elapsed = frame.start.elapsed();
         let self_time = elapsed.saturating_sub(frame.children);
+        // Peak-RSS growth caused by this region (exit peak − entry peak). Since
+        // `ru_maxrss` is monotonic the delta is non-negative; `rss_end` is the
+        // process high-water at exit.
+        let (rss_delta, rss_end, has_rss) = match frame.rss_start {
+            Some(start) => {
+                let end = rss_now().unwrap_or(start);
+                (end.saturating_sub(start), end, true)
+            }
+            None => (0, 0, false),
+        };
         // Charge the full (inclusive) time to the parent's child total.
         STACK.with(|s| {
             if let Some(parent) = s.borrow_mut().last_mut() {
@@ -104,6 +148,9 @@ impl Drop for Scope {
                     rec.inclusive = rec.inclusive.saturating_add(elapsed);
                     rec.self_ = rec.self_.saturating_add(self_time);
                     rec.count += 1;
+                    rec.rss_delta = rec.rss_delta.saturating_add(rss_delta);
+                    rec.rss_end = rss_end;
+                    rec.has_rss |= has_rss;
                 }
                 None => records.push(Record {
                     label: frame.label,
@@ -112,6 +159,9 @@ impl Drop for Scope {
                     count: 1,
                     depth: frame.depth,
                     order: frame.order,
+                    rss_delta,
+                    rss_end,
+                    has_rss,
                 }),
             }
         });
@@ -128,6 +178,7 @@ pub fn scope(label: &'static str) -> Scope {
         return Scope { active: false };
     }
     let start = Instant::now();
+    let rss_start = rss_now();
     let order = ORDER.with(|o| {
         let v = o.get();
         o.set(v + 1);
@@ -136,7 +187,7 @@ pub fn scope(label: &'static str) -> Scope {
     STACK.with(|s| {
         let mut stack = s.borrow_mut();
         let depth = stack.len();
-        stack.push(Frame { label, start, children: Duration::ZERO, depth, order });
+        stack.push(Frame { label, start, children: Duration::ZERO, depth, order, rss_start });
     });
     Scope { active: true }
 }
@@ -171,6 +222,9 @@ pub fn dump_and_reset(header: &str) {
             root
         };
         let denom_secs = denom.as_secs_f64();
+        // Memory annotation is present iff a peak-RSS probe was registered.
+        let any_rss = records.iter().any(|rec| rec.has_rss);
+        let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         eprintln!("┌─ prove profile: {header}");
         for rec in records.iter() {
             let indent = "  ".repeat(rec.depth);
@@ -193,10 +247,28 @@ pub fn dump_and_reset(header: &str) {
             } else {
                 String::new()
             };
-            eprintln!("│  {label_field:<26} {incl_s:>12}  {share:5.1}%{self_note}{count_note}");
+            // `Δrss` = peak-RSS growth this region caused; `@` = process peak at
+            // exit. Inclusive of children, matching the time columns.
+            let mem_note = if rec.has_rss {
+                format!("  Δrss=+{:>8.1}MiB  @{:>9.1}MiB", mib(rec.rss_delta), mib(rec.rss_end))
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "│  {label_field:<26} {incl_s:>12}  {share:5.1}%{mem_note}{self_note}{count_note}"
+            );
         }
         let denom_s = format!("{denom:.3?}");
-        eprintln!("└─ top-level total {denom_s}");
+        if any_rss {
+            let peak_rss = records.iter().map(|rec| rec.rss_end).max().unwrap_or(0);
+            eprintln!(
+                "└─ top-level total {denom_s}   peak RSS {:.1} MiB ({:.3} GiB)",
+                mib(peak_rss),
+                mib(peak_rss) / 1024.0
+            );
+        } else {
+            eprintln!("└─ top-level total {denom_s}");
+        }
         records.clear();
         // Reset entry counter so the next unit starts fresh in execution order.
         ORDER.with(|o| o.set(0));
