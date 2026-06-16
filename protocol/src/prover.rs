@@ -1141,20 +1141,45 @@ impl_with_type_bounds!(ProverSumchecked
     /// When the booleanity argument ran (witness binary-poly columns
     /// present), the multipoint-eval inputs are *extended* with one extra
     /// $\alpha'$-projected column MLE and one extra scalar up_eval
-    /// $c_j = \sum_i b_{j,i}\,(\alpha')^{i}$ per witness binary-poly column.
-    /// The appended columns are placed at indices
-    /// `[num_total_cols, num_total_cols + num_wit_bin)`; no `ShiftSpec`
-    /// references those indices, so `down_evals`/`shifts` are untouched and
-    /// shifted booleanity is inherited from the un-shifted column (which
-    /// continues to live at its original $\psi_a$-projected slot).
+    /// $c_j = \sum_i b_{j,i}\,(\alpha')^{i}$ per witness binary-poly column,
+    /// placed at indices `[num_total_cols, num_total_cols + num_wit_bin)`.
+    /// On the Q-branch these carry the real bit-slice bridge claim; on the
+    /// per-prime branches they are **zero-padded** so all branches share
+    /// the same column layout (UAIR rule D6: binary witness columns live
+    /// only in Q[X], so per-prime branches have no booleanity-bridge
+    /// claim to make there). The shared layout lets a single $(n+1)$-branch
+    /// lockstep MP-eval produce a single shared $r_0$ across all branches,
+    /// which Phases H/I rely on for the lift-to-$\mathbb Z$ + $q''$-anchored
+    /// PCS open. No `ShiftSpec` references those indices, so
+    /// `down_evals`/`shifts` are untouched and shifted booleanity is
+    /// inherited from the un-shifted column (which continues to live at
+    /// its original $\psi_a$-projected slot).
     /// See the module-level `BooleanityChecker` docs for the soundness
     /// argument (Schwartz-Zippel at $\alpha'$ + MP/PCS chain at $r_0$).
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     pub fn step6_multipoint_eval(
         mut self,
     ) -> Result<ProverMultipointEvaled<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // --- Q[X] branch (booleanity-bridge applied iff alpha_prime present)
-        let (q_trace_mles, q_up_evals) = if let Some(alpha_prime) = &self.alpha_prime_f {
+        let n_fq = self.projected_trace_f_fq.len();
+        let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
+        let shifts = self.base.uair_signature.shifts();
+        let num_vars = self.base.num_vars;
+
+        // --- Q[X] branch (booleanity-bridge appended iff alpha_prime present)
+        //
+        // When booleanity ran, the Q-branch gets extra columns appended:
+        //   - `extra_trace_mles[j]`: the $\alpha'$-projection of witness
+        //     binary column $j$, as a DenseMultilinearExtension over Q[X]'s
+        //     inner type.
+        //   - `extra_up_evals[j] = c_j = \sum_i b_{j,i}\,(\alpha')^i$: the
+        //     $\alpha'$-batched bit_slice_evals at the booleanity endpoint.
+        // These extensions tie booleanity's $r^*$-anchored bit-slice claims
+        // into the MP-eval sumcheck so that the MP endpoint $r_0$ also binds
+        // them; the verifier's downstream lifted-eval projection at
+        // $\alpha'$ closes the loop.
+        let (q_trace_mles, q_up_evals, num_wit_bin) = if let Some(alpha_prime) =
+            &self.alpha_prime_f
+        {
             let sig = &self.base.uair_signature;
             let num_pub_bin = sig.public_cols().num_binary_poly_cols();
             let num_total_bin = sig.total_cols().num_binary_poly_cols();
@@ -1162,7 +1187,7 @@ impl_with_type_bounds!(ProverSumchecked
 
             // Project the witness binary-poly columns at \alpha' directly from the
             // committed BinaryPoly<D> data:
-            // More efficient that generic `evaluate_trace_to_column_mles` path.
+            // More efficient than the generic `evaluate_trace_to_column_mles` path.
             let one = F::one_with_cfg(&self.field_cfg);
             let alpha_powers: Vec<F> = powers(alpha_prime.clone(), one, D);
             let bin_cols = &self.base.original_trace.binary_poly[num_pub_bin..num_total_bin];
@@ -1186,72 +1211,86 @@ impl_with_type_bounds!(ProverSumchecked
             trace_mles.extend(extra_trace_mles);
             let mut up_evals = self.cpr_proof.up_evals.clone();
             up_evals.extend(extra_up_evals);
-            (trace_mles, up_evals)
+            (trace_mles, up_evals, num_wit_bin)
         } else {
-            (self.projected_trace_f, self.cpr_proof.up_evals.clone())
+            (self.projected_trace_f, self.cpr_proof.up_evals.clone(), 0)
         };
 
-        // --- Two lockstep multipoint-eval invocations -------------------
+        // --- Per-prime branches (zero-padded to match Q-branch column count)
         //
-        // The Q-branch and the per-prime branches generally carry **different
-        // column counts**: when booleanity runs, Q gets extra
-        // $\alpha'$-projected witness-bin columns appended; the per-prime
-        // branches never do (witness binaries live in $Q[X]$). Sharing
-        // batching coefficients $\gamma_j$ across mismatched column counts
-        // is not well-defined, so we run two separate lockstep invocations:
-        //
-        //   1. **Q-branch:** one single-branch run over $Q[X]$ (degenerate
-        //      lockstep — `q_star_cfg = field_cfg`). Uses the
-        //      booleanity-extended `q_trace_mles` / `q_up_evals` when
-        //      booleanity is active, otherwise the standard ones.
-        //   2. **Per-prime branches:** one $n$-branch run with shared
-        //      integer challenges in $[0, q^*)$. Skipped when `n_fq == 0`.
-        let n_fq = self.projected_trace_f_fq.len();
-        let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
-        let shifts = self.base.uair_signature.shifts();
+        // Each fq branch's trace MLEs and up_evals are extended with
+        // `num_wit_bin` zero entries, padding to the same column count as
+        // the (booleanity-extended) Q-branch. This preserves the lockstep
+        // shape (shared `gammas` and one $r_0$ across all branches) without
+        // making any non-trivial claim on the per-prime branches: zero on
+        // both sides of the MP-eval sumcheck contributes zero.
+        let extension_size = 1usize << num_vars;
+        let mut fq_trace_mles_ext: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+            Vec::with_capacity(n_fq);
+        let mut fq_up_evals_ext: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let zero_i = F::zero_with_cfg(cfg_i);
+            let zero_inner_i = zero_i.inner();
 
-        // Q-branch standalone.
-        let mut q_outputs = MultipointEval::prove_as_subprotocol(
+            let mut trace_i = self.projected_trace_f_fq[prime_idx].clone();
+            if num_wit_bin > 0 {
+                let zero_mle = DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    vec![zero_inner_i.clone(); extension_size],
+                    zero_inner_i.clone(),
+                );
+                trace_i.extend((0..num_wit_bin).map(|_| zero_mle.clone()));
+            }
+            fq_trace_mles_ext.push(trace_i);
+
+            let mut up_i = self.cpr_proofs_fq[prime_idx].up_evals.clone();
+            up_i.extend((0..num_wit_bin).map(|_| zero_i.clone()));
+            fq_up_evals_ext.push(up_i);
+        }
+
+        // --- Single $(n+1)$-branch lockstep MP-eval ---------------------
+        //
+        // Branch 0 = Q[X] (with booleanity-bridge cols when applicable);
+        // branches $i \ge 1$ = per-prime fq branches (zero-padded to the
+        // same column count). All branches share one $r_0$ in $[0, q^*)$.
+        let mut all_branches: Vec<MultipointEvalBranchInputs<'_, F>> =
+            Vec::with_capacity(add!(n_fq, 1));
+        all_branches.push(MultipointEvalBranchInputs {
+            trace_mles: &q_trace_mles,
+            eval_point: &self.cpr_eval_point,
+            up_evals: &q_up_evals,
+            down_evals: &self.cpr_proof.down_evals,
+            field_cfg: &self.field_cfg,
+        });
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            all_branches.push(MultipointEvalBranchInputs {
+                trace_mles: &fq_trace_mles_ext[prime_idx],
+                eval_point: &self.cpr_eval_points_fq[prime_idx],
+                up_evals: &fq_up_evals_ext[prime_idx],
+                down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
+                field_cfg: &self.all_field_cfgs[branch_idx],
+            });
+        }
+
+        let mut outputs_iter = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            vec![MultipointEvalBranchInputs {
-                trace_mles: &q_trace_mles,
-                eval_point: &self.cpr_eval_point,
-                up_evals: &q_up_evals,
-                down_evals: &self.cpr_proof.down_evals,
-                field_cfg: &self.field_cfg,
-            }],
+            all_branches,
             shifts,
-            &self.field_cfg,
-        )?;
-        let (mp_proof_q, q_state) = q_outputs.pop().expect("single-branch Q output");
+            &q_star_cfg,
+        )?
+        .into_iter();
+
+        let (mp_proof_q, q_state) = outputs_iter.next().expect("Q-branch present");
         let r_0_q = q_state.eval_point;
 
-        // Per-prime branches (lockstep, n_fq branches, shared `q_star_cfg`).
         let mut mp_proofs_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_fq);
         let mut r_0_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
-        if n_fq > 0 {
-            let mut fq_branches: Vec<MultipointEvalBranchInputs<'_, F>> =
-                Vec::with_capacity(n_fq);
-            for prime_idx in 0..n_fq {
-                let branch_idx = add!(prime_idx, 1);
-                fq_branches.push(MultipointEvalBranchInputs {
-                    trace_mles: &self.projected_trace_f_fq[prime_idx],
-                    eval_point: &self.cpr_eval_points_fq[prime_idx],
-                    up_evals: &self.cpr_proofs_fq[prime_idx].up_evals,
-                    down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
-                    field_cfg: &self.all_field_cfgs[branch_idx],
-                });
-            }
-            let fq_outputs = MultipointEval::prove_as_subprotocol(
-                &mut self.base.pcs_transcript.fs_transcript,
-                fq_branches,
-                shifts,
-                &q_star_cfg,
-            )?;
-            for (proof_i, state_i) in fq_outputs {
-                mp_proofs_fq.push(proof_i);
-                r_0_fq.push(state_i.eval_point);
-            }
+        for (proof_i, state_i) in outputs_iter {
+            mp_proofs_fq.push(proof_i);
+            r_0_fq.push(state_i.eval_point);
         }
 
         Ok(ProverMultipointEvaled {

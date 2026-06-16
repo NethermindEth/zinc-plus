@@ -972,26 +972,6 @@ where
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        // --- Q[X] branch up_evals (with booleanity-bridge appended when
-        // alpha_prime is present) ---
-        let q_up_evals: Vec<F> = if let (Some(bit_slice_evals), Some(alpha_prime)) =
-            (&self.bool_bit_slice_evals, &self.alpha_prime_f)
-        {
-            let sig = self.base.uair_signature.clone();
-            let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-            let num_total_bin = sig.total_cols().num_binary_poly_cols();
-            let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
-            let extra = alpha_prime_bridge_up_evals::<F, D>(
-                bit_slice_evals,
-                num_wit_bin,
-                alpha_prime,
-                &self.field_cfg,
-            );
-            self.cpr_up_evals.iter().cloned().chain(extra).collect()
-        } else {
-            self.cpr_up_evals.clone()
-        };
-
         // --- Length-mismatch guard (mirrors Phase F.2.c) ---
         let n_fq = self.cpr_eval_points_fq.len();
         if self.proof_multipoint_evals_fq.len() != n_fq {
@@ -1007,53 +987,90 @@ where
             });
         }
 
+        // --- Q[X] branch up_evals (with booleanity-bridge appended when
+        // alpha_prime is present) and num_wit_bin extension width.
+        let (q_up_evals, num_wit_bin): (Vec<F>, usize) =
+            if let (Some(bit_slice_evals), Some(alpha_prime)) =
+                (&self.bool_bit_slice_evals, &self.alpha_prime_f)
+            {
+                let sig = self.base.uair_signature.clone();
+                let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+                let num_total_bin = sig.total_cols().num_binary_poly_cols();
+                let num_wit_bin = num_total_bin.saturating_sub(num_pub_bin);
+                let extra = alpha_prime_bridge_up_evals::<F, D>(
+                    bit_slice_evals,
+                    num_wit_bin,
+                    alpha_prime,
+                    &self.field_cfg,
+                );
+                (
+                    self.cpr_up_evals.iter().cloned().chain(extra).collect(),
+                    num_wit_bin,
+                )
+            } else {
+                (self.cpr_up_evals.clone(), 0)
+            };
+
+        // --- Per-prime branches: zero-pad up_evals to match Q's column count
+        //
+        // UAIR rule D6: witness binary-poly columns live in $Q[X]$ only, so
+        // the booleanity-bridge extra columns have no analog on the fq
+        // branches. Pad with zeros to share one lockstep `gammas` vector
+        // and one shared $r_0$ across all branches.
+        let fq_up_evals_ext: Vec<Vec<F>> = (0..n_fq)
+            .map(|prime_idx| {
+                let branch_idx = add!(prime_idx, 1);
+                let zero_i = F::zero_with_cfg(&self.all_field_cfgs[branch_idx]);
+                let mut up_i = self.cpr_up_evals_fq[prime_idx].clone();
+                up_i.extend((0..num_wit_bin).map(|_| zero_i.clone()));
+                up_i
+            })
+            .collect();
+
         let shifts = self.base.uair_signature.shifts();
         let num_vars = self.base.num_vars;
         let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
 
-        // --- Q-branch standalone (degenerate single-branch lockstep) ---
-        let mut q_subclaims = MultipointEval::verify_as_subprotocol(
-            &mut self.base.pcs_transcript.fs_transcript,
-            vec![self.proof_multipoint_eval],
-            vec![MultipointEvalBranchInputs {
+        // --- Single $(n+1)$-branch lockstep MP-eval verifier ------------
+        let mut all_proofs: Vec<multipoint_eval::Proof<F>> =
+            Vec::with_capacity(add!(n_fq, 1));
+        all_proofs.push(self.proof_multipoint_eval);
+        all_proofs.extend(self.proof_multipoint_evals_fq);
+
+        let mut all_branches: Vec<MultipointEvalBranchInputs<'_, F>> =
+            Vec::with_capacity(add!(n_fq, 1));
+        all_branches.push(MultipointEvalBranchInputs {
+            trace_mles: &[],
+            eval_point: &self.cpr_eval_point,
+            up_evals: &q_up_evals,
+            down_evals: &self.cpr_down_evals,
+            field_cfg: &self.field_cfg,
+        });
+        #[allow(clippy::needless_range_loop)]
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            all_branches.push(MultipointEvalBranchInputs {
                 trace_mles: &[],
-                eval_point: &self.cpr_eval_point,
-                up_evals: &q_up_evals,
-                down_evals: &self.cpr_down_evals,
-                field_cfg: &self.field_cfg,
-            }],
+                eval_point: &self.cpr_eval_points_fq[prime_idx],
+                up_evals: &fq_up_evals_ext[prime_idx],
+                down_evals: &self.cpr_down_evals_fq[prime_idx],
+                field_cfg: &self.all_field_cfgs[branch_idx],
+            });
+        }
+
+        let mut subclaims_iter = MultipointEval::verify_as_subprotocol(
+            &mut self.base.pcs_transcript.fs_transcript,
+            all_proofs,
+            all_branches,
             shifts,
             num_vars,
-            &self.field_cfg,
-        )?;
-        assert_eq!(q_subclaims.len(), 1);
-        let mp_subclaim = q_subclaims.pop().expect("single Q-branch subclaim");
+            &q_star_cfg,
+        )?
+        .into_iter();
 
-        // --- Per-prime branches lockstep ---
-        let mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>> = if n_fq > 0 {
-            let fq_branches: Vec<MultipointEvalBranchInputs<'_, F>> = (0..n_fq)
-                .map(|prime_idx| {
-                    let branch_idx = add!(prime_idx, 1);
-                    MultipointEvalBranchInputs {
-                        trace_mles: &[],
-                        eval_point: &self.cpr_eval_points_fq[prime_idx],
-                        up_evals: &self.cpr_up_evals_fq[prime_idx],
-                        down_evals: &self.cpr_down_evals_fq[prime_idx],
-                        field_cfg: &self.all_field_cfgs[branch_idx],
-                    }
-                })
-                .collect();
-            MultipointEval::verify_as_subprotocol(
-                &mut self.base.pcs_transcript.fs_transcript,
-                self.proof_multipoint_evals_fq,
-                fq_branches,
-                shifts,
-                num_vars,
-                &q_star_cfg,
-            )?
-        } else {
-            Vec::new()
-        };
+        let mp_subclaim = subclaims_iter.next().expect("Q-branch subclaim present");
+        let mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>> = subclaims_iter.collect();
+        debug_assert_eq!(mp_subclaims_fq.len(), n_fq);
 
         Ok(VerifierMultipointEvaled {
             base: self.base,
