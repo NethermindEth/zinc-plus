@@ -32,7 +32,9 @@ pub mod verifier;
 use rayon::prelude::*;
 
 use crate::fold::FoldTrace;
-use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
+use crypto_primitives::{
+    ConstIntRing, ConstIntSemiring, FixedSemiring, FromWithConfig, PrimeField, Semiring,
+};
 use std::{fmt::Debug, iter, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
@@ -52,7 +54,10 @@ use zinc_poly::{
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
-        dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
+        dynamic::{
+            over_field::DynamicPolynomialF,
+            over_fixed_semiring::{DynamicPolyVecFS, DynamicPolynomialFS},
+        },
     },
 };
 use zinc_primality::PrimalityTest;
@@ -71,7 +76,10 @@ use zip_plus::{
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F: PrimeField>
+where
+    F::Integer: FixedSemiring,
+{
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
@@ -85,13 +93,23 @@ pub struct Proof<F: PrimeField> {
     /// Multi-point evaluation sumcheck proof (combines up_evals and
     /// down_evals at `r*` into a single evaluation point `r_0`).
     pub multipoint_eval: MultipointEvalProof<F>,
-    /// Witness-only polynomial MLE evaluations at r_0 in F_q[X]
-    /// (after \phi_q, before \psi_a), ordered as
-    /// `[wit_bin..., wit_arb..., wit_int...]`.
-    /// The verifier recomputes public lifted_evals from public data,
-    /// interleaves them with these, and derives scalar open_evals via
-    /// \psi_a for the sumcheck consistency check and Zip+ PCS verify.
-    pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Witness-only polynomial MLE evaluations at $r_0$ as
+    /// **integer-coefficient** polynomials $\bar u_j \in \mathbb{Z}[X]$,
+    /// ordered as `[wit_bin..., wit_arb..., wit_int...]`.
+    ///
+    /// The verifier recomputes public lifted-evals from public data
+    /// (also as integer polys), interleaves them with these, and projects
+    /// per-branch via $\phi_{q_i}$ + $\psi_{\text{proj}[i]}$ into each
+    /// branch's field for the MP-eval sumcheck consistency check. Zip+
+    /// PCS verify uses the $q_0$-branch projection (in the current
+    /// pre-Phase-I shape) — Phase I re-anchors that to a fresh $q''$.
+    ///
+    /// **TODO(fq-soundness)**: today the integers in this field sit in
+    /// $[0, q_0)$ (produced by lifting the $\mathbb{F}_{q_0}$-arithmetic
+    /// accumulator back to $\mathbb{Z}$), so they only soundly bind the
+    /// $q_0$ branch. Final Phase H widens this to the full CRT range
+    /// $[0, \prod_i q_i \cdot q'')$ so all branches are bound.
+    pub witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Option<BatchedLookupProof<F>>,
     /// Binary-polynomial booleanity argument proof. `None` when the UAIR
@@ -123,7 +141,7 @@ pub struct Proof<F: PrimeField> {
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F::Integer: FixedSemiring + ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
@@ -143,7 +161,8 @@ where
         let (multipoint_eval, bytes) =
             MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
-        let (witness_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let (witness_vec, bytes) =
+            DynamicPolyVecFS::<F::Integer>::read_transcription_bytes_subset(bytes);
         let witness_lifted_evals = witness_vec.0;
 
         // booleanity_proof: presence flag (u32: 0 = absent, 1 = present)
@@ -246,8 +265,8 @@ where
         // multipoint_eval: u32 length prefix + data
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
-        // witness_lifted_evals: u32 length prefix + DynamicPolyVecF encoding
-        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals)
+        // witness_lifted_evals: u32 length prefix + DynamicPolyVecFS encoding
+        buf = DynamicPolyVecFS::reinterpret(&self.witness_lifted_evals)
             .write_transcription_bytes_subset(buf);
 
         // booleanity_proof: u32 presence flag, then (optionally) the body
@@ -308,11 +327,11 @@ where
 impl<F> Transcribable for Proof<F>
 where
     F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F::Integer: FixedSemiring + ConstTranscribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let witness_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals);
+        let witness_vec = DynamicPolyVecFS::reinterpret(&self.witness_lifted_evals);
         let booleanity_bytes = match &self.booleanity_proof {
             Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
             None => 0,
@@ -350,7 +369,7 @@ where
             + self.multipoint_eval.get_num_bytes()
             // TODO: add lookup_proof size once BatchedLookupProof gets
             // Transcribable impls (lookup is not yet implemented).
-            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + DynamicPolyVecFS::<F::Integer>::LENGTH_NUM_BYTES
             + witness_vec.get_num_bytes()
             // booleanity presence flag + optional payload
             + u32::NUM_BYTES

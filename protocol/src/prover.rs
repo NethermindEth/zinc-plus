@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{ConstIntSemiring, FixedSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use std::{borrow::Cow, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -14,7 +14,10 @@ use zinc_piop::{
     sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckGroup},
 };
 use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
+    mle::DenseMultilinearExtension,
+    univariate::dynamic::{
+        over_field::DynamicPolynomialF, over_fixed_semiring::DynamicPolynomialFS,
+    },
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -382,7 +385,9 @@ pub struct ProverLifted<
     F: PrimeField,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs.
@@ -406,7 +411,10 @@ pub struct ProverLifted<
     r_0_fq: Vec<Vec<F>>,
 
     // New
-    lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// Integer-coefficient lifted MLE evaluations at $r_0$, one per
+    /// trace column. Public columns first, then witness columns,
+    /// interleaved by type. See [`compute_lifted_evals`].
+    lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
 }
 
 /// After step 8 (PCS open). No new fields are added here, but the PCS
@@ -421,7 +429,9 @@ pub struct ProverPcsOpened<
     F: PrimeField,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
@@ -434,7 +444,7 @@ pub struct ProverPcsOpened<
     mp_proof: MultipointEvalProof<F>,
     /// Per-prime multipoint-eval proofs threaded forward.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
-    lifted_evals: Vec<DynamicPolynomialF<F>>,
+    lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
 }
 
 //
@@ -474,7 +484,7 @@ where
     Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F::Integer: FixedSemiring + ConstTranscribable,
 {
     /// Step 0: Folding the trace.
     #[allow(clippy::type_complexity)]
@@ -1316,15 +1326,21 @@ impl_with_type_bounds!(ProverSumchecked
 
 impl_with_type_bounds!(ProverMultipointEvaled
 {
-    /// Step 7: Lift-and-project. Computes per-column polynomial MLE
-    /// evaluations at `r_0` in `F_q[X]` and absorbs them into the transcript.
+    /// Step 7: Lift-and-project. Computes per-column **integer-coefficient**
+    /// polynomial MLE evaluations at `r_0` ($\bar u_j \in \mathbb{Z}[X]$)
+    /// and absorbs them into the transcript.
+    ///
+    /// The verifier per-branch lifts each $\bar u_j$ into branch $i$'s
+    /// field via $\phi_{q_i}$, then evaluates at
+    /// `projecting_elements[i]` to derive the scalar `open_evals` for the
+    /// MP-eval sumcheck consistency check on each branch.
     pub fn step7_lift_and_project(
         mut self,
     ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // Compute per-column polynomial MLE evaluations at r_0 in F_q[X]
-        // (after \phi_q but before \psi_a). The verifier derives the scalar
-        // open_evals via \psi_a for the sumcheck consistency check, and
-        // supplies these to the Zip+ PCS for alpha-projection.
+        // Compute per-column polynomial MLE evaluations at r_0 as
+        // integer-coefficient polynomials. See `compute_lifted_evals_int`
+        // for the stepping-stone soundness caveat (today the integers sit
+        // in [0, q_0)).
         let lifted_evals = compute_lifted_evals(
             &self.r_0,
             &self.base.original_trace.binary_poly,
@@ -1332,12 +1348,30 @@ impl_with_type_bounds!(ProverMultipointEvaled
             &self.field_cfg,
         );
 
+        // **Today** (stepping-stone implementation): the eq-sum accumulator runs
+        // in $\mathbb{F} = \mathbb{F}_{q_0}$ exactly as in
+        // [`compute_lifted_evals`], then each coefficient is lifted back to
+        // $\mathbb{F}$::Integer via [`Field::lift_to_integer`]. This means the
+        // integer representation sits in $[0, q_0)$ and is therefore only
+        // soundly bound modulo $q_0$.
+        //
+        // **TODO(fq-soundness)**: replace the inner arithmetic with a wider
+        // generic accumulator (over `Zt::Int` / `F::Integer` directly via
+        // `Semiring` traits, no concrete `BigInt`) so the integer representation
+        // is the (unique) element of $[0, \prod_i q_i \cdot q'')$. That gives
+        // per-branch soundness for fq branches via
+        // $\phi_{q_i}(\bar u_j) \cdot \psi_{\text{proj}[i]} = \mathrm{up\\_evals}[i][j]$.
+        // Until then, the per-branch projection check is structurally in place
+        // but binds only the $q_0$ branch.
+        let lifted_evals: Vec<_> = lifted_evals.iter().map(|p| p.lift_to_integers()).collect();
+
+        // Absorb integer coefficients into the transcript
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for bar_u in &lifted_evals {
             self.base
                 .pcs_transcript
                 .fs_transcript
-                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+                .absorb_random_int_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
         Ok(ProverLifted {

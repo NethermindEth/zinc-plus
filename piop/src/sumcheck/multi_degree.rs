@@ -459,7 +459,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         }
 
         // Finalize per branch (mirrors the original single-branch tail).
-        let output = cfg_into_iter!(per_branch_prover_states)
+        cfg_into_iter!(per_branch_prover_states)
             .zip(cfg_into_iter!(per_branch_group_messages))
             .zip(cfg_into_iter!(per_branch_claimed_sums))
             .zip(cfg_into_iter!(per_branch_verifier_msg))
@@ -486,9 +486,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                     (proof, prover_states)
                 },
             )
-            .collect();
-
-        output
+            .collect()
     }
 
     /// Multi-degree sumcheck verifier.

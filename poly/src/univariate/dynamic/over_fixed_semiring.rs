@@ -7,8 +7,10 @@ use std::{
     fmt::Display,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable};
 use zinc_utils::{
-    CHECKED, UNCHECKED, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+    CHECKED, UNCHECKED, add, mul, mul_by_scalar::MulByScalar,
+    projectable_to_field::ProjectableToField,
 };
 
 use crate::{
@@ -343,6 +345,82 @@ where
                 .evaluate_at_point(&sampled_value)
                 .expect("Failed to evaluate polynomial at point")
         }
+    }
+}
+
+/// Unfortunately, we cannot implement `GenTranscribable` directly for
+/// `Vec<DynamicPolynomialFS<I>>` since both are foreign types, so we use this
+/// wrapper.
+///
+/// Encoding:
+/// ```text
+/// [ poly_0_len (u32) | poly_0_coeffs (poly_0_len * I::NUM_BYTES) | ... ]
+/// ```
+#[derive(Debug, Default, Clone, From, Hash, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct DynamicPolyVecFS<I: FixedSemiring>(pub Vec<DynamicPolynomialFS<I>>);
+
+impl<I: FixedSemiring> DynamicPolyVecFS<I> {
+    pub fn reinterpret(value: &Vec<DynamicPolynomialFS<I>>) -> &Self {
+        // Safety: `DynamicPolyVecFS<I>` is a transparent wrapper, so the memory
+        // layout is the same.
+        unsafe { &*(value as *const Vec<DynamicPolynomialFS<I>> as *const Self) }
+    }
+}
+
+impl<I> GenTranscribable for DynamicPolyVecFS<I>
+where
+    I: FixedSemiring + ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let mut bytes = bytes;
+        let mut result = Vec::new();
+        while !bytes.is_empty() {
+            let (len, rest) = u32::read_transcription_bytes_subset(bytes);
+            let len = usize::try_from(len).expect("polynomial length must fit into usize");
+            bytes = rest;
+            let end = mul!(len, I::NUM_BYTES);
+            let coeffs: Vec<I> = bytes[..end]
+                .chunks_exact(I::NUM_BYTES)
+                .map(I::read_transcription_bytes_exact)
+                .collect();
+            result.push(DynamicPolynomialFS { coeffs });
+            bytes = &bytes[end..];
+        }
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        result.into()
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        for poly in self.0.iter() {
+            // Allow untrimmed polynomials without overhead by writing trimmed length.
+            let len = poly.degree().map(|d| add!(d, 1)).unwrap_or(0);
+            let len_u32 = u32::try_from(len).expect("polynomial length must fit into u32");
+            len_u32.write_transcription_bytes_exact(&mut buf[0..u32::NUM_BYTES]);
+            buf = &mut buf[u32::NUM_BYTES..];
+            let end = mul!(len, I::NUM_BYTES);
+            for (i, coeff) in poly.coeffs[..len].iter().enumerate() {
+                let offset = mul!(i, I::NUM_BYTES);
+                let offset_end = add!(offset, I::NUM_BYTES);
+                coeff.write_transcription_bytes_exact(&mut buf[offset..offset_end]);
+            }
+            buf = &mut buf[end..];
+        }
+        assert!(buf.is_empty(), "Entire buffer should be used");
+    }
+}
+
+impl<I> Transcribable for DynamicPolyVecFS<I>
+where
+    I: FixedSemiring + ConstTranscribable,
+{
+    fn get_num_bytes(&self) -> usize {
+        let mut total = 0usize;
+        for poly in self.0.iter() {
+            let len = poly.degree().map(|d| add!(d, 1)).unwrap_or(0);
+            total = add!(total, add!(u32::NUM_BYTES, mul!(len, I::NUM_BYTES)));
+        }
+        total
     }
 }
 

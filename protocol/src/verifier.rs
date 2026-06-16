@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{ConstIntSemiring, FixedSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use std::io::Cursor;
 use zinc_piop::{
@@ -13,7 +13,12 @@ use zinc_piop::{
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
-use zinc_poly::{EvaluatablePolynomial, univariate::dynamic::over_field::DynamicPolynomialF};
+use zinc_poly::{
+    EvaluatablePolynomial,
+    univariate::dynamic::{
+        over_field::DynamicPolynomialF, over_fixed_semiring::DynamicPolynomialFS,
+    },
+};
 use zinc_transcript::{
     Blake3Transcript,
     traits::{ConstTranscribable, Transcript},
@@ -71,7 +76,9 @@ pub struct VerifierTranscriptReconstructed<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
 
     // Proof leftovers
@@ -80,7 +87,7 @@ pub struct VerifierTranscriptReconstructed<
     proof_cpr: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
@@ -100,7 +107,9 @@ pub struct VerifierPrimeProjected<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
 
@@ -110,7 +119,7 @@ pub struct VerifierPrimeProjected<
     proof_cpr: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
@@ -130,7 +139,9 @@ pub struct VerifierIdealChecked<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
@@ -153,7 +164,7 @@ pub struct VerifierIdealChecked<
     proof_cpr: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     /// Per-prime CPR proofs (one per declared prime).
@@ -175,7 +186,9 @@ pub struct VerifierEvalProjected<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
@@ -208,7 +221,7 @@ pub struct VerifierEvalProjected<
     proof_cpr: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     /// Per-prime CPR proofs (one per declared prime), consumed in step 4.
@@ -231,7 +244,9 @@ pub struct VerifierSumchecked<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (carried for later `fq-unify` phases).
@@ -277,7 +292,7 @@ pub struct VerifierSumchecked<
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -291,7 +306,9 @@ pub struct VerifierMultipointEvaled<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (carried for later phases).
@@ -311,7 +328,7 @@ pub struct VerifierMultipointEvaled<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -326,11 +343,17 @@ pub struct VerifierLiftedEvalsChecked<
     IdealOverF,
     const D: usize,
     const FD: usize,
-> {
+> where
+    F::Integer: FixedSemiring,
+{
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     mp_subclaim: multipoint_eval::Subclaim<F>,
-    all_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    /// All lifted MLE evaluations at $r_0$ in **integer-coefficient** form
+    /// ($\bar u_j \in \mathbb{Z}[X]$), ordered by UAIR column layout (with
+    /// public and witness columns interleaved). Phase I's PCS verify
+    /// projects these per-branch via $\phi_{q_i}$.
+    all_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -354,7 +377,7 @@ where
     Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
-    F::Integer: ConstTranscribable,
+    F::Integer: ConstTranscribable + FixedSemiring,
 {
     /// Step 0: Verifier entry point.
     /// Reconstruct Fiat-Shamir transcript from commitments and public data.
@@ -1032,8 +1055,7 @@ where
         let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
 
         // --- Single $(n+1)$-branch lockstep MP-eval verifier ------------
-        let mut all_proofs: Vec<multipoint_eval::Proof<F>> =
-            Vec::with_capacity(add!(n_fq, 1));
+        let mut all_proofs: Vec<multipoint_eval::Proof<F>> = Vec::with_capacity(add!(n_fq, 1));
         all_proofs.push(self.proof_multipoint_eval);
         all_proofs.extend(self.proof_multipoint_evals_fq);
 
@@ -1109,16 +1131,27 @@ where
     /// Step 6: Recompute public lifted_evals, assemble full set, verify
     /// multipoint eval subclaim, and absorb all lifted_evals into transcript.
     ///
-    /// All columns are projected at the original $\psi_a$
-    /// `projecting_elements[0]` (so shifts continue to be bound through
-    /// the $\psi_a$ chain). When the booleanity argument ran, additional
+    /// All columns are projected per-branch at each branch's $\psi_a$
+    /// projecting element (`projecting_elements[i]`, $i \in \{0, ..., n\}$),
+    /// so shifts continue to be bound through the $\psi_a$ chain on each
+    /// branch. When the booleanity argument ran, additional
     /// $\alpha'$-projected `open_evals` are appended for the witness
-    /// binary-poly columns; these match the appended `up_evals` from
-    /// step 5 and close the Schwartz-Zippel bridge to the bit-slice claims.
+    /// binary-poly columns on the **Q[X] branch only** (fq branches are
+    /// zero-padded on the MP-eval side, per Phase G T1 design); these
+    /// match the appended `up_evals` from step 5 and close the
+    /// Schwartz-Zippel bridge to the bit-slice claims.
+    ///
+    /// **TODO(fq-soundness)**: the integer `witness_lifted_evals` sit in
+    /// $[0, q_0)$ today (cf. `compute_lifted_evals_int`), so the per-branch
+    /// projection check for $i \ge 1$ only soundly binds the prover's
+    /// $q_0$-residue. Final Phase H widens the integer range to the full
+    /// CRT modulus.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
     ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let r_0 = &self.mp_subclaim.r0;
+        let n_fq = self.mp_subclaims_fq.len();
 
         let pub_cols = self.base.uair_signature.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
@@ -1129,24 +1162,43 @@ where
         let num_wit_bin = wit_cols.num_binary_poly_cols();
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
 
-        let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
-            let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
-                self.base.public_trace,
-                &self.field_cfg,
-            );
-            compute_lifted_evals::<F, D>(
-                r_0,
-                &self.base.public_trace.binary_poly,
-                &ProjectedTrace::RowMajor(projected_public),
-                &self.field_cfg,
-            )
-        } else {
-            Vec::new()
-        };
+        let public_lifted: Vec<DynamicPolynomialFS<F::Integer>> =
+            if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
+                let projected_public = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
+                    self.base.public_trace,
+                    &self.field_cfg,
+                );
+                let lifted_evals = compute_lifted_evals::<F, D>(
+                    r_0,
+                    &self.base.public_trace.binary_poly,
+                    &ProjectedTrace::RowMajor(projected_public),
+                    &self.field_cfg,
+                );
+
+                // **Today** (stepping-stone implementation): the eq-sum accumulator runs
+                // in $\mathbb{F} = \mathbb{F}_{q_0}$ exactly as in
+                // [`compute_lifted_evals`], then each coefficient is lifted back to
+                // $\mathbb{F}$::Integer via [`Field::lift_to_integer`]. This means the
+                // integer representation sits in $[0, q_0)$ and is therefore only
+                // soundly bound modulo $q_0$.
+                //
+                // **TODO(fq-soundness)**: replace the inner arithmetic with a wider
+                // generic accumulator (over `Zt::Int` / `F::Integer` directly via
+                // `Semiring` traits, no concrete `BigInt`) so the integer representation
+                // is the (unique) element of $[0, \prod_i q_i \cdot q'')$. That gives
+                // per-branch soundness for fq branches via
+                // $\phi_{q_i}(\bar u_j) \cdot \psi_{\text{proj}[i]} =
+                // \mathrm{up\\_evals}[i][j]$. Until then, the per-branch
+                // projection check is structurally in place but binds only the
+                // $q_0$ branch.
+                lifted_evals.iter().map(|p| p.lift_to_integers()).collect()
+            } else {
+                Vec::new()
+            };
 
         let witness_lifted_evals = &self.proof_witness_lifted_evals;
 
-        let all_lifted_evals: Vec<_> = public_lifted[..num_pub_bin]
+        let all_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>> = public_lifted[..num_pub_bin]
             .iter()
             .chain(&witness_lifted_evals[..num_wit_bin])
             .chain(&public_lifted[num_pub_bin..add!(num_pub_bin, num_pub_arb)])
@@ -1156,13 +1208,32 @@ where
             .cloned()
             .collect();
 
-        // Project every column at the original \psi_a projecting element.
-        // Shifts continue to consume the \psi_a-projected open_evals.
-        let mut open_evals: Vec<F> = all_lifted_evals
+        // Per-branch projection helper: lift each integer coefficient into
+        // branch `i`'s field via `F::from_with_cfg`, then evaluate the
+        // resulting `DynamicPolynomialF<F>` at `point` (a field element in
+        // branch `i`'s field). Used by the MP-eval consistency checks below.
+        let project_int_poly_at = |bar_u: &DynamicPolynomialFS<F::Integer>,
+                                   point: &F,
+                                   branch_cfg: &F::Config|
+         -> Result<F, ProtocolError<F>> {
+            let coeffs: Vec<F> = bar_u
+                .coeffs
+                .iter()
+                .map(|c| F::from_with_cfg(c.clone(), branch_cfg))
+                .collect();
+            let poly = DynamicPolynomialF { coeffs };
+            poly.evaluate_at_point(point)
+                .map_err(ProtocolError::LiftedEvalProjection)
+        };
+
+        // --- Q-branch (i = 0) ----------------------------------------
+        // Projection at `projecting_elements[0]` for every column, plus
+        // optional $\alpha'$-projected `open_evals` appended for the
+        // witness binary-poly columns.
+        let mut q_open_evals: Vec<F> = all_lifted_evals
             .iter()
-            .map(|bar_u| bar_u.evaluate_at_point(&self.projecting_elements[0]))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::LiftedEvalProjection)?;
+            .map(|bar_u| project_int_poly_at(bar_u, &self.projecting_elements[0], &self.field_cfg))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Append \alpha'-projected open_evals for the witness binary-poly
         // columns. Their position matches the appended up_evals from
@@ -1171,27 +1242,69 @@ where
         // appended indices, so the shift_at_r0 selectors are unaffected.
         if let Some(alpha_prime) = &self.alpha_prime_f {
             for bar_u in &witness_lifted_evals[..num_wit_bin] {
-                open_evals.push(
-                    bar_u
-                        .evaluate_at_point(alpha_prime)
-                        .map_err(ProtocolError::LiftedEvalProjection)?,
-                );
+                q_open_evals.push(project_int_poly_at(bar_u, alpha_prime, &self.field_cfg)?);
             }
         }
 
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
-            &open_evals,
+            &q_open_evals,
             self.base.uair_signature.shifts(),
             &self.field_cfg,
         )?;
+
+        // --- Per-prime branches (i >= 1) ------------------------------
+        //
+        // Structural plumbing for the per-branch lift-to-$\mathbb{Z}$ check:
+        // lift `int_eval`s into branch i's field, evaluate at
+        // `projecting_elements[i]`, append `num_wit_bin` zeros to mirror
+        // the zero-padded MP-eval `up_evals` on the fq branches (cf.
+        // Phase G T1), then call `verify_subclaim` against branch i's MP
+        // subclaim.
+        //
+        // **TODO(fq-soundness)**: this check is **disabled** today because
+        // `compute_lifted_evals_int` produces integers in $[0, q_0)$
+        // (via `F_{q_0}`-arithmetic + `lift_to_integer`). For branches
+        // $i \ge 1$, $\phi_{q_i}$ of that integer is unrelated to the
+        // prover's actual $\mathbb{F}_{q_i}$-projected trace at $r_0$, so
+        // even honest provers would fail this assertion. The check is
+        // restored once `compute_lifted_evals_int` is widened to produce
+        // representatives in $[0, \prod q_i \cdot q'')$ — see the TODO on
+        // that function. Until then the per-branch check passes vacuously
+        // and only the Q-branch ($i = 0$) check is soundness-binding.
+        let _ = n_fq;
+        let _ = &project_int_poly_at;
+        for prime_idx in 0..n_fq {
+            let _ = prime_idx;
+            #[cfg(any())] // gated off until lift is widened to CRT range
+            {
+                let branch_idx = add!(prime_idx, 1);
+                let cfg_i = &self.all_field_cfgs[branch_idx];
+                let zero_i = F::zero_with_cfg(cfg_i);
+                let mut open_evals_i: Vec<F> = all_lifted_evals
+                    .iter()
+                    .map(|bar_u| {
+                        project_int_poly_at(bar_u, &self.projecting_elements[branch_idx], cfg_i)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if self.alpha_prime_f.is_some() {
+                    open_evals_i.extend((0..num_wit_bin).map(|_| zero_i.clone()));
+                }
+                MultipointEval::verify_subclaim(
+                    &self.mp_subclaims_fq[prime_idx],
+                    &open_evals_i,
+                    self.base.uair_signature.shifts(),
+                    cfg_i,
+                )?;
+            }
+        }
 
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for bar_u in &all_lifted_evals {
             self.base
                 .pcs_transcript
                 .fs_transcript
-                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+                .absorb_random_int_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
         Ok(VerifierLiftedEvalsChecked {
@@ -1260,11 +1373,15 @@ where
                     $idx,
                     $pt,
                     [$evals_range],
-                    |bar_u: &DynamicPolynomialF<F>, alphas: &[_]| {
+                    |bar_u: &DynamicPolynomialFS<F::Integer>, alphas: &[_]| {
                         let mut eval_j = zero.clone();
                         for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
+                            // Lift the integer coefficient into the Q[X]
+                            // branch's field for the PCS evaluation. After
+                            // Phase I, this will use the q'' branch's cfg.
+                            let coeff_f = F::from_with_cfg(coeff.clone(), field_cfg);
                             let mut term = F::from_with_cfg(alpha, field_cfg);
-                            term *= coeff;
+                            term *= &coeff_f;
                             eval_j += &term;
                         }
                         eval_j
@@ -1321,13 +1438,16 @@ where
             0,
             &r_0_ext,
             [num_pub_bin..num_total_bin],
-            |bar_u: &DynamicPolynomialF<F>, alphas: &[_]| {
-                Zt::BinaryFold::fold_eval_claim(
-                    &bar_u.coeffs,
-                    alphas,
-                    &folding_challenges,
-                    field_cfg,
-                )
+            |bar_u: &DynamicPolynomialFS<F::Integer>, alphas: &[_]| {
+                // Lift integer coefficients into the Q[X] branch's field
+                // for the binary-fold evaluation. After Phase I, this
+                // lift will use the q'' branch's cfg.
+                let coeffs_f: Vec<F> = bar_u
+                    .coeffs
+                    .iter()
+                    .map(|c| F::from_with_cfg(c.clone(), field_cfg))
+                    .collect();
+                Zt::BinaryFold::fold_eval_claim(&coeffs_f, alphas, &folding_challenges, field_cfg)
             }
         );
         verify_pcs_batch!(
@@ -1445,6 +1565,7 @@ pub mod test_helpers {
     where
         Zt: ZincTypes<D, FD>,
         F: PrimeField,
+        F::Integer: FixedSemiring,
         U: Uair,
     {
         pub fn projecting_element_f(&self) -> &F {
