@@ -1341,7 +1341,18 @@ where
     F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 7: PCS verification at `r_0` (witness columns only).
+    /// Step 7: PCS verification at $\mathbf r^* := \mathbf r_0 \bmod q''$,
+    /// where $q''$ is a freshly sampled PCS-only prime (decoupled from the
+    /// constraint primes $q_0$ and $q_1, \dots, q_n$).
+    ///
+    /// Mirrors [`step8_pcs_open`](crate::ZincPlusPiop::step8_pcs_open): the
+    /// verifier samples $q''$ first from the transcript, builds
+    /// $\mathbf r^*$ by reducing the (shared) integer endpoint $r_0$ mod
+    /// $q''$, then runs `ZipPlus::verify_f`/`verify_with_alphas` under
+    /// $q''$. Per-poly evaluation claims are obtained by lifting each
+    /// `int_eval` coefficient into $\mathbb F_{q''}$ via
+    /// `F::from_with_cfg(coeff_int, &q_pp_cfg)`, which performs
+    /// $\phi_{q''}(\bar u_j)$ implicitly.
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F>> {
@@ -1358,10 +1369,20 @@ where
         let num_total_arb = total.num_arbitrary_poly_cols();
 
         let pcs_transcript = &mut self.base.pcs_transcript;
-        let field_cfg = &self.field_cfg;
         let all_lifted_evals = &self.all_lifted_evals;
 
-        let zero = F::zero_with_cfg(field_cfg);
+        // q''
+        let q_pp_cfg = pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+        // r* = r0 mod q''
+        let r_star: Vec<F> = r_0
+            .iter()
+            .map(|x| F::from_with_cfg(x.lift_to_integer(), &q_pp_cfg))
+            .collect();
+
+        let zero = F::zero_with_cfg(&q_pp_cfg);
 
         macro_rules! verify_pcs_batch {
             // Non-folded variant
@@ -1376,11 +1397,11 @@ where
                     |bar_u: &DynamicPolynomialFS<F::Integer>, alphas: &[_]| {
                         let mut eval_j = zero.clone();
                         for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
-                            // Lift the integer coefficient into the Q[X]
-                            // branch's field for the PCS evaluation. After
-                            // Phase I, this will use the q'' branch's cfg.
-                            let coeff_f = F::from_with_cfg(coeff.clone(), field_cfg);
-                            let mut term = F::from_with_cfg(alpha, field_cfg);
+                            // Project the integer coefficient into $\mathbb F_{q''}$
+                            // and combine with the per-poly $\alpha$ batching
+                            // coefficient (also lifted into $\mathbb F_{q''}$).
+                            let coeff_f = F::from_with_cfg(coeff.clone(), &q_pp_cfg);
+                            let mut term = F::from_with_cfg(alpha, &q_pp_cfg);
                             term *= &coeff_f;
                             eval_j += &term;
                         }
@@ -1409,7 +1430,7 @@ where
                         pcs_transcript,
                         $vp,
                         comm,
-                        field_cfg,
+                        &q_pp_cfg,
                         $pt,
                         &eval_f,
                         &per_poly_alphas,
@@ -1419,35 +1440,35 @@ where
             }};
         }
 
-        // Folded witness columns are proved using the extended evaluation point
-        // `r_0_ext = r_0 || folding_challenges`.
+        // Folded witness columns are proved using the extended evaluation
+        // point `r_star_ext = r_star || folding_challenges`.
+        // Folding challenges are sampled fresh under q''.
         let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
         let folding_challenges = (0..num_folding_challenges)
             .map(|_| {
                 let g_chal: Zt::Chal = pcs_transcript.fs_transcript.get_challenge();
-                F::from_with_cfg(&g_chal, &self.field_cfg)
+                F::from_with_cfg(&g_chal, &q_pp_cfg)
             })
             .collect_vec();
-        let mut r_0_ext = r_0.clone();
-        r_0_ext.extend_from_slice(&folding_challenges);
+        let mut r_star_ext = r_star.clone();
+        r_star_ext.extend_from_slice(&folding_challenges);
 
         verify_pcs_batch!(
             Zt::BinaryZt,
             Zt::BinaryLc,
             self.base.vp_bin,
             0,
-            &r_0_ext,
+            &r_star_ext,
             [num_pub_bin..num_total_bin],
             |bar_u: &DynamicPolynomialFS<F::Integer>, alphas: &[_]| {
-                // Lift integer coefficients into the Q[X] branch's field
-                // for the binary-fold evaluation. After Phase I, this
-                // lift will use the q'' branch's cfg.
+                // Lift integer coefficients into $\mathbb F_{q''}$ for the
+                // binary-fold evaluation.
                 let coeffs_f: Vec<F> = bar_u
                     .coeffs
                     .iter()
-                    .map(|c| F::from_with_cfg(c.clone(), field_cfg))
+                    .map(|c| F::from_with_cfg(c.clone(), &q_pp_cfg))
                     .collect();
-                Zt::BinaryFold::fold_eval_claim(&coeffs_f, alphas, &folding_challenges, field_cfg)
+                Zt::BinaryFold::fold_eval_claim(&coeffs_f, alphas, &folding_challenges, &q_pp_cfg)
             }
         );
         verify_pcs_batch!(
@@ -1455,7 +1476,7 @@ where
             Zt::ArbitraryLc,
             self.base.vp_arb,
             1,
-            &r_0,
+            &r_star,
             [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
         );
         verify_pcs_batch!(
@@ -1463,7 +1484,7 @@ where
             Zt::IntLc,
             self.base.vp_int,
             2,
-            &r_0,
+            &r_star,
             [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
         );
 

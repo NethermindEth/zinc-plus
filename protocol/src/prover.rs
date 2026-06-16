@@ -389,6 +389,10 @@ pub struct ProverLifted<
     F::Integer: FixedSemiring,
 {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
+    /// Q-branch field cfg ($q_0$). Retained for diagnostic and future use
+    /// (e.g. consistency checks against per-branch configs); the PCS open
+    /// in `step8_pcs_open` runs under a freshly sampled $q''$ instead.
+    #[allow(dead_code)] // PCS open uses freshly-sampled $q''$, not $q_0$.
     field_cfg: F::Config,
     /// Per-branch field configs.
     #[allow(dead_code)] // Used by later `fq-unify` phases.
@@ -1397,20 +1401,48 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
 impl_with_type_bounds!(ProverLifted
 {
-    /// Step 8: PCS open at `r_0` (witness columns only).
+    /// Step 8: PCS open at $\mathbf r^* := \mathbf r_0 \bmod q''$, where $q''$
+    /// is a freshly sampled PCS-only prime.
+    ///
+    /// Per the `fq-unify` design, the PCS opening prime $q''$ is decoupled
+    /// from the constraint primes ($q_0$ and the declared $q_1, \dots, q_n$).
+    /// This anchors the witness-polynomial commitments to a single fresh
+    /// prime, so PCS soundness is governed entirely by $q''$ and is
+    /// independent of the constraint moduli.
+    ///
+    /// **Transcript ordering**: $q''$ is sampled first (before the binary
+    /// folding challenges) so that the folding randomness is bound to the
+    /// PCS prime, not the other way around. Mirrored in
+    /// [`step7_pcs_verify`](crate::ZincPlusPiop::step7_pcs_verify).
     pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let witness_trace = &self.base.folded_witness_trace;
 
-        // Folded witness columns are proved using the extended evaluation point
-        // `r_0_ext = r_0 || folding_challenges`.
-        let mut r_0_ext = self.r_0.clone();
+        // Sample q'', the PCS-only prime. Decoupled from q0 and the
+        // declared q_i; the only role of q'' is to anchor the PCS open.
+        let q_pp_cfg = self
+            .base
+            .pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+        // Build (r* = r0 mod q'') component-wise.
+        let r_star: Vec<F> = self
+            .r_0
+            .iter()
+            .map(|x| F::from_with_cfg(x.lift_to_integer(), &q_pp_cfg))
+            .collect();
+
+        // Folded witness columns are proved using the extended evaluation
+        // point `r_star_ext = r_star || folding_challenges`. Folding
+        // challenges are sampled fresh under $q''$.
+        let mut r_star_ext = r_star.clone();
         let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
         (0..num_folding_challenges).for_each(|_| {
             let g_chal: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
-            let gamma = F::from_with_cfg(&g_chal, &self.field_cfg);
-            r_0_ext.push(gamma);
+            let gamma = F::from_with_cfg(&g_chal, &q_pp_cfg);
+            r_star_ext.push(gamma);
         });
 
         if let Some(hint_bin) = &self.base.hint_bin {
@@ -1418,9 +1450,9 @@ impl_with_type_bounds!(ProverLifted
                 &mut self.base.pcs_transcript,
                 self.base.pp_bin,
                 &witness_trace.binary_poly,
-                &r_0_ext,
+                &r_star_ext,
                 hint_bin,
-                &self.field_cfg,
+                &q_pp_cfg,
             )?;
         }
         if let Some(hint_arb) = &self.base.hint_arb {
@@ -1428,9 +1460,9 @@ impl_with_type_bounds!(ProverLifted
                 &mut self.base.pcs_transcript,
                 self.base.pp_arb,
                 &witness_trace.arbitrary_poly,
-                &self.r_0,
+                &r_star,
                 hint_arb,
-                &self.field_cfg,
+                &q_pp_cfg,
             )?;
         }
         if let Some(hint_int) = &self.base.hint_int {
@@ -1438,9 +1470,9 @@ impl_with_type_bounds!(ProverLifted
                 &mut self.base.pcs_transcript,
                 self.base.pp_int,
                 &witness_trace.int,
-                &self.r_0,
+                &r_star,
                 hint_int,
-                &self.field_cfg,
+                &q_pp_cfg,
             )?;
         }
 
