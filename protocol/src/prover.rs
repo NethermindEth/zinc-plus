@@ -11,7 +11,7 @@ use zinc_piop::{
         evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
-    sumcheck::multi_degree::MultiDegreeSumcheck,
+    sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckGroup},
 };
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
@@ -281,8 +281,9 @@ pub struct ProverSumchecked<
     /// Index of $q^*$ in `all_field_cfgs` (carried for later phases).
     #[allow(dead_code)] // Used by later `fq-unify` phases.
     q_star_idx: usize,
-    /// Per-branch CPR batching challenges $\alpha$: `[0]` was consumed by
-    /// the Q[X] CPR; `[i >= 1]` will drive the per-prime CPRs in Phase F+.
+    /// Per-branch CPR batching challenges $\alpha$ (length `n + 1`).
+    /// `[0]` was consumed by the Q[X] CPR in step 5; `[i + 1]` was
+    /// consumed by the per-prime CPRs in the same step.
     #[allow(dead_code)] // Used by later `fq-unify` phases.
     folding_challenges: Vec<F>,
     projected_trace: ProjectedTrace<F>,
@@ -300,6 +301,18 @@ pub struct ProverSumchecked<
     cpr_proof: CombinedPolyResolverProof<F>,
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    /// Per-prime CPR proofs (one per declared prime in
+    /// `UairSignature::primes()`), produced by F.2.b's per-prime CPR
+    /// finalize. Empty for UAIRs with no declared fq primes.
+    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
+    /// Per-prime CPR sumcheck endpoints `r^*_i`, lifted into each branch's
+    /// field. Empty for UAIRs with no declared fq primes. Carried forward
+    /// for Phase G (per-prime multipoint-eval).
+    #[allow(dead_code)] // Consumed by Phase G.
+    cpr_eval_points_fq: Vec<Vec<F>>,
+    /// Per-prime multi-degree sumcheck proofs (one per declared prime).
+    /// Empty for UAIRs with no declared fq primes.
+    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     /// Fresh challenge sampled after `bit_slice_evals` were absorbed by
@@ -330,6 +343,10 @@ pub struct ProverMultipointEvaled<
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    /// Per-prime CPR proofs threaded forward from `ProverSumchecked`.
+    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
+    /// Per-prime multi-degree sumcheck proofs threaded forward.
+    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
 
@@ -354,6 +371,8 @@ pub struct ProverLifted<
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
+    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -381,6 +400,8 @@ pub struct ProverPcsOpened<
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
+    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
@@ -883,28 +904,26 @@ impl_with_type_bounds!(ProverEvalProjected
     pub fn step5_sumcheck(
         mut self,
     ) -> Result<ProverSumchecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // CPR folds only the Q[X] family in this branch; F_q[X] constraints
-        // get folded in the per-prime CPR sumcheck added later in the
-        // pipeline.
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
         // `fq-unify`: sample one shared CPR batching challenge $\alpha$ in
         // $[0, q^*)$ and lift it into each branch's field. The Q[X] branch
-        // consumes `folding_challenges[0]`; per-prime branches (Phase F+)
-        // will read `folding_challenges[i + 1]`.
-        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
+        // consumes `folding_challenges[0]`; per-prime branches consume
+        // `folding_challenges[i + 1]`.
+        let q_star_cfg_owned = self.all_field_cfgs[self.q_star_idx].clone();
         let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
             &mut self.base.pcs_transcript.fs_transcript,
-            q_star_cfg,
+            &q_star_cfg_owned,
             &self.all_field_cfgs,
         );
 
+        // ------------- Q[X] branch groups -----------------
         // TODO(#185): once protocol-level prover materializes bit-op virtual
         // MLEs, pass them here. For now no UAIR on `main` declares
         // `bit_op_specs`, so passing an empty vec keeps behaviour identical.
         let bit_op_down_mles = Vec::new();
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+        let (q_cpr_group, q_cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             self.projected_trace_f.clone(),
             bit_op_down_mles,
             &self.ic_eval_points[0],
@@ -917,9 +936,11 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.field_cfg,
         )?;
 
-        let mut groups = vec![cpr_group];
+        let mut q_groups = vec![q_cpr_group];
 
         // Booleanity: prepare optional group over witness binary-poly cols.
+        // Lives in the Q[X] branch only (binary witness columns are the
+        // $\mathbb Z$ side).
         let sig = &self.base.uair_signature;
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_total_bin = sig.total_cols().num_binary_poly_cols();
@@ -933,7 +954,7 @@ impl_with_type_bounds!(ProverEvalProjected
                 &self.field_cfg,
             )
             .map_err(ProtocolError::Booleanity)?;
-            groups.push(bool_group);
+            q_groups.push(bool_group);
             Some(anc)
         } else {
             None
@@ -943,25 +964,65 @@ impl_with_type_bounds!(ProverEvalProjected
         //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
         //   - push triple into groups, collect pending proofs + metas
 
-        // Multi-degree sumcheck over CPR (+ booleanity + lookup groups).
-        // Only the Q[X] branch participates in this round; per-prime
-        // branches will be added by the `fq-unify` Phase F.2 wiring.
-        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
-        let (combined_sumcheck, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
-            &mut self.base.pcs_transcript.fs_transcript,
-            vec![(groups, &self.field_cfg)],
-            self.base.num_vars,
-            q_star_cfg,
-        )
-        .pop()
-        .expect("exactly one branch was submitted");
+        // ------------- Per-prime $F_{q_i}[X]$ branch groups --------------
+        // One CPR group per declared prime. No booleanity, no lookups in
+        // the fq branches (by design — binary witnesses live in Q[X]).
+        let n_fq = self.projected_trace_f_fq.len();
+        let mut fq_cpr_ancillaries: Vec<_> = Vec::with_capacity(n_fq);
+        let mut fq_branch_groups: Vec<Vec<MultiDegreeSumcheckGroup<F>>> =
+            Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let trace_f_i = self.projected_trace_f_fq[prime_idx].clone();
+            let scalars_f_i = &self.projected_scalars_f_fq[prime_idx];
+            let eval_point_i = &self.ic_eval_points[branch_idx];
+            let folding_i = &folding_challenges[branch_idx];
+            let (cpr_group_i, cpr_ancillary_i) =
+                CombinedPolyResolver::prepare_sumcheck_group::<U>(
+                    trace_f_i,
+                    Vec::new(),
+                    eval_point_i,
+                    scalars_f_i,
+                    branch_idx,
+                    num_constraints.for_prime(prime_idx),
+                    self.base.num_vars,
+                    max_degree,
+                    folding_i,
+                    cfg_i,
+                )?;
+            fq_branch_groups.push(vec![cpr_group_i]);
+            fq_cpr_ancillaries.push(cpr_ancillary_i);
+        }
 
+        // ------------- Lockstep multi-degree sumcheck --------------------
+        // Branch 0 = Q[X] with CPR + optional booleanity; branches i >= 1
+        // = per-prime CPR. Shared per-round challenges in $[0, q^*)$.
+        let mut md_sc_branches: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
+            Vec::with_capacity(add!(n_fq, 1));
+        md_sc_branches.push((q_groups, &self.field_cfg));
+        for (prime_idx, groups) in fq_branch_groups.into_iter().enumerate() {
+            let branch_idx = add!(prime_idx, 1);
+            md_sc_branches.push((groups, &self.all_field_cfgs[branch_idx]));
+        }
+
+        let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
+            &mut self.base.pcs_transcript.fs_transcript,
+            md_sc_branches,
+            self.base.num_vars,
+            &q_star_cfg_owned,
+        )
+        .into_iter();
+
+        // ------------- Q[X] branch finalize ------------------------------
+        let (combined_sumcheck, md_states) =
+            sumcheck_outputs.next().expect("Q[X] branch always present");
         let mut md_iter = md_states.into_iter();
 
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             md_iter.next().expect("CPR group always present"),
-            cpr_ancillary,
+            q_cpr_ancillary,
             &self.field_cfg,
         )?;
 
@@ -983,12 +1044,33 @@ impl_with_type_bounds!(ProverEvalProjected
         // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
         let lookup_proof = None;
 
+        // ------------- Per-prime branch finalize -------------------------
+        // For each fq branch: the multi-degree sumcheck handed back a
+        // `Vec<SumcheckProverState>` with exactly one entry (just the CPR
+        // group). Finalize CPR per branch under that branch's cfg.
+        let mut cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>> = Vec::with_capacity(n_fq);
+        let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        let mut combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>> =
+            Vec::with_capacity(n_fq);
+        for (prime_idx, cpr_ancillary_i) in fq_cpr_ancillaries.into_iter().enumerate() {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let (sumcheck_i, states_i) =
+                sumcheck_outputs.next().expect("fq branch sumcheck output");
+            let mut states_iter_i = states_i.into_iter();
+            let (cpr_proof_i, cpr_state_i) = CombinedPolyResolver::finalize_prover::<U>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                states_iter_i.next().expect("CPR group always present"),
+                cpr_ancillary_i,
+                cfg_i,
+            )?;
+            combined_sumchecks_fq.push(sumcheck_i);
+            cpr_proofs_fq.push(cpr_proof_i);
+            cpr_eval_points_fq.push(cpr_state_i.evaluation_point);
+        }
+
         // Booleanity -> multipoint-eval `alpha_prime` bridge: squeeze
         // \alpha' after `bit_slice_evals` were absorbed by `finalize_prover`.
-        // The challenge is consumed in `step6_multipoint_eval` to build the
-        // extra appended trace MLEs / up_evals (one per witness binary-poly
-        // column). `cpr_proof.up_evals` / `cpr_proof.down_evals` and
-        // `projected_trace_f` are carried through unmodified.
         let alpha_prime_f: Option<F> = booleanity_proof.as_ref().map(|_| {
             self.base
                 .pcs_transcript
@@ -1009,6 +1091,9 @@ impl_with_type_bounds!(ProverEvalProjected
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
+            cpr_proofs_fq,
+            cpr_eval_points_fq,
+            combined_sumchecks_fq,
             lookup_proof,
             booleanity_proof,
             alpha_prime_f,
@@ -1093,6 +1178,8 @@ impl_with_type_bounds!(ProverSumchecked
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
+            cpr_proofs_fq: self.cpr_proofs_fq,
+            combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             mp_proof,
@@ -1134,6 +1221,8 @@ impl_with_type_bounds!(ProverMultipointEvaled
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
+            cpr_proofs_fq: self.cpr_proofs_fq,
+            combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
@@ -1198,6 +1287,8 @@ impl_with_type_bounds!(ProverLifted
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
             combined_sumcheck: self.combined_sumcheck,
+            cpr_proofs_fq: self.cpr_proofs_fq,
+            combined_sumchecks_fq: self.combined_sumchecks_fq,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
@@ -1250,6 +1341,8 @@ impl_with_type_bounds!(ProverPcsOpened
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             ideal_checks_fq: self.ic_proof_fq,
+            cpr_proofs_fq: self.cpr_proofs_fq,
+            combined_sumchecks_fq: self.combined_sumchecks_fq,
         })
     }
 });

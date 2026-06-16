@@ -84,6 +84,8 @@ pub struct VerifierTranscriptReconstructed<
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
+    proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
+    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -111,6 +113,8 @@ pub struct VerifierPrimeProjected<
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
+    proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
+    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -150,6 +154,10 @@ pub struct VerifierIdealChecked<
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
+    /// Per-prime CPR proofs (one per declared prime).
+    proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
+    /// Per-prime multi-degree sumcheck proofs (one per declared prime).
+    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -199,6 +207,11 @@ pub struct VerifierEvalProjected<
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
+    /// Per-prime CPR proofs (one per declared prime), consumed in step 4.
+    proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
+    /// Per-prime multi-degree sumcheck proofs (one per declared prime),
+    /// consumed in step 4 by the lockstep verifier driver.
+    proof_combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     _phantom: PhantomData<(U, IdealOverF)>,
 }
 
@@ -386,6 +399,8 @@ where
             proof_lookup_proof: proof.lookup_proof,
             proof_booleanity: proof.booleanity_proof,
             proof_ideal_checks_fq: proof.ideal_checks_fq,
+            proof_cpr_fq: proof.cpr_proofs_fq,
+            proof_combined_sumchecks_fq: proof.combined_sumchecks_fq,
             _phantom: PhantomData,
         })
     }
@@ -423,6 +438,8 @@ where
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
             proof_ideal_checks_fq: self.proof_ideal_checks_fq,
+            proof_cpr_fq: self.proof_cpr_fq,
+            proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             _phantom: PhantomData,
         })
     }
@@ -563,6 +580,8 @@ where
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
+            proof_cpr_fq: self.proof_cpr_fq,
+            proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             _phantom: PhantomData,
         })
     }
@@ -642,6 +661,8 @@ where
             proof_witness_lifted_evals: self.proof_witness_lifted_evals,
             proof_lookup_proof: self.proof_lookup_proof,
             proof_booleanity: self.proof_booleanity,
+            proof_cpr_fq: self.proof_cpr_fq,
+            proof_combined_sumchecks_fq: self.proof_combined_sumchecks_fq,
             _phantom: PhantomData,
         })
     }
@@ -673,14 +694,28 @@ where
     pub fn step4_sumcheck_verify(
         mut self,
     ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        // CPR folds only the Q[X] family in this branch; F_q[X] constraints
-        // get folded in the per-prime CPR sumcheck added later in the
-        // pipeline.
         let num_constraints = count_constraints::<U>();
 
+        // Per-prime sub-proof length sanity check
+        let n_fq = self.all_field_cfgs.len().saturating_sub(1);
+        if self.proof_cpr_fq.len() != n_fq
+            || self.proof_combined_sumchecks_fq.len() != n_fq
+        {
+            return Err(ProtocolError::FqIdealCheck {
+                prime_idx: self.proof_cpr_fq.len(),
+                q: "<fq sub-proof length mismatch>".to_owned(),
+                source: IdealCheckError::IdealCollectorError(
+                    ideal_check::BatchedIdealCheckError::LengthMismatch {
+                        num_ideals: n_fq,
+                        provided_values: self.proof_cpr_fq.len(),
+                    },
+                ),
+            });
+        }
+
         // `fq-unify`: mirror the prover by sampling one shared CPR
-        // batching challenge $\alpha$ in $[0, q^*)$ before invoking
-        // `prepare_verifier`. Q[X] consumes `folding_challenges[0]`.
+        // batching challenge $\alpha$ in $[0, q^*)$. `[0]` feeds the Q[X]
+        // CPR; `[i + 1]` feeds the per-prime CPRs.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -688,9 +723,8 @@ where
             &self.all_field_cfgs,
         );
 
-        // CPR pre-sumcheck: $\alpha$ is now supplied; this call no longer
-        // touches the transcript.
-        let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
+        // -------- Q[X] branch: CPR pre-sumcheck ------------------------
+        let q_cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaims[0],
@@ -705,15 +739,13 @@ where
         // Booleanity pre-sumcheck: squeezes the zerocheck point `r`
         // (num_vars field elements) and the batching challenge `alpha`,
         // in that order.
-        // Presence is determined statically from the UAIR signature, so prover and
-        // verifier always agree on it.
         let sig = self.base.uair_signature.clone();
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
         let num_total_bin = sig.total_cols().num_binary_poly_cols();
         let bin_wit_present = num_total_bin > num_pub_bin;
 
         let bool_verifier_ancillary = if bin_wit_present {
-            // booleanity is group index 1 (right after CPR)
+            // booleanity is group index 1 (right after CPR) on the Q-branch.
             let bool_claimed_sum = self
                 .proof_combined_sumcheck
                 .claimed_sums()
@@ -734,25 +766,58 @@ where
             None
         };
 
-        // Single branch (Q[X]) for now; per-prime branches will join in
-        // `fq-unify` Phase F.2.
-        let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
-        let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+        // -------- Per-prime branches: CPR pre-sumcheck ------------------
+        let mut fq_cpr_ancillaries: Vec<_> = Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let anc_i = CombinedPolyResolver::prepare_verifier::<U>(
+                &self.proof_cpr_fq[prime_idx],
+                self.proof_combined_sumchecks_fq[prime_idx].claimed_sums()[0].clone(),
+                &self.ic_subclaims[branch_idx],
+                branch_idx,
+                num_constraints.for_prime(prime_idx),
+                self.base.num_vars,
+                &self.projecting_elements[branch_idx],
+                &folding_challenges[branch_idx],
+                cfg_i,
+            )?;
+            fq_cpr_ancillaries.push(anc_i);
+        }
+
+        // -------- Lockstep multi-degree sumcheck verify ----------------
+        // Branch 0 = Q[X] (CPR + optional booleanity); branches i >= 1
+        // = per-prime CPR.
+        let mut branch_proofs: Vec<(&MultiDegreeSumcheckProof<F>, &F::Config)> =
+            Vec::with_capacity(add!(n_fq, 1));
+        branch_proofs.push((&self.proof_combined_sumcheck, &self.field_cfg));
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            branch_proofs.push((
+                &self.proof_combined_sumchecks_fq[prime_idx],
+                &self.all_field_cfgs[branch_idx],
+            ));
+        }
+        let mut subclaims_iter = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.base.num_vars,
-            &[(&self.proof_combined_sumcheck, &self.field_cfg)],
+            &branch_proofs,
             q_star_cfg,
         )
         .map_err(CombinedPolyResolverError::SumcheckError)?
-        .pop()
-        .expect("exactly one branch was submitted");
+        .into_iter();
+
+        // -------- Q[X] branch finalize ---------------------------------
+        let md_subclaims = subclaims_iter
+            .next()
+            .expect("Q[X] branch subclaim always present");
 
         let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_cpr,
             md_subclaims.point().to_vec(),
             md_subclaims.expected_evaluations()[0].clone(),
-            cpr_verifier_ancillary,
+            q_cpr_verifier_ancillary,
             &self.projected_scalars_f,
             /* branch_idx = */ 0,
             &self.field_cfg,
@@ -788,6 +853,32 @@ where
         } else {
             None
         };
+
+        // -------- Per-prime branch finalize ---------------------------
+        // Mirror the prover's loop: pop next subclaim per branch, call
+        // `finalize_verifier` under that branch's cfg + projected scalars.
+        for (prime_idx, (cpr_proof_i, cpr_ancillary_i)) in self
+            .proof_cpr_fq
+            .into_iter()
+            .zip(fq_cpr_ancillaries)
+            .enumerate()
+        {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let md_subclaims_i = subclaims_iter
+                .next()
+                .expect("per-prime sumcheck subclaim always present");
+            CombinedPolyResolver::finalize_verifier::<U>(
+                &mut self.base.pcs_transcript.fs_transcript,
+                cpr_proof_i,
+                md_subclaims_i.point().to_vec(),
+                md_subclaims_i.expected_evaluations()[0].clone(),
+                cpr_ancillary_i,
+                &self.projected_scalars_f_fq[prime_idx],
+                branch_idx,
+                cfg_i,
+            )?;
+        }
 
         // Squeeze alpha_prime in the same transcript order as the prover.
         let alpha_prime_f: Option<F> = bool_bit_slice_evals.as_ref().map(|_| {
