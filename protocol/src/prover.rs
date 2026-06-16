@@ -119,7 +119,7 @@ pub struct ProverProjectedCombined<
     /// TODO(fq-perf): the row-major projection is duplicated -- once for the
     /// Q[X] branch and once per prime here. The `fq-unify` optimization
     /// would emit all projections in one trace sweep.
-    fq_staging: Vec<FqProjStagingRowMajor<U, F>>,
+    fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
 /// After step 2 via [`step2_mle_first`](ProverCommitted::step2_mle_first)
@@ -145,23 +145,21 @@ pub struct ProverProjectedMleFirst<
     q_star_idx: usize,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ projections, column-major layout
     /// counterpart of [`ProverProjectedCombined::fq_staging`].
-    fq_staging: Vec<FqProjStagingColumnMajor<U, F>>,
+    fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
-/// Per-prime $\phi_{q_i}$ projection of the integer trace and UAIR scalars
-/// in row-major layout, pre-built at step 2 for step 3's per-prime ideal
-/// check.
-/// Field config is stored separately and is not needed here.
+/// Per-prime $\phi_{q_i}$ projection of the integer trace and UAIR scalars,
+/// pre-built at step 2 for step 3's per-prime ideal check (and threaded
+/// forward through step 4 into the per-prime CPR / sumcheck / MP-eval
+/// chain under `fq-unify`). The trace layout (row- vs column-major)
+/// matches the variant chosen at step 2 and is carried inside
+/// [`ProjectedTrace`].
+///
+/// Field config is stored separately on the parent state (see
+/// `all_field_cfgs`) and is not needed here.
 #[derive(Clone, Debug)]
-pub struct FqProjStagingRowMajor<U: Uair, F: PrimeField> {
-    projected_trace: RowMajorTrace<F>,
-    projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-}
-
-/// Column-major counterpart of [`FqProjStagingRowMajor`].
-#[derive(Clone, Debug)]
-pub struct FqProjStagingColumnMajor<U: Uair, F: PrimeField> {
-    projected_trace: ColumnMajorTrace<F>,
+pub struct FqProjStaging<U: Uair, F: PrimeField> {
+    projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
 }
 
@@ -185,10 +183,20 @@ pub struct ProverIdealChecked<
     q_star_idx: usize,
     projected_trace: ProjectedTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+    /// Per-prime $\phi_{q_i}$ projections from step 2, threaded forward so
+    /// step 4 can build per-prime $\psi$-projected trace/scalars and step 5
+    /// can drive the per-prime CPR sumcheck branches. Empty for UAIRs
+    /// with no declared fq primes.
+    #[allow(dead_code)] // Consumed by Phase F.2.b in step4_eval_projection.
+    fq_staging: Vec<FqProjStaging<U, F>>,
 
     // New
     ic_proof: IdealCheckProof<F>,
-    ic_eval_point: Vec<F>,
+    /// Per-branch IC evaluation points (full `Vec<Vec<F>>` of size
+    /// `n + 1`, sampled once at step 3 via `sample_shared_field_challenges`
+    /// and lifted into each branch's field). `[0]` is consumed by the
+    /// Q[X] CPR in step 5; `[i + 1]` will drive the per-prime CPR.
+    ic_eval_points: Vec<Vec<F>>,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in `base.uair_signature.primes()`, in order.
     ///
@@ -216,23 +224,42 @@ pub struct ProverEvalProjected<
     field_cfg: F::Config,
     /// Per-branch field configs, kept for the per-prime CPR/sumcheck/MP
     /// chain in later phases. `[0]` = $Q[X]$ branch.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    #[allow(dead_code)] // Consumed by Phase F.2.b in step5_sumcheck.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    #[allow(dead_code)] // Consumed by Phase F.2.b in step5_sumcheck.
     q_star_idx: usize,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
-    /// and projected onto each of `all_field_cfgs`.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// and projected onto each of `all_field_cfgs`. Length `n + 1`.
+    /// `[0]` was consumed by step 4 to build `projected_trace_f`;
+    /// `[i + 1]` was consumed to build `projected_trace_f_fq[i]`. Carried
+    /// forward for later phases (H/I) that need the integer endpoint.
+    #[allow(dead_code)] // Consumed by Phase H / I.
     projecting_elements: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     ic_proof: IdealCheckProof<F>,
-    ic_eval_point: Vec<F>,
+    /// Per-branch IC evaluation points (full $\text{n+1} \times \mu$
+    /// matrix). `[0]` feeds the Q[X] CPR; `[i + 1]` feeds the per-prime
+    /// CPRs (Phase F.2.b).
+    ic_eval_points: Vec<Vec<F>>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
 
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: ProjectedScalars<U::Scalar, F>,
+    /// Per-prime $\psi$-projected trace MLEs (one entry per declared prime
+    /// in `UairSignature::primes()`). Built in step 4 from each
+    /// `fq_staging[i].projected_trace` using `projecting_elements[i + 1]`.
+    /// Consumed by per-prime CPR `prepare_sumcheck_group` in step 5 (Phase
+    /// F.2.b). Empty for UAIRs with no declared fq primes.
+    #[allow(dead_code)] // Consumed by Phase F.2.b.
+    projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
+    /// Per-prime $\psi$-projected scalars (one entry per declared prime).
+    /// Built in step 4 from each `fq_staging[i].projected_scalars_fx`
+    /// using `projecting_elements[i + 1]`. Consumed in step 5 by the
+    /// per-prime CPR. Empty for UAIRs with no declared fq primes.
+    #[allow(dead_code)] // Consumed by Phase F.2.b.
+    projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 }
 
 /// After step 5 (sumcheck).
@@ -518,13 +545,13 @@ impl_with_type_bounds!(ProverCommitted
         // `phi_{q_i}` deterministically. `project_scalar` is reused with the
         // per-prime cfg.
         let fq_cfgs = &all_field_cfgs[1..];
-        let mut fq_staging: Vec<FqProjStagingRowMajor<U, F>> = Vec::with_capacity(fq_cfgs.len());
+        let mut fq_staging: Vec<FqProjStaging<U, F>> = Vec::with_capacity(fq_cfgs.len());
         for cfg_q_i in fq_cfgs.iter() {
             let projected_trace_i =
                 project_trace_coeffs_row_major(self.original_trace, cfg_q_i);
             let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_q_i));
-            fq_staging.push(FqProjStagingRowMajor {
-                projected_trace: projected_trace_i,
+            fq_staging.push(FqProjStaging {
+                projected_trace: ProjectedTrace::RowMajor(projected_trace_i),
                 projected_scalars_fx: projected_scalars_i,
             });
         }
@@ -555,13 +582,13 @@ impl_with_type_bounds!(ProverCommitted
         let projected_trace = project_trace_coeffs_column_major(self.original_trace, &field_cfg);
 
         let fq_cfgs = &all_field_cfgs[1..];
-        let mut fq_staging: Vec<FqProjStagingColumnMajor<U, F>> = Vec::with_capacity(fq_cfgs.len());
+        let mut fq_staging: Vec<FqProjStaging<U, F>> = Vec::with_capacity(fq_cfgs.len());
         for cfg_q_i in fq_cfgs.iter() {
             let projected_trace_i =
                 project_trace_coeffs_column_major(self.original_trace, cfg_q_i);
             let projected_scalars_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_q_i));
-            fq_staging.push(FqProjStagingColumnMajor {
-                projected_trace: projected_trace_i,
+            fq_staging.push(FqProjStaging {
+                projected_trace: ProjectedTrace::ColumnMajor(projected_trace_i),
                 projected_scalars_fx: projected_scalars_i,
             });
         }
@@ -620,7 +647,7 @@ impl_with_type_bounds!(ProverProjectedCombined
                 &self.all_field_cfgs,
             );
 
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
+        let (ic_proof, _) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
@@ -638,9 +665,12 @@ impl_with_type_bounds!(ProverProjectedCombined
             fq_cfgs.iter().zip(self.fq_staging.iter()).enumerate()
         {
             let branch_idx = add!(prime_idx, 1);
+            let ProjectedTrace::RowMajor(ref trace_row) = staging.projected_trace else {
+                unreachable!("should be row-major staging")
+            };
             let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
                 &mut self.base.pcs_transcript.fs_transcript,
-                &staging.projected_trace,
+                trace_row,
                 &staging.projected_scalars_fx,
                 branch_idx,
                 num_constraints.for_prime(prime_idx),
@@ -663,8 +693,9 @@ impl_with_type_bounds!(ProverProjectedCombined
             q_star_idx: self.q_star_idx,
             projected_trace: ProjectedTrace::RowMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
+            fq_staging: self.fq_staging,
             ic_proof,
-            ic_eval_point: ic_prover_state.evaluation_point,
+            ic_eval_points: shared_eval_points,
             ic_proof_fq,
         })
     }
@@ -700,7 +731,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
                 &self.all_field_cfgs,
             );
 
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
+        let (ic_proof, _) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
@@ -720,9 +751,12 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             fq_cfgs.iter().zip(self.fq_staging.iter()).enumerate()
         {
             let branch_idx = add!(prime_idx, 1);
+            let ProjectedTrace::ColumnMajor(ref trace_col) = staging.projected_trace else {
+                unreachable!("should be column-major staging")
+            };
             let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
                 &mut self.base.pcs_transcript.fs_transcript,
-                &staging.projected_trace,
+                trace_col,
                 &staging.projected_scalars_fx,
                 branch_idx,
                 num_constraints.for_prime(prime_idx),
@@ -745,8 +779,9 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             q_star_idx: self.q_star_idx,
             projected_trace: ProjectedTrace::ColumnMajor(self.projected_trace),
             projected_scalars_fx: self.projected_scalars_fx,
+            fq_staging: self.fq_staging,
             ic_proof,
-            ic_eval_point: ic_prover_state.evaluation_point,
+            ic_eval_points: shared_eval_points,
             ic_proof_fq,
         })
     }
@@ -759,8 +794,13 @@ impl_with_type_bounds!(ProverIdealChecked
     /// **`fq-unify` projecting element.** Sample one shared integer
     /// $a \in [0, q^*)$ once via [`shared_challenge::sample_shared_field_challenge`]
     /// and lift it into each branch's field. The $Q[X]$ branch consumes
-    /// `projecting_elements[0]`; per-prime branches (Phase F+) will read
-    /// `projecting_elements[i + 1]` directly.
+    /// `projecting_elements[0]`; per-prime branches consume
+    /// `projecting_elements[i + 1]` (Phase F.2.b).
+    ///
+    /// Also builds the per-prime $\psi$-projected trace MLEs / scalars from
+    /// each `fq_staging[i]` using `projecting_elements[i + 1]`, and threads
+    /// them forward as `projected_trace_f_fq` / `projected_scalars_f_fq`
+    /// for the per-prime CPR sumcheck in step 5.
     pub fn step4_eval_projection(
         mut self,
     ) -> Result<ProverEvalProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
@@ -771,12 +811,30 @@ impl_with_type_bounds!(ProverIdealChecked
             &self.all_field_cfgs,
         );
 
+        // Q[X] branch: $\psi_a$-projected trace MLEs + projected scalars.
         let projected_trace_f =
             evaluate_trace_to_column_mles(&self.projected_trace, &projecting_elements[0]);
 
         let projected_scalars_f =
             project_scalars_to_field(self.projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+        // Per-prime $F_{q_i}[X]$ branches: same construction with each
+        // branch's $\psi$ projecting element.
+        let mut projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+            Vec::with_capacity(self.fq_staging.len());
+        let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
+            Vec::with_capacity(self.fq_staging.len());
+        for (prime_idx, staging) in self.fq_staging.into_iter().enumerate() {
+            let branch_idx = add!(prime_idx, 1);
+            let trace_f_i =
+                evaluate_trace_to_column_mles(&staging.projected_trace, &projecting_elements[branch_idx]);
+            let scalars_f_i =
+                project_scalars_to_field(staging.projected_scalars_fx, &projecting_elements[branch_idx])
+                    .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+            projected_trace_f_fq.push(trace_f_i);
+            projected_scalars_f_fq.push(scalars_f_i);
+        }
 
         Ok(ProverEvalProjected {
             base: self.base,
@@ -786,10 +844,12 @@ impl_with_type_bounds!(ProverIdealChecked
             projecting_elements,
             projected_trace: self.projected_trace,
             ic_proof: self.ic_proof,
-            ic_eval_point: self.ic_eval_point,
+            ic_eval_points: self.ic_eval_points,
             ic_proof_fq: self.ic_proof_fq,
             projected_trace_f,
             projected_scalars_f,
+            projected_trace_f_fq,
+            projected_scalars_f_fq,
         })
     }
 });
@@ -847,7 +907,7 @@ impl_with_type_bounds!(ProverEvalProjected
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             self.projected_trace_f.clone(),
             bit_op_down_mles,
-            &self.ic_eval_point,
+            &self.ic_eval_points[0],
             &self.projected_scalars_f,
             /* branch_idx = */ 0,
             num_constraints.q,

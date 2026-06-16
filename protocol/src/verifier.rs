@@ -134,7 +134,13 @@ pub struct VerifierIdealChecked<
     /// Index of $q^*$ in `all_field_cfgs`, computed once in step 2 and
     /// threaded forward so step 3 can recover `q_star_cfg` by indexing.
     q_star_idx: usize,
-    ic_subclaim: ideal_check::VerifierSubclaim<F>,
+    /// Per-branch IC subclaims (length `n + 1`). `[0]` is the Q[X]
+    /// branch's subclaim; `[i + 1]` is the per-prime $F_{q_i}[X]$
+    /// subclaim. Previously only the Q[X] subclaim was kept; the per-prime
+    /// subclaims were squeezed and discarded. They are now retained so
+    /// step 4 (CPR verify) can drive a per-prime `prepare_verifier` call
+    /// for each fq branch (Phase F.2.c).
+    ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -162,17 +168,28 @@ pub struct VerifierEvalProjected<
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
     /// $F_{q_{i-1}}[X]$), kept for later per-prime CPR/MP/PCS phases.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    #[allow(dead_code)] // Consumed by Phase F.2.c in step4_sumcheck_verify.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs`, kept for later phases that need
     /// to re-sample shared challenges in $[0, q^*)$.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    #[allow(dead_code)] // Consumed by Phase F.2.c in step4_sumcheck_verify.
     q_star_idx: usize,
-    ic_subclaim: ideal_check::VerifierSubclaim<F>,
+    /// Per-branch IC subclaims (length `n + 1`). `[0]` feeds the Q[X] CPR
+    /// `prepare_verifier`; `[i + 1]` will feed each per-prime CPR
+    /// `prepare_verifier` in Phase F.2.c.
+    ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>>,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
     projecting_elements: Vec<F>,
+    /// Q[X] branch's $\psi$-projected scalars.
     projected_scalars_f: ProjectedScalars<U::Scalar, F>,
+    /// Per-prime $\psi$-projected scalars (one per declared prime). Built
+    /// in step 3 from each branch's `projecting_elements[i + 1]` and the
+    /// UAIR-author-supplied `project_scalar` closure (applied with
+    /// `all_field_cfgs[i + 1]`). Consumed in step 4 (CPR finalize per
+    /// branch).
+    #[allow(dead_code)] // Consumed by Phase F.2.c.
+    projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
@@ -487,7 +504,9 @@ where
             &all_field_cfgs,
         );
 
-        let ic_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
+        let mut ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>> =
+            Vec::with_capacity(all_field_cfgs.len());
+        let q_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_ideal_check,
             /* branch_idx = */ 0,
@@ -497,35 +516,38 @@ where
             |_| unreachable!("Q[X] branch"),
             &self.field_cfg,
         )?;
+        ic_subclaims.push(q_subclaim);
 
         // Per-prime F_q[X] ideal-check verifications. The transcript
         // ordering MUST match the prover:
-        // Q[X] first, then per-prime in `primes()` order.
+        // Q[X] first, then per-prime in `primes()` order. Subclaims are
+        // collected and threaded forward to Phase F.2.c (per-prime CPR
+        // `prepare_verifier`).
         for (prime_idx, (cfg_q_i, fq_proof)) in all_field_cfgs[1..]
             .iter()
             .zip(self.proof_ideal_checks_fq)
             .enumerate()
         {
             let branch_idx = add!(prime_idx, 1);
-            // The per-prime subclaim is currently discarded -- see the
-            // TODO(fq-soundness) on the method doc.
-            let _ = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
-                &mut self.base.pcs_transcript.fs_transcript,
-                fq_proof,
-                branch_idx,
-                num_constraints.for_prime(prime_idx),
-                &shared_eval_points[branch_idx],
-                |_| unreachable!("F_q[X] branch"),
-                // The lifted F_q[X] ideal's coefficient modulus must match
-                // the per-prime field config
-                |ideal| project_fq_ideal(ideal, cfg_q_i),
-                cfg_q_i,
-            )
-            .map_err(|source| ProtocolError::FqIdealCheck {
-                prime_idx,
-                q: F::modulus(cfg_q_i).to_string(),
-                source,
-            })?;
+            let fq_subclaim =
+                IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
+                    &mut self.base.pcs_transcript.fs_transcript,
+                    fq_proof,
+                    branch_idx,
+                    num_constraints.for_prime(prime_idx),
+                    &shared_eval_points[branch_idx],
+                    |_| unreachable!("F_q[X] branch"),
+                    // The lifted F_q[X] ideal's coefficient modulus must match
+                    // the per-prime field config
+                    |ideal| project_fq_ideal(ideal, cfg_q_i),
+                    cfg_q_i,
+                )
+                .map_err(|source| ProtocolError::FqIdealCheck {
+                    prime_idx,
+                    q: F::modulus(cfg_q_i).to_string(),
+                    source,
+                })?;
+            ic_subclaims.push(fq_subclaim);
         }
 
         Ok(VerifierIdealChecked {
@@ -533,7 +555,7 @@ where
             field_cfg: self.field_cfg,
             all_field_cfgs,
             q_star_idx,
-            ic_subclaim,
+            ic_subclaims,
             proof_commitments: self.proof_commitments,
             proof_cpr: self.proof_cpr,
             proof_combined_sumcheck: self.proof_combined_sumcheck,
@@ -564,7 +586,14 @@ where
     ///
     /// **`fq-unify` projecting element.** Mirrors the prover: sample a
     /// shared integer $a \in [0, q^*)$ and lift it into each branch's
-    /// field. The $Q[X]$ branch consumes `projecting_elements[0]`.
+    /// field. The $Q[X]$ branch consumes `projecting_elements[0]`;
+    /// per-prime branches consume `projecting_elements[i + 1]`
+    /// (Phase F.2.c).
+    ///
+    /// Also builds per-prime $\psi$-projected scalars from
+    /// `project_scalar(., all_field_cfgs[i + 1])` and threads them
+    /// forward as `projected_scalars_f_fq` for the per-prime CPR
+    /// `finalize_verifier` in step 4.
     pub fn step3_eval_projection(
         mut self,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
@@ -576,19 +605,36 @@ where
             &self.all_field_cfgs,
         );
 
+        // Q[X] branch.
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &self.field_cfg));
         let projected_scalars_f =
             project_scalars_to_field(projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+        // Per-prime $F_{q_i}[X]$ branches.
+        let n_fq = self.all_field_cfgs.len().saturating_sub(1);
+        let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
+            Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let projected_scalars_fx_i =
+                project_scalars::<F, U>(|s| project_scalar(s, cfg_i));
+            let projected_scalars_f_i =
+                project_scalars_to_field(projected_scalars_fx_i, &projecting_elements[branch_idx])
+                    .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+            projected_scalars_f_fq.push(projected_scalars_f_i);
+        }
 
         Ok(VerifierEvalProjected {
             base: self.base,
             field_cfg: self.field_cfg,
             all_field_cfgs: self.all_field_cfgs,
             q_star_idx: self.q_star_idx,
-            ic_subclaim: self.ic_subclaim,
+            ic_subclaims: self.ic_subclaims,
             projecting_elements,
             projected_scalars_f,
+            projected_scalars_f_fq,
             proof_commitments: self.proof_commitments,
             proof_cpr: self.proof_cpr,
             proof_combined_sumcheck: self.proof_combined_sumcheck,
@@ -647,7 +693,7 @@ where
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
-            &self.ic_subclaim,
+            &self.ic_subclaims[0],
             /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
@@ -1216,7 +1262,7 @@ pub mod test_helpers {
         }
 
         pub fn ic_subclaim(&self) -> &ideal_check::VerifierSubclaim<F> {
-            &self.ic_subclaim
+            &self.ic_subclaims[0]
         }
 
         pub fn proof_cpr(&self) -> &CombinedPolyResolverProof<F> {
