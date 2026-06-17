@@ -29,7 +29,9 @@ use super::{
 };
 use crate::merkle::{MerkleProof, MerkleTree, MtHash};
 use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_int::Int};
-use num_traits::{ConstOne, ConstZero};
+use num_traits::ConstZero;
+#[cfg(feature = "basefold-modq0-consistency")]
+use num_traits::ConstOne;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{add, inner_transparent_field::InnerTransparentField, mul, mul_by_scalar::MulByScalar, sub};
 
@@ -842,6 +844,19 @@ where
                 tail_codewords.iter().map(|cw| cw[j]).collect()
             };
 
+            // Verifier of record: exact-Z consistency (Theorem soundness). The
+            // mod-q0 variant is gated behind `basefold-modq0-consistency`; it is
+            // sound only if (C3') holds (see the design ledger / paper).
+            #[cfg(not(feature = "basefold-modq0-consistency"))]
+            consistency_check_exact::<C, NK, NW>(
+                params,
+                r,
+                j,
+                challenges,
+                &parent.values,
+                &child_at_j,
+            )?;
+            #[cfg(feature = "basefold-modq0-consistency")]
             consistency_check_f::<C, F, NK, NW>(
                 params,
                 r,
@@ -868,6 +883,7 @@ where
 /// the same argument the linear claim tracking already relies on. If the
 /// block is singular mod `q0` (`q0 | det M_j`, probability `~2^-112` over
 /// the prime draw; `det != 0` over `Z`), the check reports failure.
+#[cfg(feature = "basefold-modq0-consistency")]
 #[allow(clippy::arithmetic_side_effects)] // fixed 8x(8+L) elimination over F
 fn consistency_check_f<C, F, const NK: usize, const NW: usize>(
     params: &Arity8Params<C>,
@@ -968,6 +984,81 @@ where
         return Err(fail());
     }
     Ok(())
+}
+
+/// Exact-Z fold-consistency check at one queried position --- the verifier of
+/// record (Theorem soundness); the mod-`q0` variant
+/// ([`consistency_check_f`]) is gated behind `basefold-modq0-consistency`.
+///
+/// Solves `M_j^T z_t = alpha_t` over Z by fraction-free Bareiss
+/// ([`Radix8Chain::solve_scaled`], returning `d = +-det M_j` and integer
+/// `z_t = d * M_j^{-T} alpha_t`) and verifies the integer identity
+/// `d * sum_t 2^{p t} child_t[j] == sum_t z_t^T parent_t` over Z. No modular
+/// reduction; this is the integer analogue of the Brakedown/Ligero
+/// correlated-agreement consistency check of Zip+.
+#[cfg(not(feature = "basefold-modq0-consistency"))]
+#[allow(clippy::arithmetic_side_effects)] // width-capped operands; W has ample margin
+fn consistency_check_exact<C, const NK: usize, const NW: usize>(
+    params: &Arity8Params<C>,
+    round: usize,
+    j: usize,
+    challenges: &[[Int<NW>; ARITY]],
+    parent_values: &[Int<NK>],
+    child_at_j: &[Int<NK>],
+) -> Result<(), BasefoldError>
+where
+    C: ChainConfig,
+{
+    // Wide accumulator. Honest products are below `det * 2^{2p} * 2^{leaf}`
+    // ~= 2^{228} * 2^{264} * 2^{384} = 2^{876}, so 1024 bits has margin; the
+    // leaf-width caps and challenge range keep malicious operands in range too,
+    // and `mul_by_scalar::<true>` reports any overflow as a check failure.
+    const W: usize = 16;
+    let fail = || BasefoldError::ConsistencyCheckFailed { round, position: j };
+    let (d, zs) = params
+        .chain
+        .solve_scaled::<NW>(sub!(round, 1usize), j, challenges)?;
+
+    // rhs = sum_t sum_c z_t[c] * parent_values[t*ARITY + c]   (over Z)
+    let mut rhs = Int::<W>::ZERO;
+    for (t, z) in zs.iter().enumerate() {
+        for (c, zc) in z.iter().enumerate() {
+            let pv = parent_values[add!(mul!(t, ARITY), c)].resize::<W>();
+            let term = zc
+                .resize::<W>()
+                .mul_by_scalar::<true>(&pv)
+                .ok_or_else(|| fail())?;
+            rhs = add!(rhs, term);
+        }
+    }
+
+    // lhs = d * sum_t 2^{p t} * child_at_j[t]   (over Z)
+    let mut lhs = Int::<W>::ZERO;
+    for (t, ch) in child_at_j.iter().enumerate() {
+        let scaled = ch
+            .resize::<W>()
+            .mul_by_scalar::<true>(&pow2_int::<W>(mul_u32(params.p, t)))
+            .ok_or_else(|| fail())?;
+        lhs = add!(lhs, scaled);
+    }
+    let lhs = d
+        .resize::<W>()
+        .mul_by_scalar::<true>(&lhs)
+        .ok_or_else(|| fail())?;
+
+    if lhs != rhs {
+        return Err(fail());
+    }
+    Ok(())
+}
+
+/// `2^exp` as a wide signed integer (`exp = p*t <= 2p < 64*W` by construction).
+#[cfg(not(feature = "basefold-modq0-consistency"))]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn pow2_int<const W: usize>(exp: u32) -> Int<W> {
+    let mut words = [0u64; W];
+    words[(exp / 64) as usize] = 1u64 << (exp % 64);
+    Int::<W>::new(crypto_bigint::Int::from_words(words))
 }
 
 fn squeeze_query_index(transcript: &mut impl Transcript, cap: usize) -> usize {

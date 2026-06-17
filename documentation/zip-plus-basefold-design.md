@@ -300,3 +300,19 @@ existing files in milestone 1.
 - Query count / proximity regime: unique decoding, production counts
   (Q = 147 at rate 1/4, Q = 100 at rate 1/8). Johnson-regime reduction
   considered and dropped.
+
+## DECISION: verifier of record is exact-Z consistency (2026-06-13)
+
+The arity-8 fold-consistency check defaults to **exact-Z** (`consistency_check_exact`
+in arity8.rs: `solve_scaled` Bareiss + the integer identity
+`d * sum_t 2^{p t} child[t] == sum_t z_t^T parent_t` at a 1024-bit accumulator). The
+former mod-q0 check (`consistency_check_f`) is now gated behind the off-by-default
+cargo feature `basefold-modq0-consistency`. Reason: mod-q0 consistency is NOT covered
+by the soundness theorem — it moves the *proximity* check (the integer-code distance /
+norm binder) mod a prime, which is unsound-until-proven; its soundness reduces to a
+single open lemma (C3'). Exact-Z is the direct Zip+ analogue (value-binding checks —
+claims/eval — may go mod q0, as in Zip+; the proximity check may not). Prover unchanged
+(it always folded over Z). Validated: 33 `basefold::` tests pass on both settings.
+**Full analysis + the (C3') reduction live in the falcon worktree's copy of this
+ledger** (the active record) and in the paper draft `sec-soundness.tex`
+(`thm:sound`, `thm:sound-q0`, `lem:revnorm`, `lem:claims-bdry`).

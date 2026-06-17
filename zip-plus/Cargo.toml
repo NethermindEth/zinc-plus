@@ -43,6 +43,11 @@ workspace = true
 parallel = ["dep:rayon", "zinc-utils/parallel", "zinc-poly/parallel", "ark-ff/parallel", "ark-poly/parallel"]
 simd = ["zinc-poly/simd"]
 unchecked = []
+# Fold-consistency check modulo q0: faster, but soundness is OPEN — it reduces to
+# the (C3') round-0 proximity lemma (see documentation/zip-plus-basefold-design.md
+# and the paper's sec-soundness). OFF by default; the verifier of record uses the
+# exact-Z (fraction-free Bareiss) consistency check that the soundness theorem proves.
+basefold-modq0-consistency = []
 
 [[bench]]
 name = "zip_benches"
