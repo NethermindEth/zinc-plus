@@ -45,12 +45,9 @@ use zinc_utils::{
 /// (for a specific $q_i$ prime). The `MultiDegreeSumcheck` at the protocol
 /// layer batches them all together.
 ///
-/// TODO(fq-unify): once challenge unification lands, all $n+1$ CPR groups can
-/// be merged into a single `MultiDegreeSumcheck` over a shared evaluation
+/// TODO: once full challenge unification lands, all $n+1$ CPR groups can be
+/// merged into a single `MultiDegreeSumcheck` over a shared evaluation
 /// point, soundness factor $q_i / q^*$ per branch.
-///
-/// TODO(fq-unify): merge with the Q[X] CPR group via a shared sumcheck once
-/// challenge unification lands.
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
@@ -178,10 +175,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             },
         };
 
-        // The batching challenge $\alpha$ is supplied by the caller. With
-        // `fq-unify`, the protocol layer samples one shared integer in
-        // $[0, q^*)$ once and lifts it into each branch's field, so the
-        // Q[X] CPR and per-prime CPRs reuse the same underlying integer.
+        // The batching challenge $\alpha$ is supplied by the caller. The
+        // protocol layer samples one shared integer in $[0, q^*)$ once
+        // and lifts it into each branch's field, so the Q[X] CPR and
+        // per-prime CPRs reuse the same underlying integer.
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge.clone(), one.clone(), num_constraints);
 
@@ -340,8 +337,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `branch_idx`: which constraint family. `0` -> $\Q[X]$; `i >= 1` ->
     ///   $\mathbb{F}_{q_{i-1}}[X]$. Currently unused inside this function (the
     ///   call is branch-agnostic) but accepted for symmetry with
-    ///   `prepare_sumcheck_group` / `finalize_verifier`, and as a hook for the
-    ///   per-prime soundness chain (TODO(fq-soundness)).
+    ///   `prepare_sumcheck_group` / `finalize_verifier`.
     /// - `num_constraints`: Number of constraint polynomials in `U`.
     /// - `num_vars`: Number of variables of the trace MLEs.
     /// - `projecting_element`: The random challenge used to project `F[X] → F`.
@@ -364,12 +360,10 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Integer: ConstTranscribable,
         U: Uair,
     {
-        // `prime_idx` is currently unused: `prepare_verifier` only re-derives
+        // `branch_idx` is currently unused: `prepare_verifier` only re-derives
         // the folding challenge α and the expected sum from `ic_check_subclaim`,
         // both of which are branch-agnostic. The parameter is kept for symmetry
-        // with `prepare_sumcheck_group` / `finalize_verifier` and to leave a
-        // hook for the per-prime soundness chain (TODO(fq-soundness)) and the
-        // shared-challenge unification (TODO(fq-unify)).
+        // with `prepare_sumcheck_group` / `finalize_verifier`.
         let _ = branch_idx;
         let uair_sig = U::signature();
         proof.validate_evaluation_sizes(
@@ -394,7 +388,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         };
 
         // The batching challenge $\alpha$ is supplied by the caller; see
-        // [`prepare_sumcheck_group`] for the `fq-unify` rationale.
+        // [`prepare_sumcheck_group`] for the shared-challenge rationale.
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge.clone(), one.clone(), num_constraints);
 
@@ -658,7 +652,7 @@ mod tests {
             project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare -> MultiDegreeSumcheck → finalize.
-        // With the `fq-unify` API, $\alpha$ is sampled by the caller.
+        // $\alpha$ is sampled by the caller per the shared-challenge API.
         let folding_challenge: MontyField<LIMBS> =
             prover_transcript.get_field_challenge(&test_config());
         let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(

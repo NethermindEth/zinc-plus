@@ -1,4 +1,4 @@
-use crypto_primitives::{FixedSemiring, PrimeField, Semiring};
+use crypto_primitives::{PrimeField, Semiring};
 use derive_more::From;
 use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, ConstZero, Euclid, Zero};
 use std::{
@@ -14,9 +14,7 @@ use zinc_utils::{
 
 use crate::{
     EvaluatablePolynomial, EvaluationError, Polynomial,
-    univariate::{
-        dense::DensePolynomial, dynamic, dynamic::over_fixed_semiring::DynamicPolynomialFS,
-    },
+    univariate::{dense::DensePolynomial, dynamic},
 };
 
 /// Polynomials of dynamic degree. The implementation
@@ -125,18 +123,6 @@ impl<F: PrimeField> DynamicPolynomialF<F> {
                 })
                 .collect(),
         }
-    }
-}
-
-impl<F> DynamicPolynomialF<F>
-where
-    F: PrimeField,
-    F::Integer: FixedSemiring,
-{
-    pub fn lift_to_integers(&self) -> DynamicPolynomialFS<F::Integer> {
-        let coeffs: Vec<F::Integer> = self.coeffs.iter().map(|c| c.lift_to_integer()).collect();
-        // Preserve the original coefficient count: do NOT trim trailing zeros.
-        DynamicPolynomialFS { coeffs }
     }
 }
 

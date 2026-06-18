@@ -73,13 +73,12 @@ use zip_plus::{
 ///
 /// # Lifted-eval branches
 ///
-/// Witness lifted evals are sent **per branch** (Phase H proper): for each
-/// of the $n + 2$ branches (Q[X] / $q_0$, the declared $q_1, \dots, q_n$,
-/// and the PCS-only $q''$), the prover sends a vector of
-/// `DynamicPolynomialF<F>` carrying the per-branch coefficient lift of
-/// each witness column. The verifier reads each branch's lifts under that
-/// branch's field cfg, no per-coefficient `from_with_cfg` projection is
-/// needed.
+/// Witness lifted evals are sent **per branch**: for each of the $n + 2$
+/// branches (Q[X] / $q_0$, the declared $q_1, \dots, q_n$, and the
+/// PCS-only $q''$), the prover sends a vector of `DynamicPolynomialF<F>`
+/// carrying the per-branch coefficient lift of each witness column. The
+/// verifier reads each branch's lifts under that branch's field cfg, no
+/// per-coefficient `from_with_cfg` projection is needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
     /// Zip+ commitments to the witness columns.
@@ -126,14 +125,14 @@ pub struct Proof<F: PrimeField> {
     /// Empty for legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
     pub ideal_checks_fq: Vec<IdealCheckProof<F>>,
     /// Per-prime CPR proofs, one per declared prime, produced by the
-    /// `fq-unify` lockstep sumcheck (Phase F.2). Empty for legacy UAIRs.
+    /// lockstep sumcheck in step 5. Empty for legacy UAIRs.
     pub cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime multi-degree sumcheck proofs, one per declared prime,
     /// produced by the lockstep sumcheck driver in step 5. Empty for legacy
     /// UAIRs.
     pub combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     /// Per-prime multipoint-eval proofs, one per declared prime, produced
-    /// by the lockstep multipoint-eval in Phase G (step 6). Empty for
+    /// by the lockstep multipoint-eval in step 6. Empty for
     /// legacy UAIRs.
     pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     /// Witness-only lifted MLE evaluations under the **PCS-only prime
@@ -1153,12 +1152,6 @@ mod tests {
     ///
     /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_{q_i}[X]$
     /// constraint per prime, both of the form $\phi_{q_i}(a) \in (X - 0)$.
-    ///
-    /// TODO(fq-soundness): this only checks honest-prover correctness of the
-    /// ideal-membership claim. The per-prime CPR + sumcheck +
-    /// multipoint-eval + PCS-open chain that ties $e_{i,t}$ back to the
-    /// committed trace is NYI; once that lands this test will also catch
-    /// "ideal-membership-by-construction" cheaters.
     #[test]
     fn test_e2e_fq_large_prime() {
         let num_vars = 8;
@@ -1282,9 +1275,10 @@ mod tests {
         );
     }
 
-    /// Adversarial regression for the per-declared-prime branch of Phase H's
-    /// lifted-evals consistency check. [`TestUairFqLargePrime`] declares two
-    /// primes, so `witness_lifted_evals` has shape `[Q, q_1, q_2]` (length 3).
+    /// Adversarial regression for the per-declared-prime branch of the
+    /// lifted-evals consistency check in step 6. [`TestUairFqLargePrime`]
+    /// declares two primes, so `witness_lifted_evals` has shape
+    /// `[Q, q_1, q_2]` (length 3).
     /// We perturb branch `[1]` (declared prime $q_1$) and check that the
     /// per-prime [`MultipointEval::verify_subclaim`] call inside
     /// `step6_lifted_evals` rejects with `ClaimMismatch`.

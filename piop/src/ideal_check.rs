@@ -313,10 +313,10 @@ impl<U: Uair> IdealCheckProtocol<U> {
         IdealOverFFromRef: Fn(&IdealOrZero<U::Ideal>) -> IdealOverF,
         IdealOverFFromFqRef: Fn(&IdealOrZero<U::FqIdeal>) -> IdealOverF,
     {
-        // `field_cfg` is not consumed here today; with `fq-unify` it
-        // remains in the signature for verifier-side branch sanity (the
-        // caller already lifted the shared integer challenge into this
-        // field via `from_with_cfg`).
+        // `field_cfg` is not consumed here today; it remains in the
+        // signature for verifier-side branch sanity (the caller already
+        // lifted the shared integer challenge into this field via
+        // `from_with_cfg`).
         let _ = field_cfg;
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
 

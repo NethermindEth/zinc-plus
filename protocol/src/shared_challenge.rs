@@ -1,4 +1,4 @@
-//! Helpers for the `fq-unify` shared-challenge sampling scheme.
+//! Shared-challenge sampling across constraint branches.
 //!
 //! With multiple field branches active (one Q[X] branch over a sampled prime
 //! $q_0$, plus one F_q[X] branch per declared prime $q_1, \ldots, q_n$),

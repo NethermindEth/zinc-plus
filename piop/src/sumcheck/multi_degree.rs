@@ -311,9 +311,9 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// * `num_vars`: Number of variables (must be consistent across all groups
     ///   in all branches).
     /// * `q_star_cfg`: Field configuration used for transcript metadata absorbs
-    ///   and per-round challenge squeezes. For `fq-unify`, this is the smallest
-    ///   of the per-branch moduli (so every branch can losslessly cast the
-    ///   shared integer into its own field).
+    ///   and per-round challenge squeezes. This is the smallest of the
+    ///   per-branch moduli (so every branch can losslessly cast the shared
+    ///   integer into its own field).
     ///
     /// # Returns
     ///

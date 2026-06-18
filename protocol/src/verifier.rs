@@ -141,7 +141,7 @@ pub struct VerifierIdealChecked<
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
-    /// $F_{q_{i-1}}[X]$), kept for the next step's shared `fq-unify` $\psi$
+    /// $F_{q_{i-1}}[X]$), kept for the next step's shared $\psi$
     /// projecting element.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs`, computed once in step 2 and
@@ -152,7 +152,7 @@ pub struct VerifierIdealChecked<
     /// subclaim. Previously only the Q[X] subclaim was kept; the per-prime
     /// subclaims were squeezed and discarded. They are now retained so
     /// step 4 (CPR verify) can drive a per-prime `prepare_verifier` call
-    /// for each fq branch (Phase F.2.c).
+    /// for each fq branch.
     ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>>,
 
     // Proof leftovers
@@ -189,16 +189,16 @@ pub struct VerifierEvalProjected<
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
-    /// $F_{q_{i-1}}[X]$), kept for later per-prime CPR/MP/PCS phases.
-    #[allow(dead_code)] // Consumed by Phase F.2.c in step4_sumcheck_verify.
+    /// $F_{q_{i-1}}[X]$), kept for later per-prime CPR/MP/PCS steps.
+    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     all_field_cfgs: Vec<F::Config>,
-    /// Index of $q^*$ in `all_field_cfgs`, kept for later phases that need
+    /// Index of $q^*$ in `all_field_cfgs`, kept for later steps that need
     /// to re-sample shared challenges in $[0, q^*)$.
-    #[allow(dead_code)] // Consumed by Phase F.2.c in step4_sumcheck_verify.
+    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     q_star_idx: usize,
     /// Per-branch IC subclaims (length `n + 1`). `[0]` feeds the Q[X] CPR
     /// `prepare_verifier`; `[i + 1]` will feed each per-prime CPR
-    /// `prepare_verifier` in Phase F.2.c.
+    /// `prepare_verifier` in step 4.
     ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>>,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
@@ -210,7 +210,7 @@ pub struct VerifierEvalProjected<
     /// UAIR-author-supplied `project_scalar` closure (applied with
     /// `all_field_cfgs[i + 1]`). Consumed in step 4 (CPR finalize per
     /// branch).
-    #[allow(dead_code)] // Consumed by Phase F.2.c.
+    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 
     // Proof leftovers
@@ -247,19 +247,18 @@ pub struct VerifierSumchecked<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for later `fq-unify` phases).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Per-branch field configs (carried for downstream steps).
+    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
-    /// Index of $q^*$ in `all_field_cfgs` (carried for later phases).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Index of $q^*$ in `all_field_cfgs` (carried for downstream steps).
+    #[allow(dead_code)] // Carried for downstream steps.
     q_star_idx: usize,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
     projecting_elements: Vec<F>,
     /// Per-branch CPR batching challenges $\alpha$: `[0]` was consumed by
-    /// the Q[X] CPR verifier; `[i >= 1]` will drive the per-prime CPRs in
-    /// Phase F+.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// the Q[X] CPR verifier; `[i >= 1]` is retained for downstream steps.
+    #[allow(dead_code)] // Carried for downstream steps.
     folding_challenges: Vec<F>,
     /// CPR subclaim's evaluation point ($r^\star$)
     cpr_eval_point: Vec<F>,
@@ -267,11 +266,11 @@ pub struct VerifierSumchecked<
     cpr_down_evals: Vec<F>,
     /// Per-prime CPR subclaim evaluation points ($r^\star_i$, lifted into
     /// each branch's field). Length `n_fq`. Empty for UAIRs with no
-    /// declared fq primes. Consumed by Phase G's lockstep multipoint-eval.
+    /// declared fq primes. Consumed by step 5's lockstep multipoint-eval.
     cpr_eval_points_fq: Vec<Vec<F>>,
-    /// Per-prime CPR subclaim `up_evals`. Length `n_fq`. Consumed by Phase G.
+    /// Per-prime CPR subclaim `up_evals`. Length `n_fq`. Consumed in step 5.
     cpr_up_evals_fq: Vec<Vec<F>>,
-    /// Per-prime CPR subclaim `down_evals`. Length `n_fq`. Consumed by Phase G.
+    /// Per-prime CPR subclaim `down_evals`. Length `n_fq`. Consumed in step 5.
     cpr_down_evals_fq: Vec<Vec<F>>,
     /// `bit_slice_evals` carried over from booleanity's `finalize_verifier`,
     /// to be collapsed into the appended `up_evals` entries
@@ -310,8 +309,8 @@ pub struct VerifierMultipointEvaled<
 > {
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for later phases).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Per-branch field configs (carried for downstream steps).
+    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
@@ -320,9 +319,9 @@ pub struct VerifierMultipointEvaled<
     alpha_prime_f: Option<F>,
     mp_subclaim: multipoint_eval::Subclaim<F>,
     /// Per-prime multipoint-eval subclaims, one per declared prime, produced
-    /// by Phase G's lockstep multipoint-eval verifier. Empty for UAIRs with
-    /// no declared fq primes. Threaded forward for Phase H/I.
-    #[allow(dead_code)] // Consumed by Phase H / I.
+    /// by step 5's lockstep multipoint-eval verifier. Empty for UAIRs with
+    /// no declared fq primes. Consumed in step 6.
+    #[allow(dead_code)] // Consumed in step6_lifted_evals.
     mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>>,
 
     // Proof leftovers
@@ -529,7 +528,7 @@ where
     /// `project_fq_ideal` is only invoked when the UAIR declares at least
     /// one prime; legacy UAIRs can pass `|_, _| unreachable!()`.
     ///
-    /// **`fq-unify` evaluation point.** Mirrors the prover: sample one
+    /// **Shared evaluation point.** Mirrors the prover: sample one
     /// shared $\mathbf r \in [0, q^*)^\mu$ from the transcript and lift it
     /// into each branch's field via `F::from_with_cfg`, then run the
     /// per-branch verifications in `branch_idx` order.
@@ -565,7 +564,7 @@ where
             });
         }
 
-        // `fq-unify`: rebuild per-branch field configs, then sample the
+        // Rebuild per-branch field configs, then sample the
         // shared evaluation point from the transcript exactly as the
         // prover does. Branch 0 = Q[X] (random sampled prime); branches
         // i >= 1 = declared primes in `primes()` order.
@@ -596,8 +595,8 @@ where
         // Per-prime F_q[X] ideal-check verifications. The transcript
         // ordering MUST match the prover:
         // Q[X] first, then per-prime in `primes()` order. Subclaims are
-        // collected and threaded forward to Phase F.2.c (per-prime CPR
-        // `prepare_verifier`).
+        // collected and threaded forward to step 4's per-prime CPR
+        // `prepare_verifier`.
         for (prime_idx, (cfg_q_i, fq_proof)) in all_field_cfgs[1..]
             .iter()
             .zip(self.proof_ideal_checks_fq)
@@ -663,11 +662,10 @@ where
 {
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
     ///
-    /// **`fq-unify` projecting element.** Mirrors the prover: sample a
+    /// **Shared projecting element.** Mirrors the prover: sample a
     /// shared integer $a \in [0, q^*)$ and lift it into each branch's
     /// field. The $Q[X]$ branch consumes `projecting_elements[0]`;
-    /// per-prime branches consume `projecting_elements[i + 1]`
-    /// (Phase F.2.c).
+    /// per-prime branches consume `projecting_elements[i + 1]`.
     ///
     /// Also builds per-prime $\psi$-projected scalars from
     /// `project_scalar(., all_field_cfgs[i + 1])` and threads them
@@ -772,7 +770,7 @@ where
             });
         }
 
-        // `fq-unify`: mirror the prover by sampling one shared CPR
+        // Mirror the prover by sampling one shared CPR
         // batching challenge $\alpha$ in $[0, q^*)$. `[0]` feeds the Q[X]
         // CPR; `[i + 1]` feeds the per-prime CPRs.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
@@ -1007,7 +1005,7 @@ where
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        // --- Length-mismatch guard (mirrors Phase F.2.c) ---
+        // --- Length-mismatch guard ---
         let n_fq = self.cpr_eval_points_fq.len();
         if self.proof_multipoint_evals_fq.len() != n_fq {
             return Err(ProtocolError::FqIdealCheck {
@@ -1141,8 +1139,7 @@ where
     F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
-    /// Step 6: Per-branch lifted-eval consistency check (Phase H proper,
-    /// Approach C).
+    /// Step 6: Per-branch lifted-eval consistency check.
     ///
     /// 1. **Sample $q''$** (mirror of prover step 7 start).
     /// 2. For each branch $i \in \{0, \dots, n\}$ (Q + declared primes):
@@ -1154,7 +1151,8 @@ where
     ///    - For Q-branch ($i = 0$) when booleanity ran: append $\alpha'$
     ///      projections of witness-bin lifts.
     ///    - For fq branches ($i \ge 1$): append zero entries (matching the
-    ///      zero-padded MP `up_evals` on fq branches, per Phase G T1).
+    ///      zero-padded MP `up_evals` on fq branches; witness binary-poly
+    ///      columns live in $Q[X]$ only).
     ///    - Call `MultipointEval::verify_subclaim` against the matching MP
     ///      subclaim, branch by branch.
     /// 3. Also recompute the $q''$-branch lifted evals and absorb every
@@ -1301,7 +1299,7 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Booleanity-bridge slots on fq branches are zero-padded
-            // (Phase G T1 design: witness-bin lives in Q[X] only).
+            // (witness-bin lives in Q[X] only).
             if self.alpha_prime_f.is_some() {
                 let zero_i = F::zero_with_cfg(cfg_i);
                 open_evals_i.extend((0..num_wit_bin).map(|_| zero_i.clone()));

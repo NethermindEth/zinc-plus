@@ -117,8 +117,8 @@ pub struct ProverProjectedCombined<
     /// ideal check can read them. Empty for legacy UAIRs.
     ///
     /// TODO(fq-perf): the row-major projection is duplicated -- once for the
-    /// Q[X] branch and once per prime here. The `fq-unify` optimization
-    /// would emit all projections in one trace sweep.
+    /// Q[X] branch and once per prime here. A future optimization could
+    /// emit all projections in one trace sweep.
     fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
@@ -151,9 +151,8 @@ pub struct ProverProjectedMleFirst<
 /// Per-prime $\phi_{q_i}$ projection of the integer trace and UAIR scalars,
 /// pre-built at step 2 for step 3's per-prime ideal check (and threaded
 /// forward through step 4 into the per-prime CPR / sumcheck / MP-eval
-/// chain under `fq-unify`). The trace layout (row- vs column-major)
-/// matches the variant chosen at step 2 and is carried inside
-/// [`ProjectedTrace`].
+/// chain). The trace layout (row- vs column-major) matches the variant
+/// chosen at step 2 and is carried inside [`ProjectedTrace`].
 ///
 /// Field config is stored separately on the parent state (see
 /// `all_field_cfgs`) and is not needed here.
@@ -187,7 +186,7 @@ pub struct ProverIdealChecked<
     /// step 4 can build per-prime $\psi$-projected trace/scalars and step 5
     /// can drive the per-prime CPR sumcheck branches. Empty for UAIRs
     /// with no declared fq primes.
-    #[allow(dead_code)] // Consumed by Phase F.2.b in step4_eval_projection.
+    #[allow(dead_code)] // Consumed in step4_eval_projection.
     fq_staging: Vec<FqProjStaging<U, F>>,
 
     // New
@@ -200,13 +199,13 @@ pub struct ProverIdealChecked<
     /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in `base.uair_signature.primes()`, in order.
     ///
-    /// TODO(fq-soundness): each entry is currently only a standalone
-    /// ideal-membership check on the per-prime combined polynomial
-    /// $e_{i,t}$; the downstream per-prime CPR + sumcheck +
-    /// multipoint-eval + PCS-open chain that ties $e_{i,t}$ back to the
-    /// committed trace via $\phi_{q_i}(\hat f_0)$ is **not** present yet.
-    /// See [`Proof::ideal_checks_fq`] for the soundness gap and the planned
-    /// unification optimization (one shared $\mathbf r \in [0, q^*)^\mu$).
+    /// TODO(fq-soundness): each entry is currently only a standalone ideal-membership
+    /// check on the per-prime combined polynomial $e_{i,t}$; the
+    /// downstream per-prime CPR + sumcheck + multipoint-eval + PCS-open
+    /// chain that ties $e_{i,t}$ back to the committed trace via
+    /// $\phi_{q_i}(\hat f_0)$ is **not** present yet. See
+    /// [`Proof::ideal_checks_fq`] for the soundness gap and the planned
+    /// optimization (one shared $\mathbf r \in [0, q^*)^\mu$).
     ic_proof_fq: Vec<IdealCheckProof<F>>,
 }
 
@@ -224,17 +223,17 @@ pub struct ProverEvalProjected<
     field_cfg: F::Config,
     /// Per-branch field configs, kept for the per-prime CPR/sumcheck/MP
     /// chain in later phases. `[0]` = $Q[X]$ branch.
-    #[allow(dead_code)] // Consumed by Phase F.2.b in step5_sumcheck.
+    #[allow(dead_code)] // Consumed in step5_sumcheck.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
-    #[allow(dead_code)] // Consumed by Phase F.2.b in step5_sumcheck.
+    #[allow(dead_code)] // Consumed in step5_sumcheck.
     q_star_idx: usize,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`. Length `n + 1`.
     /// `[0]` was consumed by step 4 to build `projected_trace_f`;
     /// `[i + 1]` was consumed to build `projected_trace_f_fq[i]`. Carried
-    /// forward for later phases (H/I) that need the integer endpoint.
-    #[allow(dead_code)] // Consumed by Phase H / I.
+    /// forward for later steps that need the integer endpoint.
+    #[allow(dead_code)] // Carried for downstream steps.
     projecting_elements: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
@@ -245,7 +244,7 @@ pub struct ProverEvalProjected<
     ic_proof: IdealCheckProof<F>,
     /// Per-branch IC evaluation points (full $\text{n+1} \times \mu$
     /// matrix). `[0]` feeds the Q[X] CPR; `[i + 1]` feeds the per-prime
-    /// CPRs (Phase F.2.b).
+    /// CPRs in step 5.
     ic_eval_points: Vec<Vec<F>>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
 
@@ -255,15 +254,15 @@ pub struct ProverEvalProjected<
     /// Per-prime $\psi$-projected trace MLEs (one entry per declared prime
     /// in `UairSignature::primes()`). Built in step 4 from each
     /// `fq_staging[i].projected_trace` using `projecting_elements[i + 1]`.
-    /// Consumed by per-prime CPR `prepare_sumcheck_group` in step 5 (Phase
-    /// F.2.b). Empty for UAIRs with no declared fq primes.
-    #[allow(dead_code)] // Consumed by Phase F.2.b.
+    /// Consumed by per-prime CPR `prepare_sumcheck_group` in step 5.
+    /// Empty for UAIRs with no declared fq primes.
+    #[allow(dead_code)] // Consumed in step5_sumcheck.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
     /// Per-prime $\psi$-projected scalars (one entry per declared prime).
     /// Built in step 4 from each `fq_staging[i].projected_scalars_fx`
     /// using `projecting_elements[i + 1]`. Consumed in step 5 by the
     /// per-prime CPR. Empty for UAIRs with no declared fq primes.
-    #[allow(dead_code)] // Consumed by Phase F.2.b.
+    #[allow(dead_code)] // Consumed in step5_sumcheck.
     projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 }
 
@@ -280,16 +279,16 @@ pub struct ProverSumchecked<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for later `fq-unify` phases).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Per-branch field configs (carried for downstream steps).
+    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
-    /// Index of $q^*$ in `all_field_cfgs` (carried for later phases).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Index of $q^*$ in `all_field_cfgs` (carried for downstream steps).
+    #[allow(dead_code)] // Carried for downstream steps.
     q_star_idx: usize,
     /// Per-branch CPR batching challenges $\alpha$ (length `n + 1`).
     /// `[0]` was consumed by the Q[X] CPR in step 5; `[i + 1]` was
     /// consumed by the per-prime CPRs in the same step.
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    #[allow(dead_code)] // Carried for downstream steps.
     folding_challenges: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
@@ -307,7 +306,7 @@ pub struct ProverSumchecked<
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     /// Per-prime $\psi$-projected trace MLEs (one entry per declared
     /// prime). Threaded forward from step 4 by `step5_sumcheck` so that
-    /// Phase G's lockstep multipoint-eval can build per-prime MP branches.
+    /// step 6's lockstep multipoint-eval can build per-prime MP branches.
     /// Empty for UAIRs with no declared fq primes.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 
@@ -316,12 +315,12 @@ pub struct ProverSumchecked<
     cpr_eval_point: Vec<F>,
     combined_sumcheck: MultiDegreeSumcheckProof<F>,
     /// Per-prime CPR proofs (one per declared prime in
-    /// `UairSignature::primes()`), produced by F.2.b's per-prime CPR
-    /// finalize. Empty for UAIRs with no declared fq primes.
+    /// `UairSignature::primes()`), produced by each per-prime CPR finalize
+    /// in step 5. Empty for UAIRs with no declared fq primes.
     cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime CPR sumcheck endpoints `r^*_i`, lifted into each branch's
     /// field. Empty for UAIRs with no declared fq primes. Consumed by
-    /// Phase G's lockstep multipoint-eval.
+    /// step 6's lockstep multipoint-eval.
     cpr_eval_points_fq: Vec<Vec<F>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime).
     /// Empty for UAIRs with no declared fq primes.
@@ -351,9 +350,9 @@ pub struct ProverMultipointEvaled<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for later phases that need the
-    /// per-prime cfgs, e.g. Phase H/I).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
+    /// Per-branch field configs (carried for downstream steps that need
+    /// the per-prime cfgs).
+    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
@@ -375,14 +374,14 @@ pub struct ProverMultipointEvaled<
     mp_proof: MultipointEvalProof<F>,
     r_0: Vec<F>,
     /// Per-prime multipoint-eval proofs (one per declared prime in
-    /// `UairSignature::primes()`), produced by Phase G's lockstep
+    /// `UairSignature::primes()`), produced by step 6's lockstep
     /// multipoint-eval. Empty for UAIRs with no declared fq primes.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
     /// Per-prime sumcheck output points $r_0$ (one per declared prime,
     /// lifted into each branch's field — the underlying integer is shared
     /// with the Q-branch `r_0` thanks to the lockstep sumcheck). Empty for
-    /// UAIRs with no declared fq primes. Carried forward for Phase H/I.
-    #[allow(dead_code)] // Consumed by Phase H / I.
+    /// UAIRs with no declared fq primes. Consumed in step 7.
+    #[allow(dead_code)] // Consumed in step7_lift_and_project.
     r_0_fq: Vec<Vec<F>>,
 }
 
@@ -397,15 +396,6 @@ pub struct ProverLifted<
     const FD: usize,
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
-    /// Q-branch field cfg ($q_0$). Carried to derive the `lifted_evals`
-    /// type tags and to absorb Q-branch coefficients into the transcript.
-    /// The PCS open in `step8_pcs_open` runs under `q_pp_cfg` instead.
-    #[allow(dead_code)] // PCS open uses freshly-sampled $q''$, not $q_0$.
-    field_cfg: F::Config,
-    /// Per-branch field configs (`[0]` = `Q[X]`, `[i+1]` = declared prime `i`
-    /// for `F_(q_i)[X]`).
-    #[allow(dead_code)] // Used by later `fq-unify` phases.
-    all_field_cfgs: Vec<F::Config>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -415,19 +405,10 @@ pub struct ProverLifted<
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
-    /// Q-branch sumcheck output point $r_0$ (lifted into $q_0$ cfg).
-    /// Step 8 uses `r_star` (= $r_0 \bmod q''$) instead — `r_0` is kept
-    /// here for diagnostic / future use.
-    #[allow(dead_code)] // Step 8 uses `r_star`; `r_0` retained for traceability.
-    r_0: Vec<F>,
     /// Per-prime multipoint-eval proofs threaded forward from
     /// `ProverMultipointEvaled`.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
-    /// Per-prime sumcheck output points $r_0$ threaded forward.
-    #[allow(dead_code)] // Consumed by Phase H / I.
-    r_0_fq: Vec<Vec<F>>,
 
-    // New (Phase H proper):
     /// Per-constraint-branch **witness-only** lifted MLE evaluations at
     /// $r_0$ (or branch-specific $r_0^{(i)}$). Layout: index `0` is the
     /// Q-branch ($q_0$); indices `1..=n` are the declared primes in
@@ -710,26 +691,26 @@ impl_with_type_bounds!(ProverProjectedCombined
     /// trace and scalars are projected deterministically with `q_i`'s
     /// `field_cfg`.
     ///
-    /// **`fq-unify` evaluation point.** All $n + 1$ branches share a single
+    /// **Shared evaluation point.** All $n + 1$ branches share a single
     /// MLE evaluation point $\mathbf r \in [0, q^*)^\mu$ sampled once from
     /// the transcript at the start of this step. Each branch lifts the
     /// shared integer vector into its own field via $F::from\_with\_cfg$.
     /// Since each shared integer is strictly less than every $q_i$, the
     /// lift is a type cast: all branches agree on the underlying integer.
     ///
-    /// TODO(fq-soundness): the per-prime claims produced here are only
+    /// TODO: the per-prime claims produced here are only
     /// ideal-membership checks on the combined polynomials $e_{i,t}$; the
     /// per-prime CPR + sumcheck + multipoint-eval + PCS-open chain that
     /// ties $e_{i,t}$ to the committed trace is not implemented yet.
     /// Adding it means duplicating the post-step3 chain (steps 5..=8) once
-    /// per declared prime -- or, equivalently, performing the
-    /// `fq-unify` optimization that lets the chain be run once and shared.
+    /// per declared prime -- or, equivalently, applying the
+    /// shared-challenge optimization so that the chain is run once and shared.
     pub fn step3_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let num_constraints = count_constraints::<U>();
 
-        // `fq-unify`: sample one shared evaluation point in `[0, q*)^mu`
+        // Sample one shared evaluation point in `[0, q*)^mu`
         // up-front and lift it into each branch's field.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
@@ -803,7 +784,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     /// internal transpose), and zero-ideal constraints are short-circuited
     /// to zero.
     ///
-    /// **`fq-unify` evaluation point.** See the row-major
+    /// **Shared evaluation point.** See the row-major
     /// [`step3_ideal_check`](ProverProjectedCombined::step3_ideal_check)
     /// for the shared $\mathbf r \in [0, q^*)^\mu$ design; same shape here.
     pub fn step3_ideal_check(
@@ -813,7 +794,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
         // constraints are handled by the per-prime branch below.
         let num_constraints = count_constraints::<U>();
 
-        // `fq-unify`: shared evaluation point in `[0, q*)^mu`, lifted per
+        // Shared evaluation point in `[0, q*)^mu`, lifted per
         // branch. Mirror of the row-major variant.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
@@ -884,11 +865,11 @@ impl_with_type_bounds!(ProverIdealChecked
 {
     /// Step 4: Evaluation projection ($\psi_a$: $F_q[X] \to F_q$).
     ///
-    /// **`fq-unify` projecting element.** Sample one shared integer
+    /// **Shared projecting element.** Sample one shared integer
     /// $a \in [0, q^*)$ once via [`shared_challenge::sample_shared_field_challenge`]
     /// and lift it into each branch's field. The $Q[X]$ branch consumes
     /// `projecting_elements[0]`; per-prime branches consume
-    /// `projecting_elements[i + 1]` (Phase F.2.b).
+    /// `projecting_elements[i + 1]`.
     ///
     /// Also builds the per-prime $\psi$-projected trace MLEs / scalars from
     /// each `fq_staging[i]` using `projecting_elements[i + 1]`, and threads
@@ -991,7 +972,7 @@ impl_with_type_bounds!(ProverEvalProjected
         let num_constraints = count_constraints::<U>();
         let max_degree = count_max_degree::<U>();
 
-        // `fq-unify`: sample one shared CPR batching challenge $\alpha$ in
+        // Sample one shared CPR batching challenge $\alpha$ in
         // $[0, q^*)$ and lift it into each branch's field. The Q[X] branch
         // consumes `folding_challenges[0]`; per-prime branches consume
         // `folding_challenges[i + 1]`.
@@ -1373,7 +1354,7 @@ impl_with_type_bounds!(ProverSumchecked
 
 impl_with_type_bounds!(ProverMultipointEvaled
 {
-    /// Step 7: Lift-and-project (Phase H proper, Approach C).
+    /// Step 7: Lift-and-project.
     ///
     /// 1. **Sample $q''$.** A fresh PCS-only prime, decoupled from the
     ///    constraint primes $q_0, q_1, \dots, q_n$. Sampled here (start of
@@ -1400,8 +1381,9 @@ impl_with_type_bounds!(ProverMultipointEvaled
     ///    in `primes()` order, then $q''$.
     ///
     /// **Soundness**: with $r_0$ shared across all constraint branches
-    /// (Phase G T1 invariant), the per-branch MP-eval consistency check
-    /// in `step6_lifted_evals` (verifier) binds each $\bar u_j^{(i)}$ to
+    /// (a consequence of the lockstep sumcheck), the per-branch MP-eval
+    /// consistency check in `step6_lifted_evals` (verifier) binds each
+    /// $\bar u_j^{(i)}$ to
     /// the prover's actual $q_i$-projected trace at $r_0$. The
     /// $q''$-branch lift is independently bound to the trace by the PCS
     /// open at $\mathbf r^\star$ in step 8.
@@ -1521,8 +1503,6 @@ impl_with_type_bounds!(ProverMultipointEvaled
 
         Ok(ProverLifted {
             base: self.base,
-            field_cfg: self.field_cfg,
-            all_field_cfgs: self.all_field_cfgs,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
@@ -1532,9 +1512,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             mp_proof: self.mp_proof,
-            r_0: self.r_0,
             mp_proofs_fq: self.mp_proofs_fq,
-            r_0_fq: self.r_0_fq,
             lifted_evals,
             lifted_evals_pp,
             q_pp_cfg,
@@ -1548,11 +1526,11 @@ impl_with_type_bounds!(ProverLifted
     /// Step 8: PCS open at $\mathbf r^\star := \mathbf r_0 \bmod q''$, where
     /// $q''$ was sampled at the start of step 7.
     ///
-    /// Per the `fq-unify` design, the PCS opening prime $q''$ is decoupled
-    /// from the constraint primes ($q_0$ and the declared $q_1, \dots, q_n$).
-    /// This anchors the witness-polynomial commitments to a single fresh
-    /// prime, so PCS soundness is governed entirely by $q''$ and is
-    /// independent of the constraint moduli.
+    /// The PCS opening prime $q''$ is decoupled from the constraint primes
+    /// ($q_0$ and the declared $q_1, \dots, q_n$). This anchors the
+    /// witness-polynomial commitments to a single fresh prime, so PCS
+    /// soundness is governed entirely by $q''$ and is independent of the
+    /// constraint moduli.
     ///
     /// **Transcript ordering**: $q''$ was already sampled at the start of
     /// step 7 (so that the $q''$-branch lifted evals could be computed and

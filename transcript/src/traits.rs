@@ -417,14 +417,6 @@ pub trait Transcript {
     {
         v.iter().for_each(|x| self.absorb_random_field(x, buf));
     }
-
-    /// Absorbs a slict of integers into the transcript.
-    fn absorb_random_int_slice<S>(&mut self, v: &[S], buf: &mut [u8])
-    where
-        S: Semiring + Transcribable,
-    {
-        v.iter().for_each(|x| self.absorb_random_int(x, buf));
-    }
 }
 
 //

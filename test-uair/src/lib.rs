@@ -1089,7 +1089,7 @@ where
 ///
 /// Used to exercise the per-prime $\mathbb F_{q_i}[X]$ ideal-check branch
 /// of the Zinc$+$ protocol end-to-end with multiple primes, including the
-/// lockstep multi-branch driver added by `fq-unify`.
+/// lockstep multi-branch sumcheck/MP-eval driver.
 #[derive(Clone, Debug)]
 pub struct TestUairFqLargePrime<R>(PhantomData<R>);
 
