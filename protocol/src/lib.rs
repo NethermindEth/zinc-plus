@@ -32,9 +32,7 @@ pub mod verifier;
 use rayon::prelude::*;
 
 use crate::fold::FoldTrace;
-use crypto_primitives::{
-    ConstIntRing, ConstIntSemiring, FixedSemiring, FromWithConfig, PrimeField, Semiring,
-};
+use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
 use std::{fmt::Debug, iter, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
@@ -54,10 +52,7 @@ use zinc_poly::{
     univariate::{
         binary::BinaryPoly,
         dense::DensePolynomial,
-        dynamic::{
-            over_field::DynamicPolynomialF,
-            over_fixed_semiring::{DynamicPolyVecFS, DynamicPolynomialFS},
-        },
+        dynamic::over_field::{DynamicPolyVecF, DynamicPolynomialF},
     },
 };
 use zinc_primality::PrimalityTest;
@@ -75,11 +70,18 @@ use zip_plus::{
 //
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
+///
+/// # Lifted-eval branches
+///
+/// Witness lifted evals are sent **per branch** (Phase H proper): for each
+/// of the $n + 2$ branches (Q[X] / $q_0$, the declared $q_1, \dots, q_n$,
+/// and the PCS-only $q''$), the prover sends a vector of
+/// `DynamicPolynomialF<F>` carrying the per-branch coefficient lift of
+/// each witness column. The verifier reads each branch's lifts under that
+/// branch's field cfg, no per-coefficient `from_with_cfg` projection is
+/// needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField>
-where
-    F::Integer: FixedSemiring,
-{
+pub struct Proof<F: PrimeField> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
@@ -93,23 +95,26 @@ where
     /// Multi-point evaluation sumcheck proof (combines up_evals and
     /// down_evals at `r*` into a single evaluation point `r_0`).
     pub multipoint_eval: MultipointEvalProof<F>,
-    /// Witness-only polynomial MLE evaluations at $r_0$ as
-    /// **integer-coefficient** polynomials $\bar u_j \in \mathbb{Z}[X]$,
-    /// ordered as `[wit_bin..., wit_arb..., wit_int...]`.
+    /// Witness-only polynomial MLE evaluations at $r_0$, **per constraint
+    /// branch**.
     ///
-    /// The verifier recomputes public lifted-evals from public data
-    /// (also as integer polys), interleaves them with these, and projects
-    /// per-branch via $\phi_{q_i}$ + $\psi_{\text{proj}[i]}$ into each
-    /// branch's field for the MP-eval sumcheck consistency check. Zip+
-    /// PCS verify uses the $q_0$-branch projection (in the current
-    /// pre-Phase-I shape) — Phase I re-anchors that to a fresh $q''$.
+    /// Indexing follows the standard branch convention used throughout
+    /// the protocol:
+    /// * `witness_lifted_evals[0]` — Q[X] branch under $q_0$, $\bar
+    ///   u_j^{(0)}(X) = \sum_b \mathrm{eq}(b, r_0^{(0)}) \cdot u_j(b) \in
+    ///   \mathbb F_{q_0}[X]$.
+    /// * `witness_lifted_evals[i]` for $i \in 1..=n$ — the $i$-th declared
+    ///   prime branch from [`zinc_uair::UairSignature::primes`], lifted into
+    ///   $\mathbb F_{q_i}[X]$ at $r_0$ projected mod $q_i$.
     ///
-    /// **TODO(fq-soundness)**: today the integers in this field sit in
-    /// $[0, q_0)$ (produced by lifting the $\mathbb{F}_{q_0}$-arithmetic
-    /// accumulator back to $\mathbb{Z}$), so they only soundly bind the
-    /// $q_0$ branch. Final Phase H widens this to the full CRT range
-    /// $[0, \prod_i q_i \cdot q'')$ so all branches are bound.
-    pub witness_lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
+    /// Length is `n + 1` where `n = primes().len()`. Each inner Vec
+    /// orders columns as `[wit_bin..., wit_arb..., wit_int...]`.
+    ///
+    /// The verifier recomputes per-branch public lifted-evals from public
+    /// data, interleaves them with these, evaluates at
+    /// `projecting_elements[branch_idx]` for the per-branch MP-eval
+    /// consistency check.
+    pub witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
     pub lookup_proof: Option<BatchedLookupProof<F>>,
     /// Binary-polynomial booleanity argument proof. `None` when the UAIR
@@ -130,18 +135,23 @@ where
     /// Per-prime multipoint-eval proofs, one per declared prime, produced
     /// by the lockstep multipoint-eval in Phase G (step 6). Empty for
     /// legacy UAIRs.
-    ///
-    /// TODO(fq-soundness): the per-prime multipoint-eval lands the
-    /// $r_0$ point per branch, but the lift-to-$\mathbb{Z}$ check
-    /// (Phase H) and the $q''$-anchored PCS open (Phase I) that ties
-    /// these endpoints back to the committed trace are NYI.
     pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
+    /// Witness-only lifted MLE evaluations under the **PCS-only prime
+    /// $q''$**, sampled fresh at step 7 start. Length equals the number of
+    /// witness columns. The verifier uses these directly for the PCS
+    /// evaluation check at $\mathbf r^\star = r_0 \bmod q''$ — no
+    /// per-coefficient $\phi_{q''}$ projection needed.
+    ///
+    /// Kept separate from `witness_lifted_evals` because $q''$ plays a
+    /// distinct role (PCS-only; no MP-eval / constraint check happens
+    /// under $q''$).
+    pub witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
 where
     F: PrimeField,
-    F::Integer: FixedSemiring + ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
@@ -161,9 +171,17 @@ where
         let (multipoint_eval, bytes) =
             MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
-        let (witness_vec, bytes) =
-            DynamicPolyVecFS::<F::Integer>::read_transcription_bytes_subset(bytes);
-        let witness_lifted_evals = witness_vec.0;
+        // witness_lifted_evals: u32 count (= n + 1, one per constraint
+        // branch) + length-prefixed DynamicPolyVecF entries. Each entry
+        // carries its own field-cfg header.
+        let (n_wlf, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_wlf = usize::try_from(n_wlf).expect("n_wlf must fit into usize");
+        let mut witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>> = Vec::with_capacity(n_wlf);
+        for _ in 0..n_wlf {
+            let (wv, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            witness_lifted_evals.push(wv.0);
+            bytes = rest;
+        }
 
         // booleanity_proof: presence flag (u32: 0 = absent, 1 = present)
         // followed by the proof body (length-prefixed) when present.
@@ -219,6 +237,11 @@ where
             bytes = rest;
         }
 
+        // witness_lifted_evals_pp: single length-prefixed DynamicPolyVecF
+        // (q'' branch).
+        let (witness_pp_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+        let witness_lifted_evals_pp = witness_pp_vec.0;
+
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         assert!(bytes.is_empty(), "All bytes should be consumed");
@@ -237,6 +260,7 @@ where
             cpr_proofs_fq,
             combined_sumchecks_fq,
             multipoint_evals_fq,
+            witness_lifted_evals_pp,
         }
     }
 
@@ -265,9 +289,17 @@ where
         // multipoint_eval: u32 length prefix + data
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
-        // witness_lifted_evals: u32 length prefix + DynamicPolyVecFS encoding
-        buf = DynamicPolyVecFS::reinterpret(&self.witness_lifted_evals)
-            .write_transcription_bytes_subset(buf);
+        // witness_lifted_evals (per constraint branch, n + 1 entries):
+        // u32 count + per-branch DynamicPolyVecF (each carries its own
+        // field-cfg header). Index 0 is Q[X] / q_0, indices 1..=n are
+        // declared primes.
+        let n_wlf = u32::try_from(self.witness_lifted_evals.len())
+            .expect("witness_lifted_evals length must fit into u32");
+        n_wlf.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
+        buf = &mut buf[u32::NUM_BYTES..];
+        for wlf in &self.witness_lifted_evals {
+            buf = DynamicPolyVecF::reinterpret(wlf).write_transcription_bytes_subset(buf);
+        }
 
         // booleanity_proof: u32 presence flag, then (optionally) the body
         // with its own length prefix.
@@ -318,6 +350,11 @@ where
             buf = mp.write_transcription_bytes_subset(buf);
         }
 
+        // witness_lifted_evals_pp: single length-prefixed DynamicPolyVecF
+        // (q'' branch).
+        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals_pp)
+            .write_transcription_bytes_subset(buf);
+
         // TODO: serialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
         let _ = buf;
@@ -327,11 +364,10 @@ where
 impl<F> Transcribable for Proof<F>
 where
     F: PrimeField,
-    F::Integer: FixedSemiring + ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let witness_vec = DynamicPolyVecFS::reinterpret(&self.witness_lifted_evals);
         let booleanity_bytes = match &self.booleanity_proof {
             Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
             None => 0,
@@ -356,6 +392,15 @@ where
             .iter()
             .map(|mp| MultipointEvalProof::<F>::LENGTH_NUM_BYTES + mp.get_num_bytes())
             .sum();
+        let witness_lifted_evals_bytes: usize = self
+            .witness_lifted_evals
+            .iter()
+            .map(|wlf| {
+                DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVecF::reinterpret(wlf).get_num_bytes()
+            })
+            .sum();
+        let witness_pp_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals_pp);
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -369,8 +414,10 @@ where
             + self.multipoint_eval.get_num_bytes()
             // TODO: add lookup_proof size once BatchedLookupProof gets
             // Transcribable impls (lookup is not yet implemented).
-            + DynamicPolyVecFS::<F::Integer>::LENGTH_NUM_BYTES
-            + witness_vec.get_num_bytes()
+            //
+            // witness_lifted_evals: count + sum of (length-prefix + body) per branch
+            + u32::NUM_BYTES
+            + witness_lifted_evals_bytes
             // booleanity presence flag + optional payload
             + u32::NUM_BYTES
             + booleanity_bytes
@@ -386,6 +433,9 @@ where
             // multipoint_evals_fq: count + sum of (length-prefix + body) per entry
             + u32::NUM_BYTES
             + multipoint_evals_fq_bytes
+            // witness_lifted_evals_pp: single length-prefixed body
+            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+            + witness_pp_vec.get_num_bytes()
     }
 }
 
@@ -1008,14 +1058,7 @@ mod tests {
     ///
     /// UAIR constraint: `a + b - c \in (X - 2)`
     /// (one constraint, no polynomial multiplication, ideal = `<X - 2>`).
-    // TODO(fq-soundness): re-enable once `compute_lifted_evals` is widened
-    // to produce integer representatives in $[0, \prod q_i \cdot q'')$ rather
-    // than $[0, q_0)$. The Phase I PCS open at $q''$ requires the lifted
-    // integer-coefficient polys to carry the full CRT-range value so that
-    // $\phi_{q''}(\bar u_j)$ matches the prover's $q''$-projected trace at
-    // $\mathbf r^*$. Today's stepping-stone lift only soundly binds $q_0$.
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending (see TODO above)"]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>>(
@@ -1046,7 +1089,6 @@ mod tests {
     /// magnitude. With num_vars=2 (4 rows), max degree=6 and max coefficient
     /// ~= 127^8 ~= 2^56, which fits in i64.
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_simple_multiplication() {
         let num_vars = 2;
         do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
@@ -1068,7 +1110,6 @@ mod tests {
     /// Uses mixed shift amounts (col a: shift 1, col b: shift 2).
     /// Constraints: `a[i+1] = a[i] + b[i], c[i] = b[i+2]`.
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_mixed_shifts() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
@@ -1090,7 +1131,6 @@ mod tests {
     /// Uses binary_poly (1 col) and int (1 col) trace types.
     /// UAIR constraint: `binary_poly[0] - int[0] \in <X - 2>`
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_binary_decomposition() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
@@ -1120,7 +1160,6 @@ mod tests {
     /// committed trace is NYI; once that lands this test will also catch
     /// "ideal-membership-by-construction" cheaters.
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_fq_large_prime() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt>>(
@@ -1150,7 +1189,6 @@ mod tests {
     ///   up.binary_poly[i] - down.binary_poly[i] = 0, for i=1..15
     /// ```
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_big_linear() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
@@ -1172,7 +1210,6 @@ mod tests {
     /// Same as [`BigLinearUair`], but with the first few binary_poly columns as
     /// public inputs.
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_big_linear_with_public_input() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
@@ -1202,7 +1239,6 @@ mod tests {
     ///   bp[12] - X * bp[13] \in <X - 1>
     /// ```
     #[test]
-    #[ignore = "Phase H wide-accumulator widening pending"]
     fn test_e2e_sha_proxy() {
         let num_vars = 8;
         do_test::<TestZincTypesIprs, ShaProxy<ZtInt>>(
@@ -1236,7 +1272,7 @@ mod tests {
             ),
             default_project_ideal!(),
             default_project_fq_ideal!(),
-            |proof| proof.witness_lifted_evals.swap(0, 1),
+            |proof| proof.witness_lifted_evals[0].swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),

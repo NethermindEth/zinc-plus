@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FixedSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
 use std::{borrow::Cow, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -14,10 +14,7 @@ use zinc_piop::{
     sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckGroup},
 };
 use zinc_poly::{
-    mle::DenseMultilinearExtension,
-    univariate::dynamic::{
-        over_field::DynamicPolynomialF, over_fixed_semiring::DynamicPolynomialFS,
-    },
+    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 use zinc_uair::{
@@ -240,6 +237,11 @@ pub struct ProverEvalProjected<
     #[allow(dead_code)] // Consumed by Phase H / I.
     projecting_elements: Vec<F>,
     projected_trace: ProjectedTrace<F>,
+    /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
+    /// forward from step 2's `fq_staging`. Reused by step 7
+    /// (`step7_lift_and_project`) to avoid re-projecting the integer trace
+    /// per declared prime. Empty for UAIRs with no declared fq primes.
+    projected_trace_fq: Vec<ProjectedTrace<F>>,
     ic_proof: IdealCheckProof<F>,
     /// Per-branch IC evaluation points (full $\text{n+1} \times \mu$
     /// matrix). `[0]` feeds the Q[X] CPR; `[i + 1]` feeds the per-prime
@@ -290,6 +292,10 @@ pub struct ProverSumchecked<
     #[allow(dead_code)] // Used by later `fq-unify` phases.
     folding_challenges: Vec<F>,
     projected_trace: ProjectedTrace<F>,
+    /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
+    /// forward from step 4 for reuse by step 7's lifted-eval computation.
+    /// Empty for UAIRs with no declared fq primes.
+    projected_trace_fq: Vec<ProjectedTrace<F>>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     /// Trace MLEs at the original $\psi_a$ projecting element, as built
@@ -350,6 +356,10 @@ pub struct ProverMultipointEvaled<
     #[allow(dead_code)] // Used by later `fq-unify` phases.
     all_field_cfgs: Vec<F::Config>,
     projected_trace: ProjectedTrace<F>,
+    /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
+    /// forward from step 5 for reuse by step 7's lifted-eval computation.
+    /// Empty for UAIRs with no declared fq primes.
+    projected_trace_fq: Vec<ProjectedTrace<F>>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -385,16 +395,15 @@ pub struct ProverLifted<
     F: PrimeField,
     const D: usize,
     const FD: usize,
-> where
-    F::Integer: FixedSemiring,
-{
+> {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
-    /// Q-branch field cfg ($q_0$). Retained for diagnostic and future use
-    /// (e.g. consistency checks against per-branch configs); the PCS open
-    /// in `step8_pcs_open` runs under a freshly sampled $q''$ instead.
+    /// Q-branch field cfg ($q_0$). Carried to derive the `lifted_evals`
+    /// type tags and to absorb Q-branch coefficients into the transcript.
+    /// The PCS open in `step8_pcs_open` runs under `q_pp_cfg` instead.
     #[allow(dead_code)] // PCS open uses freshly-sampled $q''$, not $q_0$.
     field_cfg: F::Config,
-    /// Per-branch field configs.
+    /// Per-branch field configs (`[0]` = `Q[X]`, `[i+1]` = declared prime `i`
+    /// for `F_(q_i)[X]`).
     #[allow(dead_code)] // Used by later `fq-unify` phases.
     all_field_cfgs: Vec<F::Config>,
     ic_proof: IdealCheckProof<F>,
@@ -406,6 +415,10 @@ pub struct ProverLifted<
     lookup_proof: Option<BatchedLookupProof<F>>,
     booleanity_proof: Option<BooleanityProof<F>>,
     mp_proof: MultipointEvalProof<F>,
+    /// Q-branch sumcheck output point $r_0$ (lifted into $q_0$ cfg).
+    /// Step 8 uses `r_star` (= $r_0 \bmod q''$) instead — `r_0` is kept
+    /// here for diagnostic / future use.
+    #[allow(dead_code)] // Step 8 uses `r_star`; `r_0` retained for traceability.
     r_0: Vec<F>,
     /// Per-prime multipoint-eval proofs threaded forward from
     /// `ProverMultipointEvaled`.
@@ -414,11 +427,24 @@ pub struct ProverLifted<
     #[allow(dead_code)] // Consumed by Phase H / I.
     r_0_fq: Vec<Vec<F>>,
 
-    // New
-    /// Integer-coefficient lifted MLE evaluations at $r_0$, one per
-    /// trace column. Public columns first, then witness columns,
-    /// interleaved by type. See [`compute_lifted_evals`].
-    lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
+    // New (Phase H proper):
+    /// Per-constraint-branch **witness-only** lifted MLE evaluations at
+    /// $r_0$ (or branch-specific $r_0^{(i)}$). Layout: index `0` is the
+    /// Q-branch ($q_0$); indices `1..=n` are the declared primes in
+    /// `UairSignature::primes()` order. Length = `1 + r_0_fq.len()`.
+    /// The verifier recomputes the public-column half per branch.
+    lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// $q''$-branch lifted MLE evaluations at $r_0 \bmod q''$, witness
+    /// columns only. Used directly by step8's PCS open as the
+    /// $\phi_{q''}$-projected claim. Tracked separately from
+    /// `lifted_evals` because the $q''$-branch is PCS-only (no
+    /// per-branch constraint check).
+    lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    /// PCS-only prime cfg sampled at step 7 start.
+    q_pp_cfg: F::Config,
+    /// $\mathbf r^\star = \mathbf r_0 \bmod q''$ — the PCS evaluation
+    /// point for step 8.
+    r_star: Vec<F>,
 }
 
 /// After step 8 (PCS open). No new fields are added here, but the PCS
@@ -433,9 +459,7 @@ pub struct ProverPcsOpened<
     F: PrimeField,
     const D: usize,
     const FD: usize,
-> where
-    F::Integer: FixedSemiring,
-{
+> {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     ic_proof: IdealCheckProof<F>,
     ic_proof_fq: Vec<IdealCheckProof<F>>,
@@ -448,7 +472,12 @@ pub struct ProverPcsOpened<
     mp_proof: MultipointEvalProof<F>,
     /// Per-prime multipoint-eval proofs threaded forward.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
-    lifted_evals: Vec<DynamicPolynomialFS<F::Integer>>,
+    /// Per-constraint-branch witness-only lifted evals. Index `0` is the
+    /// Q-branch; indices `1..=n` are the declared primes (in
+    /// `UairSignature::primes()` order). Length = `1 + mp_proofs_fq.len()`.
+    lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// $q''$-branch witness-only lifted evals (PCS-only branch).
+    lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
 }
 
 //
@@ -488,7 +517,7 @@ where
     Zt: ZincTypes<D, FD>,
     U: Uair,
     F: PrimeField,
-    F::Integer: FixedSemiring + ConstTranscribable,
+    F::Integer: ConstTranscribable,
 {
     /// Step 0: Folding the trace.
     #[allow(clippy::type_complexity)]
@@ -884,18 +913,29 @@ impl_with_type_bounds!(ProverIdealChecked
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
         // Per-prime $F_{q_i}[X]$ branches: same construction with each
-        // branch's $\psi$ projecting element.
+        // branch's $\psi$ projecting element. The per-prime
+        // $\phi_{q_i}$-projected coefficient traces are retained and
+        // threaded forward (`projected_trace_fq`) so step 7's
+        // lifted-eval computation can reuse them instead of
+        // re-projecting from the integer trace.
+        let n_fq = self.fq_staging.len();
+        let mut projected_trace_fq: Vec<ProjectedTrace<F>> = Vec::with_capacity(n_fq);
         let mut projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
-            Vec::with_capacity(self.fq_staging.len());
+            Vec::with_capacity(n_fq);
         let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
-            Vec::with_capacity(self.fq_staging.len());
+            Vec::with_capacity(n_fq);
         for (prime_idx, staging) in self.fq_staging.into_iter().enumerate() {
             let branch_idx = add!(prime_idx, 1);
+            let FqProjStaging {
+                projected_trace: projected_trace_i,
+                projected_scalars_fx: scalars_fx_i,
+            } = staging;
             let trace_f_i =
-                evaluate_trace_to_column_mles(&staging.projected_trace, &projecting_elements[branch_idx]);
+                evaluate_trace_to_column_mles(&projected_trace_i, &projecting_elements[branch_idx]);
             let scalars_f_i =
-                project_scalars_to_field(staging.projected_scalars_fx, &projecting_elements[branch_idx])
+                project_scalars_to_field(scalars_fx_i, &projecting_elements[branch_idx])
                     .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+            projected_trace_fq.push(projected_trace_i);
             projected_trace_f_fq.push(trace_f_i);
             projected_scalars_f_fq.push(scalars_f_i);
         }
@@ -907,6 +947,7 @@ impl_with_type_bounds!(ProverIdealChecked
             q_star_idx: self.q_star_idx,
             projecting_elements,
             projected_trace: self.projected_trace,
+            projected_trace_fq,
             ic_proof: self.ic_proof,
             ic_eval_points: self.ic_eval_points,
             ic_proof_fq: self.ic_proof_fq,
@@ -1128,6 +1169,7 @@ impl_with_type_bounds!(ProverEvalProjected
             q_star_idx: self.q_star_idx,
             folding_challenges,
             projected_trace: self.projected_trace,
+            projected_trace_fq: self.projected_trace_fq,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             projected_trace_f: self.projected_trace_f,
@@ -1312,6 +1354,7 @@ impl_with_type_bounds!(ProverSumchecked
             field_cfg: self.field_cfg,
             all_field_cfgs: self.all_field_cfgs,
             projected_trace: self.projected_trace,
+            projected_trace_fq: self.projected_trace_fq,
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             cpr_proof: self.cpr_proof,
@@ -1330,52 +1373,150 @@ impl_with_type_bounds!(ProverSumchecked
 
 impl_with_type_bounds!(ProverMultipointEvaled
 {
-    /// Step 7: Lift-and-project. Computes per-column **integer-coefficient**
-    /// polynomial MLE evaluations at `r_0` ($\bar u_j \in \mathbb{Z}[X]$)
-    /// and absorbs them into the transcript.
+    /// Step 7: Lift-and-project (Phase H proper, Approach C).
     ///
-    /// The verifier per-branch lifts each $\bar u_j$ into branch $i$'s
-    /// field via $\phi_{q_i}$, then evaluates at
-    /// `projecting_elements[i]` to derive the scalar `open_evals` for the
-    /// MP-eval sumcheck consistency check on each branch.
+    /// 1. **Sample $q''$.** A fresh PCS-only prime, decoupled from the
+    ///    constraint primes $q_0, q_1, \dots, q_n$. Sampled here (start of
+    ///    step 7) — before any lifted evals are produced, so that the
+    ///    $q''$-branch lift can be computed and sent in this step. This
+    ///    is post-commitments and post-$r_0$, so soundness is preserved
+    ///    (the prover cannot influence $q''$).
+    /// 2. **Compute per-branch lifted MLE evaluations** at $r_0$:
+    ///    - Q-branch ($q_0$): all columns (public + witness) interleaved by
+    ///      UAIR column layout, stored locally; only witness columns make
+    ///      it into the proof.
+    ///    - Per declared prime $q_i$ (i ≥ 1): witness-only lifted evals
+    ///      under that branch's field cfg. The $\phi_{q_i}$-projected
+    ///      coefficient trace was already built in step 2 (`fq_staging`)
+    ///      and threaded through `projected_trace_fq`; this step runs
+    ///      `compute_lifted_evals` on it at $r_0$ lifted into branch
+    ///      $i$'s field.
+    ///    - $q''$-branch: witness-only lifted evals under $q''$. Same
+    ///      pattern as fq branches; the $r_0$ lifted into $\mathbb F_{q''}$
+    ///      gives $\mathbf r^\star = \mathbf r_0 \bmod q''$ which doubles
+    ///      as the PCS evaluation point in step 8.
+    /// 3. **Absorb** each branch's coefficients into the FS transcript in
+    ///    a deterministic order: Q-branch first, then each declared prime
+    ///    in `primes()` order, then $q''$.
+    ///
+    /// **Soundness**: with $r_0$ shared across all constraint branches
+    /// (Phase G T1 invariant), the per-branch MP-eval consistency check
+    /// in `step6_lifted_evals` (verifier) binds each $\bar u_j^{(i)}$ to
+    /// the prover's actual $q_i$-projected trace at $r_0$. The
+    /// $q''$-branch lift is independently bound to the trace by the PCS
+    /// open at $\mathbf r^\star$ in step 8.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_lift_and_project(
         mut self,
     ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // Compute per-column polynomial MLE evaluations at r_0 as
-        // integer-coefficient polynomials. See `compute_lifted_evals_int`
-        // for the stepping-stone soundness caveat (today the integers sit
-        // in [0, q_0)).
-        let lifted_evals = compute_lifted_evals(
+        // --- Sample q'' (PCS-only prime) ---
+        let q_pp_cfg = self
+            .base
+            .pcs_transcript
+            .fs_transcript
+            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+
+        // Shared r_0 integer endpoint; r_star = r_0 mod q'' for PCS.
+        let r_0_int: Vec<F::Integer> =
+            self.r_0.iter().map(|x| x.lift_to_integer()).collect();
+        let r_star: Vec<F> = r_0_int
+            .iter()
+            .map(|x| F::from_with_cfg(x.clone(), &q_pp_cfg))
+            .collect();
+
+        // Witness-col extraction helper. UAIR's column layout interleaves
+        // public and witness blocks per type (bin / arb / int), so we slice
+        // out the witness sub-blocks and concatenate.
+        let sig = self.base.uair_signature.clone();
+        let pub_cols = sig.public_cols();
+        let num_pub_bin = pub_cols.num_binary_poly_cols();
+        let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
+        let num_pub_int = pub_cols.num_int_cols();
+        let total = sig.total_cols();
+        let num_total_bin = total.num_binary_poly_cols();
+        let num_total_arb = total.num_arbitrary_poly_cols();
+        let witness = sig.witness_cols();
+        let witness_arb_offset = add!(num_total_bin, num_pub_arb);
+        let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
+        let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
+
+        let witness_only =
+            |all: &[DynamicPolynomialF<F>]| -> Vec<DynamicPolynomialF<F>> {
+                all[num_pub_bin..num_total_bin]
+                    .iter()
+                    .chain(&all[witness_arb_offset..witness_arb_end])
+                    .chain(&all[witness_int_offset..])
+                    .cloned()
+                    .collect()
+            };
+
+        // --- Per-constraint-branch witness-only lifted evals ---
+        // Index 0: Q-branch (q_0) at r_0. Indices 1..=n: declared primes
+        // at branch-specific r_0_fq[i-1]. Length = 1 + n_fq.
+        let n_fq = self.r_0_fq.len();
+        let mut lifted_evals: Vec<Vec<DynamicPolynomialF<F>>> =
+            Vec::with_capacity(add!(n_fq, 1));
+
+        // Q-branch (index 0): compute all-col lifted evals, then keep
+        // witness-only. We need the all-col version momentarily for the
+        // `compute_lifted_evals` call signature (which projects from the
+        // already-projected trace), but only the witness slice is sent.
+        let q_lifted_all = compute_lifted_evals(
             &self.r_0,
             &self.base.original_trace.binary_poly,
             &self.projected_trace,
             &self.field_cfg,
         );
+        lifted_evals.push(witness_only(&q_lifted_all));
 
-        // **Today** (stepping-stone implementation): the eq-sum accumulator runs
-        // in $\mathbb{F} = \mathbb{F}_{q_0}$ exactly as in
-        // [`compute_lifted_evals`], then each coefficient is lifted back to
-        // $\mathbb{F}$::Integer via [`Field::lift_to_integer`]. This means the
-        // integer representation sits in $[0, q_0)$ and is therefore only
-        // soundly bound modulo $q_0$.
-        //
-        // **TODO(fq-soundness)**: replace the inner arithmetic with a wider
-        // generic accumulator (over `Zt::Int` / `F::Integer` directly via
-        // `Semiring` traits, no concrete `BigInt`) so the integer representation
-        // is the (unique) element of $[0, \prod_i q_i \cdot q'')$. That gives
-        // per-branch soundness for fq branches via
-        // $\phi_{q_i}(\bar u_j) \cdot \psi_{\text{proj}[i]} = \mathrm{up\\_evals}[i][j]$.
-        // Until then, the per-branch projection check is structurally in place
-        // but binds only the $q_0$ branch.
-        let lifted_evals: Vec<_> = lifted_evals.iter().map(|p| p.lift_to_integers()).collect();
+        // Declared-prime branches (indices 1..=n). Reuse the per-prime
+        // $\phi_{q_i}$-projected coefficient traces threaded forward from
+        // step 2's `fq_staging` (via steps 4--6) — same layout as the
+        // Q-branch's `projected_trace`, just under each $q_i$'s cfg.
+        debug_assert_eq!(self.projected_trace_fq.len(), n_fq);
+        for (prime_idx, projected_trace_i) in self.projected_trace_fq.iter().enumerate() {
+            let branch_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let r_0_i = &self.r_0_fq[prime_idx];
+            let lifted_evals_i = compute_lifted_evals(
+                r_0_i,
+                &self.base.original_trace.binary_poly,
+                projected_trace_i,
+                cfg_i,
+            );
+            lifted_evals.push(witness_only(&lifted_evals_i));
+        }
 
-        // Absorb integer coefficients into the transcript
+        // --- q'' branch: witness-only lifted evals (PCS-only) ---
+        let projected_trace_pp = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
+            self.base.original_trace,
+            &q_pp_cfg,
+        );
+        let lifted_evals_pp_full = compute_lifted_evals(
+            &r_star,
+            &self.base.original_trace.binary_poly,
+            &ProjectedTrace::RowMajor(projected_trace_pp),
+            &q_pp_cfg,
+        );
+        let lifted_evals_pp = witness_only(&lifted_evals_pp_full);
+
+        // --- Absorb all per-branch coefficients into the transcript ---
+        // Uniform order: each constraint branch's witness-only lifted
+        // evals, then the q'' branch. Mirrored in step6_lifted_evals.
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
-        for bar_u in &lifted_evals {
+        for lifted_i in &lifted_evals {
+            for bar_u in lifted_i {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+            }
+        }
+        for bar_u in &lifted_evals_pp {
             self.base
                 .pcs_transcript
                 .fs_transcript
-                .absorb_random_int_slice(&bar_u.coeffs, &mut transcription_buf);
+                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
         }
 
         Ok(ProverLifted {
@@ -1395,14 +1536,17 @@ impl_with_type_bounds!(ProverMultipointEvaled
             mp_proofs_fq: self.mp_proofs_fq,
             r_0_fq: self.r_0_fq,
             lifted_evals,
+            lifted_evals_pp,
+            q_pp_cfg,
+            r_star,
         })
     }
 });
 
 impl_with_type_bounds!(ProverLifted
 {
-    /// Step 8: PCS open at $\mathbf r^* := \mathbf r_0 \bmod q''$, where $q''$
-    /// is a freshly sampled PCS-only prime.
+    /// Step 8: PCS open at $\mathbf r^\star := \mathbf r_0 \bmod q''$, where
+    /// $q''$ was sampled at the start of step 7.
     ///
     /// Per the `fq-unify` design, the PCS opening prime $q''$ is decoupled
     /// from the constraint primes ($q_0$ and the declared $q_1, \dots, q_n$).
@@ -1410,29 +1554,17 @@ impl_with_type_bounds!(ProverLifted
     /// prime, so PCS soundness is governed entirely by $q''$ and is
     /// independent of the constraint moduli.
     ///
-    /// **Transcript ordering**: $q''$ is sampled first (before the binary
-    /// folding challenges) so that the folding randomness is bound to the
-    /// PCS prime, not the other way around. Mirrored in
+    /// **Transcript ordering**: $q''$ was already sampled at the start of
+    /// step 7 (so that the $q''$-branch lifted evals could be computed and
+    /// sent there). Step 8 only samples the binary folding challenges
+    /// under $q''$, then calls the PCS opens. Mirrored in
     /// [`step7_pcs_verify`](crate::ZincPlusPiop::step7_pcs_verify).
     pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let witness_trace = &self.base.folded_witness_trace;
-
-        // Sample q'', the PCS-only prime. Decoupled from q0 and the
-        // declared q_i; the only role of q'' is to anchor the PCS open.
-        let q_pp_cfg = self
-            .base
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
-
-        // Build (r* = r0 mod q'') component-wise.
-        let r_star: Vec<F> = self
-            .r_0
-            .iter()
-            .map(|x| F::from_with_cfg(x.lift_to_integer(), &q_pp_cfg))
-            .collect();
+        let q_pp_cfg = &self.q_pp_cfg;
+        let r_star = &self.r_star;
 
         // Folded witness columns are proved using the extended evaluation
         // point `r_star_ext = r_star || folding_challenges`. Folding
@@ -1441,7 +1573,7 @@ impl_with_type_bounds!(ProverLifted
         let num_folding_challenges = Zt::BinaryFold::FOLDING_FACTOR.ilog2();
         (0..num_folding_challenges).for_each(|_| {
             let g_chal: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
-            let gamma = F::from_with_cfg(&g_chal, &q_pp_cfg);
+            let gamma = F::from_with_cfg(&g_chal, q_pp_cfg);
             r_star_ext.push(gamma);
         });
 
@@ -1452,7 +1584,7 @@ impl_with_type_bounds!(ProverLifted
                 &witness_trace.binary_poly,
                 &r_star_ext,
                 hint_bin,
-                &q_pp_cfg,
+                q_pp_cfg,
             )?;
         }
         if let Some(hint_arb) = &self.base.hint_arb {
@@ -1460,9 +1592,9 @@ impl_with_type_bounds!(ProverLifted
                 &mut self.base.pcs_transcript,
                 self.base.pp_arb,
                 &witness_trace.arbitrary_poly,
-                &r_star,
+                r_star,
                 hint_arb,
-                &q_pp_cfg,
+                q_pp_cfg,
             )?;
         }
         if let Some(hint_int) = &self.base.hint_int {
@@ -1470,9 +1602,9 @@ impl_with_type_bounds!(ProverLifted
                 &mut self.base.pcs_transcript,
                 self.base.pp_int,
                 &witness_trace.int,
-                &r_star,
+                r_star,
                 hint_int,
-                &q_pp_cfg,
+                q_pp_cfg,
             )?;
         }
 
@@ -1489,6 +1621,7 @@ impl_with_type_bounds!(ProverLifted
             mp_proof: self.mp_proof,
             mp_proofs_fq: self.mp_proofs_fq,
             lifted_evals: self.lifted_evals,
+            lifted_evals_pp: self.lifted_evals_pp,
         })
     }
 });
@@ -1497,34 +1630,12 @@ impl_with_type_bounds!(ProverPcsOpened
 {
     /// Assemble the final proof from accumulated state.
     pub fn finish(self) -> Result<Proof<F>, ProtocolError<F>> {
-        let sig = self.base.uair_signature;
         let zip_proof = self.base.pcs_transcript.stream.into_inner();
         let commitments = (
             self.base.commitment_bin,
             self.base.commitment_arb,
             self.base.commitment_int,
         );
-
-        let lifted_evals = self.lifted_evals;
-
-        // Extract witness-only lifted evals (public columns come first in trace).
-        let pub_cols = sig.public_cols();
-        let num_pub_bin = pub_cols.num_binary_poly_cols();
-        let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
-        let num_pub_int = pub_cols.num_int_cols();
-        let total = sig.total_cols();
-        let num_total_bin = total.num_binary_poly_cols();
-        let num_total_arb = total.num_arbitrary_poly_cols();
-        let witness = sig.witness_cols();
-        let witness_arb_offset = add!(num_total_bin, num_pub_arb);
-        let witness_arb_end = add!(witness_arb_offset, witness.num_arbitrary_poly_cols());
-        let witness_int_offset = add!(add!(num_total_bin, num_total_arb), num_pub_int);
-        let witness_lifted_evals: Vec<_> = lifted_evals[num_pub_bin..num_total_bin]
-            .iter()
-            .chain(&lifted_evals[witness_arb_offset..witness_arb_end])
-            .chain(&lifted_evals[witness_int_offset..])
-            .cloned()
-            .collect();
 
         Ok(Proof {
             commitments,
@@ -1533,13 +1644,14 @@ impl_with_type_bounds!(ProverPcsOpened
             combined_sumcheck: self.combined_sumcheck,
             multipoint_eval: self.mp_proof,
             zip: zip_proof,
-            witness_lifted_evals,
+            witness_lifted_evals: self.lifted_evals,
             lookup_proof: self.lookup_proof,
             booleanity_proof: self.booleanity_proof,
             ideal_checks_fq: self.ic_proof_fq,
             cpr_proofs_fq: self.cpr_proofs_fq,
             combined_sumchecks_fq: self.combined_sumchecks_fq,
             multipoint_evals_fq: self.mp_proofs_fq,
+            witness_lifted_evals_pp: self.lifted_evals_pp,
         })
     }
 });
