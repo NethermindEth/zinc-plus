@@ -116,7 +116,7 @@ pub struct ProverProjectedCombined<
     /// `UairSignature::primes()`), pre-staged in step 2 so step 3's per-prime
     /// ideal check can read them. Empty for legacy UAIRs.
     ///
-    /// TODO(fq-perf): the row-major projection is duplicated -- once for the
+    /// TODO(perf): the row-major projection is duplicated -- once for the
     /// Q[X] branch and once per prime here. A future optimization could
     /// emit all projections in one trace sweep.
     fq_staging: Vec<FqProjStaging<U, F>>,
@@ -145,6 +145,10 @@ pub struct ProverProjectedMleFirst<
     q_star_idx: usize,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ projections, column-major layout
     /// counterpart of [`ProverProjectedCombined::fq_staging`].
+    ///
+    /// TODO(perf): the column-major projection is duplicated -- once for the
+    /// Q[X] branch and once per prime here. A future optimization could
+    /// emit all projections in one trace sweep.
     fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
@@ -198,14 +202,6 @@ pub struct ProverIdealChecked<
     ic_eval_points: Vec<Vec<F>>,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in `base.uair_signature.primes()`, in order.
-    ///
-    /// TODO(fq-soundness): each entry is currently only a standalone ideal-membership
-    /// check on the per-prime combined polynomial $e_{i,t}$; the
-    /// downstream per-prime CPR + sumcheck + multipoint-eval + PCS-open
-    /// chain that ties $e_{i,t}$ back to the committed trace via
-    /// $\phi_{q_i}(\hat f_0)$ is **not** present yet. See
-    /// [`Proof::ideal_checks_fq`] for the soundness gap and the planned
-    /// optimization (one shared $\mathbf r \in [0, q^*)^\mu$).
     ic_proof_fq: Vec<IdealCheckProof<F>>,
 }
 
@@ -697,14 +693,6 @@ impl_with_type_bounds!(ProverProjectedCombined
     /// shared integer vector into its own field via $F::from\_with\_cfg$.
     /// Since each shared integer is strictly less than every $q_i$, the
     /// lift is a type cast: all branches agree on the underlying integer.
-    ///
-    /// TODO: the per-prime claims produced here are only
-    /// ideal-membership checks on the combined polynomials $e_{i,t}$; the
-    /// per-prime CPR + sumcheck + multipoint-eval + PCS-open chain that
-    /// ties $e_{i,t}$ to the committed trace is not implemented yet.
-    /// Adding it means duplicating the post-step3 chain (steps 5..=8) once
-    /// per declared prime -- or, equivalently, applying the
-    /// shared-challenge optimization so that the chain is run once and shared.
     pub fn step3_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
@@ -817,8 +805,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
 
         // Per-prime F_q[X] ideal checks (MLE-first / column-major), in
         // `primes()` order. Uses the per-prime trace/scalar projections
-        // pre-built in step 2. See `step3_ideal_check` on
-        // `ProverProjectedCombined` for the TODO(fq-*) notes -- same caveats.
+        // pre-built in step 2.
         let fq_cfgs = &self.all_field_cfgs[1..];
         let mut ic_proof_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(fq_cfgs.len());
         for (prime_idx, (cfg_q_i, staging)) in

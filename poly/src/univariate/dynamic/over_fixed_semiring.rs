@@ -7,7 +7,9 @@ use std::{
     fmt::Display,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use zinc_utils::{CHECKED, UNCHECKED, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField};
+use zinc_utils::{
+    CHECKED, UNCHECKED, mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
+};
 
 use crate::{
     EvaluatablePolynomial, EvaluationError, Polynomial,

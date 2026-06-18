@@ -1571,7 +1571,6 @@ mod tests {
                 &proof_cpr,
                 claimed_sums[0].clone(),
                 &ic_subclaim,
-                /* branch_idx = */ 0,
                 num_constraints.q,
                 nv,
                 &a,

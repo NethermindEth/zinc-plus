@@ -45,9 +45,17 @@ use zinc_utils::{
 /// (for a specific $q_i$ prime). The `MultiDegreeSumcheck` at the protocol
 /// layer batches them all together.
 ///
-/// TODO: once full challenge unification lands, all $n+1$ CPR groups can be
-/// merged into a single `MultiDegreeSumcheck` over a shared evaluation
-/// point, soundness factor $q_i / q^*$ per branch.
+/// Food for thought:
+/// The n+1 CPR groups could in principle be collapsed into a single
+/// `MultiDegreeSumcheck` group sharing one evaluation-point trajectory, with
+/// per-branch soundness factor $q_i / q^*$. The shared-integer challenges
+/// (folding $\alpha$, projecting $\psi$) are already in place; what remains is
+/// fusing the per-branch combination functions and writing down the
+/// corresponding soundness lemma. The trade-off is loss of per-branch
+/// arithmetic locality — each $\mathbb{F}_{q_i}[X]$ branch currently does its
+/// sumcheck work in its native (cheap) field, which a merged comb_fn would have
+/// to give up or dispatch internally. Worth revisiting only if proof size /
+/// verifier simplicity outweighs prover cost.
 pub struct CombinedPolyResolver<F: InnerTransparentField>(PhantomData<F>);
 
 impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedPolyResolver<F> {
@@ -334,10 +342,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `combined_sumcheck.claimed_sums()[0]`.
     /// - `ic_check_subclaim`: Subclaim from the ideal check; provides the
     ///   evaluation point and claimed values used to verify the sumcheck sum.
-    /// - `branch_idx`: which constraint family. `0` -> $\Q[X]$; `i >= 1` ->
-    ///   $\mathbb{F}_{q_{i-1}}[X]$. Currently unused inside this function (the
-    ///   call is branch-agnostic) but accepted for symmetry with
-    ///   `prepare_sumcheck_group` / `finalize_verifier`.
     /// - `num_constraints`: Number of constraint polynomials in `U`.
     /// - `num_vars`: Number of variables of the trace MLEs.
     /// - `projecting_element`: The random challenge used to project `F[X] → F`.
@@ -349,7 +353,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         proof: &CprProof<F>,
         claimed_sum: F,
         ic_check_subclaim: &ideal_check::VerifierSubclaim<F>,
-        branch_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         projecting_element: &F,
@@ -360,11 +363,6 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         F::Integer: ConstTranscribable,
         U: Uair,
     {
-        // `branch_idx` is currently unused: `prepare_verifier` only re-derives
-        // the folding challenge α and the expected sum from `ic_check_subclaim`,
-        // both of which are branch-agnostic. The parameter is kept for symmetry
-        // with `prepare_sumcheck_group` / `finalize_verifier`.
-        let _ = branch_idx;
         let uair_sig = U::signature();
         proof.validate_evaluation_sizes(
             uair_sig.total_cols().cols(),
@@ -698,7 +696,6 @@ mod tests {
             &proof,
             md_proof.claimed_sums()[0].clone(),
             &ic_check_subclaim,
-            /* branch_idx = */ 0,
             num_constraints.q,
             num_vars,
             &projecting_element,

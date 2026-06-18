@@ -532,13 +532,6 @@ where
     /// shared $\mathbf r \in [0, q^*)^\mu$ from the transcript and lift it
     /// into each branch's field via `F::from_with_cfg`, then run the
     /// per-branch verifications in `branch_idx` order.
-    ///
-    /// TODO(fq-soundness): the per-prime ideal-check subclaims produced
-    /// here are *discarded* -- this only verifies that each combined
-    /// polynomial $e_{i,t}$ lies in its claimed ideal, not that
-    /// $e_{i,t}$ was correctly derived from the committed trace. The
-    /// per-prime CPR/sumcheck/multipoint-eval/PCS-open chain that closes
-    /// the soundness loop is NYI; see `Proof::fq_ideal_checks` doc.
     #[allow(clippy::type_complexity)]
     pub fn step2_ideal_check(
         mut self,
@@ -785,7 +778,6 @@ where
             &self.proof_cpr,
             self.proof_combined_sumcheck.claimed_sums()[0].clone(),
             &self.ic_subclaims[0],
-            /* branch_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             &self.projecting_elements[0],
@@ -832,7 +824,6 @@ where
                 &self.proof_cpr_fq[prime_idx],
                 self.proof_combined_sumchecks_fq[prime_idx].claimed_sums()[0].clone(),
                 &self.ic_subclaims[branch_idx],
-                branch_idx,
                 num_constraints.for_prime(prime_idx),
                 self.base.num_vars,
                 &self.projecting_elements[branch_idx],
