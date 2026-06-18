@@ -376,10 +376,11 @@ pub enum IdealCheckError<F: PrimeField> {
 #[allow(clippy::arithmetic_side_effects)]
 #[cfg(test)]
 mod tests {
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
-
     use crate::test_utils::{
         LIMBS, run_ideal_check_prover_combined, run_ideal_check_prover_linear, test_config,
+    };
+    use crypto_primitives::{
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
     };
     use rand::rng;
     use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
@@ -491,7 +492,7 @@ mod tests {
         let num_vars = 2;
 
         // Linear UAIR with non-zero ideals
-        do_test::<TestUairNoMultiplication<Int<5>>, _, _, _, 32>(
+        do_test::<TestUairNoMultiplication<Int<5>, Uint<LIMBS>>, _, _, _, 32>(
             num_vars,
             None,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
@@ -499,7 +500,7 @@ mod tests {
         );
 
         // Non-linear UAIR with all-zero ideals
-        do_test::<TestUairSimpleMultiplication<Int<5>>, _, _, _, 32>(
+        do_test::<TestUairSimpleMultiplication<Int<5>, Uint<LIMBS>>, _, _, _, 32>(
             num_vars,
             None,
             |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
@@ -507,7 +508,7 @@ mod tests {
         );
 
         // Linear UAIR with bit-op virtuals and mixed down-row splicing.
-        do_test::<TestUairBitOpsMixedSplice<Int<5>>, _, _, _, 32>(
+        do_test::<TestUairBitOpsMixedSplice<Int<5>, Uint<LIMBS>>, _, _, _, 32>(
             num_vars,
             None,
             |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),

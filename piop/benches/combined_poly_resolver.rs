@@ -5,7 +5,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime,
 };
 use crypto_primitives::{
-    ConstIntSemiring, Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_int::Int,
+    Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_int::Int,
     crypto_bigint_monty::MontyField,
 };
 use rand::rng;
@@ -21,10 +21,7 @@ use zinc_piop::{
 use zinc_poly::univariate::dense::DensePolynomial;
 use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_test_uair::{GenerateRandomTrace, TestUairNoMultiplication, TestUairSimpleMultiplication};
-use zinc_transcript::{
-    Blake3Transcript,
-    traits::{ConstTranscribable, Transcript},
-};
+use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_uair::{
     Uair, UairTrace, constraint_counter::count_constraints, degree_counter::count_max_degree,
     ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
@@ -41,9 +38,9 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    <F<FIELD_LIMBS> as Field>::Integer: ConstIntSemiring + ConstTranscribable,
-    TestUairNoMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
-        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
+    TestUairNoMultiplication<Int<INT_LIMBS>, <F<FIELD_LIMBS> as Field>::Integer>:
+        Uair<Scalar = Witness<INT_LIMBS>, Ideal = DegreeOneIdeal<WitnessCoeff<INT_LIMBS>>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Integer>,
 {
     let mut rng = rng();
@@ -52,8 +49,8 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let params = format!("NoMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
-    let max_degree = count_max_degree::<TestUairNoMultiplication<Int<INT_LIMBS>>>();
+    let num_constraints = count_constraints::<TestUairNoMultiplication<_, _>>();
+    let max_degree = count_max_degree::<TestUairNoMultiplication<_, _>>();
 
     let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
                      trace: &UairTrace<_, _, _, _>,
@@ -61,7 +58,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
         let projected_scalars =
-            project_scalars::<F<FIELD_LIMBS>, TestUairNoMultiplication<_>>(|scalar| {
+            project_scalars::<F<FIELD_LIMBS>, TestUairNoMultiplication<_, _>>(|scalar| {
                 scalar
                     .iter()
                     .map(|coeff| F::from_with_cfg(coeff, field_cfg))
@@ -71,7 +68,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let evaluation_point: Vec<F<FIELD_LIMBS>> =
             transcript.get_field_challenges(num_vars, field_cfg);
         let (ic_proof, ic_prover_state) =
-            IdealCheckProtocol::<TestUairNoMultiplication<_>>::prove_combined::<
+            IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::prove_combined::<
                 _,
                 DEGREE_PLUS_ONE,
             >(
@@ -96,7 +93,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
         let (cpr_group, cpr_ancillary) =
-            CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_>>(
+            CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_, _>>(
                 trace_f,
                 Vec::new(),
                 &ic_prover_state.evaluation_point,
@@ -119,7 +116,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let (md_proof, md_states) = sumcheck_outputs.pop().expect("single branch");
 
         let (cpr_proof, cpr_state) =
-            CombinedPolyResolver::finalize_prover::<TestUairNoMultiplication<_>>(
+            CombinedPolyResolver::finalize_prover::<TestUairNoMultiplication<_, _>>(
                 transcript,
                 md_states.into_iter().next().expect("one CPR group"),
                 cpr_ancillary,
@@ -161,7 +158,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         let ic_evaluation_point: Vec<F<FIELD_LIMBS>> =
             verifier_transcript.get_field_challenges(num_vars, &field_cfg);
         let ic_check_subclaim =
-            IdealCheckProtocol::<TestUairNoMultiplication<_>>::verify_as_subprotocol::<
+            IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::verify_as_subprotocol::<
                 F<FIELD_LIMBS>,
                 _,
                 _,
@@ -195,7 +192,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             },
             |(proof, subclaim, mut transcript)| {
                 let ancillary =
-                    CombinedPolyResolver::prepare_verifier::<TestUairNoMultiplication<_>>(
+                    CombinedPolyResolver::prepare_verifier::<TestUairNoMultiplication<_, _>>(
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
@@ -217,7 +214,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 let md_subclaims = md_subclaims_vec.pop().expect("single branch");
 
                 let _ = black_box(
-                    CombinedPolyResolver::finalize_verifier::<TestUairNoMultiplication<_>>(
+                    CombinedPolyResolver::finalize_verifier::<TestUairNoMultiplication<_, _>>(
                         &mut transcript,
                         proof,
                         md_subclaims.point().to_vec(),
@@ -240,9 +237,9 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     group: &mut BenchmarkGroup<WallTime>,
     witness_size: usize,
 ) where
-    <F<FIELD_LIMBS> as Field>::Integer: ConstIntSemiring + ConstTranscribable,
-    TestUairSimpleMultiplication<Int<INT_LIMBS>>: Uair<Scalar = Witness<INT_LIMBS>>
-        + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
+    TestUairSimpleMultiplication<Int<INT_LIMBS>, <F<FIELD_LIMBS> as Field>::Integer>:
+        Uair<Scalar = Witness<INT_LIMBS>>
+            + GenerateRandomTrace<DEGREE_PLUS_ONE, PolyCoeff = Int<INT_LIMBS>, Int = Int<INT_LIMBS>>,
     MillerRabin: PrimalityTest<<F<FIELD_LIMBS> as Field>::Integer>,
 {
     let mut rng = rng();
@@ -251,92 +248,90 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
     let params = format!("SimpleMult/LIMBS={}/nvars={}", FIELD_LIMBS, num_vars);
 
-    let num_constraints = count_constraints::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
-    let max_degree = count_max_degree::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>();
+    let num_constraints = count_constraints::<TestUairSimpleMultiplication<_, _>>();
+    let max_degree = count_max_degree::<TestUairSimpleMultiplication<_, _>>();
 
-    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
-                     trace: &UairTrace<_, _, _, _>,
-                     transcript: &mut Blake3Transcript| {
-        let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
+    let prove_cpr =
+        |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
+         trace: &UairTrace<_, _, _, _>,
+         transcript: &mut Blake3Transcript| {
+            let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
-        let projected_scalars = project_scalars::<
-            F<FIELD_LIMBS>,
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-        >(|scalar| {
-            scalar
-                .iter()
-                .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-                .collect()
-        });
+            let projected_scalars =
+                project_scalars::<F<FIELD_LIMBS>, TestUairSimpleMultiplication<_, _>>(|scalar| {
+                    scalar
+                        .iter()
+                        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                        .collect()
+                });
 
-        let evaluation_point: Vec<F<FIELD_LIMBS>> =
-            transcript.get_field_challenges(num_vars, field_cfg);
-        let (ic_proof, ic_prover_state) = IdealCheckProtocol::<
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-        >::prove_combined::<_, DEGREE_PLUS_ONE>(
-            transcript,
-            &projected_trace,
-            &projected_scalars,
-            /* branch_idx = */ 0,
-            num_constraints.q,
-            &evaluation_point,
-            field_cfg,
-        )
-        .expect("IC Prover failed");
-
-        let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
-
-        let trace_f = evaluate_trace_to_column_mles(
-            &ProjectedTrace::RowMajor(projected_trace),
-            &projecting_element,
-        );
-        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
-            .expect("failed to project scalars to field");
-
-        let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<
-            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-        >(
-            trace_f,
-            Vec::new(),
-            &ic_prover_state.evaluation_point,
-            &scalars_f,
-            /* branch_idx = */ 0,
-            num_constraints.q,
-            num_vars,
-            max_degree,
-            &folding_challenge,
-            field_cfg,
-        )
-        .expect("CPR prepare failed");
-
-        let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
-            transcript,
-            vec![(vec![cpr_group], field_cfg)],
-            num_vars,
-            field_cfg,
-        )
-        .pop()
-        .expect("single branch");
-
-        let (cpr_proof, cpr_state) =
-            CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>(
+            let evaluation_point: Vec<F<FIELD_LIMBS>> =
+                transcript.get_field_challenges(num_vars, field_cfg);
+            let (ic_proof, ic_prover_state) = IdealCheckProtocol::<
+                TestUairSimpleMultiplication<_, _>,
+            >::prove_combined::<_, DEGREE_PLUS_ONE>(
                 transcript,
-                md_states.into_iter().next().expect("one CPR group"),
-                cpr_ancillary,
+                &projected_trace,
+                &projected_scalars,
+                /* branch_idx = */ 0,
+                num_constraints.q,
+                &evaluation_point,
                 field_cfg,
             )
-            .expect("CPR finalize failed");
+            .expect("IC Prover failed");
 
-        (
-            ic_proof,
-            cpr_proof,
-            md_proof,
-            cpr_state,
-            scalars_f,
-            projecting_element,
-        )
-    };
+            let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
+
+            let trace_f = evaluate_trace_to_column_mles(
+                &ProjectedTrace::RowMajor(projected_trace),
+                &projecting_element,
+            );
+            let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
+                .expect("failed to project scalars to field");
+
+            let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
+            let (cpr_group, cpr_ancillary) =
+                CombinedPolyResolver::prepare_sumcheck_group::<TestUairSimpleMultiplication<_, _>>(
+                    trace_f,
+                    Vec::new(),
+                    &ic_prover_state.evaluation_point,
+                    &scalars_f,
+                    /* branch_idx = */ 0,
+                    num_constraints.q,
+                    num_vars,
+                    max_degree,
+                    &folding_challenge,
+                    field_cfg,
+                )
+                .expect("CPR prepare failed");
+
+            let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+                transcript,
+                vec![(vec![cpr_group], field_cfg)],
+                num_vars,
+                field_cfg,
+            )
+            .pop()
+            .expect("single branch");
+
+            let (cpr_proof, cpr_state) =
+                CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<_, _>>(
+                    transcript,
+                    md_states.into_iter().next().expect("one CPR group"),
+                    cpr_ancillary,
+                    field_cfg,
+                )
+                .expect("CPR finalize failed");
+
+            (
+                ic_proof,
+                cpr_proof,
+                md_proof,
+                cpr_state,
+                scalars_f,
+                projecting_element,
+            )
+        };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
         let mut transcript = Blake3Transcript::new();
@@ -350,55 +345,50 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
         );
     });
 
-    group.bench_function(
-        BenchmarkId::new("CPR Verifier", &params),
-        |bench| {
-            let mut prover_transcript = Blake3Transcript::new();
-            let mut verifier_transcript = prover_transcript.clone();
-            let field_cfg =
-                prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
-            let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+    group.bench_function(BenchmarkId::new("CPR Verifier", &params), |bench| {
+        let mut prover_transcript = Blake3Transcript::new();
+        let mut verifier_transcript = prover_transcript.clone();
+        let field_cfg = prover_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
+        let _ = verifier_transcript.get_random_field_cfg::<F<FIELD_LIMBS>, _, MillerRabin>();
 
-            let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
-                prove_cpr(&field_cfg, &trace, &mut prover_transcript);
+        let (ic_proof, cpr_proof, md_proof, _, scalars_f, _) =
+            prove_cpr(&field_cfg, &trace, &mut prover_transcript);
 
-            let ic_evaluation_point =
-                verifier_transcript.get_field_challenges(num_vars, &field_cfg);
-            let ic_check_subclaim =
-                IdealCheckProtocol::<TestUairSimpleMultiplication<Int<INT_LIMBS>>>::verify_as_subprotocol::<
-                    F<FIELD_LIMBS>,
-                    _,
-                    _,
-                    _,
-                >(
-                    &mut verifier_transcript,
-                    ic_proof,
-                    /* branch_idx = */ 0,
-                    num_constraints.q,
-                    &ic_evaluation_point,
-                    |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
-                    |_| unreachable!("not used here"),
-                    &field_cfg,
+        let ic_evaluation_point = verifier_transcript.get_field_challenges(num_vars, &field_cfg);
+        let ic_check_subclaim =
+            IdealCheckProtocol::<TestUairSimpleMultiplication<_, _>>::verify_as_subprotocol::<
+                F<FIELD_LIMBS>,
+                _,
+                _,
+                _,
+            >(
+                &mut verifier_transcript,
+                ic_proof,
+                /* branch_idx = */ 0,
+                num_constraints.q,
+                &ic_evaluation_point,
+                |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
+                |_| unreachable!("not used here"),
+                &field_cfg,
+            )
+            .expect("IC Verifier failed");
+
+        let verifier_projecting_element: F<FIELD_LIMBS> =
+            verifier_transcript.get_field_challenge(&field_cfg);
+        let verifier_folding_challenge: F<FIELD_LIMBS> =
+            verifier_transcript.get_field_challenge(&field_cfg);
+
+        bench.iter_batched(
+            || {
+                (
+                    cpr_proof.clone(),
+                    ic_check_subclaim.clone(),
+                    verifier_transcript.clone(),
                 )
-                .expect("IC Verifier failed");
-
-            let verifier_projecting_element: F<FIELD_LIMBS> =
-                verifier_transcript.get_field_challenge(&field_cfg);
-            let verifier_folding_challenge: F<FIELD_LIMBS> =
-                verifier_transcript.get_field_challenge(&field_cfg);
-
-            bench.iter_batched(
-                || {
-                    (
-                        cpr_proof.clone(),
-                        ic_check_subclaim.clone(),
-                        verifier_transcript.clone(),
-                    )
-                },
-                |(proof, subclaim, mut transcript)| {
-                    let ancillary = CombinedPolyResolver::prepare_verifier::<
-                        TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                    >(
+            },
+            |(proof, subclaim, mut transcript)| {
+                let ancillary =
+                    CombinedPolyResolver::prepare_verifier::<TestUairSimpleMultiplication<_, _>>(
                         &proof,
                         md_proof.claimed_sums()[0].clone(),
                         &subclaim,
@@ -410,35 +400,33 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     )
                     .expect("CPR prepare_verifier failed");
 
-                    let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+                let md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
+                    &mut transcript,
+                    num_vars,
+                    &[(&md_proof, &field_cfg)],
+                    &field_cfg,
+                )
+                .expect("MultiDegreeSumcheck verify failed")
+                .pop()
+                .expect("single branch");
+
+                let _ = black_box(
+                    CombinedPolyResolver::finalize_verifier::<TestUairSimpleMultiplication<_, _>>(
                         &mut transcript,
-                        num_vars,
-                        &[(&md_proof, &field_cfg)],
+                        proof,
+                        md_subclaims.point().to_vec(),
+                        md_subclaims.expected_evaluations()[0].clone(),
+                        ancillary,
+                        &scalars_f,
+                        /* branch_idx = */ 0,
                         &field_cfg,
                     )
-                    .expect("MultiDegreeSumcheck verify failed")
-                    .pop().expect("single branch");
-
-                    let _ = black_box(
-                        CombinedPolyResolver::finalize_verifier::<
-                            TestUairSimpleMultiplication<Int<INT_LIMBS>>,
-                        >(
-                            &mut transcript,
-                            proof,
-                            md_subclaims.point().to_vec(),
-                            md_subclaims.expected_evaluations()[0].clone(),
-                            ancillary,
-                            &scalars_f,
-                            /* branch_idx = */ 0,
-                            &field_cfg,
-                        )
-                        .expect("CPR finalize_verifier failed"),
-                    );
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+                    .expect("CPR finalize_verifier failed"),
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 pub fn combined_poly_resolver_benches(c: &mut Criterion) {

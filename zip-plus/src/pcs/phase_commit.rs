@@ -195,8 +195,7 @@ mod tests {
     };
     use crypto_bigint::{Random, U64, U256, Word};
     use crypto_primitives::{
-        Matrix, boolean::Boolean, crypto_bigint_boxed_monty::BoxedMontyField,
-        crypto_bigint_int::Int,
+        Matrix, boolean::Boolean, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
     };
     use itertools::Itertools;
     use num_traits::Zero;
@@ -769,8 +768,8 @@ mod tests {
             let codeword_len = pp.linear_code.codeword_len();
             let merkle_depth = codeword_len.next_power_of_two().ilog2() as usize;
 
-            // b vectors: per poly, 1-byte length prefix + num_rows field elements
-            let b_phase_size = batch_size * (1 + pp.num_rows * size_of_f);
+            // b vectors: per poly, num_rows field elements
+            let b_phase_size = batch_size * (pp.num_rows * size_of_f);
             let combined_row_size = pp.linear_code.row_len() * size_of_zt_m;
 
             // Column openings: per opening, column values from all cw_matrices + one Merkle
@@ -784,7 +783,7 @@ mod tests {
             b_phase_size + combined_row_size + column_opening_phase_size
         }
 
-        type F = BoxedMontyField;
+        type F = MontyField<K>;
 
         let mut rng = rng();
         let num_vars = 10;

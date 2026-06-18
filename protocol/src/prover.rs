@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use std::{borrow::Cow, fmt::Debug};
 use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
@@ -51,7 +51,7 @@ pub struct ProverFolded<
     const D: usize,
     const FD: usize,
 > {
-    uair_signature: UairSignature,
+    uair_signature: UairSignature<Zt::Fmod>,
     original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
 
@@ -72,7 +72,7 @@ pub struct ProverCommitted<
     const FD: usize,
 > {
     num_vars: usize,
-    uair_signature: UairSignature,
+    uair_signature: UairSignature<Zt::Fmod>,
     original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
     pcs_transcript: PcsProverTranscript,
@@ -470,8 +470,8 @@ macro_rules! impl_with_type_bounds {
             Zt: ZincTypes<D, FD>,
             Zt::Int: ProjectableToField<F>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-            U: Uair + 'static,
-            F: InnerTransparentField
+            U: Uair<Prime = Zt::Fmod> + 'static,
+            F: InnerTransparentField<Integer = Zt::Fmod>
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
                 + for<'b> FromWithConfig<&'b Zt::CombR>
@@ -481,8 +481,6 @@ macro_rules! impl_with_type_bounds {
                 + Send
                 + Sync
                 + 'static,
-            F::Integer:
-                ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + FromRef<u64> + Send + Sync,
         {
             $($code)*
         }
@@ -492,7 +490,7 @@ macro_rules! impl_with_type_bounds {
 impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    U: Uair<Prime = Zt::Fmod>,
     F: PrimeField,
     F::Integer: ConstTranscribable,
 {
@@ -592,7 +590,7 @@ impl_with_type_bounds!(ProverCommitted
         let field_cfg = self
             .pcs_transcript
             .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+            .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
 
         let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
         Ok((field_cfg, projected_scalars_fx))
@@ -1383,7 +1381,7 @@ impl_with_type_bounds!(ProverMultipointEvaled
             .base
             .pcs_transcript
             .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+            .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
 
         // Shared r_0 integer endpoint; r_star = r_0 mod q'' for PCS.
         let r_0_int: Vec<F::Integer> =
@@ -1630,7 +1628,7 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a Zt::CombR>
@@ -1641,9 +1639,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer:
-        ConstIntSemiring + ConstTranscribable + FromRef<Zt::Fmod> + FromRef<u64> + Send + Sync,
-    U: Uair + 'static,
+    U: Uair<Prime = Zt::Fmod> + 'static,
 {
     /// Zinc+ full PIOP prover.
     ///

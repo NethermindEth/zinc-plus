@@ -283,7 +283,7 @@ column_layout_wrapper!(/// Layout of the witness (total minus public) columns.
 /// The flattened trace ordering is:
 /// `[pub_bin, wit_bin, pub_arb, wit_arb, pub_int, wit_int]`.
 #[derive(Clone, Debug)]
-pub struct UairSignature {
+pub struct UairSignature<Prime: Semiring> {
     /// Column-type layout of all (public + witness) columns.
     total_cols: TotalColumnLayout,
     /// Public column subset.
@@ -305,10 +305,10 @@ pub struct UairSignature {
     /// $\primetuple$ in `def:uairplus`). $\mathbb{F}_{q_i}[X]$-constraints
     /// emitted via [`ConstraintBuilder::assert_in_fq_ideal`] reference these
     /// by index. Empty for legacy single-$\mathbb{Q}[X]$ UAIRs.
-    primes: Vec<u64>,
+    primes: Vec<Prime>,
 }
 
-impl UairSignature {
+impl<Prime: Semiring> UairSignature<Prime> {
     /// Create a new signature, sorting `shifts` by `source_col`.
     pub fn new(
         total_cols: TotalColumnLayout,
@@ -381,14 +381,14 @@ impl UairSignature {
     /// $\phi_{q_i}(\hat{f}_0)$ of the existing $\mathbb{Q}[X]$ witness lanes,
     /// so no extra trace columns are introduced here -- the tuple only
     /// records what primes the constraint dispatcher needs to project to.
-    pub fn with_primes(mut self, primes: Vec<u64>) -> Self {
+    pub fn with_primes(mut self, primes: Vec<Prime>) -> Self {
         self.primes = primes;
         self
     }
 
     /// Prime-power tuple $(q_1,\ldots,q_n)$ declared by this UAIR. Empty for
     /// legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
-    pub fn primes(&self) -> &[u64] {
+    pub fn primes(&self) -> &[Prime] {
         &self.primes
     }
 
@@ -542,7 +542,10 @@ impl<PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize>
 {
     /// Returns a sub-trace containing only public columns.
     /// Returned trace is borrowed from the full trace.
-    pub fn public(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
+    pub fn public<Prime: Semiring>(
+        &self,
+        sig: &UairSignature<Prime>,
+    ) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
         let p = sig.public_cols();
         UairTrace {
             binary_poly: Cow::Borrowed(&self.binary_poly[0..p.num_binary_poly_cols()]),
@@ -553,7 +556,10 @@ impl<PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize>
 
     /// Returns a sub-trace containing only witness columns.
     /// Returned trace is borrowed from the full trace.
-    pub fn witness(&self, sig: &UairSignature) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
+    pub fn witness<Prime: Semiring>(
+        &self,
+        sig: &UairSignature<Prime>,
+    ) -> UairTrace<'_, PolyCoeff, Int, DB, DA> {
         let p = sig.public_cols();
         UairTrace {
             binary_poly: Cow::Borrowed(&self.binary_poly[p.num_binary_poly_cols()..]),
@@ -625,13 +631,15 @@ pub trait Uair: Clone {
     // to @agareta, this in not always the case.
     type Scalar: Semiring;
 
+    type Prime: Semiring;
+
     /// Signature of the UAIR.
     ///
     /// TODO: Consider caching the signature to avoid recomputing it at every
     /// call site. Currently negligible since shifts are small (e.g. ~12 for
     /// SHA/ECDSA), but may matter if signatures grow more expensive to
     /// construct.
-    fn signature() -> UairSignature;
+    fn signature() -> UairSignature<Self::Prime>;
 
     /// A general method for describing constraints.
     ///
@@ -696,7 +704,7 @@ pub trait Uair: Clone {
 mod tests {
     use super::*;
 
-    fn signature_with_mixed_shifts() -> UairSignature {
+    fn signature_with_mixed_shifts() -> UairSignature<u64> {
         UairSignature::new(
             TotalColumnLayout::new(2, 1, 1),
             PublicColumnLayout::new(0, 0, 0),

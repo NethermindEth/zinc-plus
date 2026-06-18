@@ -572,7 +572,9 @@ mod tests {
         sumcheck::multi_degree::MultiDegreeSumcheck,
         test_utils::{LIMBS, run_ideal_check_prover_combined, test_config},
     };
-    use crypto_primitives::{crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
+    use crypto_primitives::{
+        crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    };
     use rand::rng;
     use zinc_poly::univariate::dense::DensePolynomial;
     use zinc_test_uair::{
@@ -735,15 +737,21 @@ mod tests {
 
         let num_vars = 2;
 
-        test_successful_verification_generic::<TestUairNoMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            None,
-            |ideal_over_ring| ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg)),
-        );
-        test_successful_verification_generic::<TestUairSimpleMultiplication<Int<5>>, _, _, 32>(
-            num_vars,
-            None,
-            |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
-        );
+        test_successful_verification_generic::<
+            TestUairNoMultiplication<Int<5>, Uint<LIMBS>>,
+            _,
+            _,
+            32,
+        >(num_vars, None, |ideal_over_ring| {
+            ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
+        });
+        test_successful_verification_generic::<
+            TestUairSimpleMultiplication<Int<5>, Uint<LIMBS>>,
+            _,
+            _,
+            32,
+        >(num_vars, None, |_ideal_over_ring| {
+            IdealOrZero::<DegreeOneIdeal<_>>::zero()
+        });
     }
 }

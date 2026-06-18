@@ -319,7 +319,7 @@ mod tests {
     };
     use crypto_bigint::U64;
     use crypto_primitives::{
-        IntoWithConfig, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
+        IntoWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
     };
     use num_traits::{ConstOne, Zero};
     use zinc_poly::mle::DenseMultilinearExtension;
@@ -332,7 +332,7 @@ mod tests {
     const M: usize = INT_LIMBS * 8;
     const DEGREE_PLUS_ONE: usize = 3;
 
-    type F = BoxedMontyField;
+    type F = MontyField<K>;
 
     type Zt = TestZipTypes<N, K, M>;
     type C = IprsCode<Zt, TestIprsConfig, REP_FACTOR, CHECKED>;

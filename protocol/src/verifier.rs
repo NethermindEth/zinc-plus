@@ -1,5 +1,5 @@
 use super::*;
-use crypto_primitives::{ConstIntSemiring, FromPrimitiveWithConfig, FromWithConfig};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use std::io::Cursor;
 use zinc_piop::{
@@ -47,7 +47,7 @@ use zip_plus::{
 #[derive(Clone, Debug)]
 pub struct VerifierBase<'a, Zt: ZincTypes<D, FD>, const D: usize, const FD: usize> {
     num_vars: usize,
-    uair_signature: UairSignature,
+    uair_signature: UairSignature<Zt::Fmod>,
     pcs_transcript: PcsVerifierTranscript,
     public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
 
@@ -381,9 +381,8 @@ pub struct VerifierPcsVerified<IdealOverF> {
 impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    U: Uair,
-    F: PrimeField,
-    F::Integer: ConstTranscribable,
+    U: Uair<Prime = Zt::Fmod>,
+    F: PrimeField<Integer = Zt::Fmod>,
 {
     /// Step 0: Verifier entry point.
     /// Reconstruct Fiat-Shamir transcript from commitments and public data.
@@ -465,8 +464,12 @@ impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
     VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
+    F: InnerTransparentField<Integer = Zt::Fmod>
+        + FromPrimitiveWithConfig
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
     U: Uair,
     IdealOverF: Ideal,
 {
@@ -508,7 +511,7 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::CombR>
@@ -518,8 +521,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer:
-        ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod> + FromRef<u64>,
     U: Uair + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -643,14 +644,13 @@ impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
     VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + FromRef<F>
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
-    U: Uair + 'static,
+    U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal,
 {
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
@@ -726,7 +726,7 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::CombR>
@@ -736,8 +736,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
-    U: Uair + 'static,
+    U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal,
 {
     /// Step 4: Sumcheck verification (CPR + optional booleanity +
@@ -979,8 +978,12 @@ impl<'a, Zt, F, IdealOverF, const D: usize, const FD: usize>
     VerifierSumchecked<'a, Zt, F, IdealOverF, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
+    F: InnerTransparentField<Integer = Zt::Fmod>
+        + FromPrimitiveWithConfig
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
     IdealOverF: Ideal,
 {
     /// Step 5: Multi-point evaluation sumcheck.
@@ -1118,7 +1121,7 @@ where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::Chal>
@@ -1127,7 +1130,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
     /// Step 6: Per-branch lifted-eval consistency check.
@@ -1349,7 +1351,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'b> FromWithConfig<&'b Zt::Int>
         + for<'b> FromWithConfig<&'b Zt::CombR>
@@ -1359,7 +1361,6 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer: ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod>,
     IdealOverF: Ideal,
 {
     /// Step 7: PCS verification at $\mathbf r^\star := \mathbf r_0 \bmod q''$,
@@ -1516,7 +1517,7 @@ where
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-    F: InnerTransparentField
+    F: InnerTransparentField<Integer = Zt::Fmod>
         + FromPrimitiveWithConfig
         + for<'a> FromWithConfig<&'a Zt::Int>
         + for<'a> FromWithConfig<&'a Zt::CombR>
@@ -1526,9 +1527,7 @@ where
         + Send
         + Sync
         + 'static,
-    F::Integer:
-        ConstIntSemiring + ConstTranscribable + Send + Sync + FromRef<Zt::Fmod> + FromRef<u64>,
-    U: Uair + 'static,
+    U: Uair<Prime = Zt::Fmod> + 'static,
 {
     /// Zinc+ full PIOP verifier.
     ///
@@ -1619,7 +1618,7 @@ pub mod test_helpers {
             self.base.num_vars
         }
 
-        pub fn uair_signature(&self) -> &UairSignature {
+        pub fn uair_signature(&self) -> &UairSignature<Zt::Fmod> {
             &self.base.uair_signature
         }
     }

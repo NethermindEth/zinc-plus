@@ -193,7 +193,7 @@ mod tests {
 
         let mut transcript = Blake3Transcript::new();
 
-        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Inner, MillerRabin>();
+        let field_cfg = transcript.get_random_field_cfg::<F, <F as Field>::Integer, MillerRabin>();
 
         let eq_r = build_eq_x_r_inner(&vec![F::from_with_cfg(2u32, &field_cfg); nvars], &field_cfg)
             .expect("Failed to build eq_r");

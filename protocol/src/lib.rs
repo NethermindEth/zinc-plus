@@ -467,7 +467,7 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
 
     /// Randomly sampled field modulus type, used throughout the protocol for
     /// finite field operations.
-    type Fmod: ConstIntSemiring + ConstTranscribable + Named;
+    type Fmod: ConstIntSemiring + ConstTranscribable + FromRef<Self::Fmod> + Named + Send + Sync;
 
     /// Primality test for the field modulus.
     type PrimeTest: PrimalityTest<Self::Fmod>;
@@ -726,16 +726,16 @@ where
 ///
 /// Primality is the UAIR author's responsibility (the UAIR is part of the
 /// pre-agreed relation index); no runtime check needed here.
-fn build_all_cfgs<F>(sig: &UairSignature, qx_cfg: F::Config) -> Vec<F::Config>
+fn build_all_cfgs<F>(sig: &UairSignature<F::Integer>, qx_cfg: F::Config) -> Vec<F::Config>
 where
     F: PrimeField,
-    F::Integer: FromRef<u64>,
 {
     iter::once(qx_cfg)
-        .chain(sig.primes().iter().map(|q| {
-            // TODO: Change type!
-            F::make_cfg(&F::Integer::from_ref(q)).expect("declared prime is assumed prime")
-        }))
+        .chain(
+            sig.primes()
+                .iter()
+                .map(|q| F::make_cfg(q).expect("declared prime is assumed prime")),
+        )
         .collect()
 }
 
@@ -774,7 +774,6 @@ mod tests {
     };
     use zinc_utils::{
         CHECKED,
-        from_ref::FromRef,
         inner_product::{MBSInnerProduct, ScalarProduct},
         projectable_to_field::ProjectableToField,
     };
@@ -802,6 +801,7 @@ mod tests {
     const REP_FACTOR: usize = 8;
 
     type F = MontyField<FIELD_LIMBS>;
+    type ZtFmod = Uint<FIELD_LIMBS>;
 
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
@@ -809,7 +809,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 100;
         type Eval = BinaryPoly<QUARTER_D>;
         type Cw = DensePolynomial<i64, QUARTER_D>;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -827,7 +827,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 100;
         type Eval = DensePolynomial<i64, D>;
         type Cw = DensePolynomial<i64, D>;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -847,7 +847,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 100;
         type Eval = DensePolynomial<i64, D>;
         type Cw = DensePolynomial<Int<K>, D>;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -867,7 +867,7 @@ mod tests {
         const NUM_COLUMN_OPENINGS: usize = 100;
         type Eval = ZtInt;
         type Cw = i128;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
         type Chal = i128;
         type Pt = i128;
@@ -886,7 +886,7 @@ mod tests {
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
 
         type BinaryZt = BinPolyZipTypes;
@@ -915,7 +915,7 @@ mod tests {
         type Chal = i128;
         type Pt = i128;
         type CombR = Int<M>;
-        type Fmod = Uint<FIELD_LIMBS>;
+        type Fmod = ZtFmod;
         type PrimeTest = MillerRabin;
 
         type BinaryZt = BinPolyZipTypes;
@@ -998,14 +998,14 @@ mod tests {
         <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
         <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
         <Zt::IntZt as ZipTypes>::Cw: ProjectableToField<F>,
-        U: Uair<Scalar = DensePolynomial<Zt::Int, D>>
+        U: Uair<Scalar = DensePolynomial<Zt::Int, D>, Prime = Zt::Fmod>
             + GenerateRandomTrace<D, PolyCoeff = Zt::Int, Int = Zt::Int>
             + 'static,
-        F: for<'a> FromWithConfig<&'a Zt::Int>
+        F: Field<Integer = Zt::Fmod>
+            + for<'a> FromWithConfig<&'a Zt::Int>
             + for<'a> FromWithConfig<&'a Zt::CombR>
             + for<'a> FromWithConfig<&'a Zt::Chal>
             + for<'a> FromWithConfig<&'a Zt::Pt>,
-        <F as Field>::Integer: FromRef<Zt::Fmod> + FromRef<u64>,
     {
         let mut rng = rng();
         let pp = setup_pp::<Zt>(num_vars, linear_codes);
@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn test_e2e_no_multiplication() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairNoMultiplication<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1090,7 +1090,7 @@ mod tests {
     #[test]
     fn test_e2e_simple_multiplication() {
         let num_vars = 2;
-        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt>>(
+        do_test::<TestZincTypesRaa, TestUairSimpleMultiplication<ZtInt, ZtFmod>>(
             num_vars,
             (
                 RaaCode::new(num_vars),
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn test_e2e_mixed_shifts() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairMixedShifts<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1132,7 +1132,7 @@ mod tests {
     #[test]
     fn test_e2e_binary_decomposition() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BinaryDecompositionUair<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn test_e2e_fq_large_prime() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1184,7 +1184,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1205,7 +1205,7 @@ mod tests {
     #[test]
     fn test_e2e_big_linear_with_public_input() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1234,7 +1234,7 @@ mod tests {
     #[test]
     fn test_e2e_sha_proxy() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, ShaProxy<ZtInt>>(
+        do_test::<TestZincTypesIprs, ShaProxy<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_lifted_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn test_fq_large_prime_tamper_lifted_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt>>(
+        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1325,7 +1325,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_up_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1349,7 +1349,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_down_evals() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_commitment() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1408,7 +1408,7 @@ mod tests {
     fn test_big_linear_tamper_booleanity_evals() {
         use zinc_piop::lookup::booleanity::BooleanityError;
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1445,7 +1445,7 @@ mod tests {
     fn test_big_linear_tamper_booleanity_evals_length() {
         use zinc_piop::lookup::booleanity::BooleanityError;
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1475,7 +1475,7 @@ mod tests {
     #[test]
     fn test_big_linear_drop_booleanity_proof() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),
@@ -1520,10 +1520,10 @@ mod tests {
             combined_poly_resolver::CombinedPolyResolver, lookup::booleanity::BooleanityChecker,
         };
 
-        type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt>, F, D, QUARTER_D>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>, F, D, QUARTER_D>;
         type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
 
-        let num_constraints = count_constraints::<BigLinearUair<ZtInt>>();
+        let num_constraints = count_constraints::<BigLinearUair<ZtInt, ZtFmod>>();
 
         let num_vars = 8;
         let iprs = (
@@ -1532,8 +1532,8 @@ mod tests {
             make_iprs(num_vars),
         );
         let pp = setup_pp::<TestZincTypesIprs>(num_vars, iprs);
-        let trace = BigLinearUair::<ZtInt>::generate_random_trace(num_vars, &mut rng());
-        let public_trace = trace.public(&BigLinearUair::<ZtInt>::signature());
+        let trace = BigLinearUair::<ZtInt, ZtFmod>::generate_random_trace(num_vars, &mut rng());
+        let public_trace = trace.public(&BigLinearUair::<ZtInt, ZtFmod>::signature());
         let mut proof =
             Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn).expect("prove");
 
@@ -1567,7 +1567,7 @@ mod tests {
             let transcript = v3.fs_transcript_mut();
 
             let folding_challenge: F = transcript.get_field_challenge(&cfg);
-            CombinedPolyResolver::<F>::prepare_verifier::<BigLinearUair<ZtInt>>(
+            CombinedPolyResolver::<F>::prepare_verifier::<BigLinearUair<ZtInt, ZtFmod>>(
                 &proof_cpr,
                 claimed_sums[0].clone(),
                 &ic_subclaim,
@@ -1647,7 +1647,7 @@ mod tests {
     #[test]
     fn test_big_linear_tamper_ideal_check() {
         let num_vars = 8;
-        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt>>(
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
             num_vars,
             (
                 make_iprs(num_vars),

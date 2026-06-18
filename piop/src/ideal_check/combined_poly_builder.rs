@@ -2,7 +2,7 @@
 use rayon::prelude::*;
 
 use crate::projections::{ColumnMajorTrace, ProjectedScalars, RowMajorTrace};
-use crypto_primitives::PrimeField;
+use crypto_primitives::{PrimeField, Semiring};
 use num_traits::Zero;
 use zinc_poly::{
     EvaluationError,
@@ -367,7 +367,7 @@ where
     Ok(combined_evaluations)
 }
 
-fn bit_op_down_offset(uair_sig: &UairSignature) -> usize {
+fn bit_op_down_offset<Prime: Semiring>(uair_sig: &UairSignature<Prime>) -> usize {
     let binary_poly_end = uair_sig.total_cols().num_binary_poly_cols();
     uair_sig
         .shifts()

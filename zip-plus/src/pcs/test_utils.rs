@@ -164,12 +164,11 @@ pub fn setup_full_protocol<F, const N: usize, const K: usize, const M: usize>(
     PcsVerifierTranscript,
 )
 where
-    F: PrimeField
+    F: PrimeField<Integer = <TestZipTypes<N, K, M> as ZipTypes>::Fmod>
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestZipTypes<N, K, M> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>,
-    F::Integer: FromRef<<TestZipTypes<N, K, M> as ZipTypes>::Fmod> + Transcribable,
     <TestZipTypes<N, K, M> as ZipTypes>::Eval: ProjectableToField<F>,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_test_params, || {
@@ -196,14 +195,12 @@ pub fn setup_full_protocol_poly<
     PcsVerifierTranscript,
 )
 where
-    F: PrimeField
+    F: PrimeField<Integer = <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod>
         + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Chal>
         + for<'a> FromWithConfig<&'a <TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::CombR>
         + for<'a> MulByScalar<&'a F>
         + FromRef<F>
         + 'static,
-    F::Integer:
-        FromRef<<TestBinPolyZipTypes<K, M, DEGREE_PLUS_ONE> as ZipTypes>::Fmod> + Transcribable,
 {
     setup_full_protocol_inner::<_, _, _, N>(num_vars, setup_poly_test_params, || {
         (0..num_vars).map(|i| i as i128 + 2).collect()
@@ -224,7 +221,7 @@ pub fn setup_full_protocol_inner<Zt, Lc, F, const N: usize>(
 where
     Zt: ZipTypes,
     Lc: LinearCode<Zt>,
-    F: PrimeField
+    F: PrimeField<Integer = Zt::Fmod>
         + for<'a> FromWithConfig<&'a Zt::CombR>
         + for<'a> FromWithConfig<&'a Zt::Chal>
         + for<'a> FromWithConfig<&'a Zt::Pt>
@@ -259,8 +256,8 @@ where
 pub fn get_field_cfg<Zt, F>(transcript: &mut impl Transcript) -> F::Config
 where
     Zt: ZipTypes,
-    F: PrimeField,
-    F::Integer: FromRef<Zt::Fmod>,
+    F: PrimeField<Integer = Zt::Fmod>,
+    Zt::Fmod: FromRef<Zt::Fmod>,
 {
-    transcript.get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
+    transcript.get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>()
 }
