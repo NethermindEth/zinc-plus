@@ -68,7 +68,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$ (i.e. UAIR-level `prime_idx = i - 1`).
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `evaluation_point`: pre-sampled MLE evaluation point, shared for all
-    ///   branches of contraints ($Q[X]$ and $F_q[X]$).
+    ///   branches of constraints ($Q[X]$ and $F_q[X]$).
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
@@ -200,7 +200,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `evaluation_point`: pre-sampled MLE evaluation point, shared for all
-    ///   branches of contraints ($Q[X]$ and $F_q[X]$).
+    ///   branches of constraints ($Q[X]$ and $F_q[X]$).
     /// - `field_cfg`: random field configuration sampled on the previous steps
     ///   of the overall protocol.
     #[allow(clippy::type_complexity)]
@@ -328,7 +328,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
 
         let ideal_collector = collect_ideals::<U>(num_constraints);
 
-        macro_rules! collect_non_trival {
+        macro_rules! collect_non_trivial {
             ($ideals:expr, $ideal_from_ref:ident) => {
                 $ideals
                     .iter()
@@ -345,10 +345,10 @@ impl<U: Uair> IdealCheckProtocol<U> {
         // verifies consistency of the claimed evaluations with the
         // actual trace.
         let (non_trivial_ideals, non_trivial_values): (Vec<_>, Vec<_>) = if branch_idx == 0 {
-            collect_non_trival!(ideal_collector.ideals, ideal_over_f_from_ref)
+            collect_non_trivial!(ideal_collector.ideals, ideal_over_f_from_ref)
         } else {
             let prime_idx = sub!(branch_idx, 1);
-            collect_non_trival!(
+            collect_non_trivial!(
                 ideal_collector.fq_ideals[prime_idx],
                 ideal_over_f_from_fq_ref
             )
