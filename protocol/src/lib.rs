@@ -1282,6 +1282,52 @@ mod tests {
         );
     }
 
+    /// Adversarial regression for the per-declared-prime branch of Phase H's
+    /// lifted-evals consistency check. [`TestUairFqLargePrime`] declares two
+    /// primes, so `witness_lifted_evals` has shape `[Q, q_1, q_2]` (length 3).
+    /// We perturb branch `[1]` (declared prime $q_1$) and check that the
+    /// per-prime [`MultipointEval::verify_subclaim`] call inside
+    /// `step6_lifted_evals` rejects with `ClaimMismatch`.
+    ///
+    /// This complements [`test_big_linear_tamper_lifted_evals`] (which
+    /// tampers the Q-branch lift at `[0]`) by exercising the symmetric
+    /// per-prime branch — i.e. that the verifier independently binds each
+    /// $\bar u_j^{(i)}$ to the $q_i$-projected trace at $r_0$, not just the
+    /// Q-branch.
+    #[test]
+    fn test_fq_large_prime_tamper_lifted_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            // No Q[X] constraints (mirrors test_e2e_fq_large_prime).
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |proof| {
+                // Branch 1 = declared prime q_1. The UAIR has a single
+                // (arbitrary-poly) witness column, so the inner Vec has
+                // length 1; tamper that one lifted polynomial by swapping
+                // two of its coefficients.
+                let lifted = &mut proof.witness_lifted_evals[1][0];
+                assert!(
+                    lifted.coeffs.len() >= 2,
+                    "lifted polynomial should have at least 2 coefficients to swap"
+                );
+                lifted.coeffs.swap(0, 1);
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
+                ));
+            },
+        );
+    }
+
     #[test]
     fn test_big_linear_tamper_up_evals() {
         let num_vars = 8;
