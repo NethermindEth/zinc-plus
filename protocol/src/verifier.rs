@@ -34,12 +34,6 @@ use zip_plus::{
 };
 
 //
-// Per-prime F_q[X] branch helpers
-//
-
-// FIXME
-
-//
 // Shared base
 //
 
@@ -190,11 +184,9 @@ pub struct VerifierEvalProjected<
     field_cfg: F::Config,
     /// Per-branch field configs (`[0]` = $Q[X]$, `[i >= 1]` =
     /// $F_{q_{i-1}}[X]$), kept for later per-prime CPR/MP/PCS steps.
-    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs`, kept for later steps that need
     /// to re-sample shared challenges in $[0, q^*)$.
-    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     q_star_idx: usize,
     /// Per-branch IC subclaims (length `n + 1`). `[0]` feeds the Q[X] CPR
     /// `prepare_verifier`; `[i + 1]` will feed each per-prime CPR
@@ -210,7 +202,6 @@ pub struct VerifierEvalProjected<
     /// UAIR-author-supplied `project_scalar` closure (applied with
     /// `all_field_cfgs[i + 1]`). Consumed in step 4 (CPR finalize per
     /// branch).
-    #[allow(dead_code)] // Consumed in step4_sumcheck_verify.
     projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 
     // Proof leftovers
@@ -248,18 +239,12 @@ pub struct VerifierSumchecked<
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (carried for downstream steps).
-    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs` (carried for downstream steps).
-    #[allow(dead_code)] // Carried for downstream steps.
     q_star_idx: usize,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
     projecting_elements: Vec<F>,
-    /// Per-branch CPR batching challenges $\alpha$: `[0]` was consumed by
-    /// the Q[X] CPR verifier; `[i >= 1]` is retained for downstream steps.
-    #[allow(dead_code)] // Carried for downstream steps.
-    folding_challenges: Vec<F>,
     /// CPR subclaim's evaluation point ($r^\star$)
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
@@ -310,7 +295,6 @@ pub struct VerifierMultipointEvaled<
     base: VerifierBase<'a, Zt, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (carried for downstream steps).
-    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
     /// and projected onto each of `all_field_cfgs`.
@@ -321,7 +305,6 @@ pub struct VerifierMultipointEvaled<
     /// Per-prime multipoint-eval subclaims, one per declared prime, produced
     /// by step 5's lockstep multipoint-eval verifier. Empty for UAIRs with
     /// no declared fq primes. Consumed in step 6.
-    #[allow(dead_code)] // Consumed in step6_lifted_evals.
     mp_subclaims_fq: Vec<multipoint_eval::Subclaim<F>>,
 
     // Proof leftovers
@@ -336,7 +319,6 @@ pub struct VerifierMultipointEvaled<
 
 /// After step 6 (lifted evals verification).
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct VerifierLiftedEvalsChecked<
     'a,
     Zt: ZincTypes<D, FD>,
@@ -346,13 +328,6 @@ pub struct VerifierLiftedEvalsChecked<
     const FD: usize,
 > {
     base: VerifierBase<'a, Zt, D, FD>,
-    field_cfg: F::Config,
-    mp_subclaim: multipoint_eval::Subclaim<F>,
-    /// Q-branch ($q_0$) lifted MLE evaluations at $r_0$, all columns
-    /// (public + witness) interleaved by UAIR column layout. Threaded
-    /// forward for diagnostic / future use; the PCS verify in step 7 uses
-    /// `lifted_evals_pp` instead.
-    all_lifted_evals: Vec<DynamicPolynomialF<F>>,
     /// $q''$-branch witness-only lifted MLE evaluations at $\mathbf
     /// r^\star = \mathbf r_0 \bmod q''$. Consumed by step7 PCS verify.
     lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
@@ -363,6 +338,11 @@ pub struct VerifierLiftedEvalsChecked<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    /// Lookup proof component, threaded through the verifier state
+    /// machine. Not yet consumed: the `BatchedLookupProof` verifier chain
+    /// is not implemented (see step 5 / step 6 TODOs). Retained so the
+    /// proof shape stays stable once lookup verification lands.
+    #[allow(dead_code)]
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -946,7 +926,7 @@ where
 
         let cpr_eval_point = cpr_subclaim.evaluation_point;
 
-        let _ = &self.proof_lookup_proof;
+        assert!(self.proof_lookup_proof.is_none(), "Arbitrary lookup argument is not supported yet!");
 
         Ok(VerifierSumchecked {
             base: self.base,
@@ -954,7 +934,6 @@ where
             all_field_cfgs: self.all_field_cfgs,
             q_star_idx: self.q_star_idx,
             projecting_elements: self.projecting_elements,
-            folding_challenges,
             cpr_eval_point,
             cpr_up_evals: cpr_subclaim.up_evals,
             cpr_down_evals: cpr_subclaim.down_evals,
@@ -1329,9 +1308,6 @@ where
 
         Ok(VerifierLiftedEvalsChecked {
             base: self.base,
-            field_cfg: self.field_cfg,
-            mp_subclaim: self.mp_subclaim,
-            all_lifted_evals: q_all_lifted,
             lifted_evals_pp: self.proof_witness_lifted_evals_pp,
             q_pp_cfg,
             r_star,

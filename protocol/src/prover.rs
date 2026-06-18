@@ -31,12 +31,6 @@ use zip_plus::{
 };
 
 //
-// Per-prime F_q[X] branch helpers
-//
-
-// FIXME
-
-//
 // Type-state structs
 //
 
@@ -190,7 +184,6 @@ pub struct ProverIdealChecked<
     /// step 4 can build per-prime $\psi$-projected trace/scalars and step 5
     /// can drive the per-prime CPR sumcheck branches. Empty for UAIRs
     /// with no declared fq primes.
-    #[allow(dead_code)] // Consumed in step4_eval_projection.
     fq_staging: Vec<FqProjStaging<U, F>>,
 
     // New
@@ -219,18 +212,9 @@ pub struct ProverEvalProjected<
     field_cfg: F::Config,
     /// Per-branch field configs, kept for the per-prime CPR/sumcheck/MP
     /// chain in later phases. `[0]` = $Q[X]$ branch.
-    #[allow(dead_code)] // Consumed in step5_sumcheck.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
-    #[allow(dead_code)] // Consumed in step5_sumcheck.
     q_star_idx: usize,
-    /// Per-branch $\psi$-projecting elements: integer sampled mod $q^*$
-    /// and projected onto each of `all_field_cfgs`. Length `n + 1`.
-    /// `[0]` was consumed by step 4 to build `projected_trace_f`;
-    /// `[i + 1]` was consumed to build `projected_trace_f_fq[i]`. Carried
-    /// forward for later steps that need the integer endpoint.
-    #[allow(dead_code)] // Carried for downstream steps.
-    projecting_elements: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
     /// forward from step 2's `fq_staging`. Reused by step 7
@@ -252,13 +236,11 @@ pub struct ProverEvalProjected<
     /// `fq_staging[i].projected_trace` using `projecting_elements[i + 1]`.
     /// Consumed by per-prime CPR `prepare_sumcheck_group` in step 5.
     /// Empty for UAIRs with no declared fq primes.
-    #[allow(dead_code)] // Consumed in step5_sumcheck.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
     /// Per-prime $\psi$-projected scalars (one entry per declared prime).
     /// Built in step 4 from each `fq_staging[i].projected_scalars_fx`
     /// using `projecting_elements[i + 1]`. Consumed in step 5 by the
     /// per-prime CPR. Empty for UAIRs with no declared fq primes.
-    #[allow(dead_code)] // Consumed in step5_sumcheck.
     projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>>,
 }
 
@@ -276,16 +258,9 @@ pub struct ProverSumchecked<
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
     /// Per-branch field configs (carried for downstream steps).
-    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs` (carried for downstream steps).
-    #[allow(dead_code)] // Carried for downstream steps.
     q_star_idx: usize,
-    /// Per-branch CPR batching challenges $\alpha$ (length `n + 1`).
-    /// `[0]` was consumed by the Q[X] CPR in step 5; `[i + 1]` was
-    /// consumed by the per-prime CPRs in the same step.
-    #[allow(dead_code)] // Carried for downstream steps.
-    folding_challenges: Vec<F>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
     /// forward from step 4 for reuse by step 7's lifted-eval computation.
@@ -348,7 +323,6 @@ pub struct ProverMultipointEvaled<
     field_cfg: F::Config,
     /// Per-branch field configs (carried for downstream steps that need
     /// the per-prime cfgs).
-    #[allow(dead_code)] // Carried for downstream steps.
     all_field_cfgs: Vec<F::Config>,
     projected_trace: ProjectedTrace<F>,
     /// Per-prime $\phi_{q_i}$-projected coefficient traces, threaded
@@ -377,7 +351,6 @@ pub struct ProverMultipointEvaled<
     /// lifted into each branch's field — the underlying integer is shared
     /// with the Q-branch `r_0` thanks to the lockstep sumcheck). Empty for
     /// UAIRs with no declared fq primes. Consumed in step 7.
-    #[allow(dead_code)] // Consumed in step7_lift_and_project.
     r_0_fq: Vec<Vec<F>>,
 }
 
@@ -911,7 +884,6 @@ impl_with_type_bounds!(ProverIdealChecked
             field_cfg: self.field_cfg,
             all_field_cfgs: self.all_field_cfgs,
             q_star_idx: self.q_star_idx,
-            projecting_elements,
             projected_trace: self.projected_trace,
             projected_trace_fq,
             ic_proof: self.ic_proof,
@@ -1133,7 +1105,6 @@ impl_with_type_bounds!(ProverEvalProjected
             field_cfg: self.field_cfg,
             all_field_cfgs: self.all_field_cfgs,
             q_star_idx: self.q_star_idx,
-            folding_challenges,
             projected_trace: self.projected_trace,
             projected_trace_fq: self.projected_trace_fq,
             ic_proof: self.ic_proof,
