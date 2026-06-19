@@ -35,8 +35,9 @@ use zinc_uair::{
 use zinc_utils::{
     UNCHECKED, cfg_chunks, cfg_into_iter, cfg_iter,
     delayed_reduction::{
-        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
-        MontgomeryLimbs,
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedFieldProductSumAlgorithm,
+        DelayedModularReductionAlgorithm, MontgomeryLimbs, MontgomeryProductSum4,
+        ProductAccumulator4,
     },
     from_ref::FromRef,
     inner_product::{FieldFieldInnerProduct, InnerProduct},
@@ -51,6 +52,8 @@ pub const NUM_SHA_RESIDUAL_FAMILIES: usize = 18;
 pub const NUM_NONZERO_SHA_FAMILIES: usize = 7;
 const SHA_RESIDUAL_EVAL_POWER_COUNT: usize = 62;
 const SHA_DIRECT_ROW_CHUNK: usize = 8;
+const SHA_SUFFIX_DMR_PAIR_CHUNK: usize = 256;
+const SHA_SUFFIX_DMR_WEIGHT_CHUNK: usize = 512;
 
 pub type MleColumn<T> = DenseMultilinearExtension<T>;
 pub type MleTable<T> = Vec<MleColumn<T>>;
@@ -790,6 +793,1126 @@ where
             traces, publics, plan, field_cfg,
         )
     }
+}
+
+pub trait ShaSuffixScannerField: PrimeField + Send + Sync + Sized {
+    fn suffix_reduced_body_buckets(
+        linear_claims: &[Self],
+        booleanity_claims: &[Vec<Self>],
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> (Self, Self) {
+        suffix_reduced_body_buckets_generic(
+            linear_claims,
+            booleanity_claims,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_direct_one_body_bucket(
+        linear_claims: &[Self],
+        booleanity_claims: &[Vec<Self>],
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> Self {
+        suffix_direct_one_body_bucket_generic(
+            linear_claims,
+            booleanity_claims,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_reduced_body_buckets_flat(
+        linear_claims: &[Self],
+        booleanity_values: &[Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> (Self, Self) {
+        suffix_reduced_body_buckets_flat_generic(
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_direct_one_body_bucket_flat(
+        linear_claims: &[Self],
+        booleanity_values: &[Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> Self {
+        suffix_direct_one_body_bucket_flat_generic(
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_fold_prepare_next_round_flat(
+        linear_claims: &mut [Self],
+        booleanity_values: &mut [Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        r: &Self,
+        need_t_one: bool,
+        field_cfg: &Self::Config,
+    ) -> (Self, Self, Option<Self>) {
+        suffix_fold_prepare_next_round_flat_generic(
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            r,
+            need_t_one,
+            field_cfg,
+        )
+    }
+}
+
+impl ShaSuffixScannerField for MontyField<4> {
+    fn suffix_reduced_body_buckets(
+        linear_claims: &[Self],
+        booleanity_claims: &[Vec<Self>],
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> (Self, Self) {
+        let product_sum = MontgomeryProductSum4::<Self>::new(field_cfg);
+        suffix_reduced_body_buckets_dmr_with_algorithm(
+            &product_sum,
+            linear_claims,
+            booleanity_claims,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_direct_one_body_bucket(
+        linear_claims: &[Self],
+        booleanity_claims: &[Vec<Self>],
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> Self {
+        let product_sum = MontgomeryProductSum4::<Self>::new(field_cfg);
+        suffix_direct_one_body_bucket_dmr_with_algorithm(
+            &product_sum,
+            linear_claims,
+            booleanity_claims,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_reduced_body_buckets_flat(
+        linear_claims: &[Self],
+        booleanity_values: &[Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> (Self, Self) {
+        let product_sum = MontgomeryProductSum4::<Self>::new(field_cfg);
+        suffix_reduced_body_buckets_flat_dmr_with_algorithm(
+            &product_sum,
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_direct_one_body_bucket_flat(
+        linear_claims: &[Self],
+        booleanity_values: &[Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        field_cfg: &Self::Config,
+    ) -> Self {
+        let product_sum = MontgomeryProductSum4::<Self>::new(field_cfg);
+        suffix_direct_one_body_bucket_flat_dmr_with_algorithm(
+            &product_sum,
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        )
+    }
+
+    fn suffix_fold_prepare_next_round_flat(
+        linear_claims: &mut [Self],
+        booleanity_values: &mut [Self],
+        source_row_count: usize,
+        source_row_weights: &[Self],
+        suffix_eq_weights: &[Self],
+        r: &Self,
+        need_t_one: bool,
+        field_cfg: &Self::Config,
+    ) -> (Self, Self, Option<Self>) {
+        let product_sum = MontgomeryProductSum4::<Self>::new(field_cfg);
+        suffix_fold_prepare_next_round_flat_dmr_with_algorithm(
+            &product_sum,
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            r,
+            need_t_one,
+            field_cfg,
+        )
+    }
+}
+
+impl ShaSuffixScannerField for BoxedMontyField {}
+
+impl<M, const N: usize> ShaSuffixScannerField for ArkFp<MontBackend<M, N>, N> where M: MontConfig<N> {}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_pair_weight<F>(suffix_eq_weights: &[F], rest: usize) -> F
+where
+    F: PrimeField,
+{
+    debug_assert!(suffix_eq_weights.len() >= 2);
+    debug_assert!(rest < (suffix_eq_weights.len() >> 1));
+    suffix_eq_weights[rest << 1].clone() + suffix_eq_weights[(rest << 1) + 1].clone()
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_generic<F>(
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> (F, F)
+where
+    F: PrimeField,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(booleanity_claims.len(), source_row_weights.len());
+    for values in booleanity_claims {
+        debug_assert_eq!(values.len(), suffix_eq_weights.len());
+    }
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let mut linear_zero = F::zero_with_cfg(field_cfg);
+    let mut quadratic_zero = F::zero_with_cfg(field_cfg);
+    let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
+
+    for rest in 0..rest_len {
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        linear_zero += weight.clone() * linear_claims[rest << 1].clone();
+
+        let mut source_zero = F::zero_with_cfg(field_cfg);
+        let mut source_infinity = F::zero_with_cfg(field_cfg);
+        for (values, scale) in booleanity_claims.iter().zip(source_row_weights) {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let even = values[rest << 1].clone();
+            let odd = values[(rest << 1) + 1].clone();
+            source_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
+            let delta = odd - even;
+            source_infinity += scale.clone() * delta.clone() * delta;
+        }
+
+        quadratic_zero += weight.clone() * source_zero;
+        quadratic_infinity += weight * source_infinity;
+    }
+
+    (linear_zero + quadratic_zero, quadratic_infinity)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_direct_one_body_bucket_generic<F>(
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(booleanity_claims.len(), source_row_weights.len());
+    for values in booleanity_claims {
+        debug_assert_eq!(values.len(), suffix_eq_weights.len());
+    }
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let mut acc = F::zero_with_cfg(field_cfg);
+
+    for rest in 0..rest_len {
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        acc += weight.clone() * linear_claims[(rest << 1) + 1].clone();
+
+        let mut source_one = F::zero_with_cfg(field_cfg);
+        for (values, scale) in booleanity_claims.iter().zip(source_row_weights) {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let odd = values[(rest << 1) + 1].clone();
+            source_one += scale.clone() * odd.clone() * (odd - one.clone());
+        }
+        acc += weight * source_one;
+    }
+
+    acc
+}
+
+#[inline(always)]
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_flat_index(tail: usize, source_row: usize, source_row_count: usize) -> usize {
+    tail * source_row_count + source_row
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_flat_generic<F>(
+    linear_claims: &[F],
+    booleanity_values: &[F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> (F, F)
+where
+    F: PrimeField,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let mut linear_zero = F::zero_with_cfg(field_cfg);
+    let mut quadratic_zero = F::zero_with_cfg(field_cfg);
+    let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
+
+    for rest in 0..rest_len {
+        let even_tail = rest << 1;
+        let odd_tail = even_tail + 1;
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        linear_zero += weight.clone() * linear_claims[even_tail].clone();
+
+        let mut source_zero = F::zero_with_cfg(field_cfg);
+        let mut source_infinity = F::zero_with_cfg(field_cfg);
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let even = booleanity_values
+                [suffix_flat_index(even_tail, source_row, source_row_count)]
+            .clone();
+            let odd = booleanity_values[suffix_flat_index(odd_tail, source_row, source_row_count)]
+                .clone();
+            source_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
+            let delta = odd - even;
+            source_infinity += scale.clone() * delta.clone() * delta;
+        }
+
+        quadratic_zero += weight.clone() * source_zero;
+        quadratic_infinity += weight * source_infinity;
+    }
+
+    (linear_zero + quadratic_zero, quadratic_infinity)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_direct_one_body_bucket_flat_generic<F>(
+    linear_claims: &[F],
+    booleanity_values: &[F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let mut acc = F::zero_with_cfg(field_cfg);
+
+    for rest in 0..rest_len {
+        let odd_tail = (rest << 1) + 1;
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        acc += weight.clone() * linear_claims[odd_tail].clone();
+
+        let mut source_one = F::zero_with_cfg(field_cfg);
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let odd = booleanity_values[suffix_flat_index(odd_tail, source_row, source_row_count)]
+                .clone();
+            source_one += scale.clone() * odd.clone() * (odd - one.clone());
+        }
+        acc += weight * source_one;
+    }
+
+    acc
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_fold_prepare_next_round_flat_generic<F>(
+    linear_claims: &mut [F],
+    booleanity_values: &mut [F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    r: &F,
+    need_t_one: bool,
+    field_cfg: &F::Config,
+) -> (F, F, Option<F>)
+where
+    F: PrimeField,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+    debug_assert_eq!(suffix_eq_weights.len() & 3, 0);
+
+    let next_pair_count = suffix_eq_weights.len() >> 2;
+    let one = F::one_with_cfg(field_cfg);
+    let mut linear_zero = F::zero_with_cfg(field_cfg);
+    let mut linear_one = F::zero_with_cfg(field_cfg);
+    let mut quadratic_zero = F::zero_with_cfg(field_cfg);
+    let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
+    let mut quadratic_one = F::zero_with_cfg(field_cfg);
+
+    for next_pair in 0..next_pair_count {
+        let old_base = next_pair << 2;
+        let folded_even = next_pair << 1;
+        let folded_odd = folded_even + 1;
+        let pair_weight = suffix_eq_weights[old_base].clone()
+            + &suffix_eq_weights[old_base + 1]
+            + &suffix_eq_weights[old_base + 2]
+            + &suffix_eq_weights[old_base + 3];
+
+        let l00 = linear_claims[old_base].clone();
+        let l01 = linear_claims[old_base + 1].clone();
+        let l10 = linear_claims[old_base + 2].clone();
+        let l11 = linear_claims[old_base + 3].clone();
+        let l0 = l00.clone() + r.clone() * (l01 - l00);
+        let l1 = l10.clone() + r.clone() * (l11 - l10);
+        linear_claims[folded_even] = l0.clone();
+        linear_claims[folded_odd] = l1.clone();
+        linear_zero += pair_weight.clone() * l0;
+        if need_t_one {
+            linear_one += pair_weight.clone() * l1;
+        }
+
+        let mut source_zero = F::zero_with_cfg(field_cfg);
+        let mut source_infinity = F::zero_with_cfg(field_cfg);
+        let mut source_one = F::zero_with_cfg(field_cfg);
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            let old_00 = suffix_flat_index(old_base, source_row, source_row_count);
+            let old_01 = suffix_flat_index(old_base + 1, source_row, source_row_count);
+            let old_10 = suffix_flat_index(old_base + 2, source_row, source_row_count);
+            let old_11 = suffix_flat_index(old_base + 3, source_row, source_row_count);
+            let d00 = booleanity_values[old_00].clone();
+            let d01 = booleanity_values[old_01].clone();
+            let d10 = booleanity_values[old_10].clone();
+            let d11 = booleanity_values[old_11].clone();
+            let d0 = d00.clone() + r.clone() * (d01 - d00);
+            let d1 = d10.clone() + r.clone() * (d11 - d10);
+            let new_0 = suffix_flat_index(folded_even, source_row, source_row_count);
+            let new_1 = suffix_flat_index(folded_odd, source_row, source_row_count);
+            booleanity_values[new_0] = d0.clone();
+            booleanity_values[new_1] = d1.clone();
+
+            if F::is_zero(scale) {
+                continue;
+            }
+            source_zero += scale.clone() * d0.clone() * (d0.clone() - one.clone());
+            let delta = d1.clone() - d0;
+            source_infinity += scale.clone() * delta.clone() * delta;
+            if need_t_one {
+                source_one += scale.clone() * d1.clone() * (d1 - one.clone());
+            }
+        }
+
+        quadratic_zero += pair_weight.clone() * source_zero;
+        quadratic_infinity += pair_weight.clone() * source_infinity;
+        if need_t_one {
+            quadratic_one += pair_weight * source_one;
+        }
+    }
+
+    let t_one = need_t_one.then(|| linear_one + quadratic_one);
+    (linear_zero + quadratic_zero, quadratic_infinity, t_one)
+}
+
+#[inline(always)]
+fn add_product_sum4<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    total: &mut F,
+    acc: &mut ProductAccumulator4,
+    lhs: &F,
+    rhs: &F,
+) where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    if F::is_zero(lhs) || F::is_zero(rhs) {
+        return;
+    }
+    product_sum.add_product(acc, lhs, rhs);
+    if acc.pending_products() >= product_sum.flush_products() {
+        *total += product_sum.reduce_products(*acc);
+        *acc = product_sum.zero_accumulator();
+    }
+}
+
+#[inline(always)]
+fn finish_product_sum4<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    mut total: F,
+    acc: ProductAccumulator4,
+) -> F
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    if acc.pending_products() != 0 {
+        total += product_sum.reduce_products(acc);
+    }
+    total
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_dmr_with_algorithm<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> (F, F)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(suffix_eq_weights.len() & 1, 0);
+    debug_assert_eq!(booleanity_claims.len(), source_row_weights.len());
+    for values in booleanity_claims {
+        debug_assert_eq!(values.len(), suffix_eq_weights.len());
+    }
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let flush_products = product_sum.flush_products();
+    let chunk_buckets: Vec<_> = cfg_chunks!(suffix_eq_weights, SHA_SUFFIX_DMR_WEIGHT_CHUNK)
+        .enumerate()
+        .map(|(chunk_idx, suffix_eq_chunk)| {
+            let chunk_product_sum =
+                MontgomeryProductSum4::<F>::new_with_flush_products(field_cfg, flush_products);
+            suffix_reduced_body_buckets_dmr_chunk(
+                &chunk_product_sum,
+                linear_claims,
+                booleanity_claims,
+                source_row_weights,
+                suffix_eq_chunk,
+                chunk_idx * SHA_SUFFIX_DMR_PAIR_CHUNK,
+                field_cfg,
+            )
+        })
+        .collect();
+
+    let mut linear_zero = zero.clone();
+    let mut quadratic_zero = zero.clone();
+    let mut quadratic_infinity = zero;
+    for (linear_chunk, quadratic_zero_chunk, quadratic_infinity_chunk) in chunk_buckets {
+        linear_zero += linear_chunk;
+        quadratic_zero += quadratic_zero_chunk;
+        quadratic_infinity += quadratic_infinity_chunk;
+    }
+
+    (linear_zero + quadratic_zero, quadratic_infinity)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_dmr_chunk<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_chunk: &[F],
+    pair_offset: usize,
+    field_cfg: &F::Config,
+) -> (F, F, F)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(suffix_eq_chunk.len() & 1, 0);
+
+    let rest_len = suffix_eq_chunk.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+
+    let mut linear_total = zero.clone();
+    let mut linear_acc = product_sum.zero_accumulator();
+    let mut quadratic_zero_total = zero.clone();
+    let mut quadratic_zero_acc = product_sum.zero_accumulator();
+    let mut quadratic_infinity_total = zero.clone();
+    let mut quadratic_infinity_acc = product_sum.zero_accumulator();
+
+    for local_rest in 0..rest_len {
+        let rest = pair_offset + local_rest;
+        let weight = suffix_pair_weight(suffix_eq_chunk, local_rest);
+        add_product_sum4(
+            product_sum,
+            &mut linear_total,
+            &mut linear_acc,
+            &weight,
+            &linear_claims[rest << 1],
+        );
+
+        let mut source_zero_total = zero.clone();
+        let mut source_zero_acc = product_sum.zero_accumulator();
+        let mut source_infinity_total = zero.clone();
+        let mut source_infinity_acc = product_sum.zero_accumulator();
+
+        for (values, scale) in booleanity_claims.iter().zip(source_row_weights) {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let even = values[rest << 1].clone();
+            let odd = values[(rest << 1) + 1].clone();
+            let zero_term = even.clone() * (even.clone() - one.clone());
+            add_product_sum4(
+                product_sum,
+                &mut source_zero_total,
+                &mut source_zero_acc,
+                scale,
+                &zero_term,
+            );
+
+            let delta = odd - even;
+            let infinity_term = delta.clone() * delta;
+            add_product_sum4(
+                product_sum,
+                &mut source_infinity_total,
+                &mut source_infinity_acc,
+                scale,
+                &infinity_term,
+            );
+        }
+
+        let source_zero = finish_product_sum4(product_sum, source_zero_total, source_zero_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_zero_total,
+            &mut quadratic_zero_acc,
+            &weight,
+            &source_zero,
+        );
+
+        let source_infinity =
+            finish_product_sum4(product_sum, source_infinity_total, source_infinity_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_infinity_total,
+            &mut quadratic_infinity_acc,
+            &weight,
+            &source_infinity,
+        );
+    }
+
+    let linear_zero = finish_product_sum4(product_sum, linear_total, linear_acc);
+    let quadratic_zero = finish_product_sum4(product_sum, quadratic_zero_total, quadratic_zero_acc);
+    let quadratic_infinity = finish_product_sum4(
+        product_sum,
+        quadratic_infinity_total,
+        quadratic_infinity_acc,
+    );
+
+    (linear_zero, quadratic_zero, quadratic_infinity)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_direct_one_body_bucket_dmr_with_algorithm<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> F
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(suffix_eq_weights.len() & 1, 0);
+    debug_assert_eq!(booleanity_claims.len(), source_row_weights.len());
+    for values in booleanity_claims {
+        debug_assert_eq!(values.len(), suffix_eq_weights.len());
+    }
+
+    let zero = F::zero_with_cfg(field_cfg);
+    let flush_products = product_sum.flush_products();
+    let chunk_buckets: Vec<_> = cfg_chunks!(suffix_eq_weights, SHA_SUFFIX_DMR_WEIGHT_CHUNK)
+        .enumerate()
+        .map(|(chunk_idx, suffix_eq_chunk)| {
+            let chunk_product_sum =
+                MontgomeryProductSum4::<F>::new_with_flush_products(field_cfg, flush_products);
+            suffix_direct_one_body_bucket_dmr_chunk(
+                &chunk_product_sum,
+                linear_claims,
+                booleanity_claims,
+                source_row_weights,
+                suffix_eq_chunk,
+                chunk_idx * SHA_SUFFIX_DMR_PAIR_CHUNK,
+                field_cfg,
+            )
+        })
+        .collect();
+
+    let mut total = zero;
+    for chunk_bucket in chunk_buckets {
+        total += chunk_bucket;
+    }
+
+    total
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_direct_one_body_bucket_dmr_chunk<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_claims: &[Vec<F>],
+    source_row_weights: &[F],
+    suffix_eq_chunk: &[F],
+    pair_offset: usize,
+    field_cfg: &F::Config,
+) -> F
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(suffix_eq_chunk.len() & 1, 0);
+
+    let rest_len = suffix_eq_chunk.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut total = zero.clone();
+    let mut acc = product_sum.zero_accumulator();
+
+    for local_rest in 0..rest_len {
+        let rest = pair_offset + local_rest;
+        let weight = suffix_pair_weight(suffix_eq_chunk, local_rest);
+        add_product_sum4(
+            product_sum,
+            &mut total,
+            &mut acc,
+            &weight,
+            &linear_claims[(rest << 1) + 1],
+        );
+
+        let mut source_one_total = zero.clone();
+        let mut source_one_acc = product_sum.zero_accumulator();
+        for (values, scale) in booleanity_claims.iter().zip(source_row_weights) {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let odd = values[(rest << 1) + 1].clone();
+            let one_term = odd.clone() * (odd - one.clone());
+            add_product_sum4(
+                product_sum,
+                &mut source_one_total,
+                &mut source_one_acc,
+                scale,
+                &one_term,
+            );
+        }
+        let source_one = finish_product_sum4(product_sum, source_one_total, source_one_acc);
+        add_product_sum4(product_sum, &mut total, &mut acc, &weight, &source_one);
+    }
+
+    finish_product_sum4(product_sum, total, acc)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_flat_dmr_with_algorithm<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_values: &[F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> (F, F)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(suffix_eq_weights.len() & 1, 0);
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut linear_total = zero.clone();
+    let mut linear_acc = product_sum.zero_accumulator();
+    let mut quadratic_zero_total = zero.clone();
+    let mut quadratic_zero_acc = product_sum.zero_accumulator();
+    let mut quadratic_infinity_total = zero.clone();
+    let mut quadratic_infinity_acc = product_sum.zero_accumulator();
+
+    for rest in 0..rest_len {
+        let even_tail = rest << 1;
+        let odd_tail = even_tail + 1;
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        add_product_sum4(
+            product_sum,
+            &mut linear_total,
+            &mut linear_acc,
+            &weight,
+            &linear_claims[even_tail],
+        );
+
+        let mut source_zero_total = zero.clone();
+        let mut source_zero_acc = product_sum.zero_accumulator();
+        let mut source_infinity_total = zero.clone();
+        let mut source_infinity_acc = product_sum.zero_accumulator();
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let even = booleanity_values
+                [suffix_flat_index(even_tail, source_row, source_row_count)]
+            .clone();
+            let odd = booleanity_values[suffix_flat_index(odd_tail, source_row, source_row_count)]
+                .clone();
+            let zero_term = even.clone() * (even.clone() - one.clone());
+            add_product_sum4(
+                product_sum,
+                &mut source_zero_total,
+                &mut source_zero_acc,
+                scale,
+                &zero_term,
+            );
+
+            let delta = odd - even;
+            let infinity_term = delta.clone() * delta;
+            add_product_sum4(
+                product_sum,
+                &mut source_infinity_total,
+                &mut source_infinity_acc,
+                scale,
+                &infinity_term,
+            );
+        }
+
+        let source_zero = finish_product_sum4(product_sum, source_zero_total, source_zero_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_zero_total,
+            &mut quadratic_zero_acc,
+            &weight,
+            &source_zero,
+        );
+
+        let source_infinity =
+            finish_product_sum4(product_sum, source_infinity_total, source_infinity_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_infinity_total,
+            &mut quadratic_infinity_acc,
+            &weight,
+            &source_infinity,
+        );
+    }
+
+    let linear_zero = finish_product_sum4(product_sum, linear_total, linear_acc);
+    let quadratic_zero = finish_product_sum4(product_sum, quadratic_zero_total, quadratic_zero_acc);
+    let quadratic_infinity = finish_product_sum4(
+        product_sum,
+        quadratic_infinity_total,
+        quadratic_infinity_acc,
+    );
+    (linear_zero + quadratic_zero, quadratic_infinity)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_direct_one_body_bucket_flat_dmr_with_algorithm<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_values: &[F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> F
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(suffix_eq_weights.len() & 1, 0);
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut total = zero.clone();
+    let mut acc = product_sum.zero_accumulator();
+
+    for rest in 0..rest_len {
+        let odd_tail = (rest << 1) + 1;
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        add_product_sum4(
+            product_sum,
+            &mut total,
+            &mut acc,
+            &weight,
+            &linear_claims[odd_tail],
+        );
+
+        let mut source_one_total = zero.clone();
+        let mut source_one_acc = product_sum.zero_accumulator();
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            if F::is_zero(scale) {
+                continue;
+            }
+            let odd = booleanity_values[suffix_flat_index(odd_tail, source_row, source_row_count)]
+                .clone();
+            let one_term = odd.clone() * (odd - one.clone());
+            add_product_sum4(
+                product_sum,
+                &mut source_one_total,
+                &mut source_one_acc,
+                scale,
+                &one_term,
+            );
+        }
+        let source_one = finish_product_sum4(product_sum, source_one_total, source_one_acc);
+        add_product_sum4(product_sum, &mut total, &mut acc, &weight, &source_one);
+    }
+
+    finish_product_sum4(product_sum, total, acc)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_fold_prepare_next_round_flat_dmr_with_algorithm<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &mut [F],
+    booleanity_values: &mut [F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    r: &F,
+    need_t_one: bool,
+    field_cfg: &F::Config,
+) -> (F, F, Option<F>)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    debug_assert_eq!(linear_claims.len(), suffix_eq_weights.len());
+    debug_assert_eq!(source_row_weights.len(), source_row_count);
+    debug_assert_eq!(
+        booleanity_values.len(),
+        suffix_eq_weights.len() * source_row_count
+    );
+    debug_assert_eq!(suffix_eq_weights.len() & 3, 0);
+
+    let next_pair_count = suffix_eq_weights.len() >> 2;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut linear_zero_total = zero.clone();
+    let mut linear_zero_acc = product_sum.zero_accumulator();
+    let mut linear_one_total = zero.clone();
+    let mut linear_one_acc = product_sum.zero_accumulator();
+    let mut quadratic_zero_total = zero.clone();
+    let mut quadratic_zero_acc = product_sum.zero_accumulator();
+    let mut quadratic_infinity_total = zero.clone();
+    let mut quadratic_infinity_acc = product_sum.zero_accumulator();
+    let mut quadratic_one_total = zero.clone();
+    let mut quadratic_one_acc = product_sum.zero_accumulator();
+
+    for next_pair in 0..next_pair_count {
+        let old_base = next_pair << 2;
+        let folded_even = next_pair << 1;
+        let folded_odd = folded_even + 1;
+        let pair_weight = suffix_eq_weights[old_base].clone()
+            + &suffix_eq_weights[old_base + 1]
+            + &suffix_eq_weights[old_base + 2]
+            + &suffix_eq_weights[old_base + 3];
+
+        let l00 = linear_claims[old_base].clone();
+        let l01 = linear_claims[old_base + 1].clone();
+        let l10 = linear_claims[old_base + 2].clone();
+        let l11 = linear_claims[old_base + 3].clone();
+        let l0 = l00.clone() + r.clone() * (l01 - l00);
+        let l1 = l10.clone() + r.clone() * (l11 - l10);
+        linear_claims[folded_even] = l0.clone();
+        linear_claims[folded_odd] = l1.clone();
+        add_product_sum4(
+            product_sum,
+            &mut linear_zero_total,
+            &mut linear_zero_acc,
+            &pair_weight,
+            &l0,
+        );
+        if need_t_one {
+            add_product_sum4(
+                product_sum,
+                &mut linear_one_total,
+                &mut linear_one_acc,
+                &pair_weight,
+                &l1,
+            );
+        }
+
+        let mut source_zero_total = zero.clone();
+        let mut source_zero_acc = product_sum.zero_accumulator();
+        let mut source_infinity_total = zero.clone();
+        let mut source_infinity_acc = product_sum.zero_accumulator();
+        let mut source_one_total = zero.clone();
+        let mut source_one_acc = product_sum.zero_accumulator();
+        for (source_row, scale) in source_row_weights.iter().enumerate() {
+            let old_00 = suffix_flat_index(old_base, source_row, source_row_count);
+            let old_01 = suffix_flat_index(old_base + 1, source_row, source_row_count);
+            let old_10 = suffix_flat_index(old_base + 2, source_row, source_row_count);
+            let old_11 = suffix_flat_index(old_base + 3, source_row, source_row_count);
+            let d00 = booleanity_values[old_00].clone();
+            let d01 = booleanity_values[old_01].clone();
+            let d10 = booleanity_values[old_10].clone();
+            let d11 = booleanity_values[old_11].clone();
+            let d0 = d00.clone() + r.clone() * (d01 - d00);
+            let d1 = d10.clone() + r.clone() * (d11 - d10);
+            let new_0 = suffix_flat_index(folded_even, source_row, source_row_count);
+            let new_1 = suffix_flat_index(folded_odd, source_row, source_row_count);
+            booleanity_values[new_0] = d0.clone();
+            booleanity_values[new_1] = d1.clone();
+
+            if F::is_zero(scale) {
+                continue;
+            }
+            let zero_term = d0.clone() * (d0.clone() - one.clone());
+            add_product_sum4(
+                product_sum,
+                &mut source_zero_total,
+                &mut source_zero_acc,
+                scale,
+                &zero_term,
+            );
+
+            let delta = d1.clone() - d0;
+            let infinity_term = delta.clone() * delta;
+            add_product_sum4(
+                product_sum,
+                &mut source_infinity_total,
+                &mut source_infinity_acc,
+                scale,
+                &infinity_term,
+            );
+
+            if need_t_one {
+                let one_term = d1.clone() * (d1 - one.clone());
+                add_product_sum4(
+                    product_sum,
+                    &mut source_one_total,
+                    &mut source_one_acc,
+                    scale,
+                    &one_term,
+                );
+            }
+        }
+
+        let source_zero = finish_product_sum4(product_sum, source_zero_total, source_zero_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_zero_total,
+            &mut quadratic_zero_acc,
+            &pair_weight,
+            &source_zero,
+        );
+
+        let source_infinity =
+            finish_product_sum4(product_sum, source_infinity_total, source_infinity_acc);
+        add_product_sum4(
+            product_sum,
+            &mut quadratic_infinity_total,
+            &mut quadratic_infinity_acc,
+            &pair_weight,
+            &source_infinity,
+        );
+
+        if need_t_one {
+            let source_one = finish_product_sum4(product_sum, source_one_total, source_one_acc);
+            add_product_sum4(
+                product_sum,
+                &mut quadratic_one_total,
+                &mut quadratic_one_acc,
+                &pair_weight,
+                &source_one,
+            );
+        }
+    }
+
+    let linear_zero = finish_product_sum4(product_sum, linear_zero_total, linear_zero_acc);
+    let quadratic_zero = finish_product_sum4(product_sum, quadratic_zero_total, quadratic_zero_acc);
+    let quadratic_infinity = finish_product_sum4(
+        product_sum,
+        quadratic_infinity_total,
+        quadratic_infinity_acc,
+    );
+    let t_one = if need_t_one {
+        let linear_one = finish_product_sum4(product_sum, linear_one_total, linear_one_acc);
+        let quadratic_one =
+            finish_product_sum4(product_sum, quadratic_one_total, quadratic_one_acc);
+        Some(linear_one + quadratic_one)
+    } else {
+        None
+    };
+
+    (linear_zero + quadratic_zero, quadratic_infinity, t_one)
 }
 
 fn build_sha_sumfold_linear_accumulator_direct_with_weights_generic<F, Trace, Public>(
@@ -2573,6 +3696,123 @@ where
 }
 
 #[derive(Clone, Debug)]
+struct BooleanityClaimTable<F> {
+    values: Vec<F>,
+    tail_len: usize,
+    source_row_count: usize,
+}
+
+impl<F> BooleanityClaimTable<F>
+where
+    F: PrimeField,
+{
+    fn new(
+        values: Vec<F>,
+        tail_len: usize,
+        source_row_count: usize,
+    ) -> Result<Self, ShaProjectionError> {
+        if tail_len == 0 || !tail_len.is_power_of_two() {
+            return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: tail_len });
+        }
+        let expected_len = tail_len.checked_mul(source_row_count).ok_or(
+            ShaProjectionError::InstanceCountMismatch {
+                got: values.len(),
+                expected: usize::MAX,
+            },
+        )?;
+        if values.len() != expected_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: values.len(),
+                expected: expected_len,
+            });
+        }
+        Ok(Self {
+            values,
+            tail_len,
+            source_row_count,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_source_major(
+        source_values: &[Vec<F>],
+        tail_len: usize,
+    ) -> Result<Self, ShaProjectionError> {
+        for values in source_values {
+            if values.len() != tail_len {
+                return Err(ShaProjectionError::InstanceCountMismatch {
+                    got: values.len(),
+                    expected: tail_len,
+                });
+            }
+        }
+        let source_row_count = source_values.len();
+        let mut values = Vec::with_capacity(tail_len * source_row_count);
+        for tail in 0..tail_len {
+            for source_row_values in source_values {
+                values.push(source_row_values[tail].clone());
+            }
+        }
+        Self::new(values, tail_len, source_row_count)
+    }
+
+    fn tail_len(&self) -> usize {
+        self.tail_len
+    }
+
+    fn source_row_count(&self) -> usize {
+        self.source_row_count
+    }
+
+    fn values(&self) -> &[F] {
+        &self.values
+    }
+
+    fn values_mut(&mut self) -> &mut [F] {
+        &mut self.values
+    }
+
+    fn value(&self, tail: usize, source_row: usize) -> &F {
+        &self.values[suffix_flat_index(tail, source_row, self.source_row_count)]
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fold_in_place(&mut self, r: &F) {
+        debug_assert!(self.tail_len.is_power_of_two());
+        debug_assert!(self.tail_len >= 2);
+        let half = self.tail_len >> 1;
+        for tail in 0..half {
+            let even_tail = tail << 1;
+            let odd_tail = even_tail + 1;
+            for source_row in 0..self.source_row_count {
+                let even = self.values
+                    [suffix_flat_index(even_tail, source_row, self.source_row_count)]
+                .clone();
+                let odd = self.values
+                    [suffix_flat_index(odd_tail, source_row, self.source_row_count)]
+                .clone();
+                let folded = even.clone() + r.clone() * (odd - even);
+                let out_idx = suffix_flat_index(tail, source_row, self.source_row_count);
+                self.values[out_idx] = folded;
+            }
+        }
+        self.truncate_tail_len(half);
+    }
+
+    fn truncate_tail_len(&mut self, tail_len: usize) {
+        debug_assert!(tail_len <= self.tail_len);
+        self.tail_len = tail_len;
+        self.values.truncate(tail_len * self.source_row_count);
+    }
+
+    fn source_row_values(&self, source_row: usize) -> Vec<F> {
+        (0..self.tail_len)
+            .map(|tail| self.value(tail, source_row).clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
 struct CollapsedSuffixEqWeights<F> {
     values: Vec<F>,
 }
@@ -3162,7 +4402,8 @@ where
             field_cfg,
         )?;
 
-        for values in source_tail_values {
+        for source_row in 0..source_tail_values.source_row_count() {
+            let values = source_tail_values.source_row_values(source_row);
             mles.push(DenseMultilinearExtension::from_evaluations_vec(
                 tail_vars,
                 values.iter().map(|value| value.inner().clone()).collect(),
@@ -3249,7 +4490,12 @@ struct RelationSumFoldAllRoundsFastPath<F: PrimeField> {
 
 impl<F> RelationSumFoldAllRoundsFastPath<F>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
 {
     fn new(
         prefix: RelationSumFoldPrefixFastPath<F>,
@@ -3311,7 +4557,8 @@ where
         r: &F,
         field_cfg: &F::Config,
     ) -> Result<(), ShaProjectionError> {
-        self.current_claim = Some(self.evaluate_last_round_at(r, field_cfg));
+        let current_claim = self.evaluate_last_round_at(r, field_cfg);
+        self.current_claim = Some(current_claim.clone());
 
         if let Some(linear) = self.live_linear.as_mut() {
             linear.fold_in_place(r);
@@ -3333,7 +4580,7 @@ where
                 self.initialize_suffix(field_cfg)?;
             }
         } else if let Some(suffix) = self.suffix.as_mut() {
-            suffix.bind_previous_challenge(r, field_cfg);
+            suffix.bind_previous_challenge(r, &current_claim, field_cfg);
         }
 
         Ok(())
@@ -3525,7 +4772,12 @@ where
 
 impl<F> PrefixFastPath<F> for RelationSumFoldAllRoundsFastPath<F>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
 {
     fn prefix_len(&self) -> usize {
         self.total_vars
@@ -3561,21 +4813,28 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+struct SuffixRoundBuckets<F> {
+    t_zero: F,
+    t_infinity: F,
+    t_one_direct: Option<F>,
+}
+
 struct RelationSumFoldSuffixState<F: PrimeField> {
     beta: Vec<F>,
     suffix_start: usize,
     round: usize,
     alpha: F,
     linear_claims: LinearClaimTable<F>,
-    booleanity_claims: Vec<Vec<F>>,
-    row_weights: Vec<F>,
-    booleanity_weights: Vec<F>,
+    booleanity_claims: BooleanityClaimTable<F>,
+    source_row_weights: Vec<F>,
     suffix_eq_weights: CollapsedSuffixEqWeights<F>,
+    prepared_round: Option<SuffixRoundBuckets<F>>,
 }
 
 impl<F> RelationSumFoldSuffixState<F>
 where
-    F: PrimeField,
+    F: ShaSuffixScannerField,
 {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -3583,7 +4842,7 @@ where
         suffix_start: usize,
         alpha: F,
         linear_claims: LinearClaimTable<F>,
-        booleanity_claims: Vec<Vec<F>>,
+        booleanity_claims: BooleanityClaimTable<F>,
         row_weights: Vec<F>,
         booleanity_weights: Vec<F>,
         field_cfg: &F::Config,
@@ -3605,24 +4864,28 @@ where
             });
         }
         let expected_booleanity_claims = booleanity_weights.len() * SHA_ROW_COUNT;
-        if booleanity_claims.len() != expected_booleanity_claims {
+        if booleanity_claims.source_row_count() != expected_booleanity_claims {
             return Err(ShaProjectionError::ColumnRowCount {
                 kind: "booleanity_claims",
                 col: 0,
-                got: booleanity_claims.len(),
+                got: booleanity_claims.source_row_count(),
                 expected: expected_booleanity_claims,
             });
         }
-        for values in &booleanity_claims {
-            if values.len() != suffix_len {
-                return Err(ShaProjectionError::InstanceCountMismatch {
-                    got: values.len(),
-                    expected: suffix_len,
-                });
-            }
+        if booleanity_claims.tail_len() != suffix_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: booleanity_claims.tail_len(),
+                expected: suffix_len,
+            });
         }
 
         let suffix_eq_weights = CollapsedSuffixEqWeights::new(&beta[suffix_start..], field_cfg)?;
+        let mut source_row_weights = Vec::with_capacity(expected_booleanity_claims);
+        for booleanity_weight in &booleanity_weights {
+            for row_weight in &row_weights {
+                source_row_weights.push(row_weight.clone() * booleanity_weight);
+            }
+        }
 
         Ok(Self {
             beta,
@@ -3631,16 +4894,31 @@ where
             alpha,
             linear_claims,
             booleanity_claims,
-            row_weights,
-            booleanity_weights,
+            source_row_weights,
             suffix_eq_weights,
+            prepared_round: None,
         })
     }
 
     fn prove_round(&mut self, current_claim: &F, field_cfg: &F::Config) -> [F; 4] {
-        debug_assert!(self.round < self.beta.len() - self.suffix_start);
+        debug_assert!(self.round < self.suffix_vars());
         self.debug_assert_live_lengths();
-        let (t_zero, t_infinity) = self.reduced_body_buckets(field_cfg);
+        let need_t_one = self.current_round_needs_direct_one(field_cfg);
+        let buckets = self
+            .prepared_round
+            .take()
+            .unwrap_or_else(|| self.scan_round_buckets(need_t_one, field_cfg));
+        let evaluations = self.round_evaluations_from_buckets(current_claim, &buckets, field_cfg);
+        self.round += 1;
+        evaluations
+    }
+
+    fn round_evaluations_from_buckets(
+        &self,
+        current_claim: &F,
+        buckets: &SuffixRoundBuckets<F>,
+        field_cfg: &F::Config,
+    ) -> [F; 4] {
         let beta_idx = self.suffix_start + self.round;
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
@@ -3648,95 +4926,110 @@ where
         let three = two.clone() + &one;
         let e_zero = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &zero, field_cfg);
         let e_one = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &one, field_cfg);
+        let t_zero = &buckets.t_zero;
+        let t_infinity = &buckets.t_infinity;
         let t_one = if F::is_zero(&e_one) {
-            self.direct_one_body_bucket(field_cfg)
+            buckets
+                .t_one_direct
+                .clone()
+                .expect("zero e1 suffix round should carry a direct T1 bucket")
         } else {
-            (current_claim.clone() - e_zero.clone() * t_zero.clone()) / e_one
+            (current_claim.clone() - e_zero.clone() * buckets.t_zero.clone()) / e_one
         };
 
         let eval_at = |x: &F| {
             let eq = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], x, field_cfg);
-            eq * eval_quadratic_from_zero_one_infinity(&t_zero, &t_one, &t_infinity, x, field_cfg)
+            eq * eval_quadratic_from_zero_one_infinity(t_zero, &t_one, t_infinity, x, field_cfg)
         };
 
         let p0 = e_zero * t_zero.clone();
         let p1 = eval_at(&one);
         let p2 = eval_at(&two);
         let p3 = eval_at(&three);
-        self.round += 1;
         [p0, p1, p2, p3]
     }
 
-    fn bind_previous_challenge(&mut self, r: &F, field_cfg: &F::Config) {
+    fn bind_previous_challenge(&mut self, r: &F, _current_claim: &F, field_cfg: &F::Config) {
         debug_assert!(self.round > 0);
+        debug_assert!(self.prepared_round.is_none());
         let beta_idx = self.suffix_start + self.round - 1;
         self.alpha *= eq_one_var(&self.beta[beta_idx], r, field_cfg);
-        self.linear_claims.fold_in_place(r);
-        for values in &mut self.booleanity_claims {
-            fold_binary_claim_vector(values, r);
+
+        if self.round < self.suffix_vars() {
+            let need_t_one = self.current_round_needs_direct_one(field_cfg);
+            let source_row_count = self.booleanity_claims.source_row_count();
+            let (t_zero, t_infinity, t_one_direct) = F::suffix_fold_prepare_next_round_flat(
+                &mut self.linear_claims.values,
+                self.booleanity_claims.values_mut(),
+                source_row_count,
+                &self.source_row_weights,
+                &self.suffix_eq_weights.values,
+                r,
+                need_t_one,
+                field_cfg,
+            );
+            let new_len = self.linear_claims.values.len() >> 1;
+            self.linear_claims.values.truncate(new_len);
+            self.booleanity_claims.truncate_tail_len(new_len);
+            self.suffix_eq_weights.collapse_current_axis();
+            self.prepared_round = Some(SuffixRoundBuckets {
+                t_zero,
+                t_infinity,
+                t_one_direct,
+            });
+        } else {
+            self.linear_claims.fold_in_place(r);
+            self.booleanity_claims.fold_in_place(r);
+            self.suffix_eq_weights.collapse_current_axis();
+            self.prepared_round = None;
         }
-        self.suffix_eq_weights.collapse_current_axis();
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn reduced_body_buckets(&self, field_cfg: &F::Config) -> (F, F) {
         self.debug_assert_live_lengths();
-        let rest_len = self.suffix_eq_weights.pair_count();
-        let one = F::one_with_cfg(field_cfg);
-        let mut linear_zero = F::zero_with_cfg(field_cfg);
-        let mut quadratic_zero = F::zero_with_cfg(field_cfg);
-        let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
-
-        for rest in 0..rest_len {
-            let weight = self.suffix_eq_weights.pair_weight(rest);
-            linear_zero += weight.clone() * self.linear_claims.values[rest << 1].clone();
-        }
-
-        for (source_idx, booleanity_weight) in self.booleanity_weights.iter().enumerate() {
-            for (row, row_weight) in self.row_weights.iter().enumerate() {
-                let scale = row_weight.clone() * booleanity_weight;
-                let values = &self.booleanity_claims[source_idx * SHA_ROW_COUNT + row];
-                for rest in 0..rest_len {
-                    let weight = self.suffix_eq_weights.pair_weight(rest);
-                    let even = values[rest << 1].clone();
-                    let odd = values[(rest << 1) + 1].clone();
-                    let weighted_scale = scale.clone() * &weight;
-                    quadratic_zero +=
-                        weighted_scale.clone() * even.clone() * (even.clone() - one.clone());
-                    let delta = odd - even;
-                    quadratic_infinity += weighted_scale * delta.clone() * delta;
-                }
-            }
-        }
-
-        (linear_zero + quadratic_zero, quadratic_infinity)
+        F::suffix_reduced_body_buckets_flat(
+            &self.linear_claims.values,
+            self.booleanity_claims.values(),
+            self.booleanity_claims.source_row_count(),
+            &self.source_row_weights,
+            &self.suffix_eq_weights.values,
+            field_cfg,
+        )
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn direct_one_body_bucket(&self, field_cfg: &F::Config) -> F {
         self.debug_assert_live_lengths();
-        let rest_len = self.suffix_eq_weights.pair_count();
+        F::suffix_direct_one_body_bucket_flat(
+            &self.linear_claims.values,
+            self.booleanity_claims.values(),
+            self.booleanity_claims.source_row_count(),
+            &self.source_row_weights,
+            &self.suffix_eq_weights.values,
+            field_cfg,
+        )
+    }
+
+    fn scan_round_buckets(&self, need_t_one: bool, field_cfg: &F::Config) -> SuffixRoundBuckets<F> {
+        let (t_zero, t_infinity) = self.reduced_body_buckets(field_cfg);
+        let t_one_direct = need_t_one.then(|| self.direct_one_body_bucket(field_cfg));
+        SuffixRoundBuckets {
+            t_zero,
+            t_infinity,
+            t_one_direct,
+        }
+    }
+
+    fn current_round_needs_direct_one(&self, field_cfg: &F::Config) -> bool {
+        let beta_idx = self.suffix_start + self.round;
         let one = F::one_with_cfg(field_cfg);
-        let mut acc = F::zero_with_cfg(field_cfg);
+        let e_one = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &one, field_cfg);
+        F::is_zero(&e_one)
+    }
 
-        for rest in 0..rest_len {
-            let weight = self.suffix_eq_weights.pair_weight(rest);
-            acc += weight.clone() * self.linear_claims.values[(rest << 1) + 1].clone();
-        }
-
-        for (source_idx, booleanity_weight) in self.booleanity_weights.iter().enumerate() {
-            for (row, row_weight) in self.row_weights.iter().enumerate() {
-                let scale = row_weight.clone() * booleanity_weight;
-                let values = &self.booleanity_claims[source_idx * SHA_ROW_COUNT + row];
-                for rest in 0..rest_len {
-                    let weight = self.suffix_eq_weights.pair_weight(rest);
-                    let odd = values[(rest << 1) + 1].clone();
-                    acc += scale.clone() * weight * odd.clone() * (odd - one.clone());
-                }
-            }
-        }
-
-        acc
+    fn suffix_vars(&self) -> usize {
+        self.beta.len() - self.suffix_start
     }
 
     fn debug_assert_live_lengths(&self) {
@@ -3744,9 +5037,14 @@ where
             self.linear_claims.values.len(),
             self.suffix_eq_weights.len()
         );
-        for values in &self.booleanity_claims {
-            debug_assert_eq!(values.len(), self.suffix_eq_weights.len());
-        }
+        debug_assert_eq!(
+            self.booleanity_claims.tail_len(),
+            self.suffix_eq_weights.len()
+        );
+        debug_assert_eq!(
+            self.booleanity_claims.values().len(),
+            self.suffix_eq_weights.len() * self.booleanity_claims.source_row_count()
+        );
     }
 }
 
@@ -4044,7 +5342,12 @@ pub fn build_production_sha_sumfold_group_from_prefix_accumulators<F, Trace>(
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
@@ -4140,7 +5443,12 @@ pub fn build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
     let ell = validate_sha_sumfold_traces(traces, beta)?;
@@ -4238,7 +5546,12 @@ pub fn build_production_sha_sumfold_group<F, Trace, Public>(
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -4310,7 +5623,12 @@ pub fn build_production_sha_sumfold_group_with_linear_cache<F, Trace, Public>(
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -4352,7 +5670,12 @@ pub fn build_production_sha_sumfold_group_with_linear_cache_and_weights<F, Trace
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
     Public: Borrow<ProjectedPublic<F>> + Sync,
 {
@@ -4494,7 +5817,12 @@ pub fn build_production_sha_sumfold_group_owned<F>(
     field_cfg: &F::Config,
 ) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
 where
-    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
 {
     let ell = validate_sha_sumfold_inputs(&traces, publics, beta)?;
     if prefix_vars > ell {
@@ -5270,15 +6598,16 @@ fn bind_sha_booleanity_sources_to_prefix<F>(
     tail_len: usize,
     prefix_weights: &[F],
     field_cfg: &F::Config,
-) -> Result<Vec<Vec<F>>, ShaProjectionError>
+) -> Result<BooleanityClaimTable<F>, ShaProjectionError>
 where
     F: DelayedFieldProductSum,
 {
     let prefix_len = binary_len(prefix_vars);
     let source_count = booleanity_sources.len();
+    let source_row_count = source_count * SHA_ROW_COUNT;
     let needs_virtuals = sources_need_virtuals(booleanity_sources);
     let mut source_values = vec![F::zero_with_cfg(field_cfg); prefix_len * source_count];
-    let mut out = vec![vec![F::zero_with_cfg(field_cfg); tail_len]; source_count * SHA_ROW_COUNT];
+    let mut out = vec![F::zero_with_cfg(field_cfg); tail_len * source_row_count];
     let mut source_column_values = Vec::with_capacity(prefix_len);
 
     for tail in 0..tail_len {
@@ -5305,12 +6634,13 @@ where
                     F::zero_with_cfg(field_cfg),
                 )
                 .map_err(ShaProjectionError::from)?;
-                out[source_idx * SHA_ROW_COUNT + row][tail] = acc;
+                let source_row = source_idx * SHA_ROW_COUNT + row;
+                out[suffix_flat_index(tail, source_row, source_row_count)] = acc;
             }
         }
     }
 
-    Ok(out)
+    BooleanityClaimTable::new(out, tail_len, source_row_count)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
@@ -8998,12 +10328,198 @@ mod tests {
     }
 
     #[test]
+    fn booleanity_claim_table_preserves_tail_major_layout() {
+        let tail_len = 4;
+        let source_count = 2;
+        let source_row_count = source_count * SHA_ROW_COUNT;
+        let source_major = (0..source_row_count)
+            .map(|source_row| {
+                (0..tail_len)
+                    .map(|tail| f(u64::try_from(source_row * 100 + tail + 1).unwrap()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let table = BooleanityClaimTable::from_source_major(&source_major, tail_len).unwrap();
+
+        assert_eq!(table.tail_len(), tail_len);
+        assert_eq!(table.source_row_count(), source_row_count);
+        for source_idx in 0..source_count {
+            for row in 0..SHA_ROW_COUNT {
+                let source_row = source_idx * SHA_ROW_COUNT + row;
+                for tail in 0..tail_len {
+                    assert_eq!(
+                        table.values()[suffix_flat_index(tail, source_row, source_row_count)],
+                        source_major[source_row][tail]
+                    );
+                    assert_eq!(
+                        *table.value(tail, source_row),
+                        source_major[source_row][tail]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_fused_fold_prepare_matches_separate_fold_then_scan() {
+        let cfg = test_config();
+        let suffix_eq_weights = eq_weights_or_one(&[f(23), f(29), f(31)], &cfg).unwrap();
+        let linear_claims = vec![f(2), f(3), f(5), f(7), f(11), f(13), f(17), f(19)];
+        let source_row_weights = vec![f(37), F::zero_with_cfg(&cfg), f(41), f(43)];
+        let source_major = vec![
+            vec![f(47), f(53), f(59), f(61), f(67), f(71), f(73), f(79)],
+            vec![f(83), f(89), f(97), f(101), f(103), f(107), f(109), f(113)],
+            vec![
+                f(127),
+                f(131),
+                f(137),
+                f(139),
+                f(149),
+                f(151),
+                f(157),
+                f(163),
+            ],
+            vec![
+                f(167),
+                f(173),
+                f(179),
+                f(181),
+                f(191),
+                f(193),
+                f(197),
+                f(199),
+            ],
+        ];
+        let table = BooleanityClaimTable::from_source_major(&source_major, 8).unwrap();
+        let r = f(211);
+
+        for need_t_one in [false, true] {
+            let mut expected_linear = LinearClaimTable::new(linear_claims.clone()).unwrap();
+            let mut expected_table = table.clone();
+            let mut expected_weights =
+                CollapsedSuffixEqWeights::from_values(suffix_eq_weights.clone()).unwrap();
+            expected_linear.fold_in_place(&r);
+            expected_table.fold_in_place(&r);
+            expected_weights.collapse_current_axis();
+
+            let expected_reduced = <F as ShaSuffixScannerField>::suffix_reduced_body_buckets_flat(
+                &expected_linear.values,
+                expected_table.values(),
+                expected_table.source_row_count(),
+                &source_row_weights,
+                &expected_weights.values,
+                &cfg,
+            );
+            let expected_one = <F as ShaSuffixScannerField>::suffix_direct_one_body_bucket_flat(
+                &expected_linear.values,
+                expected_table.values(),
+                expected_table.source_row_count(),
+                &source_row_weights,
+                &expected_weights.values,
+                &cfg,
+            );
+
+            let mut actual_linear = linear_claims.clone();
+            let mut actual_table = table.clone();
+            let actual_source_row_count = actual_table.source_row_count();
+            let actual = <F as ShaSuffixScannerField>::suffix_fold_prepare_next_round_flat(
+                &mut actual_linear,
+                actual_table.values_mut(),
+                actual_source_row_count,
+                &source_row_weights,
+                &suffix_eq_weights,
+                &r,
+                need_t_one,
+                &cfg,
+            );
+            actual_linear.truncate(expected_linear.values.len());
+            actual_table.truncate_tail_len(expected_table.tail_len());
+
+            assert_eq!(actual_linear, expected_linear.values);
+            assert_eq!(actual_table.values(), expected_table.values());
+            assert_eq!((actual.0, actual.1), expected_reduced);
+            if need_t_one {
+                assert_eq!(actual.2, Some(expected_one));
+            } else {
+                assert!(actual.2.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_fused_state_prepares_t_one_only_when_needed() {
+        let cfg = test_config();
+        let source_major = vec![vec![f(11), f(13), f(17), f(19)]; SHA_ROW_COUNT];
+        let row_weights = vec![f(2); SHA_ROW_COUNT];
+        let booleanity_weights = vec![f(3)];
+
+        for (next_beta, should_prepare_t_one) in [(f(7), false), (F::zero_with_cfg(&cfg), true)] {
+            let mut suffix = RelationSumFoldSuffixState::new(
+                vec![f(5), next_beta],
+                0,
+                F::one_with_cfg(&cfg),
+                LinearClaimTable::new(vec![f(23), f(29), f(31), f(37)]).unwrap(),
+                BooleanityClaimTable::from_source_major(&source_major, 4).unwrap(),
+                row_weights.clone(),
+                booleanity_weights.clone(),
+                &cfg,
+            )
+            .unwrap();
+            let current_claim = f(41);
+            let r = f(43);
+            let evaluations = suffix.prove_round(&current_claim, &cfg);
+            let next_claim = eval_cubic_from_zero_one_two_three(&evaluations, &r, &cfg);
+            suffix.bind_previous_challenge(&r, &next_claim, &cfg);
+
+            let prepared = suffix
+                .prepared_round
+                .clone()
+                .expect("one suffix round should remain after the first bind");
+            assert_eq!(prepared.t_one_direct.is_some(), should_prepare_t_one);
+            let expected = suffix.round_evaluations_from_buckets(&next_claim, &prepared, &cfg);
+            assert_eq!(suffix.prove_round(&next_claim, &cfg), expected);
+            assert!(suffix.prepared_round.is_none());
+        }
+    }
+
+    #[test]
+    fn suffix_final_fold_does_not_prepare_next_round() {
+        let cfg = test_config();
+        let mut suffix = RelationSumFoldSuffixState::new(
+            vec![f(5)],
+            0,
+            F::one_with_cfg(&cfg),
+            LinearClaimTable::new(vec![f(7), f(11)]).unwrap(),
+            BooleanityClaimTable::from_source_major(&vec![vec![f(13), f(17)]; SHA_ROW_COUNT], 2)
+                .unwrap(),
+            vec![f(19); SHA_ROW_COUNT],
+            vec![f(23)],
+            &cfg,
+        )
+        .unwrap();
+        let current_claim = f(29);
+        let r = f(31);
+        let evaluations = suffix.prove_round(&current_claim, &cfg);
+        let next_claim = eval_cubic_from_zero_one_two_three(&evaluations, &r, &cfg);
+
+        suffix.bind_previous_challenge(&r, &next_claim, &cfg);
+
+        assert!(suffix.prepared_round.is_none());
+        assert_eq!(suffix.linear_claims.values.len(), 1);
+        assert_eq!(suffix.booleanity_claims.tail_len(), 1);
+        assert_eq!(suffix.suffix_eq_weights.len(), 1);
+    }
+
+    #[test]
     fn suffix_buckets_use_collapsed_pair_weights() {
         let cfg = test_config();
         let beta = vec![f(5), f(7)];
         let linear_claims = LinearClaimTable::new(vec![f(2), f(3), f(5), f(7)]).unwrap();
         let mut booleanity_claims = vec![vec![F::zero_with_cfg(&cfg); 4]; SHA_ROW_COUNT];
         booleanity_claims[0] = vec![f(11), f(13), f(17), f(19)];
+        let booleanity_claim_table =
+            BooleanityClaimTable::from_source_major(&booleanity_claims, 4).unwrap();
         let mut row_weights = vec![F::zero_with_cfg(&cfg); SHA_ROW_COUNT];
         row_weights[0] = f(23);
         let booleanity_weights = vec![f(29)];
@@ -9012,7 +10528,7 @@ mod tests {
             0,
             F::one_with_cfg(&cfg),
             linear_claims,
-            booleanity_claims,
+            booleanity_claim_table,
             row_weights,
             booleanity_weights.clone(),
             &cfg,
@@ -9032,8 +10548,8 @@ mod tests {
             expected_linear_zero += weight.clone() * linear_even;
             expected_one += weight.clone() * linear_odd;
 
-            let even = suffix.booleanity_claims[0][rest << 1].clone();
-            let odd = suffix.booleanity_claims[0][(rest << 1) + 1].clone();
+            let even = suffix.booleanity_claims.value(rest << 1, 0).clone();
+            let odd = suffix.booleanity_claims.value((rest << 1) + 1, 0).clone();
             let scale = f(23) * &booleanity_weights[0] * weight;
             expected_quadratic_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
             let delta = odd.clone() - even;
@@ -9045,6 +10561,99 @@ mod tests {
         assert_eq!(actual_zero, expected_linear_zero + expected_quadratic_zero);
         assert_eq!(actual_infinity, expected_quadratic_infinity);
         assert_eq!(suffix.direct_one_body_bucket(&cfg), expected_one);
+    }
+
+    #[test]
+    fn suffix_dmr_scanner_matches_generic_with_forced_flush() {
+        let cfg = test_config();
+        let beta = vec![f(23), f(29), f(31)];
+        let suffix_eq_weights = eq_weights_or_one(&beta, &cfg).unwrap();
+        let linear_claims = vec![f(2), f(3), f(5), f(7), f(11), f(13), f(17), f(19)];
+        let source_row_weights = vec![f(37), F::zero_with_cfg(&cfg), f(41), f(43)];
+        let booleanity_claims = vec![
+            vec![f(47), f(53), f(59), f(61), f(67), f(71), f(73), f(79)],
+            vec![f(83), f(89), f(97), f(101), f(103), f(107), f(109), f(113)],
+            vec![
+                f(127),
+                f(131),
+                f(137),
+                f(139),
+                f(149),
+                f(151),
+                f(157),
+                f(163),
+            ],
+            vec![
+                f(167),
+                f(173),
+                f(179),
+                f(181),
+                f(191),
+                f(193),
+                f(197),
+                f(199),
+            ],
+        ];
+
+        let expected_reduced = suffix_reduced_body_buckets_generic(
+            &linear_claims,
+            &booleanity_claims,
+            &source_row_weights,
+            &suffix_eq_weights,
+            &cfg,
+        );
+        let expected_one = suffix_direct_one_body_bucket_generic(
+            &linear_claims,
+            &booleanity_claims,
+            &source_row_weights,
+            &suffix_eq_weights,
+            &cfg,
+        );
+
+        assert_eq!(
+            <F as ShaSuffixScannerField>::suffix_reduced_body_buckets(
+                &linear_claims,
+                &booleanity_claims,
+                &source_row_weights,
+                &suffix_eq_weights,
+                &cfg,
+            ),
+            expected_reduced
+        );
+        assert_eq!(
+            <F as ShaSuffixScannerField>::suffix_direct_one_body_bucket(
+                &linear_claims,
+                &booleanity_claims,
+                &source_row_weights,
+                &suffix_eq_weights,
+                &cfg,
+            ),
+            expected_one
+        );
+
+        let forced_flush = MontgomeryProductSum4::<F>::new_with_flush_products(&cfg, 1);
+        assert_eq!(
+            suffix_reduced_body_buckets_dmr_with_algorithm(
+                &forced_flush,
+                &linear_claims,
+                &booleanity_claims,
+                &source_row_weights,
+                &suffix_eq_weights,
+                &cfg,
+            ),
+            expected_reduced
+        );
+        assert_eq!(
+            suffix_direct_one_body_bucket_dmr_with_algorithm(
+                &forced_flush,
+                &linear_claims,
+                &booleanity_claims,
+                &source_row_weights,
+                &suffix_eq_weights,
+                &cfg,
+            ),
+            expected_one
+        );
     }
 
     #[test]
