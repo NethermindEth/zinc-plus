@@ -39,6 +39,7 @@ pub use projection_sha::{
     build_fresh_sha_ideal_cache, build_linear_residual_coeff_tables,
     build_linear_residual_coeff_tables_with_row_weights, build_production_sha_sumfold_group,
     build_production_sha_sumfold_group_from_prefix_accumulators,
+    build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
     build_production_sha_sumfold_group_owned, build_production_sha_sumfold_group_with_linear_cache,
     build_production_sha_sumfold_group_with_linear_cache_and_weights,
     build_sha_ideal_values_at_point, build_sha_lambda_powers, build_sha_residual_eval_powers,

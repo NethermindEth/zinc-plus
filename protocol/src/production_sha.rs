@@ -50,8 +50,10 @@ use zinc_piop::{
         ShaResidualFamily, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
         bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
         build_folded_row_sumcheck_group,
-        build_production_sha_sumfold_group_from_prefix_accumulators, build_sha_lambda_powers,
-        build_sha_residual_eval_powers, build_sha_sumfold_linear_accumulator,
+        build_production_sha_sumfold_group_from_prefix_accumulators,
+        build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
+        build_sha_lambda_powers, build_sha_residual_eval_powers,
+        build_sha_sumfold_linear_accumulator,
         build_sha_sumfold_linear_accumulator_direct_with_weights,
         build_sha_sumfold_quadratic_prefix_accumulator, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
@@ -1819,6 +1821,7 @@ where
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
+            &initial_claim,
             field_cfg,
         )?;
 
@@ -2048,6 +2051,7 @@ where
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
+            &initial_claim,
             field_cfg,
         )?;
 
@@ -2278,6 +2282,7 @@ where
             &booleanity_weights,
             &booleanity_sources,
             pp.prefix_vars,
+            &initial_claim,
             field_cfg,
         )?;
 
@@ -3182,6 +3187,7 @@ fn build_sumfold_accumulators_phase<F>(
     booleanity_weights: &[F],
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
+    initial_claim: &F,
     field_cfg: &F::Config,
 ) -> Result<ProductionShaSumfoldAccumulators<F>, ProductionShaError<F>>
 where
@@ -3212,7 +3218,7 @@ where
         phase = "sumfold_group",
     )
     .in_scope(|| {
-        build_production_sha_sumfold_group_from_prefix_accumulators(
+        build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim(
             traces,
             beta,
             beta_eq_weights,
@@ -3222,6 +3228,7 @@ where
             booleanity_weights,
             booleanity_sources,
             prefix_vars,
+            initial_claim,
             field_cfg,
         )
     })?;
@@ -4405,17 +4412,12 @@ where
     AllHyraxPCSTypes<C>: ZincPCSTypes<Zt, F, D>,
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS:
-        FoldablePCS<F, BinaryPoly<D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
     <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::ArbitraryPCS:
         FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::IntPCS: FoldablePCS<F, Zt::Int, D>,
 {
-    setup_verify_linear_ideal_fold_with_precompute(
-        params,
-        shape,
-        VerifierPcsPrecompute::HyraxMixed,
-    )
+    setup_verify_linear_ideal_fold_with_precompute(params, shape, VerifierPcsPrecompute::HyraxMixed)
 }
 
 pub fn setup_verify_linear_ideal_fold_packed_hyrax<C, U, Zt, F, const D: usize>(
@@ -4433,8 +4435,7 @@ where
     DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
     ScalarFieldLane: HyraxLanes<C, C::ScalarField, D>,
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
-    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS:
-        FoldablePCS<F, BinaryPoly<D>, D>,
+    <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::BinaryPCS: FoldablePCS<F, BinaryPoly<D>, D>,
     <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::ArbitraryPCS:
         FoldablePCS<F, DensePolynomial<Zt::Int, D>, D>,
     <AllHyraxPCSTypes<C> as ZincPCSTypes<Zt, F, D>>::IntPCS: FoldablePCS<F, Zt::Int, D>,
@@ -7396,7 +7397,7 @@ where
         &booleanity_weights,
         field_cfg,
     )?;
-    let group = build_production_sha_sumfold_group_from_prefix_accumulators(
+    let group = build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim(
         traces,
         beta,
         &beta_eq_weights,
@@ -7406,6 +7407,7 @@ where
         &booleanity_weights,
         booleanity_sources,
         prefix_vars,
+        initial_claim,
         field_cfg,
     )?;
     let (proof, r_b, c_sf) = prove_optimized_sha_sumfold_with_weights(

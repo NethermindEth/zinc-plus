@@ -2527,6 +2527,92 @@ where
 }
 
 #[derive(Clone, Debug)]
+struct LinearClaimTable<F> {
+    values: Vec<F>,
+}
+
+impl<F> LinearClaimTable<F>
+where
+    F: PrimeField,
+{
+    fn new(values: Vec<F>) -> Result<Self, ShaProjectionError> {
+        if values.is_empty() || !values.len().is_power_of_two() {
+            return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: values.len() });
+        }
+        Ok(Self { values })
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn finite_bucket(
+        &self,
+        weights: &CollapsedSuffixEqWeights<F>,
+        branch: usize,
+        field_cfg: &F::Config,
+    ) -> F {
+        debug_assert!(branch < 2);
+        debug_assert_eq!(weights.len(), self.values.len());
+        debug_assert!(self.values.len() >= 2);
+        let mut acc = F::zero_with_cfg(field_cfg);
+        for rest in 0..(self.values.len() >> 1) {
+            acc += weights.pair_weight(rest) * self.values[(rest << 1) + branch].clone();
+        }
+        acc
+    }
+
+    fn zero_bucket(&self, weights: &CollapsedSuffixEqWeights<F>, field_cfg: &F::Config) -> F {
+        self.finite_bucket(weights, 0, field_cfg)
+    }
+
+    fn one_bucket(&self, weights: &CollapsedSuffixEqWeights<F>, field_cfg: &F::Config) -> F {
+        self.finite_bucket(weights, 1, field_cfg)
+    }
+
+    fn fold_in_place(&mut self, r: &F) {
+        fold_binary_claim_vector(&mut self.values, r);
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CollapsedSuffixEqWeights<F> {
+    values: Vec<F>,
+}
+
+impl<F> CollapsedSuffixEqWeights<F>
+where
+    F: PrimeField,
+{
+    fn new(beta_suffix: &[F], field_cfg: &F::Config) -> Result<Self, ShaProjectionError> {
+        Self::from_values(eq_weights_or_one(beta_suffix, field_cfg)?)
+    }
+
+    fn from_values(values: Vec<F>) -> Result<Self, ShaProjectionError> {
+        if values.is_empty() || !values.len().is_power_of_two() {
+            return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: values.len() });
+        }
+        Ok(Self { values })
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn pair_count(&self) -> usize {
+        debug_assert!(self.values.len() >= 2);
+        self.values.len() >> 1
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn pair_weight(&self, rest: usize) -> F {
+        debug_assert!(rest < self.pair_count());
+        self.values[rest << 1].clone() + self.values[(rest << 1) + 1].clone()
+    }
+
+    fn collapse_current_axis(&mut self) {
+        collapse_binary_weight_vector(&mut self.values);
+    }
+}
+
+#[derive(Clone, Debug)]
 struct TernaryPrefixTailTable<F> {
     values: Vec<F>,
     prefix_vars: usize,
@@ -2967,6 +3053,55 @@ where
     }
 
     #[allow(clippy::arithmetic_side_effects)]
+    fn quadratic_reduced_buckets(
+        &self,
+        field_cfg: &F::Config,
+    ) -> Result<(F, F), ShaProjectionError> {
+        debug_assert!(self.round < self.total_prefix_vars);
+        debug_assert!(self.booleanity.prefix_vars > 0);
+        let suffix_weights = &self.prefix_suffix_eq_weights[self.round];
+        let rest_len = suffix_weights.len();
+        let prefix_len = checked_ternary_len(self.booleanity.prefix_vars)?;
+        let mut at_zero = F::zero_with_cfg(field_cfg);
+        let mut at_infinity = F::zero_with_cfg(field_cfg);
+
+        for tail in 0..self.tail_eq_weights.len() {
+            for (rest, suffix_weight) in suffix_weights.iter().enumerate().take(rest_len) {
+                let ternary_rest =
+                    binary_bits_to_ternary_index(rest, self.booleanity.prefix_vars - 1);
+                let base = tail * prefix_len + ternary_rest * 3;
+                let weight = self.tail_eq_weights[tail].clone() * suffix_weight;
+                at_zero += weight.clone() * self.booleanity.values[base].clone();
+                at_infinity += weight * self.booleanity.values[base + 2].clone();
+            }
+        }
+
+        Ok((at_zero, at_infinity))
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn quadratic_one_bucket(&self, field_cfg: &F::Config) -> Result<F, ShaProjectionError> {
+        debug_assert!(self.round < self.total_prefix_vars);
+        debug_assert!(self.booleanity.prefix_vars > 0);
+        let suffix_weights = &self.prefix_suffix_eq_weights[self.round];
+        let rest_len = suffix_weights.len();
+        let prefix_len = checked_ternary_len(self.booleanity.prefix_vars)?;
+        let mut at_one = F::zero_with_cfg(field_cfg);
+
+        for tail in 0..self.tail_eq_weights.len() {
+            for (rest, suffix_weight) in suffix_weights.iter().enumerate().take(rest_len) {
+                let ternary_rest =
+                    binary_bits_to_ternary_index(rest, self.booleanity.prefix_vars - 1);
+                let base = tail * prefix_len + ternary_rest * 3;
+                let weight = self.tail_eq_weights[tail].clone() * suffix_weight;
+                at_one += weight * self.booleanity.values[base + 1].clone();
+            }
+        }
+
+        Ok(at_one)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
     fn finish_tail_mles(
         mut self,
         prefix_challenges: &[F],
@@ -3102,6 +3237,8 @@ struct RelationSumFoldAllRoundsFastPath<F: PrimeField> {
     prefix: RelationSumFoldPrefixFastPath<F>,
     total_vars: usize,
     prefix_vars: usize,
+    live_linear: Option<LinearClaimTable<F>>,
+    live_eq_weights: Option<CollapsedSuffixEqWeights<F>>,
     row_weights: Vec<F>,
     booleanity_weights: Vec<F>,
     prefix_challenges: Vec<F>,
@@ -3142,6 +3279,8 @@ where
             prefix,
             total_vars,
             prefix_vars,
+            live_linear: None,
+            live_eq_weights: None,
             row_weights,
             booleanity_weights,
             prefix_challenges: Vec::with_capacity(prefix_vars),
@@ -3151,6 +3290,22 @@ where
         })
     }
 
+    fn new_with_initial_claim(
+        prefix: RelationSumFoldPrefixFastPath<F>,
+        row_weights: Vec<F>,
+        booleanity_weights: Vec<F>,
+        initial_claim: F,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        let live_eq_weights = CollapsedSuffixEqWeights::new(&prefix.beta, field_cfg)?;
+        let live_linear = LinearClaimTable::new(prefix.linear.values.clone())?;
+        let mut out = Self::new(prefix, row_weights, booleanity_weights)?;
+        out.current_claim = Some(initial_claim);
+        out.live_linear = Some(live_linear);
+        out.live_eq_weights = Some(live_eq_weights);
+        Ok(out)
+    }
+
     fn absorb_previous_challenge(
         &mut self,
         r: &F,
@@ -3158,10 +3313,23 @@ where
     ) -> Result<(), ShaProjectionError> {
         self.current_claim = Some(self.evaluate_last_round_at(r, field_cfg));
 
-        if self.prefix.linear.prefix_vars > 0 {
-            self.prefix.bind_previous_round(r, field_cfg)?;
+        if let Some(linear) = self.live_linear.as_mut() {
+            linear.fold_in_place(r);
+            self.live_eq_weights
+                .as_mut()
+                .expect("live linear mode should carry active equality weights")
+                .collapse_current_axis();
+        }
+
+        if self.prefix.round <= self.prefix_vars && self.prefix.booleanity.prefix_vars > 0 {
+            let beta_idx = self.prefix.round - 1;
+            self.prefix.eq_bound *= eq_one_var(&self.prefix.beta[beta_idx], r, field_cfg);
+            if self.live_linear.is_none() {
+                self.prefix.linear.bind_first_axis(r, field_cfg);
+            }
+            self.prefix.booleanity.bind_first_axis(r, field_cfg)?;
             self.prefix_challenges.push(r.clone());
-            if self.prefix.linear.prefix_vars == 0 && self.prefix_vars < self.total_vars {
+            if self.prefix.booleanity.prefix_vars == 0 && self.prefix_vars < self.total_vars {
                 self.initialize_suffix(field_cfg)?;
             }
         } else if let Some(suffix) = self.suffix.as_mut() {
@@ -3187,7 +3355,12 @@ where
         }
 
         let tail_len = binary_len(tail_vars);
-        debug_assert_eq!(self.prefix.linear.values.len(), tail_len);
+        let linear_claims = self
+            .live_linear
+            .as_ref()
+            .map(|linear| linear.values.clone())
+            .unwrap_or_else(|| self.prefix.linear.values.clone());
+        debug_assert_eq!(linear_claims.len(), tail_len);
         let prefix_weights = eq_weights_or_one(&self.prefix_challenges, field_cfg)?;
         let traces = self
             .prefix
@@ -3207,16 +3380,22 @@ where
             self.prefix.beta.clone(),
             self.prefix_vars,
             self.prefix.eq_bound.clone(),
-            self.prefix.linear.values.clone(),
+            LinearClaimTable::new(linear_claims)?,
             booleanity_claims,
             self.row_weights.clone(),
             self.booleanity_weights.clone(),
             field_cfg,
         )?);
+        self.live_linear = None;
+        self.live_eq_weights = None;
         Ok(())
     }
 
     fn prove_current_prefix_round(&mut self, field_cfg: &F::Config) -> PrefixRoundOutput<F> {
+        if self.live_linear.is_some() {
+            return self.prove_current_prefix_round_with_live_linear(field_cfg);
+        }
+
         let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
         let two = one.clone() + &one;
@@ -3241,6 +3420,77 @@ where
 
         let asserted_sum = if self.prefix.round == 0 {
             Some(p0.clone() + &p1)
+        } else {
+            None
+        };
+        self.last_round_evaluations = Some([p0, p1.clone(), p2.clone(), p3.clone()]);
+        self.prefix.round += 1;
+
+        PrefixRoundOutput {
+            asserted_sum,
+            tail_evaluations: vec![p1, p2, p3],
+        }
+    }
+
+    fn prove_current_prefix_round_with_live_linear(
+        &mut self,
+        field_cfg: &F::Config,
+    ) -> PrefixRoundOutput<F> {
+        let linear = self
+            .live_linear
+            .as_ref()
+            .expect("live linear mode should own a linear claim table");
+        let live_eq_weights = self
+            .live_eq_weights
+            .as_ref()
+            .expect("live linear mode should carry active equality weights");
+        let linear_zero = linear.zero_bucket(live_eq_weights, field_cfg);
+        let (quadratic_zero, quadratic_infinity) = self
+            .prefix
+            .quadratic_reduced_buckets(field_cfg)
+            .expect("validated SHA prefix table should produce reduced buckets");
+        let t_zero = linear_zero + quadratic_zero;
+        let beta_idx = self.prefix.round;
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let two = one.clone() + &one;
+        let three = two.clone() + &one;
+        let e_zero = self.prefix.eq_bound.clone()
+            * eq_one_var(&self.prefix.beta[beta_idx], &zero, field_cfg);
+        let e_one =
+            self.prefix.eq_bound.clone() * eq_one_var(&self.prefix.beta[beta_idx], &one, field_cfg);
+        let current_claim = self
+            .current_claim
+            .as_ref()
+            .expect("claim-aware SHA fast path should carry a current claim");
+        let t_one = if F::is_zero(&e_one) {
+            linear.one_bucket(live_eq_weights, field_cfg)
+                + self
+                    .prefix
+                    .quadratic_one_bucket(field_cfg)
+                    .expect("validated SHA prefix table should produce a one bucket")
+        } else {
+            (current_claim.clone() - e_zero.clone() * t_zero.clone()) / e_one
+        };
+
+        let eval_at = |x: &F| {
+            let eq = self.prefix.eq_bound.clone()
+                * eq_one_var(&self.prefix.beta[beta_idx], x, field_cfg);
+            eq * eval_quadratic_from_zero_one_infinity(
+                &t_zero,
+                &t_one,
+                &quadratic_infinity,
+                x,
+                field_cfg,
+            )
+        };
+
+        let p0 = e_zero * t_zero.clone();
+        let p1 = eval_at(&one);
+        let p2 = eval_at(&two);
+        let p3 = eval_at(&three);
+        let asserted_sum = if self.prefix.round == 0 {
+            Some(current_claim.clone())
         } else {
             None
         };
@@ -3316,11 +3566,11 @@ struct RelationSumFoldSuffixState<F: PrimeField> {
     suffix_start: usize,
     round: usize,
     alpha: F,
-    linear_claims: Vec<F>,
+    linear_claims: LinearClaimTable<F>,
     booleanity_claims: Vec<Vec<F>>,
     row_weights: Vec<F>,
     booleanity_weights: Vec<F>,
-    suffix_eq_weights: Vec<Vec<F>>,
+    suffix_eq_weights: CollapsedSuffixEqWeights<F>,
 }
 
 impl<F> RelationSumFoldSuffixState<F>
@@ -3332,7 +3582,7 @@ where
         beta: Vec<F>,
         suffix_start: usize,
         alpha: F,
-        linear_claims: Vec<F>,
+        linear_claims: LinearClaimTable<F>,
         booleanity_claims: Vec<Vec<F>>,
         row_weights: Vec<F>,
         booleanity_weights: Vec<F>,
@@ -3340,9 +3590,9 @@ where
     ) -> Result<Self, ShaProjectionError> {
         let suffix_vars = beta.len() - suffix_start;
         let suffix_len = binary_len(suffix_vars);
-        if linear_claims.len() != suffix_len {
+        if linear_claims.values.len() != suffix_len {
             return Err(ShaProjectionError::InstanceCountMismatch {
-                got: linear_claims.len(),
+                got: linear_claims.values.len(),
                 expected: suffix_len,
             });
         }
@@ -3372,13 +3622,7 @@ where
             }
         }
 
-        let mut suffix_eq_weights = Vec::with_capacity(suffix_vars);
-        for round in 0..suffix_vars {
-            suffix_eq_weights.push(eq_weights_or_one(
-                &beta[suffix_start + round + 1..],
-                field_cfg,
-            )?);
-        }
+        let suffix_eq_weights = CollapsedSuffixEqWeights::new(&beta[suffix_start..], field_cfg)?;
 
         Ok(Self {
             beta,
@@ -3394,7 +3638,8 @@ where
     }
 
     fn prove_round(&mut self, current_claim: &F, field_cfg: &F::Config) -> [F; 4] {
-        debug_assert!(self.round < self.suffix_eq_weights.len());
+        debug_assert!(self.round < self.beta.len() - self.suffix_start);
+        self.debug_assert_live_lengths();
         let (t_zero, t_infinity) = self.reduced_body_buckets(field_cfg);
         let beta_idx = self.suffix_start + self.round;
         let zero = F::zero_with_cfg(field_cfg);
@@ -3426,34 +3671,36 @@ where
         debug_assert!(self.round > 0);
         let beta_idx = self.suffix_start + self.round - 1;
         self.alpha *= eq_one_var(&self.beta[beta_idx], r, field_cfg);
-        fold_binary_claim_vector(&mut self.linear_claims, r);
+        self.linear_claims.fold_in_place(r);
         for values in &mut self.booleanity_claims {
             fold_binary_claim_vector(values, r);
         }
+        self.suffix_eq_weights.collapse_current_axis();
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn reduced_body_buckets(&self, field_cfg: &F::Config) -> (F, F) {
-        let rest_len = self.linear_claims.len() >> 1;
-        let weights = &self.suffix_eq_weights[self.round];
-        debug_assert_eq!(weights.len(), rest_len);
+        self.debug_assert_live_lengths();
+        let rest_len = self.suffix_eq_weights.pair_count();
         let one = F::one_with_cfg(field_cfg);
         let mut linear_zero = F::zero_with_cfg(field_cfg);
         let mut quadratic_zero = F::zero_with_cfg(field_cfg);
         let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
 
-        for (rest, weight) in weights.iter().enumerate() {
-            linear_zero += weight.clone() * self.linear_claims[rest << 1].clone();
+        for rest in 0..rest_len {
+            let weight = self.suffix_eq_weights.pair_weight(rest);
+            linear_zero += weight.clone() * self.linear_claims.values[rest << 1].clone();
         }
 
         for (source_idx, booleanity_weight) in self.booleanity_weights.iter().enumerate() {
             for (row, row_weight) in self.row_weights.iter().enumerate() {
                 let scale = row_weight.clone() * booleanity_weight;
                 let values = &self.booleanity_claims[source_idx * SHA_ROW_COUNT + row];
-                for (rest, weight) in weights.iter().enumerate() {
+                for rest in 0..rest_len {
+                    let weight = self.suffix_eq_weights.pair_weight(rest);
                     let even = values[rest << 1].clone();
                     let odd = values[(rest << 1) + 1].clone();
-                    let weighted_scale = scale.clone() * weight;
+                    let weighted_scale = scale.clone() * &weight;
                     quadratic_zero +=
                         weighted_scale.clone() * even.clone() * (even.clone() - one.clone());
                     let delta = odd - even;
@@ -3467,21 +3714,22 @@ where
 
     #[allow(clippy::arithmetic_side_effects)]
     fn direct_one_body_bucket(&self, field_cfg: &F::Config) -> F {
-        let rest_len = self.linear_claims.len() >> 1;
-        let weights = &self.suffix_eq_weights[self.round];
-        debug_assert_eq!(weights.len(), rest_len);
+        self.debug_assert_live_lengths();
+        let rest_len = self.suffix_eq_weights.pair_count();
         let one = F::one_with_cfg(field_cfg);
         let mut acc = F::zero_with_cfg(field_cfg);
 
-        for (rest, weight) in weights.iter().enumerate() {
-            acc += weight.clone() * self.linear_claims[(rest << 1) + 1].clone();
+        for rest in 0..rest_len {
+            let weight = self.suffix_eq_weights.pair_weight(rest);
+            acc += weight.clone() * self.linear_claims.values[(rest << 1) + 1].clone();
         }
 
         for (source_idx, booleanity_weight) in self.booleanity_weights.iter().enumerate() {
             for (row, row_weight) in self.row_weights.iter().enumerate() {
                 let scale = row_weight.clone() * booleanity_weight;
                 let values = &self.booleanity_claims[source_idx * SHA_ROW_COUNT + row];
-                for (rest, weight) in weights.iter().enumerate() {
+                for rest in 0..rest_len {
+                    let weight = self.suffix_eq_weights.pair_weight(rest);
                     let odd = values[(rest << 1) + 1].clone();
                     acc += scale.clone() * weight * odd.clone() * (odd - one.clone());
                 }
@@ -3489,6 +3737,16 @@ where
         }
 
         acc
+    }
+
+    fn debug_assert_live_lengths(&self) {
+        debug_assert_eq!(
+            self.linear_claims.values.len(),
+            self.suffix_eq_weights.len()
+        );
+        for values in &self.booleanity_claims {
+            debug_assert_eq!(values.len(), self.suffix_eq_weights.len());
+        }
     }
 }
 
@@ -3539,6 +3797,20 @@ where
         let even = values[idx << 1].clone();
         let odd = values[(idx << 1) + 1].clone();
         values[idx] = even.clone() + r.clone() * (odd - even);
+    }
+    values.truncate(half);
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn collapse_binary_weight_vector<F>(values: &mut Vec<F>)
+where
+    F: PrimeField,
+{
+    debug_assert!(values.len().is_power_of_two());
+    debug_assert!(values.len() >= 2);
+    let half = values.len() >> 1;
+    for idx in 0..half {
+        values[idx] = values[idx << 1].clone() + values[(idx << 1) + 1].clone();
     }
     values.truncate(half);
 }
@@ -3843,6 +4115,104 @@ where
         prefix_fast_path,
         row_weights.to_vec(),
         booleanity_weights.to_vec(),
+    )?;
+
+    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+        3,
+        Vec::new(),
+        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights.to_vec(), field_cfg),
+        Box::new(fast_path),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim<F, Trace>(
+    traces: &[Trace],
+    beta: &[F],
+    beta_eq_weights: &[F],
+    row_weights: &[F],
+    linear_accumulator: &[F],
+    quadratic_prefix_accumulator: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    initial_claim: &F,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let ell = validate_sha_sumfold_traces(traces, beta)?;
+    if beta_eq_weights.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta_eq_weights.len(),
+            expected: traces.len(),
+        });
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if linear_accumulator.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_accumulator.len(),
+            expected: traces.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        if !quadratic_prefix_accumulator.is_empty() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: quadratic_prefix_accumulator.len(),
+                expected: 0,
+            });
+        }
+        return build_dense_sha_sumfold_group_from_accumulators(
+            traces,
+            beta,
+            beta_eq_weights,
+            row_weights,
+            linear_accumulator,
+            booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        );
+    }
+
+    let prefix_fast_path = RelationSumFoldPrefixFastPath::new_with_accumulators(
+        traces,
+        beta,
+        linear_accumulator,
+        quadratic_prefix_accumulator,
+        booleanity_sources,
+        prefix_vars,
+        field_cfg,
+    )?;
+    let fast_path = RelationSumFoldAllRoundsFastPath::new_with_initial_claim(
+        prefix_fast_path,
+        row_weights.to_vec(),
+        booleanity_weights.to_vec(),
+        initial_claim.clone(),
+        field_cfg,
     )?;
 
     Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
@@ -8579,11 +8949,11 @@ mod tests {
 
     #[test]
     fn suffix_linear_claim_vector_folds_adjacent_pairs() {
-        let mut values = vec![f(2), f(7), f(11), f(19)];
+        let mut table = LinearClaimTable::new(vec![f(2), f(7), f(11), f(19)]).unwrap();
         let r0 = f(5);
-        fold_binary_claim_vector(&mut values, &r0);
+        table.fold_in_place(&r0);
         assert_eq!(
-            values,
+            table.values,
             vec![
                 f(2) + r0.clone() * (f(7) - f(2)),
                 f(11) + r0.clone() * (f(19) - f(11)),
@@ -8591,9 +8961,90 @@ mod tests {
         );
 
         let r1 = f(13);
-        let expected = values[0].clone() + r1.clone() * (values[1].clone() - values[0].clone());
-        fold_binary_claim_vector(&mut values, &r1);
-        assert_eq!(values, vec![expected]);
+        let expected = table.values[0].clone()
+            + r1.clone() * (table.values[1].clone() - table.values[0].clone());
+        table.fold_in_place(&r1);
+        assert_eq!(table.values, vec![expected]);
+    }
+
+    #[test]
+    fn collapsed_suffix_eq_weights_match_rebuilt_tail_weights() {
+        let cfg = test_config();
+        let beta = vec![f(5), f(7), f(11)];
+        let mut weights = CollapsedSuffixEqWeights::new(&beta, &cfg).unwrap();
+
+        for round in 0..beta.len() {
+            let expected_pair_weights = eq_weights_or_one(&beta[round + 1..], &cfg).unwrap();
+            assert_eq!(weights.pair_count(), expected_pair_weights.len());
+            for (rest, expected) in expected_pair_weights.iter().enumerate() {
+                assert_eq!(weights.pair_weight(rest), *expected);
+            }
+
+            weights.collapse_current_axis();
+            assert_eq!(weights.values, expected_pair_weights);
+        }
+    }
+
+    #[test]
+    fn collapsed_suffix_eq_weights_handle_single_round_suffix() {
+        let cfg = test_config();
+        let beta = vec![f(5)];
+        let mut weights = CollapsedSuffixEqWeights::new(&beta, &cfg).unwrap();
+
+        assert_eq!(weights.pair_count(), 1);
+        assert_eq!(weights.pair_weight(0), F::one_with_cfg(&cfg));
+        weights.collapse_current_axis();
+        assert_eq!(weights.values, vec![F::one_with_cfg(&cfg)]);
+    }
+
+    #[test]
+    fn suffix_buckets_use_collapsed_pair_weights() {
+        let cfg = test_config();
+        let beta = vec![f(5), f(7)];
+        let linear_claims = LinearClaimTable::new(vec![f(2), f(3), f(5), f(7)]).unwrap();
+        let mut booleanity_claims = vec![vec![F::zero_with_cfg(&cfg); 4]; SHA_ROW_COUNT];
+        booleanity_claims[0] = vec![f(11), f(13), f(17), f(19)];
+        let mut row_weights = vec![F::zero_with_cfg(&cfg); SHA_ROW_COUNT];
+        row_weights[0] = f(23);
+        let booleanity_weights = vec![f(29)];
+        let suffix = RelationSumFoldSuffixState::new(
+            beta.clone(),
+            0,
+            F::one_with_cfg(&cfg),
+            linear_claims,
+            booleanity_claims,
+            row_weights,
+            booleanity_weights.clone(),
+            &cfg,
+        )
+        .unwrap();
+
+        let tail_weights = eq_weights_or_one(&beta[1..], &cfg).unwrap();
+        let mut expected_linear_zero = F::zero_with_cfg(&cfg);
+        let mut expected_quadratic_zero = F::zero_with_cfg(&cfg);
+        let mut expected_quadratic_infinity = F::zero_with_cfg(&cfg);
+        let mut expected_one = F::zero_with_cfg(&cfg);
+        let one = F::one_with_cfg(&cfg);
+
+        for (rest, weight) in tail_weights.iter().enumerate() {
+            let linear_even = suffix.linear_claims.values[rest << 1].clone();
+            let linear_odd = suffix.linear_claims.values[(rest << 1) + 1].clone();
+            expected_linear_zero += weight.clone() * linear_even;
+            expected_one += weight.clone() * linear_odd;
+
+            let even = suffix.booleanity_claims[0][rest << 1].clone();
+            let odd = suffix.booleanity_claims[0][(rest << 1) + 1].clone();
+            let scale = f(23) * &booleanity_weights[0] * weight;
+            expected_quadratic_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
+            let delta = odd.clone() - even;
+            expected_quadratic_infinity += scale.clone() * delta.clone() * delta;
+            expected_one += scale * odd.clone() * (odd - one.clone());
+        }
+
+        let (actual_zero, actual_infinity) = suffix.reduced_body_buckets(&cfg);
+        assert_eq!(actual_zero, expected_linear_zero + expected_quadratic_zero);
+        assert_eq!(actual_infinity, expected_quadratic_infinity);
+        assert_eq!(suffix.direct_one_body_bucket(&cfg), expected_one);
     }
 
     #[test]
@@ -8669,12 +9120,13 @@ mod tests {
         all_round.absorb_previous_challenge(&r0, &cfg).unwrap();
 
         assert_eq!(
-            all_round
+            &all_round
                 .suffix
                 .as_ref()
                 .expect("suffix state initialized")
-                .linear_claims,
-            expected_linear_claims
+                .linear_claims
+                .values,
+            &expected_linear_claims
         );
     }
 
@@ -8778,6 +9230,85 @@ mod tests {
         assert_eq!(optimized_proof, dense_proof);
         assert_eq!(optimized_point, dense_point);
         assert_eq!(optimized_expected, dense_expected);
+    }
+
+    #[test]
+    fn production_sha_sumfold_live_linear_claims_match_dense_sumcheck() {
+        let cfg = test_config();
+        let ell = 3usize;
+        let a = f(3);
+        let traces = (0..(1usize << ell))
+            .map(|idx| synthetic_boolean_trace(u64::try_from(idx).unwrap(), &a))
+            .collect::<Vec<_>>();
+        let publics = vec![zero_public(); traces.len()];
+        let beta = vec![f(5), F::zero_with_cfg(&cfg), f(11)];
+        let beta_eq_weights = build_eq_x_r_vec(&beta, &cfg).unwrap();
+        let r_ic = [f(2), f(3), f(5), f(7), f(11), f(13), f(17)];
+        let row_weights = build_eq_x_r_vec(&r_ic, &cfg).unwrap();
+        let lambda = f(19);
+        let rho = f(23);
+        let xi = f(29);
+        let sources = vec![
+            ShaBooleanitySource::WordBit {
+                col: ShaWordCol::A,
+                bit: 0,
+            },
+            ShaBooleanitySource::WordBit {
+                col: ShaWordCol::E,
+                bit: 1,
+            },
+            ShaBooleanitySource::WordBit {
+                col: ShaWordCol::W,
+                bit: 2,
+            },
+        ];
+        let a_powers = build_sha_residual_eval_powers(&a, &cfg);
+        let lambda_powers = build_sha_lambda_powers(&lambda, &cfg);
+        let booleanity_weights = build_booleanity_weights(&rho, &xi, sources.len(), &cfg);
+        let coeff_tables =
+            build_linear_residual_coeff_tables(&traces, &publics, &r_ic, &cfg).unwrap();
+        let linear_accumulator =
+            build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, &cfg)
+                .unwrap();
+
+        for prefix_vars in [1usize, 2, 3] {
+            let dense = build_dense_sha_sumfold_group(
+                &traces, &publics, &beta, &r_ic, &a, &lambda, &rho, &xi, &sources, &cfg,
+            )
+            .unwrap();
+            let (dense_proof, dense_point, dense_expected) = prove_and_verify_sumfold(dense, ell);
+            let initial_claim = dense_proof.claimed_sums()[0].clone();
+            let quadratic_prefix_accumulator = build_sha_sumfold_quadratic_prefix_accumulator(
+                &traces,
+                &sources,
+                prefix_vars,
+                &row_weights,
+                &booleanity_weights,
+                &cfg,
+            )
+            .unwrap();
+            let optimized =
+                build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim(
+                    &traces,
+                    &beta,
+                    &beta_eq_weights,
+                    &row_weights,
+                    &linear_accumulator,
+                    &quadratic_prefix_accumulator,
+                    &booleanity_weights,
+                    &sources,
+                    prefix_vars,
+                    &initial_claim,
+                    &cfg,
+                )
+                .unwrap();
+            let (optimized_proof, optimized_point, optimized_expected) =
+                prove_and_verify_sumfold(optimized, ell);
+
+            assert_eq!(optimized_proof, dense_proof);
+            assert_eq!(optimized_point, dense_point);
+            assert_eq!(optimized_expected, dense_expected);
+        }
     }
 
     #[test]
