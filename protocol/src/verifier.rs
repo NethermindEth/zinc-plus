@@ -926,7 +926,10 @@ where
 
         let cpr_eval_point = cpr_subclaim.evaluation_point;
 
-        assert!(self.proof_lookup_proof.is_none(), "Arbitrary lookup argument is not supported yet!");
+        assert!(
+            self.proof_lookup_proof.is_none(),
+            "Arbitrary lookup argument is not supported yet!"
+        );
 
         Ok(VerifierSumchecked {
             base: self.base,
