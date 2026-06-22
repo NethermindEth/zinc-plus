@@ -486,7 +486,7 @@ fn verifier_errors_on_incomplete_proof() {
         &(),
     );
 
-    let mut incomplete_proof = proof.clone();
+    let mut incomplete_proof = proof;
     incomplete_proof.messages.pop(); // Remove last prover message
 
     let mut verifier_transcript = Blake3Transcript::default();

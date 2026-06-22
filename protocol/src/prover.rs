@@ -682,7 +682,7 @@ impl_with_type_bounds!(ProverProjectedCombined
                 &self.all_field_cfgs,
             );
 
-        let (ic_proof, _) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
+        let ic_proof = IdealCheckProtocol::<U>::prove_combined::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
@@ -703,7 +703,7 @@ impl_with_type_bounds!(ProverProjectedCombined
             let ProjectedTrace::RowMajor(ref trace_row) = staging.projected_trace else {
                 unreachable!("should be row-major staging")
             };
-            let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_combined::<_, D>(
+            let ic_proof_i = IdealCheckProtocol::<U>::prove_combined::<_, D>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 trace_row,
                 &staging.projected_scalars_fx,
@@ -766,7 +766,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
                 &self.all_field_cfgs,
             );
 
-        let (ic_proof, _) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
+        let ic_proof = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
@@ -788,7 +788,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             let ProjectedTrace::ColumnMajor(ref trace_col) = staging.projected_trace else {
                 unreachable!("should be column-major staging")
             };
-            let (ic_proof_i, _ic_prover_state_i) = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
+            let ic_proof_i = IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 trace_col,
                 &staging.projected_scalars_fx,

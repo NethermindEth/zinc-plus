@@ -80,7 +80,6 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             field_cfg,
         )
         .expect("Prover failed")
-        .0
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
@@ -175,7 +174,6 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             field_cfg,
         )
         .expect("Prover failed")
-        .0
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
@@ -277,7 +275,6 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             field_cfg,
         )
         .expect("Prover failed")
-        .0
     };
 
     group.bench_function(BenchmarkId::new("Ideal Check Prover", &params), |bench| {
@@ -365,7 +362,6 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                 $field_cfg,
             )
             .expect("Prover failed")
-            .0
         }};
     }
 

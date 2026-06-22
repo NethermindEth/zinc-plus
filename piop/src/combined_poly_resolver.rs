@@ -388,7 +388,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         // The batching challenge $\alpha$ is supplied by the caller; see
         // [`prepare_sumcheck_group`] for the shared-challenge rationale.
         let folding_challenge_powers: Vec<F> =
-            powers(folding_challenge.clone(), one.clone(), num_constraints);
+            powers(folding_challenge.clone(), one, num_constraints);
 
         // TODO(Alex): investigate if parallelising this is beneficial.
         // Compute v_0 + \alpha * v_1 + ... + \alpha ^ k * v_k.
@@ -614,7 +614,7 @@ mod tests {
 
         let trace = U::generate_random_trace(num_vars, &mut rng);
 
-        let (ic_proof, ic_prover_state, projected_scalars, projected_trace) =
+        let (ic_proof, evaluation_point, projected_scalars, projected_trace) =
             run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &trace,
@@ -660,7 +660,7 @@ mod tests {
                 &projecting_element,
             ),
             Vec::new(),
-            &ic_prover_state.evaluation_point,
+            &evaluation_point,
             &projected_scalars,
             /* family_idx = */ 0,
             num_constraints.q,

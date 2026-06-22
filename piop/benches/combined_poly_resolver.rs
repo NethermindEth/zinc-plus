@@ -67,7 +67,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let evaluation_point: Vec<F<FIELD_LIMBS>> =
             transcript.get_field_challenges(num_vars, field_cfg);
-        let (ic_proof, ic_prover_state) =
+        let ic_proof=
             IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::prove_combined::<
                 _,
                 DEGREE_PLUS_ONE,
@@ -96,7 +96,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             CombinedPolyResolver::prepare_sumcheck_group::<TestUairNoMultiplication<_, _>>(
                 trace_f,
                 Vec::new(),
-                &ic_prover_state.evaluation_point,
+                &evaluation_point,
                 &scalars_f,
                 /* family_idx = */ 0,
                 num_constraints.q,
@@ -266,7 +266,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
             let evaluation_point: Vec<F<FIELD_LIMBS>> =
                 transcript.get_field_challenges(num_vars, field_cfg);
-            let (ic_proof, ic_prover_state) = IdealCheckProtocol::<
+            let ic_proof = IdealCheckProtocol::<
                 TestUairSimpleMultiplication<_, _>,
             >::prove_combined::<_, DEGREE_PLUS_ONE>(
                 transcript,
@@ -293,7 +293,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 CombinedPolyResolver::prepare_sumcheck_group::<TestUairSimpleMultiplication<_, _>>(
                     trace_f,
                     Vec::new(),
-                    &ic_prover_state.evaluation_point,
+                    &evaluation_point,
                     &scalars_f,
                     /* family_idx = */ 0,
                     num_constraints.q,

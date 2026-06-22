@@ -2,7 +2,7 @@
 
 use crate::{
     ideal_check::{
-        IdealCheckProtocol, Proof as IdealCheckProof, ProverState as IdealCheckProverState,
+        IdealCheckProtocol, Proof as IdealCheckProof,
     },
     projections::{
         ColumnMajorTrace, ProjectedScalars, RowMajorTrace, project_scalars,
@@ -37,7 +37,7 @@ pub fn run_ideal_check_prover_linear<U, const DEGREE_PLUS_ONE: usize>(
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
-    IdealCheckProverState<F>,
+    Vec<F>,
     ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
     ColumnMajorTrace<F>,
 )
@@ -68,7 +68,7 @@ where
 
     let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
 
-    let (proof, state) = IdealCheckProtocol::<U>::prove_mle_first::<_, DEGREE_PLUS_ONE>(
+    let proof = IdealCheckProtocol::<U>::prove_mle_first::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
@@ -79,7 +79,7 @@ where
     )
     .unwrap();
 
-    (proof, state, scalars, trace)
+    (proof, evaluation_point, scalars, trace)
 }
 
 /// Run ideal check prover using combined polynomial approach (for any
@@ -91,7 +91,7 @@ pub fn run_ideal_check_prover_combined<U, const DEGREE_PLUS_ONE: usize>(
     transcript: &mut impl Transcript,
 ) -> (
     IdealCheckProof<F>,
-    IdealCheckProverState<F>,
+    Vec<F>,
     ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
     RowMajorTrace<F>,
 )
@@ -122,7 +122,7 @@ where
 
     let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
 
-    let (proof, state) = IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
+    let proof= IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,
@@ -133,5 +133,5 @@ where
     )
     .unwrap();
 
-    (proof, state, scalars, trace)
+    (proof, evaluation_point, scalars, trace)
 }

@@ -80,7 +80,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
         num_constraints: usize,
         evaluation_point: &[F],
         field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F>>
+    ) -> Result<Proof<F>, IdealCheckError<F>>
     where
         F: InnerTransparentField,
         F::Integer: ConstTranscribable,
@@ -172,14 +172,9 @@ impl<U: Uair> IdealCheckProtocol<U> {
             transcript.absorb_random_field_slice(&cv.coeffs, &mut transcription_buf);
         });
 
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState {
-                evaluation_point: evaluation_point.to_vec(),
-            },
-        ))
+        Ok(Proof {
+            combined_mle_values,
+        })
     }
 
     /// Prover for any UAIR using combined polynomial construction.
@@ -212,7 +207,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
         num_constraints: usize,
         evaluation_point: &[F],
         field_cfg: &F::Config,
-    ) -> Result<(Proof<F>, ProverState<F>), IdealCheckError<F>>
+    ) -> Result<Proof<F>, IdealCheckError<F>>
     where
         F: InnerTransparentField,
         F::Integer: ConstTranscribable,
@@ -263,14 +258,9 @@ impl<U: Uair> IdealCheckProtocol<U> {
             transcript.absorb_random_field_slice(&v.coeffs, &mut transcription_buf);
         });
 
-        Ok((
-            Proof {
-                combined_mle_values,
-            },
-            ProverState {
-                evaluation_point: evaluation_point.to_vec(),
-            },
-        ))
+        Ok(Proof {
+            combined_mle_values,
+        })
     }
 
     /// The verifier part of the ideal-check subprotocol.
@@ -423,7 +413,7 @@ mod tests {
         // Combined approach
         {
             let transcript = Blake3Transcript::new();
-            let (proof, prover_state, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
+            let (proof, evaluation_point, ..) = run_ideal_check_prover_combined::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &U::generate_random_trace(num_vars, &mut rng),
                 prime_idx,
@@ -437,14 +427,14 @@ mod tests {
                 proof,
                 family_idx,
                 num_constraints,
-                &prover_state.evaluation_point,
+                &evaluation_point,
                 ideal_over_f_from_ref,
                 ideal_over_f_from_fq_ref,
             )
             .expect("Verification failed");
 
             assert_eq!(
-                prover_state.evaluation_point,
+                evaluation_point,
                 verifier_result.evaluation_point
             );
         }
@@ -452,7 +442,7 @@ mod tests {
         // MLE-first
         {
             let transcript = Blake3Transcript::new();
-            let (proof, prover_state, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
+            let (proof, evaluation_point, ..) = run_ideal_check_prover_linear::<U, DEGREE_PLUS_ONE>(
                 num_vars,
                 &U::generate_random_trace(num_vars, &mut rng),
                 prime_idx,
@@ -464,14 +454,14 @@ mod tests {
                 proof,
                 family_idx,
                 num_constraints,
-                &prover_state.evaluation_point,
+                &evaluation_point,
                 ideal_over_f_from_ref,
                 ideal_over_f_from_fq_ref,
             )
             .expect("Verification failed");
 
             assert_eq!(
-                prover_state.evaluation_point,
+                evaluation_point,
                 verifier_result.evaluation_point
             );
         }

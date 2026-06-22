@@ -36,11 +36,6 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct ProverState<F: PrimeField> {
-    pub evaluation_point: Vec<F>,
-}
-
-#[derive(Clone, Debug)]
 pub struct VerifierSubclaim<F: PrimeField> {
     pub evaluation_point: Vec<F>,
     pub values: Vec<DynamicPolynomialF<F>>,

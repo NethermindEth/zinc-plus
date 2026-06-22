@@ -132,12 +132,6 @@ impl<F> MultiDegreeSumcheckProof<F> {
         &self.claimed_sums
     }
 
-    /// Per-group prover round messages. `group_messages()[g][round]` is the
-    /// round message for group `g` in the given `round`.
-    pub fn group_messages(&self) -> &[Vec<SumcheckProverMsg<F>>] {
-        &self.group_messages
-    }
-
     #[cfg(test)]
     pub fn group_messages_mut(&mut self) -> &mut [Vec<SumcheckProverMsg<F>>] {
         &mut self.group_messages
@@ -276,22 +270,22 @@ pub struct MultiDegreeSumcheck<F>(PhantomData<F>);
 impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// Multi-degree sumcheck prover.
     ///
-    /// Drives one or more **families** of multi-degree sumchecks in lockstep,
-    /// sharing one per-round verifier challenge across **all families and all
-    /// groups within each family**. Each family carries its own degree groups
-    /// in its own field config (i.e. a different prime); the shared challenge
-    /// is sampled once per round as an integer in $[0, q^*)$ via
-    /// `q_star_cfg`, then lifted into each family's field via
-    /// `F::from_with_cfg` (a no-op type cast when $q^* \le q_i$).
+    /// Drives one or more **families** of multi-degree sumchecks in lockstep
+    /// (interleaved), sharing one per-round verifier challenge across **all
+    /// families and all groups within each family**. Each family carries
+    /// its own degree groups in its own field config (i.e. a different
+    /// prime); the shared challenge is sampled once per round as an integer
+    /// in $[0, q^*)$ via `q_star_cfg`, then lifted into each family's field
+    /// via `F::from_with_cfg` (a no-op type cast when $q^* \le q_i$).
     ///
-    /// Proves, for every family $b$ and every group $g$ in that family:
+    /// Proves, for every family $f$ and every group $g$ in that family:
     ///
     /// $$
-    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{b, g}(x) =
-    /// \text{claimed\\_sum}_{b, g}
+    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{f, g}(x) =
+    /// \text{claimed\\_sum}_{f, g}
     /// $$
     ///
-    /// where $G_{b, g}(x) = \text{comb\\_fn}_{b, g}(\text{mles}_{b, g}(x))$.
+    /// where $G_{f, g}(x) = \text{comb\\_fn}_{f, g}(\text{mles}_{f, g}(x))$.
     ///
     /// Designed to be used as a subprotocol within a larger system: takes
     /// the FS transcript (`transcript`) as input and returns the **internal
@@ -494,14 +488,14 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// Mirror of [`prove_as_subprotocol`]: drives one or more families of
     /// multi-degree sumchecks in lockstep, sharing one per-round challenge
     /// sampled in $[0, q^*)$ via `q_star_cfg` and lifted into each family's
-    /// field. Verifies, for every family $b$ and every group $g$:
+    /// field. Verifies, for every family $f$ and every group $g$:
     ///
     /// $$
-    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{b, g}(x) =
-    /// \text{claimed\\_sum}_{b, g}
+    /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{f, g}(x) =
+    /// \text{claimed\\_sum}_{f, g}
     /// $$
     ///
-    /// where $G_{b, g}(x) = \text{comb\\_fn}_{b, g}(\text{mles}_{b, g}(x))$.
+    /// where $G_{f, g}(x) = \text{comb\\_fn}_{f, g}(\text{mles}_{f, g}(x))$.
     ///
     /// Returns one `MultiDegreeSubClaims<F>` per family: shared evaluation
     /// point `r*` (in that family's field) and per-group expected
