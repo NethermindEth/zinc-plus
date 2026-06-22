@@ -58,7 +58,7 @@ pub trait ConstraintBuilder {
     ///
     /// To make `count_constraints` / `count_constraint_degrees` /
     /// `IdealCollector::ideals` / `IdealCollector::fq_ideals` line up with
-    /// the per-branch dispatch in the PIOP, UAIRs MUST emit *all* of their
+    /// the per-family dispatch in the PIOP, UAIRs MUST emit *all* of their
     /// $\mathbb{Q}[X]$ constraints (via `assert_in_ideal` / `assert_zero`)
     /// before any $\mathbb{F}_{q_i}[X]$ constraints (via this method).
     /// Within each family the order is arbitrary but must be stable across

@@ -48,11 +48,11 @@ use zinc_utils::{
 /// Food for thought:
 /// The n+1 CPR groups could in principle be collapsed into a single
 /// `MultiDegreeSumcheck` group sharing one evaluation-point trajectory, with
-/// per-branch soundness factor $q_i / q^*$. The shared-integer challenges
+/// per-family soundness factor $q_i / q^*$. The shared-integer challenges
 /// (folding $\alpha$, projecting $\psi$) are already in place; what remains is
-/// fusing the per-branch combination functions and writing down the
-/// corresponding soundness lemma. The trade-off is loss of per-branch
-/// arithmetic locality — each $\mathbb{F}_{q_i}[X]$ branch currently does its
+/// fusing the per-family combination functions and writing down the
+/// corresponding soundness lemma. The trade-off is loss of per-family
+/// arithmetic locality — each $\mathbb{F}_{q_i}[X]$ family currently does its
 /// sumcheck work in its native (cheap) field, which a merged comb_fn would have
 /// to give up or dispatch internally. Worth revisiting only if proof size /
 /// verifier simplicity outweighs prover cost.
@@ -86,8 +86,8 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   `bit_op_specs().len()`.
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
-    /// - `branch_idx`: which constraint family to fold. `0` -> $\Q[X]$; `i >=
-    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
+    /// - `family_idx`: which constraint family to fold. `0` -> $Q[X]$; `i >= 1`
+    ///   -> $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
@@ -101,7 +101,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         bit_op_down_mles: Vec<DenseMultilinearExtension<F::Inner>>,
         evaluation_point: &[F],
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
-        branch_idx: usize,
+        family_idx: usize,
         num_constraints: usize,
         num_vars: usize,
         max_degree: usize,
@@ -185,7 +185,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
 
         // The batching challenge $\alpha$ is supplied by the caller. The
         // protocol layer samples one shared integer in $[0, q^*)$ once
-        // and lifts it into each branch's field, so the Q[X] CPR and
+        // and lifts it into each family's field, so the Q[X] CPR and
         // per-prime CPRs reuse the same underlying integer.
         let folding_challenge_powers: Vec<F> =
             powers(folding_challenge.clone(), one.clone(), num_constraints);
@@ -213,7 +213,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             let selector = &mle_values[0];
             let eq_r = &mle_values[1];
 
-            let mut folder = ConstraintFolder::new(branch_idx, &folding_challenge_powers, &zero);
+            let mut folder = ConstraintFolder::new(family_idx, &folding_challenge_powers, &zero);
 
             let project = |scalar: &U::Scalar| {
                 projected_scalars
@@ -437,7 +437,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `ancillary`: Produced by [`prepare_verifier`]; carries folding
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
-    /// - `branch_idx`: which constraint family. `0` -> $\Q[X]$; `i >= 1` ->
+    /// - `family_idx`: which constraint family. `0` -> $Q[X]$; `i >= 1` ->
     ///   $\mathbb{F}_{q_{i-1}}[X]$.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::too_many_arguments)]
@@ -448,7 +448,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         expected_evaluation: F,
         ancillary: CprVerifierAncillary<F>,
         projected_scalars: &ProjectedScalars<U::Scalar, F>,
-        branch_idx: usize,
+        family_idx: usize,
         field_cfg: &F::Config,
     ) -> Result<VerifierSubclaim<F>, CombinedPolyResolverError<F>>
     where
@@ -468,7 +468,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
         )?;
 
         let mut folder =
-            ConstraintFolder::new(branch_idx, &ancillary.folding_challenge_powers, &zero);
+            ConstraintFolder::new(family_idx, &ancillary.folding_challenge_powers, &zero);
 
         let project = |scalar: &U::Scalar| {
             projected_scalars
@@ -634,12 +634,11 @@ mod tests {
         let ic_check_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol(
             &mut verifier_transcript,
             ic_proof,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &ic_evaluation_point,
             ideal_over_f_from_ref,
             |_| panic!("F_q[X] not supported here!"),
-            &test_config(),
         )
         .expect("Verification failed");
 
@@ -663,7 +662,7 @@ mod tests {
             Vec::new(),
             &ic_prover_state.evaluation_point,
             &projected_scalars,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             num_vars,
             max_degree,
@@ -678,7 +677,7 @@ mod tests {
             num_vars,
             &test_config(),
         );
-        let (md_proof, states) = sumcheck_outputs.pop().expect("single branch");
+        let (md_proof, states) = sumcheck_outputs.pop().expect("single family");
 
         let (proof, _) = CombinedPolyResolver::finalize_prover::<U>(
             &mut prover_transcript,
@@ -714,7 +713,7 @@ mod tests {
         )
         .expect("MultiDegreeSumcheck verify failed")
         .pop()
-        .expect("single branch");
+        .expect("single family");
 
         assert!(
             CombinedPolyResolver::finalize_verifier::<U>(
@@ -724,7 +723,7 @@ mod tests {
                 md_subclaims.expected_evaluations()[0].clone(),
                 cpr_verifier_ancillary,
                 &projected_scalars,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 &test_config(),
             )
             .is_ok()

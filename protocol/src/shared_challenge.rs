@@ -1,27 +1,27 @@
-//! Shared-challenge sampling across constraint branches.
+//! Shared-challenge sampling across constraint families.
 //!
-//! With multiple field branches active (one Q[X] branch over a sampled prime
-//! $q_0$, plus one F_q[X] branch per declared prime $q_1, \ldots, q_n$),
+//! With multiple field families active (one Q[X] family over a sampled prime
+//! $q_0$, plus one F_q[X] family per declared prime $q_1, \ldots, q_n$),
 //! every protocol-level challenge is sampled **once** as an integer in
 //! $[0, q^*)$ — where $q^* := \min(q_0, q_1, \ldots, q_n)$ — and then lifted
-//! into each branch's field via [`F::new_with_cfg`]. Because each shared
-//! integer is strictly less than every $q_i$, the per-branch lift is a
-//! type cast: all branches see the same integer value, just typed in
+//! into each family's field via [`F::new_with_cfg`]. Because each shared
+//! integer is strictly less than every $q_i$, the per-family lift is a
+//! type cast: all families see the same integer value, just typed in
 //! different fields.
 //!
 //! The functions in this module are independent of the `MultiDegreeSumcheck`
 //! / `IdealCheck` / `CombinedPolyResolver` / etc. interfaces: they produce
-//! `Vec<F>` (one entry per branch). The caller distributes the per-branch
+//! `Vec<F>` (one entry per family). The caller distributes the per-family
 //! lifts to the appropriate sub-protocol invocations.
 
 use crypto_primitives::PrimeField;
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
 
-/// Compute the index of $q^* := \min$ in `prime_cfgs` (the branch whose
+/// Compute the index of $q^* := \min$ in `prime_cfgs` (the family whose
 /// modulus is smallest).
 ///
-/// `prime_cfgs[0]` is $q_0$ ($Q[X]$ branch); `prime_cfgs[1..=n]` are $q_i$
-/// ($F_q[X]$ branches).
+/// `prime_cfgs[0]` is $q_0$ ($Q[X]$ family); `prime_cfgs[1..=n]` are $q_i$
+/// ($F_q[X]$ families).
 ///
 /// # Panics
 /// Panics if `prime_cfgs` is empty.
@@ -40,11 +40,11 @@ where
 }
 
 /// Sample one shared integer challenge in $[0, q^*)$ from the transcript and
-/// return it lifted into each per-branch field.
+/// return it lifted into each per-family field.
 ///
 /// The returned `Vec<F>` has length `prime_cfgs.len()`; entry $i$ is the
 /// same underlying integer typed in $\mathbb{F}_{q_i}$ via
-/// [`F::new_with_cfg`]. Since the integer is `< q^* <= q_i`, no per-branch
+/// [`F::new_with_cfg`]. Since the integer is `< q^* <= q_i`, no per-family
 /// modular reduction occurs.
 ///
 /// Internally this samples a wide [`F::Integer`] from the transcript and
@@ -70,7 +70,7 @@ where
 }
 
 /// Sample `n` shared integer challenges in $[0, q^*)$ and return the result
-/// as a per-branch matrix: outer length `prime_cfgs.len()`, inner length
+/// as a per-family matrix: outer length `prime_cfgs.len()`, inner length
 /// `n`. Entry `[i][k]` is the $k$-th shared integer typed in
 /// $\mathbb{F}_{q_i}$.
 #[inline]
@@ -85,8 +85,8 @@ where
     F::Integer: ConstTranscribable,
 {
     // Sample shared integers first (one transcript draw per challenge),
-    // then transpose into per-branch vectors. This guarantees that each
-    // branch sees challenges in the same order they were squeezed.
+    // then transpose into per-family vectors. This guarantees that each
+    // family sees challenges in the same order they were squeezed.
     let shared: Vec<F::Integer> = (0..n)
         .map(|_| {
             transcript
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_challenge_lifts_same_integer_to_each_branch() {
+    fn shared_challenge_lifts_same_integer_to_each_family() {
         let cfgs = vec![
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFC5),
             cfg_from_u64(0xFFFF_FFFF_FFFF_FFAD),
@@ -149,19 +149,19 @@ mod tests {
         let q_star = &cfgs[compute_q_star_idx::<F>(&cfgs)];
         let mut transcript = Blake3Transcript::new();
 
-        let per_branch = sample_shared_field_challenge::<F>(&mut transcript, q_star, &cfgs);
-        assert_eq!(per_branch.len(), cfgs.len());
+        let per_family = sample_shared_field_challenge::<F>(&mut transcript, q_star, &cfgs);
+        assert_eq!(per_family.len(), cfgs.len());
 
-        // Every branch must hold the same underlying *natural integer*
+        // Every family must hold the same underlying *natural integer*
         // (modular reduction is the identity because the shared integer is
         // strictly less than every q_i). Compare via `LiftToInteger` so the
         // Montgomery encoding (which differs per cfg) doesn't get in the way.
-        let int_0: FMod = per_branch[0].lift_to_integer();
-        for (i, fe) in per_branch.iter().enumerate().skip(1) {
+        let int_0: FMod = per_family[0].lift_to_integer();
+        for (i, fe) in per_family.iter().enumerate().skip(1) {
             let int_i: FMod = fe.lift_to_integer();
             assert_eq!(
                 int_i, int_0,
-                "branch {i}: shared challenge differs from branch 0",
+                "family {i}: shared challenge differs from family 0",
             );
         }
 
@@ -185,30 +185,30 @@ mod tests {
         let mut t_batch = Blake3Transcript::new();
         let batched = sample_shared_field_challenges::<F>(&mut t_batch, n, q_star, &cfgs);
         assert_eq!(batched.len(), cfgs.len());
-        for branch in &batched {
-            assert_eq!(branch.len(), n);
+        for family in &batched {
+            assert_eq!(family.len(), n);
         }
 
         // Same n single-element samples on a fresh transcript.
         let mut t_single = Blake3Transcript::new();
-        let mut singles_per_branch: Vec<Vec<F>> =
+        let mut singles_per_family: Vec<Vec<F>> =
             cfgs.iter().map(|_| Vec::with_capacity(n)).collect();
         for _ in 0..n {
-            let per_branch = sample_shared_field_challenge::<F>(&mut t_single, q_star, &cfgs);
-            for (i, fe) in per_branch.into_iter().enumerate() {
-                singles_per_branch[i].push(fe);
+            let per_family = sample_shared_field_challenge::<F>(&mut t_single, q_star, &cfgs);
+            for (i, fe) in per_family.into_iter().enumerate() {
+                singles_per_family[i].push(fe);
             }
         }
 
         // Batched output must equal repeated singles, element-wise (compared
         // via natural integer form).
-        for (i, (b, s)) in batched.iter().zip(&singles_per_branch).enumerate() {
+        for (i, (b, s)) in batched.iter().zip(&singles_per_family).enumerate() {
             for (k, (bk, sk)) in b.iter().zip(s).enumerate() {
                 let bk_int: FMod = bk.lift_to_integer();
                 let sk_int: FMod = sk.lift_to_integer();
                 assert_eq!(
                     bk_int, sk_int,
-                    "branch {i}, idx {k}: batched != repeated singles",
+                    "family {i}, idx {k}: batched != repeated singles",
                 );
             }
         }

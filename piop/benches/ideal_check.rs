@@ -74,7 +74,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             transcript,
             &trace,
             &projected_scalars,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &evaluation_point,
             field_cfg,
@@ -108,14 +108,13 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
-                        /* branch_idx = */ 0,
+                        /* family_idx = */ 0,
                         num_constraints.q,
                         &evaluation_point,
                         |ideal_over_ring| {
                             ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
                         },
                         |_| unreachable!("not used here"),
-                        &field_cfg,
                     ),
                 )
                 .expect("Failed to verify");
@@ -170,7 +169,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             transcript,
             &trace,
             &projected_scalars,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &evaluation_point,
             field_cfg,
@@ -207,12 +206,11 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     let _ = black_box(IdealCheckProtocol::<TestUairSimpleMultiplication<_, _>>::verify_as_subprotocol(
                         &mut transcript,
                         proof,
-                        /* branch_idx = */ 0,
+                        /* family_idx = */ 0,
                         num_constraints.q,
                         &evaluation_point,
                         |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
                         |_| unreachable!("not used here"),
-                        &field_cfg,
                     ))
                     .expect("Failed to verify");
                 },
@@ -273,7 +271,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
             transcript,
             &trace,
             &projected_scalars,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &evaluation_point,
             field_cfg,
@@ -306,7 +304,7 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                 let _ = black_box(IdealCheckProtocol::<uair_type!()>::verify_as_subprotocol(
                     &mut transcript,
                     proof,
-                    /* branch_idx = */ 0,
+                    /* family_idx = */ 0,
                     num_constraints.q,
                     &evaluation_point,
                     |ideal_over_ring| {
@@ -315,7 +313,6 @@ fn bench_binary_decomposition<const FIELD_LIMBS: usize>(
                         })
                     },
                     |_| unreachable!("not used here"),
-                    &field_cfg,
                 ))
                 .expect("Failed to verify");
             },
@@ -362,7 +359,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                 $transcript,
                 &trace,
                 &projected_scalars,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 &evaluation_point,
                 $field_cfg,
@@ -431,7 +428,7 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                 let _ = black_box(IdealCheckProtocol::<uair_type!()>::verify_as_subprotocol(
                     &mut transcript,
                     proof,
-                    /* branch_idx = */ 0,
+                    /* family_idx = */ 0,
                     num_constraints.q,
                     &evaluation_point,
                     |ideal_over_ring| {
@@ -440,7 +437,6 @@ fn bench_big_linear_uair<const FIELD_LIMBS: usize>(
                         })
                     },
                     |_| unreachable!("not used here"),
-                    &field_cfg,
                 ))
                 .expect("Failed to verify");
             },

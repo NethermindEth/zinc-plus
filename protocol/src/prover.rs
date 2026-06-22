@@ -5,7 +5,7 @@ use zinc_piop::{
     combined_poly_resolver::CombinedPolyResolver,
     ideal_check::IdealCheckProtocol,
     lookup::booleanity::{BooleanityChecker, BooleanityProof},
-    multipoint_eval::{MultipointEval, MultipointEvalBranchInputs, Proof as MultipointEvalProof},
+    multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedScalars, ProjectedTrace, RowMajorTrace,
         evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
@@ -100,7 +100,7 @@ pub struct ProverProjectedCombined<
     field_cfg: F::Config,
     projected_trace: RowMajorTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    /// Field configs for all constraint branches, starting with randomly
+    /// Field configs for all constraint families, starting with randomly
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
     all_field_cfgs: Vec<F::Config>,
@@ -111,8 +111,8 @@ pub struct ProverProjectedCombined<
     /// ideal check can read them. Empty for legacy UAIRs.
     ///
     /// TODO(perf): the row-major projection is duplicated -- once for the
-    /// Q[X] branch and once per prime here. A future optimization could
-    /// emit all projections in one trace sweep.
+    ///   Q[X] family and once per prime here. A future optimization could
+    ///   emit all projections in one trace sweep.
     fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
@@ -131,7 +131,7 @@ pub struct ProverProjectedMleFirst<
     field_cfg: F::Config,
     projected_trace: ColumnMajorTrace<F>,
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
-    /// Field configs for all constraint branches, starting with randomly
+    /// Field configs for all constraint families, starting with randomly
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
     all_field_cfgs: Vec<F::Config>,
@@ -141,8 +141,8 @@ pub struct ProverProjectedMleFirst<
     /// counterpart of [`ProverProjectedCombined::fq_staging`].
     ///
     /// TODO(perf): the column-major projection is duplicated -- once for the
-    /// Q[X] branch and once per prime here. A future optimization could
-    /// emit all projections in one trace sweep.
+    ///   Q[X] family and once per prime here. A future optimization could
+    ///   emit all projections in one trace sweep.
     fq_staging: Vec<FqProjStaging<U, F>>,
 }
 
@@ -172,7 +172,7 @@ pub struct ProverIdealChecked<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Field configs for all constraint branches, starting with randomly
+    /// Field configs for all constraint families, starting with randomly
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
     all_field_cfgs: Vec<F::Config>,
@@ -182,15 +182,15 @@ pub struct ProverIdealChecked<
     projected_scalars_fx: ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
     /// Per-prime $\phi_{q_i}$ projections from step 2, threaded forward so
     /// step 4 can build per-prime $\psi$-projected trace/scalars and step 5
-    /// can drive the per-prime CPR sumcheck branches. Empty for UAIRs
+    /// can drive the per-prime CPR sumcheck families. Empty for UAIRs
     /// with no declared fq primes.
     fq_staging: Vec<FqProjStaging<U, F>>,
 
     // New
     ic_proof: IdealCheckProof<F>,
-    /// Per-branch IC evaluation points (full `Vec<Vec<F>>` of size
+    /// Per-family IC evaluation points (full `Vec<Vec<F>>` of size
     /// `n + 1`, sampled once at step 3 via `sample_shared_field_challenges`
-    /// and lifted into each branch's field). `[0]` is consumed by the
+    /// and lifted into each family's field). `[0]` is consumed by the
     /// Q[X] CPR in step 5; `[i + 1]` will drive the per-prime CPR.
     ic_eval_points: Vec<Vec<F>>,
     /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
@@ -210,8 +210,8 @@ pub struct ProverEvalProjected<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs, kept for the per-prime CPR/sumcheck/MP
-    /// chain in later phases. `[0]` = $Q[X]$ branch.
+    /// Per-family field configs, kept for the per-prime CPR/sumcheck/MP
+    /// chain in later phases. `[0]` = $Q[X]$ family.
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^* := \min_i q_i$ in `all_field_cfgs`.
     q_star_idx: usize,
@@ -222,7 +222,7 @@ pub struct ProverEvalProjected<
     /// per declared prime. Empty for UAIRs with no declared fq primes.
     projected_trace_fq: Vec<ProjectedTrace<F>>,
     ic_proof: IdealCheckProof<F>,
-    /// Per-branch IC evaluation points (full $\text{n+1} \times \mu$
+    /// Per-family IC evaluation points (full $\text{n+1} \times \mu$
     /// matrix). `[0]` feeds the Q[X] CPR; `[i + 1]` feeds the per-prime
     /// CPRs in step 5.
     ic_eval_points: Vec<Vec<F>>,
@@ -257,7 +257,7 @@ pub struct ProverSumchecked<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for downstream steps).
+    /// Per-family field configs (carried for downstream steps).
     all_field_cfgs: Vec<F::Config>,
     /// Index of $q^*$ in `all_field_cfgs` (carried for downstream steps).
     q_star_idx: usize,
@@ -277,7 +277,7 @@ pub struct ProverSumchecked<
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
     /// Per-prime $\psi$-projected trace MLEs (one entry per declared
     /// prime). Threaded forward from step 4 by `step5_sumcheck` so that
-    /// step 6's lockstep multipoint-eval can build per-prime MP branches.
+    /// step 6's lockstep multipoint-eval can build per-prime MP families.
     /// Empty for UAIRs with no declared fq primes.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 
@@ -289,7 +289,7 @@ pub struct ProverSumchecked<
     /// `UairSignature::primes()`), produced by each per-prime CPR finalize
     /// in step 5. Empty for UAIRs with no declared fq primes.
     cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
-    /// Per-prime CPR sumcheck endpoints `r^*_i`, lifted into each branch's
+    /// Per-prime CPR sumcheck endpoints `r^*_i`, lifted into each family's
     /// field. Empty for UAIRs with no declared fq primes. Consumed by
     /// step 6's lockstep multipoint-eval.
     cpr_eval_points_fq: Vec<Vec<F>>,
@@ -321,7 +321,7 @@ pub struct ProverMultipointEvaled<
 > {
     base: ProverCommitted<'a, Zt, U, F, D, FD>,
     field_cfg: F::Config,
-    /// Per-branch field configs (carried for downstream steps that need
+    /// Per-family field configs (carried for downstream steps that need
     /// the per-prime cfgs).
     all_field_cfgs: Vec<F::Config>,
     projected_trace: ProjectedTrace<F>,
@@ -348,8 +348,8 @@ pub struct ProverMultipointEvaled<
     /// multipoint-eval. Empty for UAIRs with no declared fq primes.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
     /// Per-prime sumcheck output points $r_0$ (one per declared prime,
-    /// lifted into each branch's field — the underlying integer is shared
-    /// with the Q-branch `r_0` thanks to the lockstep sumcheck). Empty for
+    /// lifted into each family's field — the underlying integer is shared
+    /// with the Q-family `r_0` thanks to the lockstep sumcheck). Empty for
     /// UAIRs with no declared fq primes. Consumed in step 7.
     r_0_fq: Vec<Vec<F>>,
 }
@@ -378,17 +378,17 @@ pub struct ProverLifted<
     /// `ProverMultipointEvaled`.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
 
-    /// Per-constraint-branch **witness-only** lifted MLE evaluations at
-    /// $r_0$ (or branch-specific $r_0^{(i)}$). Layout: index `0` is the
-    /// Q-branch ($q_0$); indices `1..=n` are the declared primes in
+    /// Per-constraint-family **witness-only** lifted MLE evaluations at
+    /// $r_0$ (or family-specific $r_0^{(i)}$). Layout: index `0` is the
+    /// Q-family ($q_0$); indices `1..=n` are the declared primes in
     /// `UairSignature::primes()` order. Length = `1 + r_0_fq.len()`.
-    /// The verifier recomputes the public-column half per branch.
+    /// The verifier recomputes the public-column half per family.
     lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    /// $q''$-branch lifted MLE evaluations at $r_0 \bmod q''$, witness
+    /// $q''$-family lifted MLE evaluations at $r_0 \bmod q''$, witness
     /// columns only. Used directly by step8's PCS open as the
     /// $\phi_{q''}$-projected claim. Tracked separately from
-    /// `lifted_evals` because the $q''$-branch is PCS-only (no
-    /// per-branch constraint check).
+    /// `lifted_evals` because the $q''$-family is PCS-only (no
+    /// per-family constraint check).
     /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
     /// `q'' := q0` and this is identical to `lifted_evals`.
     lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
@@ -424,11 +424,11 @@ pub struct ProverPcsOpened<
     mp_proof: MultipointEvalProof<F>,
     /// Per-prime multipoint-eval proofs threaded forward.
     mp_proofs_fq: Vec<MultipointEvalProof<F>>,
-    /// Per-constraint-branch witness-only lifted evals. Index `0` is the
-    /// Q-branch; indices `1..=n` are the declared primes (in
+    /// Per-constraint-family witness-only lifted evals. Index `0` is the
+    /// Q-family; indices `1..=n` are the declared primes (in
     /// `UairSignature::primes()` order). Length = `1 + mp_proofs_fq.len()`.
     lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    /// $q''$-branch witness-only lifted evals (PCS-only branch).
+    /// $q''$-family witness-only lifted evals (PCS-only family).
     lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
 }
 
@@ -660,19 +660,19 @@ impl_with_type_bounds!(ProverProjectedCombined
     /// trace and scalars are projected deterministically with `q_i`'s
     /// `field_cfg`.
     ///
-    /// **Shared evaluation point.** All $n + 1$ branches share a single
+    /// **Shared evaluation point.** All $n + 1$ families share a single
     /// MLE evaluation point $\mathbf r \in [0, q^*)^\mu$ sampled once from
-    /// the transcript at the start of this step. Each branch lifts the
+    /// the transcript at the start of this step. Each family lifts the
     /// shared integer vector into its own field via $F::from\_with\_cfg$.
     /// Since each shared integer is strictly less than every $q_i$, the
-    /// lift is a type cast: all branches agree on the underlying integer.
+    /// lift is a type cast: all families agree on the underlying integer.
     pub fn step3_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
         let num_constraints = count_constraints::<U>();
 
         // Sample one shared evaluation point in `[0, q*)^mu`
-        // up-front and lift it into each branch's field.
+        // up-front and lift it into each family's field.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
             shared_challenge::sample_shared_field_challenges::<F>(
@@ -686,7 +686,7 @@ impl_with_type_bounds!(ProverProjectedCombined
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &shared_eval_points[0],
             &self.field_cfg,
@@ -699,7 +699,7 @@ impl_with_type_bounds!(ProverProjectedCombined
         for (prime_idx, (cfg_q_i, staging)) in
             fq_cfgs.iter().zip(self.fq_staging.iter()).enumerate()
         {
-            let branch_idx = add!(prime_idx, 1);
+            let family_idx = add!(prime_idx, 1);
             let ProjectedTrace::RowMajor(ref trace_row) = staging.projected_trace else {
                 unreachable!("should be row-major staging")
             };
@@ -707,9 +707,9 @@ impl_with_type_bounds!(ProverProjectedCombined
                 &mut self.base.pcs_transcript.fs_transcript,
                 trace_row,
                 &staging.projected_scalars_fx,
-                branch_idx,
+                family_idx,
                 num_constraints.for_prime(prime_idx),
-                &shared_eval_points[branch_idx],
+                &shared_eval_points[family_idx],
                 cfg_q_i,
             )
             .map_err(|source| ProtocolError::FqIdealCheck {
@@ -751,12 +751,12 @@ impl_with_type_bounds!(ProverProjectedMleFirst
     pub fn step3_ideal_check(
         mut self,
     ) -> Result<ProverIdealChecked<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // The Q[X]-branch ideal check only consumes Q[X] constraints; F_q[X]
-        // constraints are handled by the per-prime branch below.
+        // The Q[X]-family ideal check only consumes Q[X] constraints; F_q[X]
+        // constraints are handled by the per-prime family below.
         let num_constraints = count_constraints::<U>();
 
         // Shared evaluation point in `[0, q*)^mu`, lifted per
-        // branch. Mirror of the row-major variant.
+        // family. Mirror of the row-major variant.
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let shared_eval_points: Vec<Vec<F>> =
             shared_challenge::sample_shared_field_challenges::<F>(
@@ -770,7 +770,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_trace,
             &self.projected_scalars_fx,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             &shared_eval_points[0],
             &self.field_cfg,
@@ -784,7 +784,7 @@ impl_with_type_bounds!(ProverProjectedMleFirst
         for (prime_idx, (cfg_q_i, staging)) in
             fq_cfgs.iter().zip(self.fq_staging.iter()).enumerate()
         {
-            let branch_idx = add!(prime_idx, 1);
+            let family_idx = add!(prime_idx, 1);
             let ProjectedTrace::ColumnMajor(ref trace_col) = staging.projected_trace else {
                 unreachable!("should be column-major staging")
             };
@@ -792,9 +792,9 @@ impl_with_type_bounds!(ProverProjectedMleFirst
                 &mut self.base.pcs_transcript.fs_transcript,
                 trace_col,
                 &staging.projected_scalars_fx,
-                branch_idx,
+                family_idx,
                 num_constraints.for_prime(prime_idx),
-                &shared_eval_points[branch_idx],
+                &shared_eval_points[family_idx],
                 cfg_q_i,
             )
             .map_err(|source| ProtocolError::FqIdealCheck {
@@ -827,8 +827,8 @@ impl_with_type_bounds!(ProverIdealChecked
     ///
     /// **Shared projecting element.** Sample one shared integer
     /// $a \in [0, q^*)$ once via [`shared_challenge::sample_shared_field_challenge`]
-    /// and lift it into each branch's field. The $Q[X]$ branch consumes
-    /// `projecting_elements[0]`; per-prime branches consume
+    /// and lift it into each family's field. The $Q[X]$ family consumes
+    /// `projecting_elements[0]`; per-prime families consume
     /// `projecting_elements[i + 1]`.
     ///
     /// Also builds the per-prime $\psi$-projected trace MLEs / scalars from
@@ -845,7 +845,7 @@ impl_with_type_bounds!(ProverIdealChecked
             &self.all_field_cfgs,
         );
 
-        // Q[X] branch: $\psi_a$-projected trace MLEs + projected scalars.
+        // Q[X] family: $\psi_a$-projected trace MLEs + projected scalars.
         let projected_trace_f =
             evaluate_trace_to_column_mles(&self.projected_trace, &projecting_elements[0]);
 
@@ -853,8 +853,8 @@ impl_with_type_bounds!(ProverIdealChecked
             project_scalars_to_field(self.projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-        // Per-prime $F_{q_i}[X]$ branches: same construction with each
-        // branch's $\psi$ projecting element. The per-prime
+        // Per-prime $F_{q_i}[X]$ families: same construction with each
+        // family's $\psi$ projecting element. The per-prime
         // $\phi_{q_i}$-projected coefficient traces are retained and
         // threaded forward (`projected_trace_fq`) so step 7's
         // lifted-eval computation can reuse them instead of
@@ -866,15 +866,15 @@ impl_with_type_bounds!(ProverIdealChecked
         let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
             Vec::with_capacity(n_fq);
         for (prime_idx, staging) in self.fq_staging.into_iter().enumerate() {
-            let branch_idx = add!(prime_idx, 1);
+            let family_idx = add!(prime_idx, 1);
             let FqProjStaging {
                 projected_trace: projected_trace_i,
                 projected_scalars_fx: scalars_fx_i,
             } = staging;
             let trace_f_i =
-                evaluate_trace_to_column_mles(&projected_trace_i, &projecting_elements[branch_idx]);
+                evaluate_trace_to_column_mles(&projected_trace_i, &projecting_elements[family_idx]);
             let scalars_f_i =
-                project_scalars_to_field(scalars_fx_i, &projecting_elements[branch_idx])
+                project_scalars_to_field(scalars_fx_i, &projecting_elements[family_idx])
                     .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
             projected_trace_fq.push(projected_trace_i);
             projected_trace_f_fq.push(trace_f_i);
@@ -932,8 +932,8 @@ impl_with_type_bounds!(ProverEvalProjected
         let max_degree = count_max_degree::<U>();
 
         // Sample one shared CPR batching challenge $\alpha$ in
-        // $[0, q^*)$ and lift it into each branch's field. The Q[X] branch
-        // consumes `folding_challenges[0]`; per-prime branches consume
+        // $[0, q^*)$ and lift it into each family's field. The Q[X] family
+        // consumes `folding_challenges[0]`; per-prime families consume
         // `folding_challenges[i + 1]`.
         let q_star_cfg_owned = self.all_field_cfgs[self.q_star_idx].clone();
         let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
@@ -942,7 +942,7 @@ impl_with_type_bounds!(ProverEvalProjected
             &self.all_field_cfgs,
         );
 
-        // ------------- Q[X] branch groups -----------------
+        // ------------- Q[X] family groups -----------------
         // TODO(#185): once protocol-level prover materializes bit-op virtual
         // MLEs, pass them here. For now no UAIR on `main` declares
         // `bit_op_specs`, so passing an empty vec keeps behaviour identical.
@@ -952,7 +952,7 @@ impl_with_type_bounds!(ProverEvalProjected
             bit_op_down_mles,
             &self.ic_eval_points[0],
             &self.projected_scalars_f,
-            /* branch_idx = */ 0,
+            /* family_idx = */ 0,
             num_constraints.q,
             self.base.num_vars,
             max_degree,
@@ -963,7 +963,7 @@ impl_with_type_bounds!(ProverEvalProjected
         let mut q_groups = vec![q_cpr_group];
 
         // Booleanity: prepare optional group over witness binary-poly cols.
-        // Lives in the Q[X] branch only (binary witness columns are the
+        // Lives in the Q[X] family only (binary witness columns are the
         // $\mathbb Z$ side).
         let sig = &self.base.uair_signature;
         let num_pub_bin = sig.public_cols().num_binary_poly_cols();
@@ -988,59 +988,59 @@ impl_with_type_bounds!(ProverEvalProjected
         //   - call prepare_batched_lookup_group(transcript, instance, &field_cfg)
         //   - push triple into groups, collect pending proofs + metas
 
-        // ------------- Per-prime $F_{q_i}[X]$ branch groups --------------
+        // ------------- Per-prime $F_{q_i}[X]$ family groups --------------
         // One CPR group per declared prime. No booleanity, no lookups in
-        // the fq branches (by design — binary witnesses live in Q[X]).
+        // the fq families (by design — binary witnesses live in Q[X]).
         let n_fq = self.projected_trace_f_fq.len();
         let mut fq_cpr_ancillaries: Vec<_> = Vec::with_capacity(n_fq);
-        let mut fq_branch_groups: Vec<Vec<MultiDegreeSumcheckGroup<F>>> =
+        let mut fq_family_groups: Vec<Vec<MultiDegreeSumcheckGroup<F>>> =
             Vec::with_capacity(n_fq);
         for prime_idx in 0..n_fq {
-            let branch_idx = add!(prime_idx, 1);
-            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[family_idx];
             let trace_f_i = self.projected_trace_f_fq[prime_idx].clone();
             let scalars_f_i = &self.projected_scalars_f_fq[prime_idx];
-            let eval_point_i = &self.ic_eval_points[branch_idx];
-            let folding_i = &folding_challenges[branch_idx];
+            let eval_point_i = &self.ic_eval_points[family_idx];
+            let folding_i = &folding_challenges[family_idx];
             let (cpr_group_i, cpr_ancillary_i) =
                 CombinedPolyResolver::prepare_sumcheck_group::<U>(
                     trace_f_i,
                     Vec::new(),
                     eval_point_i,
                     scalars_f_i,
-                    branch_idx,
+                    family_idx,
                     num_constraints.for_prime(prime_idx),
                     self.base.num_vars,
                     max_degree,
                     folding_i,
                     cfg_i,
                 )?;
-            fq_branch_groups.push(vec![cpr_group_i]);
+            fq_family_groups.push(vec![cpr_group_i]);
             fq_cpr_ancillaries.push(cpr_ancillary_i);
         }
 
         // ------------- Lockstep multi-degree sumcheck --------------------
-        // Branch 0 = Q[X] with CPR + optional booleanity; branches i >= 1
+        // Family 0 = Q[X] with CPR + optional booleanity; families i >= 1
         // = per-prime CPR. Shared per-round challenges in $[0, q^*)$.
-        let mut md_sc_branches: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
+        let mut md_sc_families: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
             Vec::with_capacity(add!(n_fq, 1));
-        md_sc_branches.push((q_groups, &self.field_cfg));
-        for (prime_idx, groups) in fq_branch_groups.into_iter().enumerate() {
-            let branch_idx = add!(prime_idx, 1);
-            md_sc_branches.push((groups, &self.all_field_cfgs[branch_idx]));
+        md_sc_families.push((q_groups, &self.field_cfg));
+        for (prime_idx, groups) in fq_family_groups.into_iter().enumerate() {
+            let family_idx = add!(prime_idx, 1);
+            md_sc_families.push((groups, &self.all_field_cfgs[family_idx]));
         }
 
         let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            md_sc_branches,
+            md_sc_families,
             self.base.num_vars,
             &q_star_cfg_owned,
         )
         .into_iter();
 
-        // ------------- Q[X] branch finalize ------------------------------
+        // ------------- Q[X] family finalize ------------------------------
         let (combined_sumcheck, md_states) =
-            sumcheck_outputs.next().expect("Q[X] branch always present");
+            sumcheck_outputs.next().expect("Q[X] family always present");
         let mut md_iter = md_states.into_iter();
 
         let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover::<U>(
@@ -1068,19 +1068,19 @@ impl_with_type_bounds!(ProverEvalProjected
         // TODO: build BatchedLookupProof from collected lookup_proofs + lookup_metas
         let lookup_proof = None;
 
-        // ------------- Per-prime branch finalize -------------------------
-        // For each fq branch: the multi-degree sumcheck handed back a
+        // ------------- Per-prime family finalize -------------------------
+        // For each fq family: the multi-degree sumcheck handed back a
         // `Vec<SumcheckProverState>` with exactly one entry (just the CPR
-        // group). Finalize CPR per branch under that branch's cfg.
+        // group). Finalize CPR per family under that family's cfg.
         let mut cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>> = Vec::with_capacity(n_fq);
         let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         let mut combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>> =
             Vec::with_capacity(n_fq);
         for (prime_idx, cpr_ancillary_i) in fq_cpr_ancillaries.into_iter().enumerate() {
-            let branch_idx = add!(prime_idx, 1);
-            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[family_idx];
             let (sumcheck_i, states_i) =
-                sumcheck_outputs.next().expect("fq branch sumcheck output");
+                sumcheck_outputs.next().expect("fq family sumcheck output");
             let mut states_iter_i = states_i.into_iter();
             let (cpr_proof_i, cpr_state_i) = CombinedPolyResolver::finalize_prover::<U>(
                 &mut self.base.pcs_transcript.fs_transcript,
@@ -1138,12 +1138,12 @@ impl_with_type_bounds!(ProverSumchecked
     /// $\alpha'$-projected column MLE and one extra scalar up_eval
     /// $c_j = \sum_i b_{j,i}\,(\alpha')^{i}$ per witness binary-poly column,
     /// placed at indices `[num_total_cols, num_total_cols + num_wit_bin)`.
-    /// On the Q-branch these carry the real bit-slice bridge claim; on the
-    /// per-prime branches they are **zero-padded** so all branches share
+    /// On the Q-family these carry the real bit-slice bridge claim; on the
+    /// per-prime families they are **zero-padded** so all families share
     /// the same column layout (UAIR rule D6: binary witness columns live
-    /// only in Q[X], so per-prime branches have no booleanity-bridge
-    /// claim to make there). The shared layout lets a single $(n+1)$-branch
-    /// lockstep MP-eval produce a single shared $r_0$ across all branches,
+    /// only in Q[X], so per-prime families have no booleanity-bridge
+    /// claim to make there). The shared layout lets a single $(n+1)$-family
+    /// lockstep MP-eval produce a single shared $r_0$ across all families,
     /// which Phases H/I rely on for the lift-to-$\mathbb Z$ + $q''$-anchored
     /// PCS open. No `ShiftSpec` references those indices, so
     /// `down_evals`/`shifts` are untouched and shifted booleanity is
@@ -1160,9 +1160,9 @@ impl_with_type_bounds!(ProverSumchecked
         let shifts = self.base.uair_signature.shifts();
         let num_vars = self.base.num_vars;
 
-        // --- Q[X] branch (booleanity-bridge appended iff alpha_prime present)
+        // --- Q[X] family (booleanity-bridge appended iff alpha_prime present)
         //
-        // When booleanity ran, the Q-branch gets extra columns appended:
+        // When booleanity ran, the Q-family gets extra columns appended:
         //   - `extra_trace_mles[j]`: the $\alpha'$-projection of witness
         //     binary column $j$, as a DenseMultilinearExtension over Q[X]'s
         //     inner type.
@@ -1211,21 +1211,21 @@ impl_with_type_bounds!(ProverSumchecked
             (self.projected_trace_f, self.cpr_proof.up_evals.clone(), 0)
         };
 
-        // --- Per-prime branches (zero-padded to match Q-branch column count)
+        // --- Per-prime families (zero-padded to match Q-family column count)
         //
-        // Each fq branch's trace MLEs and up_evals are extended with
+        // Each fq family's trace MLEs and up_evals are extended with
         // `num_wit_bin` zero entries, padding to the same column count as
-        // the (booleanity-extended) Q-branch. This preserves the lockstep
-        // shape (shared `gammas` and one $r_0$ across all branches) without
-        // making any non-trivial claim on the per-prime branches: zero on
+        // the (booleanity-extended) Q-family. This preserves the lockstep
+        // shape (shared `gammas` and one $r_0$ across all families) without
+        // making any non-trivial claim on the per-prime families: zero on
         // both sides of the MP-eval sumcheck contributes zero.
         let extension_size = 1usize << num_vars;
         let mut fq_trace_mles_ext: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
             Vec::with_capacity(n_fq);
         let mut fq_up_evals_ext: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         for prime_idx in 0..n_fq {
-            let branch_idx = add!(prime_idx, 1);
-            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[family_idx];
             let zero_i = F::zero_with_cfg(cfg_i);
             let zero_inner_i = zero_i.inner();
 
@@ -1245,14 +1245,14 @@ impl_with_type_bounds!(ProverSumchecked
             fq_up_evals_ext.push(up_i);
         }
 
-        // --- Single $(n+1)$-branch lockstep MP-eval ---------------------
+        // --- Single (n+1)-family lockstep MP-eval ---------------------
         //
-        // Branch 0 = Q[X] (with booleanity-bridge cols when applicable);
-        // branches $i \ge 1$ = per-prime fq branches (zero-padded to the
-        // same column count). All branches share one $r_0$ in $[0, q^*)$.
-        let mut all_branches: Vec<MultipointEvalBranchInputs<'_, F>> =
+        // Family 0 = Q[X] (with booleanity-bridge cols when applicable);
+        // families $i \ge 1$ = per-prime fq families (zero-padded to the
+        // same column count). All families share one r_0 in [0, q^*).
+        let mut all_families: Vec<MultipointEvalFamilyInputs<'_, F>> =
             Vec::with_capacity(add!(n_fq, 1));
-        all_branches.push(MultipointEvalBranchInputs {
+        all_families.push(MultipointEvalFamilyInputs {
             trace_mles: &q_trace_mles,
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
@@ -1260,25 +1260,25 @@ impl_with_type_bounds!(ProverSumchecked
             field_cfg: &self.field_cfg,
         });
         for prime_idx in 0..n_fq {
-            let branch_idx = add!(prime_idx, 1);
-            all_branches.push(MultipointEvalBranchInputs {
+            let family_idx = add!(prime_idx, 1);
+            all_families.push(MultipointEvalFamilyInputs {
                 trace_mles: &fq_trace_mles_ext[prime_idx],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals: &fq_up_evals_ext[prime_idx],
                 down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
-                field_cfg: &self.all_field_cfgs[branch_idx],
+                field_cfg: &self.all_field_cfgs[family_idx],
             });
         }
 
         let mut outputs_iter = MultipointEval::prove_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
-            all_branches,
+            all_families,
             shifts,
             &q_star_cfg,
         )?
         .into_iter();
 
-        let (mp_proof_q, q_state) = outputs_iter.next().expect("Q-branch present");
+        let (mp_proof_q, q_state) = outputs_iter.next().expect("Q-family present");
         let r_0_q = q_state.eval_point;
 
         let mut mp_proofs_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_fq);
@@ -1317,33 +1317,33 @@ impl_with_type_bounds!(ProverMultipointEvaled
     /// 1. **Sample $q''$.** A fresh PCS-only prime, decoupled from the
     ///    constraint primes $q_0, q_1, \dots, q_n$. Sampled here (start of
     ///    step 7) — before any lifted evals are produced, so that the
-    ///    $q''$-branch lift can be computed and sent in this step. This
+    ///    $q''$-family lift can be computed and sent in this step. This
     ///    is post-commitments and post-$r_0$, so soundness is preserved
     ///    (the prover cannot influence $q''$).
-    /// 2. **Compute per-branch lifted MLE evaluations** at $r_0$:
-    ///    - Q-branch ($q_0$): all columns (public + witness) interleaved by
+    /// 2. **Compute per-family lifted MLE evaluations** at $r_0$:
+    ///    - Q-family ($q_0$): all columns (public + witness) interleaved by
     ///      UAIR column layout, stored locally; only witness columns make
     ///      it into the proof.
     ///    - Per declared prime $q_i$ (i ≥ 1): witness-only lifted evals
-    ///      under that branch's field cfg. The $\phi_{q_i}$-projected
+    ///      under that family's field cfg. The $\phi_{q_i}$-projected
     ///      coefficient trace was already built in step 2 (`fq_staging`)
     ///      and threaded through `projected_trace_fq`; this step runs
-    ///      `compute_lifted_evals` on it at $r_0$ lifted into branch
+    ///      `compute_lifted_evals` on it at $r_0$ lifted into family
     ///      $i$'s field.
-    ///    - $q''$-branch: witness-only lifted evals under $q''$. Same
-    ///      pattern as fq branches; the $r_0$ lifted into $\mathbb F_{q''}$
+    ///    - $q''$-family: witness-only lifted evals under $q''$. Same
+    ///      pattern as fq families; the $r_0$ lifted into $\mathbb F_{q''}$
     ///      gives $\mathbf r^\star = \mathbf r_0 \bmod q''$ which doubles
     ///      as the PCS evaluation point in step 8.
-    /// 3. **Absorb** each branch's coefficients into the FS transcript in
-    ///    a deterministic order: Q-branch first, then each declared prime
+    /// 3. **Absorb** each family's coefficients into the FS transcript in
+    ///    a deterministic order: Q-family first, then each declared prime
     ///    in `primes()` order, then $q''$.
     ///
-    /// **Soundness**: with $r_0$ shared across all constraint branches
-    /// (a consequence of the lockstep sumcheck), the per-branch MP-eval
+    /// **Soundness**: with $r_0$ shared across all constraint families
+    /// (a consequence of the lockstep sumcheck), the per-family MP-eval
     /// consistency check in `step6_lifted_evals` (verifier) binds each
     /// $\bar u_j^{(i)}$ to
     /// the prover's actual $q_i$-projected trace at $r_0$. The
-    /// $q''$-branch lift is independently bound to the trace by the PCS
+    /// $q''$-family lift is independently bound to the trace by the PCS
     /// open at $\mathbf r^\star$ in step 8.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_lift_and_project(
@@ -1397,13 +1397,13 @@ impl_with_type_bounds!(ProverMultipointEvaled
                     .collect()
             };
 
-        // --- Per-constraint-branch witness-only lifted evals ---
-        // Index 0: Q-branch (q_0) at r_0. Indices 1..=n: declared primes
-        // at branch-specific r_0_fq[i-1]. Length = 1 + n_fq.
+        // --- Per-constraint-family witness-only lifted evals ---
+        // Index 0: Q-family (q_0) at r_0. Indices 1..=n: declared primes
+        // at family-specific r_0_fq[i-1]. Length = 1 + n_fq.
         let mut lifted_evals: Vec<Vec<DynamicPolynomialF<F>>> =
             Vec::with_capacity(add!(n_fq, 1));
 
-        // Q-branch (index 0): compute all-col lifted evals, then keep
+        // Q-family (index 0): compute all-col lifted evals, then keep
         // witness-only. We need the all-col version momentarily for the
         // `compute_lifted_evals` call signature (which projects from the
         // already-projected trace), but only the witness slice is sent.
@@ -1415,14 +1415,14 @@ impl_with_type_bounds!(ProverMultipointEvaled
         );
         lifted_evals.push(witness_only(&q_lifted_all));
 
-        // Declared-prime branches (indices 1..=n). Reuse the per-prime
+        // Declared-prime families (indices 1..=n). Reuse the per-prime
         // $\phi_{q_i}$-projected coefficient traces threaded forward from
         // step 2's `fq_staging` (via steps 4--6) — same layout as the
-        // Q-branch's `projected_trace`, just under each $q_i$'s cfg.
+        // Q-family's `projected_trace`, just under each $q_i$'s cfg.
         debug_assert_eq!(self.projected_trace_fq.len(), n_fq);
         for (prime_idx, projected_trace_i) in self.projected_trace_fq.iter().enumerate() {
-            let branch_idx = add!(prime_idx, 1);
-            let cfg_i = &self.all_field_cfgs[branch_idx];
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &self.all_field_cfgs[family_idx];
             let r_0_i = &self.r_0_fq[prime_idx];
             let lifted_evals_i = compute_lifted_evals(
                 r_0_i,
@@ -1433,10 +1433,10 @@ impl_with_type_bounds!(ProverMultipointEvaled
             lifted_evals.push(witness_only(&lifted_evals_i));
         }
 
-        // q'' branch: witness-only lifted evals (PCS-only)
+        // q'' family: witness-only lifted evals (PCS-only)
         // Compute the q''-projected witness lift at r*.
         // When q'' is aliased to q_0 (no F_q[X] constraints), this lift is
-        // identical to the Q-branch lift already computed, so we reuse it
+        // identical to the Q-family lift already computed, so we reuse it
         // while avoiding duplication.
         let lifted_evals_pp = if n_fq == 0 {
             None
@@ -1454,9 +1454,9 @@ impl_with_type_bounds!(ProverMultipointEvaled
             Some(witness_only(&lifted_evals_pp_full))
         };
 
-        // --- Absorb all per-branch coefficients into the transcript ---
-        // Uniform order: each constraint branch's witness-only lifted
-        // evals, then the q'' branch. Mirrored in step6_lifted_evals.
+        // --- Absorb all per-family coefficients into the transcript ---
+        // Uniform order: each constraint family's witness-only lifted
+        // evals, then the q'' family. Mirrored in step6_lifted_evals.
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for lifted_i in &lifted_evals {
             for bar_u in lifted_i {
@@ -1507,7 +1507,7 @@ impl_with_type_bounds!(ProverLifted
     /// constraint moduli.
     ///
     /// **Transcript ordering**: $q''$ was already sampled at the start of
-    /// step 7 (so that the $q''$-branch lifted evals could be computed and
+    /// step 7 (so that the $q''$-family lifted evals could be computed and
     /// sent there). Step 8 only samples the binary folding challenges
     /// under $q''$, then calls the PCS opens. Mirrored in
     /// [`step7_pcs_verify`](crate::ZincPlusPiop::step7_pcs_verify).

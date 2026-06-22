@@ -7,7 +7,7 @@ use crypto_primitives::{
     FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
 use rand::{Rng, rng};
-use zinc_piop::multipoint_eval::{MultipointEval, MultipointEvalBranchInputs};
+use zinc_piop::multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs};
 
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_primality::MillerRabin;
@@ -76,7 +76,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let mut base_transcript = Blake3Transcript::new();
     base_transcript.absorb_slice(b"bench");
 
-    // --- Bench prover (single-branch shape) ---
+    // --- Bench prover (single-family shape) ---
     group.bench_function(BenchmarkId::new("Prover", &params), |bench| {
         bench.iter_batched(
             || base_transcript.clone(),
@@ -84,7 +84,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                 let _ = black_box(
                     MultipointEval::<F>::prove_as_subprotocol(
                         &mut t,
-                        vec![MultipointEvalBranchInputs {
+                        vec![MultipointEvalFamilyInputs {
                             trace_mles: &trace_mles,
                             eval_point: &eval_point,
                             up_evals: &up_evals,
@@ -107,7 +107,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     prover_transcript.absorb_slice(b"bench");
     let mut prover_outputs = MultipointEval::<F>::prove_as_subprotocol(
         &mut prover_transcript,
-        vec![MultipointEvalBranchInputs {
+        vec![MultipointEvalFamilyInputs {
             trace_mles: &trace_mles,
             eval_point: &eval_point,
             up_evals: &up_evals,
@@ -118,7 +118,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
         &field_cfg,
     )
     .expect("prover failed");
-    let (proof, prover_state) = prover_outputs.pop().expect("single branch");
+    let (proof, prover_state) = prover_outputs.pop().expect("single family");
 
     let open_evals: Vec<F> = trace_mles
         .iter()
@@ -136,7 +136,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                 let mut subclaims = MultipointEval::<F>::verify_as_subprotocol(
                     &mut t,
                     vec![proof],
-                    vec![MultipointEvalBranchInputs {
+                    vec![MultipointEvalFamilyInputs {
                         trace_mles: &[],
                         eval_point: &eval_point,
                         up_evals: &up_evals,
@@ -148,7 +148,7 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     &field_cfg,
                 )
                 .expect("verifier failed");
-                let subclaim = subclaims.pop().expect("single branch");
+                let subclaim = subclaims.pop().expect("single family");
                 MultipointEval::<F>::verify_subclaim(&subclaim, &open_evals, &shifts, &field_cfg)
                     .expect("subclaim check failed");
             },

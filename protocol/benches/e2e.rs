@@ -398,7 +398,6 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
                     num_vars,
                     project_scalar,
                     project_ideal,
-                    // Bench UAIRs are Q[X]-only; F_q[X] branch unreachable.
                     |_, _| unreachable!("bench UAIR has no F_q[X] constraints"),
                 ))
                 .expect("Verifier failed");

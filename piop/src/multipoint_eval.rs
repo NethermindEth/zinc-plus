@@ -63,13 +63,13 @@ use zinc_utils::{cfg_into_iter, inner_transparent_field::InnerTransparentField};
 /// Proof for the multi-point evaluation protocol.
 ///
 /// Wraps the inner [`MultiDegreeSumcheckProof`] driven by
-/// [`MultiDegreeSumcheck`]: each branch contributes a single degree-2
-/// group, all branches sharing one $r_0$ per round. The MLE evaluations
+/// [`MultiDegreeSumcheck`]: each family contributes a single degree-2
+/// group, all families sharing one $r_0$ per round. The MLE evaluations
 /// at $r_0$ are provided externally via `lifted_evals` (in $F_q[X]$),
 /// from which the verifier derives the scalar `open_evals` via $\psi_a$.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
-    /// The inner multi-degree sumcheck proof. Single-branch shape: one
+    /// The inner multi-degree sumcheck proof. Single-family shape: one
     /// degree-2 group.
     pub sumcheck_proof: MultiDegreeSumcheckProof<F>,
 }
@@ -77,57 +77,57 @@ pub struct Proof<F: PrimeField> {
 delegate_transcribable!(Proof<F> { sumcheck_proof: MultiDegreeSumcheckProof<F> }
     where F: PrimeField, F::Integer: ConstTranscribable);
 
-/// Per-branch inputs to the lockstep multi-point evaluation protocol,
-/// those that aren't shared between branches.
+/// Per-family inputs to the lockstep multi-point evaluation protocol,
+/// those that aren't shared between families.
 ///
-/// All branches share the same `shifts` (UAIR-static), the same column
+/// All families share the same `shifts` (UAIR-static), the same column
 /// counts, and the same `num_vars`. They differ only in (a) the field
-/// config they operate over and (b) the per-branch field-projected
+/// config they operate over and (b) the per-family field-projected
 /// `trace_mles`, `eval_point`, `up_evals`, and `down_evals`.
-pub struct MultipointEvalBranchInputs<'a, F: PrimeField> {
-    /// Trace MLEs for this branch (projected into this branch's field).
+pub struct MultipointEvalFamilyInputs<'a, F: PrimeField> {
+    /// Trace MLEs for this family (projected into this family's field).
     pub trace_mles: &'a [DenseMultilinearExtension<F::Inner>],
-    /// Evaluation point $r^\star$ for this branch.
+    /// Evaluation point $r^\star$ for this family.
     pub eval_point: &'a [F],
-    /// `up_eval_j = v_j(r*)` for every column $j$, in this branch's
+    /// `up_eval_j = v_j(r*)` for every column $j$, in this family's
     /// field.
     pub up_evals: &'a [F],
     /// `down_eval_k = v_{src_k}^{<<c_k}(r*)` for every shift $k$, in
-    /// this branch's field.
+    /// this family's field.
     pub down_evals: &'a [F],
-    /// Field configuration for this branch.
+    /// Field configuration for this family.
     pub field_cfg: &'a F::Config,
 }
 
-/// Prover state after the multi-point evaluation protocol for one branch.
+/// Prover state after the multi-point evaluation protocol for one family.
 #[derive(Clone, Debug)]
 pub struct ProverState<F: PrimeField> {
     /// The combined evaluation point `r_0` produced by the sumcheck
-    /// (lifted into this branch's field — the underlying integer is shared
-    /// across all branches).
+    /// (lifted into this family's field — the underlying integer is shared
+    /// across all families).
     pub eval_point: Vec<F>,
 }
 
-/// Verifier subclaim after the multi-point evaluation sumcheck for one branch.
+/// Verifier subclaim after the multi-point evaluation sumcheck for one family.
 ///
-/// Carries the shared evaluation point $r_0$ (lifted into this branch's
+/// Carries the shared evaluation point $r_0$ (lifted into this family's
 /// field), the expected MLE-combination evaluation handed back by the
 /// inner multi-degree sumcheck, plus the intermediate values needed to
 /// finalize the check via [`MultipointEval::verify_subclaim`] once the
 /// caller has assembled the `open_evals`.
 #[derive(Clone, Debug)]
 pub struct Subclaim<F: PrimeField> {
-    /// Shared sumcheck output point $r_0$ (in this branch's field).
+    /// Shared sumcheck output point $r_0$ (in this family's field).
     pub r0: Vec<F>,
     /// Expected evaluation of the combined polynomial at $r_0$ handed back
     /// by the inner multi-degree sumcheck — `verify_subclaim` checks this
     /// against the batched `open_evals`.
     pub expected_evaluation: F,
     /// Column batching coefficients $\gamma_j$ sampled during the protocol
-    /// (lifted into this branch's field).
+    /// (lifted into this family's field).
     pub gammas: Vec<F>,
     /// Per-shift batching coefficients $\alpha_k$ sampled during the
-    /// protocol (lifted into this branch's field).
+    /// protocol (lifted into this family's field).
     pub alphas: Vec<F>,
     /// `eq(r_0, r^\star)` — the equality selector at the sumcheck output
     /// point.
@@ -148,39 +148,39 @@ where
     F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
     F::Integer: ConstTranscribable + Zero + Default + Send + Sync,
 {
-    /// Multi-point evaluation protocol prover (lockstep over branches).
+    /// Multi-point evaluation protocol prover (lockstep over families).
     ///
-    /// Drives one or more **branches** of multi-point evaluation in lockstep,
-    /// each branch operating over its own field config. All branches share
+    /// Drives one or more **families** of multi-point evaluation in lockstep,
+    /// each family operating over its own field config. All families share
     /// the same UAIR-static [`ShiftSpec`]s, the same number of columns, and
-    /// the same `num_vars`; they differ only in their per-branch projected
+    /// the same `num_vars`; they differ only in their per-family projected
     /// MLEs/scalars.
     ///
     /// All protocol-level challenges $(\alpha_k, \gamma_j)$ are sampled once
     /// as integers in $[0, q^*)$ via `q_star_cfg` and lifted into each
-    /// branch's field via [`F::from_with_cfg`]. The inner sumcheck is
-    /// driven by [`MultiDegreeSumcheck`] (one degree-2 group per branch),
-    /// so each round's challenge is likewise shared across branches and
-    /// lifted per-branch.
+    /// family's field via [`F::from_with_cfg`]. The inner sumcheck is
+    /// driven by [`MultiDegreeSumcheck`] (one degree-2 group per family),
+    /// so each round's challenge is likewise shared across families and
+    /// lifted per-family.
     ///
-    /// The single-branch case (`branches.len() == 1`) is the natural
-    /// degenerate form; pass `q_star_cfg = branches[0].field_cfg`.
+    /// The single-family case (`families.len() == 1`) is the natural
+    /// degenerate form; pass `q_star_cfg = families[0].field_cfg`.
     ///
-    /// Per branch, proves
+    /// Per family, proves
     ///
     /// $$\sum_b \Bigl[\, \mathrm{eq}(b, r^\star) \sum_j \gamma_j v_j(b) +
     /// \sum_k \alpha_k \cdot \mathrm{next}_{c_k}(r^\star, b) \cdot
     /// v_{\mathrm{src}_k}(b) \Bigr] = \sum_j \gamma_j \cdot
     /// \mathrm{up\\_eval}_j + \sum_k \alpha_k \cdot \mathrm{down\\_eval}_k.$$
     ///
-    /// Returns one `(Proof, ProverState)` per branch in branch order. The
+    /// Returns one `(Proof, ProverState)` per family in family order. The
     /// caller is responsible for computing and sending `lifted_evals` at
-    /// the shared $r_0$ for each branch.
+    /// the shared $r_0$ for each family.
     ///
     /// # Panics
     ///
-    /// * If `branches` is empty.
-    /// * If branches disagree on `num_vars` or column counts.
+    /// * If `families` is empty.
+    /// * If families disagree on `num_vars` or column counts.
     #[allow(
         clippy::arithmetic_side_effects,
         clippy::too_many_lines,
@@ -188,27 +188,27 @@ where
     )]
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
-        branches: Vec<MultipointEvalBranchInputs<'_, F>>,
+        families: Vec<MultipointEvalFamilyInputs<'_, F>>,
         shifts: &[ShiftSpec],
         q_star_cfg: &F::Config,
     ) -> Result<Vec<(Proof<F>, ProverState<F>)>, MultipointEvalError<F>> {
-        assert!(!branches.is_empty(), "need at least one branch");
+        assert!(!families.is_empty(), "need at least one family");
 
-        let num_branches = branches.len();
-        let num_cols = branches[0].trace_mles.len();
-        let num_vars = branches[0].eval_point.len();
+        let num_families = families.len();
+        let num_cols = families[0].trace_mles.len();
+        let num_vars = families[0].eval_point.len();
         let num_down_cols = shifts.len();
 
-        for b in &branches {
+        for b in &families {
             assert_eq!(
                 b.trace_mles.len(),
                 num_cols,
-                "all branches must have the same number of columns",
+                "all families must have the same number of columns",
             );
             assert_eq!(
                 b.eval_point.len(),
                 num_vars,
-                "all branches must have the same num_vars",
+                "all families must have the same num_vars",
             );
             assert_eq!(
                 b.up_evals.len(),
@@ -224,7 +224,7 @@ where
 
         // Step 1: Sample shared batching coefficients $\alpha_k$ and
         // $\gamma_j$ as integers in $[0, q^*)$, then lift into each
-        // branch's field.
+        // family's field.
         let shared_alpha_ints: Vec<F::Integer> = (0..num_down_cols)
             .map(|_| {
                 transcript
@@ -240,7 +240,7 @@ where
             })
             .collect();
 
-        let per_branch_alphas: Vec<Vec<F>> = branches
+        let per_family_alphas: Vec<Vec<F>> = families
             .iter()
             .map(|b| {
                 shared_alpha_ints
@@ -249,7 +249,7 @@ where
                     .collect()
             })
             .collect();
-        let per_branch_gammas: Vec<Vec<F>> = branches
+        let per_family_gammas: Vec<Vec<F>> = families
             .iter()
             .map(|b| {
                 shared_gamma_ints
@@ -259,33 +259,33 @@ where
             })
             .collect();
 
-        // Step 2: Build per-branch sumcheck groups.
+        // Step 2: Build per-family sumcheck groups.
         //
-        // Each branch contributes one degree-2 group with MLE layout
+        // Each family contributes one degree-2 group with MLE layout
         // `[eq_r, next_mles[..], precombined, down_cols[..]]` and
         // comb_fn `eq * precombined + \sum_k \alpha_k * next_k * down_k`.
-        let mut branch_groups: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
-            Vec::with_capacity(num_branches);
+        let mut family_groups: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
+            Vec::with_capacity(num_families);
 
         // Sanity-check claimed sums in debug builds.
-        let mut debug_expected_sums: Vec<F> = Vec::with_capacity(num_branches);
+        let mut debug_expected_sums: Vec<F> = Vec::with_capacity(num_families);
 
-        for (b_idx, branch) in branches.iter().enumerate() {
-            let cfg = branch.field_cfg;
-            let alphas_b = per_branch_alphas[b_idx].clone();
-            let gammas_b = &per_branch_gammas[b_idx];
+        for (b_idx, family) in families.iter().enumerate() {
+            let cfg = family.field_cfg;
+            let alphas_b = per_family_alphas[b_idx].clone();
+            let gammas_b = &per_family_gammas[b_idx];
             let zero = F::zero_with_cfg(cfg);
             let zero_inner = zero.inner();
 
             // Build the two selector MLEs:
             //   eq_r(b)   = eq(b, r')
             //   next_c_r_mle(b) = next_c_mle(r', b)
-            let eq_r = build_eq_x_r_inner(branch.eval_point, cfg)?;
+            let eq_r = build_eq_x_r_inner(family.eval_point, cfg)?;
             let (next_mles, down_cols): (Vec<_>, Vec<_>) = shifts
                 .iter()
                 .map(|spec| {
-                    let next = build_next_c_r_mle(branch.eval_point, spec.shift_amount(), cfg)?;
-                    let col = branch.trace_mles[spec.source_col()].clone();
+                    let next = build_next_c_r_mle(family.eval_point, spec.shift_amount(), cfg)?;
+                    let col = family.trace_mles[spec.source_col()].clone();
                     Ok((next, col))
                 })
                 .collect::<Result<Vec<_>, ArithErrors>>()?
@@ -301,7 +301,7 @@ where
                             .enumerate()
                             .fold(zero.clone(), |acc, (j, gamma)| {
                                 let eval_f = F::new_unchecked_with_cfg(
-                                    branch.trace_mles[j].evaluations[i].clone(),
+                                    family.trace_mles[j].evaluations[i].clone(),
                                     cfg,
                                 );
                                 acc + eval_f * gamma
@@ -341,12 +341,12 @@ where
             };
 
             let group = MultiDegreeSumcheckGroup::new(2, mles, comb_fn);
-            branch_groups.push((vec![group], cfg));
+            family_groups.push((vec![group], cfg));
 
             if cfg!(debug_assertions) {
                 debug_expected_sums.push(compute_expected_sum(
-                    branch.up_evals,
-                    branch.down_evals,
+                    family.up_evals,
+                    family.down_evals,
                     gammas_b,
                     &alphas_b,
                     zero,
@@ -355,28 +355,28 @@ where
         }
 
         // Step 3: Run the lockstep multi-degree sumcheck (degree 2, one
-        // group per branch).
+        // group per family).
         let sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
             transcript,
-            branch_groups,
+            family_groups,
             num_vars,
             q_star_cfg,
         );
 
-        // Step 4: Repackage into per-branch (Proof, ProverState).
-        let mut result = Vec::with_capacity(num_branches);
+        // Step 4: Repackage into per-family (Proof, ProverState).
+        let mut result = Vec::with_capacity(num_families);
         for (b_idx, (proof, mut prover_states)) in sumcheck_outputs.into_iter().enumerate() {
             debug_assert_eq!(
                 prover_states.len(),
                 1,
-                "each branch contributed exactly one degree group",
+                "each family contributed exactly one degree group",
             );
             debug_assert_eq!(
                 proof.claimed_sums()[0],
                 debug_expected_sums[b_idx],
-                "claimed sum mismatch on branch {b_idx}",
+                "claimed sum mismatch on family {b_idx}",
             );
-            let state = prover_states.pop().expect("single group per branch");
+            let state = prover_states.pop().expect("single group per family");
             result.push((
                 Proof {
                     sumcheck_proof: proof,
@@ -392,9 +392,9 @@ where
 
     /// Multi-point evaluation protocol verifier (sumcheck phase, lockstep).
     ///
-    /// Mirror of [`prove_as_subprotocol`]: drives one or more branches in
+    /// Mirror of [`prove_as_subprotocol`]: drives one or more families in
     /// lockstep, sharing batching coefficients and per-round challenges
-    /// in $[0, q^*)$ via `q_star_cfg`. Returns one [`Subclaim`] per branch
+    /// in $[0, q^*)$ via `q_star_cfg`. Returns one [`Subclaim`] per family
     /// carrying $r_0$, $\gamma_j$, $\alpha_k$, `eq_at_r0`, `shifts_at_r0`,
     /// and the inner sumcheck's `expected_evaluation`. The caller
     /// finalizes via [`verify_subclaim`](Self::verify_subclaim) once
@@ -402,33 +402,33 @@ where
     ///
     /// # Panics
     ///
-    /// * If `branches` is empty.
-    /// * If branches disagree on `num_vars` or column counts.
+    /// * If `families` is empty.
+    /// * If families disagree on `num_vars` or column counts.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         proofs: Vec<Proof<F>>,
-        branches: Vec<MultipointEvalBranchInputs<'_, F>>,
+        families: Vec<MultipointEvalFamilyInputs<'_, F>>,
         shifts: &[ShiftSpec],
         num_vars: usize,
         q_star_cfg: &F::Config,
     ) -> Result<Vec<Subclaim<F>>, MultipointEvalError<F>> {
-        assert!(!branches.is_empty(), "need at least one branch");
+        assert!(!families.is_empty(), "need at least one family");
         assert_eq!(
             proofs.len(),
-            branches.len(),
-            "proofs and branches must have the same length",
+            families.len(),
+            "proofs and families must have the same length",
         );
 
-        let num_cols = branches[0].up_evals.len();
+        let num_cols = families[0].up_evals.len();
         let num_down_cols = shifts.len();
 
         // Sanity check
-        for b in &branches {
+        for b in &families {
             assert_eq!(
                 b.up_evals.len(),
                 num_cols,
-                "all branches must have the same number of up_evals",
+                "all families must have the same number of up_evals",
             );
             assert_eq!(
                 b.down_evals.len(),
@@ -438,7 +438,7 @@ where
             assert_eq!(
                 b.eval_point.len(),
                 num_vars,
-                "all branches must have the same num_vars",
+                "all families must have the same num_vars",
             );
         }
 
@@ -459,7 +459,7 @@ where
             })
             .collect();
 
-        let per_branch_alphas: Vec<Vec<F>> = branches
+        let per_family_alphas: Vec<Vec<F>> = families
             .iter()
             .map(|b| {
                 shared_alpha_ints
@@ -468,7 +468,7 @@ where
                     .collect()
             })
             .collect();
-        let per_branch_gammas: Vec<Vec<F>> = branches
+        let per_family_gammas: Vec<Vec<F>> = families
             .iter()
             .map(|b| {
                 shared_gamma_ints
@@ -478,15 +478,15 @@ where
             })
             .collect();
 
-        // Step 2: Per-branch claimed-sum check (must equal the integer-
-        // shared expected sum derived from each branch's up/down evals).
-        for (b_idx, (proof, branch)) in proofs.iter().zip(branches.iter()).enumerate() {
-            let zero = F::zero_with_cfg(branch.field_cfg);
+        // Step 2: Per-family claimed-sum check (must equal the integer-
+        // shared expected sum derived from each family's up/down evals).
+        for (b_idx, (proof, family)) in proofs.iter().zip(families.iter()).enumerate() {
+            let zero = F::zero_with_cfg(family.field_cfg);
             let expected = compute_expected_sum(
-                branch.up_evals,
-                branch.down_evals,
-                &per_branch_gammas[b_idx],
-                &per_branch_alphas[b_idx],
+                family.up_evals,
+                family.down_evals,
+                &per_family_gammas[b_idx],
+                &per_family_alphas[b_idx],
                 zero,
             );
             let claimed = &proof.sumcheck_proof.claimed_sums()[0];
@@ -501,7 +501,7 @@ where
         // Step 3: Run the lockstep multi-degree sumcheck verifier.
         let proof_refs: Vec<(&MultiDegreeSumcheckProof<F>, &F::Config)> = proofs
             .iter()
-            .zip(branches.iter())
+            .zip(families.iter())
             .map(|(p, b)| (&p.sumcheck_proof, b.field_cfg))
             .collect();
         let sub_claims: Vec<MultiDegreeSubClaims<F>> = MultiDegreeSumcheck::verify_as_subprotocol(
@@ -511,23 +511,23 @@ where
             q_star_cfg,
         )?;
 
-        // Step 4: Per-branch finalize: recompute selectors at $r_0$.
-        branches
+        // Step 4: Per-family finalize: recompute selectors at $r_0$.
+        families
             .iter()
             .zip(sub_claims)
             .enumerate()
-            .map(|(b_idx, (branch, sub))| {
-                let cfg = branch.field_cfg;
+            .map(|(b_idx, (family, sub))| {
+                let cfg = family.field_cfg;
                 let one = F::one_with_cfg(cfg);
                 let r_0_owned: Vec<F> = sub.point().to_vec();
                 let expected_evaluation = sub.expected_evaluations()[0].clone();
 
-                let eq_at_r0 = zinc_poly::utils::eq_eval(&r_0_owned, branch.eval_point, one)?;
+                let eq_at_r0 = zinc_poly::utils::eq_eval(&r_0_owned, family.eval_point, one)?;
                 let shifts_at_r0: Vec<F> = shifts
                     .iter()
                     .map(|spec| {
                         eval_shift_predicate(
-                            branch.eval_point,
+                            family.eval_point,
                             &r_0_owned,
                             spec.shift_amount(),
                             cfg,
@@ -538,8 +538,8 @@ where
                 Ok(Subclaim {
                     r0: r_0_owned,
                     expected_evaluation,
-                    gammas: per_branch_gammas[b_idx].clone(),
-                    alphas: per_branch_alphas[b_idx].clone(),
+                    gammas: per_family_gammas[b_idx].clone(),
+                    alphas: per_family_alphas[b_idx].clone(),
                     eq_at_r0,
                     shifts_at_r0,
                 })
@@ -548,13 +548,13 @@ where
     }
 
     /// Finalize the multi-point evaluation check given `open_evals` for one
-    /// branch.
+    /// family.
     ///
     /// Verifies that
     /// `eq_at_r0 * \sum_j(gamma_j * open_eval_j) + \sum_k(alpha_k *
     /// shift_at_r0_k * open_eval[source_col_k])` equals the sumcheck's
     /// expected evaluation. This is a pure arithmetic check with no
-    /// transcript interaction — call it once per branch with that branch's
+    /// transcript interaction — call it once per family with that family's
     /// `open_evals`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn verify_subclaim(
@@ -745,7 +745,7 @@ mod tests {
         let mut transcript = make_transcript();
         let mut outputs = MultipointEval::<F>::prove_as_subprotocol(
             &mut transcript,
-            vec![MultipointEvalBranchInputs {
+            vec![MultipointEvalFamilyInputs {
                 trace_mles,
                 eval_point: &public.eval_point,
                 up_evals: &public.up_evals,
@@ -756,8 +756,8 @@ mod tests {
             &(),
         )
         .expect("prover should succeed");
-        assert_eq!(outputs.len(), 1, "single-branch shape");
-        let (proof, prover_state) = outputs.pop().expect("single branch");
+        assert_eq!(outputs.len(), 1, "single-family shape");
+        let (proof, prover_state) = outputs.pop().expect("single family");
 
         let r_0 = &prover_state.eval_point;
         let open_evals: Vec<F> = trace_mles
@@ -776,7 +776,7 @@ mod tests {
         let mut subclaims = MultipointEval::<F>::verify_as_subprotocol(
             &mut make_transcript(),
             vec![msg.proof.clone()],
-            vec![MultipointEvalBranchInputs {
+            vec![MultipointEvalFamilyInputs {
                 trace_mles: &[],
                 eval_point: &public.eval_point,
                 up_evals: &public.up_evals,
@@ -787,8 +787,8 @@ mod tests {
             public.num_vars,
             &(),
         )?;
-        assert_eq!(subclaims.len(), 1, "single-branch shape");
-        let subclaim = subclaims.pop().expect("single branch");
+        assert_eq!(subclaims.len(), 1, "single-family shape");
+        let subclaim = subclaims.pop().expect("single family");
 
         MultipointEval::<F>::verify_subclaim(&subclaim, &msg.open_evals, &public.shifts, &())?;
 

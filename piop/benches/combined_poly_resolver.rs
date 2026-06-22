@@ -75,7 +75,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 &evaluation_point,
                 field_cfg,
@@ -98,7 +98,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 Vec::new(),
                 &ic_prover_state.evaluation_point,
                 &scalars_f,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 num_vars,
                 max_degree,
@@ -113,7 +113,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             num_vars,
             field_cfg,
         );
-        let (md_proof, md_states) = sumcheck_outputs.pop().expect("single branch");
+        let (md_proof, md_states) = sumcheck_outputs.pop().expect("single family");
 
         let (cpr_proof, cpr_state) =
             CombinedPolyResolver::finalize_prover::<TestUairNoMultiplication<_, _>>(
@@ -166,14 +166,13 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             >(
                 &mut verifier_transcript,
                 ic_proof,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 &ic_evaluation_point,
                 |ideal_over_ring| {
                     ideal_over_ring.map(|i| DegreeOneIdeal::from_with_cfg(i, &field_cfg))
                 },
                 |_| unreachable!("not used here"),
-                &field_cfg,
             )
             .expect("IC Verifier failed");
 
@@ -211,7 +210,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     &field_cfg,
                 )
                 .expect("MultiDegreeSumcheck verify failed");
-                let md_subclaims = md_subclaims_vec.pop().expect("single branch");
+                let md_subclaims = md_subclaims_vec.pop().expect("single family");
 
                 let _ = black_box(
                     CombinedPolyResolver::finalize_verifier::<TestUairNoMultiplication<_, _>>(
@@ -221,7 +220,7 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         md_subclaims.expected_evaluations()[0].clone(),
                         ancillary,
                         &scalars_f,
-                        /* branch_idx = */ 0,
+                        /* family_idx = */ 0,
                         &field_cfg,
                     )
                     .expect("CPR finalize_verifier failed"),
@@ -273,7 +272,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 transcript,
                 &projected_trace,
                 &projected_scalars,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 &evaluation_point,
                 field_cfg,
@@ -296,7 +295,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                     Vec::new(),
                     &ic_prover_state.evaluation_point,
                     &scalars_f,
-                    /* branch_idx = */ 0,
+                    /* family_idx = */ 0,
                     num_constraints.q,
                     num_vars,
                     max_degree,
@@ -312,7 +311,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 field_cfg,
             )
             .pop()
-            .expect("single branch");
+            .expect("single family");
 
             let (cpr_proof, cpr_state) =
                 CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<_, _>>(
@@ -364,12 +363,11 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
             >(
                 &mut verifier_transcript,
                 ic_proof,
-                /* branch_idx = */ 0,
+                /* family_idx = */ 0,
                 num_constraints.q,
                 &ic_evaluation_point,
                 |_ideal_over_ring| IdealOrZero::<DegreeOneIdeal<_>>::zero(),
                 |_| unreachable!("not used here"),
-                &field_cfg,
             )
             .expect("IC Verifier failed");
 
@@ -408,7 +406,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                 )
                 .expect("MultiDegreeSumcheck verify failed")
                 .pop()
-                .expect("single branch");
+                .expect("single family");
 
                 let _ = black_box(
                     CombinedPolyResolver::finalize_verifier::<TestUairSimpleMultiplication<_, _>>(
@@ -418,7 +416,7 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
                         md_subclaims.expected_evaluations()[0].clone(),
                         ancillary,
                         &scalars_f,
-                        /* branch_idx = */ 0,
+                        /* family_idx = */ 0,
                         &field_cfg,
                     )
                     .expect("CPR finalize_verifier failed"),

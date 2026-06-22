@@ -1118,9 +1118,9 @@ where
 /// integer zero, so both constraints hold simultaneously regardless of the
 /// chosen primes.
 ///
-/// Used to exercise the per-prime $\mathbb F_{q_i}[X]$ ideal-check branch
+/// Used to exercise the per-prime $\mathbb F_{q_i}[X]$ ideal-check family
 /// of the Zinc$+$ protocol end-to-end with multiple primes, including the
-/// lockstep multi-branch sumcheck/MP-eval driver.
+/// lockstep multi-family sumcheck/MP-eval driver.
 #[derive(Clone, Debug)]
 pub struct TestUairFqLargePrime<R, P>(PhantomData<(R, P)>);
 

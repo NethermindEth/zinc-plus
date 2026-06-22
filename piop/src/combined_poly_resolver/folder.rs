@@ -22,14 +22,14 @@ use zinc_utils::add;
 /// an `assert_*` method is called it adds it to the RLC
 /// with the next power of the challenge `\alpha`.
 pub struct ConstraintFolder<'a, F: PrimeField> {
-    /// Branch index selecting which family of constraints to fold.
+    /// Family index selecting which family of constraints to fold.
     ///
     /// - `0` -> $\mathbb{Q}[X]$ constraints (from `assert_in_ideal` /
     ///   `assert_zero`).
     /// - `i > 0` -> $\mathbb{F}_{q_{i-1}}[X]$ (from `assert_in_fq_ideal`).
     ///
     /// All unrelated constraints are skipped.
-    branch_idx: usize,
+    family_idx: usize,
     /// A reference to precomputed powers of the challenge.
     challenge_powers: &'a [F],
     /// Index of the current constraint,
@@ -40,11 +40,11 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
 }
 
 impl<'a, F: PrimeField> ConstraintFolder<'a, F> {
-    /// Build a folder for a given `branch_idx` (`0` = Q[X], `i >= 1` =
+    /// Build a folder for a given `family_idx` (`0` = Q[X], `i >= 1` =
     /// declared prime `i - 1`).
-    pub fn new(branch_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
+    pub fn new(family_idx: usize, challenge_powers: &'a [F], zero: &F) -> Self {
         Self {
-            branch_idx,
+            family_idx,
             challenge_powers,
             current_constraint: 0,
             folded_constraints: zero.clone(),
@@ -66,24 +66,24 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
 
     #[inline(always)]
     fn assert_in_ideal(&mut self, expr: Self::Expr, _ideal: &Self::Ideal) {
-        // Q[X] family -> branch 0.
-        if self.branch_idx == 0 {
+        // Q[X] family -> index 0.
+        if self.family_idx == 0 {
             self.fold_constraint(expr);
         }
     }
 
     #[inline(always)]
     fn assert_zero(&mut self, expr: Self::Expr) {
-        // Q[X] family -> branch 0.
-        if self.branch_idx == 0 {
+        // Q[X] family -> index 0.
+        if self.family_idx == 0 {
             self.fold_constraint(expr);
         }
     }
 
     #[inline(always)]
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
-        // F_{q_{prime_idx}}[X] family -> branch (prime_idx + 1).
-        if self.branch_idx == add!(prime_idx, 1) {
+        // F_{q_{prime_idx}}[X] family -> index (prime_idx + 1).
+        if self.family_idx == add!(prime_idx, 1) {
             self.fold_constraint(expr);
         }
     }

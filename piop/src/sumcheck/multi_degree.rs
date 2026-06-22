@@ -276,15 +276,15 @@ pub struct MultiDegreeSumcheck<F>(PhantomData<F>);
 impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// Multi-degree sumcheck prover.
     ///
-    /// Drives one or more **branches** of multi-degree sumchecks in lockstep,
-    /// sharing one per-round verifier challenge across **all branches and all
-    /// groups within each branch**. Each branch carries its own degree groups
+    /// Drives one or more **families** of multi-degree sumchecks in lockstep,
+    /// sharing one per-round verifier challenge across **all families and all
+    /// groups within each family**. Each family carries its own degree groups
     /// in its own field config (i.e. a different prime); the shared challenge
     /// is sampled once per round as an integer in $[0, q^*)$ via
-    /// `q_star_cfg`, then lifted into each branch's field via
+    /// `q_star_cfg`, then lifted into each family's field via
     /// `F::from_with_cfg` (a no-op type cast when $q^* \le q_i$).
     ///
-    /// Proves, for every branch $b$ and every group $g$ in that branch:
+    /// Proves, for every family $b$ and every group $g$ in that family:
     ///
     /// $$
     /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{b, g}(x) =
@@ -295,39 +295,39 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ///
     /// Designed to be used as a subprotocol within a larger system: takes
     /// the FS transcript (`transcript`) as input and returns the **internal
-    /// ProverState** alongside the sumcheck proof for every branch. Claimed
+    /// ProverState** alongside the sumcheck proof for every family. Claimed
     /// sums are derived by the prover during the first round.
     ///
-    /// The single-branch case (`branches.len() == 1`) is the natural
-    /// degenerate form; pass `q_star_cfg = &branches[0].1` and the lift is
+    /// The single-family case (`families.len() == 1`) is the natural
+    /// degenerate form; pass `q_star_cfg = &families[0].1` and the lift is
     /// the identity.
     ///
     /// # Arguments
     ///
     /// * `transcript`: Fiat-Shamir transcript.
-    /// * `branches`: One entry per branch: `(groups, F::Config)`. Each branch
-    ///   contributes one or more degree groups that share that branch's
+    /// * `families`: One entry per family: `(groups, F::Config)`. Each family
+    ///   contributes one or more degree groups that share that family's
     ///   `F::Config`.
     /// * `num_vars`: Number of variables (must be consistent across all groups
-    ///   in all branches).
+    ///   in all families).
     /// * `q_star_cfg`: Field configuration used for transcript metadata absorbs
     ///   and per-round challenge squeezes. This is the smallest of the
-    ///   per-branch moduli (so every branch can losslessly cast the shared
+    ///   per-family moduli (so every family can losslessly cast the shared
     ///   integer into its own field).
     ///
     /// # Returns
     ///
-    /// One `(proof, prover_states)` tuple per branch, in the order branches
+    /// One `(proof, prover_states)` tuple per family, in the order families
     /// were provided.
     ///
     /// # Panics
     ///
     /// * If `num_vars == 0`.
-    /// * If `branches` is empty or any branch has no groups.
+    /// * If `families` is empty or any family has no groups.
     #[allow(clippy::type_complexity)]
     pub fn prove_as_subprotocol(
         transcript: &mut impl Transcript,
-        branches: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)>,
+        families: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)>,
         num_vars: usize,
         q_star_cfg: &F::Config,
     ) -> Vec<(MultiDegreeSumcheckProof<F>, Vec<SumcheckProverState<F>>)>
@@ -339,33 +339,33 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             num_vars > 0,
             "Attempts to prove a constant: num_vars must be > 0"
         );
-        assert!(!branches.is_empty(), "need at least one branch");
-        for (groups, _) in &branches {
-            assert!(!groups.is_empty(), "every branch needs at least one group");
+        assert!(!families.is_empty(), "need at least one family");
+        for (groups, _) in &families {
+            assert!(!groups.is_empty(), "every family needs at least one group");
         }
 
-        let num_branches = branches.len();
+        let num_families = families.len();
         let mut buf = vec![0; F::Integer::NUM_BYTES];
 
-        // Metadata: absorb (num_vars, num_branches) under `q_star_cfg` so the
-        // transcript layout is canonical across branches.
+        // Metadata: absorb (num_vars, num_families) under `q_star_cfg` so the
+        // transcript layout is canonical across families.
         let nvars_field = F::from_with_cfg(num_vars as u64, q_star_cfg);
-        let nbranches_field = F::from_with_cfg(num_branches as u64, q_star_cfg);
+        let nfamilies_field = F::from_with_cfg(num_families as u64, q_star_cfg);
         transcript.absorb_random_field(&nvars_field, &mut buf);
-        transcript.absorb_random_field(&nbranches_field, &mut buf);
+        transcript.absorb_random_field(&nfamilies_field, &mut buf);
 
-        // Per-branch state, one `Vec` per branch.
-        let mut per_branch_group_messages: Vec<Vec<Vec<SumcheckProverMsg<F>>>> =
-            Vec::with_capacity(num_branches);
-        let mut per_branch_claimed_sums: Vec<Vec<F>> = Vec::with_capacity(num_branches);
-        let mut per_branch_prover_states: Vec<Vec<SumcheckProverState<F>>> =
-            Vec::with_capacity(num_branches);
-        let mut per_branch_comb_fns: Vec<Vec<CombFn<F>>> = Vec::with_capacity(num_branches);
-        let mut per_branch_fast_paths: Vec<Vec<Option<Box<dyn Round1FastPath<F>>>>> =
-            Vec::with_capacity(num_branches);
-        let mut per_branch_cfg: Vec<&F::Config> = Vec::with_capacity(num_branches);
+        // Per-family state, one `Vec` per family.
+        let mut per_family_group_messages: Vec<Vec<Vec<SumcheckProverMsg<F>>>> =
+            Vec::with_capacity(num_families);
+        let mut per_family_claimed_sums: Vec<Vec<F>> = Vec::with_capacity(num_families);
+        let mut per_family_prover_states: Vec<Vec<SumcheckProverState<F>>> =
+            Vec::with_capacity(num_families);
+        let mut per_family_comb_fns: Vec<Vec<CombFn<F>>> = Vec::with_capacity(num_families);
+        let mut per_family_fast_paths: Vec<Vec<Option<Box<dyn Round1FastPath<F>>>>> =
+            Vec::with_capacity(num_families);
+        let mut per_family_cfg: Vec<&F::Config> = Vec::with_capacity(num_families);
 
-        for (groups, cfg) in branches {
+        for (groups, cfg) in families {
             let num_groups = groups.len();
             let ngroups_field = F::from_with_cfg(num_groups as u64, q_star_cfg);
             transcript.absorb_random_field(&ngroups_field, &mut buf);
@@ -387,27 +387,27 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 fast_paths.push(group.round_1_fast_path);
             }
 
-            per_branch_group_messages.push(group_messages);
-            per_branch_claimed_sums.push(Vec::with_capacity(num_groups));
-            per_branch_prover_states.push(prover_states);
-            per_branch_comb_fns.push(comb_fns);
-            per_branch_fast_paths.push(fast_paths);
-            per_branch_cfg.push(cfg);
+            per_family_group_messages.push(group_messages);
+            per_family_claimed_sums.push(Vec::with_capacity(num_groups));
+            per_family_prover_states.push(prover_states);
+            per_family_comb_fns.push(comb_fns);
+            per_family_fast_paths.push(fast_paths);
+            per_family_cfg.push(cfg);
         }
 
-        // Per-branch last challenge in each branch's field. The underlying
-        // integer is shared across branches; each branch lifts it locally.
-        let mut per_branch_verifier_msg: Vec<Option<F>> = vec![None; num_branches];
+        // Per-family last challenge in each family's field. The underlying
+        // integer is shared across families; each family lifts it locally.
+        let mut per_family_verifier_msg: Vec<Option<F>> = vec![None; num_families];
 
         for round in 1..=num_vars {
-            // 1. Each branch produces its round messages (per-branch cfg).
-            for b in 0..num_branches {
-                let cfg = &per_branch_cfg[b];
-                let verifier_msg = &per_branch_verifier_msg[b];
+            // 1. Each family produces its round messages (per-family cfg).
+            for b in 0..num_families {
+                let cfg = &per_family_cfg[b];
+                let verifier_msg = &per_family_verifier_msg[b];
                 let round_msgs: Vec<SumcheckProverMsg<F>> =
-                    cfg_iter_mut!(per_branch_prover_states[b])
-                        .zip(cfg_iter!(per_branch_comb_fns[b]))
-                        .zip(cfg_iter!(per_branch_fast_paths[b]))
+                    cfg_iter_mut!(per_family_prover_states[b])
+                        .zip(cfg_iter!(per_family_comb_fns[b]))
+                        .zip(cfg_iter!(per_family_fast_paths[b]))
                         .map(|((state, comb_fn), fast_path)| {
                             if round == 1
                                 && let Some(fast_path) = fast_path.as_ref()
@@ -430,7 +430,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 }
 
                 for (j, msg) in round_msgs.into_iter().enumerate() {
-                    per_branch_group_messages[b][j].push(msg);
+                    per_family_group_messages[b][j].push(msg);
                 }
             }
 
@@ -439,30 +439,30 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             transcript.absorb_random_field(&shared_chal_q_star, &mut buf);
             let shared_chal_int = shared_chal_q_star.lift_to_integer();
 
-            // 3. Per branch: lift the shared integer into its field and feed each group.
+            // 3. Per family: lift the shared integer into its field and feed each group.
             //    Install fast-path post-fold MLEs on round 1.
-            for b in 0..num_branches {
-                let chal_b = F::from_with_cfg(shared_chal_int.clone(), per_branch_cfg[b]);
+            for b in 0..num_families {
+                let chal_b = F::from_with_cfg(shared_chal_int.clone(), per_family_cfg[b]);
                 if round == 1 {
-                    per_branch_prover_states[b]
+                    per_family_prover_states[b]
                         .iter_mut()
-                        .zip(per_branch_fast_paths[b].iter_mut())
+                        .zip(per_family_fast_paths[b].iter_mut())
                         .for_each(|(state, fp_slot)| {
                             if let Some(fp) = fp_slot.take() {
-                                state.mles = fp.fold_with_challenge(&chal_b, per_branch_cfg[b]);
+                                state.mles = fp.fold_with_challenge(&chal_b, per_family_cfg[b]);
                                 state.skip_next_fold = true;
                             }
                         });
                 }
-                per_branch_verifier_msg[b] = Some(chal_b);
+                per_family_verifier_msg[b] = Some(chal_b);
             }
         }
 
-        // Finalize per branch (mirrors the original single-branch tail).
-        cfg_into_iter!(per_branch_prover_states)
-            .zip(cfg_into_iter!(per_branch_group_messages))
-            .zip(cfg_into_iter!(per_branch_claimed_sums))
-            .zip(cfg_into_iter!(per_branch_verifier_msg))
+        // Finalize per family (mirrors the original single-family tail).
+        cfg_into_iter!(per_family_prover_states)
+            .zip(cfg_into_iter!(per_family_group_messages))
+            .zip(cfg_into_iter!(per_family_claimed_sums))
+            .zip(cfg_into_iter!(per_family_verifier_msg))
             .map(
                 |(((mut prover_states, group_messages), mut claimed_sums), last_chal)| {
                     prover_states.iter_mut().for_each(|state| {
@@ -491,10 +491,10 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
     /// Multi-degree sumcheck verifier.
     ///
-    /// Mirror of [`prove_as_subprotocol`]: drives one or more branches of
+    /// Mirror of [`prove_as_subprotocol`]: drives one or more families of
     /// multi-degree sumchecks in lockstep, sharing one per-round challenge
-    /// sampled in $[0, q^*)$ via `q_star_cfg` and lifted into each branch's
-    /// field. Verifies, for every branch $b$ and every group $g$:
+    /// sampled in $[0, q^*)$ via `q_star_cfg` and lifted into each family's
+    /// field. Verifies, for every family $b$ and every group $g$:
     ///
     /// $$
     /// \sum_{x \in \{0, 1\}^{\text{num\\_vars}}} G_{b, g}(x) =
@@ -503,12 +503,12 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     ///
     /// where $G_{b, g}(x) = \text{comb\\_fn}_{b, g}(\text{mles}_{b, g}(x))$.
     ///
-    /// Returns one `MultiDegreeSubClaims<F>` per branch: shared evaluation
-    /// point `r*` (in that branch's field) and per-group expected
-    /// evaluations. The caller must verify each branch's MLE combination at
+    /// Returns one `MultiDegreeSubClaims<F>` per family: shared evaluation
+    /// point `r*` (in that family's field) and per-group expected
+    /// evaluations. The caller must verify each family's MLE combination at
     /// its `r*` equals its expected evaluation.
     ///
-    /// The single-branch case (`proofs.len() == 1`) is the natural degenerate
+    /// The single-family case (`proofs.len() == 1`) is the natural degenerate
     /// form; pass `q_star_cfg = &proofs[0].1`.
     ///
     /// # Arguments
@@ -516,14 +516,14 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
     /// * `transcript`: Fiat-Shamir transcript (must match prover state at the
     ///   start of the sumcheck).
     /// * `num_vars`: Number of variables (sumcheck rounds).
-    /// * `proofs`: One `(proof, F::Config)` per branch.
+    /// * `proofs`: One `(proof, F::Config)` per family.
     /// * `q_star_cfg`: Field configuration used for transcript metadata absorbs
     ///   and per-round challenge squeezes (mirror of the prover).
     ///
     /// # Panics
     ///
     /// * If `num_vars == 0`.
-    /// * If `proofs` is empty or any branch's proof has no groups.
+    /// * If `proofs` is empty or any family's proof has no groups.
     pub fn verify_as_subprotocol(
         transcript: &mut impl Transcript,
         num_vars: usize,
@@ -538,22 +538,22 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             num_vars > 0,
             "Attempts to prove a constant: num_vars must be > 0"
         );
-        assert!(!proofs.is_empty(), "need at least one branch");
+        assert!(!proofs.is_empty(), "need at least one family");
 
-        let num_branches = proofs.len();
+        let num_families = proofs.len();
         let mut buf = vec![0; F::Integer::NUM_BYTES];
 
-        // Metadata: (num_vars, num_branches) under q_star_cfg.
+        // Metadata: (num_vars, num_families) under q_star_cfg.
         let nvars_field = F::from_with_cfg(num_vars as u64, q_star_cfg);
-        let nbranches_field = F::from_with_cfg(num_branches as u64, q_star_cfg);
+        let nfamilies_field = F::from_with_cfg(num_families as u64, q_star_cfg);
         transcript.absorb_random_field(&nvars_field, &mut buf);
-        transcript.absorb_random_field(&nbranches_field, &mut buf);
+        transcript.absorb_random_field(&nfamilies_field, &mut buf);
 
-        let mut per_branch_verifier_states: Vec<Vec<VerifierState<F>>> =
-            Vec::with_capacity(num_branches);
+        let mut per_family_verifier_states: Vec<Vec<VerifierState<F>>> =
+            Vec::with_capacity(num_families);
         for (proof, cfg) in proofs {
             let num_groups = proof.degrees.len();
-            assert!(num_groups != 0, "every branch needs at least one group");
+            assert!(num_groups != 0, "every family needs at least one group");
             let ngroups_field = F::from_with_cfg(num_groups as u64, q_star_cfg);
             transcript.absorb_random_field(&ngroups_field, &mut buf);
 
@@ -583,11 +583,11 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
                 proof.group_messages.len(),
             );
 
-            per_branch_verifier_states.push(states);
+            per_family_verifier_states.push(states);
         }
 
         for i in 0..num_vars {
-            // Absorb all branches' messages in branch-major order to match
+            // Absorb all families' messages in family-major order to match
             // the prover.
             for (proof, _) in proofs {
                 proof.group_messages.iter().for_each(|msg| {
@@ -602,7 +602,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 
             for (b, (proof, cfg)) in proofs.iter().enumerate() {
                 let chal_b = F::from_with_cfg(shared_chal_int.clone(), cfg);
-                per_branch_verifier_states[b]
+                per_family_verifier_states[b]
                     .iter_mut()
                     .zip(proof.group_messages.iter())
                     .for_each(|(state, msg)| {
@@ -612,9 +612,9 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         }
 
         // TODO: parallelize when multiple lookup groups exist
-        let mut output = Vec::with_capacity(num_branches);
+        let mut output = Vec::with_capacity(num_families);
         for (b, (proof, _)) in proofs.iter().enumerate() {
-            let states = std::mem::take(&mut per_branch_verifier_states[b]);
+            let states = std::mem::take(&mut per_family_verifier_states[b]);
             let mut shared_point: Option<Vec<F>> = None;
             let mut expected_evaluations = Vec::with_capacity(states.len());
             for (j, state) in states.into_iter().enumerate() {
@@ -660,9 +660,9 @@ mod tests {
         let num_vars = 3;
         let cfg = &();
 
-        let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 1)).collect();
-        let b_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 10)).collect();
-        let inner_zero = *F::from(0u32).inner();
+        let a_vals: Vec<F> = (0_u32..8).map(|i| F::from(i + 1)).collect();
+        let b_vals: Vec<F> = (0_u32..8).map(|i| F::from(i + 10)).collect();
+        let inner_zero = *F::from(0_u32).inner();
 
         let a_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
@@ -675,7 +675,7 @@ mod tests {
             inner_zero,
         );
 
-        let r: Vec<F> = vec![F::from(5u32), F::from(7u32), F::from(11u32)];
+        let r: Vec<F> = vec![F::from(5_u32), F::from(7_u32), F::from(11_u32)];
         let eq_r = build_eq_x_r_inner(&r, cfg).unwrap();
 
         // Group 0 (degree 2): eq · (a + b)
@@ -692,7 +692,7 @@ mod tests {
             Box::new(|v: &[F]| v[0] * v[1] * v[2]),
         );
 
-        // Prove (single-branch shape: one branch with `q_star_cfg = cfg`).
+        // Prove (single-family shape: one family with `q_star_cfg = cfg`).
         let mut pt = Blake3Transcript::new();
         let mut outputs = MultiDegreeSumcheck::<F>::prove_as_subprotocol(
             &mut pt,
@@ -700,7 +700,7 @@ mod tests {
             num_vars,
             cfg,
         );
-        let (proof, _states) = outputs.pop().expect("single branch");
+        let (proof, _states) = outputs.pop().expect("single family");
 
         // Verify
         let mut vt = Blake3Transcript::new();
@@ -711,13 +711,13 @@ mod tests {
             cfg,
         )
         .expect("verification should succeed");
-        let subclaims = subclaims_vec.pop().expect("single branch");
+        let subclaims = subclaims_vec.pop().expect("single family");
 
         assert_eq!(subclaims.expected_evaluations.len(), 2);
 
         // Check final evaluations manually
         let point = &subclaims.point;
-        let eq_eval = zinc_poly::utils::eq_eval(point, &r, F::from(1u32)).unwrap();
+        let eq_eval = zinc_poly::utils::eq_eval(point, &r, F::from(1_u32)).unwrap();
         let a_eval = a_mle.evaluate_with_config(point, cfg).unwrap();
         let b_eval = b_mle.evaluate_with_config(point, cfg).unwrap();
 
@@ -734,15 +734,15 @@ mod tests {
         let num_vars = 2;
         let cfg = &();
 
-        let vals: Vec<F> = (0u32..4).map(|i| F::from(i + 1)).collect();
-        let inner_zero = *F::from(0u32).inner();
+        let vals: Vec<F> = (0_u32..4).map(|i| F::from(i + 1)).collect();
+        let inner_zero = *F::from(0_u32).inner();
         let mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
             vals.iter().map(|x| *x.inner()).collect(),
             inner_zero,
         );
 
-        let r: Vec<F> = vec![F::from(3u32), F::from(7u32)];
+        let r: Vec<F> = vec![F::from(3_u32), F::from(7_u32)];
         let eq_r = build_eq_x_r_inner(&r, cfg).unwrap();
 
         let g = MultiDegreeSumcheckGroup::new(
@@ -758,7 +758,7 @@ mod tests {
             num_vars,
             cfg,
         );
-        let (proof, _) = outputs.pop().expect("single branch");
+        let (proof, _) = outputs.pop().expect("single family");
 
         let mut vt = Blake3Transcript::new();
         let mut subclaims_vec = MultiDegreeSumcheck::<F>::verify_as_subprotocol(
@@ -768,31 +768,31 @@ mod tests {
             cfg,
         )
         .expect("verification should succeed");
-        let subclaims = subclaims_vec.pop().expect("single branch");
+        let subclaims = subclaims_vec.pop().expect("single family");
 
         let point = &subclaims.point;
-        let eq_eval = zinc_poly::utils::eq_eval(point, &r, F::from(1u32)).unwrap();
+        let eq_eval = zinc_poly::utils::eq_eval(point, &r, F::from(1_u32)).unwrap();
         let a_eval = mle.clone().evaluate_with_config(point, cfg).unwrap();
 
         assert_eq!(subclaims.expected_evaluations[0], eq_eval * a_eval);
     }
 
-    /// Two branches sharing the same `F::Config` (i.e. $q^* = q_i$ for every
-    /// branch): every branch must accept the shared per-round challenge in
-    /// its field, and the resulting subclaims must verify per branch.
+    /// Two families sharing the same `F::Config` (i.e. $q^* = q_i$ for every
+    /// family): every family must accept the shared per-round challenge in
+    /// its field, and the resulting subclaims must verify per family.
     ///
-    /// Exercises the multi-branch behavior of the unified API (one shared
-    /// integer challenge per round, lifted into each branch).
+    /// Exercises the multi-family behavior of the unified API (one shared
+    /// integer challenge per round, lifted into each family).
     #[test]
-    fn two_branches_same_cfg() {
+    fn two_families_same_cfg() {
         let num_vars = 3;
         let cfg = &();
         let q_star_cfg = cfg;
 
-        // Branch A: degree-2 group on (a, b).
-        let a_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 1)).collect();
-        let b_vals: Vec<F> = (0u32..8).map(|i| F::from(i + 10)).collect();
-        let inner_zero = *F::from(0u32).inner();
+        // Group A: degree-2 group on (a, b).
+        let a_vals: Vec<F> = (0_u32..8).map(|i| F::from(i + 1)).collect();
+        let b_vals: Vec<F> = (0_u32..8).map(|i| F::from(i + 10)).collect();
+        let inner_zero = *F::from(0_u32).inner();
         let a_mle = DenseMultilinearExtension::from_evaluations_vec(
             num_vars,
             a_vals.iter().map(|x| *x.inner()).collect(),
@@ -803,7 +803,7 @@ mod tests {
             b_vals.iter().map(|x| *x.inner()).collect(),
             inner_zero,
         );
-        let r_a: Vec<F> = vec![F::from(5u32), F::from(7u32), F::from(11u32)];
+        let r_a: Vec<F> = vec![F::from(5_u32), F::from(7_u32), F::from(11_u32)];
         let eq_r_a = build_eq_x_r_inner(&r_a, cfg).unwrap();
         let group_a = MultiDegreeSumcheckGroup::new(
             2,
@@ -811,8 +811,8 @@ mod tests {
             Box::new(|v: &[F]| v[0] * (v[1] + v[2])),
         );
 
-        // Branch B: degree-3 group on (a, b), different evaluation point.
-        let r_b: Vec<F> = vec![F::from(2u32), F::from(3u32), F::from(5u32)];
+        // Group B: degree-3 group on (a, b), different evaluation point.
+        let r_b: Vec<F> = vec![F::from(2_u32), F::from(3_u32), F::from(5_u32)];
         let eq_r_b = build_eq_x_r_inner(&r_b, cfg).unwrap();
         let group_b = MultiDegreeSumcheckGroup::new(
             3,
@@ -843,14 +843,13 @@ mod tests {
         .expect("verification should succeed");
         assert_eq!(subclaims.len(), 2);
 
-        // Both branches must land at the same shared point (same cfg →
-        // same lift).
+        // Both families must land at the same shared point (same cfg -> same lift).
         assert_eq!(subclaims[0].point(), subclaims[1].point());
 
-        // Per-branch subclaim checks against the polynomial identity.
+        // Per-family subclaim checks against the polynomial identity.
         let point = subclaims[0].point();
-        let eq_a_eval = zinc_poly::utils::eq_eval(point, &r_a, F::from(1u32)).unwrap();
-        let eq_b_eval = zinc_poly::utils::eq_eval(point, &r_b, F::from(1u32)).unwrap();
+        let eq_a_eval = zinc_poly::utils::eq_eval(point, &r_a, F::from(1_u32)).unwrap();
+        let eq_b_eval = zinc_poly::utils::eq_eval(point, &r_b, F::from(1_u32)).unwrap();
         let a_eval = a_mle.evaluate_with_config(point, cfg).unwrap();
         let b_eval = b_mle.evaluate_with_config(point, cfg).unwrap();
 

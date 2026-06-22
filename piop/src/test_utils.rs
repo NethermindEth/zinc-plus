@@ -55,7 +55,7 @@ where
     let num_constraints = prime_idx
         .map(|i| num_constraints.for_prime(i))
         .unwrap_or(num_constraints.q);
-    let branch_idx = prime_idx.map_or(0, |i| i + 1);
+    let family_idx = prime_idx.map_or(0, |i| i + 1);
 
     let scalars = project_scalars::<F, U>(|scalar| {
         scalar
@@ -72,7 +72,7 @@ where
         transcript,
         &trace,
         &scalars,
-        branch_idx,
+        family_idx,
         num_constraints,
         &evaluation_point,
         &field_cfg,
@@ -109,7 +109,7 @@ where
     let num_constraints = prime_idx
         .map(|i| num_constraints.for_prime(i))
         .unwrap_or(num_constraints.q);
-    let branch_idx = prime_idx.map_or(0, |i| i + 1);
+    let family_idx = prime_idx.map_or(0, |i| i + 1);
 
     let scalars = project_scalars::<F, U>(|scalar| {
         scalar
@@ -126,7 +126,7 @@ where
         transcript,
         &trace,
         &scalars,
-        branch_idx,
+        family_idx,
         num_constraints,
         &evaluation_point,
         &field_cfg,

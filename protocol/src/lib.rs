@@ -71,13 +71,13 @@ use zip_plus::{
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
 ///
-/// # Lifted-eval branches
+/// # Lifted-eval families
 ///
-/// Witness lifted evals are sent **per branch**: for each of the $n + 2$
-/// branches (Q[X] / $q_0$, the declared $q_1, \dots, q_n$, and the
+/// Witness lifted evals are sent **per family**: for each of the $n + 2$
+/// families (Q[X] / $q_0$, the declared $q_1, \dots, q_n$, and the
 /// PCS-only $q''$), the prover sends a vector of `DynamicPolynomialF<F>`
-/// carrying the per-branch coefficient lift of each witness column. The
-/// verifier reads each branch's lifts under that branch's field cfg, no
+/// carrying the per-family coefficient lift of each witness column. The
+/// verifier reads each family's lifts under that family's field cfg, no
 /// per-coefficient `from_with_cfg` projection is needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<F: PrimeField> {
@@ -85,7 +85,7 @@ pub struct Proof<F: PrimeField> {
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
-    /// Randomized ideal check proof (Q[X] branch).
+    /// Randomized ideal check proof (Q[X] family).
     pub ideal_check: IdealCheckProof<F>,
     /// Combined polynomial resolver proof (up_evals + down_evals).
     pub cpr_proof: CombinedPolyResolverProof<F>,
@@ -95,23 +95,23 @@ pub struct Proof<F: PrimeField> {
     /// down_evals at `r*` into a single evaluation point `r_0`).
     pub multipoint_eval: MultipointEvalProof<F>,
     /// Witness-only polynomial MLE evaluations at $r_0$, **per constraint
-    /// branch**.
+    /// family**.
     ///
-    /// Indexing follows the standard branch convention used throughout
+    /// Indexing follows the standard family convention used throughout
     /// the protocol:
-    /// * `witness_lifted_evals[0]` — Q[X] branch under $q_0$, $\bar
+    /// * `witness_lifted_evals[0]` — Q[X] family under $q_0$, $\bar
     ///   u_j^{(0)}(X) = \sum_b \mathrm{eq}(b, r_0^{(0)}) \cdot u_j(b) \in
     ///   \mathbb F_{q_0}[X]$.
     /// * `witness_lifted_evals[i]` for $i \in 1..=n$ — the $i$-th declared
-    ///   prime branch from [`zinc_uair::UairSignature::primes`], lifted into
+    ///   prime family from [`zinc_uair::UairSignature::primes`], lifted into
     ///   $\mathbb F_{q_i}[X]$ at $r_0$ projected mod $q_i$.
     ///
     /// Length is `n + 1` where `n = primes().len()`. Each inner Vec
     /// orders columns as `[wit_bin..., wit_arb..., wit_int...]`.
     ///
-    /// The verifier recomputes per-branch public lifted-evals from public
+    /// The verifier recomputes per-family public lifted-evals from public
     /// data, interleaves them with these, evaluates at
-    /// `projecting_elements[branch_idx]` for the per-branch MP-eval
+    /// `projecting_elements[family_idx]` for the per-family MP-eval
     /// consistency check.
     pub witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// Lookup argument proof. `None` when the UAIR has no lookup specs.
@@ -174,7 +174,7 @@ where
             MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
         // witness_lifted_evals: u32 count (= n + 1, one per constraint
-        // branch) + length-prefixed DynamicPolyVecF entries. Each entry
+        // family) + length-prefixed DynamicPolyVecF entries. Each entry
         // carries its own field-cfg header.
         let (n_wlf, mut bytes) = u32::read_transcription_bytes_subset(bytes);
         let n_wlf = usize::try_from(n_wlf).expect("n_wlf must fit into usize");
@@ -240,7 +240,7 @@ where
         }
 
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
-        // length-prefixed DynamicPolyVecF (q'' branch).
+        // length-prefixed DynamicPolyVecF (q'' family).
         let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
         let (witness_lifted_evals_pp, bytes) = if presence != 0 {
             let (p, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
@@ -295,8 +295,8 @@ where
         // multipoint_eval: u32 length prefix + data
         buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
 
-        // witness_lifted_evals (per constraint branch, n + 1 entries):
-        // u32 count + per-branch DynamicPolyVecF (each carries its own
+        // witness_lifted_evals (per constraint family, n + 1 entries):
+        // u32 count + per-family DynamicPolyVecF (each carries its own
         // field-cfg header). Index 0 is Q[X] / q_0, indices 1..=n are
         // declared primes.
         let n_wlf = u32::try_from(self.witness_lifted_evals.len())
@@ -347,7 +347,7 @@ where
         }
 
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
-        // length-prefixed DynamicPolyVecF (q'' branch).
+        // length-prefixed DynamicPolyVecF (q'' family).
         let presence = u32::from(self.witness_lifted_evals_pp.is_some());
         buf = presence.write_transcription_bytes_subset(buf);
         if let Some(ref lifted_pp) = self.witness_lifted_evals_pp {
@@ -420,7 +420,7 @@ where
             // TODO: add lookup_proof size once BatchedLookupProof gets
             // Transcribable impls (lookup is not yet implemented).
             //
-            // witness_lifted_evals: count + sum of (length-prefix + body) per branch
+            // witness_lifted_evals: count + sum of (length-prefix + body) per family
             + u32::NUM_BYTES
             + witness_lifted_evals_bytes
             // booleanity presence flag + optional payload
@@ -723,14 +723,14 @@ where
         .collect()
 }
 
-/// Build the list of per-branch [`F::Config`]'s in branch order:
-/// `prime_cfgs[0]` is the $Q[X]$ branch's sampled prime $q_0$,
+/// Build the list of per-family [`F::Config`]'s in family order:
+/// `prime_cfgs[0]` is the $Q[X]$ family's sampled prime $q_0$,
 /// `prime_cfgs[1..=n]` are the declared $q_1, ..., q_n$ in
 /// [`zinc_uair::UairSignature::primes`] order.
 ///
-/// The branch indexing convention follows the paper's
-/// `prot:zincplus-ucs-pior`: branch 0 = $\mathbb{Q}[X]$,
-/// branches $i \ge 1$ = $\mathbb{F}_{q_i}[X]$.
+/// The family indexing convention follows the paper's
+/// `prot:zincplus-ucs-pior`: family 0 = $\mathbb{Q}[X]$,
+/// families $i \ge 1$ = $\mathbb{F}_{q_i}[X]$.
 ///
 /// Primality is the UAIR author's responsibility (the UAIR is part of the
 /// pre-agreed relation index); no runtime check needed here.
@@ -975,7 +975,7 @@ mod tests {
     }
 
     /// Legacy test UAIRs declare no primes, so the F_q[X] ideal projection
-    /// is never invoked at runtime. UAIRs that exercise the F_q[X] branch
+    /// is never invoked at runtime. UAIRs that exercise the F_q[X] family
     /// must pass a concrete projection closure.
     macro_rules! default_project_fq_ideal {
         () => {
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     /// End-to-end test: [`TestUairFqLargePrime`] -- exercises the per-prime
-    /// $\mathbb F_{q_i}[X]$ ideal-check branch with **two** large primes
+    /// $\mathbb F_{q_i}[X]$ ideal-check family with **two** large primes
     /// (`TEST_UAIR_FQ_LARGE_PRIME_0`, `TEST_UAIR_FQ_LARGE_PRIME_1`).
     ///
     /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_{q_i}[X]$
@@ -1283,19 +1283,19 @@ mod tests {
         );
     }
 
-    /// Adversarial regression for the per-declared-prime branch of the
+    /// Adversarial regression for the per-declared-prime family of the
     /// lifted-evals consistency check in step 6. [`TestUairFqLargePrime`]
     /// declares two primes, so `witness_lifted_evals` has shape
     /// `[Q, q_1, q_2]` (length 3).
-    /// We perturb branch `[1]` (declared prime $q_1$) and check that the
+    /// We perturb family `[1]` (declared prime $q_1$) and check that the
     /// per-prime [`MultipointEval::verify_subclaim`] call inside
     /// `step6_lifted_evals` rejects with `ClaimMismatch`.
     ///
     /// This complements [`test_big_linear_tamper_lifted_evals`] (which
-    /// tampers the Q-branch lift at `[0]`) by exercising the symmetric
-    /// per-prime branch — i.e. that the verifier independently binds each
+    /// tampers the Q-family lift at `[0]`) by exercising the symmetric
+    /// per-prime family — i.e. that the verifier independently binds each
     /// $\bar u_j^{(i)}$ to the $q_i$-projected trace at $r_0$, not just the
-    /// Q-branch.
+    /// Q-family.
     #[test]
     fn test_fq_large_prime_tamper_lifted_evals() {
         let num_vars = 8;
@@ -1310,7 +1310,7 @@ mod tests {
             |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
             |proof| {
-                // Branch 1 = declared prime q_1. The UAIR has a single
+                // Family 1 = declared prime q_1. The UAIR has a single
                 // (arbitrary-poly) witness column, so the inner Vec has
                 // length 1; tamper that one lifted polynomial by swapping
                 // two of its coefficients.
@@ -1330,7 +1330,7 @@ mod tests {
         );
     }
 
-    /// Adversarial regression for the q''-branch lifted-evals length guard.
+    /// Adversarial regression for the q''-family lifted-evals length guard.
     /// The q'' vector (`witness_lifted_evals_pp`) is PCS-only:
     /// `step7_pcs_verify` consumes only the witness-column ranges — yet the
     /// whole vector is absorbed into the FS transcript first. Without the
@@ -1354,7 +1354,7 @@ mod tests {
                 // inflating its length past the expected witness-column count.
                 // This UAIR has no F_q[X] constraints, so q'' is aliased to
                 // q_0 and the prover sends `None`;
-                // The surplus entry — sourced from the Q-branch lift — must still be rejected
+                // The surplus entry — sourced from the Q-family lift — must still be rejected
                 // by the length guard before it can be absorbed as free
                 // transcript entropy.
                 let extra = proof.witness_lifted_evals[0][0].clone();
