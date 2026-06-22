@@ -43,7 +43,7 @@ where
 /// return it lifted into each per-family field.
 ///
 /// The returned `Vec<F>` has length `prime_cfgs.len()`; entry $i$ is the
-/// same underlying integer typed in $\mathbb{F}_{q_i}$ via
+/// same underlying integer typed in $F_{q_i}$ via
 /// [`F::new_with_cfg`]. Since the integer is `< q^* <= q_i`, no per-family
 /// modular reduction occurs.
 ///
@@ -72,7 +72,7 @@ where
 /// Sample `n` shared integer challenges in $[0, q^*)$ and return the result
 /// as a per-family matrix: outer length `prime_cfgs.len()`, inner length
 /// `n`. Entry `[i][k]` is the $k$-th shared integer typed in
-/// $\mathbb{F}_{q_i}$.
+/// $F_{q_i}$.
 #[inline]
 pub fn sample_shared_field_challenges<F>(
     transcript: &mut impl Transcript,

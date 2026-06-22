@@ -24,9 +24,8 @@ use zinc_utils::add;
 pub struct ConstraintFolder<'a, F: PrimeField> {
     /// Family index selecting which family of constraints to fold.
     ///
-    /// - `0` -> $\mathbb{Q}[X]$ constraints (from `assert_in_ideal` /
-    ///   `assert_zero`).
-    /// - `i > 0` -> $\mathbb{F}_{q_{i-1}}[X]$ (from `assert_in_fq_ideal`).
+    /// - `0` -> $Q[X]$ constraints (from `assert_in_ideal` / assert_zero`).
+    /// - `i >= 1` -> $F_{q_{i-1}}[X]$ (from `assert_in_fq_ideal`).
     ///
     /// All unrelated constraints are skipped.
     family_idx: usize,

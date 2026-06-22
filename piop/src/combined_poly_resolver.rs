@@ -41,7 +41,7 @@ use zinc_utils::{
 /// Combined polynomial resolver.
 ///
 /// Builds one sumcheck group over either the Q[X]-projected trace and the
-/// $\mathbb{Q}[X]$ family of constraints, or the $\mathbb{F}_{q_i}[X]$ family
+/// $Q[X]$ family of constraints, or the $F_{q_i}[X]$ family
 /// (for a specific $q_i$ prime). The `MultiDegreeSumcheck` at the protocol
 /// layer batches them all together.
 ///
@@ -52,7 +52,7 @@ use zinc_utils::{
 /// (folding $\alpha$, projecting $\psi$) are already in place; what remains is
 /// fusing the per-family combination functions and writing down the
 /// corresponding soundness lemma. The trade-off is loss of per-family
-/// arithmetic locality — each $\mathbb{F}_{q_i}[X]$ family currently does its
+/// arithmetic locality — each $F_{q_i}[X]$ family currently does its
 /// sumcheck work in its native (cheap) field, which a merged comb_fn would have
 /// to give up or dispatch internally. Worth revisiting only if proof size /
 /// verifier simplicity outweighs prover cost.
@@ -87,7 +87,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     /// - `evaluation_point`: The evaluation point for the claims.
     /// - `projected_scalars`: The UAIR scalars projected to `F`.
     /// - `family_idx`: which constraint family to fold. `0` -> $Q[X]$; `i >= 1`
-    ///   -> $\mathbb{F}_{q_{i-1}}[X]$.
+    ///   -> $F_{q_{i-1}}[X]$.
     /// - `num_constraints`: The number of constraint polynomials in the UAIR
     ///   `U`.
     /// - `num_vars`: The number of variables of the trace MLEs.
@@ -438,7 +438,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
     ///   challenge powers, ideal-check evaluation point, and `num_vars`.
     /// - `projected_scalars`: UAIR scalars projected to `F`.
     /// - `family_idx`: which constraint family. `0` -> $Q[X]$; `i >= 1` ->
-    ///   $\mathbb{F}_{q_{i-1}}[X]$.
+    ///   $F_{q_{i-1}}[X]$.
     /// - `field_cfg`: Field configuration.
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_verifier<U>(

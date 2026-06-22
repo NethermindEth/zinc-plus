@@ -78,6 +78,10 @@ pub struct VerifierTranscriptReconstructed<
     /// `[0]` = Q-family ($q_0$), `[i]` = declared prime $i - 1$ for
     /// $i = 1, \ldots, n$. Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime.
+    /// `None` when there's no $F_q[X]$ constraints, in which case we assume
+    /// $q'' := q_0$ and thus `proof_witness_lifted_evals[0]` is used for
+    /// PCS verification.
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
@@ -109,8 +113,10 @@ pub struct VerifierPrimeProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     /// Per-constraint-family witness-only lifted MLE evals (see
-    /// [`VerifierBase`] doc). Length = `1 + n_fq`.
+    /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime (see
+    /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
@@ -155,8 +161,10 @@ pub struct VerifierIdealChecked<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     /// Per-constraint-family witness-only lifted MLE evals (see
-    /// [`VerifierBase`] doc). Length = `1 + n_fq`.
+    /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime (see
+    /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
@@ -210,12 +218,14 @@ pub struct VerifierEvalProjected<
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     /// Per-constraint-family witness-only lifted MLE evals (see
-    /// [`VerifierBase`] doc). Length = `1 + n_fq`.
+    /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime (see
+    /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
-    /// Per-prime CPR proofs (one per declared prime), consumed in step 4.
+    /// Per-prime CPR proofs (one per declared prime).
     proof_cpr_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime multi-degree sumcheck proofs (one per declared prime),
     /// consumed in step 4 by the lockstep verifier driver.
@@ -249,9 +259,9 @@ pub struct VerifierSumchecked<
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
     cpr_down_evals: Vec<F>,
-    /// Per-prime CPR subclaim evaluation points ($r^\star_i$, lifted into
+    /// Per-prime CPR subclaim evaluation points (r*, lifted into
     /// each family's field). Length `n_fq`. Empty for UAIRs with no
-    /// declared fq primes. Consumed by step 5's lockstep multipoint-eval.
+    /// declared fq primes.
     cpr_eval_points_fq: Vec<Vec<F>>,
     /// Per-prime CPR subclaim `up_evals`. Length `n_fq`. Consumed in step 5.
     cpr_up_evals_fq: Vec<Vec<F>>,
@@ -275,8 +285,10 @@ pub struct VerifierSumchecked<
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     /// Per-constraint-family witness-only lifted MLE evals (see
-    /// [`VerifierBase`] doc). Length = `1 + n_fq`.
+    /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime (see
+    /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
@@ -310,8 +322,10 @@ pub struct VerifierMultipointEvaled<
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Per-constraint-family witness-only lifted MLE evals (see
-    /// [`VerifierBase`] doc). Length = `1 + n_fq`.
+    /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
+    /// Witness-only lifted MLE evals for $q''$ prime (see
+    /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
@@ -328,12 +342,12 @@ pub struct VerifierLiftedEvalsChecked<
     const FD: usize,
 > {
     base: VerifierBase<'a, Zt, D, FD>,
-    /// $q''$-family witness-only lifted MLE evaluations at $\mathbf
-    /// r^\star = \mathbf r_0 \bmod q''$. Consumed by step7 PCS verify.
+    /// `q''`-family witness-only lifted MLE evaluations at `r* =  r_0 mod q''`.
+    /// Consumed by PCS verify.
     lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
     /// PCS-only prime cfg sampled at step 6 start (mirror of prover step 7).
     q_pp_cfg: F::Config,
-    /// $\mathbf r^\star = \mathbf r_0 \bmod q''$ — the PCS evaluation point.
+    /// $r^\star = r_0 \bmod q''$ — the PCS evaluation point.
     r_star: Vec<F>,
 
     // Proof leftovers
@@ -385,10 +399,9 @@ where
             "Attempt to verify a constant: num_vars must be > 0"
         );
         let zip_proof = std::mem::take(&mut proof.zip);
-        let uair_signature = U::signature();
         let mut base = VerifierBase {
             num_vars,
-            uair_signature,
+            uair_signature: U::signature(),
             public_trace,
             pcs_transcript: PcsVerifierTranscript {
                 fs_transcript: Blake3Transcript::default(),
@@ -506,21 +519,22 @@ where
 {
     /// Step 2: Ideal check verification.
     ///
-    /// `project_fq_ideal` is only invoked when the UAIR declares at least
-    /// one prime; legacy UAIRs can pass `|_, _| unreachable!()`.
+    /// **Shared evaluation point.**
     ///
-    /// **Shared evaluation point.** Mirrors the prover: sample one
-    /// shared $\mathbf r \in [0, q^*)^\mu$ from the transcript and lift it
-    /// into each family's field via `F::from_with_cfg`, then run the
-    /// per-family verifications in `family_idx` order.
+    /// Mirrors the prover: sample one shared $r \in [0, q^*)^\mu$ from the
+    /// transcript and lift it into each family's field via
+    /// `F::from_with_cfg`, then run the per-family verifications in
+    /// `family_idx` order.
+    ///
+    /// `project_fq_ideal` is only invoked when the UAIR declares at least
+    /// one prime; UAIRs with $Q[X]$ only constraints can pass
+    /// `|_, _| unreachable!()`.
     #[allow(clippy::type_complexity)]
     pub fn step2_ideal_check(
         mut self,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
         project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F::Config) -> IdealOverF,
     ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        // The Q[X]-family ideal check only consumes Q[X] constraints; F_q[X]
-        // constraints are handled by the per-prime family below.
         let num_constraints = count_constraints::<U>();
         let primes = self.base.uair_signature.primes().to_vec();
 
@@ -552,6 +566,7 @@ where
             &all_field_cfgs,
         );
 
+        // Q[X]-family ideal check verification.
         let mut ic_subclaims: Vec<ideal_check::VerifierSubclaim<F>> =
             Vec::with_capacity(all_field_cfgs.len());
         let q_subclaim = IdealCheckProtocol::<U>::verify_as_subprotocol::<_, IdealOverF, _, _>(
@@ -565,10 +580,8 @@ where
         )?;
         ic_subclaims.push(q_subclaim);
 
-        // Per-prime F_q[X] ideal-check verifications. The transcript
-        // ordering MUST match the prover:
-        // Q[X] first, then per-prime in `primes()` order. Subclaims are
-        // collected and threaded forward to step 4's per-prime CPR
+        // Per-prime F_q[X] ideal-check verifications.
+        // Subclaims are collected and threaded forward to step 4's per-prime CPR
         // `prepare_verifier`.
         for (prime_idx, (cfg_q_i, fq_proof)) in all_field_cfgs[1..]
             .iter()
@@ -584,8 +597,6 @@ where
                     num_constraints.for_prime(prime_idx),
                     &shared_eval_points[family_idx],
                     |_| unreachable!("F_q[X] family"),
-                    // The lifted F_q[X] ideal's coefficient modulus must match
-                    // the per-prime field config
                     |ideal| project_fq_ideal(ideal, cfg_q_i),
                 )
                 .map_err(|source| ProtocolError::FqIdealCheck {
@@ -633,10 +644,12 @@ where
 {
     /// Step 3: Evaluation projection. Consumes `project_scalar`.
     ///
-    /// **Shared projecting element.** Mirrors the prover: sample a
-    /// shared integer $a \in [0, q^*)$ and lift it into each family's
-    /// field. The $Q[X]$ family consumes `projecting_elements[0]`;
-    /// per-prime families consume `projecting_elements[i + 1]`.
+    /// **Shared projecting element.**
+    ///
+    /// Mirrors the prover: sample a shared integer $a \in [0, q^*)$ and lift it
+    /// into each family's field. The $Q[X]$ family consumes
+    /// `projecting_elements[0]`; per-prime families consume
+    /// `projecting_elements[i + 1]`.
     ///
     /// Also builds per-prime $\psi$-projected scalars from
     /// `project_scalar(., all_field_cfgs[i + 1])` and threads them
@@ -659,19 +672,19 @@ where
             project_scalars_to_field(projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
-        // Per-prime $F_{q_i}[X]$ families.
-        let n_fq = self.all_field_cfgs.len().saturating_sub(1);
-        let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
-            Vec::with_capacity(n_fq);
-        for prime_idx in 0..n_fq {
-            let family_idx = add!(prime_idx, 1);
-            let cfg_i = &self.all_field_cfgs[family_idx];
-            let projected_scalars_fx_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_i));
-            let projected_scalars_f_i =
-                project_scalars_to_field(projected_scalars_fx_i, &projecting_elements[family_idx])
-                    .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
-            projected_scalars_f_fq.push(projected_scalars_f_i);
-        }
+        // Per-prime F_q[X] families.
+        let projected_scalars_f_fq: Result<Vec<ProjectedScalars<U::Scalar, F>>, _> = self
+            .all_field_cfgs
+            .iter()
+            .zip(projecting_elements.iter())
+            .skip(1) // Skip Q[X] family
+            .map(|(cfg_i, projecting_element)| {
+                let projected_scalars_fx_i = project_scalars::<F, U>(|s| project_scalar(s, cfg_i));
+                project_scalars_to_field(projected_scalars_fx_i, projecting_element)
+                    .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))
+            })
+            .collect();
+        let projected_scalars_f_fq = projected_scalars_f_fq?;
 
         Ok(VerifierEvalProjected {
             base: self.base,
@@ -740,9 +753,7 @@ where
             });
         }
 
-        // Mirror the prover by sampling one shared CPR
-        // batching challenge $\alpha$ in $[0, q^*)$. `[0]` feeds the Q[X]
-        // CPR; `[i + 1]` feeds the per-prime CPRs.
+        // Sample one shared CPR batching challenge \alpha in [0, q*)
         let q_star_cfg = &self.all_field_cfgs[self.q_star_idx];
         let folding_challenges: Vec<F> = shared_challenge::sample_shared_field_challenge::<F>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -823,25 +834,24 @@ where
                 &self.all_field_cfgs[family_idx],
             ));
         }
-        let mut subclaims_iter = MultiDegreeSumcheck::verify_as_subprotocol(
+        let all_md_subclaims = MultiDegreeSumcheck::verify_as_subprotocol(
             &mut self.base.pcs_transcript.fs_transcript,
             self.base.num_vars,
             &family_proofs,
             q_star_cfg,
         )
-        .map_err(CombinedPolyResolverError::SumcheckError)?
-        .into_iter();
+        .map_err(CombinedPolyResolverError::SumcheckError)?;
 
         // -------- Q[X] family finalize ---------------------------------
-        let md_subclaims = subclaims_iter
-            .next()
+        let q_md_subclaims = all_md_subclaims
+            .first()
             .expect("Q[X] family subclaim always present");
 
         let cpr_subclaim = CombinedPolyResolver::finalize_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
             self.proof_cpr,
-            md_subclaims.point().to_vec(),
-            md_subclaims.expected_evaluations()[0].clone(),
+            q_md_subclaims.point().to_vec(),
+            q_md_subclaims.expected_evaluations()[0].clone(),
             q_cpr_verifier_ancillary,
             &self.projected_scalars_f,
             /* family_idx = */ 0,
@@ -857,7 +867,7 @@ where
                 .proof_booleanity
                 .take()
                 .ok_or(ProtocolError::BooleanityProofMissing)?;
-            let expected_eval = md_subclaims
+            let expected_eval = q_md_subclaims
                 .expected_evaluations()
                 .get(1)
                 .ok_or(ProtocolError::BooleanityProofMissing)?;
@@ -867,7 +877,7 @@ where
             let bool_subclaim = BooleanityChecker::<F>::finalize_verifier(
                 &mut self.base.pcs_transcript.fs_transcript,
                 booleanity_proof,
-                md_subclaims.point().to_vec(),
+                q_md_subclaims.point().to_vec(),
                 expected_eval,
                 anc,
                 &self.field_cfg,
@@ -888,17 +898,15 @@ where
         let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         let mut cpr_up_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         let mut cpr_down_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
-        for (prime_idx, (cpr_proof_i, cpr_ancillary_i)) in self
+        for (prime_idx, ((cpr_proof_i, cpr_ancillary_i), md_subclaims_i)) in self
             .proof_cpr_fq
             .into_iter()
             .zip(fq_cpr_ancillaries)
+            .zip(all_md_subclaims.iter().skip(1))
             .enumerate()
         {
             let family_idx = add!(prime_idx, 1);
             let cfg_i = &self.all_field_cfgs[family_idx];
-            let md_subclaims_i = subclaims_iter
-                .next()
-                .expect("per-prime sumcheck subclaim always present");
             let cpr_subclaim_i = CombinedPolyResolver::finalize_verifier::<U>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 cpr_proof_i,
@@ -979,7 +987,7 @@ where
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
     ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        // --- Length-mismatch guard ---
+        // Length-mismatch guard
         let n_fq = self.cpr_eval_points_fq.len();
         if self.proof_multipoint_evals_fq.len() != n_fq {
             return Err(ProtocolError::FqIdealCheck {
@@ -994,8 +1002,9 @@ where
             });
         }
 
-        // --- Q[X] family up_evals (with booleanity-bridge appended when
-        // alpha_prime is present) and num_wit_bin extension width.
+        // Q[X] family up_evals
+        // (with booleanity-bridge appended when alpha_prime is present) and num_wit_bin
+        // extension width.
         let (q_up_evals, num_wit_bin): (Vec<F>, usize) =
             if let (Some(bit_slice_evals), Some(alpha_prime)) =
                 (&self.bool_bit_slice_evals, &self.alpha_prime_f)
@@ -1018,12 +1027,11 @@ where
                 (self.cpr_up_evals.clone(), 0)
             };
 
-        // --- Per-prime families: zero-pad up_evals to match Q's column count
+        // Per-prime families: zero-pad up_evals to match Q's column count
         //
-        // UAIR rule D6: witness binary-poly columns live in $Q[X]$ only, so
-        // the booleanity-bridge extra columns have no analog on the fq
-        // families. Pad with zeros to share one lockstep `gammas` vector
-        // and one shared $r_0$ across all families.
+        // Witness binary-poly columns live in Q[X] only.
+        // Pad F_q[X] evals with zeros to share one lockstep `gammas` vector and one
+        // shared r_0 across all families.
         let fq_up_evals_ext: Vec<Vec<F>> = (0..n_fq)
             .map(|prime_idx| {
                 let family_idx = add!(prime_idx, 1);
@@ -1038,7 +1046,7 @@ where
         let num_vars = self.base.num_vars;
         let q_star_cfg = self.all_field_cfgs[self.q_star_idx].clone();
 
-        // --- Single $(n+1)$-family lockstep MP-eval verifier ------------
+        // Single (n+1)-family lockstep MP-eval verifier
         let mut all_proofs: Vec<multipoint_eval::Proof<F>> = Vec::with_capacity(add!(n_fq, 1));
         all_proofs.push(self.proof_multipoint_eval);
         all_proofs.extend(self.proof_multipoint_evals_fq);
@@ -1046,21 +1054,21 @@ where
         let mut all_families: Vec<MultipointEvalFamilyInputs<'_, F>> =
             Vec::with_capacity(add!(n_fq, 1));
         all_families.push(MultipointEvalFamilyInputs {
+            field_cfg: &self.field_cfg,
             trace_mles: &[],
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
             down_evals: &self.cpr_down_evals,
-            field_cfg: &self.field_cfg,
         });
-        #[allow(clippy::needless_range_loop)]
-        for prime_idx in 0..n_fq {
+
+        for (prime_idx, up_evals) in fq_up_evals_ext.iter().enumerate() {
             let family_idx = add!(prime_idx, 1);
             all_families.push(MultipointEvalFamilyInputs {
+                field_cfg: &self.all_field_cfgs[family_idx],
                 trace_mles: &[],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
-                up_evals: &fq_up_evals_ext[prime_idx],
+                up_evals,
                 down_evals: &self.cpr_down_evals_fq[prime_idx],
-                field_cfg: &self.all_field_cfgs[family_idx],
             });
         }
 
@@ -1114,23 +1122,31 @@ where
 {
     /// Step 6: Per-family lifted-eval consistency check.
     ///
+    /// **When $F_q[X]$ constraints are present:**
+    ///
     /// 1. **Sample $q''$** (mirror of prover step 7 start).
-    /// 2. For each family $i \in \{0, \dots, n\}$ (Q + declared primes):
+    /// 2. For each family $i \in \{0, ..., n\}$ (Q + declared primes):
     ///    - Recompute the public-column lifted evals under family $i$'s cfg,
     ///      interleave with the sent witness-only lifted evals to get the full
     ///      all-column lifted-eval list `all_lifted_evals[i]`.
     ///    - Project each lifted eval at `projecting_elements[i]` to get
     ///      `open_evals_i`.
-    ///    - For Q-family ($i = 0$) when booleanity ran: append $\alpha'$
+    ///    - For Q-family (i = 0) when booleanity ran: append $\alpha'$
     ///      projections of witness-bin lifts.
-    ///    - For fq families ($i \ge 1$): append zero entries (matching the
-    ///      zero-padded MP `up_evals` on fq families; witness binary-poly
-    ///      columns live in $Q[X]$ only).
+    ///    - For F_q families (i >= 1): append zero entries (matching the
+    ///      zero-padded MP `up_evals` on F_q families).
     ///    - Call `MultipointEval::verify_subclaim` against the matching MP
     ///      subclaim, family by family.
     /// 3. Also recompute the $q''$-family lifted evals and absorb every
     ///    family's coefficients into the FS transcript in the same order as the
     ///    prover.
+    ///
+    /// **When only $Q[X]$ constraints are present:**
+    ///
+    /// We alias $q'' := q_0$ and $r^* := r_0$ instead of sampling $q''$
+    /// randomly. The rest proceeds as described above, but we use
+    /// `proof_witness_lifted_evals[0]` instead of
+    /// `proof_witness_lifted_evals_pp`.
     ///
     /// **Soundness**: per-family arithmetic in single prime fields. With
     /// the shared $r_0$ integer endpoint, the $n + 1$ constraint-family
@@ -1173,9 +1189,7 @@ where
 
         // Since the entire vector is absorbed into the FS transcript below,
         // prevent a malicious prover from adding entries not tied to a
-        // commitment. When q'' is aliased to q_0 (no F_q[X] constraints) the
-        // prover sends None and the PCS check reuses
-        // family 0
+        // commitment.
         let num_wit_total = add!(add!(num_wit_bin, num_wit_arb), num_wit_int);
         let expected_pp_len = if n_fq == 0 { 0 } else { num_wit_total };
         let actual_pp_len = self
@@ -1190,9 +1204,9 @@ where
             });
         }
 
-        // --- Sample q'' (mirror of prover step 7 start) ---
+        // Sample q'' (mirror of prover step 7 start)
         //
-        // With no F_q[X] constraints, q'' is aliased to q_0 and r* = r_0.
+        // With no F_q[X] constraints, q'' is aliased to q_0 and r* = r0.
         let q_pp_cfg = if n_fq == 0 {
             self.field_cfg.clone()
         } else {
@@ -1201,9 +1215,9 @@ where
                 .fs_transcript
                 .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
         };
-        // r_star = r_0 mod q'' (the underlying integer of mp_subclaim.r0 is
+        // r* = r0 mod q'' (the underlying integer of mp_subclaim.r0 is
         // the shared challenge in [0, q*); lift into q'' cfg).
-        // Aliased to r_0 when q'' = q_0.
+        // Aliased to r0 when q'' = q0.
         let r_star: Vec<F> = if n_fq == 0 {
             self.mp_subclaim.r0.clone()
         } else {
@@ -1249,7 +1263,7 @@ where
                 )
             };
 
-        // --- Q-family (i = 0) ----------------------------------------
+        // Q-family (i = 0)
         let q_r_0 = self.mp_subclaim.r0.clone();
         let q_public_lifted = recompute_public_lifted(&q_r_0, &self.field_cfg);
         let q_witness_lifted = self.proof_witness_lifted_evals[0].clone();
@@ -1282,7 +1296,7 @@ where
             &self.field_cfg,
         )?;
 
-        // --- Per-prime families (i >= 1) ------------------------------
+        // Per-prime families (i >= 1)
         for prime_idx in 0..n_fq {
             let family_idx = add!(prime_idx, 1);
             let cfg_i = &self.all_field_cfgs[family_idx];
@@ -1315,11 +1329,8 @@ where
             )?;
         }
 
-        // --- Absorb all families' coefficients into the FS transcript
-        // in the same uniform order as the prover: each constraint
-        // family's witness-only lifted evals (index `[0]` = Q-family,
-        // `[i]` = declared prime $i - 1$), then the $q''$ family's
-        // witness-only lifted evals. ---
+        // Absorb all families' coefficients into the FS transcript in the same uniform
+        // order as the prover
         let mut transcription_buf: Vec<u8> = vec![0; F::Integer::NUM_BYTES];
         for witness_lifted_i in &self.proof_witness_lifted_evals {
             for bar_u in witness_lifted_i {
@@ -1338,8 +1349,7 @@ where
             }
         }
 
-        // When q'' was aliased to q_0, the PCS check reuses family 0's witness lift
-        // which equals the q'' lift.
+        // When q'' was aliased to q0, the PCS check reuses Q[X] family's witness lift.
         let lifted_evals_pp = if n_fq == 0 {
             self.proof_witness_lifted_evals[0].clone()
         } else {
@@ -1385,16 +1395,18 @@ where
         + 'static,
     IdealOverF: Ideal,
 {
-    /// Step 7: PCS verification at $\mathbf r^\star := \mathbf r_0 \bmod q''$,
+    /// Step 7: PCS verification at $r^\star := r_0 \bmod q''$,
     /// using the $q''$-family lifted evals sent by the prover and
     /// recovered into `lifted_evals_pp` during step 6.
     ///
-    /// $q''$ was sampled at the start of step 6 (mirror of prover step 7).
-    /// Step 7 samples binary folding challenges under $q''$ and runs the
-    /// per-commitment PCS verify. Per-poly claims for `verify_with_alphas`
-    /// are computed directly from `lifted_evals_pp[witness_range]` — no
-    /// per-coefficient $\phi_{q''}$ lift is needed because the prover
-    /// already sent each $\bar u_j^{(q'')} \in \mathbb F_{q''}[X]$.
+    /// $q''$ was sampled at the start of step 6.
+    /// Here we sample binary folding challenges under $q''$ and run the
+    /// per-commitment PCS verify.
+    ///
+    /// Per-poly claims for `verify_with_alphas` are computed directly from
+    /// `lifted_evals_pp[witness_range]` — no per-coefficient $\phi_{q''}$
+    /// lift is needed because the prover already sent each $\bar
+    /// u_j^{(q'')} \in F_{q''}[X]$.
     pub fn step7_pcs_verify<U: Uair, const CHECK_FOR_OVERFLOW: bool>(
         mut self,
     ) -> Result<VerifierPcsVerified<IdealOverF>, ProtocolError<F>> {

@@ -85,11 +85,11 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     MultipointEval::<F>::prove_as_subprotocol(
                         &mut t,
                         vec![MultipointEvalFamilyInputs {
+                            field_cfg: &field_cfg,
                             trace_mles: &trace_mles,
                             eval_point: &eval_point,
                             up_evals: &up_evals,
                             down_evals: &down_evals,
-                            field_cfg: &field_cfg,
                         }],
                         &shifts,
                         &field_cfg,
@@ -108,11 +108,11 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
     let mut prover_outputs = MultipointEval::<F>::prove_as_subprotocol(
         &mut prover_transcript,
         vec![MultipointEvalFamilyInputs {
+            field_cfg: &field_cfg,
             trace_mles: &trace_mles,
             eval_point: &eval_point,
             up_evals: &up_evals,
             down_evals: &down_evals,
-            field_cfg: &field_cfg,
         }],
         &shifts,
         &field_cfg,
@@ -137,11 +137,11 @@ fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
                     &mut t,
                     vec![proof],
                     vec![MultipointEvalFamilyInputs {
+                        field_cfg: &field_cfg,
                         trace_mles: &[],
                         eval_point: &eval_point,
                         up_evals: &up_evals,
                         down_evals: &down_evals,
-                        field_cfg: &field_cfg,
                     }],
                     &shifts,
                     num_vars,

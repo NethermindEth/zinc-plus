@@ -334,7 +334,6 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
 ) where
     Zt: ZincTypes<D, QUARTER_D>,
     Zt::Int: ProjectableToField<F>,
-    Zt::Fmod: From<u64>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,
@@ -427,7 +426,6 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 ) where
     Zt: ZincTypes<D, QUARTER_D>,
     Zt::Int: ProjectableToField<F>,
-    Zt::Fmod: From<u64>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Cw: ProjectableToField<F>,

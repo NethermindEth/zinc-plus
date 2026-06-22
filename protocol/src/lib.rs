@@ -101,10 +101,10 @@ pub struct Proof<F: PrimeField> {
     /// the protocol:
     /// * `witness_lifted_evals[0]` — Q[X] family under $q_0$, $\bar
     ///   u_j^{(0)}(X) = \sum_b \mathrm{eq}(b, r_0^{(0)}) \cdot u_j(b) \in
-    ///   \mathbb F_{q_0}[X]$.
+    ///   F_{q_0}[X]$.
     /// * `witness_lifted_evals[i]` for $i \in 1..=n$ — the $i$-th declared
     ///   prime family from [`zinc_uair::UairSignature::primes`], lifted into
-    ///   $\mathbb F_{q_i}[X]$ at $r_0$ projected mod $q_i$.
+    ///   $F_{q_i}[X]$ at $r_0$ projected mod $q_i$.
     ///
     /// Length is `n + 1` where `n = primes().len()`. Each inner Vec
     /// orders columns as `[wit_bin..., wit_arb..., wit_int...]`.
@@ -120,25 +120,26 @@ pub struct Proof<F: PrimeField> {
     /// has no witness binary-poly columns (the argument is omitted from
     /// the multi-degree sumcheck in that case).
     pub booleanity_proof: Option<BooleanityProof<F>>,
-    /// Per-prime $\mathbb{F}_{q_i}[X]$ ideal-check proofs, one per declared
+    /// Per-prime $F_{q_i}[X]$ ideal-check proofs, one per declared
     /// prime in [`zinc_uair::UairSignature::primes`], in the same order.
-    /// Empty for legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
+    /// Empty for UAIRs with $Q[X]$-only constraints.
     pub ideal_checks_fq: Vec<IdealCheckProof<F>>,
     /// Per-prime CPR proofs, one per declared prime, produced by the
-    /// lockstep sumcheck in step 5. Empty for legacy UAIRs.
+    /// lockstep sumcheck in step 5. Empty for UAIRs with $Q[X]$ only
+    /// constraints.
     pub cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
     /// Per-prime multi-degree sumcheck proofs, one per declared prime,
-    /// produced by the lockstep sumcheck driver in step 5. Empty for legacy
-    /// UAIRs.
+    /// produced by the lockstep sumcheck driver in step 5.
+    /// Empty for UAIRs with $Q[X]$ only constraints.
     pub combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
     /// Per-prime multipoint-eval proofs, one per declared prime, produced
-    /// by the lockstep multipoint-eval in step 6. Empty for
-    /// legacy UAIRs.
+    /// by the lockstep multipoint-eval in step 6.
+    /// Empty for UAIRs with $Q[X]$ only constraints.
     pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     /// Witness-only lifted MLE evaluations under the **PCS-only prime
     /// $q''$**, sampled fresh at step 7 start. Length equals the number of
     /// witness columns. The verifier uses these directly for the PCS
-    /// evaluation check at $\mathbf r^\star = r_0 \bmod q''$ — no
+    /// evaluation check at $r^\star = r_0 \bmod q''$ — no
     /// per-coefficient $\phi_{q''}$ projection needed.
     ///
     /// Kept separate from `witness_lifted_evals` because $q''$ plays a
@@ -729,8 +730,8 @@ where
 /// [`zinc_uair::UairSignature::primes`] order.
 ///
 /// The family indexing convention follows the paper's
-/// `prot:zincplus-ucs-pior`: family 0 = $\mathbb{Q}[X]$,
-/// families $i \ge 1$ = $\mathbb{F}_{q_i}[X]$.
+/// `prot:zincplus-ucs-pior`: family 0 = $Q[X]$,
+/// families $i \ge 1$ = $F_{q_i}[X]$.
 ///
 /// Primality is the UAIR author's responsibility (the UAIR is part of the
 /// pre-agreed relation index); no runtime check needed here.
@@ -974,13 +975,13 @@ mod tests {
         };
     }
 
-    /// Legacy test UAIRs declare no primes, so the F_q[X] ideal projection
+    /// Older test UAIRs declare no primes, so the F_q[X] ideal projection
     /// is never invoked at runtime. UAIRs that exercise the F_q[X] family
     /// must pass a concrete projection closure.
     macro_rules! default_project_fq_ideal {
         () => {
             |_ideal, _cfg| -> IdealOrZero<DegreeOneIdeal<F>> {
-                unreachable!("legacy UAIR has no F_q[X] constraints")
+                unreachable!("this UAIR has no F_q[X] constraints")
             }
         };
     }
@@ -1155,10 +1156,10 @@ mod tests {
     }
 
     /// End-to-end test: [`TestUairFqLargePrime`] -- exercises the per-prime
-    /// $\mathbb F_{q_i}[X]$ ideal-check family with **two** large primes
+    /// $F_{q_i}[X]$ ideal-check family with **two** large primes
     /// (`TEST_UAIR_FQ_LARGE_PRIME_0`, `TEST_UAIR_FQ_LARGE_PRIME_1`).
     ///
-    /// UAIR has zero $\mathbb Q[X]$ constraints and one $\mathbb F_{q_i}[X]$
+    /// UAIR has zero $Q[X]$ constraints and one $F_{q_i}[X]$
     /// constraint per prime, both of the form $\phi_{q_i}(a) \in (X - 0)$.
     #[test]
     fn test_e2e_fq_large_prime() {

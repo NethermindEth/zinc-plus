@@ -9,21 +9,19 @@ use crate::{
 
 /// A `ConstraintBuilder` that collects ideals used in a `Uair`.
 ///
-/// Both legacy $\mathbb{Q}[X]$-ideals (from
-/// [`ConstraintBuilder::assert_in_ideal`] /
-/// [`ConstraintBuilder::assert_zero`]) and new
-/// $\mathbb{F}_{q_i}[X]$-ideals (from
-/// [`ConstraintBuilder::assert_in_fq_ideal`]) are kept in separate
-/// vectors, so downstream consumers (the PIOP layer) can dispatch them
-/// independently. The $F_q[X]$ ideals are wrapped in [`IdealOrZero`] to reuse
-/// the unconditional [`IdealCheck<DummySemiring>`] proxy impl used during
-/// collection; the `Zero` variant is never produced by collection (there is
-/// no `assert_fq_zero`) but downstream consumers may construct it.
+/// Both $Q[X]$-only-ideals (from [`ConstraintBuilder::assert_in_ideal`] /
+/// [`ConstraintBuilder::assert_zero`]) and new $F_{q_i}[X]$-ideals (from
+/// [`ConstraintBuilder::assert_in_fq_ideal`]) are kept in separate vectors, so
+/// downstream consumers (the PIOP layer) can dispatch them independently. The
+/// $F_q[X]$ ideals are wrapped in [`IdealOrZero`] to reuse the unconditional
+/// [`IdealCheck<DummySemiring>`] proxy impl used during the collection;
+/// the `Zero` variant is never produced by the collection (there is no
+/// `assert_fq_zero`) but downstream consumers may construct it.
 pub struct IdealCollector<I: Ideal, IFq: Ideal> {
     pub ideals: Vec<IdealOrZero<I>>,
-    /// $\mathbb{F}_{q_i}[X]$-ideals indexed by their `prime_idx` into the
-    /// owning UAIR's [`crate::UairSignature::primes`] tuple. Empty for legacy
-    /// UAIRs with $\mathbb{Q}[X]$-only constraints.
+    /// $F_{q_i}[X]$-ideals indexed by their `prime_idx` into the
+    /// owning UAIR's [`crate::UairSignature::primes`] tuple. Empty for
+    /// UAIRs with $Q[X]$-only constraints.
     pub fq_ideals: Vec<Vec<IdealOrZero<IFq>>>,
 }
 

@@ -31,12 +31,12 @@ pub trait ConstraintBuilder {
     type Expr: Semiring;
     /// The type of ideals used by the constraint builder.
     type Ideal: Ideal + IdealCheck<Self::Expr>;
-    /// Ideals living over $\mathbb{F}_{q_i}[X]$ for the prime tuple declared by
+    /// Ideals living over $F_{q_i}[X]$ for the prime tuple declared by
     /// the surrounding [`UairSignature::primes`]. A single
     /// `ConstraintBuilder` shares one runtime type for all primes; the prime
     /// index is passed at the call site via
     /// [`ConstraintBuilder::assert_in_fq_ideal`]. Builders that don't care
-    /// about $\mathbb{F}_q[X]$-constraints (counters, collectors, etc.) set
+    /// about $F_q[X]$-constraints (counters, collectors, etc.) set
     /// this to `ImpossibleIdeal`.
     type FqIdeal: Ideal + IdealCheck<Self::Expr>;
 
@@ -49,30 +49,25 @@ pub trait ConstraintBuilder {
 
     /// Add a constraint saying that `expr`, after coefficient-wise reduction
     /// mod $q_{\text{prime\_index}}$ (the paper's $\phi_{q_i}$), belongs to
-    /// the $\mathbb{F}_{q_i}[X]$-ideal `ideal`.
+    /// the $F_{q_i}[X]$-ideal `ideal`.
     ///
     /// `prime_idx` indexes into [`UairSignature::primes`] and must be a
     /// valid index for any UAIR that calls this method.
     ///
     /// # Ordering convention
     ///
-    /// To make `count_constraints` / `count_constraint_degrees` /
-    /// `IdealCollector::ideals` / `IdealCollector::fq_ideals` line up with
-    /// the per-family dispatch in the PIOP, UAIRs MUST emit *all* of their
-    /// $\mathbb{Q}[X]$ constraints (via `assert_in_ideal` / `assert_zero`)
-    /// before any $\mathbb{F}_{q_i}[X]$ constraints (via this method).
-    /// Within each family the order is arbitrary but must be stable across
-    /// `constrain_general` calls on the same UAIR. Inside the
-    /// $\mathbb{F}_{q_i}[X]$ family, constraints may interleave primes
-    /// freely — the PIOP filters by `prime_idx` at use time.
+    /// The order of constraints *within* each family must be stable across
+    /// `constrain_general` calls, so `count_constraints` /
+    /// `count_constraint_degrees` / `IdealCollector::{ideals, fq_ideals}`
+    /// line up per family.
     ///
-    /// # Flavor-1 scope (current implementation)
+    /// # Scope: projections of f_0 only
     ///
-    /// `expr` is built only from the $\mathbb{Q}[X]$-typed `up`/`down` rows
-    /// supplied to [`Uair::constrain_general`] (i.e. projections of
-    /// $\hat{f}_0$ in `def:uairplus`); no new $\hat{f}_i$ witness lane is
-    /// introduced. The reduction $\phi_{q_i}$ is applied at proving / verifying
-    /// time by the PIOP layer.
+    /// `expr` is built only from the $Q[X]$-typed `up`/`down` rows passed to
+    /// [`Uair::constrain_general`] — i.e. the projection $\phi_{q_i}(\hat f_0)$
+    /// of the single integer trace. There is no separate $\hat f_i$ witness
+    /// typed natively in $F_{q_i}[X]$; $\phi_{q_i}$ is applied by the PIOP
+    /// layer at prove/verify time.
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, ideal: &Self::FqIdeal);
 }
 
@@ -301,10 +296,10 @@ pub struct UairSignature<Prime: Semiring> {
     /// Lookup specifications: which trace columns are constrained against
     /// which table types.
     lookup_specs: Vec<LookupColumnSpec>,
-    /// Prime powers $(q_1,\ldots,q_n)$ declared by this UAIR (the paper's
-    /// $\primetuple$ in `def:uairplus`). $\mathbb{F}_{q_i}[X]$-constraints
-    /// emitted via [`ConstraintBuilder::assert_in_fq_ideal`] reference these
-    /// by index. Empty for legacy single-$\mathbb{Q}[X]$ UAIRs.
+    /// Prime powers `(q_1, ..., q_n)` declared by this UAIR.
+    /// $F_{q_i}[X]$-constraints emitted via
+    /// [`ConstraintBuilder::assert_in_fq_ideal`] reference these by index.
+    /// Empty for $Q[X]$-only UAIRs.
     primes: Vec<Prime>,
 }
 
@@ -372,22 +367,15 @@ impl<Prime: Semiring> UairSignature<Prime> {
         }
     }
 
-    /// Attach the prime-power tuple $(q_1,\ldots,q_n)$ that
-    /// $\mathbb{F}_{q_i}[X]$-constraints emitted by this UAIR live over.
-    ///
-    /// In the Flavor-1 slice of `def:uairplus` implemented today (cf. the
-    /// project plan for the Fq[X] extension), every
-    /// $\mathbb{F}_{q_i}[X]$-constraint reads only the projection
-    /// $\phi_{q_i}(\hat{f}_0)$ of the existing $\mathbb{Q}[X]$ witness lanes,
-    /// so no extra trace columns are introduced here -- the tuple only
-    /// records what primes the constraint dispatcher needs to project to.
+    /// Attach the prime-power tuple `(q_1, ..., q_n)` that
+    /// $F_{q_i}[X]$-constraints emitted by this UAIR live over.
     pub fn with_primes(mut self, primes: Vec<Prime>) -> Self {
         self.primes = primes;
         self
     }
 
-    /// Prime-power tuple $(q_1,\ldots,q_n)$ declared by this UAIR. Empty for
-    /// legacy UAIRs with $\mathbb{Q}[X]$-only constraints.
+    /// Prime-power tuple `(q_1, ..., q_n)` declared by this UAIR. Empty for
+    /// UAIRs with $Q[X]$-only constraints.
     pub fn primes(&self) -> &[Prime] {
         &self.primes
     }
@@ -618,10 +606,9 @@ pub trait Uair: Clone {
     /// via the `FromRef` trait.
     type Ideal: Ideal;
 
-    /// The ideal type for $\mathbb{F}_{q_i}[X]$-constraints emitted via
+    /// The ideal type for $F_{q_i}[X]$-constraints emitted via
     /// [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs that do not declare
-    /// any primes (the legacy case) should set this to
-    /// [`ideal::ImpossibleIdeal`].
+    /// any primes should set this to [`ideal::ImpossibleIdeal`].
     type FqIdeal: Ideal;
 
     /// The type of scalars of the UAIR.
@@ -660,11 +647,11 @@ pub trait Uair: Clone {
     /// - `mbs`: a closure that allows to multiply expressions by `R`. Same
     ///   rationale as for `from_ref`.
     /// - `ideal_from_ref`: a closure that turns a `Self::Ideal` into `B::Ideal`
-    ///   for the legacy $\mathbb{Q}[X]$-ideal-membership family.
+    ///   for the $Q[X]$-ideal-membership family.
     /// - `fq_ideal_from_ref`: a closure that turns a `Self::FqIdeal` into
-    ///   `B::FqIdeal` for the new $\mathbb{F}_{q_i}[X]$-ideal-membership family
-    ///   emitted via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs without
-    ///   $\mathbb{F}_q[X]$-constraints can ignore this closure.
+    ///   `B::FqIdeal` for the new $F_{q_i}[X]$-ideal-membership family emitted
+    ///   via [`ConstraintBuilder::assert_in_fq_ideal`]. UAIRs without
+    ///   $F_q[X]$-constraints can ignore this closure.
     fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
         b: &mut B,
         up: TraceRow<B::Expr>,

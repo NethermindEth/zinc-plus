@@ -31,7 +31,7 @@ use zinc_utils::{
 /// already be projected mod $q_i$.
 ///
 /// `family_idx` selects the constraint family: `0` for $Q[X]$, `i >= 1`
-/// for $\mathbb{F}_{q_{i-1}}[X]$.
+/// for $F_{q_{i-1}}[X]$.
 ///
 /// Returns one `DynamicPolynomialF<F>` per requested constraint, in the
 /// same order as `constraint_indices`.
@@ -234,7 +234,7 @@ where
 /// already be projected mod $q_i$.
 ///
 /// `family_idx` selects the constraint family: `0` for $Q[X]$, `i >= 1`
-/// for $\mathbb{F}_{q_{i-1}}[X]$.
+/// for $F_{q_{i-1}}[X]$.
 ///
 /// Does `(num_columns + num_shifted_columns) * max_num_coeffs` evaluations of
 /// MLEs.
@@ -404,8 +404,8 @@ fn apply_bit_op_to_poly<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
 
 /// Row-builder that accumulates only the specific family of constraints,
 /// selected by `family_idx`:
-/// - `family_idx == 0` -> $\mathbb{Q}[X]$ constraints
-/// - `family_idx == i (i >= 1)` -> $\mathbb{F}_{q_{i-1}}[X]$ constraints (i.e.
+/// - `family_idx == 0` -> $Q[X]$ constraints
+/// - `family_idx == i (i >= 1)` -> $F_{q_{i-1}}[X]$ constraints (i.e.
 ///   UAIR-level `prime_idx = i - 1`).
 pub struct CombinedPolyRowBuilder<F: PrimeField> {
     family_idx: usize,

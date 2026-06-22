@@ -22,8 +22,8 @@ pub fn count_max_degree<U: Uair>() -> usize {
 /// Returns a `Vec<usize>` where the i-th element is the degree of the i-th
 /// emitted constraint, in emission order. Under the
 /// [`crate::ConstraintBuilder::assert_in_fq_ideal`] ordering convention, all
-/// $\mathbb{Q}[X]$ degrees appear first, followed by all
-/// $\mathbb{F}_{q_i}[X]$ degrees.
+/// $Q[X]$ degrees appear first, followed by all
+/// $F_{q_i}[X]$ degrees.
 pub fn count_constraint_degrees_flattened<U: Uair>() -> Vec<usize> {
     let split = count_constraint_degrees::<U>();
     let mut all = split.q_degrees;

@@ -29,12 +29,12 @@ use zinc_utils::{inner_transparent_field::InnerTransparentField, sub};
 
 /// Ideal-check subprotocol.
 ///
-/// The evaluation point $\mathbf{r} \in \mathbb{F}^\mu$ at which the
+/// The evaluation point $r \in F^\mu$ at which the
 /// combined polynomial MLEs are pinned down is supplied **by the caller**
 /// rather than squeezed from the transcript inside this subprotocol:
 ///
 /// The protocol layer samples a single shared integer vector
-/// $\mathbf{r} \in [0, q^*)^\mu$ once and projects it into each family's field,
+/// $r \in [0, q^*)^\mu$ once and projects it into each family's field,
 /// so all $n + 1$ families re-use the same underlying integers (just typed in
 /// their respective fields).
 #[derive(Default, Clone, Copy)]
@@ -65,7 +65,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// - `projected_scalars`: UAIR scalars projected to
     ///   `DynamicPolynomialF<F>`.
     /// - `family_idx`: which constraint family to prove. `0` -> $Q[X]$; `i >=
-    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$ (i.e. UAIR-level `prime_idx = i - 1`).
+    ///   1` -> $F_{q_{i-1}}[X]$ (i.e. UAIR-level `prime_idx = i - 1`).
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `evaluation_point`: pre-sampled MLE evaluation point, shared for all
     ///   families of constraints ($Q[X]$ and $F_q[X]$).
@@ -192,7 +192,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// - `projected_scalars`: UAIR scalars projected to
     ///   `DynamicPolynomialF<F>`.
     /// - `family_idx`: which constraint family to prove. `0` -> $Q[X]$; `i >=
-    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
+    ///   1` -> $F_{q_{i-1}}[X]$.
     /// - `num_constraints`: number of constraints this UAIR encodes.
     /// - `evaluation_point`: pre-sampled MLE evaluation point, shared for all
     ///   families of constraints ($Q[X]$ and $F_q[X]$).
@@ -214,25 +214,22 @@ impl<U: Uair> IdealCheckProtocol<U> {
     {
         // Collect ideals to identify assert_zero constraints whose
         // combined polynomial is zero by construction (for honest provers).
+        macro_rules! get_non_zero_indices {
+            ($ideals:expr) => {
+                $ideals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, i)| !i.is_zero_ideal())
+                    .map(|(idx, _)| idx)
+                    .collect::<Vec<usize>>()
+            };
+        }
         let ideal_collector = collect_ideals::<U>(num_constraints);
         let non_zero_indices: Vec<usize> = if family_idx == 0 {
-            ideal_collector
-                .ideals
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| !i.is_zero_ideal())
-                .map(|(idx, _)| idx)
-                .collect()
+            get_non_zero_indices!(ideal_collector.ideals)
         } else {
             let prime_idx = sub!(family_idx, 1);
-            let per_prime_ideals = &ideal_collector.fq_ideals[prime_idx];
-
-            per_prime_ideals
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| !i.is_zero_ideal())
-                .map(|(idx, _)| idx)
-                .collect()
+            get_non_zero_indices!(ideal_collector.fq_ideals[prime_idx])
         };
 
         let mut combined_mle_values = vec![DynamicPolynomialF::ZERO; num_constraints];
@@ -273,7 +270,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
     /// - `transcript`: the Fiat-Shamir transcript.
     /// - `proof`: a purported proof produced by the prover.
     /// - `family_idx`: which constraint family to verify. `0` -> $Q[X]$; `i >=
-    ///   1` -> $\mathbb{F}_{q_{i-1}}[X]$.
+    ///   1` -> $F_{q_{i-1}}[X]$.
     /// - `num_constraints`: the number of constraints the UAIR `U` encodes.
     /// - `evaluation_point`: pre-sampled MLE evaluation point matching the one
     ///   used by the prover. The caller is responsible for ensuring transcript
@@ -433,10 +430,7 @@ mod tests {
             )
             .expect("Verification failed");
 
-            assert_eq!(
-                evaluation_point,
-                verifier_result.evaluation_point
-            );
+            assert_eq!(evaluation_point, verifier_result.evaluation_point);
         }
 
         // MLE-first
@@ -460,10 +454,7 @@ mod tests {
             )
             .expect("Verification failed");
 
-            assert_eq!(
-                evaluation_point,
-                verifier_result.evaluation_point
-            );
+            assert_eq!(evaluation_point, verifier_result.evaluation_point);
         }
     }
 

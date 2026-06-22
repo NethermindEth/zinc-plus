@@ -67,20 +67,19 @@ fn bench_no_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
 
         let evaluation_point: Vec<F<FIELD_LIMBS>> =
             transcript.get_field_challenges(num_vars, field_cfg);
-        let ic_proof=
-            IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::prove_combined::<
-                _,
-                DEGREE_PLUS_ONE,
-            >(
-                transcript,
-                &projected_trace,
-                &projected_scalars,
-                /* family_idx = */ 0,
-                num_constraints.q,
-                &evaluation_point,
-                field_cfg,
-            )
-            .expect("IC Prover failed");
+        let ic_proof = IdealCheckProtocol::<TestUairNoMultiplication<_, _>>::prove_combined::<
+            _,
+            DEGREE_PLUS_ONE,
+        >(
+            transcript,
+            &projected_trace,
+            &projected_scalars,
+            /* family_idx = */ 0,
+            num_constraints.q,
+            &evaluation_point,
+            field_cfg,
+        )
+        .expect("IC Prover failed");
 
         let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
 
@@ -250,87 +249,87 @@ fn bench_simple_mult<const INT_LIMBS: usize, const FIELD_LIMBS: usize>(
     let num_constraints = count_constraints::<TestUairSimpleMultiplication<_, _>>();
     let max_degree = count_max_degree::<TestUairSimpleMultiplication<_, _>>();
 
-    let prove_cpr =
-        |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
-         trace: &UairTrace<_, _, _, _>,
-         transcript: &mut Blake3Transcript| {
-            let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
+    let prove_cpr = |field_cfg: &<F<FIELD_LIMBS> as HasPrimeFieldConfig>::Config,
+                     trace: &UairTrace<_, _, _, _>,
+                     transcript: &mut Blake3Transcript| {
+        let projected_trace = project_trace_coeffs_row_major(trace, field_cfg);
 
-            let projected_scalars =
-                project_scalars::<F<FIELD_LIMBS>, TestUairSimpleMultiplication<_, _>>(|scalar| {
-                    scalar
-                        .iter()
-                        .map(|coeff| F::from_with_cfg(coeff, field_cfg))
-                        .collect()
-                });
+        let projected_scalars =
+            project_scalars::<F<FIELD_LIMBS>, TestUairSimpleMultiplication<_, _>>(|scalar| {
+                scalar
+                    .iter()
+                    .map(|coeff| F::from_with_cfg(coeff, field_cfg))
+                    .collect()
+            });
 
-            let evaluation_point: Vec<F<FIELD_LIMBS>> =
-                transcript.get_field_challenges(num_vars, field_cfg);
-            let ic_proof = IdealCheckProtocol::<
-                TestUairSimpleMultiplication<_, _>,
-            >::prove_combined::<_, DEGREE_PLUS_ONE>(
-                transcript,
-                &projected_trace,
-                &projected_scalars,
+        let evaluation_point: Vec<F<FIELD_LIMBS>> =
+            transcript.get_field_challenges(num_vars, field_cfg);
+        let ic_proof = IdealCheckProtocol::<TestUairSimpleMultiplication<_, _>>::prove_combined::<
+            _,
+            DEGREE_PLUS_ONE,
+        >(
+            transcript,
+            &projected_trace,
+            &projected_scalars,
+            /* family_idx = */ 0,
+            num_constraints.q,
+            &evaluation_point,
+            field_cfg,
+        )
+        .expect("IC Prover failed");
+
+        let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
+
+        let trace_f = evaluate_trace_to_column_mles(
+            &ProjectedTrace::RowMajor(projected_trace),
+            &projecting_element,
+        );
+        let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
+            .expect("failed to project scalars to field");
+
+        let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
+        let (cpr_group, cpr_ancillary) =
+            CombinedPolyResolver::prepare_sumcheck_group::<TestUairSimpleMultiplication<_, _>>(
+                trace_f,
+                Vec::new(),
+                &evaluation_point,
+                &scalars_f,
                 /* family_idx = */ 0,
                 num_constraints.q,
-                &evaluation_point,
-                field_cfg,
-            )
-            .expect("IC Prover failed");
-
-            let projecting_element: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
-
-            let trace_f = evaluate_trace_to_column_mles(
-                &ProjectedTrace::RowMajor(projected_trace),
-                &projecting_element,
-            );
-            let scalars_f = project_scalars_to_field(projected_scalars, &projecting_element)
-                .expect("failed to project scalars to field");
-
-            let folding_challenge: F<FIELD_LIMBS> = transcript.get_field_challenge(field_cfg);
-            let (cpr_group, cpr_ancillary) =
-                CombinedPolyResolver::prepare_sumcheck_group::<TestUairSimpleMultiplication<_, _>>(
-                    trace_f,
-                    Vec::new(),
-                    &evaluation_point,
-                    &scalars_f,
-                    /* family_idx = */ 0,
-                    num_constraints.q,
-                    num_vars,
-                    max_degree,
-                    &folding_challenge,
-                    field_cfg,
-                )
-                .expect("CPR prepare failed");
-
-            let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
-                transcript,
-                vec![(vec![cpr_group], field_cfg)],
                 num_vars,
+                max_degree,
+                &folding_challenge,
                 field_cfg,
             )
-            .pop()
-            .expect("single family");
+            .expect("CPR prepare failed");
 
-            let (cpr_proof, cpr_state) =
-                CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<_, _>>(
-                    transcript,
-                    md_states.into_iter().next().expect("one CPR group"),
-                    cpr_ancillary,
-                    field_cfg,
-                )
-                .expect("CPR finalize failed");
+        let (md_proof, md_states) = MultiDegreeSumcheck::prove_as_subprotocol(
+            transcript,
+            vec![(vec![cpr_group], field_cfg)],
+            num_vars,
+            field_cfg,
+        )
+        .pop()
+        .expect("single family");
 
-            (
-                ic_proof,
-                cpr_proof,
-                md_proof,
-                cpr_state,
-                scalars_f,
-                projecting_element,
+        let (cpr_proof, cpr_state) =
+            CombinedPolyResolver::finalize_prover::<TestUairSimpleMultiplication<_, _>>(
+                transcript,
+                md_states.into_iter().next().expect("one CPR group"),
+                cpr_ancillary,
+                field_cfg,
             )
-        };
+            .expect("CPR finalize failed");
+
+        (
+            ic_proof,
+            cpr_proof,
+            md_proof,
+            cpr_state,
+            scalars_f,
+            projecting_element,
+        )
+    };
 
     group.bench_function(BenchmarkId::new("CPR Prover", &params), |bench| {
         let mut transcript = Blake3Transcript::new();

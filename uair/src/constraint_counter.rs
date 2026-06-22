@@ -3,33 +3,29 @@ use crate::{
 };
 use zinc_utils::add;
 
-/// Get the total number of polynomial constraints in a `Uair`, summed across
-/// the $\mathbb{Q}[X]$ family and all $\mathbb{F}_{q_i}[X]$ families.
-///
-/// For dispatch-aware counts use [`count_constraints_q`] /
-/// [`count_constraints_fq`] / [`count_constraints`].
-pub fn count_constraints_total<U: Uair>() -> usize {
-    let split = count_constraints::<U>();
-    add!(split.q, split.fq.into_iter().sum())
-}
-
 /// Per-family breakdown of constraint counts. Returned by
 /// [`count_constraints_split`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConstraintCount {
     /// Number of constraints emitted via
     /// [`crate::ConstraintBuilder::assert_in_ideal`] or
-    /// [`crate::ConstraintBuilder::assert_zero`] (the $\mathbb{Q}[X]$ family).
+    /// [`crate::ConstraintBuilder::assert_zero`] (the $Q[X]$ family).
     pub q: usize,
     /// Number of constraints emitted via
     /// [`crate::ConstraintBuilder::assert_in_fq_ideal`] (the
-    /// $\mathbb{F}_{q_i}[X]$ family, aggregated for each prime).
+    /// $F_{q_i}[X]$ family, aggregated for each prime).
     pub fq: Vec<usize>,
 }
 
 impl ConstraintCount {
     pub fn for_prime(&self, idx: usize) -> usize {
         self.fq.get(idx).cloned().unwrap_or(0)
+    }
+
+    /// Get the total number of polynomial constraints, summed across
+    /// the $Q[X]$ family and all $F_{q_i}[X]$ families.
+    pub fn total(&self) -> usize {
+        add!(self.q, self.fq.iter().sum())
     }
 }
 
@@ -48,19 +44,8 @@ pub fn count_constraints<U: Uair>() -> ConstraintCount {
     ConstraintCount { q: cc.q, fq: cc.fq }
 }
 
-/// Get the number of $\mathbb{Q}[X]$ constraints in a `Uair`.
-pub fn count_constraints_q<U: Uair>() -> usize {
-    count_constraints::<U>().q
-}
-
-/// Get the number of $\mathbb{F}_{q_i}[X]$ constraints in a `Uair`, summed
-/// across all declared primes.
-pub fn count_constraints_fq<U: Uair>() -> Vec<usize> {
-    count_constraints::<U>().fq
-}
-
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ConstraintCounter {
+struct ConstraintCounter {
     q: usize,
     fq: Vec<usize>,
 }

@@ -1,9 +1,7 @@
 #![allow(clippy::type_complexity, clippy::arithmetic_side_effects)]
 
 use crate::{
-    ideal_check::{
-        IdealCheckProtocol, Proof as IdealCheckProof,
-    },
+    ideal_check::{IdealCheckProtocol, Proof as IdealCheckProof},
     projections::{
         ColumnMajorTrace, ProjectedScalars, RowMajorTrace, project_scalars,
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
@@ -122,7 +120,7 @@ where
 
     let evaluation_point: Vec<F> = transcript.get_field_challenges(num_vars, &field_cfg);
 
-    let proof= IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
+    let proof = IdealCheckProtocol::<U>::prove_combined::<_, DEGREE_PLUS_ONE>(
         transcript,
         &trace,
         &scalars,

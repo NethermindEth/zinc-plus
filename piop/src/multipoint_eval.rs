@@ -85,6 +85,8 @@ delegate_transcribable!(Proof<F> { sumcheck_proof: MultiDegreeSumcheckProof<F> }
 /// config they operate over and (b) the per-family field-projected
 /// `trace_mles`, `eval_point`, `up_evals`, and `down_evals`.
 pub struct MultipointEvalFamilyInputs<'a, F: PrimeField> {
+    /// Field configuration for this family.
+    pub field_cfg: &'a F::Config,
     /// Trace MLEs for this family (projected into this family's field).
     pub trace_mles: &'a [DenseMultilinearExtension<F::Inner>],
     /// Evaluation point $r^\star$ for this family.
@@ -95,11 +97,10 @@ pub struct MultipointEvalFamilyInputs<'a, F: PrimeField> {
     /// `down_eval_k = v_{src_k}^{<<c_k}(r*)` for every shift $k$, in
     /// this family's field.
     pub down_evals: &'a [F],
-    /// Field configuration for this family.
-    pub field_cfg: &'a F::Config,
 }
 
-/// Prover state after the multi-point evaluation protocol for one family.
+/// Prover state after the multi-point evaluation protocol for one constraint
+/// family.
 #[derive(Clone, Debug)]
 pub struct ProverState<F: PrimeField> {
     /// The combined evaluation point `r_0` produced by the sumcheck
@@ -108,7 +109,8 @@ pub struct ProverState<F: PrimeField> {
     pub eval_point: Vec<F>,
 }
 
-/// Verifier subclaim after the multi-point evaluation sumcheck for one family.
+/// Verifier subclaim after the multi-point evaluation sumcheck for one
+/// constraint family.
 ///
 /// Carries the shared evaluation point $r_0$ (lifted into this family's
 /// field), the expected MLE-combination evaluation handed back by the
@@ -519,24 +521,19 @@ where
             .map(|(b_idx, (family, sub))| {
                 let cfg = family.field_cfg;
                 let one = F::one_with_cfg(cfg);
-                let r_0_owned: Vec<F> = sub.point().to_vec();
+                let r0: Vec<F> = sub.point().to_vec();
                 let expected_evaluation = sub.expected_evaluations()[0].clone();
 
-                let eq_at_r0 = zinc_poly::utils::eq_eval(&r_0_owned, family.eval_point, one)?;
+                let eq_at_r0 = zinc_poly::utils::eq_eval(&r0, family.eval_point, one)?;
                 let shifts_at_r0: Vec<F> = shifts
                     .iter()
                     .map(|spec| {
-                        eval_shift_predicate(
-                            family.eval_point,
-                            &r_0_owned,
-                            spec.shift_amount(),
-                            cfg,
-                        )
+                        eval_shift_predicate(family.eval_point, &r0, spec.shift_amount(), cfg)
                     })
                     .collect();
 
                 Ok(Subclaim {
-                    r0: r_0_owned,
+                    r0,
                     expected_evaluation,
                     gammas: per_family_gammas[b_idx].clone(),
                     alphas: per_family_alphas[b_idx].clone(),
@@ -746,11 +743,11 @@ mod tests {
         let mut outputs = MultipointEval::<F>::prove_as_subprotocol(
             &mut transcript,
             vec![MultipointEvalFamilyInputs {
+                field_cfg: &(),
                 trace_mles,
                 eval_point: &public.eval_point,
                 up_evals: &public.up_evals,
                 down_evals: &public.down_evals,
-                field_cfg: &(),
             }],
             &public.shifts,
             &(),
@@ -777,11 +774,11 @@ mod tests {
             &mut make_transcript(),
             vec![msg.proof.clone()],
             vec![MultipointEvalFamilyInputs {
+                field_cfg: &(),
                 trace_mles: &[],
                 eval_point: &public.eval_point,
                 up_evals: &public.up_evals,
                 down_evals: &public.down_evals,
-                field_cfg: &(),
             }],
             &public.shifts,
             public.num_vars,
