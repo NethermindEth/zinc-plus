@@ -229,7 +229,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
             get_non_zero_indices!(ideal_collector.ideals)
         } else {
             let prime_idx = sub!(family_idx, 1);
-            get_non_zero_indices!(ideal_collector.fq_ideals[prime_idx])
+            get_non_zero_indices!(ideal_collector.fq_ideals.get(prime_idx).unwrap_or(&vec![]))
         };
 
         let mut combined_mle_values = vec![DynamicPolynomialF::ZERO; num_constraints];
@@ -330,7 +330,7 @@ impl<U: Uair> IdealCheckProtocol<U> {
         } else {
             let prime_idx = sub!(family_idx, 1);
             collect_non_trivial!(
-                ideal_collector.fq_ideals[prime_idx],
+                ideal_collector.fq_ideals.get(prime_idx).unwrap_or(&vec![]),
                 ideal_over_f_from_fq_ref
             )
         };
