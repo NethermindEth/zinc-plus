@@ -558,6 +558,8 @@ pub enum ProtocolError<F: PrimeField> {
         q: String,
         source: IdealCheckError<F>,
     },
+    #[error("q'' witness lifted-evals length mismatch: got {got}, expected {expected}")]
+    WitnessLiftedEvalsPpLengthMismatch { got: usize, expected: usize },
 }
 
 //
@@ -1317,6 +1319,40 @@ mod tests {
                 assert!(matches!(
                     res.unwrap_err(),
                     ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
+                ));
+            },
+        );
+    }
+
+    /// Adversarial regression for the q''-branch lifted-evals length guard.
+    /// The q'' vector (`witness_lifted_evals_pp`) is PCS-only:
+    /// `step7_pcs_verify` consumes only the witness-column ranges — yet the
+    /// whole vector is absorbed into the FS transcript first. Without the
+    /// guard, a malicious prover could append arbitrary polynomials as free
+    /// transcript entropy to grind the later PCS folding/alpha challenges
+    /// without opening any extra column.
+    #[test]
+    fn test_tamper_witness_lifted_evals_pp_extra_tail() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, BigLinearUairWithPublicInput<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            default_project_fq_ideal!(),
+            |proof| {
+                // Append a surplus polynomial to the q'' lifted-evals vector,
+                // inflating its length past the witness-column count.
+                let extra = proof.witness_lifted_evals_pp[0].clone();
+                proof.witness_lifted_evals_pp.push(extra);
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::WitnessLiftedEvalsPpLengthMismatch { .. }
                 ));
             },
         );

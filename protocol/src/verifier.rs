@@ -1171,6 +1171,17 @@ where
         let wit_cols = self.base.uair_signature.witness_cols();
         let num_wit_bin = wit_cols.num_binary_poly_cols();
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
+        let num_wit_int = wit_cols.num_int_cols();
+
+        // Since the entire vector is absorbed into the FS transcript below,
+        // prevent malicious prover from adding entries not tied to a commitment.
+        let num_wit_total = add!(add!(num_wit_bin, num_wit_arb), num_wit_int);
+        if self.proof_witness_lifted_evals_pp.len() != num_wit_total {
+            return Err(ProtocolError::WitnessLiftedEvalsPpLengthMismatch {
+                got: self.proof_witness_lifted_evals_pp.len(),
+                expected: num_wit_total,
+            });
+        }
 
         // --- Sample q'' (mirror of prover step 7 start) ---
         let q_pp_cfg = self
