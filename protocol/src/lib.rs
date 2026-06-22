@@ -567,6 +567,14 @@ pub enum ProtocolError<F: PrimeField> {
     },
     #[error("q'' witness lifted-evals length mismatch: got {got}, expected {expected}")]
     WitnessLiftedEvalsPpLengthMismatch { got: usize, expected: usize },
+    #[error(
+        "witness lifted-evals length mismatch at family {family_idx}: got {got}, expected {expected}"
+    )]
+    WitnessLiftedEvalsLengthMismatch {
+        family_idx: usize,
+        got: usize,
+        expected: usize,
+    },
 }
 
 //
@@ -1326,6 +1334,33 @@ mod tests {
                 assert!(matches!(
                     res.unwrap_err(),
                     ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
+                ));
+            },
+        );
+    }
+
+    /// Regression: a too-short per-family inner lifted-evals vector must be
+    /// rejected with `WitnessLiftedEvalsLengthMismatch`, not panic in the
+    /// `assemble_all` slices of `step6_lifted_evals`.
+    #[test]
+    fn test_fq_large_prime_truncated_lifted_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairFqLargePrime<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            |_ideal, _field_cfg| IdealOrZero::<DegreeOneIdeal<F>>::zero(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            // Drop family 1's only witness column, making its inner vec shorter
+            // than the witness-column count.
+            |proof| proof.witness_lifted_evals[1].clear(),
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::WitnessLiftedEvalsLengthMismatch { family_idx: 1, .. }
                 ));
             },
         );

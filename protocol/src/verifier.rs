@@ -1191,6 +1191,17 @@ where
         // prevent a malicious prover from adding entries not tied to a
         // commitment.
         let num_wit_total = add!(add!(num_wit_bin, num_wit_arb), num_wit_int);
+
+        for (family_idx, witness_lifted_i) in self.proof_witness_lifted_evals.iter().enumerate() {
+            if witness_lifted_i.len() != num_wit_total {
+                return Err(ProtocolError::WitnessLiftedEvalsLengthMismatch {
+                    family_idx,
+                    got: witness_lifted_i.len(),
+                    expected: num_wit_total,
+                });
+            }
+        }
+
         let expected_pp_len = if n_fq == 0 { 0 } else { num_wit_total };
         let actual_pp_len = self
             .proof_witness_lifted_evals_pp
