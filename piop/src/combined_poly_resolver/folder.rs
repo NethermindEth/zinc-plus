@@ -1,5 +1,6 @@
 use crypto_primitives::PrimeField;
 use zinc_uair::{ConstraintBuilder, ideal::ImpossibleIdeal};
+use zinc_utils::add;
 
 /// There are several situations where we need to
 /// compute an RLC `u_0 + \alpha * u_1 + ... + \alpha ^ k * u_k`,
@@ -25,10 +26,7 @@ pub struct ConstraintFolder<'a, F: PrimeField> {
     ///
     /// - `0` -> $\mathbb{Q}[X]$ constraints (from `assert_in_ideal` /
     ///   `assert_zero`).
-    /// - `i >= 1` -> $\mathbb{F}_{q_{i-1}}[X]$ constraints emitted via
-    ///   `assert_in_fq_ideal(i - 1, ...)`. The off-by-one stems from the
-    ///   UAIR-facing `prime_idx` indexing into [`UairSignature::primes`] while
-    ///   the protocol-level branch index reserves `0` for $\Q[X]$.
+    /// - `i > 0` -> $\mathbb{F}_{q_{i-1}}[X]$ (from `assert_in_fq_ideal`).
     ///
     /// All unrelated constraints are skipped.
     branch_idx: usize,
@@ -83,10 +81,9 @@ impl<'a, F: PrimeField> ConstraintBuilder for ConstraintFolder<'a, F> {
     }
 
     #[inline(always)]
-    #[allow(clippy::arithmetic_side_effects)]
     fn assert_in_fq_ideal(&mut self, prime_idx: usize, expr: Self::Expr, _ideal: &Self::FqIdeal) {
         // F_{q_{prime_idx}}[X] family -> branch (prime_idx + 1).
-        if self.branch_idx == prime_idx + 1 {
+        if self.branch_idx == add!(prime_idx, 1) {
             self.fold_constraint(expr);
         }
     }

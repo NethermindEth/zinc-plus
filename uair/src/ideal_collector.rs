@@ -10,12 +10,12 @@ use crate::{
 /// A `ConstraintBuilder` that collects ideals used in a `Uair`.
 ///
 /// Both legacy $\mathbb{Q}[X]$-ideals (from
-/// [`crate::ConstraintBuilder::assert_in_ideal`] /
-/// [`crate::ConstraintBuilder::assert_zero`]) and new
+/// [`ConstraintBuilder::assert_in_ideal`] /
+/// [`ConstraintBuilder::assert_zero`]) and new
 /// $\mathbb{F}_{q_i}[X]$-ideals (from
-/// [`crate::ConstraintBuilder::assert_in_fq_ideal`]) are kept in separate
+/// [`ConstraintBuilder::assert_in_fq_ideal`]) are kept in separate
 /// vectors, so downstream consumers (the PIOP layer) can dispatch them
-/// independently. The Fq[X] ideals are wrapped in [`IdealOrZero`] to reuse
+/// independently. The $F_q[X]$ ideals are wrapped in [`IdealOrZero`] to reuse
 /// the unconditional [`IdealCheck<DummySemiring>`] proxy impl used during
 /// collection; the `Zero` variant is never produced by collection (there is
 /// no `assert_fq_zero`) but downstream consumers may construct it.

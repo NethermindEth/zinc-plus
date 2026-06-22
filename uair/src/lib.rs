@@ -625,12 +625,13 @@ pub trait Uair: Clone {
     type FqIdeal: Ideal;
 
     /// The type of scalars of the UAIR.
-    /// For now, we assume they are of
-    /// the type "arbitrary polynomials".
+    /// For now, we assume they are of the type "arbitrary polynomials".
     // Note: This is usually Z_32[X] (i.e. DensePolynomial<Ring, 32>), but according
     // to @agareta, this in not always the case.
     type Scalar: Semiring;
 
+    /// Type of primes defined in signature. Must be compatible with the field
+    /// type we're using.
     type Prime: Semiring;
 
     /// Signature of the UAIR.
