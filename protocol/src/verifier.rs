@@ -78,7 +78,7 @@ pub struct VerifierTranscriptReconstructed<
     /// `[0]` = Q-branch ($q_0$), `[i]` = declared prime $i - 1$ for
     /// $i = 1, \ldots, n$. Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
@@ -111,7 +111,7 @@ pub struct VerifierPrimeProjected<
     /// Per-constraint-branch witness-only lifted MLE evals (see
     /// [`VerifierBase`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     proof_ideal_checks_fq: Vec<IdealCheckProof<F>>,
@@ -157,7 +157,7 @@ pub struct VerifierIdealChecked<
     /// Per-constraint-branch witness-only lifted MLE evals (see
     /// [`VerifierBase`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     /// Per-prime CPR proofs (one per declared prime).
@@ -212,7 +212,7 @@ pub struct VerifierEvalProjected<
     /// Per-constraint-branch witness-only lifted MLE evals (see
     /// [`VerifierBase`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     proof_booleanity: Option<BooleanityProof<F>>,
     /// Per-prime CPR proofs (one per declared prime), consumed in step 4.
@@ -277,7 +277,7 @@ pub struct VerifierSumchecked<
     /// Per-constraint-branch witness-only lifted MLE evals (see
     /// [`VerifierBase`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -312,7 +312,7 @@ pub struct VerifierMultipointEvaled<
     /// Per-constraint-branch witness-only lifted MLE evals (see
     /// [`VerifierBase`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    proof_witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -1174,29 +1174,47 @@ where
         let num_wit_int = wit_cols.num_int_cols();
 
         // Since the entire vector is absorbed into the FS transcript below,
-        // prevent malicious prover from adding entries not tied to a commitment.
+        // prevent a malicious prover from adding entries not tied to a
+        // commitment. When q'' is aliased to q_0 (no F_q[X] constraints) the
+        // prover sends None and the PCS check reuses
+        // branch 0
         let num_wit_total = add!(add!(num_wit_bin, num_wit_arb), num_wit_int);
-        if self.proof_witness_lifted_evals_pp.len() != num_wit_total {
+        let expected_pp_len = if n_fq == 0 { 0 } else { num_wit_total };
+        let actual_pp_len = self
+            .proof_witness_lifted_evals_pp
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if actual_pp_len != expected_pp_len {
             return Err(ProtocolError::WitnessLiftedEvalsPpLengthMismatch {
-                got: self.proof_witness_lifted_evals_pp.len(),
-                expected: num_wit_total,
+                got: actual_pp_len,
+                expected: expected_pp_len,
             });
         }
 
         // --- Sample q'' (mirror of prover step 7 start) ---
-        let q_pp_cfg = self
-            .base
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        //
+        // With no F_q[X] constraints, q'' is aliased to q_0 and r* = r_0.
+        let q_pp_cfg = if n_fq == 0 {
+            self.field_cfg.clone()
+        } else {
+            self.base
+                .pcs_transcript
+                .fs_transcript
+                .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>()
+        };
         // r_star = r_0 mod q'' (the underlying integer of mp_subclaim.r0 is
         // the shared challenge in [0, q*); lift into q'' cfg).
-        let r_star: Vec<F> = self
-            .mp_subclaim
-            .r0
-            .iter()
-            .map(|x| F::from_with_cfg(x.lift_to_integer(), &q_pp_cfg))
-            .collect();
+        // Aliased to r_0 when q'' = q_0.
+        let r_star: Vec<F> = if n_fq == 0 {
+            self.mp_subclaim.r0.clone()
+        } else {
+            self.mp_subclaim
+                .r0
+                .iter()
+                .map(|x| F::from_with_cfg(x.lift_to_integer(), &q_pp_cfg))
+                .collect()
+        };
 
         // Helper: assemble all-column lifted evals from per-branch public
         // (recomputed) + sent witness lifts.
@@ -1313,16 +1331,32 @@ where
                     .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
             }
         }
-        for bar_u in &self.proof_witness_lifted_evals_pp {
-            self.base
-                .pcs_transcript
-                .fs_transcript
-                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        if let Some(ref lifted_evals_pp) = self.proof_witness_lifted_evals_pp {
+            for bar_u in lifted_evals_pp.iter() {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+            }
         }
+
+        // When q'' was aliased to q_0, the PCS check reuses branch 0's witness lift
+        // which equals the q'' lift.
+        let lifted_evals_pp = if n_fq == 0 {
+            self.proof_witness_lifted_evals[0].clone()
+        } else {
+            let Some(lifted_evals_pp) = self.proof_witness_lifted_evals_pp else {
+                return Err(ProtocolError::WitnessLiftedEvalsPpLengthMismatch {
+                    got: 0,
+                    expected: expected_pp_len,
+                });
+            };
+            lifted_evals_pp
+        };
 
         Ok(VerifierLiftedEvalsChecked {
             base: self.base,
-            lifted_evals_pp: self.proof_witness_lifted_evals_pp,
+            lifted_evals_pp,
             q_pp_cfg,
             r_star,
             proof_commitments: self.proof_commitments,

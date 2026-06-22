@@ -389,7 +389,9 @@ pub struct ProverLifted<
     /// $\phi_{q''}$-projected claim. Tracked separately from
     /// `lifted_evals` because the $q''$-branch is PCS-only (no
     /// per-branch constraint check).
-    lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
+    /// `q'' := q0` and this is identical to `lifted_evals`.
+    lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
     /// PCS-only prime cfg sampled at step 7 start.
     q_pp_cfg: F::Config,
     /// $\mathbf r^\star = \mathbf r_0 \bmod q''$ — the PCS evaluation
@@ -427,7 +429,7 @@ pub struct ProverPcsOpened<
     /// `UairSignature::primes()` order). Length = `1 + mp_proofs_fq.len()`.
     lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// $q''$-branch witness-only lifted evals (PCS-only branch).
-    lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
 }
 
 //
@@ -1347,20 +1349,27 @@ impl_with_type_bounds!(ProverMultipointEvaled
     pub fn step7_lift_and_project(
         mut self,
     ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        // --- Sample q'' (PCS-only prime) ---
-        let q_pp_cfg = self
-            .base
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
+        let n_fq = self.r_0_fq.len();
 
-        // Shared r_0 integer endpoint; r_star = r_0 mod q'' for PCS.
-        let r_0_int: Vec<F::Integer> =
-            self.r_0.iter().map(|x| x.lift_to_integer()).collect();
-        let r_star: Vec<F> = r_0_int
-            .iter()
-            .map(|x| F::from_with_cfg(x.clone(), &q_pp_cfg))
-            .collect();
+        // --- Sample q'' (PCS-only prime) ---
+        //
+        // The fresh PCS-only prime exists to decouple the witness-trace
+        // commitment from *which* of several constraint primes opens it. With
+        // no F_q[X] constraints, there is only q_0, so this decoupling buys
+        // nothing: we alias q'' := q_0; r* := r_0 and skip q'' lift.
+        let (q_pp_cfg, r_star) = if n_fq == 0 {
+            (self.field_cfg.clone(), self.r_0.clone())
+        } else {
+            let cfg = self.base
+                .pcs_transcript
+                .fs_transcript
+                .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
+            let r_star =  self.r_0
+                .iter()
+                .map(|x| F::from_with_cfg(x.lift_to_integer(), &cfg))
+                .collect();
+            (cfg, r_star)
+        };
 
         // Witness-col extraction helper. UAIR's column layout interleaves
         // public and witness blocks per type (bin / arb / int), so we slice
@@ -1391,7 +1400,6 @@ impl_with_type_bounds!(ProverMultipointEvaled
         // --- Per-constraint-branch witness-only lifted evals ---
         // Index 0: Q-branch (q_0) at r_0. Indices 1..=n: declared primes
         // at branch-specific r_0_fq[i-1]. Length = 1 + n_fq.
-        let n_fq = self.r_0_fq.len();
         let mut lifted_evals: Vec<Vec<DynamicPolynomialF<F>>> =
             Vec::with_capacity(add!(n_fq, 1));
 
@@ -1425,18 +1433,26 @@ impl_with_type_bounds!(ProverMultipointEvaled
             lifted_evals.push(witness_only(&lifted_evals_i));
         }
 
-        // --- q'' branch: witness-only lifted evals (PCS-only) ---
-        let projected_trace_pp = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
-            self.base.original_trace,
-            &q_pp_cfg,
-        );
-        let lifted_evals_pp_full = compute_lifted_evals(
-            &r_star,
-            &self.base.original_trace.binary_poly,
-            &ProjectedTrace::RowMajor(projected_trace_pp),
-            &q_pp_cfg,
-        );
-        let lifted_evals_pp = witness_only(&lifted_evals_pp_full);
+        // q'' branch: witness-only lifted evals (PCS-only)
+        // Compute the q''-projected witness lift at r*.
+        // When q'' is aliased to q_0 (no F_q[X] constraints), this lift is
+        // identical to the Q-branch lift already computed, so we reuse it
+        // while avoiding duplication.
+        let lifted_evals_pp = if n_fq == 0 {
+            None
+        } else {
+            let projected_trace_pp = project_trace_coeffs_row_major::<F, Zt::Int, Zt::Int, D, D>(
+                self.base.original_trace,
+                &q_pp_cfg,
+            );
+            let lifted_evals_pp_full = compute_lifted_evals(
+                &r_star,
+                &self.base.original_trace.binary_poly,
+                &ProjectedTrace::RowMajor(projected_trace_pp),
+                &q_pp_cfg,
+            );
+            Some(witness_only(&lifted_evals_pp_full))
+        };
 
         // --- Absorb all per-branch coefficients into the transcript ---
         // Uniform order: each constraint branch's witness-only lifted
@@ -1450,11 +1466,13 @@ impl_with_type_bounds!(ProverMultipointEvaled
                     .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
             }
         }
-        for bar_u in &lifted_evals_pp {
-            self.base
-                .pcs_transcript
-                .fs_transcript
-                .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+        if let Some(ref lifted_pp) = lifted_evals_pp {
+            for bar_u in lifted_pp.iter() {
+                self.base
+                    .pcs_transcript
+                    .fs_transcript
+                    .absorb_random_field_slice(&bar_u.coeffs, &mut transcription_buf);
+            }
         }
 
         Ok(ProverLifted {

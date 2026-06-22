@@ -144,7 +144,10 @@ pub struct Proof<F: PrimeField> {
     /// Kept separate from `witness_lifted_evals` because $q''$ plays a
     /// distinct role (PCS-only; no MP-eval / constraint check happens
     /// under $q''$).
-    pub witness_lifted_evals_pp: Vec<DynamicPolynomialF<F>>,
+    ///
+    /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
+    /// $q'' := q_0$ and this is identical to `witness_lifted_evals`.
+    pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
 }
 
 impl<F> GenTranscribable for Proof<F>
@@ -236,10 +239,15 @@ where
             bytes = rest;
         }
 
-        // witness_lifted_evals_pp: single length-prefixed DynamicPolyVecF
-        // (q'' branch).
-        let (witness_pp_vec, bytes) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
-        let witness_lifted_evals_pp = witness_pp_vec.0;
+        // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
+        // length-prefixed DynamicPolyVecF (q'' branch).
+        let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let (witness_lifted_evals_pp, bytes) = if presence != 0 {
+            let (p, rest) = DynamicPolyVecF::<F>::read_transcription_bytes_subset(bytes);
+            (Some(p.0), rest)
+        } else {
+            (None, bytes)
+        };
 
         // TODO: deserialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
@@ -271,8 +279,7 @@ where
 
         // zip: u32 length + raw bytes
         let zip_len = u32::try_from(self.zip.len()).expect("zip length must fit into u32");
-        zip_len.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = zip_len.write_transcription_bytes_subset(buf);
         buf[..self.zip.len()].copy_from_slice(&self.zip);
         buf = &mut buf[self.zip.len()..];
 
@@ -294,21 +301,15 @@ where
         // declared primes.
         let n_wlf = u32::try_from(self.witness_lifted_evals.len())
             .expect("witness_lifted_evals length must fit into u32");
-        n_wlf.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = n_wlf.write_transcription_bytes_subset(buf);
         for wlf in &self.witness_lifted_evals {
             buf = DynamicPolyVecF::reinterpret(wlf).write_transcription_bytes_subset(buf);
         }
 
         // booleanity_proof: u32 presence flag, then (optionally) the body
         // with its own length prefix.
-        let presence: u32 = if self.booleanity_proof.is_some() {
-            1
-        } else {
-            0
-        };
-        presence.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        let presence = u32::from(self.booleanity_proof.is_some());
+        buf = presence.write_transcription_bytes_subset(buf);
         if let Some(ref bp) = self.booleanity_proof {
             buf = bp.write_transcription_bytes_subset(buf);
         }
@@ -316,8 +317,7 @@ where
         // ideal_checks_fq: u32 count + that many length-prefixed entries.
         let n_fq = u32::try_from(self.ideal_checks_fq.len())
             .expect("ideal_checks_fq length must fit into u32");
-        n_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = n_fq.write_transcription_bytes_subset(buf);
         for ic in &self.ideal_checks_fq {
             buf = ic.write_transcription_bytes_subset(buf);
         }
@@ -325,8 +325,7 @@ where
         // cpr_proofs_fq: u32 count + length-prefixed entries.
         let n_cpr_fq = u32::try_from(self.cpr_proofs_fq.len())
             .expect("cpr_proofs_fq length must fit into u32");
-        n_cpr_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = n_cpr_fq.write_transcription_bytes_subset(buf);
         for cpr in &self.cpr_proofs_fq {
             buf = cpr.write_transcription_bytes_subset(buf);
         }
@@ -334,8 +333,7 @@ where
         // combined_sumchecks_fq: u32 count + length-prefixed entries.
         let n_sum_fq = u32::try_from(self.combined_sumchecks_fq.len())
             .expect("combined_sumchecks_fq length must fit into u32");
-        n_sum_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = n_sum_fq.write_transcription_bytes_subset(buf);
         for sumcheck in &self.combined_sumchecks_fq {
             buf = sumcheck.write_transcription_bytes_subset(buf);
         }
@@ -343,16 +341,18 @@ where
         // multipoint_evals_fq: u32 count + length-prefixed entries.
         let n_mp_fq = u32::try_from(self.multipoint_evals_fq.len())
             .expect("multipoint_evals_fq length must fit into u32");
-        n_mp_fq.write_transcription_bytes_exact(&mut buf[..u32::NUM_BYTES]);
-        buf = &mut buf[u32::NUM_BYTES..];
+        buf = n_mp_fq.write_transcription_bytes_subset(buf);
         for mp in &self.multipoint_evals_fq {
             buf = mp.write_transcription_bytes_subset(buf);
         }
 
-        // witness_lifted_evals_pp: single length-prefixed DynamicPolyVecF
-        // (q'' branch).
-        buf = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals_pp)
-            .write_transcription_bytes_subset(buf);
+        // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
+        // length-prefixed DynamicPolyVecF (q'' branch).
+        let presence = u32::from(self.witness_lifted_evals_pp.is_some());
+        buf = presence.write_transcription_bytes_subset(buf);
+        if let Some(ref lifted_pp) = self.witness_lifted_evals_pp {
+            buf = DynamicPolyVecF::reinterpret(lifted_pp).write_transcription_bytes_subset(buf);
+        }
 
         // TODO: serialize lookup_proof once BatchedLookupProof gets
         // Transcribable impls (lookup is not yet implemented).
@@ -399,7 +399,13 @@ where
                     + DynamicPolyVecF::reinterpret(wlf).get_num_bytes()
             })
             .sum();
-        let witness_pp_vec = DynamicPolyVecF::reinterpret(&self.witness_lifted_evals_pp);
+        let witness_lifted_evals_pp_bytes = match &self.witness_lifted_evals_pp {
+            Some(wpp) => {
+                DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
+                    + DynamicPolyVecF::reinterpret(wpp).get_num_bytes()
+            }
+            None => 0,
+        };
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
@@ -433,8 +439,8 @@ where
             + u32::NUM_BYTES
             + multipoint_evals_fq_bytes
             // witness_lifted_evals_pp: single length-prefixed body
-            + DynamicPolyVecF::<F>::LENGTH_NUM_BYTES
-            + witness_pp_vec.get_num_bytes()
+            + u32::NUM_BYTES
+            + witness_lifted_evals_pp_bytes
     }
 }
 
@@ -1345,9 +1351,14 @@ mod tests {
             default_project_fq_ideal!(),
             |proof| {
                 // Append a surplus polynomial to the q'' lifted-evals vector,
-                // inflating its length past the witness-column count.
-                let extra = proof.witness_lifted_evals_pp[0].clone();
-                proof.witness_lifted_evals_pp.push(extra);
+                // inflating its length past the expected witness-column count.
+                // This UAIR has no F_q[X] constraints, so q'' is aliased to
+                // q_0 and the prover sends `None`;
+                // The surplus entry — sourced from the Q-branch lift — must still be rejected
+                // by the length guard before it can be absorbed as free
+                // transcript entropy.
+                let extra = proof.witness_lifted_evals[0][0].clone();
+                proof.witness_lifted_evals_pp = Some(vec![extra]);
             },
             |res| {
                 assert!(matches!(
