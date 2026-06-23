@@ -1014,6 +1014,80 @@ where
     }
 }
 
+/// UAIR combining bit-op virtual columns with both Q[X] and F_q[X]
+/// constraint families.
+///
+/// The single bit-op virtual column is `ShR(w, 3)`. Both families constrain it
+/// to match the committed expected column `s`, so the full protocol must carry
+/// the virtual bit-op column through each family, not just through ideal check.
+#[derive(Clone, Debug)]
+pub struct TestUairBitOpsFqFamily<R, P>(PhantomData<(R, P)>);
+
+impl<R, P> Uair for TestUairBitOpsFqFamily<R, P>
+where
+    R: ConstSemiring + 'static,
+    P: Semiring + From<u64> + 'static,
+{
+    type Ideal = DegreeOneIdeal<R>;
+    type FqIdeal = DegreeOneIdeal<R>;
+    type Scalar = DensePolynomial<R, 32>;
+    type Prime = P;
+
+    fn signature() -> UairSignature<Self::Prime> {
+        let total = TotalColumnLayout::new(2, 0, 0);
+        UairSignature::new(total, PublicColumnLayout::default(), vec![], vec![])
+            .with_bit_op_specs(vec![BitOpSpec::new(0, BitOp::ShR(3))])
+            .with_primes(vec![P::from(MERSENNE_61_PRIME)])
+    }
+
+    fn constrain_general<B, FromR, MulByScalar, IFromR, IFqFromR>(
+        b: &mut B,
+        up: TraceRow<B::Expr>,
+        down: TraceRow<B::Expr>,
+        _from_ref: FromR,
+        _mbs: MulByScalar,
+        ideal_from_ref: IFromR,
+        fq_ideal_from_ref: IFqFromR,
+    ) where
+        B: ConstraintBuilder,
+        IFromR: Fn(&Self::Ideal) -> B::Ideal,
+        IFqFromR: Fn(&Self::FqIdeal) -> B::FqIdeal,
+    {
+        let q_ideal = ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
+        let fq_ideal = fq_ideal_from_ref(&DegreeOneIdeal::new(R::ONE));
+        let bit_op_matches_expected = down.binary_poly[0].clone() - &up.binary_poly[1];
+
+        b.assert_in_ideal(bit_op_matches_expected.clone(), &q_ideal);
+        b.assert_in_fq_ideal(0, bit_op_matches_expected, &fq_ideal);
+    }
+}
+
+impl<R, P> GenerateRandomTrace<32> for TestUairBitOpsFqFamily<R, P>
+where
+    R: ConstSemiring + 'static,
+    P: Semiring + From<u64> + 'static,
+{
+    type PolyCoeff = R;
+    type Int = R;
+
+    fn generate_random_trace<Rng: RngCore + ?Sized>(
+        num_vars: usize,
+        rng: &mut Rng,
+    ) -> UairTrace<'static, R, R, 32, 32> {
+        let n = 1usize << num_vars;
+        let w_u32: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
+        let w_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            w_u32.iter().map(|w| BinaryPoly::from(*w)).collect();
+        let s_shr_col: DenseMultilinearExtension<BinaryPoly<32>> =
+            w_u32.iter().map(|w| BinaryPoly::from(w >> 3)).collect();
+
+        UairTrace {
+            binary_poly: vec![w_col, s_shr_col].into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// A UAIR exercising the Flavor-1 $F_{q}[X]$-constraint surface
 /// for **multiple large primes**.
 ///
@@ -1156,6 +1230,7 @@ mod tests {
         assert_uair_shape::<BigLinearUair<u32, u64>>(&[1; 17]);
         assert_uair_shape::<TestUairMixedShifts<Int<LIMBS>, u64>>(&[1, 1]);
         assert_uair_shape::<TestUairBitOpsMixedSplice<Int<LIMBS>, u64>>(&[1, 1, 1]);
+        assert_uair_shape::<TestUairBitOpsFqFamily<Int<LIMBS>, u64>>(&[1, 1]);
         // TestUairFqLargePrime: two F_{q_i}[X] linear constraints (one per
         // declared prime).
         assert_uair_shape::<TestUairFqLargePrime<Int<LIMBS>, u64>>(&[1, 1]);

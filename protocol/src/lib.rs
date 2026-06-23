@@ -783,8 +783,8 @@ mod tests {
     use zinc_primality::MillerRabin;
     use zinc_test_uair::{
         BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
-        ShaProxy, TestUairFqLargePrime, TestUairMixedShifts, TestUairNoMultiplication,
-        TestUairSimpleMultiplication,
+        ShaProxy, TestUairBitOpsFqFamily, TestUairFqLargePrime, TestUairMixedShifts,
+        TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
         constraint_counter::count_constraints, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
@@ -1189,6 +1189,25 @@ mod tests {
         );
     }
 
+    /// End-to-end test: [`TestUairBitOpsFqFamily`] -- exercises bit-op virtual
+    /// columns through both the Q[X] and F_q[X] constraint families.
+    #[test]
+    fn test_e2e_bit_ops_with_fq_family() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairBitOpsFqFamily<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |_| {},
+            |res| res.unwrap(),
+        );
+    }
+
     /// End-to-end test: [`BigLinearUair`].
     ///
     /// Uses 16 binary_poly cols and 1 int col.
@@ -1335,6 +1354,79 @@ mod tests {
                     res.unwrap_err(),
                     ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
                 ));
+            },
+        );
+    }
+
+    /// Regression for source-lift tampering on a bit-op UAIR in a
+    /// declared-prime family.
+    ///
+    /// [`TestUairBitOpsFqFamily`] constrains `ShR(w, 3)` through both Q[X]
+    /// and F_q[X]. Perturbing the F_q-family lifted eval of source column `w`
+    /// changes the committed-source opening and the verifier-derived bit-op
+    /// opening, so this is an end-to-end regression rather than an isolated
+    /// bit-op binding test.
+    #[test]
+    fn test_bit_ops_fq_family_tamper_source_lifted_evals() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairBitOpsFqFamily<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |proof| {
+                // Family 1 = declared prime q_1. Source column 0 is `w`, the
+                // source of the UAIR's single bit-op virtual `ShR(w, 3)`.
+                let cfg = *proof.cpr_proofs_fq[0].up_evals[0].cfg();
+                let one = F::one_with_cfg(&cfg);
+                let lifted = &mut proof.witness_lifted_evals[1][0];
+                if lifted.coeffs.is_empty() {
+                    lifted.coeffs.push(one);
+                } else {
+                    lifted.coeffs[0] += one;
+                }
+            },
+            |res| {
+                assert!(matches!(
+                    res.unwrap_err(),
+                    ProtocolError::MultipointEval(MultipointEvalError::ClaimMismatch { .. })
+                ));
+            },
+        );
+    }
+
+    /// Regression: a tampered F_q-family bit-op claim is rejected end-to-end.
+    ///
+    /// This perturbs the prover's claimed `ShR(w, 3)(r*)` value in the CPR
+    /// proof. That value is shared by CPR and multipoint-eval; in practice,
+    /// this mutation is caught by CPR's constraint reconstruction before the
+    /// final multipoint-eval check.
+    #[test]
+    fn test_bit_ops_fq_family_tamper_bit_op_eval() {
+        let num_vars = 8;
+        do_test::<TestZincTypesIprs, TestUairBitOpsFqFamily<ZtInt, ZtFmod>>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+            default_project_ideal!(),
+            |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
+            |proof| {
+                let bit_op_eval = &mut proof.cpr_proofs_fq[0].bit_op_evals[0];
+                let cfg = *bit_op_eval.cfg();
+                *bit_op_eval += F::one_with_cfg(&cfg);
+            },
+            |res| {
+                assert!(
+                    res.is_err(),
+                    "tampered F_q-family bit-op evaluation must be rejected"
+                );
             },
         );
     }

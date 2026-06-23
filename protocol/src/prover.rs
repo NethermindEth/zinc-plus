@@ -8,8 +8,9 @@ use zinc_piop::{
     multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs, Proof as MultipointEvalProof},
     projections::{
         ColumnMajorTrace, ProjectedScalars, ProjectedTrace, RowMajorTrace,
-        evaluate_trace_to_column_mles, project_scalars, project_scalars_to_field,
-        project_trace_coeffs_column_major, project_trace_coeffs_row_major,
+        build_bit_op_virtual_mle, evaluate_trace_to_column_mles, project_scalars,
+        project_scalars_to_field, project_trace_coeffs_column_major,
+        project_trace_coeffs_row_major,
     },
     sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckGroup},
 };
@@ -230,6 +231,9 @@ pub struct ProverEvalProjected<
 
     // New
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Q[X] family bit-op virtual MLEs, in `UairSignature::bit_op_specs()`
+    /// order.
+    bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
     projected_scalars_f: ProjectedScalars<U::Scalar, F>,
     /// Per-prime $\psi$-projected trace MLEs (one entry per declared prime
     /// in `UairSignature::primes()`). Built in step 4 from each
@@ -237,6 +241,9 @@ pub struct ProverEvalProjected<
     /// Consumed by per-prime CPR `prepare_sumcheck_group` in step 5.
     /// Empty for UAIRs with no declared fq primes.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
+    /// Per-prime family bit-op virtual MLEs, one vector per declared prime,
+    /// each in `UairSignature::bit_op_specs()` order.
+    bit_op_mles_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
     /// Per-prime $\psi$-projected scalars (one entry per declared prime).
     /// Built in step 4 from each `fq_staging[i].projected_scalars_fx`
     /// using `projecting_elements[i + 1]`. Consumed in step 5 by the
@@ -275,11 +282,15 @@ pub struct ProverSumchecked<
     /// the multipoint-eval inputs (and optionally append $\alpha'$-projected
     /// witness-bin MLEs as the Schwartz-Zippel bridge).
     projected_trace_f: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Q[X] family bit-op virtual MLEs, carried to multipoint eval.
+    bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
     /// Per-prime $\psi$-projected trace MLEs (one entry per declared
     /// prime). Threaded forward from step 4 by `step5_sumcheck` so that
     /// step 6's lockstep multipoint-eval can build per-prime MP families.
     /// Empty for UAIRs with no declared fq primes.
     projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
+    /// Per-prime bit-op virtual MLEs, carried to multipoint eval.
+    bit_op_mles_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>>,
 
     // New
     cpr_proof: CombinedPolyResolverProof<F>,
@@ -850,6 +861,19 @@ impl_with_type_bounds!(ProverIdealChecked
         let projected_trace_f =
             evaluate_trace_to_column_mles(&self.projected_trace, &projecting_elements[0]);
 
+        let bit_op_specs = self.base.uair_signature.bit_op_specs().to_vec();
+        let bit_op_mles = bit_op_specs
+            .iter()
+            .map(|spec| {
+                build_bit_op_virtual_mle::<F, D>(
+                    &self.projected_trace,
+                    spec,
+                    &projecting_elements[0],
+                    &self.field_cfg,
+                )
+            })
+            .collect();
+
         let projected_scalars_f =
             project_scalars_to_field(self.projected_scalars_fx, &projecting_elements[0])
                 .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
@@ -864,6 +888,8 @@ impl_with_type_bounds!(ProverIdealChecked
         let mut projected_trace_fq: Vec<ProjectedTrace<F>> = Vec::with_capacity(n_fq);
         let mut projected_trace_f_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
             Vec::with_capacity(n_fq);
+        let mut bit_op_mles_fq: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+            Vec::with_capacity(n_fq);
         let mut projected_scalars_f_fq: Vec<ProjectedScalars<U::Scalar, F>> =
             Vec::with_capacity(n_fq);
         for (prime_idx, staging) in self.fq_staging.into_iter().enumerate() {
@@ -874,11 +900,23 @@ impl_with_type_bounds!(ProverIdealChecked
             } = staging;
             let trace_f_i =
                 evaluate_trace_to_column_mles(&projected_trace_i, &projecting_elements[family_idx]);
+            let bit_op_mles_i = bit_op_specs
+                .iter()
+                .map(|spec| {
+                    build_bit_op_virtual_mle::<F, D>(
+                        &projected_trace_i,
+                        spec,
+                        &projecting_elements[family_idx],
+                        &self.all_field_cfgs[family_idx],
+                    )
+                })
+                .collect();
             let scalars_f_i =
                 project_scalars_to_field(scalars_fx_i, &projecting_elements[family_idx])
                     .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
             projected_trace_fq.push(projected_trace_i);
             projected_trace_f_fq.push(trace_f_i);
+            bit_op_mles_fq.push(bit_op_mles_i);
             projected_scalars_f_fq.push(scalars_f_i);
         }
 
@@ -893,8 +931,10 @@ impl_with_type_bounds!(ProverIdealChecked
             ic_eval_points: self.ic_eval_points,
             ic_proof_fq: self.ic_proof_fq,
             projected_trace_f,
+            bit_op_mles,
             projected_scalars_f,
             projected_trace_f_fq,
+            bit_op_mles_fq,
             projected_scalars_f_fq,
         })
     }
@@ -944,13 +984,9 @@ impl_with_type_bounds!(ProverEvalProjected
         );
 
         // ------------- Q[X] family groups -----------------
-        // TODO(#185): once protocol-level prover materializes bit-op virtual
-        // MLEs, pass them here. For now no UAIR on `main` declares
-        // `bit_op_specs`, so passing an empty vec keeps behaviour identical.
-        let bit_op_down_mles = Vec::new();
         let (q_cpr_group, q_cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
             self.projected_trace_f.clone(),
-            bit_op_down_mles,
+            self.bit_op_mles.clone(),
             &self.ic_eval_points[0],
             &self.projected_scalars_f,
             /* family_idx = */ 0,
@@ -1005,7 +1041,7 @@ impl_with_type_bounds!(ProverEvalProjected
             let (cpr_group_i, cpr_ancillary_i) =
                 CombinedPolyResolver::prepare_sumcheck_group::<U>(
                     trace_f_i,
-                    Vec::new(),
+                    self.bit_op_mles_fq[prime_idx].clone(),
                     eval_point_i,
                     scalars_f_i,
                     family_idx,
@@ -1112,7 +1148,9 @@ impl_with_type_bounds!(ProverEvalProjected
             ic_proof: self.ic_proof,
             ic_proof_fq: self.ic_proof_fq,
             projected_trace_f: self.projected_trace_f,
+            bit_op_mles: self.bit_op_mles,
             projected_trace_f_fq: self.projected_trace_f_fq,
+            bit_op_mles_fq: self.bit_op_mles_fq,
             cpr_proof,
             cpr_eval_point: cpr_prover_state.evaluation_point,
             combined_sumcheck,
@@ -1255,10 +1293,10 @@ impl_with_type_bounds!(ProverSumchecked
         all_families.push(MultipointEvalFamilyInputs {
             field_cfg: &self.field_cfg,
             trace_mles: &projected_trace_f,
-            bit_op_mles: &[],
+            bit_op_mles: &self.bit_op_mles,
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
-            bit_op_evals: &[],
+            bit_op_evals: &self.cpr_proof.bit_op_evals,
             down_evals: &self.cpr_proof.down_evals,
         });
         for prime_idx in 0..n_fq {
@@ -1266,10 +1304,10 @@ impl_with_type_bounds!(ProverSumchecked
             all_families.push(MultipointEvalFamilyInputs {
                 field_cfg: &self.all_field_cfgs[family_idx],
                 trace_mles: &fq_trace_mles_padded[prime_idx],
-                bit_op_mles: &[],
+                bit_op_mles: &self.bit_op_mles_fq[prime_idx],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals: &fq_up_evals_padded[prime_idx],
-                bit_op_evals: &[],
+                bit_op_evals: &self.cpr_proofs_fq[prime_idx].bit_op_evals,
                 down_evals: &self.cpr_proofs_fq[prime_idx].down_evals,
             });
         }

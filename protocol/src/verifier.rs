@@ -19,7 +19,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair, UairSignature, UairTrace,
+    BitOp, Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
@@ -258,6 +258,7 @@ pub struct VerifierSumchecked<
     /// CPR subclaim's evaluation point ($r^\star$)
     cpr_eval_point: Vec<F>,
     cpr_up_evals: Vec<F>,
+    cpr_bit_op_evals: Vec<F>,
     cpr_down_evals: Vec<F>,
     /// Per-prime CPR subclaim evaluation points (r*, lifted into
     /// each family's field). Length `n_fq`. Empty for UAIRs with no
@@ -265,6 +266,9 @@ pub struct VerifierSumchecked<
     cpr_eval_points_fq: Vec<Vec<F>>,
     /// Per-prime CPR subclaim `up_evals`. Length `n_fq`. Consumed in step 5.
     cpr_up_evals_fq: Vec<Vec<F>>,
+    /// Per-prime CPR subclaim `bit_op_evals`. Length `n_fq`. Consumed in step
+    /// 5.
+    cpr_bit_op_evals_fq: Vec<Vec<F>>,
     /// Per-prime CPR subclaim `down_evals`. Length `n_fq`. Consumed in step 5.
     cpr_down_evals_fq: Vec<Vec<F>>,
     /// `bit_slice_evals` carried over from booleanity's `finalize_verifier`,
@@ -897,6 +901,7 @@ where
         let n_fq = self.all_field_cfgs.len().saturating_sub(1);
         let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         let mut cpr_up_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        let mut cpr_bit_op_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         let mut cpr_down_evals_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
         for (prime_idx, ((cpr_proof_i, cpr_ancillary_i), md_subclaims_i)) in self
             .proof_cpr_fq
@@ -919,6 +924,7 @@ where
             )?;
             cpr_eval_points_fq.push(cpr_subclaim_i.evaluation_point);
             cpr_up_evals_fq.push(cpr_subclaim_i.up_evals);
+            cpr_bit_op_evals_fq.push(cpr_subclaim_i.bit_op_evals);
             cpr_down_evals_fq.push(cpr_subclaim_i.down_evals);
         }
 
@@ -945,9 +951,11 @@ where
             projecting_elements: self.projecting_elements,
             cpr_eval_point,
             cpr_up_evals: cpr_subclaim.up_evals,
+            cpr_bit_op_evals: cpr_subclaim.bit_op_evals,
             cpr_down_evals: cpr_subclaim.down_evals,
             cpr_eval_points_fq,
             cpr_up_evals_fq,
+            cpr_bit_op_evals_fq,
             cpr_down_evals_fq,
             bool_bit_slice_evals,
             alpha_prime_f,
@@ -1053,13 +1061,15 @@ where
 
         let mut all_families: Vec<MultipointEvalFamilyInputs<'_, F>> =
             Vec::with_capacity(add!(n_fq, 1));
+        // The verifier-side MP precheck only consumes the claimed eval vectors;
+        // bit-op MLE bodies exist on the prover side only.
         all_families.push(MultipointEvalFamilyInputs {
             field_cfg: &self.field_cfg,
             trace_mles: &[],
             bit_op_mles: &[],
             eval_point: &self.cpr_eval_point,
             up_evals: &q_up_evals,
-            bit_op_evals: &[],
+            bit_op_evals: &self.cpr_bit_op_evals,
             down_evals: &self.cpr_down_evals,
         });
 
@@ -1071,7 +1081,7 @@ where
                 bit_op_mles: &[],
                 eval_point: &self.cpr_eval_points_fq[prime_idx],
                 up_evals,
-                bit_op_evals: &[],
+                bit_op_evals: &self.cpr_bit_op_evals_fq[prime_idx],
                 down_evals: &self.cpr_down_evals_fq[prime_idx],
             });
         }
@@ -1307,7 +1317,12 @@ where
         MultipointEval::verify_subclaim(
             &self.mp_subclaim,
             &q_open_evals,
-            &[],
+            &derive_bit_op_open_evals::<F, D>(
+                self.base.uair_signature.bit_op_specs(),
+                &q_all_lifted,
+                &self.projecting_elements[0],
+                &self.field_cfg,
+            )?,
             self.base.uair_signature.shifts(),
             &self.field_cfg,
         )?;
@@ -1340,7 +1355,12 @@ where
             MultipointEval::verify_subclaim(
                 &self.mp_subclaims_fq[prime_idx],
                 &open_evals_i,
-                &[],
+                &derive_bit_op_open_evals::<F, D>(
+                    self.base.uair_signature.bit_op_specs(),
+                    &all_lifted_i,
+                    &self.projecting_elements[family_idx],
+                    cfg_i,
+                )?,
                 self.base.uair_signature.shifts(),
                 cfg_i,
             )?;
@@ -1554,6 +1574,27 @@ impl<IdealOverF: Ideal> VerifierPcsVerified<IdealOverF> {
     pub fn finish<F: PrimeField>(self) -> Result<(), ProtocolError<F>> {
         Ok(())
     }
+}
+
+fn derive_bit_op_open_evals<F: PrimeField, const D: usize>(
+    specs: &[zinc_uair::BitOpSpec],
+    all_lifted: &[DynamicPolynomialF<F>],
+    projecting_element: &F,
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ProtocolError<F>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let source = &all_lifted[spec.source_col()];
+            let transformed = match spec.op() {
+                BitOp::Rot(c) => source.rotate_right::<D>(c, field_cfg),
+                BitOp::ShR(c) => source.shr::<D>(c, field_cfg),
+            };
+            transformed
+                .evaluate_at_point(projecting_element)
+                .map_err(ProtocolError::LiftedEvalProjection)
+        })
+        .collect()
 }
 
 //
