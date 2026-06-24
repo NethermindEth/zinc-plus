@@ -195,6 +195,115 @@ impl BitOpSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Affine virtual columns for booleanity targets
+// ---------------------------------------------------------------------------
+
+/// One term in an affine virtual binary-polynomial expression.
+///
+/// `source_col` uses the same flat `binary_poly || arbitrary_poly || int`
+/// indexing as [`ShiftSpec`]. [`UairSignature::with_affine_virtual_specs`]
+/// validates that every source is a `binary_poly` column.
+///
+/// `row_shift = 0` means the current row. Positive shifts use the same
+/// zero-padded row access convention as [`ShiftSpec`]: row `i` reads
+/// `source_col[i + row_shift]`, or zero beyond the trace length.
+///
+/// `coefficient` is an integer scalar. The Ch/Maj affine booleanity
+/// constraints from the Zinc+ paper only need small signed coefficients
+/// such as `1`, `-1`, and `-2`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AffineVirtualTerm {
+    source_col: usize,
+    coefficient: i64,
+    row_shift: usize,
+}
+
+impl AffineVirtualTerm {
+    /// Construct an unshifted term `coefficient * source_col`.
+    pub fn new(source_col: usize, coefficient: i64) -> Self {
+        assert!(
+            coefficient != 0,
+            "affine virtual coefficient must be non-zero"
+        );
+        Self {
+            source_col,
+            coefficient,
+            row_shift: 0,
+        }
+    }
+
+    /// Construct a shifted term `coefficient * source_col[row + row_shift]`.
+    pub fn new_shifted(source_col: usize, coefficient: i64, row_shift: usize) -> Self {
+        assert!(row_shift > 0, "row shift must be non-zero");
+        Self {
+            row_shift,
+            ..Self::new(source_col, coefficient)
+        }
+    }
+
+    pub fn source_col(&self) -> usize {
+        self.source_col
+    }
+
+    pub fn coefficient(&self) -> i64 {
+        self.coefficient
+    }
+
+    pub fn row_shift(&self) -> usize {
+        self.row_shift
+    }
+}
+
+/// Declares an affine virtual binary-polynomial expression whose coefficients
+/// must be proved boolean.
+///
+/// The represented expression is
+///
+/// ```text
+/// ones_coefficient * 1_D + sum_i coefficient_i * source_i[row + shift_i]
+/// ```
+///
+/// where `1_D = 1 + X + ... + X^(D-1)` is the all-ones bit polynomial for the
+/// binary-poly cell width `D`. This covers the paper's Ch/Maj lookup targets,
+/// for example `a + b + c - 2m` and `(1_D - e) + g - 2u`.
+///
+/// Affine virtual specs are Q-side booleanity targets. They do not add entries
+/// to the `down` row, and they are not committed columns.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AffineVirtualSpec {
+    terms: Vec<AffineVirtualTerm>,
+    ones_coefficient: i64,
+}
+
+impl AffineVirtualSpec {
+    /// Construct an affine virtual expression with no `1_D` offset.
+    pub fn new(terms: Vec<AffineVirtualTerm>) -> Self {
+        Self::with_ones_coefficient(terms, 0)
+    }
+
+    /// Construct an affine virtual expression with a scalar multiple of
+    /// `1_D` as its constant bit-polynomial offset.
+    pub fn with_ones_coefficient(terms: Vec<AffineVirtualTerm>, ones_coefficient: i64) -> Self {
+        assert!(
+            !terms.is_empty(),
+            "affine virtual spec must have at least one non-constant term"
+        );
+        Self {
+            terms,
+            ones_coefficient,
+        }
+    }
+
+    pub fn terms(&self) -> &[AffineVirtualTerm] {
+        &self.terms
+    }
+
+    pub fn ones_coefficient(&self) -> i64 {
+        self.ones_coefficient
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Column layout types
 // ---------------------------------------------------------------------------
 
@@ -305,6 +414,9 @@ pub struct UairSignature<Prime: Semiring> {
     /// binary_poly source column and contributes one extra entry to the
     /// binary_poly slice of the down row, appended after the shifted entries.
     bit_op_specs: Vec<BitOpSpec>,
+    /// Affine virtual expressions whose cells are Q-side booleanity targets.
+    /// These are not committed columns and do not contribute to `down_cols`.
+    affine_virtual_specs: Vec<AffineVirtualSpec>,
     /// Column-type layout of the down row (shifted virtuals + bit-op virtuals).
     down_cols: VirtualColumnLayout,
     /// Lookup specifications: which trace columns are constrained against
@@ -374,6 +486,7 @@ impl<Prime: Semiring> UairSignature<Prime> {
             public_cols,
             shifts,
             bit_op_specs: Vec::new(),
+            affine_virtual_specs: Vec::new(),
             down_cols,
             witness_cols,
             lookup_specs,
@@ -436,6 +549,33 @@ impl<Prime: Semiring> UairSignature<Prime> {
         self
     }
 
+    /// Attach affine virtual booleanity specs to the signature.
+    ///
+    /// Each term in each spec must reference a binary_poly column. Affine
+    /// virtuals describe Q-side `{0,1}^{<D}[X]` membership targets such as the
+    /// Ch/Maj linear combinations in the Zinc+ paper. They are not committed
+    /// columns and do not affect the down-row layout.
+    pub fn with_affine_virtual_specs(
+        mut self,
+        affine_virtual_specs: Vec<AffineVirtualSpec>,
+    ) -> Self {
+        let binary_poly_end = self.total_cols.num_binary_poly_cols();
+        for spec in &affine_virtual_specs {
+            for term in spec.terms() {
+                assert!(
+                    term.source_col() < binary_poly_end,
+                    "AffineVirtualTerm source_col {} is not a binary_poly column \
+                     (binary_poly_end = {}). Affine virtual booleanity targets \
+                     are only defined over binary_poly cells.",
+                    term.source_col(),
+                    binary_poly_end,
+                );
+            }
+        }
+        self.affine_virtual_specs = affine_virtual_specs;
+        self
+    }
+
     pub fn lookup_specs(&self) -> &[LookupColumnSpec] {
         &self.lookup_specs
     }
@@ -485,6 +625,11 @@ impl<Prime: Semiring> UairSignature<Prime> {
     /// entries.
     pub fn bit_op_specs(&self) -> &[BitOpSpec] {
         &self.bit_op_specs
+    }
+
+    /// Affine virtual booleanity specs, in insertion order.
+    pub fn affine_virtual_specs(&self) -> &[AffineVirtualSpec] {
+        &self.affine_virtual_specs
     }
 
     /// Number of row-shift virtual columns that precede bit-op virtuals in the
@@ -759,5 +904,65 @@ mod tests {
     fn bit_op_specs_reject_non_binary_source() {
         let _ =
             signature_with_mixed_shifts().with_bit_op_specs(vec![BitOpSpec::new(2, BitOp::ShR(1))]);
+    }
+
+    #[test]
+    fn affine_virtual_specs_are_attached_in_order() {
+        let specs = vec![
+            AffineVirtualSpec::new(vec![
+                AffineVirtualTerm::new(0, 1),
+                AffineVirtualTerm::new_shifted(1, 1, 2),
+                AffineVirtualTerm::new(0, -2),
+            ]),
+            AffineVirtualSpec::with_ones_coefficient(
+                vec![
+                    AffineVirtualTerm::new(0, -1),
+                    AffineVirtualTerm::new_shifted(1, 1, 1),
+                ],
+                1,
+            ),
+        ];
+
+        let sig = signature_with_mixed_shifts().with_affine_virtual_specs(specs.clone());
+
+        assert_eq!(sig.affine_virtual_specs(), specs);
+        assert_eq!(sig.affine_virtual_specs()[0].terms()[1].source_col(), 1);
+        assert_eq!(sig.affine_virtual_specs()[0].terms()[1].coefficient(), 1);
+        assert_eq!(sig.affine_virtual_specs()[0].terms()[1].row_shift(), 2);
+        assert_eq!(sig.affine_virtual_specs()[1].ones_coefficient(), 1);
+        assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
+        assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
+        assert_eq!(sig.down_cols().num_int_cols(), 1);
+    }
+
+    #[test]
+    fn empty_affine_virtual_specs_are_supported() {
+        let sig = signature_with_mixed_shifts().with_affine_virtual_specs(vec![]);
+
+        assert!(sig.affine_virtual_specs().is_empty());
+        assert_eq!(sig.down_cols().num_binary_poly_cols(), 1);
+        assert_eq!(sig.down_cols().num_arbitrary_poly_cols(), 1);
+        assert_eq!(sig.down_cols().num_int_cols(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "affine virtual coefficient must be non-zero")]
+    fn affine_virtual_term_rejects_zero_coefficient() {
+        let _ = AffineVirtualTerm::new(0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "affine virtual spec must have at least one non-constant term")]
+    fn affine_virtual_spec_rejects_constant_only_expression() {
+        let _ = AffineVirtualSpec::with_ones_coefficient(vec![], 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a binary_poly column")]
+    fn affine_virtual_specs_reject_non_binary_source() {
+        let _ =
+            signature_with_mixed_shifts().with_affine_virtual_specs(vec![AffineVirtualSpec::new(
+                vec![AffineVirtualTerm::new(2, 1)],
+            )]);
     }
 }
