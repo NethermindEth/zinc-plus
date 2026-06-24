@@ -9,11 +9,13 @@ pub mod ideal;
 pub mod ideal_collector;
 pub mod lookup_types;
 
-use crypto_primitives::Semiring;
+use crypto_primitives::{PrimeField, Semiring};
 use std::borrow::Cow;
 use zinc_poly::{
     mle::DenseMultilinearExtension,
-    univariate::{binary::BinaryPoly, dense::DensePolynomial},
+    univariate::{
+        binary::BinaryPoly, dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF,
+    },
 };
 use zinc_utils::{UNCHECKED, add, from_ref::FromRef, mul_by_scalar::MulByScalar, sub};
 
@@ -144,6 +146,18 @@ impl BitOp {
     pub fn count(&self) -> usize {
         match self {
             BitOp::Rot(c) | BitOp::ShR(c) => *c,
+        }
+    }
+
+    /// Apply the bit operation to a projected bit-polynomial cell.
+    pub fn transform<F: PrimeField, const D: usize>(
+        &self,
+        source: &DynamicPolynomialF<F>,
+        field_cfg: &F::Config,
+    ) -> DynamicPolynomialF<F> {
+        match self {
+            BitOp::Rot(c) => source.rotate_right::<D>(*c, field_cfg),
+            BitOp::ShR(c) => source.shr::<D>(*c, field_cfg),
         }
     }
 }

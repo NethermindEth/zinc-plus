@@ -13,7 +13,7 @@ use zinc_poly::{
     utils::{ArithErrors as PolyArithErrors, build_eq_x_r_vec},
 };
 use zinc_uair::{
-    BitOp, BitOpSpec, ColumnLayout, ConstraintBuilder, ShiftSpec, TraceRow, Uair, UairSignature,
+    ColumnLayout, ConstraintBuilder, ShiftSpec, TraceRow, Uair, UairSignature,
     ideal::ImpossibleIdeal,
 };
 use zinc_utils::{
@@ -87,9 +87,7 @@ where
 
             for spec in uair_sig.bit_op_specs() {
                 let source = &trace_matrix[row_idx][spec.source_col()];
-                down.push(apply_bit_op_to_poly::<F, DEGREE_PLUS_ONE>(
-                    source, spec, field_cfg,
-                ));
+                down.push(spec.op().transform::<F, DEGREE_PLUS_ONE>(source, field_cfg));
             }
 
             for spec in &shifts[bit_op_down_offset..] {
@@ -327,11 +325,8 @@ where
         .bit_op_specs()
         .iter()
         .map(|spec| {
-            apply_bit_op_to_poly::<F, DEGREE_PLUS_ONE>(
-                &up_evals[spec.source_col()],
-                spec,
-                field_cfg,
-            )
+            spec.op()
+                .transform::<F, DEGREE_PLUS_ONE>(&up_evals[spec.source_col()], field_cfg)
         })
         .collect();
 
@@ -388,17 +383,6 @@ fn push_shifted_down_entry<F: PrimeField>(
         down.push(trace_matrix[shifted_row_idx][spec.source_col()].clone());
     } else {
         down.push(DynamicPolynomialF::zero());
-    }
-}
-
-fn apply_bit_op_to_poly<F: PrimeField, const DEGREE_PLUS_ONE: usize>(
-    source: &DynamicPolynomialF<F>,
-    spec: &BitOpSpec,
-    field_cfg: &F::Config,
-) -> DynamicPolynomialF<F> {
-    match spec.op() {
-        BitOp::Rot(c) => source.rotate_right::<DEGREE_PLUS_ONE>(c, field_cfg),
-        BitOp::ShR(c) => source.shr::<DEGREE_PLUS_ONE>(c, field_cfg),
     }
 }
 

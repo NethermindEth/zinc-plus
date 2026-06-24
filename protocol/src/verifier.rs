@@ -19,7 +19,7 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    BitOp, Uair, UairSignature, UairTrace,
+    Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     ideal::{Ideal, IdealCheck},
     ideal_collector::IdealOrZero,
@@ -1586,10 +1586,7 @@ fn derive_bit_op_open_evals<F: PrimeField, const D: usize>(
         .iter()
         .map(|spec| {
             let source = &all_lifted[spec.source_col()];
-            let transformed = match spec.op() {
-                BitOp::Rot(c) => source.rotate_right::<D>(c, field_cfg),
-                BitOp::ShR(c) => source.shr::<D>(c, field_cfg),
-            };
+            let transformed = spec.op().transform::<F, D>(source, field_cfg);
             transformed
                 .evaluate_at_point(projecting_element)
                 .map_err(ProtocolError::LiftedEvalProjection)

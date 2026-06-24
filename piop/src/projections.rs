@@ -8,7 +8,7 @@ use zinc_poly::{
     mle::DenseMultilinearExtension,
     univariate::dynamic::over_field::{DynamicPolyFInnerProduct, DynamicPolynomialF},
 };
-use zinc_uair::{BitOp, BitOpSpec, Uair, UairTrace, collect_scalars::collect_scalars};
+use zinc_uair::{BitOpSpec, Uair, UairTrace, collect_scalars::collect_scalars};
 use zinc_utils::{
     UNCHECKED, cfg_extend, cfg_into_iter, cfg_iter, cfg_iter_mut, inner_product::InnerProduct,
     powers,
@@ -357,10 +357,7 @@ pub fn build_bit_op_virtual_mle<F: PrimeField + 'static, const D: usize>(
     );
 
     let evaluate_with_bit_op = |cell: &DynamicPolynomialF<F>| -> F::Inner {
-        let transformed = match spec.op() {
-            BitOp::Rot(c) => cell.rotate_right::<D>(c, field_cfg),
-            BitOp::ShR(c) => cell.shr::<D>(c, field_cfg),
-        };
+        let transformed = spec.op().transform::<F, D>(cell, field_cfg);
         DynamicPolyFInnerProduct::inner_product::<UNCHECKED>(
             &transformed.coeffs,
             &projection_powers,
@@ -464,6 +461,7 @@ mod tests {
     use crypto_primitives::{
         Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_monty::MontyField,
     };
+    use zinc_uair::BitOp;
 
     type F = MontyField<LIMBS>;
 
