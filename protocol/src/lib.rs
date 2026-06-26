@@ -23,9 +23,11 @@
 //! - Lift-and-project (unprojected MLE evaluations at `r_0`)
 //! - Zip+ PCS open/verify at `r_0`
 
+pub mod constraint_system;
 pub mod fold;
 pub mod prover;
 pub mod shared_challenge;
+pub mod uair_frontend;
 pub mod verifier;
 
 #[cfg(feature = "parallel")]
