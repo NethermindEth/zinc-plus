@@ -201,22 +201,17 @@ impl BitOpSpec {
 // ---------------------------------------------------------------------------
 
 /// One term in an affine virtual binary-polynomial expression.
-///
-/// `source_col` uses the same flat `binary_poly || arbitrary_poly || int`
-/// indexing as [`ShiftSpec`]. [`UairSignature::with_affine_virtual_specs`]
-/// validates that every source is a `binary_poly` column.
-///
-/// `row_shift = 0` means the current row. Positive shifts use the same
-/// zero-padded row access convention as [`ShiftSpec`]: row `i` reads
-/// `source_col[i + row_shift]`, or zero beyond the trace length.
-///
-/// `coefficient` is an integer scalar. The Ch/Maj affine booleanity
-/// constraints from the Zinc+ paper only need small signed coefficients
-/// such as `1`, `-1`, and `-2`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AffineVirtualTerm {
+    /// Flat total-column index of a binary-polynomial source. Binary-polynomial
+    /// columns form the prefix of the trace layout, with public columns before
+    /// witness columns.
     source_col: usize,
+    /// Integer scalar applied to the source. The Ch/Maj constraints only need
+    /// small signed coefficients such as `1`, `-1`, and `-2`.
     coefficient: i64,
+    /// Forward row shift. Zero reads the current row; a positive shift reads
+    /// `source_col[row + row_shift]`, with zero padding past the trace length.
     row_shift: usize,
 }
 

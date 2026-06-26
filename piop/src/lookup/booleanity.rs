@@ -1,11 +1,13 @@
 //! Booleanity (binary-polynomial lookup) argument.
 //!
 //! Proves that every coefficient of every witness binary-polynomial column is
-//! a bit $\in \\{0,1\\}$. The argument is structured as a single
-//! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing
-//! CPR group with shared randomness, and emits bit-slice claims at the
+//! a bit $\in \\{0,1\\}$. The committed-witness path is structured as a
+//! [`MultiDegreeSumcheckGroup`] of degree 3, batched alongside the existing CPR
+//! group with shared randomness, and emits bit-slice claims at the
 //! multi-degree sumcheck output point $r^\star$ for the protocol layer's
 //! $\alpha'$ bridge into multipoint-eval (see "Soundness bridge" below).
+//! Affine virtual booleanity targets use a generic degree-3 group without the
+//! `BinaryPoly` round-1 fast path.
 //!
 //! # Relation
 //!
@@ -89,6 +91,7 @@ use zinc_transcript::{
     delegate_transcribable,
     traits::{ConstTranscribable, Transcript},
 };
+use zinc_uair::AffineVirtualSpec;
 use zinc_utils::{add, mul, powers};
 
 //
@@ -98,14 +101,16 @@ use zinc_utils::{add, mul, powers};
 /// Booleanity sumcheck group constructor / verifier.
 pub struct BooleanityChecker<C: SemiringConfig>(PhantomData<C>);
 
+type BooleanityZerocheckSetup<F> = (Vec<F>, Vec<F>, CombFn<F>);
+
 /// Proof produced by the booleanity prover.
 ///
-/// Carries `bit_slice_evals`: per-column bit-slice MLE evaluations at the
-/// multi-degree sumcheck output point $r^\star$, flat in
-/// `(j-major, i-minor)` order with length `num_wit_bin_cols * D`. It is
-/// absorbed into the transcript by `finalize_prover` / `finalize_verifier`,
-/// after which the protocol layer squeezes the $\alpha'$ challenge
-/// used to bind the bit-decomposition into the multipoint-eval boundary.
+/// Carries `bit_slice_evals`: per-booleanity-target bit-slice MLE evaluations
+/// at the multi-degree sumcheck output point $r^\star$, flat in
+/// `(j-major, i-minor)` order. It is absorbed into the transcript by
+/// `finalize_prover` / `finalize_verifier`, after which the protocol layer
+/// squeezes the $\alpha'$ challenge used to bind the bit-decomposition into
+/// the multipoint-eval boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BooleanityProof<F> {
     /// Flat list of `\widetilde{v_{j,i}}(r*)`, ordered `(j-major, i-minor)`.
@@ -133,7 +138,10 @@ delegate_transcribable!(BooleanityProof<F> { bit_slice_evals: Vec<F> }
 /// Ancillary data produced by [`BooleanityChecker::prepare_sumcheck_group`]
 /// and consumed by [`BooleanityChecker::finalize_prover`].
 pub struct BoolProverAncillary {
-    /// Number of witness binary-poly columns (`N`).
+    /// Number of binary-poly booleanity target columns (`N`).
+    ///
+    /// This is the witness binary-poly count for the committed-column group
+    /// and the affine virtual count for an affine virtual group.
     pub num_wit_bin_cols: usize,
     /// Bit-width of each binary-poly coefficient cell (`D`).
     pub bit_width: usize,
@@ -149,7 +157,7 @@ pub struct BoolVerifierAncillary<F> {
     pub alpha_powers: Vec<F>,
     /// The zerocheck point `r` sampled before the multi-degree sumcheck.
     pub zerocheck_point: Vec<F>,
-    /// Number of witness binary-poly columns (`N`).
+    /// Number of binary-poly booleanity target columns (`N`).
     pub num_wit_bin_cols: usize,
     /// Bit-width of each binary-poly coefficient cell (`D`).
     pub bit_width: usize,
@@ -197,38 +205,13 @@ where
     ) -> Result<(MultiDegreeSumcheckGroup<C>, BoolProverAncillary), BooleanityError<C::Element>>
     {
         let n = trace_bin_poly.len();
-        let one = field_cfg.one();
-
-        // Order of challenge squeezing must match between prover and verifier.
-
-        // 1. Zerocheck point r.
-        let r: Vec<C::Element> = transcript.get_field_challenges(num_vars, field_cfg);
-
-        // 2. Single batching challenge alpha over the flat (j-major, i-minor) index.
-        //    Powers vector has length N*D.
-        let alpha: C::Element = transcript.get_field_challenge(field_cfg);
-        let alpha_powers: Vec<C::Element> = powers(field_cfg, &alpha, n.saturating_mul(D));
-
-        // 3. comb_fn (degree 3 in the variables), used by `MultiDegreeSumcheck` in
-        //    rounds 2..num_vars:
-        //
-        //       eq_r(b) * sum_k alpha^k * v_k(b) * (v_k(b) - 1)
-        //
-        //    The fast path emits the round-1 message and the post-round-1
-        //    folded MLEs directly, so this closure is *not* invoked in round 1.
-        let comb_fn: CombFn<C::Element> = {
-            let alpha_powers = alpha_powers.clone();
-            let field_cfg = field_cfg.clone();
-            Box::new(move |mle_values: &[C::Element]| {
-                let eq_r_val = &mle_values[0];
-                let sum = batched_booleanity_sum(&field_cfg, &mle_values[1..], &alpha_powers);
-                field_cfg.mul(&sum, eq_r_val)
-            })
-        };
+        let (r, alpha_powers, comb_fn) =
+            booleanity_zerocheck_setup(transcript, n, D, num_vars, field_cfg);
 
         // 4. Precompute `E_other(b')` = eq(b', r[1..]) for the fast path.
-        //    `build_eq_x_r_inner` rejects empty inputs, so handle num_vars == 1
-        //    explicitly by emitting the empty-product table `[1]`.
+        //    `build_eq_x_r` rejects empty inputs, so handle num_vars == 1 explicitly by
+        //    emitting the empty-product table `[1]`.
+        let one = field_cfg.one();
         let eq_other_table: Vec<C::Element> = if num_vars <= 1 {
             vec![one]
         } else {
@@ -257,6 +240,55 @@ where
             ),
             BoolProverAncillary {
                 num_wit_bin_cols: n,
+                bit_width: D,
+                num_vars,
+            },
+        ))
+    }
+
+    /// Build a generic booleanity sumcheck group for affine virtual targets.
+    ///
+    /// Unlike [`Self::prepare_sumcheck_group`], this path does not install the
+    /// `BinaryPoly` round-1 fast path: affine residual cells may be non-binary
+    /// field values before the booleanity relation is enforced. The trace
+    /// slice must contain all binary-polynomial columns in public-then-witness
+    /// order so that affine source indices match the UAIR layout.
+    pub fn prepare_affine_virtual_sumcheck_group<const D: usize>(
+        transcript: &mut impl Transcript,
+        all_trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        affine_virtual_specs: &[AffineVirtualSpec],
+        num_vars: usize,
+        field_cfg: &C,
+    ) -> Result<(MultiDegreeSumcheckGroup<C>, BoolProverAncillary), BooleanityError<C::Element>>
+    {
+        if affine_virtual_specs.is_empty() {
+            return Err(BooleanityError::NoAffineVirtualSpecs);
+        }
+        if all_trace_bin_poly.is_empty() {
+            return Err(BooleanityError::NoBinaryPolyColumns);
+        }
+
+        let bit_slice_mles = build_affine_virtual_bit_slice_mles::<C, D>(
+            all_trace_bin_poly,
+            affine_virtual_specs,
+            num_vars,
+            field_cfg,
+        );
+        let num_cols = affine_virtual_specs.len();
+        let active_len = num_cols.saturating_mul(D);
+        let (r, _, comb_fn) =
+            booleanity_zerocheck_setup(transcript, num_cols, D, num_vars, field_cfg);
+
+        debug_assert_eq!(bit_slice_mles.len(), active_len);
+
+        let mut mles = Vec::with_capacity(add!(1, bit_slice_mles.len()));
+        mles.push(build_eq_x_r(field_cfg, &r)?);
+        mles.extend(bit_slice_mles);
+
+        Ok((
+            MultiDegreeSumcheckGroup::new(3, mles, comb_fn),
+            BoolProverAncillary {
+                num_wit_bin_cols: num_cols,
                 bit_width: D,
                 num_vars,
             },
@@ -595,6 +627,8 @@ where
 pub enum BooleanityError<F: std::fmt::Debug> {
     #[error("no binary polynomial columns provided to booleanity checker")]
     NoBinaryPolyColumns,
+    #[error("no affine virtual specs provided to booleanity checker")]
+    NoAffineVirtualSpecs,
     #[error("sumcheck error: {0}")]
     SumcheckError(#[from] SumCheckError<F>),
     #[error("expected booleanity claimed sum is non-zero: got {got:?}")]
@@ -685,6 +719,141 @@ where
     out
 }
 
+fn booleanity_zerocheck_setup<C>(
+    transcript: &mut impl Transcript,
+    num_cols: usize,
+    bit_width: usize,
+    num_vars: usize,
+    field_cfg: &C,
+) -> BooleanityZerocheckSetup<C::Element>
+where
+    C: BaseFieldConfig + ProjectPrimitiveIntegersWithConfig + 'static,
+    C::Element: ConstTranscribable,
+    C::Integer: ConstTranscribable,
+{
+    // Order of challenge squeezing must match between prover and verifier.
+
+    // 1. Zerocheck point r.
+    let r: Vec<C::Element> = transcript.get_field_challenges(num_vars, field_cfg);
+
+    // 2. Single batching challenge alpha over the flat (j-major, i-minor) index.
+    //    Powers vector has length N*D.
+    let alpha: C::Element = transcript.get_field_challenge(field_cfg);
+    let alpha_powers: Vec<C::Element> =
+        powers(field_cfg, &alpha, num_cols.saturating_mul(bit_width));
+
+    // 3. comb_fn (degree 3 in the variables):
+    //
+    //       eq_r(b) * sum_k alpha^k * v_k(b) * (v_k(b) - 1)
+    //
+    //    The committed-column group installs a fast path that emits the
+    //    round-1 message and folded MLEs directly, so this closure is not
+    //    invoked in its first round. Generic affine virtual groups use it in
+    //    every round.
+    let comb_fn: CombFn<C::Element> = {
+        let alpha_powers = alpha_powers.clone();
+        let field_cfg = field_cfg.clone();
+        Box::new(move |mle_values: &[C::Element]| {
+            let eq_r_val = &mle_values[0];
+            let sum = batched_booleanity_sum(&field_cfg, &mle_values[1..], &alpha_powers);
+            field_cfg.mul(&sum, eq_r_val)
+        })
+    };
+
+    (r, alpha_powers, comb_fn)
+}
+
+/// Build per-bit-slice MLEs for affine virtual booleanity targets.
+///
+/// Returns `N * D` MLEs in `(spec-major, i-minor)` order:
+/// `$[v_{0,0}, v_{0,1}, ..., v_{0,D-1}, v_{1,0}, ...]$`. The `j`-th
+/// spec, `i`-th bit MLE evaluates at row `b` to the `i`-th coefficient of
+///
+/// ```text
+/// ones_coefficient * 1_D + sum_t coefficient_t * source_t[b + row_shift_t]
+/// ```
+///
+/// with out-of-range shifted rows contributing zero, matching `ShiftSpec`.
+/// `all_trace_bin_poly` must contain every binary-polynomial trace column in
+/// the UAIR's flat total-column order: public columns first, then witness
+/// columns.
+pub fn build_affine_virtual_bit_slice_mles<C, const D: usize>(
+    all_trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+    affine_virtual_specs: &[AffineVirtualSpec],
+    num_vars: usize,
+    field_cfg: &C,
+) -> Vec<DenseMultilinearExtension<C::Element>>
+where
+    C: SemiringConfig + ProjectPrimitiveIntegersWithConfig,
+{
+    if affine_virtual_specs.is_empty() {
+        return Vec::new();
+    }
+
+    let n_rows = 1usize << num_vars;
+    for col in all_trace_bin_poly {
+        assert_eq!(
+            col.num_vars, num_vars,
+            "all affine virtual source columns must have the same num_vars",
+        );
+        assert_eq!(
+            col.evaluations.len(),
+            n_rows,
+            "source column length must match num_vars",
+        );
+    }
+
+    let mut out = Vec::with_capacity(affine_virtual_specs.len().saturating_mul(D));
+    for spec in affine_virtual_specs {
+        let ones = field_cfg.project(&spec.ones_coefficient());
+        let terms: Vec<_> = spec
+            .terms()
+            .iter()
+            .map(|term| {
+                assert!(
+                    term.source_col() < all_trace_bin_poly.len(),
+                    "AffineVirtualTerm source_col {} out of range (binary columns = {})",
+                    term.source_col(),
+                    all_trace_bin_poly.len(),
+                );
+                (
+                    term.source_col(),
+                    field_cfg.project(&term.coefficient()),
+                    term.row_shift(),
+                )
+            })
+            .collect();
+
+        for bit_idx in 0..D {
+            let mut evals: Vec<C::Element> = Vec::with_capacity(n_rows);
+            for row_idx in 0..n_rows {
+                let mut residual = ones.clone();
+                for (source_col, coeff, row_shift) in &terms {
+                    let shifted_row = add!(row_idx, *row_shift);
+                    if shifted_row >= n_rows {
+                        continue;
+                    }
+                    let bit = all_trace_bin_poly[*source_col].evaluations[shifted_row]
+                        .iter()
+                        .nth(bit_idx)
+                        .expect("BinaryPoly<D> has D coefficients")
+                        .into_inner();
+                    if bit {
+                        field_cfg.add_assign(&mut residual, coeff);
+                    }
+                }
+                evals.push(residual);
+            }
+            out.push(DenseMultilinearExtension {
+                num_vars,
+                evaluations: evals,
+            });
+        }
+    }
+
+    out
+}
+
 //
 // Tests
 //
@@ -701,10 +870,13 @@ mod tests {
     use super::*;
     use crate::sumcheck::multi_degree::MultiDegreeSumcheck;
     use crypto_bigint::{U128, const_monty_params};
-    use crypto_primitives::{FixedConfig, crypto_bigint_const_monty::ConstMontyField};
+    use crypto_primitives::{
+        FixedConfig, ProjectElementWithConfig, crypto_bigint_const_monty::ConstMontyField,
+    };
     use num_traits::{One, Zero};
     use zinc_poly::mle::MultilinearExtension;
     use zinc_transcript::Blake3Transcript;
+    use zinc_uair::{AffineVirtualSpec, AffineVirtualTerm};
     use zinc_utils::powers;
 
     const_monty_params!(TestParams, U128, "00000000b933426489189cb5b47d567f");
@@ -917,6 +1089,236 @@ mod tests {
             |err| matches!(err, BooleanityError::WrongBitSliceEvalsNumber { .. }),
             false,
         );
+    }
+
+    #[test]
+    fn affine_virtual_bit_slice_mles_materialize_residual_coefficients() {
+        let cfg = &FC::default();
+        let public = build_col(vec![[true; D], [true; D], [true; D], [true; D]]);
+        let a = build_col(vec![
+            [true, false, true, false],
+            [false, true, false, true],
+            [true, true, false, false],
+            [false, false, true, true],
+        ]);
+        let b = build_col(vec![
+            [false, true, true, false],
+            [true, false, false, false],
+            [false, true, true, true],
+            [true, true, false, false],
+        ]);
+        let m = build_col(vec![
+            [false, false, true, false],
+            [false, false, false, false],
+            [false, true, false, false],
+            [false, false, false, false],
+        ]);
+        let specs = vec![AffineVirtualSpec::new(vec![
+            AffineVirtualTerm::new(1, 1),
+            AffineVirtualTerm::new(2, 1),
+            AffineVirtualTerm::new(3, -2),
+        ])];
+
+        // Index 0 is the public binary-polynomial prefix. Affine source
+        // indices use the full public-then-witness trace layout.
+        let mles = build_affine_virtual_bit_slice_mles::<FC, D>(&[public, a, b, m], &specs, 2, cfg);
+
+        assert_eq!(mles.len(), D);
+        let expected_by_bit: [[i32; 4]; D] =
+            [[1, 1, 1, 1], [1, 1, 0, 1], [0, 0, 1, 1], [0, 1, 1, 1]];
+        for (bit_idx, expected_rows) in expected_by_bit.iter().enumerate() {
+            let expected: Vec<_> = expected_rows
+                .iter()
+                .map(|value| cfg.project(value))
+                .collect();
+            assert_eq!(
+                mles[bit_idx].evaluations, expected,
+                "unexpected affine virtual residual at bit {bit_idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn affine_virtual_bit_slice_mles_apply_forward_shift_and_ones_offset() {
+        let cfg = &FC::default();
+        let a = build_col(vec![
+            [true, false, false, false],
+            [false, true, false, false],
+            [true, true, false, false],
+            [false, false, false, false],
+        ]);
+        let specs = vec![AffineVirtualSpec::with_ones_coefficient(
+            vec![AffineVirtualTerm::new_shifted(0, -1, 1)],
+            1,
+        )];
+
+        let mles = build_affine_virtual_bit_slice_mles::<FC, D>(&[a], &specs, 2, cfg);
+
+        assert_eq!(mles.len(), D);
+        let expected_by_bit: [[i32; 4]; D] =
+            [[1, 0, 1, 1], [0, 0, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]];
+        for (bit_idx, expected_rows) in expected_by_bit.iter().enumerate() {
+            let expected: Vec<_> = expected_rows
+                .iter()
+                .map(|value| cfg.project(value))
+                .collect();
+            assert_eq!(
+                mles[bit_idx].evaluations, expected,
+                "unexpected shifted affine virtual residual at bit {bit_idx}"
+            );
+        }
+    }
+
+    fn run_affine_virtual_roundtrip(
+        all_trace_bin_poly: &[DenseMultilinearExtension<BinaryPoly<D>>],
+        specs: &[AffineVirtualSpec],
+        num_vars: usize,
+        tamper_proof: impl FnOnce(&mut BooleanityProof<F>),
+    ) -> Result<(), BooleanityError<F>> {
+        let cfg = &FC::default();
+
+        let mut pt = make_transcript();
+        let (group, anc) = BooleanityChecker::<FC>::prepare_affine_virtual_sumcheck_group::<D>(
+            &mut pt,
+            all_trace_bin_poly,
+            specs,
+            num_vars,
+            cfg,
+        )
+        .expect("prepare_affine_virtual_sumcheck_group failed");
+        let mut sumcheck_outputs = MultiDegreeSumcheck::<FC>::prove_as_subprotocol(
+            &mut pt,
+            vec![(vec![group], cfg)],
+            num_vars,
+            cfg,
+        );
+        let (md_proof, states) = sumcheck_outputs.pop().expect("single family");
+        let state = states.into_iter().next().unwrap();
+        let mut proof = BooleanityChecker::<FC>::finalize_prover(&mut pt, state, anc, cfg)
+            .expect("finalize prover");
+        tamper_proof(&mut proof);
+
+        let mut vt = make_transcript();
+        let verifier_anc = BooleanityChecker::<FC>::prepare_verifier(
+            &mut vt,
+            &md_proof.claimed_sums()[0],
+            specs.len(),
+            D,
+            num_vars,
+            cfg,
+        )?;
+        let md_subclaims = MultiDegreeSumcheck::<FC>::verify_as_subprotocol(
+            &mut vt,
+            num_vars,
+            &[(&md_proof, cfg)],
+            cfg,
+        )
+        .expect("md verify")
+        .pop()
+        .expect("single family");
+
+        BooleanityChecker::<FC>::finalize_verifier(
+            &mut vt,
+            proof,
+            md_subclaims.point().to_vec(),
+            &md_subclaims.expected_evaluations()[0],
+            verifier_anc,
+            cfg,
+        )
+        .map(|_| ())
+    }
+
+    #[test]
+    fn affine_virtual_group_accepts_boolean_residual_and_rejects_non_boolean_residual() {
+        let public = build_col(vec![[true; D], [true; D], [true; D], [true; D]]);
+        let a = build_col(vec![
+            [true, false, true, false],
+            [false, true, false, true],
+            [true, true, false, false],
+            [false, false, true, true],
+        ]);
+        let b = build_col(vec![
+            [false, true, true, false],
+            [true, false, false, false],
+            [false, true, true, true],
+            [true, true, false, false],
+        ]);
+        let m = build_col(vec![
+            [false, false, true, false],
+            [false, false, false, false],
+            [false, true, false, false],
+            [false, false, false, false],
+        ]);
+        let specs = vec![AffineVirtualSpec::new(vec![
+            AffineVirtualTerm::new(1, 1),
+            AffineVirtualTerm::new(2, 1),
+            AffineVirtualTerm::new(3, -2),
+        ])];
+
+        run_affine_virtual_roundtrip(
+            &[public.clone(), a.clone(), b.clone(), m],
+            &specs,
+            2,
+            |_| {},
+        )
+        .expect("boolean affine residual should verify");
+
+        let bad_m = build_col(vec![
+            [true, false, true, false],
+            [false, false, false, false],
+            [false, true, false, false],
+            [false, false, false, false],
+        ]);
+        let err = run_affine_virtual_roundtrip(&[public, a, b, bad_m], &specs, 2, |_| {})
+            .expect_err("non-boolean affine residual should be rejected");
+        assert!(matches!(err, BooleanityError::NonZeroClaimedSum { .. }));
+    }
+
+    #[test]
+    fn affine_virtual_group_rejects_tampered_bit_slice_eval() {
+        let zero = zero_col_4rows();
+        let specs = vec![AffineVirtualSpec::new(vec![AffineVirtualTerm::new(0, 1)])];
+
+        let err = run_affine_virtual_roundtrip(&[zero], &specs, 2, |proof| {
+            proof.bit_slice_evals[0] += F::from(7u32);
+        })
+        .expect_err("tampered affine bit-slice evaluation should be rejected");
+        assert!(matches!(
+            err,
+            BooleanityError::ClaimValueDoesNotMatch { .. }
+        ));
+    }
+
+    #[test]
+    fn affine_virtual_prepare_rejects_missing_inputs_with_precise_errors() {
+        let cfg = &FC::default();
+        let mut transcript = make_transcript();
+        let col = zero_col_4rows();
+        let no_specs = BooleanityChecker::<FC>::prepare_affine_virtual_sumcheck_group::<D>(
+            &mut transcript,
+            &[col],
+            &[],
+            2,
+            cfg,
+        );
+        assert!(matches!(
+            no_specs,
+            Err(BooleanityError::NoAffineVirtualSpecs)
+        ));
+
+        let mut transcript = make_transcript();
+        let specs = vec![AffineVirtualSpec::new(vec![AffineVirtualTerm::new(0, 1)])];
+        let no_columns = BooleanityChecker::<FC>::prepare_affine_virtual_sumcheck_group::<D>(
+            &mut transcript,
+            &[],
+            &specs,
+            2,
+            cfg,
+        );
+        assert!(matches!(
+            no_columns,
+            Err(BooleanityError::NoBinaryPolyColumns)
+        ));
     }
 
     //
