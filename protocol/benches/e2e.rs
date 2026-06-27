@@ -37,6 +37,7 @@ use zinc_uair::{
     ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
+    field::runtime_monty::Fp,
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
     mul_by_scalar::MulByScalar,
@@ -321,7 +322,10 @@ const INT_LIMBS: usize = U64::LIMBS;
 // fixed secp256k1 base prime fits in `Fmod = Uint<FIELD_LIMBS>`.
 const FIELD_LIMBS: usize = U64::LIMBS * 4;
 
-type F = MontyField<FIELD_LIMBS>;
+// Value-sized field with the modulus installed once into `ProofSlot` (drop-in
+// for `MontyField<FIELD_LIMBS>`; see utils/src/field/runtime_monty.rs).
+zinc_utils::define_modulus!(ProofSlot, FIELD_LIMBS);
+type F = Fp<ProofSlot, FIELD_LIMBS>;
 
 type BenchZincTypes = GenericBenchZincTypes<
     /* Int         = */ i64,

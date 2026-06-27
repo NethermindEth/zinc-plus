@@ -799,6 +799,7 @@ mod tests {
     };
     use zinc_utils::{
         CHECKED,
+        field::runtime_monty::Fp,
         from_ref::FromRef,
         inner_product::{MBSInnerProduct, ScalarProduct},
         projectable_to_field::ProjectableToField,
@@ -849,7 +850,12 @@ mod tests {
         150
     };
 
-    type F = MontyField<FIELD_LIMBS>;
+    // Value-sized field with the modulus installed once into `ProofSlot`
+    // (drop-in for `MontyField<FIELD_LIMBS>`; see utils/src/field/runtime_monty.rs).
+    // `F::make_cfg` (called via `secp256k1_field_cfg`) installs the slot before
+    // any field arithmetic runs.
+    zinc_utils::define_modulus!(ProofSlot, FIELD_LIMBS);
+    type F = Fp<ProofSlot, FIELD_LIMBS>;
 
     #[derive(Debug, Clone)]
     pub struct BinPolyZipTypes {}
