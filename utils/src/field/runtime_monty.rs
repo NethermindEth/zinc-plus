@@ -235,12 +235,6 @@ impl<S: Modulus<LIMBS>, const LIMBS: usize> Fp<S, LIMBS> {
         Self::from_montgomery(*S::params().monty.one())
     }
 
-    /// True iff this is the additive identity.
-    #[inline]
-    pub fn is_zero(&self) -> bool {
-        self.mont == Uint::ZERO
-    }
-
     /// Multiplicative inverse, or `None` for zero. (Not a hot path; routed
     /// through `MontyForm` for a vetted constant-time inversion.)
     #[inline]
@@ -250,9 +244,11 @@ impl<S: Modulus<LIMBS>, const LIMBS: usize> Fp<S, LIMBS> {
             .map(|i: MontyForm<LIMBS>| Self::from_montgomery(*i.as_montgomery()))
     }
 
-    /// Exponentiation by a small exponent (square-and-multiply).
+    /// Exponentiation by a small exponent (square-and-multiply). Exposed as the
+    /// `num_traits::Pow<u32>` trait impl below; named distinctly to avoid a
+    /// method-resolution clash with it.
     #[inline]
-    pub fn pow(&self, mut exp: u32) -> Self {
+    pub fn pow_u32(&self, mut exp: u32) -> Self {
         let mut base = *self;
         let mut acc = Self::one();
         while exp > 0 {
@@ -514,6 +510,296 @@ pub(crate) mod mont_mul {
     }
 }
 
+// ===========================================================================
+// Drop-in `F` integration: the crypto-primitives + zinc trait surface.
+//
+// `Fp` behaves like `ConstMontyField` (ambient modulus), not the dynamic
+// `MontyField` (per-element config): conversions are plain `From<T>`, so
+// `FromWithConfig<T>` / `FromPrimitiveWithConfig` come for free via the blanket
+// impls in crypto-primitives. `Config = ()`, and `make_cfg` installs the runtime
+// modulus into the slot. `Inner`/`Modulus` reuse crypto-primitives' `Uint`
+// newtype, so their heavy bounds (ConstIntSemiring, ConstTranscribable, FromRef,
+// Zero, Default, …) are inherited unchanged.
+// ===========================================================================
+
+use crate::from_ref::FromRef;
+use crate::inner_transparent_field::InnerTransparentField;
+use crate::mul_by_scalar::MulByScalar;
+use crate::projectable_to_field::ProjectableToField;
+use crypto_primitives::crypto_bigint_int::Int as CpInt;
+use crypto_primitives::crypto_bigint_monty::MontyField;
+use crypto_primitives::crypto_bigint_uint::Uint as CpUint;
+use crypto_primitives::{
+    Field, FieldError, FromWithConfig, IntoWithConfig, PrimeField, Ring, Semiring,
+};
+use num_traits::{CheckedAdd, CheckedMul, CheckedNeg, CheckedSub, Pow};
+
+// --- Division (via the multiplicative inverse) ---
+impl<S: Modulus<LIMBS>, const LIMBS: usize> core::ops::Div for Fp<S, LIMBS> {
+    type Output = Self;
+    // Field division is multiplication by the inverse — the `*` is correct here.
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    #[inline]
+    fn div(self, rhs: Self) -> Self {
+        self * rhs.inv().expect("runtime_monty: division by zero")
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> core::ops::Div<&Fp<S, LIMBS>> for Fp<S, LIMBS> {
+    type Output = Self;
+    #[inline]
+    fn div(self, rhs: &Self) -> Self {
+        self / *rhs
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> core::ops::DivAssign for Fp<S, LIMBS> {
+    #[inline]
+    fn div_assign(&mut self, rhs: Self) {
+        *self = *self / rhs;
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> core::ops::DivAssign<&Fp<S, LIMBS>> for Fp<S, LIMBS> {
+    #[inline]
+    fn div_assign(&mut self, rhs: &Self) {
+        *self = *self / *rhs;
+    }
+}
+
+// --- num_traits checked ops (field arithmetic is total) ---
+impl<S: Modulus<LIMBS>, const LIMBS: usize> CheckedAdd for Fp<S, LIMBS> {
+    #[inline]
+    fn checked_add(&self, v: &Self) -> Option<Self> {
+        Some(*self + *v)
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> CheckedSub for Fp<S, LIMBS> {
+    #[inline]
+    fn checked_sub(&self, v: &Self) -> Option<Self> {
+        Some(*self - *v)
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> CheckedMul for Fp<S, LIMBS> {
+    #[inline]
+    fn checked_mul(&self, v: &Self) -> Option<Self> {
+        Some(*self * *v)
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> CheckedNeg for Fp<S, LIMBS> {
+    #[inline]
+    fn checked_neg(&self) -> Option<Self> {
+        Some(-*self)
+    }
+}
+
+// --- Pow ---
+impl<S: Modulus<LIMBS>, const LIMBS: usize> Pow<u32> for Fp<S, LIMBS> {
+    type Output = Self;
+    #[inline]
+    fn pow(self, exp: u32) -> Self {
+        self.pow_u32(exp)
+    }
+}
+
+// --- crypto-primitives algebra hierarchy ---
+impl<S: Modulus<LIMBS>, const LIMBS: usize> Semiring for Fp<S, LIMBS> {}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> Ring for Fp<S, LIMBS> {}
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> Field for Fp<S, LIMBS> {
+    type Inner = CpUint<LIMBS>;
+    type Modulus = CpUint<LIMBS>;
+    #[inline(always)]
+    fn inner(&self) -> &Self::Inner {
+        CpUint::new_ref(&self.mont)
+    }
+    #[inline(always)]
+    fn inner_mut(&mut self) -> &mut Self::Inner {
+        CpUint::new_ref_mut(&mut self.mont)
+    }
+    #[inline(always)]
+    fn into_inner(self) -> Self::Inner {
+        CpUint::new(self.mont)
+    }
+}
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> PrimeField for Fp<S, LIMBS> {
+    type Config = ();
+
+    #[inline(always)]
+    fn cfg(&self) -> &Self::Config {
+        &()
+    }
+
+    #[inline]
+    fn is_zero(value: &Self) -> bool {
+        value.mont == Uint::ZERO
+    }
+
+    #[inline]
+    fn modulus(&self) -> Self::Modulus {
+        CpUint::new(*S::params().modulus())
+    }
+
+    fn modulus_minus_one_div_two(&self) -> Self::Inner {
+        let value = *S::params().modulus();
+        CpUint::new(
+            (value - Uint::<LIMBS>::ONE)
+                / NonZero::new(Uint::<LIMBS>::from(2_u8))
+                    .into_option()
+                    .expect("2 is nonzero"),
+        )
+    }
+
+    fn make_cfg(modulus: &Self::Modulus) -> Result<Self::Config, FieldError> {
+        let Some(odd) = Odd::new(*modulus.inner()).into_option() else {
+            return Err(FieldError::InvalidModulus);
+        };
+        S::install(Params::new(MontyParams::new(odd)));
+        Ok(())
+    }
+
+    #[inline]
+    fn new_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
+        Self::new(*inner.inner())
+    }
+
+    #[inline]
+    fn new_unchecked_with_cfg(inner: Self::Inner, _cfg: &Self::Config) -> Self {
+        Self::from_montgomery(*inner.inner())
+    }
+
+    #[inline]
+    fn zero_with_cfg(_cfg: &Self::Config) -> Self {
+        Self::zero()
+    }
+
+    #[inline]
+    fn one_with_cfg(_cfg: &Self::Config) -> Self {
+        Self::one()
+    }
+}
+
+// --- zinc-side traits ---
+impl<S: Modulus<LIMBS>, const LIMBS: usize> MulByScalar<&Self> for Fp<S, LIMBS> {
+    #[inline]
+    fn mul_by_scalar<const CHECK: bool>(&self, rhs: &Self) -> Option<Self> {
+        Some(*self * *rhs)
+    }
+}
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> FromRef<Self> for Fp<S, LIMBS> {
+    #[inline]
+    fn from_ref(value: &Self) -> Self {
+        *value
+    }
+}
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> InnerTransparentField for Fp<S, LIMBS> {
+    #[inline]
+    fn add_inner(lhs: &Self::Inner, rhs: &Self::Inner, _cfg: &Self::Config) -> Self::Inner {
+        CpUint::new(lhs.inner().add_mod(rhs.inner(), S::params().modulus_nz()))
+    }
+    #[inline]
+    fn sub_inner(lhs: &Self::Inner, rhs: &Self::Inner, _cfg: &Self::Config) -> Self::Inner {
+        CpUint::new(lhs.inner().sub_mod(rhs.inner(), S::params().modulus_nz()))
+    }
+    #[inline]
+    fn mul_assign_by_inner(&mut self, rhs: &Self::Inner) {
+        let p = S::params();
+        self.mont = mont_mul::monty_mul(&self.mont, rhs.inner(), p.modulus(), p.mod_neg_inv);
+    }
+}
+
+impl<T, S: Modulus<LIMBS>, const LIMBS: usize> ProjectableToField<Fp<S, LIMBS>> for T
+where
+    Fp<S, LIMBS>: for<'a> FromWithConfig<&'a T>,
+{
+    fn prepare_projection(
+        sampled: &Fp<S, LIMBS>,
+    ) -> impl Fn(&T) -> Fp<S, LIMBS> + Send + Sync + 'static {
+        // `config` is typed as `<Fp as PrimeField>::Config` (= unit), which is
+        // what `into_with_cfg` expects — avoids a literal-`()` normalization
+        // mismatch. Mirrors the `MontyField` impl in `field/monty.rs`.
+        let config = sampled.cfg().clone();
+        move |value: &T| value.into_with_cfg(&config)
+    }
+}
+
+// --- conversions: plain `From<T>` ⇒ `FromWithConfig<T>` for free ---
+macro_rules! fp_from_unsigned {
+    ($($t:ty),* $(,)?) => {$(
+        impl<S: Modulus<LIMBS>, const LIMBS: usize> From<$t> for Fp<S, LIMBS> {
+            #[inline] fn from(v: $t) -> Self { Self::new(Uint::<LIMBS>::from(v)) }
+        }
+        impl<S: Modulus<LIMBS>, const LIMBS: usize> From<&$t> for Fp<S, LIMBS> {
+            #[inline] fn from(v: &$t) -> Self { Self::from(*v) }
+        }
+    )*};
+}
+fp_from_unsigned!(u8, u16, u32, u64, u128);
+
+macro_rules! fp_from_signed {
+    ($($t:ty),* $(,)?) => {$(
+        impl<S: Modulus<LIMBS>, const LIMBS: usize> From<$t> for Fp<S, LIMBS> {
+            #[inline]
+            fn from(v: $t) -> Self {
+                let mag = Self::new(Uint::<LIMBS>::from(v.unsigned_abs()));
+                if v < 0 { -mag } else { mag }
+            }
+        }
+        impl<S: Modulus<LIMBS>, const LIMBS: usize> From<&$t> for Fp<S, LIMBS> {
+            #[inline] fn from(v: &$t) -> Self { Self::from(*v) }
+        }
+    )*};
+}
+fp_from_signed!(i8, i16, i32, i64, i128);
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> From<bool> for Fp<S, LIMBS> {
+    #[inline]
+    fn from(b: bool) -> Self {
+        if b { Self::one() } else { Self::zero() }
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> From<&bool> for Fp<S, LIMBS> {
+    #[inline]
+    fn from(b: &bool) -> Self {
+        Self::from(*b)
+    }
+}
+
+impl<S: Modulus<LIMBS>, const LIMBS: usize> From<CpUint<LIMBS>> for Fp<S, LIMBS> {
+    #[inline]
+    fn from(v: CpUint<LIMBS>) -> Self {
+        Self::new(*v.inner())
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize> From<&CpUint<LIMBS>> for Fp<S, LIMBS> {
+    #[inline]
+    fn from(v: &CpUint<LIMBS>) -> Self {
+        Self::new(*v.inner())
+    }
+}
+
+// Signed wide integers (`Int<LIMBS2>`, possibly wider than the field) reduce mod
+// the prime. This is a one-time projection-side conversion (not hot arithmetic),
+// so we delegate to `MontyField`'s vetted reduction — which correctly handles
+// `LIMBS2 > LIMBS` — and read off the Montgomery limbs into `Fp`.
+impl<S: Modulus<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From<&CpInt<LIMBS2>>
+    for Fp<S, LIMBS>
+{
+    #[inline]
+    fn from(value: &CpInt<LIMBS2>) -> Self {
+        let mf = MontyField::<LIMBS>::from_with_cfg(value, &S::params().monty);
+        Self::from_montgomery(*mf.to_montgomery().inner())
+    }
+}
+impl<S: Modulus<LIMBS>, const LIMBS: usize, const LIMBS2: usize> From<CpInt<LIMBS2>>
+    for Fp<S, LIMBS>
+{
+    #[inline]
+    fn from(value: CpInt<LIMBS2>) -> Self {
+        Self::from(&value)
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -523,6 +809,8 @@ pub(crate) mod mont_mul {
 mod tests {
     use super::*;
     use crypto_bigint::U256;
+    use crypto_primitives::PrimeField;
+    use num_traits::Pow;
     use proptest::prelude::*;
 
     // A 256-bit prime (the modulus used in the existing crypto_primitives field
@@ -568,8 +856,8 @@ mod tests {
         setup();
         assert_eq!(F::zero().retrieve(), U256::ZERO);
         assert_eq!(F::one().retrieve(), U256::ONE);
-        assert!(F::zero().is_zero());
-        assert!(!F::one().is_zero());
+        assert!(PrimeField::is_zero(&F::zero()));
+        assert!(!PrimeField::is_zero(&F::one()));
     }
 
     #[test]
@@ -624,7 +912,7 @@ mod tests {
         fn inv_is_multiplicative_identity(a in any_u256()) {
             setup();
             let f = F::new(a);
-            if !f.is_zero() {
+            if f.retrieve() != U256::ZERO {
                 let inv = f.inv().unwrap();
                 prop_assert_eq!((f * inv).retrieve(), U256::ONE);
             }
@@ -638,7 +926,8 @@ mod tests {
             for _ in 0..e {
                 want = want * f;
             }
-            prop_assert_eq!(f.pow(e).retrieve(), want.retrieve());
+            prop_assert_eq!(f.pow_u32(e).retrieve(), want.retrieve());
+            prop_assert_eq!(Pow::pow(f, e).retrieve(), want.retrieve());
         }
 
         #[test]
