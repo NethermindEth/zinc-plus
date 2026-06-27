@@ -157,6 +157,19 @@ There is **no kernel where `Fp` is slower.** (An earlier revision that
 recomputed `mod_neg_inv` per multiply lost ~10% on the compute-bound `dot`;
 caching it in the slot fixed that.)
 
+### End-to-end (the real workload)
+
+With `Fp` wired in as the integer-path field `F` (see §7), the **full SHA+ECDSA
+prover** peak RSS (debug, `test_e2e_sha_ecdsa_proof_shape`, `/usr/bin/time -l`):
+
+```
+MontyField (before) : 140.7 MiB
+Fp         (after)  :  70.7 MiB     →  ~2.0x less total prover memory
+```
+
+The per-element config was pervasive enough that removing it nearly **halves the
+whole prover's memory footprint** — not just the field vectors in isolation.
+
 ## 6. Tradeoffs / constraints
 
 * **One modulus per slot per process.** A slot is set once (`OnceLock`):
@@ -173,39 +186,48 @@ caching it in the slot fixed that.)
   need, the slot could be backed by a generation counter or a thread-local
   installed via `rayon::broadcast`; not needed for the current prover.
 
-## 7. Migration path to a true drop-in `F`
+## 7. Drop-in integration (DONE)
 
-The prototype already has the full operator surface and is proptest-correct. To
-make `Fp` substitutable for `MontyField` in the protocol generics:
+`Fp` is now the integer-path field `F` — the full migration is implemented and
+validated, not just prototyped:
 
-1. **Implement the crypto-primitives trait surface** on `Fp` —
-   `Semiring`, `Ring`, `Field`, `PrimeField` (+ `Display`, `Hash`, `CheckedAdd/
-   Sub/Mul`, `Pow<u32>`, `Div`, `Sum`/`Product`) and the zinc traits
-   (`FromWithConfig<…>`, `MulByScalar`, `FromRef`, `FromPrimitiveWithConfig`,
-   `InnerTransparentField`). The blueprint is `ConstMontyField` in
-   `crypto-primitives/src/field/crypto_bigint_const_monty.rs` — it implements
-   exactly this surface for a value-sized element; copy its structure, replacing
-   the `Mod::PARAMS` const reads with `S::params()` slot reads.
-2. **Set `type Config = ()`** (like a const field) and make `make_cfg(modulus)`
-   *install the slot* as its side effect, returning `()`. The prover's existing
-   `field_cfg: F::Config` threading then carries `()` harmlessly, and the one
-   `secp256k1_field_cfg` call becomes the single install point — minimal churn.
-3. **Retire the `_inner` duplication.** With a 32 B element and ambient modulus,
-   the single generic `Vec<F>` path is already optimal; `build_eq_x_r_inner_vec`,
-   `InnerTransparentField`, and the `Vec<F::Inner>` plumbing can be deleted (or
-   kept as thin shims) once call sites use `Fp`.
+1. **Trait surface implemented** on `Fp` (`utils/src/field/runtime_monty.rs`):
+   `Semiring`, `Ring`, `Field`, `PrimeField`, plus `CheckedAdd/Sub/Mul/Neg`,
+   `Pow<u32>`, `Div`/`DivAssign`, and the zinc traits `MulByScalar`, `FromRef`,
+   `InnerTransparentField`, `ProjectableToField`. Conversions are plain
+   `From<T>` (primitives, `bool`, `Uint`, signed `Int<N>`), so
+   `FromWithConfig<T>` / `FromPrimitiveWithConfig` come for free via the
+   crypto-primitives blanket — the same ambient-modulus pattern as
+   `ConstMontyField`. Wide `Int<N>` (more limbs than the field) delegates its
+   one-time reduction to `MontyField` at the projection boundary.
+2. **`type Config = ()`**, and `make_cfg(modulus)` installs the slot as its side
+   effect. The prover's existing `field_cfg: F::Config` threading now carries
+   `()` harmlessly; the single `secp256k1_field_cfg` call is the install point.
+   `Inner = Modulus = crypto-primitives `Uint`` newtype, so all the heavy
+   `Inner`/`Modulus` bounds are inherited unchanged.
+3. **Wiring**: the protocol library is generic over `F`, so the change is one
+   type alias per concrete site — `type F = Fp<ProofSlot, FIELD_LIMBS>` in the
+   e2e test module (`protocol/src/lib.rs`) and the e2e benchmark
+   (`protocol/benches/e2e.rs`), each with a `define_modulus!(ProofSlot, …)` slot.
 
-Step 1 is mechanical but sizeable (~ the size of `crypto_bigint_const_monty.rs`);
-steps 2–3 are small. The win is repo-wide and automatic: every `Vec<F>` shrinks
-4.5× and every field-vector copy gets ~4.5× faster, with no per-call-site
-changes.
+**Validation:** all 21 `zinc-protocol` lib tests pass, including the full
+SHA+ECDSA e2e (`test_e2e_sha_ecdsa_proof_shape`, `_folded_4x_round_trip`) and
+every soundness/tamper test, plus the ~2.0× e2e memory reduction in §5.
+
+The remaining cleanup (optional, follow-up): the `_inner` SoA duplication
+(`build_eq_x_r_inner_vec`, the `Vec<F::Inner>` plumbing) is now redundant — with
+a 32 B element and ambient modulus the single generic `Vec<F>` path is already
+optimal — and can be deleted or kept as thin shims.
 
 ## 8. Files
 
 * `utils/src/field/runtime_monty.rs` — `Fp`, `Modulus`, `Params`,
-  `define_modulus!`, the CIOS multiply port, and the proptest suite.
+  `define_modulus!`, the CIOS multiply port, the full crypto-primitives + zinc
+  trait surface, and the proptest suite.
 * `utils/examples/runtime_monty_bench.rs` — the `Fp`-vs-`MontyForm` time +
   memory benchmark (counting allocator + best-of-K kernels).
+* `protocol/src/lib.rs`, `protocol/benches/e2e.rs` — the integer-path
+  `type F = Fp<ProofSlot, FIELD_LIMBS>` swap (one alias + slot each).
 
 ### Build note (unrelated to this change)
 
