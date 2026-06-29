@@ -47,10 +47,9 @@ use zinc_piop::{
         SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS, ShaAggregateIdealWeightPlan,
         ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol, ShaLinearAccumulatorField,
         ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol, ShaPublicWordCol,
-        ShaResidualFamily, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
-        bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
-        build_folded_row_sumcheck_group,
-        build_production_sha_sumfold_group_from_prefix_accumulators,
+        ShaResidualFamily, ShaSuffixScannerField, ShaWordCol,
+        beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
+        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
         build_sha_lambda_powers, build_sha_residual_eval_powers,
         build_sha_sumfold_linear_accumulator,
@@ -1648,7 +1647,8 @@ where
         + Send
         + Sync
         + 'static
-        + ShaLinearAccumulatorField,
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1725,7 +1725,8 @@ where
         + Send
         + Sync
         + 'static
-        + ShaLinearAccumulatorField,
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     P: ZincPCSTypes<Zt, F, D>,
@@ -1957,7 +1958,8 @@ where
         + Send
         + Sync
         + 'static
-        + ShaLinearAccumulatorField,
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
@@ -2187,7 +2189,8 @@ where
         + Send
         + Sync
         + 'static
-        + ShaLinearAccumulatorField,
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaPackedHyraxPcs<Zt, F, D>,
@@ -2407,7 +2410,8 @@ where
         + HyraxFieldBridge<C>
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
@@ -2931,33 +2935,42 @@ where
         <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::precompute_ck(&pcs_params.int);
     });
 
-    let artifacts = cfg_iter!(prepared_instances)
-        .map(|prepared| {
-            let (data, commitment) = tracing::info_span!(
-                target: "zinc_protocol::production_sha",
-                "fresh_commit_mixed_hyrax_instance",
-                side = "prove",
-                phase = "fresh_commit_mixed_hyrax_instance",
-            )
-            .in_scope(|| {
-                commit_production_sha_mixed_hyrax_instance::<C, Zt, F, D>(
-                    pcs_params,
-                    &prepared.instance.witness_polys,
+    let artifacts = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fresh_commit_mixed_hyrax_instances",
+        side = "prove",
+        phase = "fresh_commit_mixed_hyrax_instances",
+        instances = prepared_instances.len(),
+    )
+    .in_scope(|| {
+        cfg_iter!(prepared_instances)
+            .map(|prepared| {
+                let (data, commitment) = tracing::info_span!(
+                    target: "zinc_protocol::production_sha",
+                    "fresh_commit_mixed_hyrax_instance",
+                    side = "prove",
+                    phase = "fresh_commit_mixed_hyrax_instance",
                 )
-            })?;
+                .in_scope(|| {
+                    commit_production_sha_mixed_hyrax_instance::<C, Zt, F, D>(
+                        pcs_params,
+                        &prepared.instance.witness_polys,
+                    )
+                })?;
 
-            Ok((
-                UairInstance {
-                    public_trace: prepared.public_trace.clone(),
-                    commitments: commitment.clone(),
-                },
-                commitment,
-                data,
-                &prepared.instance.trace,
-                &prepared.instance.public,
-            ))
-        })
-        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+                Ok((
+                    UairInstance {
+                        public_trace: prepared.public_trace.clone(),
+                        commitments: commitment.clone(),
+                    },
+                    commitment,
+                    data,
+                    &prepared.instance.trace,
+                    &prepared.instance.public,
+                ))
+            })
+            .collect::<Result<Vec<_>, ProductionShaError<F>>>()
+    })?;
 
     let mut fresh_instances = Vec::with_capacity(artifacts.len());
     let mut instance_commitments = Vec::with_capacity(artifacts.len());
@@ -3194,6 +3207,7 @@ where
     F: InnerTransparentField
         + DelayedFieldProductSum
         + ShaLinearAccumulatorField
+        + ShaSuffixScannerField
         + Send
         + Sync
         + 'static,
@@ -3258,7 +3272,8 @@ where
         + FromPrimitiveWithConfig
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaSuffixScannerField,
     F::Inner: Transcribable + Send + Sync,
     F::Modulus: Transcribable,
 {
@@ -3904,7 +3919,8 @@ where
         + FromPrimitiveWithConfig
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaSuffixScannerField,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
@@ -7290,6 +7306,7 @@ where
     F: InnerTransparentField
         + DelayedFieldProductSum
         + ShaBinaryFoldField
+        + ShaSuffixScannerField
         + FromPrimitiveWithConfig
         + Send
         + Sync
@@ -7378,7 +7395,8 @@ where
         + FromPrimitiveWithConfig
         + Send
         + Sync
-        + 'static,
+        + 'static
+        + ShaSuffixScannerField,
     F::Inner: Transcribable,
     F::Modulus: Transcribable,
 {
@@ -11746,19 +11764,20 @@ mod tests {
         assert_eq!(linear_accumulator.len(), traces.len());
         assert_eq!(quadratic_prefix_accumulator.len(), 18);
 
-        let group = build_production_sha_sumfold_group_from_prefix_accumulators(
-            &traces,
-            &beta,
-            &beta_eq_weights,
-            &r_ic_eq_weights,
-            &linear_accumulator,
-            &quadratic_prefix_accumulator,
-            &booleanity_weights,
-            &booleanity_sources,
-            prefix_vars,
-            &field_cfg,
-        )
-        .unwrap();
+        let group =
+            zinc_piop::neutron_nova::build_production_sha_sumfold_group_from_prefix_accumulators(
+                &traces,
+                &beta,
+                &beta_eq_weights,
+                &r_ic_eq_weights,
+                &linear_accumulator,
+                &quadratic_prefix_accumulator,
+                &booleanity_weights,
+                &booleanity_sources,
+                prefix_vars,
+                &field_cfg,
+            )
+            .unwrap();
         let mut sumfold_prover_transcript = Blake3Transcript::new();
         sumfold_prover_transcript.absorb_slice(b"sha-sumfold-row-bridge");
         let (sumfold_proof, r_b, c_sf) = prove_optimized_sha_sumfold_with_weights(

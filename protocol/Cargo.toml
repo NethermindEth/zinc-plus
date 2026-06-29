@@ -59,3 +59,11 @@ harness = false
 [[bench]]
 name = "hyrax_width_sweep"
 harness = false
+
+[[bench]]
+name = "og_sha256_instance_sweep"
+harness = false
+
+[[bench]]
+name = "sha256_combined_instance_sweep"
+harness = false

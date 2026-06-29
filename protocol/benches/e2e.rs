@@ -17,12 +17,26 @@ use rand::rng;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{
-    borrow::Cow, fmt::Debug, fs, hint::black_box, marker::PhantomData, ops::Neg, path::Path,
+    borrow::Cow,
+    collections::HashMap,
+    fmt::{Debug, Write as _},
+    fs,
+    hint::black_box,
+    marker::PhantomData,
+    ops::Neg,
+    path::Path,
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
+use tracing::{
+    Id, Subscriber,
+    field::{Field as TracingField, Visit},
+};
+use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan};
 use zinc_piop::neutron_nova::{
     MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-    ShaBinaryFoldField, ShaLinearAccumulatorField, ShaPublicCol, bit_slice_index,
+    ShaBinaryFoldField, ShaLinearAccumulatorField, ShaPublicCol, ShaSuffixScannerField,
+    bit_slice_index,
 };
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
@@ -44,12 +58,12 @@ use zinc_protocol::{
     },
     production_sha::{
         LinearIdealFoldProverParams, LinearIdealFoldVerifierParams, PACKED_SHA_VALUES_PER_INSTANCE,
-        ProductionShaError, ProductionShaMixedHyraxPcs, ProductionShaMixedHyraxProof,
-        ProductionShaPackedHyraxProof, ProductionShaProjectionAdapter, ProductionShaWitnessPolys,
-        UairShape, packed_sha_layout, prepare_linear_ideal_fold_witnesses,
+        PreparedProductionShaProverInstance, ProductionShaError, ProductionShaMixedHyraxPcs,
+        ProductionShaMixedHyraxProof, ProductionShaPackedHyraxProof,
+        ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
+        VerifiedLinearIdealFoldSetup, packed_sha_layout, prepare_linear_ideal_fold_witnesses,
         prove_prepared_linear_ideal_fold_mixed_hyrax,
-        prove_prepared_linear_ideal_fold_packed_hyrax,
-        setup_verify_linear_ideal_fold_mixed_hyrax,
+        prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold_mixed_hyrax,
         setup_verify_linear_ideal_fold_packed_hyrax, verify_linear_ideal_fold_mixed_hyrax,
         verify_linear_ideal_fold_packed_hyrax,
     },
@@ -447,6 +461,23 @@ fn setup_pp_real_ecdsa(num_vars: usize) -> Pp<RealEcdsaBenchZincTypes> {
     )
 }
 
+fn try_setup_pp_real_ecdsa(num_vars: usize) -> Result<Pp<RealEcdsaBenchZincTypes>, String> {
+    let poly_size = 1 << num_vars;
+    let binary = ZipPlus::setup(
+        poly_size,
+        IprsCode::new_with_optimal_depth(poly_size).map_err(|error| error.to_string())?,
+    );
+    let arbitrary = ZipPlus::setup(
+        poly_size,
+        IprsCode::new_with_optimal_depth(poly_size).map_err(|error| error.to_string())?,
+    );
+    let int = ZipPlus::setup(
+        poly_size,
+        IprsCode::new_with_optimal_depth(poly_size).map_err(|error| error.to_string())?,
+    );
+    Ok((binary, arbitrary, int))
+}
+
 /// Project an `IdealOrZero<Sha256Ideal<RealEcdsaInt>>` to `Sha256Ideal<F>`
 /// for the verifier. Zero ideals are filtered upstream of this closure (see
 /// piop's ideal_check), so the `Zero` arm is unreachable.
@@ -477,6 +508,27 @@ fn real_sha256_chain_blocks() -> [Sha256MessageBlock; REAL_SHA256_CHAIN_BLOCKS] 
     let message = real_sha256_chain_message();
     sha256_padded_message_blocks::<REAL_SHA256_CHAIN_BLOCKS>(message.as_bytes())
         .expect("real SHA-256 benchmark fixture should canonically pad to eight blocks")
+}
+
+#[allow(clippy::unwrap_used)]
+fn exact_sha256_chain_blocks<const N: usize>() -> [Sha256MessageBlock; N] {
+    assert!(N > 0, "SHA instance sweep requires at least one block");
+    const SHA_BLOCK_BYTES: usize = 64;
+    const SHA_PADDING_BYTES: usize = 9;
+    let message_len = N
+        .checked_mul(SHA_BLOCK_BYTES)
+        .and_then(|len| len.checked_sub(SHA_PADDING_BYTES))
+        .expect("SHA instance sweep message length fits usize");
+    let message = (0..message_len)
+        .map(|idx| b'a' + u8::try_from(idx % 26).expect("alphabet index fits u8"))
+        .collect::<Vec<_>>();
+    sha256_padded_message_blocks::<N>(&message)
+        .expect("instance sweep fixture should pad to exactly N SHA-256 blocks")
+}
+
+fn log2_power_of_two(value: usize) -> usize {
+    assert!(value.is_power_of_two(), "value must be a power of two");
+    value.trailing_zeros() as usize
 }
 
 #[allow(clippy::unwrap_used)]
@@ -1075,11 +1127,8 @@ impl<F: BenchShaField> ProductionShaProjectionAdapter<RealEcdsaBenchZincTypes, F
             .map(|&col| projection_sha_project_binary_source(col, field_cfg))
             .collect::<Result<Vec<_>, _>>()?;
         let bit_slices = projection_sha_flatten_bit_columns(bit_columns);
-        let scalarized = F::scalarize_bit_slices(
-            &bit_slices,
-            &F::from_with_cfg(2u64, field_cfg),
-            field_cfg,
-        )?;
+        let scalarized =
+            F::scalarize_bit_slices(&bit_slices, &F::from_with_cfg(2u64, field_cfg), field_cfg)?;
         let pa_a = projection_sha_project_binary_source(
             projection_sha_binary_col(public_trace, witness_trace, sha256_cols::PA_A)?,
             field_cfg,
@@ -1204,6 +1253,76 @@ where
     )
 }
 
+type BenchBn254HyraxParams = (
+    PCSParams<
+        AllHyraxPCSTypes<ark_bn254::G1Affine>,
+        RealEcdsaBenchZincTypes,
+        ArkFBn254,
+        DEGREE_PLUS_ONE,
+    >,
+    PCSVerifierParams<
+        AllHyraxPCSTypes<ark_bn254::G1Affine>,
+        RealEcdsaBenchZincTypes,
+        ArkFBn254,
+        DEGREE_PLUS_ONE,
+    >,
+);
+
+type BenchProjectionShaUair = ProjectionShaBenchUair<RealEcdsaInt>;
+type BenchBn254MixedHyraxVerifierSetup = VerifiedLinearIdealFoldSetup<
+    AllHyraxPCSTypes<ark_bn254::G1Affine>,
+    BenchProjectionShaUair,
+    RealEcdsaBenchZincTypes,
+    ArkFBn254,
+    DEGREE_PLUS_ONE,
+>;
+
+static PROJECTION_SHA_BN254_HYRAX_PARAMS: OnceLock<Mutex<HashMap<usize, BenchBn254HyraxParams>>> =
+    OnceLock::new();
+static PROJECTION_SHA_BN254_MIXED_HYRAX_VERIFIER_SETUPS: OnceLock<
+    Mutex<HashMap<usize, BenchBn254MixedHyraxVerifierSetup>>,
+> = OnceLock::new();
+
+fn projection_sha_bn254_hyrax_pcs_params(width: usize) -> BenchBn254HyraxParams {
+    let mut cache = PROJECTION_SHA_BN254_HYRAX_PARAMS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("ProjectionFold Hyrax params cache mutex poisoned");
+    cache
+        .entry(width)
+        .or_insert_with(|| projection_sha_hyrax_pcs_params::<ark_bn254::G1Affine, ArkFBn254>(width))
+        .clone()
+}
+
+fn projection_sha_bn254_mixed_hyrax_verifier_setup(
+    width: usize,
+) -> BenchBn254MixedHyraxVerifierSetup {
+    let mut cache = PROJECTION_SHA_BN254_MIXED_HYRAX_VERIFIER_SETUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("ProjectionFold Hyrax verifier setup cache mutex poisoned");
+    cache
+        .entry(width)
+        .or_insert_with(|| {
+            let (_, pcs_verifier_params) = projection_sha_bn254_hyrax_pcs_params(width);
+            setup_verify_linear_ideal_fold_mixed_hyrax::<
+                ark_bn254::G1Affine,
+                BenchProjectionShaUair,
+                RealEcdsaBenchZincTypes,
+                ArkFBn254,
+                DEGREE_PLUS_ONE,
+            >(
+                LinearIdealFoldVerifierParams::new(
+                    pcs_verifier_params,
+                    ArkFBn254::curve_field_cfg::<ark_bn254::G1Affine>(),
+                ),
+                UairShape::<BenchProjectionShaUair>::new(SHA_ROW_VARS),
+            )
+            .expect("mixed Hyrax verifier setup succeeds")
+        })
+        .clone()
+}
+
 fn projection_sha_packed_hyrax_pcs_params<C, F>(
     width: usize,
 ) -> (
@@ -1233,12 +1352,50 @@ where
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HyraxReportCategory {
+    OgHash,
+    OgMixedHyrax,
+    ProjectionFoldMixedHyrax,
+    ProjectionFoldPackedHyrax,
+}
+
+impl HyraxReportCategory {
+    fn algorithm(self) -> &'static str {
+        match self {
+            Self::OgHash => "OG Zinc+ hash PCS",
+            Self::OgMixedHyrax => "OG Zinc+ with Mixed Hyrax",
+            Self::ProjectionFoldMixedHyrax => "ProjectionFold with Mixed Hyrax",
+            Self::ProjectionFoldPackedHyrax => "ProjectionFold with Packed Hyrax",
+        }
+    }
+
+    fn order(self) -> usize {
+        match self {
+            Self::OgHash => 0,
+            Self::OgMixedHyrax => 1,
+            Self::ProjectionFoldMixedHyrax => 2,
+            Self::ProjectionFoldPackedHyrax => 3,
+        }
+    }
+
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::OgHash => "OG hash",
+            Self::OgMixedHyrax => "OG mixed",
+            Self::ProjectionFoldMixedHyrax => "PF mixed",
+            Self::ProjectionFoldPackedHyrax => "PF packed",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct HyraxWidthSweepRow {
-    label: String,
+    algorithm: &'static str,
+    variant: String,
     width: Option<usize>,
-    ecc_points_per_instance: Option<usize>,
-    fresh_ecc_points: Option<usize>,
+    ecc_points_per_commitment: Option<usize>,
+    ecc_points_per_proof: Option<usize>,
     /// Headline prover time: median of the recorded warmed samples.
     prover_ms: f64,
     prover_mean_ms: f64,
@@ -1253,7 +1410,108 @@ struct HyraxWidthSweepRow {
     verifier_samples: usize,
     proof_bytes: usize,
     proof_zstd_bytes: usize,
-    kind: &'static str,
+    category: HyraxReportCategory,
+}
+
+#[derive(Clone, Debug)]
+struct HyraxInstanceSweepRow {
+    algorithm: &'static str,
+    variant: String,
+    instances: usize,
+    ell: usize,
+    l0: usize,
+    tail_vars: usize,
+    width: usize,
+    ecc_points_per_commitment: usize,
+    ecc_points_per_proof: usize,
+    trace_witness_ms: f64,
+    setup_ms: f64,
+    prepare_ms: f64,
+    setup_prepare_ms: f64,
+    probe_prove_ms: f64,
+    probe_commit_ms: f64,
+    probe_sumfold_ms: f64,
+    probe_fold_ms: f64,
+    probe_open_ms: f64,
+    probe_open_core_ms: f64,
+    /// Headline prover time: median of the recorded warmed samples.
+    prover_ms: f64,
+    prover_mean_ms: f64,
+    prover_min_ms: f64,
+    prover_max_ms: f64,
+    prover_samples: usize,
+    /// Headline verifier time: median of the recorded warmed samples.
+    verifier_ms: f64,
+    verifier_mean_ms: f64,
+    verifier_min_ms: f64,
+    verifier_max_ms: f64,
+    verifier_samples: usize,
+    proof_bytes: usize,
+    proof_zstd_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct OgSha256InstanceSweepRow {
+    algorithm: &'static str,
+    status: &'static str,
+    error: String,
+    instances: usize,
+    pcs_width: usize,
+    active_rows: usize,
+    domain_rows: usize,
+    num_vars: usize,
+    setup_ms: Option<f64>,
+    prover_ms: Option<f64>,
+    prover_mean_ms: Option<f64>,
+    prover_min_ms: Option<f64>,
+    prover_max_ms: Option<f64>,
+    prover_samples: Option<usize>,
+    verifier_ms: Option<f64>,
+    verifier_mean_ms: Option<f64>,
+    verifier_min_ms: Option<f64>,
+    verifier_max_ms: Option<f64>,
+    verifier_samples: Option<usize>,
+    proof_bytes: Option<usize>,
+    proof_zstd_bytes: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct Sha256CombinedInstanceSweepRow {
+    algorithm: String,
+    variant: String,
+    status: &'static str,
+    error: String,
+    instances: usize,
+    ell: Option<usize>,
+    l0: Option<usize>,
+    tail_vars: Option<usize>,
+    width: Option<usize>,
+    active_rows: Option<usize>,
+    domain_rows: Option<usize>,
+    num_vars: Option<usize>,
+    setup_ms: Option<f64>,
+    trace_witness_ms: Option<f64>,
+    pcs_setup_ms: Option<f64>,
+    prepare_ms: Option<f64>,
+    setup_prepare_ms: Option<f64>,
+    probe_prove_ms: Option<f64>,
+    probe_commit_ms: Option<f64>,
+    probe_sumfold_ms: Option<f64>,
+    probe_fold_ms: Option<f64>,
+    probe_open_ms: Option<f64>,
+    probe_open_core_ms: Option<f64>,
+    prover_ms: Option<f64>,
+    prover_mean_ms: Option<f64>,
+    prover_min_ms: Option<f64>,
+    prover_max_ms: Option<f64>,
+    prover_samples: Option<usize>,
+    verifier_ms: Option<f64>,
+    verifier_mean_ms: Option<f64>,
+    verifier_min_ms: Option<f64>,
+    verifier_max_ms: Option<f64>,
+    verifier_samples: Option<usize>,
+    proof_bytes: Option<usize>,
+    proof_zstd_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1271,10 +1529,90 @@ struct TimingStats {
     samples: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HyraxSetupPrepareTimings {
+    trace_witness_ms: f64,
+    setup_ms: f64,
+    prepare_ms: f64,
+    setup_prepare_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HyraxProvePhaseTimings {
+    prove_ms: f64,
+    commit_ms: f64,
+    sumfold_ms: f64,
+    fold_ms: f64,
+    open_ms: f64,
+    open_core_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProvePhase {
+    FreshCommitMixedHyraxInstances,
+    FreshCommitMixedHyraxInstance,
+    SumfoldAccumulators,
+    SumfoldProve,
+    FoldAfterSumfold,
+    PcsOpening,
+    PcsOpenCore,
+}
+
+const PROVE_PHASE_COUNT: usize = 7;
+
+impl ProvePhase {
+    fn from_name(value: &str) -> Option<Self> {
+        Some(match value {
+            "fresh_commit_mixed_hyrax_instances" => Self::FreshCommitMixedHyraxInstances,
+            "fresh_commit_mixed_hyrax_instance" => Self::FreshCommitMixedHyraxInstance,
+            "sumfold_accumulators" => Self::SumfoldAccumulators,
+            "sumfold_prove" => Self::SumfoldProve,
+            "fold_after_sumfold" => Self::FoldAfterSumfold,
+            "pcs_opening" => Self::PcsOpening,
+            "pcs_open_core" => Self::PcsOpenCore,
+            _ => return None,
+        })
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::FreshCommitMixedHyraxInstances => 0,
+            Self::FreshCommitMixedHyraxInstance => 1,
+            Self::SumfoldAccumulators => 2,
+            Self::SumfoldProve => 3,
+            Self::FoldAfterSumfold => 4,
+            Self::PcsOpening => 5,
+            Self::PcsOpenCore => 6,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PhaseSpanTiming {
+    phase: ProvePhase,
+    entered_at: Option<Instant>,
+}
+
+#[derive(Clone, Default)]
+struct PhaseTimingLayer {
+    totals_ms: Arc<Mutex<[f64; PROVE_PHASE_COUNT]>>,
+}
+
+#[derive(Default)]
+struct PhaseFieldVisitor {
+    phase: Option<ProvePhase>,
+}
+
 const HYRAX_WIDTH_SWEEP_WARMUP_RUNS: usize = 2;
 const HYRAX_WIDTH_SWEEP_TUNING_SAMPLES: usize = 5;
 const HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES: usize = 15;
 const HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K: usize = 3;
+const HYRAX_INSTANCE_SWEEP_WIDTH: usize = 1024;
+const OG_SHA256_SWEEP_DEFAULT_HYRAX_WIDTH: usize = 1024;
+const OG_SHA256_SWEEP_DEFAULT_WARMUP_RUNS: usize = 1;
+const OG_SHA256_SWEEP_DEFAULT_SAMPLES: usize = 3;
+const SHA256_COMBINED_SWEEP_DEFAULT_WARMUP_RUNS: usize = 1;
+const SHA256_COMBINED_SWEEP_DEFAULT_SAMPLES: usize = 3;
 
 impl TimingStats {
     fn from_samples(samples: &[f64]) -> Self {
@@ -1304,23 +1642,120 @@ impl TimingStats {
     }
 }
 
+impl Visit for PhaseFieldVisitor {
+    fn record_str(&mut self, field: &TracingField, value: &str) {
+        if field.name() == "phase" {
+            self.phase = ProvePhase::from_name(value);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &TracingField, _value: &dyn Debug) {}
+}
+
+impl PhaseTimingLayer {
+    fn phase_ms(totals: &[f64; PROVE_PHASE_COUNT], phase: ProvePhase) -> f64 {
+        totals[phase.index()]
+    }
+
+    fn snapshot(&self, prove_ms: f64) -> HyraxProvePhaseTimings {
+        let totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
+        let commit_wall_ms = Self::phase_ms(&totals, ProvePhase::FreshCommitMixedHyraxInstances);
+        let commit_instance_ms = Self::phase_ms(&totals, ProvePhase::FreshCommitMixedHyraxInstance);
+        HyraxProvePhaseTimings {
+            prove_ms,
+            commit_ms: if commit_wall_ms > 0.0 {
+                commit_wall_ms
+            } else {
+                commit_instance_ms
+            },
+            sumfold_ms: Self::phase_ms(&totals, ProvePhase::SumfoldAccumulators)
+                + Self::phase_ms(&totals, ProvePhase::SumfoldProve),
+            fold_ms: Self::phase_ms(&totals, ProvePhase::FoldAfterSumfold),
+            open_ms: Self::phase_ms(&totals, ProvePhase::PcsOpening),
+            open_core_ms: Self::phase_ms(&totals, ProvePhase::PcsOpenCore),
+        }
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for PhaseTimingLayer
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut visitor = PhaseFieldVisitor::default();
+        attrs.record(&mut visitor);
+        let Some(phase) = visitor.phase else {
+            return;
+        };
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        span.extensions_mut().insert(PhaseSpanTiming {
+            phase,
+            entered_at: None,
+        });
+    }
+
+    fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
+        let mut visitor = PhaseFieldVisitor::default();
+        values.record(&mut visitor);
+        let Some(phase) = visitor.phase else {
+            return;
+        };
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let mut extensions = span.extensions_mut();
+        if let Some(timing) = extensions.get_mut::<PhaseSpanTiming>() {
+            timing.phase = phase;
+        }
+    }
+
+    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let mut extensions = span.extensions_mut();
+        if let Some(timing) = extensions.get_mut::<PhaseSpanTiming>() {
+            timing.entered_at = Some(Instant::now());
+        }
+    }
+
+    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        let mut extensions = span.extensions_mut();
+        let Some(timing) = extensions.get_mut::<PhaseSpanTiming>() else {
+            return;
+        };
+        let Some(start) = timing.entered_at.take() else {
+            return;
+        };
+        let elapsed_ms = elapsed_ms(start);
+        let mut totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
+        totals[timing.phase.index()] += elapsed_ms;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn hyrax_width_sweep_row(
-    label: String,
+    category: HyraxReportCategory,
+    variant: String,
     width: Option<usize>,
-    ecc_points_per_instance: Option<usize>,
-    fresh_ecc_points: Option<usize>,
+    ecc_points_per_commitment: Option<usize>,
+    ecc_points_per_proof: Option<usize>,
     prover: TimingStats,
     verifier: TimingStats,
     proof_bytes: usize,
     proof_zstd_bytes: usize,
-    kind: &'static str,
 ) -> HyraxWidthSweepRow {
     HyraxWidthSweepRow {
-        label,
+        algorithm: category.algorithm(),
+        variant,
         width,
-        ecc_points_per_instance,
-        fresh_ecc_points,
+        ecc_points_per_commitment,
+        ecc_points_per_proof,
         prover_ms: prover.median_ms,
         prover_mean_ms: prover.mean_ms,
         prover_min_ms: prover.min_ms,
@@ -1333,7 +1768,57 @@ fn hyrax_width_sweep_row(
         verifier_samples: verifier.samples,
         proof_bytes,
         proof_zstd_bytes,
-        kind,
+        category,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hyrax_instance_sweep_row(
+    instances: usize,
+    ell: usize,
+    l0: usize,
+    width: usize,
+    ecc_points_per_commitment: usize,
+    ecc_points_per_proof: usize,
+    setup_prepare: HyraxSetupPrepareTimings,
+    prove_phases: HyraxProvePhaseTimings,
+    prover: TimingStats,
+    verifier: TimingStats,
+    proof_bytes: usize,
+    proof_zstd_bytes: usize,
+) -> HyraxInstanceSweepRow {
+    HyraxInstanceSweepRow {
+        algorithm: HyraxReportCategory::ProjectionFoldMixedHyrax.algorithm(),
+        variant: format!("l0 {l0} instances {instances}"),
+        instances,
+        ell,
+        l0,
+        tail_vars: ell.saturating_sub(l0),
+        width,
+        ecc_points_per_commitment,
+        ecc_points_per_proof,
+        trace_witness_ms: setup_prepare.trace_witness_ms,
+        setup_ms: setup_prepare.setup_ms,
+        prepare_ms: setup_prepare.prepare_ms,
+        setup_prepare_ms: setup_prepare.setup_prepare_ms,
+        probe_prove_ms: prove_phases.prove_ms,
+        probe_commit_ms: prove_phases.commit_ms,
+        probe_sumfold_ms: prove_phases.sumfold_ms,
+        probe_fold_ms: prove_phases.fold_ms,
+        probe_open_ms: prove_phases.open_ms,
+        probe_open_core_ms: prove_phases.open_core_ms,
+        prover_ms: prover.median_ms,
+        prover_mean_ms: prover.mean_ms,
+        prover_min_ms: prover.min_ms,
+        prover_max_ms: prover.max_ms,
+        prover_samples: prover.samples,
+        verifier_ms: verifier.median_ms,
+        verifier_mean_ms: verifier.mean_ms,
+        verifier_min_ms: verifier.min_ms,
+        verifier_max_ms: verifier.max_ms,
+        verifier_samples: verifier.samples,
+        proof_bytes,
+        proof_zstd_bytes,
     }
 }
 
@@ -1438,24 +1923,132 @@ fn measure_warmed<T>(
     )
 }
 
+fn measure_mixed_hyrax_prove_phase_timings<C, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+) -> HyraxProvePhaseTimings
+where
+    U: Uair,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + FromPrimitiveWithConfig
+        + zip_plus::pcs::hyrax::HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
+    F::Inner: Transcribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    DensePolyScalarLanes: zip_plus::pcs::hyrax::HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: zip_plus::pcs::hyrax::HyraxLanes<C, Zt::Int, D>,
+{
+    let layer = PhaseTimingLayer::default();
+    let subscriber = tracing_subscriber::registry().with(layer.clone());
+    let start = Instant::now();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut transcript = Blake3Transcript::new();
+        prove_prepared_linear_ideal_fold_mixed_hyrax::<C, U, Zt, F, D>(
+            pp,
+            shape,
+            prepared_instances,
+            &mut transcript,
+        )
+        .expect("mixed Hyrax phase-timing probe failed");
+    });
+    layer.snapshot(elapsed_ms(start))
+}
+
+trait CsvValue {
+    fn write_csv(self, out: &mut String);
+}
+
+impl CsvValue for &str {
+    fn write_csv(self, out: &mut String) {
+        if self.chars().any(|ch| matches!(ch, ',' | '"' | '\n')) {
+            out.push('"');
+            for ch in self.chars() {
+                if ch == '"' {
+                    out.push('"');
+                }
+                out.push(ch);
+            }
+            out.push('"');
+        } else {
+            out.push_str(self);
+        }
+    }
+}
+
+impl CsvValue for String {
+    fn write_csv(self, out: &mut String) {
+        self.as_str().write_csv(out);
+    }
+}
+
+impl CsvValue for &String {
+    fn write_csv(self, out: &mut String) {
+        self.as_str().write_csv(out);
+    }
+}
+
+impl CsvValue for usize {
+    fn write_csv(self, out: &mut String) {
+        write!(out, "{self}").expect("write to String cannot fail");
+    }
+}
+
+impl CsvValue for f64 {
+    fn write_csv(self, out: &mut String) {
+        write!(out, "{self:.6}").expect("write to String cannot fail");
+    }
+}
+
+impl CsvValue for Option<usize> {
+    fn write_csv(self, out: &mut String) {
+        match self {
+            Some(value) => value.write_csv(out),
+            None => out.push_str("N/A"),
+        }
+    }
+}
+
+impl CsvValue for Option<f64> {
+    fn write_csv(self, out: &mut String) {
+        match self {
+            Some(value) => value.write_csv(out),
+            None => out.push_str("N/A"),
+        }
+    }
+}
+
+macro_rules! push_csv_row {
+    ($csv:expr, $first:expr $(, $rest:expr)* $(,)?) => {{
+        ($first).write_csv(&mut $csv);
+        $(
+            $csv.push(',');
+            ($rest).write_csv(&mut $csv);
+        )*
+        $csv.push('\n');
+    }};
+}
+
 fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
     let mut csv = String::from(
-        "label,kind,width,ecc_points_per_instance,fresh_ecc_points,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+        "algorithm,variant,width,ecc_points_per_commitment,ecc_points_per_proof,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
-        csv.push_str(&format!(
-            "{},{},{},{},{},{:.6},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6},{:.6},{},{},{}\n",
-            row.label,
-            row.kind,
-            row.width
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
-            row.ecc_points_per_instance
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
-            row.fresh_ecc_points
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "N/A".to_string()),
+        push_csv_row!(
+            csv,
+            row.algorithm,
+            row.variant.as_str(),
+            row.width,
+            row.ecc_points_per_commitment,
+            row.ecc_points_per_proof,
             row.prover_ms,
             row.prover_mean_ms,
             row.prover_min_ms,
@@ -1468,9 +2061,132 @@ fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
             row.verifier_samples,
             row.proof_bytes,
             row.proof_zstd_bytes
-        ));
+        );
     }
     fs::write(path, csv).expect("write hyrax width sweep CSV");
+}
+
+fn write_hyrax_instance_sweep_csv(path: &Path, rows: &[HyraxInstanceSweepRow]) {
+    let mut csv = String::from(
+        "algorithm,variant,instances,ell,l0,tail_vars,width,ecc_points_per_commitment,ecc_points_per_proof,trace_witness_ms,setup_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+    );
+    for row in rows {
+        push_csv_row!(
+            csv,
+            row.algorithm,
+            row.variant.as_str(),
+            row.instances,
+            row.ell,
+            row.l0,
+            row.tail_vars,
+            row.width,
+            row.ecc_points_per_commitment,
+            row.ecc_points_per_proof,
+            row.trace_witness_ms,
+            row.setup_ms,
+            row.prepare_ms,
+            row.setup_prepare_ms,
+            row.probe_prove_ms,
+            row.probe_commit_ms,
+            row.probe_sumfold_ms,
+            row.probe_fold_ms,
+            row.probe_open_ms,
+            row.probe_open_core_ms,
+            row.prover_ms,
+            row.prover_mean_ms,
+            row.prover_min_ms,
+            row.prover_max_ms,
+            row.prover_samples,
+            row.verifier_ms,
+            row.verifier_mean_ms,
+            row.verifier_min_ms,
+            row.verifier_max_ms,
+            row.verifier_samples,
+            row.proof_bytes,
+            row.proof_zstd_bytes
+        );
+    }
+    fs::write(path, csv).expect("write Hyrax instance sweep CSV");
+}
+
+fn write_og_sha256_instance_sweep_csv(path: &Path, rows: &[OgSha256InstanceSweepRow]) {
+    let mut csv = String::from(
+        "algorithm,status,error,instances,pcs_width,active_rows,domain_rows,num_vars,setup_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+    );
+    for row in rows {
+        push_csv_row!(
+            csv,
+            row.algorithm,
+            row.status,
+            row.error.as_str(),
+            row.instances,
+            row.pcs_width,
+            row.active_rows,
+            row.domain_rows,
+            row.num_vars,
+            row.setup_ms,
+            row.prover_ms,
+            row.prover_mean_ms,
+            row.prover_min_ms,
+            row.prover_max_ms,
+            row.prover_samples,
+            row.verifier_ms,
+            row.verifier_mean_ms,
+            row.verifier_min_ms,
+            row.verifier_max_ms,
+            row.verifier_samples,
+            row.proof_bytes,
+            row.proof_zstd_bytes
+        );
+    }
+    fs::write(path, csv).expect("write OG SHA-256 instance sweep CSV");
+}
+
+fn write_sha256_combined_instance_sweep_csv(path: &Path, rows: &[Sha256CombinedInstanceSweepRow]) {
+    let mut csv = String::from(
+        "algorithm,variant,status,error,instances,ell,l0,tail_vars,width,active_rows,domain_rows,num_vars,setup_ms,trace_witness_ms,pcs_setup_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+    );
+    for row in rows {
+        push_csv_row!(
+            csv,
+            row.algorithm.as_str(),
+            row.variant.as_str(),
+            row.status,
+            row.error.as_str(),
+            row.instances,
+            row.ell,
+            row.l0,
+            row.tail_vars,
+            row.width,
+            row.active_rows,
+            row.domain_rows,
+            row.num_vars,
+            row.setup_ms,
+            row.trace_witness_ms,
+            row.pcs_setup_ms,
+            row.prepare_ms,
+            row.setup_prepare_ms,
+            row.probe_prove_ms,
+            row.probe_commit_ms,
+            row.probe_sumfold_ms,
+            row.probe_fold_ms,
+            row.probe_open_ms,
+            row.probe_open_core_ms,
+            row.prover_ms,
+            row.prover_mean_ms,
+            row.prover_min_ms,
+            row.prover_max_ms,
+            row.prover_samples,
+            row.verifier_ms,
+            row.verifier_mean_ms,
+            row.verifier_min_ms,
+            row.verifier_max_ms,
+            row.verifier_samples,
+            row.proof_bytes,
+            row.proof_zstd_bytes
+        );
+    }
+    fs::write(path, csv).expect("write combined SHA-256 instance sweep CSV");
 }
 
 fn write_hyrax_width_sweep_skipped_csv(path: &Path, skipped: &[SkippedPackedWidth]) {
@@ -1527,7 +2243,7 @@ where
 fn mixed_width_candidates() -> Vec<(String, usize)> {
     [8usize, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
         .into_iter()
-        .map(|width| (format!("mixed {width}"), width))
+        .map(|width| (format!("width {width}"), width))
         .collect()
 }
 
@@ -1749,49 +2465,159 @@ fn write_svg(path: &Path, title: &str, body: &str) {
 }
 
 fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
+    fn width_points(
+        rows: &[&HyraxWidthSweepRow],
+        metric: impl Fn(&HyraxWidthSweepRow) -> f64,
+    ) -> Vec<(f64, f64)> {
+        rows.iter()
+            .filter_map(|row| row.width.map(|width| (width as f64, metric(row))))
+            .collect()
+    }
+
+    fn category_svg_color(category: HyraxReportCategory) -> &'static str {
+        match category {
+            HyraxReportCategory::OgHash => "#111827",
+            HyraxReportCategory::OgMixedHyrax => "#f97316",
+            HyraxReportCategory::ProjectionFoldMixedHyrax => "#dc2626",
+            HyraxReportCategory::ProjectionFoldPackedHyrax => "#2563eb",
+        }
+    }
+
+    fn category_png_color(category: HyraxReportCategory) -> Rgb {
+        match category {
+            HyraxReportCategory::OgHash => PNG_OG,
+            HyraxReportCategory::OgMixedHyrax => PNG_SCATTER,
+            HyraxReportCategory::ProjectionFoldMixedHyrax => PNG_MIXED,
+            HyraxReportCategory::ProjectionFoldPackedHyrax => PNG_PROOF,
+        }
+    }
+
     let packed = rows
         .iter()
-        .filter(|row| row.kind == "packed")
+        .filter(|row| row.category == HyraxReportCategory::ProjectionFoldPackedHyrax)
         .collect::<Vec<_>>();
-    let og = rows.iter().find(|row| row.kind == "og_zip");
-    let fastest_mixed = rows
+    let projection_mixed = rows
         .iter()
-        .filter(|row| row.kind == "mixed_hyrax")
-        .min_by(|a, b| {
-            a.prover_ms
-                .partial_cmp(&b.prover_ms)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        .filter(|row| row.category == HyraxReportCategory::ProjectionFoldMixedHyrax)
+        .collect::<Vec<_>>();
+    let og_mixed = rows
+        .iter()
+        .filter(|row| row.category == HyraxReportCategory::OgMixedHyrax)
+        .collect::<Vec<_>>();
+    let og_hash = rows
+        .iter()
+        .find(|row| row.category == HyraxReportCategory::OgHash);
+    let width_rows = rows
+        .iter()
+        .filter(|row| row.width.is_some())
+        .collect::<Vec<_>>();
 
-    let width_min = packed.iter().filter_map(|row| row.width).min().unwrap_or(1) as f64;
-    let width_max = packed.iter().filter_map(|row| row.width).max().unwrap_or(2) as f64;
+    let width_min = width_rows
+        .iter()
+        .filter_map(|row| row.width)
+        .min()
+        .unwrap_or(1) as f64;
+    let width_max = width_rows
+        .iter()
+        .filter_map(|row| row.width)
+        .max()
+        .unwrap_or(2) as f64;
     let xlog =
         |x: f64| 80.0 + ((x.ln() - width_min.ln()) / (width_max.ln() - width_min.ln())) * 860.0;
 
     let (time_min, time_max) = finite_range(
-        packed
+        width_rows
             .iter()
             .flat_map(|row| [row.prover_ms, row.verifier_ms])
-            .chain(og.iter().flat_map(|row| [row.prover_ms, row.verifier_ms]))
-            .chain(fastest_mixed.iter().flat_map(|row| [row.prover_ms, row.verifier_ms])),
+            .chain(
+                og_hash
+                    .iter()
+                    .flat_map(|row| [row.prover_ms, row.verifier_ms]),
+            ),
     );
     let ytime = |y: f64| 500.0 - ((y - time_min) / (time_max - time_min)) * 430.0;
-    let prover_points = packed
-        .iter()
-        .map(|row| (row.width.unwrap_or_default() as f64, row.prover_ms))
-        .collect::<Vec<_>>();
-    let verifier_points = packed
-        .iter()
-        .map(|row| (row.width.unwrap_or_default() as f64, row.verifier_ms))
-        .collect::<Vec<_>>();
+    let packed_prover_points = width_points(&packed, |row| row.prover_ms);
+    let packed_verifier_points = width_points(&packed, |row| row.verifier_ms);
+    let projection_mixed_prover_points = width_points(&projection_mixed, |row| row.prover_ms);
+    let projection_mixed_verifier_points = width_points(&projection_mixed, |row| row.verifier_ms);
+    let og_mixed_prover_points = width_points(&og_mixed, |row| row.prover_ms);
+    let og_mixed_verifier_points = width_points(&og_mixed, |row| row.verifier_ms);
     let mut body = String::new();
-    body.push_str(&svg_polyline(&prover_points, "#0f766e", &xlog, &ytime));
-    body.push_str(&svg_polyline(&verifier_points, "#7c3aed", &xlog, &ytime));
+    body.push_str(&svg_polyline(
+        &packed_prover_points,
+        "#2563eb",
+        &xlog,
+        &ytime,
+    ));
+    body.push_str(&svg_polyline(
+        &packed_verifier_points,
+        "#60a5fa",
+        &xlog,
+        &ytime,
+    ));
+    body.push_str(&svg_polyline(
+        &projection_mixed_prover_points,
+        "#dc2626",
+        &xlog,
+        &ytime,
+    ));
+    body.push_str(&svg_polyline(
+        &projection_mixed_verifier_points,
+        "#fca5a5",
+        &xlog,
+        &ytime,
+    ));
+    body.push_str(&svg_polyline(
+        &og_mixed_prover_points,
+        "#f97316",
+        &xlog,
+        &ytime,
+    ));
+    body.push_str(&svg_polyline(
+        &og_mixed_verifier_points,
+        "#facc15",
+        &xlog,
+        &ytime,
+    ));
     let mut png = blank_png_canvas();
     draw_png_axes(&mut png);
-    draw_png_polyline(&mut png, &prover_points, PNG_PROVER, &xlog, &ytime);
-    draw_png_polyline(&mut png, &verifier_points, PNG_VERIFIER, &xlog, &ytime);
-    if let Some(row) = og {
+    draw_png_polyline(&mut png, &packed_prover_points, PNG_PROOF, &xlog, &ytime);
+    draw_png_polyline(
+        &mut png,
+        &packed_verifier_points,
+        Rgb(96, 165, 250),
+        &xlog,
+        &ytime,
+    );
+    draw_png_polyline(
+        &mut png,
+        &projection_mixed_prover_points,
+        PNG_MIXED,
+        &xlog,
+        &ytime,
+    );
+    draw_png_polyline(
+        &mut png,
+        &projection_mixed_verifier_points,
+        Rgb(252, 165, 165),
+        &xlog,
+        &ytime,
+    );
+    draw_png_polyline(
+        &mut png,
+        &og_mixed_prover_points,
+        PNG_SCATTER,
+        &xlog,
+        &ytime,
+    );
+    draw_png_polyline(
+        &mut png,
+        &og_mixed_verifier_points,
+        Rgb(250, 204, 21),
+        &xlog,
+        &ytime,
+    );
+    if let Some(row) = og_hash {
         body.push_str(&format!(
             r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#0f766e" stroke-dasharray="6 4"/><line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#7c3aed" stroke-dasharray="6 4"/>"##,
             ytime(row.prover_ms),
@@ -1802,18 +2628,7 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
         draw_png_dashed_hline(&mut png, ytime(row.prover_ms), PNG_PROVER);
         draw_png_dashed_hline(&mut png, ytime(row.verifier_ms), PNG_VERIFIER);
     }
-    if let Some(row) = fastest_mixed {
-        body.push_str(&format!(
-            r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="8 5"/><line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="2 5"/>"##,
-            ytime(row.prover_ms),
-            ytime(row.prover_ms),
-            ytime(row.verifier_ms),
-            ytime(row.verifier_ms)
-        ));
-        draw_png_dashed_hline(&mut png, ytime(row.prover_ms), PNG_MIXED);
-        draw_png_dashed_hline(&mut png, ytime(row.verifier_ms), PNG_MIXED);
-    }
-    body.push_str(r##"<text x="720" y="92" font-family="sans-serif" font-size="14" fill="#0f766e">prover</text><text x="720" y="112" font-family="sans-serif" font-size="14" fill="#7c3aed">verifier</text>"##);
+    body.push_str(r##"<text x="650" y="82" font-family="sans-serif" font-size="13" fill="#2563eb">PF packed</text><text x="650" y="102" font-family="sans-serif" font-size="13" fill="#dc2626">PF mixed</text><text x="650" y="122" font-family="sans-serif" font-size="13" fill="#f97316">OG mixed</text><text x="650" y="142" font-family="sans-serif" font-size="13" fill="#111827">OG hash dashed</text>"##);
     write_svg(
         &out_dir.join("plot1_time_vs_width.svg"),
         "Prover/Verifier Time vs Width",
@@ -1823,23 +2638,47 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
 
     let (proof_min, proof_max) = finite_range(rows.iter().map(|row| row.proof_bytes as f64));
     let yproof = |y: f64| 500.0 - ((y - proof_min) / (proof_max - proof_min)) * 430.0;
-    let proof_points = packed
-        .iter()
-        .map(|row| (row.width.unwrap_or_default() as f64, row.proof_bytes as f64))
-        .collect::<Vec<_>>();
-    let mut body = svg_polyline(&proof_points, "#2563eb", &xlog, &yproof);
+    let packed_proof_points = width_points(&packed, |row| row.proof_bytes as f64);
+    let projection_mixed_proof_points =
+        width_points(&projection_mixed, |row| row.proof_bytes as f64);
+    let og_mixed_proof_points = width_points(&og_mixed, |row| row.proof_bytes as f64);
+    let mut body = String::new();
+    body.push_str(&svg_polyline(
+        &packed_proof_points,
+        "#2563eb",
+        &xlog,
+        &yproof,
+    ));
+    body.push_str(&svg_polyline(
+        &projection_mixed_proof_points,
+        "#dc2626",
+        &xlog,
+        &yproof,
+    ));
+    body.push_str(&svg_polyline(
+        &og_mixed_proof_points,
+        "#f97316",
+        &xlog,
+        &yproof,
+    ));
     let mut png = blank_png_canvas();
     draw_png_axes(&mut png);
-    draw_png_polyline(&mut png, &proof_points, PNG_PROOF, &xlog, &yproof);
-    if let Some(row) = fastest_mixed {
-        body.push_str(&format!(
-            r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#dc2626" stroke-dasharray="6 4"/>"##,
-            yproof(row.proof_bytes as f64),
-            yproof(row.proof_bytes as f64)
-        ));
-        draw_png_dashed_hline(&mut png, yproof(row.proof_bytes as f64), PNG_MIXED);
-    }
-    if let Some(row) = og {
+    draw_png_polyline(&mut png, &packed_proof_points, PNG_PROOF, &xlog, &yproof);
+    draw_png_polyline(
+        &mut png,
+        &projection_mixed_proof_points,
+        PNG_MIXED,
+        &xlog,
+        &yproof,
+    );
+    draw_png_polyline(
+        &mut png,
+        &og_mixed_proof_points,
+        PNG_SCATTER,
+        &xlog,
+        &yproof,
+    );
+    if let Some(row) = og_hash {
         body.push_str(&format!(
             r##"<line x1="80" x2="940" y1="{:.2}" y2="{:.2}" stroke="#111827" stroke-dasharray="3 5"/>"##,
             yproof(row.proof_bytes as f64),
@@ -1855,30 +2694,32 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     write_png(&out_dir.join("plot2_proof_size_vs_width.png"), &png);
 
     let (scatter_x_min, scatter_x_max) =
-        finite_range(packed.iter().map(|row| row.proof_bytes as f64));
-    let (scatter_y_min, scatter_y_max) = finite_range(packed.iter().map(|row| row.prover_ms));
+        finite_range(width_rows.iter().map(|row| row.proof_bytes as f64));
+    let (scatter_y_min, scatter_y_max) = finite_range(width_rows.iter().map(|row| row.prover_ms));
     let sx = |x: f64| 80.0 + ((x - scatter_x_min) / (scatter_x_max - scatter_x_min)) * 860.0;
     let sy = |y: f64| 500.0 - ((y - scatter_y_min) / (scatter_y_max - scatter_y_min)) * 430.0;
-    let max_ecc = packed
+    let max_ecc = width_rows
         .iter()
-        .filter_map(|row| row.ecc_points_per_instance)
+        .filter_map(|row| row.ecc_points_per_commitment)
         .max()
         .unwrap_or(1) as f64;
     let mut body = String::new();
     let mut png = blank_png_canvas();
     draw_png_axes(&mut png);
-    for row in &packed {
-        let ecc = row.ecc_points_per_instance.unwrap_or(1) as f64;
+    for row in &width_rows {
+        let ecc = row.ecc_points_per_commitment.unwrap_or(1) as f64;
         let radius = 4.0 + 8.0 * (ecc / max_ecc).sqrt();
         let x = sx(row.proof_bytes as f64);
         let y = sy(row.prover_ms);
+        let color = category_svg_color(row.category);
         body.push_str(&format!(
-            r##"<circle cx="{x:.2}" cy="{y:.2}" r="{radius:.2}" fill="#f97316" fill-opacity="0.72"/><text x="{:.2}" y="{:.2}" font-family="sans-serif" font-size="11">{}</text>"##,
+            r##"<circle cx="{x:.2}" cy="{y:.2}" r="{radius:.2}" fill="{color}" fill-opacity="0.72"/><text x="{:.2}" y="{:.2}" font-family="sans-serif" font-size="11">{} {}</text>"##,
             x + radius + 2.0,
             y - radius,
-            row.label
+            row.category.short_label(),
+            row.variant
         ));
-        draw_png_filled_circle(&mut png, x, y, radius, PNG_SCATTER);
+        draw_png_filled_circle(&mut png, x, y, radius, category_png_color(row.category));
     }
     write_svg(
         &out_dir.join("plot3_pareto_scatter.svg"),
@@ -1887,32 +2728,88 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     );
     write_png(&out_dir.join("plot3_pareto_scatter.png"), &png);
 
-    let ecc_min = packed
+    let ecc_min = width_rows
         .iter()
-        .filter_map(|row| row.ecc_points_per_instance)
+        .filter_map(|row| row.ecc_points_per_commitment)
         .min()
         .unwrap_or(1) as f64;
-    let ecc_max = packed
+    let ecc_max = width_rows
         .iter()
-        .filter_map(|row| row.ecc_points_per_instance)
+        .filter_map(|row| row.ecc_points_per_commitment)
         .max()
         .unwrap_or(2) as f64;
     let x_ecc = |x: f64| 80.0 + ((x.ln() - ecc_min.ln()) / (ecc_max.ln() - ecc_min.ln())) * 860.0;
-    let (verifier_min, verifier_max) = finite_range(packed.iter().map(|row| row.verifier_ms));
+    let (verifier_min, verifier_max) = finite_range(width_rows.iter().map(|row| row.verifier_ms));
     let yver = |y: f64| 500.0 - ((y - verifier_min) / (verifier_max - verifier_min)) * 430.0;
-    let verifier_ecc_points = packed
+    let packed_verifier_ecc_points = packed
         .iter()
         .map(|row| {
             (
-                row.ecc_points_per_instance.unwrap_or_default() as f64,
+                row.ecc_points_per_commitment.unwrap_or_default() as f64,
                 row.verifier_ms,
             )
         })
         .collect::<Vec<_>>();
-    let body = svg_polyline(&verifier_ecc_points, "#9333ea", &x_ecc, &yver);
+    let projection_mixed_verifier_ecc_points = projection_mixed
+        .iter()
+        .map(|row| {
+            (
+                row.ecc_points_per_commitment.unwrap_or_default() as f64,
+                row.verifier_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let og_mixed_verifier_ecc_points = og_mixed
+        .iter()
+        .map(|row| {
+            (
+                row.ecc_points_per_commitment.unwrap_or_default() as f64,
+                row.verifier_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut body = String::new();
+    body.push_str(&svg_polyline(
+        &packed_verifier_ecc_points,
+        "#2563eb",
+        &x_ecc,
+        &yver,
+    ));
+    body.push_str(&svg_polyline(
+        &projection_mixed_verifier_ecc_points,
+        "#dc2626",
+        &x_ecc,
+        &yver,
+    ));
+    body.push_str(&svg_polyline(
+        &og_mixed_verifier_ecc_points,
+        "#f97316",
+        &x_ecc,
+        &yver,
+    ));
     let mut png = blank_png_canvas();
     draw_png_axes(&mut png);
-    draw_png_polyline(&mut png, &verifier_ecc_points, PNG_VERIFIER, &x_ecc, &yver);
+    draw_png_polyline(
+        &mut png,
+        &packed_verifier_ecc_points,
+        PNG_PROOF,
+        &x_ecc,
+        &yver,
+    );
+    draw_png_polyline(
+        &mut png,
+        &projection_mixed_verifier_ecc_points,
+        PNG_MIXED,
+        &x_ecc,
+        &yver,
+    );
+    draw_png_polyline(
+        &mut png,
+        &og_mixed_verifier_ecc_points,
+        PNG_SCATTER,
+        &x_ecc,
+        &yver,
+    );
     write_svg(
         &out_dir.join("plot4_verifier_vs_ecc.svg"),
         "Verifier Time vs ECC Points",
@@ -1921,9 +2818,143 @@ fn write_hyrax_width_sweep_plots(out_dir: &Path, rows: &[HyraxWidthSweepRow]) {
     write_png(&out_dir.join("plot4_verifier_vs_ecc.png"), &png);
 }
 
+fn write_hyrax_instance_sweep_plot(out_dir: &Path, rows: &[HyraxInstanceSweepRow]) {
+    if rows.is_empty() {
+        return;
+    }
+
+    fn l0_svg_color(l0: usize) -> &'static str {
+        match l0 {
+            3 => "#0f766e",
+            4 => "#dc2626",
+            5 => "#2563eb",
+            _ => "#111827",
+        }
+    }
+
+    fn l0_png_color(l0: usize) -> Rgb {
+        match l0 {
+            3 => PNG_PROVER,
+            4 => PNG_MIXED,
+            5 => PNG_PROOF,
+            _ => PNG_OG,
+        }
+    }
+
+    fn push_svg_y_axis_labels(body: &mut String, min: f64, max: f64, ymap: &dyn Fn(f64) -> f64) {
+        const TICKS: usize = 5;
+        for idx in 0..=TICKS {
+            let value = min + (max - min) * idx as f64 / TICKS as f64;
+            let y = ymap(value);
+            body.push_str(&format!(
+                r##"<line x1="74" y1="{y:.2}" x2="80" y2="{y:.2}" stroke="#222"/><text x="68" y="{:.2}" font-family="sans-serif" font-size="11" text-anchor="end">{value:.0} ms</text>"##,
+                y + 3.5
+            ));
+        }
+    }
+
+    let mut l0_values = rows.iter().map(|row| row.l0).collect::<Vec<_>>();
+    l0_values.sort_unstable();
+    l0_values.dedup();
+
+    let instance_max = rows.iter().map(|row| row.instances).max().unwrap_or(2) as f64;
+    let xinstance = |x: f64| 80.0 + (x / instance_max) * 860.0;
+    let (time_min, time_max) = (0.0, finite_range(rows.iter().map(|row| row.prover_ms)).1);
+    let ytime = |y: f64| 500.0 - ((y - time_min) / (time_max - time_min)) * 430.0;
+
+    let mut body = String::new();
+    push_svg_y_axis_labels(&mut body, time_min, time_max, &ytime);
+    let mut png = blank_png_canvas();
+    draw_png_axes(&mut png);
+    for (idx, l0) in l0_values.iter().copied().enumerate() {
+        let mut l0_rows = rows.iter().filter(|row| row.l0 == l0).collect::<Vec<_>>();
+        l0_rows.sort_by_key(|row| row.instances);
+        let prover_points = l0_rows
+            .iter()
+            .map(|row| (row.instances as f64, row.prover_ms))
+            .collect::<Vec<_>>();
+        let prover_svg = l0_svg_color(l0);
+        let prover_png = l0_png_color(l0);
+        body.push_str(&svg_polyline(
+            &prover_points,
+            prover_svg,
+            &xinstance,
+            &ytime,
+        ));
+        draw_png_polyline(&mut png, &prover_points, prover_png, &xinstance, &ytime);
+        body.push_str(&format!(
+            r##"<text x="700" y="{}" font-family="sans-serif" font-size="13" fill="{prover_svg}">l0 {l0}</text>"##,
+            84 + idx * 24
+        ));
+    }
+    let mut instance_labels = rows.iter().map(|row| row.instances).collect::<Vec<_>>();
+    instance_labels.sort_unstable();
+    instance_labels.dedup();
+    for instances in instance_labels {
+        body.push_str(&format!(
+            r##"<text x="{:.2}" y="522" font-family="sans-serif" font-size="12" text-anchor="middle">{}</text>"##,
+            xinstance(instances as f64),
+            instances
+        ));
+    }
+    body.push_str(
+        r##"<text x="510" y="548" font-family="sans-serif" font-size="13" text-anchor="middle">instances, linear scale</text><text x="18" y="285" font-family="sans-serif" font-size="13" text-anchor="middle" transform="rotate(-90 18 285)">prover time (ms)</text>"##,
+    );
+    write_svg(
+        &out_dir.join("plot5_instance_scaling.svg"),
+        "ProjectionFold Mixed Hyrax Prover Time vs Instances by L0 (Linear X)",
+        &body,
+    );
+    write_png(&out_dir.join("plot5_instance_scaling.png"), &png);
+
+    let tail_min = rows.iter().map(|row| row.tail_vars).min().unwrap_or(0) as f64;
+    let tail_max = rows.iter().map(|row| row.tail_vars).max().unwrap_or(1) as f64;
+    let xtail = |x: f64| {
+        if (tail_max - tail_min).abs() < f64::EPSILON {
+            510.0
+        } else {
+            80.0 + ((x - tail_min) / (tail_max - tail_min)) * 860.0
+        }
+    };
+    let mut body = String::new();
+    push_svg_y_axis_labels(&mut body, time_min, time_max, &ytime);
+    let mut png = blank_png_canvas();
+    draw_png_axes(&mut png);
+    for (idx, l0) in l0_values.iter().copied().enumerate() {
+        let mut l0_rows = rows.iter().filter(|row| row.l0 == l0).collect::<Vec<_>>();
+        l0_rows.sort_by_key(|row| row.tail_vars);
+        let prover_points = l0_rows
+            .iter()
+            .map(|row| (row.tail_vars as f64, row.prover_ms))
+            .collect::<Vec<_>>();
+        let prover_svg = l0_svg_color(l0);
+        let prover_png = l0_png_color(l0);
+        body.push_str(&svg_polyline(&prover_points, prover_svg, &xtail, &ytime));
+        draw_png_polyline(&mut png, &prover_points, prover_png, &xtail, &ytime);
+        body.push_str(&format!(
+            r##"<text x="700" y="{}" font-family="sans-serif" font-size="13" fill="{prover_svg}">l0 {l0}</text>"##,
+            84 + idx * 24
+        ));
+    }
+    for tail in tail_min as usize..=tail_max as usize {
+        body.push_str(&format!(
+            r##"<text x="{:.2}" y="522" font-family="sans-serif" font-size="12" text-anchor="middle">{}</text>"##,
+            xtail(tail as f64),
+            tail
+        ));
+    }
+    write_svg(
+        &out_dir.join("plot6_tail_scaling.svg"),
+        "ProjectionFold Mixed Hyrax Prover Time vs Tail Variables by L0",
+        &body,
+    );
+    write_png(&out_dir.join("plot6_tail_scaling.png"), &png);
+}
+
 fn write_hyrax_width_sweep_report(
     out_dir: &Path,
     rows: &[HyraxWidthSweepRow],
+    instance_rows: &[HyraxInstanceSweepRow],
     confirmation_rows: &[HyraxWidthSweepRow],
     skipped_widths: &[SkippedPackedWidth],
 ) {
@@ -1931,6 +2962,17 @@ fn write_hyrax_width_sweep_report(
         rows: impl Iterator<Item = &'a HyraxWidthSweepRow>,
         metric: impl Fn(&HyraxWidthSweepRow) -> f64,
     ) -> Option<&'a HyraxWidthSweepRow> {
+        rows.min_by(|a, b| {
+            metric(a)
+                .partial_cmp(&metric(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
+    fn best_instance_row_by<'a>(
+        rows: impl Iterator<Item = &'a HyraxInstanceSweepRow>,
+        metric: impl Fn(&HyraxInstanceSweepRow) -> f64,
+    ) -> Option<&'a HyraxInstanceSweepRow> {
         rows.min_by(|a, b| {
             metric(a)
                 .partial_cmp(&metric(b))
@@ -1959,21 +3001,37 @@ fn write_hyrax_width_sweep_report(
 
     fn row_summary(row: &HyraxWidthSweepRow) -> String {
         format!(
-            "{}{}: prover median {:.3} ms, verifier median {:.3} ms, proof {} bytes, zstd {} bytes",
-            row.label,
-            row.width
-                .map(|width| format!(
-                    " (width {width}, ECC/inst {}, fresh ECC {})",
-                    row.ecc_points_per_instance
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "N/A".to_string()),
-                    row.fresh_ecc_points
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "N/A".to_string())
-                ))
-                .unwrap_or_default(),
+            "{} / {}: prover median {:.3} ms, verifier median {:.3} ms, ECC commitment {}, ECC proof {}, proof {} bytes, zstd {} bytes",
+            row.algorithm,
+            row.variant,
             row.prover_ms,
             row.verifier_ms,
+            row.ecc_points_per_commitment
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            row.ecc_points_per_proof
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            row.proof_bytes,
+            row.proof_zstd_bytes
+        )
+    }
+
+    fn instance_row_summary(row: &HyraxInstanceSweepRow) -> String {
+        format!(
+            "{} / {}: instances {}, ell {}, l0 {}, tail {}, width {}, setup+prepare {:.3} ms, prover median {:.3} ms ({:.3} ms/instance), verifier median {:.3} ms ({:.3} ms/instance), proof {} bytes, zstd {} bytes",
+            row.algorithm,
+            row.variant,
+            row.instances,
+            row.ell,
+            row.l0,
+            row.tail_vars,
+            row.width,
+            row.setup_prepare_ms,
+            row.prover_ms,
+            row.prover_ms / row.instances as f64,
+            row.verifier_ms,
+            row.verifier_ms / row.instances as f64,
             row.proof_bytes,
             row.proof_zstd_bytes
         )
@@ -2024,7 +3082,7 @@ fn write_hyrax_width_sweep_report(
 
     fn row_table(rows: &[&HyraxWidthSweepRow], winner_rows: &[&HyraxWidthSweepRow]) -> String {
         let mut table = String::from(
-            "<table><thead><tr><th>label</th><th>kind</th><th>width</th><th>ECC points/inst</th><th>fresh ECC points</th><th>prover median ms</th><th>prover mean ms</th><th>prover min ms</th><th>prover max ms</th><th>verifier median ms</th><th>verifier mean ms</th><th>verifier min ms</th><th>verifier max ms</th><th>samples p/v</th><th>proof bytes</th><th>zstd bytes</th></tr></thead><tbody>",
+            "<table><thead><tr><th>algorithm</th><th>variant</th><th>width</th><th>ECC points/commitment</th><th>ECC points/proof</th><th>prover median ms</th><th>prover mean ms</th><th>prover min ms</th><th>prover max ms</th><th>verifier median ms</th><th>verifier mean ms</th><th>verifier min ms</th><th>verifier max ms</th><th>samples p/v</th><th>proof bytes</th><th>zstd bytes</th></tr></thead><tbody>",
         );
         for row in rows {
             let row = *row;
@@ -2038,11 +3096,11 @@ fn write_hyrax_width_sweep_report(
             };
             table.push_str(&format!(
                 "<tr{class}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{}/{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(&row.label),
-                row.kind,
+                html_escape(row.algorithm),
+                html_escape(&row.variant),
                 optional_usize(row.width),
-                optional_usize(row.ecc_points_per_instance),
-                optional_usize(row.fresh_ecc_points),
+                optional_usize(row.ecc_points_per_commitment),
+                optional_usize(row.ecc_points_per_proof),
                 row.prover_ms,
                 row.prover_mean_ms,
                 row.prover_min_ms,
@@ -2061,19 +3119,134 @@ fn write_hyrax_width_sweep_report(
         table
     }
 
+    fn instance_row_table(
+        rows: &[&HyraxInstanceSweepRow],
+        winner_rows: &[&HyraxInstanceSweepRow],
+    ) -> String {
+        let mut table = String::from(
+            "<table><thead><tr><th>algorithm</th><th>variant</th><th>instances</th><th>ell</th><th>l0</th><th>tail vars</th><th>width</th><th>ECC points/commitment</th><th>ECC points/proof</th><th>trace/witness ms</th><th>PCS setup ms</th><th>prepare ms</th><th>setup+prepare ms</th><th>probe prove ms</th><th>probe commit ms</th><th>probe sumfold ms</th><th>probe fold ms</th><th>probe open ms</th><th>probe open core ms</th><th>prover median ms</th><th>prover mean ms</th><th>prover min ms</th><th>prover max ms</th><th>prover ms/instance</th><th>prover scaling vs L0 base</th><th>verifier median ms</th><th>verifier mean ms</th><th>verifier min ms</th><th>verifier max ms</th><th>verifier ms/instance</th><th>verifier scaling vs L0 base</th><th>samples p/v</th><th>proof bytes</th><th>proof growth vs L0 base</th><th>zstd bytes</th><th>zstd growth vs L0 base</th></tr></thead><tbody>",
+        );
+        for row in rows {
+            let row = *row;
+            let base = rows
+                .iter()
+                .filter(|candidate| candidate.l0 == row.l0)
+                .min_by_key(|candidate| candidate.instances)
+                .copied()
+                .expect("each row has a same-l0 base row");
+            let class = if winner_rows
+                .iter()
+                .any(|winner| std::ptr::eq::<HyraxInstanceSweepRow>(*winner, row))
+            {
+                r#" class="winner""#
+            } else {
+                ""
+            };
+            table.push_str(&format!(
+                "<tr{class}><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.2}x</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.3}</td><td>{:.2}x</td><td>{}/{}</td><td>{}</td><td>{:.2}x</td><td>{}</td><td>{:.2}x</td></tr>",
+                html_escape(row.algorithm),
+                html_escape(&row.variant),
+                row.instances,
+                row.ell,
+                row.l0,
+                row.tail_vars,
+                row.width,
+                row.ecc_points_per_commitment,
+                row.ecc_points_per_proof,
+                row.trace_witness_ms,
+                row.setup_ms,
+                row.prepare_ms,
+                row.setup_prepare_ms,
+                row.probe_prove_ms,
+                row.probe_commit_ms,
+                row.probe_sumfold_ms,
+                row.probe_fold_ms,
+                row.probe_open_ms,
+                row.probe_open_core_ms,
+                row.prover_ms,
+                row.prover_mean_ms,
+                row.prover_min_ms,
+                row.prover_max_ms,
+                row.prover_ms / row.instances as f64,
+                row.prover_ms / base.prover_ms,
+                row.verifier_ms,
+                row.verifier_mean_ms,
+                row.verifier_min_ms,
+                row.verifier_max_ms,
+                row.verifier_ms / row.instances as f64,
+                row.verifier_ms / base.verifier_ms,
+                row.prover_samples,
+                row.verifier_samples,
+                row.proof_bytes,
+                row.proof_bytes as f64 / base.proof_bytes as f64,
+                row.proof_zstd_bytes,
+                row.proof_zstd_bytes as f64 / base.proof_zstd_bytes as f64
+            ));
+        }
+        table.push_str("</tbody></table>");
+        table
+    }
+
+    fn best_l0_by_instance_table(rows: &[&HyraxInstanceSweepRow]) -> String {
+        let mut instances = rows.iter().map(|row| row.instances).collect::<Vec<_>>();
+        instances.sort_unstable();
+        instances.dedup();
+        let mut table = String::from(
+            "<table><thead><tr><th>instances</th><th>best prover l0</th><th>best prover ms</th><th>best verifier l0</th><th>best verifier ms</th><th>smallest raw l0</th><th>raw bytes</th><th>smallest zstd l0</th><th>zstd bytes</th></tr></thead><tbody>",
+        );
+        for instance_count in instances {
+            let matching = rows
+                .iter()
+                .copied()
+                .filter(|row| row.instances == instance_count)
+                .collect::<Vec<_>>();
+            let best_prover = best_instance_row_by(matching.iter().copied(), |row| row.prover_ms)
+                .expect("instance count has at least one row");
+            let best_verifier =
+                best_instance_row_by(matching.iter().copied(), |row| row.verifier_ms)
+                    .expect("instance count has at least one row");
+            let smallest_raw =
+                best_instance_row_by(matching.iter().copied(), |row| row.proof_bytes as f64)
+                    .expect("instance count has at least one row");
+            let smallest_zstd =
+                best_instance_row_by(matching.iter().copied(), |row| row.proof_zstd_bytes as f64)
+                    .expect("instance count has at least one row");
+            table.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{:.3}</td><td>{}</td><td>{:.3}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                instance_count,
+                best_prover.l0,
+                best_prover.prover_ms,
+                best_verifier.l0,
+                best_verifier.verifier_ms,
+                smallest_raw.l0,
+                smallest_raw.proof_bytes,
+                smallest_zstd.l0,
+                smallest_zstd.proof_zstd_bytes
+            ));
+        }
+        table.push_str("</tbody></table>");
+        table
+    }
+
     let packed_rows = rows
         .iter()
-        .filter(|row| row.kind == "packed")
+        .filter(|row| row.category == HyraxReportCategory::ProjectionFoldPackedHyrax)
         .collect::<Vec<_>>();
-    let mixed_rows = rows
+    let projection_mixed_rows = rows
         .iter()
-        .filter(|row| row.kind == "mixed_hyrax")
+        .filter(|row| row.category == HyraxReportCategory::ProjectionFoldMixedHyrax)
+        .collect::<Vec<_>>();
+    let og_mixed_rows = rows
+        .iter()
+        .filter(|row| row.category == HyraxReportCategory::OgMixedHyrax)
         .collect::<Vec<_>>();
     let hyrax_rows = rows
         .iter()
-        .filter(|row| row.kind != "og_zip")
+        .filter(|row| row.category != HyraxReportCategory::OgHash)
         .collect::<Vec<_>>();
-    let og_zip = rows.iter().find(|row| row.kind == "og_zip");
+    let og_zip = rows
+        .iter()
+        .find(|row| row.category == HyraxReportCategory::OgHash);
     let hyrax_fastest_prover = best_row_by(hyrax_rows.iter().copied(), |row| row.prover_ms);
     let hyrax_fastest_verifier = best_row_by(hyrax_rows.iter().copied(), |row| row.verifier_ms);
     let hyrax_smallest_proof =
@@ -2088,12 +3261,26 @@ fn write_hyrax_width_sweep_report(
     let packed_smallest_zstd = best_row_by(packed_rows.iter().copied(), |row| {
         row.proof_zstd_bytes as f64
     });
-    let mixed_fastest_prover = best_row_by(mixed_rows.iter().copied(), |row| row.prover_ms);
-    let mixed_fastest_verifier = best_row_by(mixed_rows.iter().copied(), |row| row.verifier_ms);
-    let mixed_smallest_proof =
-        best_row_by(mixed_rows.iter().copied(), |row| row.proof_bytes as f64);
-    let mixed_smallest_zstd =
-        best_row_by(mixed_rows.iter().copied(), |row| row.proof_zstd_bytes as f64);
+    let projection_mixed_fastest_prover =
+        best_row_by(projection_mixed_rows.iter().copied(), |row| row.prover_ms);
+    let projection_mixed_fastest_verifier =
+        best_row_by(projection_mixed_rows.iter().copied(), |row| row.verifier_ms);
+    let projection_mixed_smallest_proof =
+        best_row_by(projection_mixed_rows.iter().copied(), |row| {
+            row.proof_bytes as f64
+        });
+    let projection_mixed_smallest_zstd =
+        best_row_by(projection_mixed_rows.iter().copied(), |row| {
+            row.proof_zstd_bytes as f64
+        });
+    let og_mixed_fastest_prover = best_row_by(og_mixed_rows.iter().copied(), |row| row.prover_ms);
+    let og_mixed_fastest_verifier =
+        best_row_by(og_mixed_rows.iter().copied(), |row| row.verifier_ms);
+    let og_mixed_smallest_proof =
+        best_row_by(og_mixed_rows.iter().copied(), |row| row.proof_bytes as f64);
+    let og_mixed_smallest_zstd = best_row_by(og_mixed_rows.iter().copied(), |row| {
+        row.proof_zstd_bytes as f64
+    });
     let packed_balanced = if packed_rows.is_empty() {
         None
     } else {
@@ -2122,22 +3309,106 @@ fn write_hyrax_width_sweep_report(
         packed_fastest_verifier,
         packed_smallest_proof,
         packed_smallest_zstd,
-        mixed_fastest_prover,
-        mixed_fastest_verifier,
-        mixed_smallest_proof,
-        mixed_smallest_zstd,
+        projection_mixed_fastest_prover,
+        projection_mixed_fastest_verifier,
+        projection_mixed_smallest_proof,
+        projection_mixed_smallest_zstd,
+        og_mixed_fastest_prover,
+        og_mixed_fastest_verifier,
+        og_mixed_smallest_proof,
+        og_mixed_smallest_zstd,
         packed_balanced,
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
 
-    let all_rows = rows.iter().collect::<Vec<_>>();
+    let mut all_rows = rows.iter().collect::<Vec<_>>();
+    all_rows.sort_by_key(|row| {
+        (
+            row.category.order(),
+            row.width.unwrap_or_default(),
+            row.variant.clone(),
+        )
+    });
     let table = row_table(&all_rows, &winner_rows);
     let pareto_rows = pareto_frontier(&hyrax_rows);
     let pareto_table = row_table(&pareto_rows, &[]);
     let confirmation_refs = confirmation_rows.iter().collect::<Vec<_>>();
     let confirmation_table = row_table(&confirmation_refs, &[]);
+    let mut instance_refs = instance_rows.iter().collect::<Vec<_>>();
+    instance_refs.sort_by_key(|row| (row.l0, row.instances));
+    let instance_fastest_prover =
+        best_instance_row_by(instance_refs.iter().copied(), |row| row.prover_ms);
+    let instance_fastest_verifier =
+        best_instance_row_by(instance_refs.iter().copied(), |row| row.verifier_ms);
+    let instance_best_amortized_prover =
+        best_instance_row_by(instance_refs.iter().copied(), |row| {
+            row.prover_ms / row.instances as f64
+        });
+    let instance_best_amortized_verifier =
+        best_instance_row_by(instance_refs.iter().copied(), |row| {
+            row.verifier_ms / row.instances as f64
+        });
+    let instance_winner_rows = [
+        instance_fastest_prover,
+        instance_fastest_verifier,
+        instance_best_amortized_prover,
+        instance_best_amortized_verifier,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let instance_scaling_html = if instance_refs.is_empty() {
+        String::new()
+    } else {
+        let ell8_rows = instance_refs
+            .iter()
+            .copied()
+            .filter(|row| row.ell == 8)
+            .collect::<Vec<_>>();
+        let ell8_fastest_prover =
+            best_instance_row_by(ell8_rows.iter().copied(), |row| row.prover_ms);
+        let ell8_fastest_verifier =
+            best_instance_row_by(ell8_rows.iter().copied(), |row| row.verifier_ms);
+        let best_l0_table = best_l0_by_instance_table(&instance_refs);
+        let instance_table = instance_row_table(&instance_refs, &instance_winner_rows);
+        format!(
+            r#"<h2>ProjectionFold L0 Scaling</h2>
+<p>ProjectionFold Mixed Hyrax L0 sweep with width {HYRAX_INSTANCE_SWEEP_WIDTH}, BN254 Hyrax, and ArkFBn254. Rows cover l0 3 with ell 3..8, l0 4 with ell 4..8, and l0 5 with ell 5..8.</p>
+<ul>
+<li><strong>Fastest prover instance row:</strong> {}</li>
+<li><strong>Fastest verifier instance row:</strong> {}</li>
+<li><strong>Best amortized prover row:</strong> {}</li>
+<li><strong>Best amortized verifier row:</strong> {}</li>
+<li><strong>Fastest 256-instance prover L0:</strong> {}</li>
+<li><strong>Fastest 256-instance verifier L0:</strong> {}</li>
+</ul>
+<h3>Best L0 by instance count</h3>
+{best_l0_table}
+<h3>All L0 rows</h3>
+{instance_table}
+<img src="plot5_instance_scaling.svg" alt="ProjectionFold L0 instance scaling">"#,
+            instance_fastest_prover
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string()),
+            instance_fastest_verifier
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string()),
+            instance_best_amortized_prover
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string()),
+            instance_best_amortized_verifier
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string()),
+            ell8_fastest_prover
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string()),
+            ell8_fastest_verifier
+                .map(instance_row_summary)
+                .unwrap_or_else(|| "N/A".to_string())
+        )
+    };
 
     let skipped_html = if skipped_widths.is_empty() {
         String::new()
@@ -2163,15 +3434,19 @@ fn write_hyrax_width_sweep_report(
 <li><strong>Fastest Hyrax verifier:</strong> {}</li>
 <li><strong>Smallest Hyrax raw proof:</strong> {}</li>
 <li><strong>Smallest Hyrax zstd proof:</strong> {}</li>
-<li><strong>Fastest mixed prover:</strong> {}</li>
-<li><strong>Fastest mixed verifier:</strong> {}</li>
-<li><strong>Smallest mixed raw proof:</strong> {}</li>
-<li><strong>Smallest mixed zstd proof:</strong> {}</li>
-<li><strong>Fastest packed prover:</strong> {}</li>
-<li><strong>Fastest packed verifier:</strong> {}</li>
-<li><strong>Smallest packed raw proof:</strong> {}</li>
-<li><strong>Smallest packed zstd proof:</strong> {}</li>
-<li><strong>Best balanced packed width:</strong> {} <em>(min normalized prover + verifier + raw proof + zstd proof)</em></li>
+<li><strong>Best OG mixed-Hyrax prover width:</strong> {}</li>
+<li><strong>Best OG mixed-Hyrax verifier width:</strong> {}</li>
+<li><strong>Smallest OG mixed-Hyrax raw proof:</strong> {}</li>
+<li><strong>Smallest OG mixed-Hyrax zstd proof:</strong> {}</li>
+<li><strong>Best ProjectionFold mixed-Hyrax prover width:</strong> {}</li>
+<li><strong>Best ProjectionFold mixed-Hyrax verifier width:</strong> {}</li>
+<li><strong>Smallest ProjectionFold mixed-Hyrax raw proof:</strong> {}</li>
+<li><strong>Smallest ProjectionFold mixed-Hyrax zstd proof:</strong> {}</li>
+<li><strong>Best ProjectionFold packed-Hyrax prover width:</strong> {}</li>
+<li><strong>Best ProjectionFold packed-Hyrax verifier width:</strong> {}</li>
+<li><strong>Smallest ProjectionFold packed-Hyrax raw proof:</strong> {}</li>
+<li><strong>Smallest ProjectionFold packed-Hyrax zstd proof:</strong> {}</li>
+<li><strong>Best balanced ProjectionFold packed width:</strong> {} <em>(min normalized prover + verifier + raw proof + zstd proof)</em></li>
 <li><strong>OG Zinc+ hash baseline:</strong> {}</li>
 </ul>
 <p>Rows highlighted in the main table are Hyrax winners for at least one metric. Timing values are warmed medians.</p>"#,
@@ -2187,16 +3462,28 @@ fn write_hyrax_width_sweep_report(
         hyrax_smallest_zstd
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        mixed_fastest_prover
+        og_mixed_fastest_prover
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        mixed_fastest_verifier
+        og_mixed_fastest_verifier
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        mixed_smallest_proof
+        og_mixed_smallest_proof
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
-        mixed_smallest_zstd
+        og_mixed_smallest_zstd
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        projection_mixed_fastest_prover
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        projection_mixed_fastest_verifier
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        projection_mixed_smallest_proof
+            .map(row_summary)
+            .unwrap_or_else(|| "N/A".to_string()),
+        projection_mixed_smallest_zstd
             .map(row_summary)
             .unwrap_or_else(|| "N/A".to_string()),
         packed_fastest_prover
@@ -2228,6 +3515,7 @@ fn write_hyrax_width_sweep_report(
 {most_performant}
 {table}
 {skipped_html}
+{instance_scaling_html}
 <h2>Confirmation Pass</h2>
 {confirmation_table}
 <h2>Pareto Frontier</h2>
@@ -2241,6 +3529,908 @@ fn write_hyrax_width_sweep_report(
 </body></html>"#
     );
     fs::write(out_dir.join("report.html"), html).expect("write hyrax width sweep HTML report");
+}
+
+fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, const L0: usize>(
+    warmup_runs: usize,
+    sample_count: usize,
+    width: usize,
+) -> HyraxInstanceSweepRow {
+    type C = ark_bn254::G1Affine;
+    type HyraxF = ArkFBn254;
+    type P = AllHyraxPCSTypes<C>;
+    type U = ProjectionShaBenchUair<RealEcdsaInt>;
+
+    let ell = log2_power_of_two(N);
+    assert!(ell >= L0, "instance sweep requires ell >= l0");
+
+    let setup_start = Instant::now();
+    let trace_start = Instant::now();
+    let message_blocks = exact_sha256_chain_blocks::<N>();
+    let num_vars = SHA_ROW_VARS + ell;
+    let (_mono_trace, mono_final_state) = synthesize_sha256_chain_trace::<RealEcdsaInt, N>(
+        num_vars,
+        SHA256_INITIAL_STATE,
+        message_blocks,
+    )
+    .expect("monolithic instance-sweep SHA trace synthesis should succeed");
+    let (witnesses, projection_final_state) =
+        synthesize_sha256_chain_witnesses::<RealEcdsaInt, N>(SHA256_INITIAL_STATE, message_blocks)
+            .expect("ProjectionFold instance-sweep SHA witness synthesis should succeed");
+    assert_eq!(mono_final_state, projection_final_state);
+    let trace_witness_ms = elapsed_ms(trace_start);
+
+    let setup_phase_start = Instant::now();
+    let shape = UairShape::<U>::new(SHA_ROW_VARS);
+    let field_cfg = HyraxF::curve_field_cfg::<C>();
+    let (pcs_params, _) = projection_sha_bn254_hyrax_pcs_params(width);
+    let pp =
+        LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>::new(
+            pcs_params,
+            field_cfg.clone(),
+            L0,
+        );
+    let vs = projection_sha_bn254_mixed_hyrax_verifier_setup(width);
+    let setup_ms = elapsed_ms(setup_phase_start);
+
+    let prepare_start = Instant::now();
+    let prepared_instances = prepare_linear_ideal_fold_witnesses::<
+        U,
+        RealEcdsaBenchZincTypes,
+        HyraxF,
+        DEGREE_PLUS_ONE,
+    >(&shape, &witnesses, &pp.field_cfg)
+    .expect("ProjectionFold instance-sweep SHA witness preparation should succeed");
+    let prepare_ms = elapsed_ms(prepare_start);
+    let setup_prepare_ms = elapsed_ms(setup_start);
+    let setup_prepare = HyraxSetupPrepareTimings {
+        trace_witness_ms,
+        setup_ms,
+        prepare_ms,
+        setup_prepare_ms,
+    };
+
+    let prove_phases = measure_mixed_hyrax_prove_phase_timings::<
+        C,
+        U,
+        RealEcdsaBenchZincTypes,
+        HyraxF,
+        DEGREE_PLUS_ONE,
+    >(&pp, &shape, &prepared_instances);
+
+    if env_bool_or("SHA256_COMBINED_SWEEP_TRACE_ONCE", false) {
+        eprintln!("ProjectionFold instance sweep tracing: instances={N}, l0={L0}");
+        eprintln!(
+            "phase probe: prove={:.3} ms commit={:.3} ms sumfold={:.3} ms fold={:.3} ms open={:.3} ms open_core={:.3} ms",
+            prove_phases.prove_ms,
+            prove_phases.commit_ms,
+            prove_phases.sumfold_ms,
+            prove_phases.fold_ms,
+            prove_phases.open_ms,
+            prove_phases.open_core_ms
+        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut prover_transcript = Blake3Transcript::new();
+            let traced_output =
+                prove_prepared_linear_ideal_fold_mixed_hyrax::<
+                    C,
+                    U,
+                    RealEcdsaBenchZincTypes,
+                    HyraxF,
+                    DEGREE_PLUS_ONE,
+                >(&pp, &shape, &prepared_instances, &mut prover_transcript)
+                .expect("traced instance-sweep mixed Hyrax prover failed");
+
+            let mut verifier_transcript = Blake3Transcript::new();
+            let traced_verified = verify_linear_ideal_fold_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                &vs,
+                &traced_output.fresh_instances,
+                &traced_output.proof,
+                &mut verifier_transcript,
+            )
+            .expect("traced instance-sweep mixed Hyrax verifier failed");
+            assert_eq!(traced_verified.target, traced_output.folded_instance.target);
+            assert_eq!(traced_verified.public, traced_output.folded_instance.public);
+        });
+    }
+
+    let measured_prover_warmups = warmup_runs.saturating_sub(1);
+    let (output, prover_stats) = measure_warmed(measured_prover_warmups, sample_count, || {
+        let mut transcript = Blake3Transcript::new();
+        prove_prepared_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >(&pp, &shape, &prepared_instances, &mut transcript)
+        .expect("instance-sweep mixed Hyrax prover failed")
+    });
+    let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
+        let mut transcript = Blake3Transcript::new();
+        verify_linear_ideal_fold_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
+            .expect("instance-sweep mixed Hyrax verifier failed")
+    });
+    let raw = production_mixed_hyrax_proof_raw_bytes(&output.proof);
+    let ecc_points_per_commitment = output
+        .proof
+        .instance_commitments
+        .first()
+        .map(|commitment| {
+            commitment.binary.group_point_count() + commitment.int.group_point_count()
+        })
+        .unwrap_or_default();
+    let ecc_points_per_proof = output
+        .proof
+        .instance_commitments
+        .iter()
+        .map(|commitment| {
+            commitment.binary.group_point_count() + commitment.int.group_point_count()
+        })
+        .sum();
+
+    hyrax_instance_sweep_row(
+        N,
+        ell,
+        L0,
+        width,
+        ecc_points_per_commitment,
+        ecc_points_per_proof,
+        setup_prepare,
+        prove_phases,
+        prover_stats,
+        verifier_stats,
+        raw.len(),
+        zstd_len(&raw),
+    )
+}
+
+fn measure_projectionfold_mixed_hyrax_instances<const N: usize, const L0: usize>()
+-> HyraxInstanceSweepRow {
+    measure_projectionfold_mixed_hyrax_instances_with_samples::<N, L0>(
+        HYRAX_WIDTH_SWEEP_WARMUP_RUNS,
+        HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
+        HYRAX_INSTANCE_SWEEP_WIDTH,
+    )
+}
+
+fn env_usize_or(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool_or(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => panic!("{name} must be a boolean value"),
+        })
+        .unwrap_or(default)
+}
+
+fn env_usize_filter(name: &str) -> Option<Vec<usize>> {
+    let raw = std::env::var(name).ok()?;
+    let values = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("{name} must contain comma-separated usize values"))
+        })
+        .collect::<Vec<_>>();
+    assert!(!values.is_empty(), "{name} must not be empty");
+    Some(values)
+}
+
+fn enabled_by_filter(filter: Option<&[usize]>, value: usize) -> bool {
+    filter.map_or(true, |values| values.contains(&value))
+}
+
+fn og_sha256_num_vars(instances: usize) -> (usize, usize, usize) {
+    let active_rows = instances
+        .checked_mul(sha256_cols::ROWS_PER_COMP)
+        .and_then(|rows| rows.checked_add(4))
+        .expect("OG SHA-256 sweep active row count fits usize");
+    let domain_rows = active_rows.next_power_of_two();
+    let num_vars = log2_power_of_two(domain_rows);
+    (active_rows, domain_rows, num_vars)
+}
+
+fn skipped_og_sha256_row(
+    algorithm: &'static str,
+    error: String,
+    instances: usize,
+    pcs_width: usize,
+    active_rows: usize,
+    domain_rows: usize,
+    num_vars: usize,
+    setup_ms: Option<f64>,
+) -> OgSha256InstanceSweepRow {
+    OgSha256InstanceSweepRow {
+        algorithm,
+        status: "skipped",
+        error,
+        instances,
+        pcs_width,
+        active_rows,
+        domain_rows,
+        num_vars,
+        setup_ms,
+        prover_ms: None,
+        prover_mean_ms: None,
+        prover_min_ms: None,
+        prover_max_ms: None,
+        prover_samples: None,
+        verifier_ms: None,
+        verifier_mean_ms: None,
+        verifier_min_ms: None,
+        verifier_max_ms: None,
+        verifier_samples: None,
+        proof_bytes: None,
+        proof_zstd_bytes: None,
+    }
+}
+
+fn og_sha256_all_hyrax_pcs_params<C: AffineRepr>(
+    width: usize,
+) -> (
+    PCSParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+)
+where
+    F: zip_plus::pcs::hyrax::HyraxFieldBridge<C>,
+    AllHyraxPCSTypes<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = HyraxPCS<C, DensePolyScalarLanes>,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
+        >,
+{
+    let (binary_ck, binary_vk) = HyraxPCS::<C, BinaryLanes>::setup(
+        width,
+        b"og-zinc-sha256-sweep-binary",
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("OG SHA-256 all-Hyrax binary setup should be valid");
+    let (arbitrary_ck, arbitrary_vk) = HyraxPCS::<C, DensePolyScalarLanes>::setup(
+        width,
+        b"og-zinc-sha256-sweep-arbitrary",
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("OG SHA-256 all-Hyrax arbitrary setup should be valid");
+    let (int_ck, int_vk) = HyraxPCS::<C, IntScalarLane>::setup(
+        width,
+        b"og-zinc-sha256-sweep-int",
+        HyraxBlindingMode::Unblinded,
+    )
+    .expect("OG SHA-256 all-Hyrax int setup should be valid");
+
+    (
+        PCSParams::<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: binary_ck,
+            arbitrary: arbitrary_ck,
+            int: int_ck,
+        },
+        PCSVerifierParams::<AllHyraxPCSTypes<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: binary_vk,
+            arbitrary: arbitrary_vk,
+            int: int_vk,
+        },
+    )
+}
+
+fn try_zip_pcs_params(
+    num_vars: usize,
+) -> Result<
+    (
+        PCSParams<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+        PCSVerifierParams<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    ),
+    String,
+> {
+    let pp = try_setup_pp_real_ecdsa(num_vars)?;
+    Ok((
+        PCSParams::<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: pp.0.clone(),
+            arbitrary: pp.1.clone(),
+            int: pp.2.clone(),
+        },
+        PCSVerifierParams::<AllZipPCSTypes, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE> {
+            binary: pp.0,
+            arbitrary: pp.1,
+            int: pp.2,
+        },
+    ))
+}
+
+fn measure_og_zinc_sha256_zip_instances<const N: usize>(
+    warmup_runs: usize,
+    sample_count: usize,
+) -> OgSha256InstanceSweepRow {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+    type P = AllZipPCSTypes;
+
+    let (active_rows, domain_rows, num_vars) = og_sha256_num_vars(N);
+    eprintln!(
+        "measuring OG Zinc+ Zip SHA-256 instances={N}, active_rows={active_rows}, num_vars={num_vars}, warmups={warmup_runs}, samples={sample_count}"
+    );
+
+    let setup_start = Instant::now();
+    let (pp, vp) = match try_zip_pcs_params(num_vars) {
+        Ok(params) => params,
+        Err(error) => {
+            return skipped_og_sha256_row(
+                "OG Zinc+ ZipBn254",
+                error,
+                N,
+                domain_rows,
+                active_rows,
+                domain_rows,
+                num_vars,
+                Some(elapsed_ms(setup_start)),
+            );
+        }
+    };
+    let message_blocks = exact_sha256_chain_blocks::<N>();
+    let (trace, _final_state) = synthesize_sha256_chain_trace::<RealEcdsaInt, N>(
+        num_vars,
+        SHA256_INITIAL_STATE,
+        message_blocks,
+    )
+    .expect("OG Zinc+ Zip SHA chain trace synthesis should succeed");
+    let public_trace = trace.public(&U::signature());
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        ark_bn254::G1Affine,
+    >();
+    let setup_ms = elapsed_ms(setup_start);
+
+    let (proof, prover_stats) = measure_warmed(warmup_runs, sample_count, || {
+        ZincPlusPiop::<RealEcdsaBenchZincTypes, U, F, DEGREE_PLUS_ONE>::prove_with_pcs_and_field_cfg::<
+            P,
+            false,
+            PERFORM_CHECKS,
+        >(
+            &pp,
+            &trace,
+            num_vars,
+            zinc_protocol::project_scalar_fn,
+            field_cfg.clone(),
+        )
+        .expect("OG Zinc+ Zip SHA prover failed")
+    });
+    let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
+        ZincPlusPiop::<RealEcdsaBenchZincTypes, U, F, DEGREE_PLUS_ONE>::verify_with_pcs_and_field_cfg::<
+            P,
+            Sha256Ideal<F>,
+            PERFORM_CHECKS,
+        >(
+            &vp,
+            proof.clone(),
+            &public_trace,
+            num_vars,
+            zinc_protocol::project_scalar_fn,
+            sha256_real_project_ideal,
+            field_cfg.clone(),
+        )
+        .expect("OG Zinc+ Zip SHA verifier failed")
+    });
+    let raw = generic_pcs_proof_raw_bytes::<P, RealEcdsaBenchZincTypes>(&proof);
+
+    OgSha256InstanceSweepRow {
+        algorithm: "OG Zinc+ ZipBn254",
+        status: "ok",
+        error: String::new(),
+        instances: N,
+        pcs_width: domain_rows,
+        active_rows,
+        domain_rows,
+        num_vars,
+        setup_ms: Some(setup_ms),
+        prover_ms: Some(prover_stats.median_ms),
+        prover_mean_ms: Some(prover_stats.mean_ms),
+        prover_min_ms: Some(prover_stats.min_ms),
+        prover_max_ms: Some(prover_stats.max_ms),
+        prover_samples: Some(prover_stats.samples),
+        verifier_ms: Some(verifier_stats.median_ms),
+        verifier_mean_ms: Some(verifier_stats.mean_ms),
+        verifier_min_ms: Some(verifier_stats.min_ms),
+        verifier_max_ms: Some(verifier_stats.max_ms),
+        verifier_samples: Some(verifier_stats.samples),
+        proof_bytes: Some(raw.len()),
+        proof_zstd_bytes: Some(zstd_len(&raw)),
+    }
+}
+
+fn measure_og_zinc_sha256_all_hyrax_instances<const N: usize>(
+    warmup_runs: usize,
+    sample_count: usize,
+    pcs_width: usize,
+) -> OgSha256InstanceSweepRow {
+    type U = Sha256CompressionSliceUair<RealEcdsaInt>;
+    type C = ark_bn254::G1Affine;
+    type P = AllHyraxPCSTypes<C>;
+
+    let (active_rows, domain_rows, num_vars) = og_sha256_num_vars(N);
+    eprintln!(
+        "measuring OG Zinc+ SHA-256 instances={N}, active_rows={active_rows}, num_vars={num_vars}, pcs_width={pcs_width}, warmups={warmup_runs}, samples={sample_count}"
+    );
+
+    let setup_start = Instant::now();
+    let message_blocks = exact_sha256_chain_blocks::<N>();
+    let (trace, _final_state) = synthesize_sha256_chain_trace::<RealEcdsaInt, N>(
+        num_vars,
+        SHA256_INITIAL_STATE,
+        message_blocks,
+    )
+    .expect("OG Zinc+ SHA chain trace synthesis should succeed");
+    let public_trace = trace.public(&U::signature());
+    let field_cfg = field_cfg_from_curve_scalar::<
+        F,
+        <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+        ark_bn254::G1Affine,
+    >();
+    let (pp, vp) = og_sha256_all_hyrax_pcs_params::<C>(pcs_width);
+    let setup_ms = elapsed_ms(setup_start);
+
+    let (proof, prover_stats) = measure_warmed(warmup_runs, sample_count, || {
+        ZincPlusPiop::<RealEcdsaBenchZincTypes, U, F, DEGREE_PLUS_ONE>::prove_with_pcs_and_field_cfg::<
+            P,
+            false,
+            PERFORM_CHECKS,
+        >(
+            &pp,
+            &trace,
+            num_vars,
+            zinc_protocol::project_scalar_fn,
+            field_cfg.clone(),
+        )
+        .expect("OG Zinc+ SHA prover failed")
+    });
+    let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
+        ZincPlusPiop::<RealEcdsaBenchZincTypes, U, F, DEGREE_PLUS_ONE>::verify_with_pcs_and_field_cfg::<
+            P,
+            Sha256Ideal<F>,
+            PERFORM_CHECKS,
+        >(
+            &vp,
+            proof.clone(),
+            &public_trace,
+            num_vars,
+            zinc_protocol::project_scalar_fn,
+            sha256_real_project_ideal,
+            field_cfg.clone(),
+        )
+        .expect("OG Zinc+ SHA verifier failed")
+    });
+    let raw = generic_pcs_proof_raw_bytes::<P, RealEcdsaBenchZincTypes>(&proof);
+
+    OgSha256InstanceSweepRow {
+        algorithm: "OG Zinc+ AllHyraxBn254",
+        status: "ok",
+        error: String::new(),
+        instances: N,
+        pcs_width,
+        active_rows,
+        domain_rows,
+        num_vars,
+        setup_ms: Some(setup_ms),
+        prover_ms: Some(prover_stats.median_ms),
+        prover_mean_ms: Some(prover_stats.mean_ms),
+        prover_min_ms: Some(prover_stats.min_ms),
+        prover_max_ms: Some(prover_stats.max_ms),
+        prover_samples: Some(prover_stats.samples),
+        verifier_ms: Some(verifier_stats.median_ms),
+        verifier_mean_ms: Some(verifier_stats.mean_ms),
+        verifier_min_ms: Some(verifier_stats.min_ms),
+        verifier_max_ms: Some(verifier_stats.max_ms),
+        verifier_samples: Some(verifier_stats.samples),
+        proof_bytes: Some(raw.len()),
+        proof_zstd_bytes: Some(zstd_len(&raw)),
+    }
+}
+
+macro_rules! for_sha256_instance_sizes {
+    ($callback:ident $(, $arg:expr)* $(,)?) => {{
+        $callback!(8 $(, $arg)*);
+        $callback!(16 $(, $arg)*);
+        $callback!(32 $(, $arg)*);
+        $callback!(64 $(, $arg)*);
+        $callback!(128 $(, $arg)*);
+        $callback!(256 $(, $arg)*);
+    }};
+}
+
+macro_rules! for_sha256_l0s {
+    ($callback:ident, $n:tt $(, $arg:expr)* $(,)?) => {{
+        $callback!($n, 3 $(, $arg)*);
+        $callback!($n, 4 $(, $arg)*);
+        $callback!($n, 5 $(, $arg)*);
+    }};
+}
+
+macro_rules! push_og_sha256_instance_rows {
+    ($n:literal, $rows:expr, $warmup_runs:expr, $sample_count:expr, $pcs_width:expr) => {{
+        $rows.push(measure_og_zinc_sha256_zip_instances::<$n>(
+            $warmup_runs,
+            $sample_count,
+        ));
+        $rows.push(measure_og_zinc_sha256_all_hyrax_instances::<$n>(
+            $warmup_runs,
+            $sample_count,
+            $pcs_width,
+        ));
+    }};
+}
+
+macro_rules! push_sha256_combined_instance_if_enabled {
+    (
+        $n:literal,
+        $rows:expr,
+        $warmup_runs:expr,
+        $sample_count:expr,
+        $pcs_width:expr,
+        $include_og:expr,
+        $enabled_instances:expr,
+        $enabled_l0s:expr
+    ) => {{
+        if enabled_by_filter($enabled_instances, $n) {
+            push_sha256_combined_instance::<$n>(
+                &mut $rows,
+                $warmup_runs,
+                $sample_count,
+                $pcs_width,
+                $include_og,
+                $enabled_l0s,
+            );
+        }
+    }};
+}
+
+macro_rules! push_projectionfold_instance_row_for_l0 {
+    ($n:literal, $l0:literal, $rows:expr) => {{
+        if log2_power_of_two($n) >= $l0 {
+            $rows.push(measure_projectionfold_mixed_hyrax_instances::<$n, $l0>());
+        }
+    }};
+}
+
+macro_rules! push_projectionfold_instance_rows {
+    ($n:literal, $rows:expr) => {{
+        for_sha256_l0s!(push_projectionfold_instance_row_for_l0, $n, $rows);
+    }};
+}
+
+fn measure_og_zinc_sha256_instance_rows(
+    warmup_runs: usize,
+    sample_count: usize,
+    pcs_width: usize,
+) -> Vec<OgSha256InstanceSweepRow> {
+    let mut rows = Vec::new();
+    for_sha256_instance_sizes!(
+        push_og_sha256_instance_rows,
+        rows,
+        warmup_runs,
+        sample_count,
+        pcs_width
+    );
+    rows
+}
+
+fn combined_row_from_og(row: OgSha256InstanceSweepRow) -> Sha256CombinedInstanceSweepRow {
+    let variant = if row.algorithm.contains("Zip") {
+        "zip".to_string()
+    } else {
+        format!("all-hyrax width {}", row.pcs_width)
+    };
+    Sha256CombinedInstanceSweepRow {
+        algorithm: row.algorithm.to_string(),
+        variant,
+        status: row.status,
+        error: row.error,
+        instances: row.instances,
+        ell: Some(log2_power_of_two(row.instances)),
+        l0: None,
+        tail_vars: None,
+        width: Some(row.pcs_width),
+        active_rows: Some(row.active_rows),
+        domain_rows: Some(row.domain_rows),
+        num_vars: Some(row.num_vars),
+        setup_ms: row.setup_ms,
+        trace_witness_ms: None,
+        pcs_setup_ms: None,
+        prepare_ms: None,
+        setup_prepare_ms: None,
+        probe_prove_ms: None,
+        probe_commit_ms: None,
+        probe_sumfold_ms: None,
+        probe_fold_ms: None,
+        probe_open_ms: None,
+        probe_open_core_ms: None,
+        prover_ms: row.prover_ms,
+        prover_mean_ms: row.prover_mean_ms,
+        prover_min_ms: row.prover_min_ms,
+        prover_max_ms: row.prover_max_ms,
+        prover_samples: row.prover_samples,
+        verifier_ms: row.verifier_ms,
+        verifier_mean_ms: row.verifier_mean_ms,
+        verifier_min_ms: row.verifier_min_ms,
+        verifier_max_ms: row.verifier_max_ms,
+        verifier_samples: row.verifier_samples,
+        proof_bytes: row.proof_bytes,
+        proof_zstd_bytes: row.proof_zstd_bytes,
+    }
+}
+
+fn combined_row_from_l0(row: HyraxInstanceSweepRow) -> Sha256CombinedInstanceSweepRow {
+    let num_vars = SHA_ROW_VARS + row.ell;
+    Sha256CombinedInstanceSweepRow {
+        algorithm: "Small-value SumFold ProjectionFold Mixed Hyrax".to_string(),
+        variant: format!("l0 {}", row.l0),
+        status: "ok",
+        error: String::new(),
+        instances: row.instances,
+        ell: Some(row.ell),
+        l0: Some(row.l0),
+        tail_vars: Some(row.tail_vars),
+        width: Some(row.width),
+        active_rows: Some(row.instances * SHA_ROW_COUNT),
+        domain_rows: Some(1usize << num_vars),
+        num_vars: Some(num_vars),
+        setup_ms: Some(row.setup_ms),
+        trace_witness_ms: Some(row.trace_witness_ms),
+        pcs_setup_ms: None,
+        prepare_ms: Some(row.prepare_ms),
+        setup_prepare_ms: Some(row.setup_prepare_ms),
+        probe_prove_ms: Some(row.probe_prove_ms),
+        probe_commit_ms: Some(row.probe_commit_ms),
+        probe_sumfold_ms: Some(row.probe_sumfold_ms),
+        probe_fold_ms: Some(row.probe_fold_ms),
+        probe_open_ms: Some(row.probe_open_ms),
+        probe_open_core_ms: Some(row.probe_open_core_ms),
+        prover_ms: Some(row.prover_ms),
+        prover_mean_ms: Some(row.prover_mean_ms),
+        prover_min_ms: Some(row.prover_min_ms),
+        prover_max_ms: Some(row.prover_max_ms),
+        prover_samples: Some(row.prover_samples),
+        verifier_ms: Some(row.verifier_ms),
+        verifier_mean_ms: Some(row.verifier_mean_ms),
+        verifier_min_ms: Some(row.verifier_min_ms),
+        verifier_max_ms: Some(row.verifier_max_ms),
+        verifier_samples: Some(row.verifier_samples),
+        proof_bytes: Some(row.proof_bytes),
+        proof_zstd_bytes: Some(row.proof_zstd_bytes),
+    }
+}
+
+fn skipped_l0_combined_row(
+    instances: usize,
+    l0: usize,
+    width: usize,
+) -> Sha256CombinedInstanceSweepRow {
+    let ell = log2_power_of_two(instances);
+    let num_vars = SHA_ROW_VARS + ell;
+    Sha256CombinedInstanceSweepRow {
+        algorithm: "Small-value SumFold ProjectionFold Mixed Hyrax".to_string(),
+        variant: format!("l0 {l0}"),
+        status: "skipped",
+        error: format!("ell {ell} is smaller than l0 {l0}"),
+        instances,
+        ell: Some(ell),
+        l0: Some(l0),
+        tail_vars: None,
+        width: Some(width),
+        active_rows: Some(instances * SHA_ROW_COUNT),
+        domain_rows: Some(1usize << num_vars),
+        num_vars: Some(num_vars),
+        setup_ms: None,
+        trace_witness_ms: None,
+        pcs_setup_ms: None,
+        prepare_ms: None,
+        setup_prepare_ms: None,
+        probe_prove_ms: None,
+        probe_commit_ms: None,
+        probe_sumfold_ms: None,
+        probe_fold_ms: None,
+        probe_open_ms: None,
+        probe_open_core_ms: None,
+        prover_ms: None,
+        prover_mean_ms: None,
+        prover_min_ms: None,
+        prover_max_ms: None,
+        prover_samples: None,
+        verifier_ms: None,
+        verifier_mean_ms: None,
+        verifier_min_ms: None,
+        verifier_max_ms: None,
+        verifier_samples: None,
+        proof_bytes: None,
+        proof_zstd_bytes: None,
+    }
+}
+
+fn push_l0_combined_row<const N: usize, const L0: usize>(
+    rows: &mut Vec<Sha256CombinedInstanceSweepRow>,
+    warmup_runs: usize,
+    sample_count: usize,
+    pcs_width: usize,
+    enabled_l0s: Option<&[usize]>,
+) {
+    if !enabled_by_filter(enabled_l0s, L0) {
+        return;
+    }
+    if log2_power_of_two(N) < L0 {
+        rows.push(skipped_l0_combined_row(N, L0, pcs_width));
+        return;
+    }
+    rows.push(combined_row_from_l0(
+        measure_projectionfold_mixed_hyrax_instances_with_samples::<N, L0>(
+            warmup_runs,
+            sample_count,
+            pcs_width,
+        ),
+    ));
+}
+
+macro_rules! push_l0_combined_row_for_l0 {
+    (
+        $n:tt,
+        $l0:literal,
+        $rows:expr,
+        $warmup_runs:expr,
+        $sample_count:expr,
+        $pcs_width:expr,
+        $enabled_l0s:expr
+    ) => {{
+        push_l0_combined_row::<$n, $l0>(
+            $rows,
+            $warmup_runs,
+            $sample_count,
+            $pcs_width,
+            $enabled_l0s,
+        );
+    }};
+}
+
+fn push_sha256_combined_instance<const N: usize>(
+    rows: &mut Vec<Sha256CombinedInstanceSweepRow>,
+    warmup_runs: usize,
+    sample_count: usize,
+    pcs_width: usize,
+    include_og: bool,
+    enabled_l0s: Option<&[usize]>,
+) {
+    if include_og {
+        rows.push(combined_row_from_og(
+            measure_og_zinc_sha256_zip_instances::<N>(warmup_runs, sample_count),
+        ));
+        rows.push(combined_row_from_og(
+            measure_og_zinc_sha256_all_hyrax_instances::<N>(warmup_runs, sample_count, pcs_width),
+        ));
+    }
+
+    for_sha256_l0s!(
+        push_l0_combined_row_for_l0,
+        N,
+        rows,
+        warmup_runs,
+        sample_count,
+        pcs_width,
+        enabled_l0s
+    );
+}
+
+fn measure_sha256_combined_instance_rows(
+    warmup_runs: usize,
+    sample_count: usize,
+    pcs_width: usize,
+) -> Vec<Sha256CombinedInstanceSweepRow> {
+    let mut rows = Vec::new();
+    drop(projection_sha_bn254_hyrax_pcs_params(pcs_width));
+    drop(projection_sha_bn254_mixed_hyrax_verifier_setup(pcs_width));
+    let enabled_instances = env_usize_filter("SHA256_COMBINED_SWEEP_INSTANCES");
+    let enabled_l0s = env_usize_filter("SHA256_COMBINED_SWEEP_L0S");
+    let include_og = env_bool_or("SHA256_COMBINED_SWEEP_INCLUDE_OG", true);
+    let enabled_instances = enabled_instances.as_deref();
+    let enabled_l0s = enabled_l0s.as_deref();
+
+    for_sha256_instance_sizes!(
+        push_sha256_combined_instance_if_enabled,
+        rows,
+        warmup_runs,
+        sample_count,
+        pcs_width,
+        include_og,
+        enabled_instances,
+        enabled_l0s
+    );
+    rows
+}
+
+pub fn run_og_sha256_instance_sweep_report() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("protocol crate should live under the workspace root");
+    let out_dir = workspace_root.join("target/og-sha256-instance-sweep");
+    fs::create_dir_all(&out_dir).expect("create OG SHA-256 sweep output directory");
+
+    let warmup_runs = env_usize_or(
+        "OG_SHA256_SWEEP_WARMUP_RUNS",
+        OG_SHA256_SWEEP_DEFAULT_WARMUP_RUNS,
+    );
+    let sample_count = env_usize_or("OG_SHA256_SWEEP_SAMPLES", OG_SHA256_SWEEP_DEFAULT_SAMPLES);
+    let pcs_width = env_usize_or(
+        "OG_SHA256_SWEEP_HYRAX_WIDTH",
+        OG_SHA256_SWEEP_DEFAULT_HYRAX_WIDTH,
+    );
+    assert!(
+        sample_count > 0,
+        "OG SHA-256 sweep requires at least one sample"
+    );
+
+    let rows = measure_og_zinc_sha256_instance_rows(warmup_runs, sample_count, pcs_width);
+    let csv_path = out_dir.join("results.csv");
+    write_og_sha256_instance_sweep_csv(&csv_path, &rows);
+    eprintln!("OG SHA-256 instance sweep wrote {}", csv_path.display());
+}
+
+pub fn run_sha256_combined_instance_sweep_report() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("protocol crate should live under the workspace root");
+    let out_dir = workspace_root.join("target/sha256-combined-instance-sweep");
+    fs::create_dir_all(&out_dir).expect("create combined SHA-256 sweep output directory");
+
+    let warmup_runs = env_usize_or(
+        "SHA256_COMBINED_SWEEP_WARMUP_RUNS",
+        SHA256_COMBINED_SWEEP_DEFAULT_WARMUP_RUNS,
+    );
+    let sample_count = env_usize_or(
+        "SHA256_COMBINED_SWEEP_SAMPLES",
+        SHA256_COMBINED_SWEEP_DEFAULT_SAMPLES,
+    );
+    let pcs_width = env_usize_or(
+        "SHA256_COMBINED_SWEEP_HYRAX_WIDTH",
+        OG_SHA256_SWEEP_DEFAULT_HYRAX_WIDTH,
+    );
+    assert!(
+        sample_count > 0,
+        "combined SHA-256 sweep requires at least one sample"
+    );
+
+    let rows = measure_sha256_combined_instance_rows(warmup_runs, sample_count, pcs_width);
+    let csv_path = out_dir.join("results.csv");
+    write_sha256_combined_instance_sweep_csv(&csv_path, &rows);
+    eprintln!(
+        "combined SHA-256 instance sweep wrote {}",
+        csv_path.display()
+    );
 }
 
 pub fn run_hyrax_width_sweep_report() {
@@ -2334,7 +4524,8 @@ pub fn run_hyrax_width_sweep_report() {
     let zip_raw =
         generic_pcs_proof_raw_bytes::<AllZipPCSTypes, RealEcdsaBenchZincTypes>(&zip_proof);
     rows.push(hyrax_width_sweep_row(
-        "OG Zinc+ hash PCS".to_string(),
+        HyraxReportCategory::OgHash,
+        "baseline".to_string(),
         None,
         None,
         None,
@@ -2342,101 +4533,159 @@ pub fn run_hyrax_width_sweep_report() {
         zip_verifier_stats,
         zip_raw.len(),
         zstd_len(&zip_raw),
-        "og_zip",
     ));
 
-    let measure_mixed_hyrax =
-        |label: String, width: usize, sample_count: usize| -> HyraxWidthSweepRow {
-        let (mixed_pcs_params, mixed_verifier_params) =
-            projection_sha_hyrax_pcs_params::<C, HyraxF>(width);
-        let mixed_pp = LinearIdealFoldProverParams::<
-            P,
-            U,
-            RealEcdsaBenchZincTypes,
-            HyraxF,
-            DEGREE_PLUS_ONE,
-        >::new(mixed_pcs_params, hyrax_field_cfg.clone(), 3);
-        let mixed_vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
-            C,
-            U,
-            RealEcdsaBenchZincTypes,
-            HyraxF,
-            DEGREE_PLUS_ONE,
-        >(
-            LinearIdealFoldVerifierParams::new(mixed_verifier_params, hyrax_field_cfg.clone()),
-            shape.clone(),
-        )
-        .expect("mixed Hyrax verifier setup succeeds");
-        let (mixed_output, mixed_prover_stats) =
-            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
-                let mut transcript = Blake3Transcript::new();
-                prove_prepared_linear_ideal_fold_mixed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
-                .expect("mixed Hyrax prover failed")
-            });
-        let (_, mixed_verifier_stats) =
-            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
-                let mut transcript = Blake3Transcript::new();
-                verify_linear_ideal_fold_mixed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(
-                    &mixed_vs,
-                    &mixed_output.fresh_instances,
-                    &mixed_output.proof,
-                    &mut transcript,
-                )
-                .expect("mixed Hyrax verifier failed")
-            });
-        let mixed_raw = production_mixed_hyrax_proof_raw_bytes(&mixed_output.proof);
-        let mixed_ecc = mixed_output
-            .proof
-            .instance_commitments
-            .first()
-            .map(|commitment| {
-                commitment.binary.group_point_count() + commitment.int.group_point_count()
-            })
-            .unwrap_or_default();
-        let mixed_fresh_ecc = mixed_output
-            .proof
-            .instance_commitments
-            .iter()
-            .map(|commitment| {
-                commitment.binary.group_point_count() + commitment.int.group_point_count()
-            })
-            .sum();
-        hyrax_width_sweep_row(
-            label,
-            Some(width),
-            Some(mixed_ecc),
-            Some(mixed_fresh_ecc),
-            mixed_prover_stats,
-            mixed_verifier_stats,
-            mixed_raw.len(),
-            zstd_len(&mixed_raw),
-            "mixed_hyrax",
-        )
-    };
+    let measure_og_mixed_hyrax =
+        |variant: String, width: usize, sample_count: usize| -> HyraxWidthSweepRow {
+            let (hyrax_pp, hyrax_vp) =
+                hyrax_pcs_params_with_width::<C>(REAL_SHA256_CHAIN_NUM_VARS, width);
+            let (hyrax_proof, hyrax_prover_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    ZincPlusPiop::<
+                        RealEcdsaBenchZincTypes,
+                        Sha256CompressionSliceUair<RealEcdsaInt>,
+                        ZipF,
+                        DEGREE_PLUS_ONE,
+                    >::prove_with_pcs_and_field_cfg::<
+                        BinaryIntHyraxZipArbitrary<C>,
+                        false,
+                        PERFORM_CHECKS,
+                    >(
+                        &hyrax_pp,
+                        &trace,
+                        REAL_SHA256_CHAIN_NUM_VARS,
+                        zinc_protocol::project_scalar_fn,
+                        zip_field_cfg.clone(),
+                    )
+                    .expect("OG Zinc+ mixed-Hyrax SHA prover failed")
+                });
+            let (_, hyrax_verifier_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    ZincPlusPiop::<
+                        RealEcdsaBenchZincTypes,
+                        Sha256CompressionSliceUair<RealEcdsaInt>,
+                        ZipF,
+                        DEGREE_PLUS_ONE,
+                    >::verify_with_pcs_and_field_cfg::<
+                        BinaryIntHyraxZipArbitrary<C>,
+                        _,
+                        PERFORM_CHECKS,
+                    >(
+                        &hyrax_vp,
+                        hyrax_proof.clone(),
+                        &public_trace,
+                        REAL_SHA256_CHAIN_NUM_VARS,
+                        zinc_protocol::project_scalar_fn,
+                        sha256_real_project_ideal,
+                        zip_field_cfg.clone(),
+                    )
+                    .expect("OG Zinc+ mixed-Hyrax SHA verifier failed")
+                });
+            let hyrax_raw = generic_pcs_proof_raw_bytes::<
+                BinaryIntHyraxZipArbitrary<C>,
+                RealEcdsaBenchZincTypes,
+            >(&hyrax_proof);
+            let hyrax_ecc = hyrax_proof.commitments.binary.group_point_count()
+                + hyrax_proof.commitments.int.group_point_count();
+            hyrax_width_sweep_row(
+                HyraxReportCategory::OgMixedHyrax,
+                variant,
+                Some(width),
+                Some(hyrax_ecc),
+                Some(hyrax_ecc),
+                hyrax_prover_stats,
+                hyrax_verifier_stats,
+                hyrax_raw.len(),
+                zstd_len(&hyrax_raw),
+            )
+        };
+
+    let measure_projection_mixed_hyrax =
+        |variant: String, width: usize, sample_count: usize| -> HyraxWidthSweepRow {
+            let (mixed_pcs_params, _) = projection_sha_bn254_hyrax_pcs_params(width);
+            let mixed_pp = LinearIdealFoldProverParams::<
+                P,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >::new(mixed_pcs_params, hyrax_field_cfg.clone(), 3);
+            let mixed_vs = projection_sha_bn254_mixed_hyrax_verifier_setup(width);
+            let (mixed_output, mixed_prover_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    let mut transcript = Blake3Transcript::new();
+                    prove_prepared_linear_ideal_fold_mixed_hyrax::<
+                        C,
+                        U,
+                        RealEcdsaBenchZincTypes,
+                        HyraxF,
+                        DEGREE_PLUS_ONE,
+                    >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
+                    .expect("mixed Hyrax prover failed")
+                });
+            let (_, mixed_verifier_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    let mut transcript = Blake3Transcript::new();
+                    verify_linear_ideal_fold_mixed_hyrax::<
+                        C,
+                        U,
+                        RealEcdsaBenchZincTypes,
+                        HyraxF,
+                        DEGREE_PLUS_ONE,
+                    >(
+                        &mixed_vs,
+                        &mixed_output.fresh_instances,
+                        &mixed_output.proof,
+                        &mut transcript,
+                    )
+                    .expect("mixed Hyrax verifier failed")
+                });
+            let mixed_raw = production_mixed_hyrax_proof_raw_bytes(&mixed_output.proof);
+            let mixed_ecc = mixed_output
+                .proof
+                .instance_commitments
+                .first()
+                .map(|commitment| {
+                    commitment.binary.group_point_count() + commitment.int.group_point_count()
+                })
+                .unwrap_or_default();
+            let mixed_fresh_ecc = mixed_output
+                .proof
+                .instance_commitments
+                .iter()
+                .map(|commitment| {
+                    commitment.binary.group_point_count() + commitment.int.group_point_count()
+                })
+                .sum();
+            hyrax_width_sweep_row(
+                HyraxReportCategory::ProjectionFoldMixedHyrax,
+                variant,
+                Some(width),
+                Some(mixed_ecc),
+                Some(mixed_fresh_ecc),
+                mixed_prover_stats,
+                mixed_verifier_stats,
+                mixed_raw.len(),
+                zstd_len(&mixed_raw),
+            )
+        };
 
     let mixed_widths = mixed_width_candidates();
-    for (label, width) in &mixed_widths {
-        rows.push(measure_mixed_hyrax(
-            label.clone(),
+    for (variant, width) in &mixed_widths {
+        rows.push(measure_og_mixed_hyrax(
+            variant.clone(),
+            *width,
+            HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
+        ));
+        rows.push(measure_projection_mixed_hyrax(
+            variant.clone(),
             *width,
             HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
         ));
     }
 
     let (widths, skipped_widths) = packed_width_candidates::<HyraxF>();
-    let measure_packed_hyrax = |label: String,
+    let measure_packed_hyrax = |variant: String,
                                 width: usize,
                                 sample_count: usize|
      -> HyraxWidthSweepRow {
@@ -2493,7 +4742,8 @@ pub fn run_hyrax_width_sweep_report() {
             .map(|commitment| commitment.group_point_count())
             .sum();
         hyrax_width_sweep_row(
-            label,
+            HyraxReportCategory::ProjectionFoldPackedHyrax,
+            variant,
             Some(width),
             Some(layout.ecc_points_per_instance()),
             Some(fresh_ecc),
@@ -2501,13 +4751,12 @@ pub fn run_hyrax_width_sweep_report() {
             verifier_stats,
             raw.len(),
             zstd_len(&raw),
-            "packed",
         )
     };
 
     for (label, width) in &widths {
         rows.push(measure_packed_hyrax(
-            label.clone(),
+            format!("packed {label}"),
             *width,
             HYRAX_WIDTH_SWEEP_TUNING_SAMPLES,
         ));
@@ -2515,40 +4764,93 @@ pub fn run_hyrax_width_sweep_report() {
 
     let mut confirmation_targets = rows
         .iter()
-        .filter(|row| row.kind != "og_zip")
-        .map(|row| (row.prover_ms, row.kind, row.label.clone(), row.width))
+        .filter(|row| row.category != HyraxReportCategory::OgHash)
+        .map(|row| (row.prover_ms, row.category, row.variant.clone(), row.width))
         .collect::<Vec<_>>();
     confirmation_targets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     confirmation_targets.truncate(HYRAX_WIDTH_SWEEP_CONFIRMATION_TOP_K);
     let confirmation_rows = confirmation_targets
         .into_iter()
-        .map(|(_, kind, label, width)| match kind {
-            "mixed_hyrax" => measure_mixed_hyrax(
-                label,
-                width.expect("mixed confirmation target has a width"),
+        .map(|(_, category, variant, width)| match category {
+            HyraxReportCategory::OgMixedHyrax => measure_og_mixed_hyrax(
+                variant,
+                width.expect("OG mixed confirmation target has a width"),
                 HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
             ),
-            "packed" => measure_packed_hyrax(
-                label,
+            HyraxReportCategory::ProjectionFoldMixedHyrax => measure_projection_mixed_hyrax(
+                variant,
+                width.expect("ProjectionFold mixed confirmation target has a width"),
+                HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
+            ),
+            HyraxReportCategory::ProjectionFoldPackedHyrax => measure_packed_hyrax(
+                variant,
                 width.expect("packed confirmation target has a width"),
                 HYRAX_WIDTH_SWEEP_CONFIRMATION_SAMPLES,
             ),
-            _ => unreachable!("only Hyrax rows are selected for confirmation"),
+            HyraxReportCategory::OgHash => unreachable!("OG hash is not selected for confirmation"),
         })
         .collect::<Vec<_>>();
 
+    let include_instance_sweeps = env_bool_or("HYRAX_WIDTH_SWEEP_INCLUDE_INSTANCE_SWEEP", false);
+    let instance_rows = if include_instance_sweeps {
+        let mut rows = Vec::new();
+        for_sha256_instance_sizes!(push_projectionfold_instance_rows, rows);
+        rows
+    } else {
+        Vec::new()
+    };
+
     write_hyrax_width_sweep_csv(&out_dir.join("results.csv"), &rows);
     write_hyrax_width_sweep_csv(&out_dir.join("confirmation.csv"), &confirmation_rows);
+    if include_instance_sweeps {
+        let og_instance_rows = measure_og_zinc_sha256_instance_rows(
+            env_usize_or(
+                "OG_SHA256_SWEEP_WARMUP_RUNS",
+                OG_SHA256_SWEEP_DEFAULT_WARMUP_RUNS,
+            ),
+            env_usize_or("OG_SHA256_SWEEP_SAMPLES", OG_SHA256_SWEEP_DEFAULT_SAMPLES),
+            env_usize_or(
+                "OG_SHA256_SWEEP_HYRAX_WIDTH",
+                OG_SHA256_SWEEP_DEFAULT_HYRAX_WIDTH,
+            ),
+        );
+        write_hyrax_instance_sweep_csv(&out_dir.join("instance_results.csv"), &instance_rows);
+        write_hyrax_instance_sweep_csv(&out_dir.join("l0_instance_results.csv"), &instance_rows);
+        write_og_sha256_instance_sweep_csv(
+            &out_dir.join("og_instance_results.csv"),
+            &og_instance_rows,
+        );
+        write_hyrax_instance_sweep_plot(&out_dir, &instance_rows);
+    }
     write_hyrax_width_sweep_skipped_csv(&out_dir.join("skipped_widths.csv"), &skipped_widths);
     write_hyrax_width_sweep_plots(&out_dir, &rows);
-    write_hyrax_width_sweep_report(&out_dir, &rows, &confirmation_rows, &skipped_widths);
-    eprintln!(
-        "hyrax width sweep wrote {}, {}, {}, {}, and SVG/PNG plots",
-        out_dir.join("results.csv").display(),
-        out_dir.join("confirmation.csv").display(),
-        out_dir.join("skipped_widths.csv").display(),
-        out_dir.join("report.html").display()
+    write_hyrax_width_sweep_report(
+        &out_dir,
+        &rows,
+        &instance_rows,
+        &confirmation_rows,
+        &skipped_widths,
     );
+    if include_instance_sweeps {
+        eprintln!(
+            "hyrax width sweep wrote {}, {}, {}, {}, {}, {}, {}, and SVG/PNG plots",
+            out_dir.join("results.csv").display(),
+            out_dir.join("confirmation.csv").display(),
+            out_dir.join("instance_results.csv").display(),
+            out_dir.join("l0_instance_results.csv").display(),
+            out_dir.join("og_instance_results.csv").display(),
+            out_dir.join("skipped_widths.csv").display(),
+            out_dir.join("report.html").display()
+        );
+    } else {
+        eprintln!(
+            "hyrax width sweep wrote {}, {}, {}, {}, and SVG/PNG plots",
+            out_dir.join("results.csv").display(),
+            out_dir.join("confirmation.csv").display(),
+            out_dir.join("skipped_widths.csv").display(),
+            out_dir.join("report.html").display()
+        );
+    }
 }
 
 //
@@ -3360,15 +5662,67 @@ where
     let pp = setup_pp_real_ecdsa(num_vars);
     let binary_width = pp.0.linear_code.row_len();
     let int_width = pp.2.linear_code.row_len();
+    hyrax_pcs_params_from_zip_pp::<C>(pp, binary_width, int_width, "default")
+}
+
+fn hyrax_pcs_params_with_width<C: AffineRepr>(
+    num_vars: usize,
+    width: usize,
+) -> (
+    PCSParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+)
+where
+    BinaryIntHyraxZipArbitrary<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+            >,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
+        >,
+{
+    let pp = setup_pp_real_ecdsa(num_vars);
+    let domain_suffix = format!("width-{width}");
+    hyrax_pcs_params_from_zip_pp::<C>(pp, width, width, &domain_suffix)
+}
+
+fn hyrax_pcs_params_from_zip_pp<C: AffineRepr>(
+    pp: Pp<RealEcdsaBenchZincTypes>,
+    binary_width: usize,
+    int_width: usize,
+    domain_suffix: &str,
+) -> (
+    PCSParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+    PCSVerifierParams<BinaryIntHyraxZipArbitrary<C>, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>,
+)
+where
+    BinaryIntHyraxZipArbitrary<C>: ZincPCSTypes<
+            RealEcdsaBenchZincTypes,
+            F,
+            DEGREE_PLUS_ONE,
+            BinaryPCS = HyraxPCS<C, BinaryLanes>,
+            ArbitraryPCS = ZipPlusPCS<
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                <RealEcdsaBenchZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+            >,
+            IntPCS = HyraxPCS<C, IntScalarLane>,
+        >,
+{
+    let binary_domain = format!("zinc-plus-bench-real-sha256-hyrax-binary-{domain_suffix}");
+    let int_domain = format!("zinc-plus-bench-real-sha256-hyrax-int-{domain_suffix}");
     let (binary, binary_vk) = HyraxPCS::<C, BinaryLanes>::setup(
         binary_width,
-        b"zinc-plus-bench-real-sha256-hyrax-binary",
+        binary_domain.as_bytes(),
         HyraxBlindingMode::Unblinded,
     )
     .expect("Hyrax binary benchmark setup must be valid");
     let (int, int_vk) = HyraxPCS::<C, IntScalarLane>::setup(
         int_width,
-        b"zinc-plus-bench-real-sha256-hyrax-int",
+        int_domain.as_bytes(),
         HyraxBlindingMode::Unblinded,
     )
     .expect("Hyrax int benchmark setup must be valid");
@@ -3566,6 +5920,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
         + DelayedFieldProductSum
         + ShaBinaryFoldField
         + ShaLinearAccumulatorField
+        + ShaSuffixScannerField
         + zip_plus::pcs::hyrax::HyraxFieldBridge<C>
         + Send
         + Sync
@@ -3593,8 +5948,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
 
     let shape = UairShape::<U>::new(SHA_ROW_VARS);
     let field_cfg = F::curve_field_cfg::<C>();
-    let (pcs_params, pcs_verifier_params) =
-        projection_sha_hyrax_pcs_params::<C, F>(SHA_ROW_COUNT);
+    let (pcs_params, pcs_verifier_params) = projection_sha_hyrax_pcs_params::<C, F>(SHA_ROW_COUNT);
     let pp =
         LinearIdealFoldProverParams::<P<C>, U, RealEcdsaBenchZincTypes, F, DEGREE_PLUS_ONE>::new(
             pcs_params,

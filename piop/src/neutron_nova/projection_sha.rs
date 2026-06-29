@@ -6602,6 +6602,16 @@ fn bind_sha_booleanity_sources_to_prefix<F>(
 where
     F: DelayedFieldProductSum,
 {
+    if is_canonical_production_booleanity_sources(booleanity_sources) {
+        return bind_canonical_sha_booleanity_sources_to_prefix(
+            traces,
+            prefix_vars,
+            tail_len,
+            prefix_weights,
+            field_cfg,
+        );
+    }
+
     let prefix_len = binary_len(prefix_vars);
     let source_count = booleanity_sources.len();
     let source_row_count = source_count * SHA_ROW_COUNT;
@@ -6641,6 +6651,98 @@ where
     }
 
     BooleanityClaimTable::new(out, tail_len, source_row_count)
+}
+
+#[allow(clippy::arithmetic_side_effects)]
+fn bind_canonical_sha_booleanity_sources_to_prefix<F>(
+    traces: &[ProjectedTrace<F>],
+    prefix_vars: usize,
+    tail_len: usize,
+    prefix_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<BooleanityClaimTable<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let prefix_len = binary_len(prefix_vars);
+    if prefix_weights.len() != prefix_len {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: prefix_weights.len(),
+            expected: prefix_len,
+        });
+    }
+    let expected_traces = prefix_len * tail_len;
+    if traces.len() != expected_traces {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: traces.len(),
+            expected: expected_traces,
+        });
+    }
+
+    let source_count = ShaWordCol::COUNT * SHA_WORD_BITS + 3 * SHA_WORD_BITS;
+    let source_row_count = source_count * SHA_ROW_COUNT;
+    let mut out = vec![F::zero_with_cfg(field_cfg); tail_len * source_row_count];
+    let word_bit_count = ShaWordCol::COUNT * SHA_WORD_BITS;
+    let one = F::one_with_cfg(field_cfg);
+
+    for tail in 0..tail_len {
+        for (prefix, prefix_weight) in prefix_weights.iter().enumerate() {
+            if F::is_zero(prefix_weight) {
+                continue;
+            }
+            let trace = &traces[prefix + (tail << prefix_vars)];
+            for row in 0..SHA_ROW_COUNT {
+                for col_idx in 0..ShaWordCol::COUNT {
+                    let bit_base = bit_slice_index(col_idx, 0, SHA_WORD_BITS);
+                    let source_base = col_idx * SHA_WORD_BITS;
+                    for bit in 0..SHA_WORD_BITS {
+                        let value = &trace.bit_slices[bit_base + bit].evaluations[row];
+                        if F::is_zero(value) {
+                            continue;
+                        }
+                        let source_row = (source_base + bit) * SHA_ROW_COUNT + row;
+                        add_weighted_boolean_value(
+                            &mut out[suffix_flat_index(tail, source_row, source_row_count)],
+                            prefix_weight,
+                            value,
+                            &one,
+                        );
+                    }
+                }
+
+                let virtuals = reconstruct_virtual_ch_maj_at_row_unchecked(trace, row, field_cfg)?;
+                for bit in 0..SHA_WORD_BITS {
+                    let values = [&virtuals.ch1[bit], &virtuals.ch2[bit], &virtuals.maj[bit]];
+                    for (family_idx, value) in values.into_iter().enumerate() {
+                        if F::is_zero(value) {
+                            continue;
+                        }
+                        let source_idx = word_bit_count + bit * 3 + family_idx;
+                        let source_row = source_idx * SHA_ROW_COUNT + row;
+                        add_weighted_boolean_value(
+                            &mut out[suffix_flat_index(tail, source_row, source_row_count)],
+                            prefix_weight,
+                            value,
+                            &one,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    BooleanityClaimTable::new(out, tail_len, source_row_count)
+}
+
+fn add_weighted_boolean_value<F>(acc: &mut F, weight: &F, value: &F, one: &F)
+where
+    F: PrimeField,
+{
+    if value == one {
+        *acc += weight;
+    } else {
+        *acc += weight.clone() * value.clone();
+    }
 }
 
 #[allow(clippy::arithmetic_side_effects)]
