@@ -1,18 +1,272 @@
-//! UAIR adapter for the [`ConstraintSystem`](crate::constraint_system::ConstraintSystem)
-//! seam.
+//! UAIR adapter for the
+//! [`ConstraintSystem`](crate::constraint_system::ConstraintSystem) seam.
 //!
-//! [`UairFrontend`] is the bridge that will implement `ConstraintSystem` for any
-//! `U: Uair` by delegating to the existing UAIR constraint engine
-//! (`CombinedPolyResolver` + `IdealCheckProtocol` + booleanity).
+//! [`UairFrontend`] bridges any `U: Uair` to the protocol-facing
+//! [`ConstraintSystem`] trait by delegating to the existing UAIR constraint
+//! engine (`CombinedPolyResolver` + `IdealCheckProtocol` + booleanity).
 //!
-//! **This commit declares the adapter type only.** The `impl ConstraintSystem
-//! for UairFrontend` — i.e. moving the bodies of prover steps 3–5 (and their
-//! verifier counterparts) behind the trait — is Phase 2 and is deliberately
-//! left out so the abstract surface can be reviewed first.
+//! **Phase 3 scope (prover side).** The body of `prove_constraints` is the
+//! constraint argument that used to live in prover steps 3--5 (plus the
+//! step-4 scalar / bit-op pieces and the step-6 booleanity-bridge +
+//! per-prime zero-padding). The substrate now keeps only commit / prime
+//! projection / multipoint-eval / lift-and-project / PCS-open and feeds the
+//! frontend the `phi_q`-projected per-family traces. The verifier side
+//! (`verify_constraints`, `reconstruct_virtual_evals`) is Phase 4 and is
+//! left as `todo!`.
 
+use crate::{
+    CombinedPolyResolverProof, IdealCheckProof, MultiDegreeSumcheckProof, ProtocolError,
+    alpha_prime_bridge_up_evals,
+    constraint_system::{ConstraintEndpoints, ConstraintSystem, Layout},
+};
 use core::marker::PhantomData;
+use crypto_primitives::{FromPrimitiveWithConfig, HasPrimeFieldConfig, PrimeField};
+use num_traits::Zero;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use zinc_piop::{
+    combined_poly_resolver::CombinedPolyResolver,
+    ideal_check::IdealCheckProtocol,
+    lookup::{
+        BatchedLookupProof,
+        booleanity::{BooleanityChecker, BooleanityProof},
+    },
+    multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs, Proof as MultipointEvalProof},
+    projections::{
+        ProjectedScalars, ProjectedTrace, build_bit_op_virtual_mle, evaluate_trace_to_column_mles,
+        project_scalars, project_scalars_to_field,
+    },
+    sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckGroup},
+};
+use zinc_poly::{
+    mle::DenseMultilinearExtension,
+    univariate::{binary::BinaryPoly, dynamic::over_field::DynamicPolynomialF},
+};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
+use zinc_uair::{
+    Uair, UairSignature, constraint_counter::count_constraints, degree_counter::count_max_degree,
+};
+use zinc_utils::{
+    add, cfg_iter, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
+    mul_by_scalar::MulByScalar, powers,
+};
 
-use zinc_uair::Uair;
+/// The constraint-argument sub-proof produced by [`UairFrontend`].
+///
+/// Holds exactly the constraint-argument outputs that the substrate `Proof`
+/// embeds today: the Q[X]-family ideal-check / CPR / multi-degree sumcheck,
+/// the per-prime `F_{q_i}[X]` mirrors, and the optional booleanity / lookup
+/// arguments.
+///
+/// The [`GenTranscribable`] / [`Transcribable`] impls mirror, field-for-field
+/// and byte-for-byte, the corresponding slices of the substrate `Proof`'s
+/// (de)serialization (`protocol/src/lib.rs`). They are not exercised in
+/// Phase 3 (the substrate still hand-serializes the unpacked fields) but are
+/// required by the trait's `ConstraintProof: Transcribable` bound and become
+/// the Phase-4 serialization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UairConstraintProof<F: PrimeField> {
+    /// Randomized ideal check proof ($Q[X]$ constraint family).
+    pub ideal_check: IdealCheckProof<F>,
+    /// Per-prime $F_{q_i}[X]$ ideal-check proofs.
+    pub ideal_checks_fq: Vec<IdealCheckProof<F>>,
+    /// Combined polynomial resolver proof ($Q[X]$ constraint family).
+    pub cpr_proof: CombinedPolyResolverProof<F>,
+    /// Per-prime $F_{q_i}[X]$ CPR proofs.
+    pub cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
+    /// Multi-degree sumcheck proof ($Q[X]$ constraint family).
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    /// Per-prime $F_{q_i}[X]$ multi-degree sumcheck proofs.
+    pub combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
+    /// Multipoint-eval proof ($Q[X]$ constraint family): collapses the
+    /// per-column / shift / bit-op-virtual claims at `r*` into one claim at the
+    /// shared endpoint `r_0`.
+    pub multipoint_eval: MultipointEvalProof<F>,
+    /// Per-prime $F_{q_i}[X]$ multipoint-eval proofs, produced by the same
+    /// lockstep reduction.
+    pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
+    /// Binary-polynomial booleanity argument proof. `None` when the UAIR has
+    /// no witness binary-poly columns.
+    pub booleanity_proof: Option<BooleanityProof<F>>,
+    /// Lookup argument proof (`None`; lookup is not yet implemented).
+    pub lookup_proof: Option<BatchedLookupProof<F>>,
+}
+
+impl<F> GenTranscribable for UairConstraintProof<F>
+where
+    F: PrimeField,
+    F::Integer: ConstTranscribable,
+{
+    fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
+        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (cpr_proof, bytes) =
+            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+        let (combined_sumcheck, bytes) =
+            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+        let (multipoint_eval, bytes) =
+            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+
+        // booleanity_proof: presence flag (u32) + optional length-prefixed body.
+        let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
+        let (booleanity_proof, bytes) = if presence != 0 {
+            let (bp, rest) = BooleanityProof::<F>::read_transcription_bytes_subset(bytes);
+            (Some(bp), rest)
+        } else {
+            (None, bytes)
+        };
+
+        // ideal_checks_fq: u32 count + length-prefixed entries.
+        let (n_ic, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_ic = usize::try_from(n_ic).expect("fits usize");
+        let mut ideal_checks_fq = Vec::with_capacity(n_ic);
+        for _ in 0..n_ic {
+            let (ic, rest) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
+            ideal_checks_fq.push(ic);
+            bytes = rest;
+        }
+
+        // cpr_proofs_fq: u32 count + length-prefixed entries.
+        let (n_cpr_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_cpr_fq = usize::try_from(n_cpr_fq).expect("n_cpr_fq must fit into usize");
+        let mut cpr_proofs_fq = Vec::with_capacity(n_cpr_fq);
+        for _ in 0..n_cpr_fq {
+            let (cpr, rest) =
+                CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
+            cpr_proofs_fq.push(cpr);
+            bytes = rest;
+        }
+
+        // combined_sumchecks_fq: u32 count + length-prefixed entries.
+        let (n_sum_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_sum_fq = usize::try_from(n_sum_fq).expect("n_sum_fq must fit into usize");
+        let mut combined_sumchecks_fq = Vec::with_capacity(n_sum_fq);
+        for _ in 0..n_sum_fq {
+            let (sumcheck, rest) =
+                MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
+            combined_sumchecks_fq.push(sumcheck);
+            bytes = rest;
+        }
+
+        // multipoint_evals_fq: u32 count + length-prefixed entries.
+        let (n_mp_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
+        let n_mp_fq = usize::try_from(n_mp_fq).expect("n_mp_fq must fit into usize");
+        let mut multipoint_evals_fq = Vec::with_capacity(n_mp_fq);
+        for _ in 0..n_mp_fq {
+            let (mp, rest) = MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
+            multipoint_evals_fq.push(mp);
+            bytes = rest;
+        }
+
+        assert!(bytes.is_empty(), "All bytes should be consumed");
+        Self {
+            ideal_check,
+            ideal_checks_fq,
+            cpr_proof,
+            cpr_proofs_fq,
+            combined_sumcheck,
+            combined_sumchecks_fq,
+            multipoint_eval,
+            multipoint_evals_fq,
+            booleanity_proof,
+            lookup_proof: None,
+        }
+    }
+
+    fn write_transcription_bytes_exact(&self, mut buf: &mut [u8]) {
+        buf = self.ideal_check.write_transcription_bytes_subset(buf);
+        buf = self.cpr_proof.write_transcription_bytes_subset(buf);
+        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
+        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
+
+        let presence = u32::from(self.booleanity_proof.is_some());
+        buf = presence.write_transcription_bytes_subset(buf);
+        if let Some(ref bp) = self.booleanity_proof {
+            buf = bp.write_transcription_bytes_subset(buf);
+        }
+
+        let n_ic = u32::try_from(self.ideal_checks_fq.len()).expect("fits u32");
+        buf = n_ic.write_transcription_bytes_subset(buf);
+        for ic in &self.ideal_checks_fq {
+            buf = ic.write_transcription_bytes_subset(buf);
+        }
+
+        let n_cpr = u32::try_from(self.cpr_proofs_fq.len()).expect("fits u32");
+        buf = n_cpr.write_transcription_bytes_subset(buf);
+        for cpr in &self.cpr_proofs_fq {
+            buf = cpr.write_transcription_bytes_subset(buf);
+        }
+
+        let n_sc = u32::try_from(self.combined_sumchecks_fq.len()).expect("fits u32");
+        buf = n_sc.write_transcription_bytes_subset(buf);
+        for sc in &self.combined_sumchecks_fq {
+            buf = sc.write_transcription_bytes_subset(buf);
+        }
+
+        let n_mp = u32::try_from(self.multipoint_evals_fq.len()).expect("fits u32");
+        buf = n_mp.write_transcription_bytes_subset(buf);
+        for mp in &self.multipoint_evals_fq {
+            buf = mp.write_transcription_bytes_subset(buf);
+        }
+        let _ = buf;
+    }
+}
+
+impl<F> Transcribable for UairConstraintProof<F>
+where
+    F: PrimeField,
+    F::Integer: ConstTranscribable,
+{
+    #[allow(clippy::arithmetic_side_effects)]
+    fn get_num_bytes(&self) -> usize {
+        let booleanity_bytes = match &self.booleanity_proof {
+            Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
+            None => 0,
+        };
+        let ideal_checks_fq_bytes: usize = self
+            .ideal_checks_fq
+            .iter()
+            .map(|ic| IdealCheckProof::<F>::LENGTH_NUM_BYTES + ic.get_num_bytes())
+            .sum();
+        let cpr_proofs_fq_bytes: usize = self
+            .cpr_proofs_fq
+            .iter()
+            .map(|cpr| CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES + cpr.get_num_bytes())
+            .sum();
+        let combined_sumchecks_fq_bytes: usize = self
+            .combined_sumchecks_fq
+            .iter()
+            .map(|sc| MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES + sc.get_num_bytes())
+            .sum();
+        let multipoint_evals_fq_bytes: usize = self
+            .multipoint_evals_fq
+            .iter()
+            .map(|mp| MultipointEvalProof::<F>::LENGTH_NUM_BYTES + mp.get_num_bytes())
+            .sum();
+        IdealCheckProof::<F>::LENGTH_NUM_BYTES
+            + self.ideal_check.get_num_bytes()
+            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
+            + self.cpr_proof.get_num_bytes()
+            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
+            + self.combined_sumcheck.get_num_bytes()
+            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
+            + self.multipoint_eval.get_num_bytes()
+            // ideal_checks_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + ideal_checks_fq_bytes
+            // cpr_proofs_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + cpr_proofs_fq_bytes
+            // combined_sumchecks_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + combined_sumchecks_fq_bytes
+            // booleanity presence flag + optional payload
+            + u32::NUM_BYTES
+            + booleanity_bytes
+            // multipoint_evals_fq: count + sum of (length-prefix + body) per entry
+            + u32::NUM_BYTES
+            + multipoint_evals_fq_bytes
+    }
+}
 
 /// Adapter wrapping a `U: Uair` so it can serve as a
 /// [`ConstraintSystem`](crate::constraint_system::ConstraintSystem).
@@ -21,13 +275,592 @@ use zinc_uair::Uair;
 /// - `U` — the UAIR description (authoring trait).
 /// - `F` — the projection field (becomes `ConstraintSystem::Field`); fixed on
 ///   the type so the impl can require the full field-bound bundle.
-/// - `D` (= `DEGREE_PLUS_ONE`) / `FD` (folded degree+1) — const generics, on the
-///   type per decision 5 of `docs/ucs-refactor-plan.md`.
+/// - `D` (= `DEGREE_PLUS_ONE`) / `FD` (folded degree+1) — const generics, on
+///   the type per decision 5 of `docs/ucs-refactor-plan.md`.
 ///
-/// Phase 2 will likely extend this to borrow the original trace (needed for
-/// booleanity / bit-op virtual materialization) and to carry the
-/// `project_scalar` / `project_ideal` / `project_fq_ideal` closures.
-pub struct UairFrontend<U: Uair, F, const D: usize, const FD: usize> {
-    #[allow(dead_code)] // populated in Phase 2 when the impl lands
-    marker: PhantomData<(U, F)>,
+/// It borrows the original (un-projected) witness binary-poly columns from the
+/// trace — needed for the booleanity argument and the `alpha'` booleanity
+/// bridge — and carries the `project_scalar` projection map and the
+/// [`UairSignature`] (so [`ConstraintSystem::layout`] can hand back a borrow).
+pub struct UairFrontend<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> {
+    /// The original (un-projected) witness binary-poly columns, borrowed from
+    /// the trace. Used for booleanity + the `alpha'` bridge.
+    witness_binary_cols: &'a [DenseMultilinearExtension<BinaryPoly<D>>],
+    /// Projection map `phi_q` for UAIR scalars (`U::Scalar -> F[X]` under a
+    /// per-family field cfg). Internalized here so the seam stays
+    /// constraint-system-agnostic.
+    project_scalar: fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>,
+    /// The UAIR layout, stored so `layout()` can return a borrow.
+    signature: UairSignature<U::Prime>,
+    _marker: PhantomData<F>,
+}
+
+impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> UairFrontend<'a, U, F, D, FD> {
+    /// Build a UAIR frontend.
+    ///
+    /// `witness_binary_cols` is the original (un-projected) witness slice of
+    /// the trace's binary-poly columns (i.e.
+    /// `&trace.binary_poly[num_pub_bin..num_total_bin]`).
+    pub fn new(
+        witness_binary_cols: &'a [DenseMultilinearExtension<BinaryPoly<D>>],
+        project_scalar: fn(
+            &U::Scalar,
+            &<F as HasPrimeFieldConfig>::Config,
+        ) -> DynamicPolynomialF<F>,
+    ) -> Self {
+        Self {
+            witness_binary_cols,
+            project_scalar,
+            signature: U::signature(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, U, F, const D: usize, const FD: usize> ConstraintSystem for UairFrontend<'a, U, F, D, FD>
+where
+    U: Uair + 'static,
+    F: InnerTransparentField
+        + FromPrimitiveWithConfig
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>
+        + Send
+        + Sync
+        + 'static,
+    F::Integer: ConstTranscribable + Ord + Zero + Default + Send + Sync,
+{
+    type Prime = U::Prime;
+    type Field = F;
+    type ConstraintProof = UairConstraintProof<F>;
+
+    fn layout(&self) -> &Layout<Self::Prime> {
+        &self.signature
+    }
+
+    /// Prover side of the UAIR constraint argument.
+    ///
+    /// Faithfully relocates prover steps 3--6: the constraint argument proper,
+    /// the step-6 booleanity-bridge / per-prime zero-padding, and the lockstep
+    /// multipoint-eval itself (former substrate step 6). Transcript
+    /// squeeze/absorb order is preserved verbatim relative to the original step
+    /// chain:
+    ///
+    /// 1. shared ideal-check eval points (`mu` per family), per-family ideal
+    ///    check (Q then each prime);
+    /// 2. shared `psi_a` projecting element `a`;
+    /// 3. shared CPR folding challenge `alpha`, booleanity `prepare`, lockstep
+    ///    multi-degree sumcheck, per-family CPR/booleanity finalize, then the
+    ///    `alpha'` booleanity-bridge squeeze;
+    /// 4. assemble the per-family eval claims (Q-family with appended `alpha'`
+    ///    bridge columns/up-evals, per-prime zero-padded);
+    /// 5. lockstep multipoint-eval over those claims, reducing them to the
+    ///    shared endpoint `r_0` returned as [`ConstraintEndpoints`].
+    #[allow(clippy::too_many_lines, clippy::arithmetic_side_effects)]
+    fn prove_constraints(
+        &self,
+        transcript: &mut impl Transcript,
+        projected_traces: &[ProjectedTrace<Self::Field>],
+        field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
+        num_vars: usize,
+    ) -> Result<
+        (Self::ConstraintProof, ConstraintEndpoints<Self::Field>),
+        ProtocolError<Self::Field>,
+    > {
+        let sig = &self.signature;
+        let num_constraints = count_constraints::<U>();
+        let max_degree = count_max_degree::<U>();
+        let n_fq = projected_traces.len().saturating_sub(1);
+
+        let field_cfg = field_cfgs[0].clone();
+        let q_star_idx = crate::shared_challenge::compute_q_star_idx::<F>(field_cfgs);
+        let q_star_cfg = field_cfgs[q_star_idx].clone();
+
+        // ---- per-family scalar projections (phi_q) -------------------------
+        // The substrate no longer projects scalars; the frontend recomputes
+        // them per family from its own `project_scalar` map.
+        let projected_scalars_fx: Vec<ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>> =
+            field_cfgs
+                .iter()
+                .map(|cfg| project_scalars::<F, U>(|s| (self.project_scalar)(s, cfg)))
+                .collect();
+
+        // =================== step 3: ideal check ===========================
+        let shared_eval_points: Vec<Vec<F>> =
+            crate::shared_challenge::sample_shared_field_challenges::<F>(
+                transcript,
+                num_vars,
+                &q_star_cfg,
+                field_cfgs,
+            );
+
+        let ideal_check = prove_ideal_family::<U, F, _, D>(
+            transcript,
+            &projected_traces[0],
+            &projected_scalars_fx[0],
+            0,
+            num_constraints.q,
+            &shared_eval_points[0],
+            &field_cfg,
+        )?;
+
+        let mut ideal_checks_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let family_idx = add!(prime_idx, 1);
+            let cfg_q_i = &field_cfgs[family_idx];
+            let ic_proof_i = prove_ideal_family::<U, F, _, D>(
+                transcript,
+                &projected_traces[family_idx],
+                &projected_scalars_fx[family_idx],
+                family_idx,
+                num_constraints.for_prime(prime_idx),
+                &shared_eval_points[family_idx],
+                cfg_q_i,
+            )
+            .map_err(|source| ProtocolError::FqIdealCheck {
+                prime_idx,
+                q: F::modulus(cfg_q_i).to_string(),
+                source,
+            })?;
+            ideal_checks_fq.push(ic_proof_i);
+        }
+
+        // =================== step 4: eval projection (psi_a) ================
+        let projecting_elements: Vec<F> = crate::shared_challenge::sample_shared_field_challenge::<F>(
+            transcript,
+            &q_star_cfg,
+            field_cfgs,
+        );
+
+        let bit_op_specs = sig.bit_op_specs().to_vec();
+
+        // Per-family psi_a-projected trace MLEs, bit-op virtual MLEs, and
+        // psi_a-projected scalars.
+        let mut projected_trace_f: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+            Vec::with_capacity(projected_traces.len());
+        let mut bit_op_mles_per_family: Vec<Vec<DenseMultilinearExtension<F::Inner>>> =
+            Vec::with_capacity(projected_traces.len());
+        let mut projected_scalars_f: Vec<ProjectedScalars<U::Scalar, F>> =
+            Vec::with_capacity(projected_traces.len());
+
+        for (family_idx, trace_i) in projected_traces.iter().enumerate() {
+            let cfg_i = &field_cfgs[family_idx];
+            let elem_i = &projecting_elements[family_idx];
+
+            let trace_f_i = evaluate_trace_to_column_mles(trace_i, elem_i);
+            let bit_op_mles_i = bit_op_specs
+                .iter()
+                .map(|spec| build_bit_op_virtual_mle::<F, D>(trace_i, spec, elem_i, cfg_i))
+                .collect();
+            let scalars_f_i =
+                project_scalars_to_field(projected_scalars_fx[family_idx].clone(), elem_i)
+                    .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+
+            projected_trace_f.push(trace_f_i);
+            bit_op_mles_per_family.push(bit_op_mles_i);
+            projected_scalars_f.push(scalars_f_i);
+        }
+
+        // =================== step 5: sumcheck ===============================
+        let folding_challenges: Vec<F> = crate::shared_challenge::sample_shared_field_challenge::<F>(
+            transcript,
+            &q_star_cfg,
+            field_cfgs,
+        );
+
+        // ---- Q[X] family groups: CPR + optional booleanity ----
+        let (q_cpr_group, q_cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+            projected_trace_f[0].clone(),
+            bit_op_mles_per_family[0].clone(),
+            &shared_eval_points[0],
+            &projected_scalars_f[0],
+            0,
+            num_constraints.q,
+            num_vars,
+            max_degree,
+            &folding_challenges[0],
+            &field_cfg,
+        )?;
+
+        let mut q_groups = vec![q_cpr_group];
+
+        let trace_wit_bin_poly = self.witness_binary_cols;
+        let bool_ancillary = if !trace_wit_bin_poly.is_empty() {
+            let (bool_group, anc) = BooleanityChecker::prepare_sumcheck_group::<D>(
+                transcript,
+                trace_wit_bin_poly,
+                num_vars,
+                &field_cfg,
+            )
+            .map_err(ProtocolError::Booleanity)?;
+            q_groups.push(bool_group);
+            Some(anc)
+        } else {
+            None
+        };
+
+        // ---- Per-prime F_q[X] family groups: one CPR each ----
+        let mut fq_cpr_ancillaries = Vec::with_capacity(n_fq);
+        let mut fq_family_groups: Vec<Vec<MultiDegreeSumcheckGroup<F>>> = Vec::with_capacity(n_fq);
+        for prime_idx in 0..n_fq {
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &field_cfgs[family_idx];
+            let (cpr_group_i, cpr_ancillary_i) = CombinedPolyResolver::prepare_sumcheck_group::<U>(
+                projected_trace_f[family_idx].clone(),
+                bit_op_mles_per_family[family_idx].clone(),
+                &shared_eval_points[family_idx],
+                &projected_scalars_f[family_idx],
+                family_idx,
+                num_constraints.for_prime(prime_idx),
+                num_vars,
+                max_degree,
+                &folding_challenges[family_idx],
+                cfg_i,
+            )?;
+            fq_family_groups.push(vec![cpr_group_i]);
+            fq_cpr_ancillaries.push(cpr_ancillary_i);
+        }
+
+        // ---- Lockstep multi-degree sumcheck ----
+        let mut md_sc_families: Vec<(Vec<MultiDegreeSumcheckGroup<F>>, &F::Config)> =
+            Vec::with_capacity(add!(n_fq, 1));
+        md_sc_families.push((q_groups, &field_cfg));
+        for (prime_idx, groups) in fq_family_groups.into_iter().enumerate() {
+            let family_idx = add!(prime_idx, 1);
+            md_sc_families.push((groups, &field_cfgs[family_idx]));
+        }
+
+        let mut sumcheck_outputs = MultiDegreeSumcheck::prove_as_subprotocol(
+            transcript,
+            md_sc_families,
+            num_vars,
+            &q_star_cfg,
+        )
+        .into_iter();
+
+        // ---- Q[X] family finalize ----
+        let (combined_sumcheck, md_states) =
+            sumcheck_outputs.next().expect("Q[X] family always present");
+        let mut md_iter = md_states.into_iter();
+
+        let (cpr_proof, cpr_prover_state) = CombinedPolyResolver::finalize_prover::<U>(
+            transcript,
+            md_iter.next().expect("CPR group always present"),
+            q_cpr_ancillary,
+            &field_cfg,
+        )?;
+
+        let booleanity_proof = if let Some(anc) = bool_ancillary {
+            let state = md_iter.next().expect("booleanity group present");
+            Some(
+                BooleanityChecker::finalize_prover(transcript, state, anc, &field_cfg)
+                    .map_err(ProtocolError::Booleanity)?,
+            )
+        } else {
+            None
+        };
+
+        // TODO: build BatchedLookupProof from collected lookup proofs + metas.
+        let lookup_proof = None;
+
+        // ---- Per-prime family finalize ----
+        let mut cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>> = Vec::with_capacity(n_fq);
+        let mut cpr_eval_points_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        let mut combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>> = Vec::with_capacity(n_fq);
+        for (prime_idx, cpr_ancillary_i) in fq_cpr_ancillaries.into_iter().enumerate() {
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &field_cfgs[family_idx];
+            let (sumcheck_i, states_i) =
+                sumcheck_outputs.next().expect("fq family sumcheck output");
+            let mut states_iter_i = states_i.into_iter();
+            let (cpr_proof_i, cpr_state_i) = CombinedPolyResolver::finalize_prover::<U>(
+                transcript,
+                states_iter_i.next().expect("CPR group always present"),
+                cpr_ancillary_i,
+                cfg_i,
+            )?;
+            combined_sumchecks_fq.push(sumcheck_i);
+            cpr_proofs_fq.push(cpr_proof_i);
+            cpr_eval_points_fq.push(cpr_state_i.evaluation_point);
+        }
+
+        // ---- booleanity -> multipoint-eval `alpha'` bridge squeeze ----
+        let alpha_prime_f: Option<F> = booleanity_proof
+            .as_ref()
+            .map(|_| transcript.get_field_challenge(&field_cfg));
+
+        // ============ step 6 (frontend part): family eval claims ============
+        // Q[X] family: append the alpha'-bridge columns/up-evals when booleanity
+        // ran; per-prime families: zero-pad to match the Q-family column count.
+        let mut q_trace_mles = projected_trace_f[0].clone();
+        let (q_up_evals, num_wit_bin) = if let Some(alpha_prime) = &alpha_prime_f {
+            let num_wit_bin = trace_wit_bin_poly.len();
+            let one = F::one_with_cfg(&field_cfg);
+            let alpha_powers: Vec<F> = powers(alpha_prime.clone(), one, D);
+            let extra_trace_mles: Vec<DenseMultilinearExtension<F::Inner>> =
+                cfg_iter!(trace_wit_bin_poly)
+                    .map(|col| project_binary_col_at_field::<F, D>(col, &alpha_powers, &field_cfg))
+                    .collect();
+            debug_assert_eq!(extra_trace_mles.len(), num_wit_bin);
+
+            let bp = booleanity_proof
+                .as_ref()
+                .expect("booleanity_proof present iff alpha_prime_f is Some");
+            let extra_up_evals = alpha_prime_bridge_up_evals::<F, D>(
+                &bp.bit_slice_evals,
+                num_wit_bin,
+                alpha_prime,
+                &field_cfg,
+            );
+
+            q_trace_mles.extend(extra_trace_mles);
+            let mut up_evals = cpr_proof.up_evals.clone();
+            up_evals.extend(extra_up_evals);
+            (up_evals, num_wit_bin)
+        } else {
+            (cpr_proof.up_evals.clone(), 0)
+        };
+
+        let extension_size = 1usize << num_vars;
+        let mut claims: Vec<FamilyEvalClaims<F>> = Vec::with_capacity(add!(n_fq, 1));
+        claims.push(FamilyEvalClaims::new(
+            field_cfg.clone(),
+            q_trace_mles,
+            bit_op_mles_per_family[0].clone(),
+            cpr_prover_state.evaluation_point.clone(),
+            q_up_evals,
+            cpr_proof.bit_op_evals.clone(),
+            cpr_proof.down_evals.clone(),
+        ));
+
+        for prime_idx in 0..n_fq {
+            let family_idx = add!(prime_idx, 1);
+            let cfg_i = &field_cfgs[family_idx];
+            let zero_i = F::zero_with_cfg(cfg_i);
+            let zero_inner_i = zero_i.inner();
+
+            let mut trace_i = projected_trace_f[family_idx].clone();
+            if num_wit_bin > 0 {
+                let zero_mle = DenseMultilinearExtension::from_evaluations_vec(
+                    num_vars,
+                    vec![zero_inner_i.clone(); extension_size],
+                    zero_inner_i.clone(),
+                );
+                trace_i.extend((0..num_wit_bin).map(|_| zero_mle.clone()));
+            }
+
+            let mut up_i = cpr_proofs_fq[prime_idx].up_evals.clone();
+            up_i.extend((0..num_wit_bin).map(|_| zero_i.clone()));
+
+            claims.push(FamilyEvalClaims::new(
+                cfg_i.clone(),
+                trace_i,
+                bit_op_mles_per_family[family_idx].clone(),
+                cpr_eval_points_fq[prime_idx].clone(),
+                up_i,
+                cpr_proofs_fq[prime_idx].bit_op_evals.clone(),
+                cpr_proofs_fq[prime_idx].down_evals.clone(),
+            ));
+        }
+
+        // ============ step 6: lockstep multipoint-eval ============
+        // Reduce every per-family up/down/bit-op evaluation claim (at the
+        // per-family points `r*`) to the single shared endpoint `r_0`. This is
+        // the former substrate step 6, now the closing move of the constraint
+        // argument; the substrate consumes only the returned `r_0` for its
+        // lift-and-project + PCS open. Transcript order is unchanged: the
+        // reduction runs immediately after the `alpha'` bridge squeeze, exactly
+        // as it did when the substrate invoked it after `prove_constraints`.
+        let shifts = sig.shifts();
+        let mp_inputs: Vec<MultipointEvalFamilyInputs<'_, F>> =
+            claims.iter().map(FamilyEvalClaims::as_inputs).collect();
+
+        let mut mp_outputs =
+            MultipointEval::prove_as_subprotocol(transcript, mp_inputs, shifts, &q_star_cfg)?
+                .into_iter();
+
+        let (multipoint_eval, q_state) = mp_outputs.next().expect("Q-family present");
+        let r_0 = q_state.eval_point;
+
+        let mut multipoint_evals_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_fq);
+        let mut r_0_fq: Vec<Vec<F>> = Vec::with_capacity(n_fq);
+        for (proof_i, state_i) in mp_outputs {
+            multipoint_evals_fq.push(proof_i);
+            r_0_fq.push(state_i.eval_point);
+        }
+
+        let proof = UairConstraintProof {
+            ideal_check,
+            cpr_proof,
+            combined_sumcheck,
+            multipoint_eval,
+            ideal_checks_fq,
+            cpr_proofs_fq,
+            combined_sumchecks_fq,
+            multipoint_evals_fq,
+            booleanity_proof,
+            lookup_proof,
+        };
+
+        Ok((proof, ConstraintEndpoints::new(r_0, r_0_fq)))
+    }
+
+    fn verify_constraints(
+        &self,
+        _transcript: &mut impl Transcript,
+        _proof: &Self::ConstraintProof,
+        _field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
+        _num_vars: usize,
+    ) -> Result<ConstraintEndpoints<Self::Field>, ProtocolError<Self::Field>> {
+        todo!("Phase 4: verifier side")
+    }
+
+    fn reconstruct_virtual_evals(
+        &self,
+        _committed_lifted_at_r0: &[DynamicPolynomialF<Self::Field>],
+        _field_cfg: &<Self::Field as HasPrimeFieldConfig>::Config,
+    ) -> Vec<DynamicPolynomialF<Self::Field>> {
+        todo!("Phase 4: verifier side")
+    }
+}
+
+/// Project a single witness binary-poly column at a field element by
+/// evaluating each bit-packed cell $\sum_i \text{bit}_i \cdot X^i$ at
+/// $X = \alpha$.
+///
+/// Used to build the appended $\alpha'$-projected witness-binary-poly MLEs
+/// that participate in `MultipointEval` as the Schwartz-Zippel bridge from
+/// booleanity into the PCS chain. Moved here verbatim from the prover.
+#[allow(clippy::arithmetic_side_effects)]
+fn project_binary_col_at_field<F, const D: usize>(
+    col: &DenseMultilinearExtension<BinaryPoly<D>>,
+    alpha_powers: &[F],
+    field_cfg: &F::Config,
+) -> DenseMultilinearExtension<F::Inner>
+where
+    F: PrimeField,
+    F::Integer: Clone + Send + Sync,
+{
+    debug_assert_eq!(alpha_powers.len(), D);
+    let zero = F::zero_with_cfg(field_cfg);
+
+    let evaluations: Vec<F::Inner> = col
+        .evaluations
+        .iter()
+        .map(|entry| {
+            let mut acc = zero.clone();
+            for (i, bit) in entry.iter().enumerate() {
+                if bit.into_inner() {
+                    acc += &alpha_powers[i];
+                }
+            }
+            acc.into_inner()
+        })
+        .collect();
+
+    DenseMultilinearExtension {
+        num_vars: col.num_vars,
+        evaluations,
+    }
+}
+
+/// Run the per-family ideal check, dispatching on the projected trace layout
+/// (`RowMajor` -> `prove_combined`, `ColumnMajor` -> `prove_mle_first`).
+#[allow(clippy::too_many_arguments)]
+fn prove_ideal_family<U, F, T, const D: usize>(
+    transcript: &mut T,
+    trace: &ProjectedTrace<F>,
+    scalars: &ProjectedScalars<U::Scalar, DynamicPolynomialF<F>>,
+    family_idx: usize,
+    num_constraints: usize,
+    eval_point: &[F],
+    cfg: &F::Config,
+) -> Result<IdealCheckProof<F>, zinc_piop::ideal_check::IdealCheckError<F>>
+where
+    U: Uair,
+    F: InnerTransparentField,
+    F::Integer: ConstTranscribable,
+    T: Transcript,
+{
+    match trace {
+        ProjectedTrace::RowMajor(t) => IdealCheckProtocol::<U>::prove_combined::<_, D>(
+            transcript,
+            t,
+            scalars,
+            family_idx,
+            num_constraints,
+            eval_point,
+            cfg,
+        ),
+        ProjectedTrace::ColumnMajor(t) => IdealCheckProtocol::<U>::prove_mle_first::<_, D>(
+            transcript,
+            t,
+            scalars,
+            family_idx,
+            num_constraints,
+            eval_point,
+            cfg,
+        ),
+    }
+}
+
+/// Owned, per-family bundle of the MLE-evaluation claims the constraint
+/// argument produces and feeds into the frontend's multipoint-eval.
+///
+/// This is the owned counterpart of [`MultipointEvalFamilyInputs`] (which
+/// borrows); [`FamilyEvalClaims::as_inputs`] hands a borrowing view to
+/// [`MultipointEval`]. It is purely internal scaffolding for
+/// [`UairFrontend::prove_constraints`] — now that multipoint-eval runs inside
+/// the frontend, these claims never cross the [`ConstraintSystem`] seam.
+struct FamilyEvalClaims<F: PrimeField> {
+    /// Field configuration for this family.
+    field_cfg: F::Config,
+    /// Trace MLEs, projected into this family's field.
+    trace_mles: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Bit-op virtual-column MLEs, projected into this family's field.
+    bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
+    /// Evaluation point `r*` for this family.
+    eval_point: Vec<F>,
+    /// `up_eval_j = v_j(r*)` per committed column `j`.
+    up_evals: Vec<F>,
+    /// `bit_op_eval_l = bit_op_l(r*)` per bit-op virtual column `l`.
+    bit_op_evals: Vec<F>,
+    /// `down_eval_k = v_{src_k}^{<<c_k}(r*)` per shift `k`.
+    down_evals: Vec<F>,
+}
+
+impl<F: PrimeField> FamilyEvalClaims<F> {
+    /// Assemble a per-family claim bundle.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        field_cfg: F::Config,
+        trace_mles: Vec<DenseMultilinearExtension<F::Inner>>,
+        bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
+        eval_point: Vec<F>,
+        up_evals: Vec<F>,
+        bit_op_evals: Vec<F>,
+        down_evals: Vec<F>,
+    ) -> Self {
+        Self {
+            field_cfg,
+            trace_mles,
+            bit_op_mles,
+            eval_point,
+            up_evals,
+            bit_op_evals,
+            down_evals,
+        }
+    }
+
+    /// Borrowing view consumed by [`MultipointEval::prove_as_subprotocol`].
+    fn as_inputs(&self) -> MultipointEvalFamilyInputs<'_, F> {
+        MultipointEvalFamilyInputs {
+            field_cfg: &self.field_cfg,
+            trace_mles: &self.trace_mles,
+            bit_op_mles: &self.bit_op_mles,
+            eval_point: &self.eval_point,
+            up_evals: &self.up_evals,
+            bit_op_evals: &self.bit_op_evals,
+            down_evals: &self.down_evals,
+        }
+    }
 }

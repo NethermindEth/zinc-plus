@@ -1,15 +1,23 @@
 //! Abstract constraint-system seam for the Zinc+ protocol.
 //!
 //! This module introduces [`ConstraintSystem`] — the protocol-facing boundary
-//! that the substrate (commit / `phi_q` & `psi_a` projection / multipoint-eval
-//! / lift-and-project / Zip+ PCS) is to be made generic over. UAIR will be the
-//! first (and, for now, only) implementation, wired up via the
+//! that the substrate (commit / `phi_q` projection / lift-and-project / Zip+
+//! PCS) is made generic over. UAIR is the first (and, for now, only)
+//! implementation, wired up via the
 //! [`UairFrontend`](crate::uair_frontend::UairFrontend) adapter.
 //!
-//! **Scope of this commit:** trait + contract types only. No prover-step bodies
-//! are moved yet, the protocol is not yet generic over the trait, and the
-//! verifier is untouched. Items marked `PROPOSED` are expected to be refined
-//! when the step bodies move (Phase 2 of `docs/ucs-refactor-plan.md`).
+//! **Seam shape.** The constraint argument owns everything that reduces the
+//! relation to a *single* witness-evaluation claim — including the lockstep
+//! multipoint-eval (former substrate step 6, now run inside
+//! [`UairFrontend::prove_constraints`](crate::uair_frontend::UairFrontend)). It
+//! hands the substrate only the shared endpoint [`ConstraintEndpoints`]; the
+//! substrate's remaining job is lift-and-project + the Zip+ PCS open at that
+//! point, which keeps it constraint-system-agnostic (a future R1CS/Spartan
+//! frontend terminates at a single point directly).
+//!
+//! Verifier-side methods are still `todo!` — wiring them is the later verifier
+//! phase and does not modify the existing verifier (Phase 4 of
+//! `docs/ucs-refactor-plan.md`).
 //!
 //! ## Why `Field` is an associated type (not a method generic)
 //!
@@ -24,10 +32,8 @@
 //! `ZincPlusPiop<Zt, U, F, D, FD>` is monomorphized today.
 
 use crypto_primitives::{HasPrimeFieldConfig, PrimeField, Semiring};
-use zinc_piop::{multipoint_eval::MultipointEvalFamilyInputs, projections::ProjectedTrace};
-use zinc_poly::{
-    mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
-};
+use zinc_piop::projections::ProjectedTrace;
+use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_uair::UairSignature;
 
@@ -39,72 +45,38 @@ use crate::ProtocolError;
 /// Kept identical to [`UairSignature`] for now — the 3-group
 /// `binary_poly` / `arbitrary_poly` / `int` layout plus `shifts` and `primes`
 /// (the "keep 3 groups" decision in `docs/ucs-refactor-plan.md`). Bit-op and
-/// lookup specs stay *inside* the frontend; they only surface across the seam
-/// as opaque MLEs/evals in [`FamilyEvalClaims`].
+/// lookup specs stay *inside* the frontend; they never surface across the seam
+/// (the frontend's own multipoint-eval consumes them).
 pub type Layout<P> = UairSignature<P>;
 
-/// Owned, per-family bundle of the MLE-evaluation claims the constraint
-/// argument produces and the substrate's multipoint-eval binds.
+/// The single evaluation endpoint the constraint argument reduces all of its
+/// per-family claims down to.
 ///
-/// This is the owned counterpart of [`MultipointEvalFamilyInputs`] (which
-/// borrows); use [`FamilyEvalClaims::as_inputs`] to hand a borrowing view to
-/// the substrate.
+/// The UAIR frontend's lockstep multipoint-eval (the reduction over committed
+/// columns, shifts, and bit-op virtuals) collapses every per-column / shift /
+/// virtual evaluation claim at the per-family points `r*` into a single shared
+/// point `r_0` (lifted into each family's field). The substrate consumes only
+/// this endpoint: its lift-and-project + Zip+ PCS open bind the committed
+/// witness to `r_0`. A frontend whose argument already terminates at a single
+/// point (e.g. R1CS/Spartan) returns that point directly, with no multipoint
+/// reduction.
 ///
 /// `#[non_exhaustive]` so future additions (e.g. ZK blinding metadata) stay
 /// purely additive.
 #[non_exhaustive]
-pub struct FamilyEvalClaims<F: PrimeField> {
-    /// Field configuration for this family.
-    pub field_cfg: F::Config,
-    /// Trace MLEs, projected into this family's field.
-    pub trace_mles: Vec<DenseMultilinearExtension<F::Inner>>,
-    /// Bit-op virtual-column MLEs, projected into this family's field.
-    pub bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
-    /// Evaluation point `r*` for this family.
-    pub eval_point: Vec<F>,
-    /// `up_eval_j = v_j(r*)` per committed column `j`.
-    pub up_evals: Vec<F>,
-    /// `bit_op_eval_l = bit_op_l(r*)` per bit-op virtual column `l`.
-    pub bit_op_evals: Vec<F>,
-    /// `down_eval_k = v_{src_k}^{<<c_k}(r*)` per shift `k`.
-    pub down_evals: Vec<F>,
+pub struct ConstraintEndpoints<F: PrimeField> {
+    /// Q[X]-family (`q_0`) evaluation point `r_0`.
+    pub r_0: Vec<F>,
+    /// Per-prime `F_{q_i}[X]` evaluation points — the shared `r_0` lifted into
+    /// each declared prime's field, in `layout().primes()` order. Empty for a
+    /// `Q[X]`-only layout.
+    pub r_0_fq: Vec<Vec<F>>,
 }
 
-impl<F: PrimeField> FamilyEvalClaims<F> {
-    /// Assemble a per-family claim bundle.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        field_cfg: F::Config,
-        trace_mles: Vec<DenseMultilinearExtension<F::Inner>>,
-        bit_op_mles: Vec<DenseMultilinearExtension<F::Inner>>,
-        eval_point: Vec<F>,
-        up_evals: Vec<F>,
-        bit_op_evals: Vec<F>,
-        down_evals: Vec<F>,
-    ) -> Self {
-        Self {
-            field_cfg,
-            trace_mles,
-            bit_op_mles,
-            eval_point,
-            up_evals,
-            bit_op_evals,
-            down_evals,
-        }
-    }
-
-    /// Borrowing view consumed by the substrate's multipoint-eval
-    /// (`MultipointEval::prove_as_subprotocol` / `verify_subclaim`).
-    pub fn as_inputs(&self) -> MultipointEvalFamilyInputs<'_, F> {
-        MultipointEvalFamilyInputs {
-            field_cfg: &self.field_cfg,
-            trace_mles: &self.trace_mles,
-            bit_op_mles: &self.bit_op_mles,
-            eval_point: &self.eval_point,
-            up_evals: &self.up_evals,
-            bit_op_evals: &self.bit_op_evals,
-            down_evals: &self.down_evals,
-        }
+impl<F: PrimeField> ConstraintEndpoints<F> {
+    /// Assemble the constraint-argument endpoint bundle.
+    pub fn new(r_0: Vec<F>, r_0_fq: Vec<Vec<F>>) -> Self {
+        Self { r_0, r_0_fq }
     }
 }
 
@@ -112,19 +84,22 @@ impl<F: PrimeField> FamilyEvalClaims<F> {
 ///
 /// An implementation owns the **constraint argument** — today, for UAIR: the
 /// ideal-membership check (prover step 3), the `psi_a` scalar projection and
-/// bit-op virtual-column materialization (part of step 4), and the constraint
-/// sumcheck + booleanity (step 5). It consumes the per-family `phi_q`-projected
-/// traces the substrate produced and returns its sub-proof plus one
-/// [`FamilyEvalClaims`] per constraint family for the substrate to bind via
-/// multipoint-eval, lift-and-project, and the Zip+ PCS open.
+/// bit-op virtual-column materialization (part of step 4), the constraint
+/// sumcheck + booleanity (step 5), and the lockstep multipoint-eval that
+/// reduces every per-family evaluation claim to a single shared point (former
+/// substrate step 6). It consumes the per-family `phi_q`-projected traces the
+/// substrate produced and returns its sub-proof plus the
+/// [`ConstraintEndpoints`] the substrate binds via lift-and-project and the
+/// Zip+ PCS open.
 ///
-/// **Seam discipline (decision 9 of `docs/ucs-refactor-plan.md`, Option A).** Only
-/// field-projected witness data crosses the seam (`ProjectedTrace<Self::Field>` +
-/// cfgs). Frontend-private state stays on the implementing type: UAIR's raw
-/// `BinaryPoly<D>` columns (a const generic cannot appear in a trait-method
-/// signature) and its projection maps; R1CS's `A,B,C` matrices. This keeps the
-/// trait constraint-system-agnostic and lets a future ZK variant add blinding via
-/// layout-declared columns without changing these methods.
+/// **Seam discipline (decision 9 of `docs/ucs-refactor-plan.md`, Option A).**
+/// Only field-projected witness data crosses the seam
+/// (`ProjectedTrace<Self::Field>` + cfgs). Frontend-private state stays on the
+/// implementing type: UAIR's raw `BinaryPoly<D>` columns (a const generic
+/// cannot appear in a trait-method signature) and its projection maps; R1CS's
+/// `A,B,C` matrices. This keeps the trait constraint-system-agnostic and lets a
+/// future ZK variant add blinding via layout-declared columns without changing
+/// these methods.
 ///
 /// Families are ordered `[Q[X] (q0), q_1, .., q_n]` with `q_1..q_n =
 /// self.layout().primes()`.
@@ -161,11 +136,14 @@ pub trait ConstraintSystem {
 
     /// Prover side of the constraint argument.
     ///
-    /// PROPOSED signature (finalized when step bodies move in Phase 2). Inputs
-    /// shown are the substrate-produced, field-projected data; the UAIR impl
+    /// Inputs are the substrate-produced, field-projected data; the UAIR impl
     /// additionally relies on its own state (the borrowed original trace for
     /// booleanity / bit-op materialization, and the projection closures), which
     /// it carries on the concrete frontend type rather than across the seam.
+    ///
+    /// Returns the sub-proof together with the [`ConstraintEndpoints`] — the
+    /// shared point `r_0` (and its per-prime liftings) the multipoint-eval
+    /// reduced to — which the substrate's lift-and-project + PCS open bind.
     ///
     /// `projected_traces` / `field_cfgs` are indexed by family
     /// (`[0] = Q[X]`, `[i] = q_i`).
@@ -176,12 +154,13 @@ pub trait ConstraintSystem {
         field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
         num_vars: usize,
     ) -> Result<
-        (Self::ConstraintProof, Vec<FamilyEvalClaims<Self::Field>>),
+        (Self::ConstraintProof, ConstraintEndpoints<Self::Field>),
         ProtocolError<Self::Field>,
     >;
 
-    /// Verifier side: re-derive the per-family expected claim bundles from the
-    /// sub-proof, for the substrate to bind via multipoint-eval verify.
+    /// Verifier side: re-derive the shared evaluation endpoint(s) from the
+    /// sub-proof (running the frontend's multipoint-eval verify), for the
+    /// substrate to bind via lift-and-project + PCS verify.
     ///
     /// PROPOSED — see [`Self::prove_constraints`]. (Wiring this is part of the
     /// later verifier work; declaring it here does not modify the verifier.)
@@ -191,7 +170,7 @@ pub trait ConstraintSystem {
         proof: &Self::ConstraintProof,
         field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
         num_vars: usize,
-    ) -> Result<Vec<FamilyEvalClaims<Self::Field>>, ProtocolError<Self::Field>>;
+    ) -> Result<ConstraintEndpoints<Self::Field>, ProtocolError<Self::Field>>;
 
     /// Verifier hook: reconstruct the frontend-defined *virtual* column
     /// evaluations (bit-op virtuals, booleanity `alpha'` bridge) at the

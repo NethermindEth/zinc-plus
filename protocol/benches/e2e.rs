@@ -327,8 +327,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     num_vars: usize,
     pp: &Pp<Zt>,
     trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
-    project_scalar: impl Fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>
-    + Copy,
+    project_scalar: fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>,
     project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &<F as HasPrimeFieldConfig>::Config) -> IdealOverF
     + Copy,
 ) where
@@ -477,13 +476,13 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     let p_folded = <piop!()>::step0_fold(trace).unwrap();
     let p_committed = p_folded.clone().step1_commit(pp, num_vars).unwrap();
-    let p_projected = p_committed.clone().step2_combined(project_scalar).unwrap();
-    let p_projected_mle = p_committed.clone().step2_mle_first(project_scalar).unwrap();
-    let p_ideal_checked = p_projected.clone().step3_ideal_check().unwrap();
-    let p_eval_projected = p_ideal_checked.clone().step4_eval_projection().unwrap();
-    let p_sumchecked = p_eval_projected.clone().step5_sumcheck().unwrap();
-    let p_mp_evaled = p_sumchecked.clone().step6_multipoint_eval().unwrap();
-    let p_lifted = p_mp_evaled.clone().step7_lift_and_project().unwrap();
+    let p_projected = p_committed.clone().step2_combined().unwrap();
+    let p_projected_mle = p_committed.clone().step2_mle_first().unwrap();
+    let p_constrained = p_projected
+        .clone()
+        .step_constraints(project_scalar)
+        .unwrap();
+    let p_lifted = p_constrained.clone().step7_lift_and_project().unwrap();
 
     step_bench!(
         "Prove" / "0: Fold",
@@ -500,48 +499,30 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Prove" / "2: Prime projection (Combined)",
         setup = || p_committed.clone(),
-        run = |s| s.step2_combined(project_scalar),
+        run = |s| s.step2_combined(),
     );
 
     step_bench!(
         "Prove" / "2: Prime projection (MLE-first)",
         setup = || p_committed.clone(),
-        run = |s| s.step2_mle_first(project_scalar),
+        run = |s| s.step2_mle_first(),
     );
 
     step_bench!(
-        "Prove" / "3: Ideal check (Combined)",
+        "Prove" / "3-6: Constraint argument + multi-point eval (Combined)",
         setup = || p_projected.clone(),
-        run = |s| s.step3_ideal_check(),
+        run = |s| s.step_constraints(project_scalar),
     );
 
     step_bench!(
-        "Prove" / "3: Ideal check (MLE-first)",
+        "Prove" / "3-6: Constraint argument + multi-point eval (MLE-first)",
         setup = || p_projected_mle.clone(),
-        run = |s| s.step3_ideal_check(),
-    );
-
-    step_bench!(
-        "Prove" / "4: Eval projection",
-        setup = || p_ideal_checked.clone(),
-        run = |s| s.step4_eval_projection(),
-    );
-
-    step_bench!(
-        "Prove" / "5: Combined sumcheck",
-        setup = || p_eval_projected.clone(),
-        run = |s| s.step5_sumcheck(),
-    );
-
-    step_bench!(
-        "Prove" / "6: Multi-point eval",
-        setup = || p_sumchecked.clone(),
-        run = |s| s.step6_multipoint_eval(),
+        run = |s| s.step_constraints(project_scalar),
     );
 
     step_bench!(
         "Prove" / "7: Lift-and-project",
-        setup = || p_mp_evaled.clone(),
+        setup = || p_constrained.clone(),
         run = |s| s.step7_lift_and_project(),
     );
 
