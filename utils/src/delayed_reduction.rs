@@ -5,11 +5,12 @@
 //! reduction. The limb routines are adapted from Spartan2's MIT-licensed
 //! `big_num` helpers.
 
-use ark_ff::{Field as ArkField, MontBackend, MontConfig};
+use ark_ff::{BigInt, Field as ArkField, MontBackend, MontConfig};
 use crypto_bigint::modular::{ConstMontyForm, ConstMontyParams, MontyForm};
 use crypto_primitives::{
-    PrimeField, ark_ff_fp::Fp as ArkFp, crypto_bigint_const_monty::ConstMontyField,
-    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    ConstPrimeField, Field as CryptoField, PrimeField, ark_ff_fp::Fp as ArkFp,
+    crypto_bigint_const_monty::ConstMontyField, crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::Uint,
 };
 use num_traits::Zero;
 use std::marker::PhantomData;
@@ -37,7 +38,7 @@ impl BarrettReductionParams {
 }
 
 /// Field types that expose reduced Montgomery-form limbs.
-pub trait MontgomeryLimbs: PrimeField<Inner = Uint<4>> + Sized {
+pub trait MontgomeryLimbs: PrimeField + Sized {
     /// Construct a field element from reduced Montgomery-form limbs.
     fn from_montgomery_limbs(limbs: [u64; 4], cfg: &Self::Config) -> Self;
 
@@ -125,10 +126,6 @@ where
     pub fn flush_adds(&self) -> usize {
         self.flush_adds
     }
-
-    pub fn params(&self) -> &BarrettReductionParams {
-        &self.params
-    }
 }
 
 impl<F> DelayedModularReductionAlgorithm for BarrettDelayedReduction<'_, F>
@@ -164,10 +161,6 @@ impl ProductAccumulator4 {
     pub fn pending_products(&self) -> usize {
         self.pending_products
     }
-
-    pub fn limbs(&self) -> &Uint<9> {
-        &self.limbs
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -189,19 +182,20 @@ where
     pub fn new(cfg: &'cfg F::Config) -> Self {
         let reduction_params = F::barrett_reduction_params(cfg);
         let leading_zeros = clz::<4>(&reduction_params.modulus);
-        let flush_products = if leading_zeros == 0 {
-            1
-        } else {
-            usize::try_from(leading_zeros)
-                .ok()
-                .and_then(|shift| 1usize.checked_shl(shift as u32))
-                .unwrap_or(usize::MAX)
-        };
-        Self::new_with_flush_products(cfg, flush_products)
+        let flush_products = 1usize.checked_shl(leading_zeros).unwrap_or(usize::MAX);
+        Self::from_reduction_params(cfg, reduction_params, flush_products)
     }
 
     pub fn new_with_flush_products(cfg: &'cfg F::Config, flush_products: usize) -> Self {
         let reduction_params = F::barrett_reduction_params(cfg);
+        Self::from_reduction_params(cfg, reduction_params, flush_products)
+    }
+
+    fn from_reduction_params(
+        cfg: &'cfg F::Config,
+        reduction_params: BarrettReductionParams,
+        flush_products: usize,
+    ) -> Self {
         Self {
             cfg,
             reduction_params,
@@ -539,6 +533,26 @@ impl MontgomeryLimbs for MontyField<4> {
     }
 }
 
+impl<M> MontgomeryLimbs for ArkFp<MontBackend<M, 4>, 4>
+where
+    M: MontConfig<4>,
+{
+    #[inline(always)]
+    fn from_montgomery_limbs(limbs: [u64; 4], _cfg: &Self::Config) -> Self {
+        <Self as ConstPrimeField>::new_unchecked(BigInt(limbs))
+    }
+
+    #[inline(always)]
+    fn montgomery_limbs(&self) -> &[u64; 4] {
+        &<Self as CryptoField>::inner(self).0
+    }
+
+    #[inline(always)]
+    fn barrett_reduction_params(_cfg: &Self::Config) -> BarrettReductionParams {
+        BarrettReductionParams::new(M::MODULUS.0)
+    }
+}
+
 /// Barrett reduction for a 5-limb value modulo a 4-limb modulus.
 ///
 /// This uses the 5-limb remainder path, which is required for moduli near
@@ -756,6 +770,7 @@ mod tests {
     use crypto_primitives::{FromWithConfig, crypto_bigint_monty::MontyField};
 
     type F = MontyField<4>;
+    type ArkF = ArkFp<MontBackend<ark_bn254::FrConfig, 4>, 4>;
 
     fn secp256k1_cfg() -> <F as PrimeField>::Config {
         let modulus = Uint::<4>::from_words([
@@ -941,6 +956,73 @@ mod tests {
             .zip(&rhs)
             .fold(F::zero_with_cfg(&cfg), |acc, (left, right)| {
                 acc + left.clone() * right
+            });
+
+        assert_eq!(reducer.sum_of_products(&lhs, &rhs), expected);
+    }
+
+    #[test]
+    fn ark_fp_montgomery_limb_round_trip_matches_original() {
+        let cfg = ();
+        assert_eq!(
+            ArkF::barrett_reduction_params(&cfg).modulus,
+            ark_bn254::FrConfig::MODULUS.0,
+        );
+
+        for value in [0u64, 1, 2, 17, 1_000_003, u64::MAX] {
+            let field = ArkF::from(value);
+            let limbs = *field.montgomery_limbs();
+            assert_eq!(ArkF::from_montgomery_limbs(limbs, &cfg), field);
+        }
+    }
+
+    #[test]
+    fn ark_fp_delayed_sum_matches_field_addition() {
+        let cfg = ();
+        let reducer = BarrettDelayedReduction::<ArkF>::new(&cfg);
+        let values: Vec<ArkF> = (0..512).map(|idx| ArkF::from(idx * 13 + 7)).collect();
+
+        let expected = values
+            .iter()
+            .fold(ArkF::zero_with_cfg(&cfg), |acc, value| acc + value);
+
+        let mut acc = reducer.zero_accumulator();
+        for value in &values {
+            reducer.add(&mut acc, value);
+        }
+
+        assert_eq!(reducer.reduce(acc), expected);
+    }
+
+    #[test]
+    fn ark_fp_product_accumulator_multi_product_matches_naive_sum() {
+        let cfg = ();
+        let reducer = MontgomeryProductSum4::<ArkF>::new(&cfg);
+        let lhs: Vec<ArkF> = (0..64).map(|idx| ArkF::from(idx * 17 + 5)).collect();
+        let rhs: Vec<ArkF> = (0..64).map(|idx| ArkF::from(409 - idx * 3)).collect();
+
+        let expected = lhs
+            .iter()
+            .zip(&rhs)
+            .fold(ArkF::zero_with_cfg(&cfg), |acc, (left, right)| {
+                acc + *left * right
+            });
+
+        assert_eq!(reducer.sum_of_products(&lhs, &rhs), expected);
+    }
+
+    #[test]
+    fn ark_fp_product_accumulator_forced_flush_matches_naive_sum() {
+        let cfg = ();
+        let reducer = MontgomeryProductSum4::<ArkF>::new_with_flush_products(&cfg, 1);
+        let lhs: Vec<ArkF> = (0..64).map(|idx| ArkF::from(idx * 19 + 11)).collect();
+        let rhs: Vec<ArkF> = (0..64).map(|idx| ArkF::from(1_009 - idx * 7)).collect();
+
+        let expected = lhs
+            .iter()
+            .zip(&rhs)
+            .fold(ArkF::zero_with_cfg(&cfg), |acc, (left, right)| {
+                acc + *left * right
             });
 
         assert_eq!(reducer.sum_of_products(&lhs, &rhs), expected);

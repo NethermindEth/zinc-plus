@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+ark-bn254 = { version = "0.5.0", default-features = false, features = ["scalar_field"] }
 proptest = { workspace = true }
 
 [lints]

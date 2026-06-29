@@ -741,7 +741,19 @@ pub trait ShaLinearAccumulatorField: DelayedFieldProductSum + Send + Sync + Size
         Public: Borrow<ProjectedPublic<Self>> + Sync;
 }
 
-impl ShaLinearAccumulatorField for MontyField<4> {
+// The DMR SHA fast path is intentionally fixed to four-limb Montgomery
+// backends; this covers the native MontyField path and the BN254 ArkFp
+// production benchmark path.
+trait ShaDmrField: MontgomeryLimbs + DelayedFieldProductSum + Send + Sync {}
+
+impl ShaDmrField for MontyField<4> {}
+
+impl<M> ShaDmrField for ArkFp<MontBackend<M, 4>, 4> where M: MontConfig<4> {}
+
+impl<F> ShaLinearAccumulatorField for F
+where
+    F: ShaDmrField,
+{
     fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
         traces: &[Trace],
         publics: &[Public],
@@ -759,26 +771,6 @@ impl ShaLinearAccumulatorField for MontyField<4> {
 }
 
 impl ShaLinearAccumulatorField for BoxedMontyField {
-    fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
-        traces: &[Trace],
-        publics: &[Public],
-        plan: &ShaLinearResidualWeightPlan<Self>,
-        field_cfg: &Self::Config,
-    ) -> Result<Vec<Self>, ShaProjectionError>
-    where
-        Trace: Borrow<ProjectedTrace<Self>> + Sync,
-        Public: Borrow<ProjectedPublic<Self>> + Sync,
-    {
-        build_sha_sumfold_linear_accumulator_direct_with_weights_generic(
-            traces, publics, plan, field_cfg,
-        )
-    }
-}
-
-impl<M, const N: usize> ShaLinearAccumulatorField for ArkFp<MontBackend<M, N>, N>
-where
-    M: MontConfig<N>,
-{
     fn build_sha_sumfold_linear_accumulator_direct_with_weights<Trace, Public>(
         traces: &[Trace],
         publics: &[Public],
@@ -887,7 +879,10 @@ pub trait ShaSuffixScannerField: PrimeField + Send + Sync + Sized {
     }
 }
 
-impl ShaSuffixScannerField for MontyField<4> {
+impl<F> ShaSuffixScannerField for F
+where
+    F: ShaDmrField,
+{
     fn suffix_reduced_body_buckets(
         linear_claims: &[Self],
         booleanity_claims: &[Vec<Self>],
@@ -990,8 +985,6 @@ impl ShaSuffixScannerField for MontyField<4> {
 }
 
 impl ShaSuffixScannerField for BoxedMontyField {}
-
-impl<M, const N: usize> ShaSuffixScannerField for ArkFp<MontBackend<M, N>, N> where M: MontConfig<N> {}
 
 #[allow(clippy::arithmetic_side_effects)]
 fn suffix_pair_weight<F>(suffix_eq_weights: &[F], rest: usize) -> F
@@ -1340,14 +1333,11 @@ where
     }
 
     let zero = F::zero_with_cfg(field_cfg);
-    let flush_products = product_sum.flush_products();
     let chunk_buckets: Vec<_> = cfg_chunks!(suffix_eq_weights, SHA_SUFFIX_DMR_WEIGHT_CHUNK)
         .enumerate()
         .map(|(chunk_idx, suffix_eq_chunk)| {
-            let chunk_product_sum =
-                MontgomeryProductSum4::<F>::new_with_flush_products(field_cfg, flush_products);
             suffix_reduced_body_buckets_dmr_chunk(
-                &chunk_product_sum,
+                product_sum,
                 linear_claims,
                 booleanity_claims,
                 source_row_weights,
@@ -1489,14 +1479,11 @@ where
     }
 
     let zero = F::zero_with_cfg(field_cfg);
-    let flush_products = product_sum.flush_products();
     let chunk_buckets: Vec<_> = cfg_chunks!(suffix_eq_weights, SHA_SUFFIX_DMR_WEIGHT_CHUNK)
         .enumerate()
         .map(|(chunk_idx, suffix_eq_chunk)| {
-            let chunk_product_sum =
-                MontgomeryProductSum4::<F>::new_with_flush_products(field_cfg, flush_products);
             suffix_direct_one_body_bucket_dmr_chunk(
-                &chunk_product_sum,
+                product_sum,
                 linear_claims,
                 booleanity_claims,
                 source_row_weights,
@@ -9810,9 +9797,14 @@ mod tests {
     use zinc_transcript::Blake3Transcript;
 
     type F = MontyField<4>;
+    type ArkTestF = ArkFp<MontBackend<ark_bn254::FrConfig, 4>, 4>;
 
     fn f(value: u64) -> F {
         F::from_with_cfg(value, &test_config())
+    }
+
+    fn ark_f(value: u64) -> ArkTestF {
+        ArkTestF::from(value)
     }
 
     fn zero_table(cols: usize) -> MleTable<F> {
@@ -9885,6 +9877,47 @@ mod tests {
             scalarized,
             int_columns: zero_table(ShaIntCol::COUNT),
             public_columns: zero_table(ShaPublicCol::COUNT),
+        }
+    }
+
+    fn ark_zero_table(cols: usize) -> MleTable<ArkTestF> {
+        mle_table_from_columns(
+            vec![vec![ArkTestF::zero_with_cfg(&()); SHA_ROW_COUNT]; cols],
+            SHA_ROW_VARS,
+        )
+    }
+
+    fn ark_zero_public() -> ProjectedPublic<ArkTestF> {
+        ProjectedPublic {
+            columns: ark_zero_table(ShaPublicCol::COUNT),
+            bit_slices: None,
+        }
+    }
+
+    fn ark_synthetic_boolean_trace(instance_idx: u64, a: &ArkTestF) -> ProjectedTrace<ArkTestF> {
+        let zero = ArkTestF::zero_with_cfg(&());
+        let mut bits =
+            vec![vec![vec![zero.clone(); SHA_WORD_BITS]; SHA_ROW_COUNT]; ShaWordCol::COUNT];
+        for (col_idx, col) in bits.iter_mut().enumerate() {
+            for (row_idx, row) in col.iter_mut().enumerate() {
+                for (bit_idx, bit) in row.iter_mut().enumerate() {
+                    let selector = instance_idx
+                        + u64::try_from(col_idx * 17 + row_idx * 3 + bit_idx)
+                            .expect("test selector fits u64");
+                    if selector % 2 == 1 {
+                        *bit = ark_f(1);
+                    }
+                }
+            }
+        }
+        let bit_slices =
+            flatten_bit_columns(bits, SHA_WORD_BITS, SHA_ROW_VARS, "bit_slices").unwrap();
+        let scalarized = scalarize_bit_slices(&bit_slices, a, &()).unwrap();
+        ProjectedTrace {
+            bit_slices,
+            scalarized,
+            int_columns: ark_zero_table(ShaIntCol::COUNT),
+            public_columns: ark_zero_table(ShaPublicCol::COUNT),
         }
     }
 
@@ -10191,6 +10224,66 @@ mod tests {
         let table_linear =
             build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, &cfg)
                 .unwrap();
+        assert_eq!(direct_linear, table_linear);
+    }
+
+    #[test]
+    fn ark_fp_direct_linear_accumulator_matches_residual_table_path() {
+        let cfg = ();
+        let a = ark_f(5);
+        let mut traces = vec![
+            ark_synthetic_boolean_trace(11, &a),
+            ark_synthetic_boolean_trace(29, &a),
+        ];
+        for (trace_idx, trace) in traces.iter_mut().enumerate() {
+            for (col_idx, column) in trace.int_columns.iter_mut().enumerate() {
+                for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                    *value = ark_f(
+                        u64::try_from((trace_idx + 2) * (col_idx + 3) * (row_idx % 17 + 1))
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+
+        let mut publics = vec![ark_zero_public(), ark_zero_public()];
+        for (public_idx, public) in publics.iter_mut().enumerate() {
+            for (col_idx, column) in public.columns.iter_mut().enumerate() {
+                for (row_idx, value) in column.evaluations.iter_mut().enumerate() {
+                    *value = ark_f(
+                        u64::try_from((public_idx + 5) * (col_idx + 7) * (row_idx % 19 + 1))
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+
+        let row_weights = (0..SHA_ROW_COUNT)
+            .map(|row| ark_f(u64::try_from(row % 23 + 1).unwrap()))
+            .collect::<Vec<_>>();
+        let coeff_tables = build_linear_residual_coeff_tables_with_row_weights(
+            &traces,
+            &publics,
+            &row_weights,
+            &cfg,
+        )
+        .unwrap();
+
+        let a_powers = build_sha_residual_eval_powers(&ark_f(31), &cfg);
+        let lambda_powers = build_sha_lambda_powers(&ark_f(37), &cfg);
+        let linear_plan =
+            ShaLinearResidualWeightPlan::new(&row_weights, &a_powers, &lambda_powers).unwrap();
+        let direct_linear = build_sha_sumfold_linear_accumulator_direct_with_weights(
+            &traces,
+            &publics,
+            &linear_plan,
+            &cfg,
+        )
+        .unwrap();
+        let table_linear =
+            build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, &cfg)
+                .unwrap();
+
         assert_eq!(direct_linear, table_linear);
     }
 
@@ -10665,75 +10758,64 @@ mod tests {
         assert_eq!(suffix.direct_one_body_bucket(&cfg), expected_one);
     }
 
-    #[test]
-    fn suffix_dmr_scanner_matches_generic_with_forced_flush() {
-        let cfg = test_config();
-        let beta = vec![f(23), f(29), f(31)];
-        let suffix_eq_weights = eq_weights_or_one(&beta, &cfg).unwrap();
-        let linear_claims = vec![f(2), f(3), f(5), f(7), f(11), f(13), f(17), f(19)];
-        let source_row_weights = vec![f(37), F::zero_with_cfg(&cfg), f(41), f(43)];
-        let booleanity_claims = vec![
-            vec![f(47), f(53), f(59), f(61), f(67), f(71), f(73), f(79)],
-            vec![f(83), f(89), f(97), f(101), f(103), f(107), f(109), f(113)],
-            vec![
-                f(127),
-                f(131),
-                f(137),
-                f(139),
-                f(149),
-                f(151),
-                f(157),
-                f(163),
-            ],
-            vec![
-                f(167),
-                f(173),
-                f(179),
-                f(181),
-                f(191),
-                f(193),
-                f(197),
-                f(199),
-            ],
-        ];
+    fn assert_suffix_dmr_scanner_matches_generic_with_forced_flush<T>(
+        cfg: &T::Config,
+        make: impl Fn(u64) -> T,
+    ) where
+        T: ShaSuffixScannerField + MontgomeryLimbs + Send + Sync,
+    {
+        let values = |items: &[u64]| items.iter().copied().map(&make).collect::<Vec<_>>();
+        let beta = values(&[23, 29, 31]);
+        let suffix_eq_weights = eq_weights_or_one(&beta, cfg).unwrap();
+        let linear_claims = values(&[2, 3, 5, 7, 11, 13, 17, 19]);
+        let source_row_weights = vec![make(37), T::zero_with_cfg(cfg), make(41), make(43)];
+        let booleanity_claims = [
+            [47, 53, 59, 61, 67, 71, 73, 79],
+            [83, 89, 97, 101, 103, 107, 109, 113],
+            [127, 131, 137, 139, 149, 151, 157, 163],
+            [167, 173, 179, 181, 191, 193, 197, 199],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(&make).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
 
         let expected_reduced = suffix_reduced_body_buckets_generic(
             &linear_claims,
             &booleanity_claims,
             &source_row_weights,
             &suffix_eq_weights,
-            &cfg,
+            cfg,
         );
         let expected_one = suffix_direct_one_body_bucket_generic(
             &linear_claims,
             &booleanity_claims,
             &source_row_weights,
             &suffix_eq_weights,
-            &cfg,
+            cfg,
         );
 
         assert_eq!(
-            <F as ShaSuffixScannerField>::suffix_reduced_body_buckets(
+            T::suffix_reduced_body_buckets(
                 &linear_claims,
                 &booleanity_claims,
                 &source_row_weights,
                 &suffix_eq_weights,
-                &cfg,
+                cfg,
             ),
             expected_reduced
         );
         assert_eq!(
-            <F as ShaSuffixScannerField>::suffix_direct_one_body_bucket(
+            T::suffix_direct_one_body_bucket(
                 &linear_claims,
                 &booleanity_claims,
                 &source_row_weights,
                 &suffix_eq_weights,
-                &cfg,
+                cfg,
             ),
             expected_one
         );
 
-        let forced_flush = MontgomeryProductSum4::<F>::new_with_flush_products(&cfg, 1);
+        let forced_flush = MontgomeryProductSum4::<T>::new_with_flush_products(cfg, 1);
         assert_eq!(
             suffix_reduced_body_buckets_dmr_with_algorithm(
                 &forced_flush,
@@ -10741,7 +10823,7 @@ mod tests {
                 &booleanity_claims,
                 &source_row_weights,
                 &suffix_eq_weights,
-                &cfg,
+                cfg,
             ),
             expected_reduced
         );
@@ -10752,9 +10834,26 @@ mod tests {
                 &booleanity_claims,
                 &source_row_weights,
                 &suffix_eq_weights,
-                &cfg,
+                cfg,
             ),
             expected_one
+        );
+    }
+
+    #[test]
+    fn suffix_dmr_scanner_matches_generic_with_forced_flush() {
+        let cfg = test_config();
+        assert_suffix_dmr_scanner_matches_generic_with_forced_flush::<F>(&cfg, |value| {
+            F::from_with_cfg(value, &cfg)
+        });
+    }
+
+    #[test]
+    fn ark_fp_suffix_dmr_scanner_matches_generic_with_forced_flush() {
+        let cfg = ();
+        assert_suffix_dmr_scanner_matches_generic_with_forced_flush::<ArkTestF>(
+            &cfg,
+            ArkTestF::from,
         );
     }
 
