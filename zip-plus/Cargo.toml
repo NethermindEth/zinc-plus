@@ -37,7 +37,7 @@ uninit = "0.6.2"
 zstd = "0.13"
 
 [dev-dependencies]
-ark-bn254 = { version = "0.5.0", default-features = false, features = ["curve"] }
+ark-bn254 = { workspace = true, features = ["curve"] }
 ark-secp256k1 = { version = "0.5.0", default-features = false }
 criterion = { workspace = true }
 proptest = { workspace = true }

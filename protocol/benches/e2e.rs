@@ -89,6 +89,7 @@ use zinc_utils::{
     cfg_into_iter, cfg_iter,
     delayed_reduction::{
         BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs,
     },
     from_ref::FromRef,
     inner_product::{InnerProduct, MBSInnerProduct, ScalarProduct},
@@ -599,8 +600,8 @@ type ArkFSecp256k1 = ArkFp<MontBackend<ark_secp256k1::FrConfig, 4>, 4>;
 ///
 /// The arkworks-backed const field cannot implement
 /// `FromWithConfig<&RealEcdsaInt>` (trait and type are both foreign) and has
-/// no Montgomery-limb Barrett reducer, so config acquisition, int projection,
-/// and bit-slice scalarization route through this seam.
+/// custom config acquisition and int projection hooks, while four-limb fields
+/// share the DMR bit-slice scalarization path.
 trait BenchShaField: PrimeField + FromPrimitiveWithConfig {
     fn curve_field_cfg<C: AffineRepr>() -> Self::Config;
 
@@ -657,7 +658,7 @@ impl<M: MontConfig<4>> BenchShaField for ArkFp<MontBackend<M, 4>, 4> {
         a: &Self,
         field_cfg: &Self::Config,
     ) -> Result<MleTable<Self>, ProductionShaError<Self>> {
-        projection_sha_scalarize_bit_slices_generic(bit_slices, a, field_cfg)
+        projection_sha_scalarize_bit_slices_dmr(bit_slices, a, field_cfg)
     }
 }
 
@@ -835,15 +836,18 @@ fn projection_sha_flatten_bit_column_refs<T: Clone + Send + Sync>(
     projection_sha_mle_table_from_columns(flattened)
 }
 
-fn projection_sha_scalarize_bit_slices_dmr(
-    bit_slices: &MleTable<F>,
-    a: &F,
-    field_cfg: &<F as PrimeField>::Config,
-) -> Result<MleTable<F>, ProductionShaError<F>> {
-    let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
+fn projection_sha_scalarize_bit_slices_dmr<G>(
+    bit_slices: &MleTable<G>,
+    a: &G,
+    field_cfg: &G::Config,
+) -> Result<MleTable<G>, ProductionShaError<G>>
+where
+    G: MontgomeryLimbs + Send + Sync,
+{
+    let powers = zinc_utils::powers(a.clone(), G::one_with_cfg(field_cfg), SHA_WORD_BITS);
     let word_count = bit_slices.len() / SHA_WORD_BITS;
-    let one = F::one_with_cfg(field_cfg);
-    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
+    let one = G::one_with_cfg(field_cfg);
+    let reducer = BarrettDelayedReduction::<G>::new(field_cfg);
     let words = cfg_into_iter!(0..word_count)
         .map(|col_idx| {
             let bit_cols = (0..SHA_WORD_BITS)
@@ -860,7 +864,7 @@ fn projection_sha_scalarize_bit_slices_dmr(
                     }
                     Ok(bit_col)
                 })
-                .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+                .collect::<Result<Vec<_>, ProductionShaError<G>>>()?;
             let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
             for row in 0..SHA_ROW_COUNT {
                 out_col.push(projection_sha_scalarize_binary_row_dmr(
@@ -869,72 +873,28 @@ fn projection_sha_scalarize_bit_slices_dmr(
             }
             Ok(out_col)
         })
-        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
+        .collect::<Result<Vec<_>, ProductionShaError<G>>>()?;
     Ok(projection_sha_mle_table_from_columns(words))
 }
 
-fn projection_sha_scalarize_bit_slices_generic<F: PrimeField>(
-    bit_slices: &MleTable<F>,
-    a: &F,
-    field_cfg: &F::Config,
-) -> Result<MleTable<F>, ProductionShaError<F>> {
-    let powers = zinc_utils::powers(a.clone(), F::one_with_cfg(field_cfg), SHA_WORD_BITS);
-    let word_count = bit_slices.len() / SHA_WORD_BITS;
-    let one = F::one_with_cfg(field_cfg);
-    let words = cfg_into_iter!(0..word_count)
-        .map(|col_idx| {
-            let bit_cols = (0..SHA_WORD_BITS)
-                .map(|bit| {
-                    let bit_col = &bit_slices[bit_slice_index(col_idx, bit, SHA_WORD_BITS)];
-                    if bit_col.num_vars != SHA_ROW_VARS
-                        || bit_col.evaluations.len() != SHA_ROW_COUNT
-                    {
-                        return Err(ProductionShaError::LengthMismatch {
-                            label: "SHA scalarized bit-slice rows",
-                            got: bit_col.evaluations.len(),
-                            expected: SHA_ROW_COUNT,
-                        });
-                    }
-                    Ok(bit_col)
-                })
-                .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
-            let mut out_col = Vec::with_capacity(SHA_ROW_COUNT);
-            for row in 0..SHA_ROW_COUNT {
-                let mut value = F::zero_with_cfg(field_cfg);
-                for (bit_col, power) in bit_cols.iter().zip(&powers) {
-                    let bit = &bit_col.evaluations[row];
-                    if F::is_zero(bit) {
-                        continue;
-                    }
-                    if bit == &one {
-                        value += power.clone();
-                    } else {
-                        value += bit.clone() * power;
-                    }
-                }
-                out_col.push(value);
-            }
-            Ok(out_col)
-        })
-        .collect::<Result<Vec<_>, ProductionShaError<F>>>()?;
-    Ok(projection_sha_mle_table_from_columns(words))
-}
-
-fn projection_sha_scalarize_binary_row_dmr(
-    bit_cols: &[&DenseMultilinearExtension<F>],
+fn projection_sha_scalarize_binary_row_dmr<G>(
+    bit_cols: &[&DenseMultilinearExtension<G>],
     row: usize,
-    powers: &[F],
-    one: &F,
-    field_cfg: &<F as PrimeField>::Config,
-    reducer: &BarrettDelayedReduction<'_, F>,
-) -> F {
+    powers: &[G],
+    one: &G,
+    field_cfg: &G::Config,
+    reducer: &BarrettDelayedReduction<'_, G>,
+) -> G
+where
+    G: MontgomeryLimbs,
+{
     let mut bucket = Uint::<5>::zero();
     let mut pending_adds = 0usize;
-    let mut acc = F::zero_with_cfg(field_cfg);
+    let mut acc = G::zero_with_cfg(field_cfg);
 
     for (bit_col, power) in bit_cols.iter().zip(powers) {
         let bit = &bit_col.evaluations[row];
-        if F::is_zero(bit) {
+        if G::is_zero(bit) {
             continue;
         }
         if bit != one {
@@ -955,13 +915,13 @@ fn projection_sha_scalarize_binary_row_dmr(
     acc
 }
 
-fn projection_sha_scalarize_row_naive(
-    bit_cols: &[&DenseMultilinearExtension<F>],
+fn projection_sha_scalarize_row_naive<G: PrimeField>(
+    bit_cols: &[&DenseMultilinearExtension<G>],
     row: usize,
-    powers: &[F],
-    field_cfg: &<F as PrimeField>::Config,
-) -> F {
-    let mut value = F::zero_with_cfg(field_cfg);
+    powers: &[G],
+    field_cfg: &G::Config,
+) -> G {
+    let mut value = G::zero_with_cfg(field_cfg);
     for (bit_col, power) in bit_cols.iter().zip(powers) {
         value += bit_col.evaluations[row].clone() * power;
     }
