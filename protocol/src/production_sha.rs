@@ -47,12 +47,13 @@ use zinc_piop::{
         ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
         ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol,
         ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol,
-        ShaPublicWordCol, ShaResidualFamily, ShaSuffixScannerField, ShaWordCol,
-        beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
+        ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode, ShaSuffixScannerField,
+        ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
         build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
         build_sha_lambda_powers, build_sha_residual_eval_powers,
         build_sha_sumfold_linear_accumulator, build_sha_sumfold_linear_accumulator_from_bases,
+        build_sha_sumfold_linear_accumulator_from_small_bases,
         build_sha_sumfold_quadratic_prefix_accumulator,
         build_sha_sumfold_quadratic_prefix_accumulator_from_bases, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
@@ -1646,6 +1647,7 @@ where
         + DelayedFieldProductSum
         + ShaBinaryFoldField
         + FromPrimitiveWithConfig
+        + ShaSmallFieldDecode
         + Send
         + Sync
         + 'static
@@ -1673,7 +1675,7 @@ pub fn prepare_linear_ideal_fold_witnesses<U, Zt, F, const D: usize>(
 where
     U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
     Zt: ZincTypes<D>,
-    F: PrimeField + Send + Sync,
+    F: PrimeField + FromPrimitiveWithConfig + ShaSmallFieldDecode + Send + Sync,
 {
     if witnesses.len() < 2 {
         return Err(ProductionShaError::InstanceCountTooSmall(witnesses.len()));
@@ -3158,8 +3160,25 @@ fn build_sumfold_linear_accumulator_phase<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
-    F: ShaLinearAccumulatorField + DelayedFieldProductSum + Send + Sync + 'static,
+    F: ShaLinearAccumulatorField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
 {
+    if let Some(accumulator) = build_sha_sumfold_linear_accumulator_from_small_bases(
+        sumfold_bases,
+        &linear_weight_plan.row_weights,
+        &linear_weight_plan.a_powers,
+        &linear_weight_plan.lambda_powers,
+        field_cfg,
+    )
+    .map_err(ProductionShaError::from)?
+    {
+        return Ok(accumulator);
+    }
+
     build_sha_sumfold_linear_accumulator_from_bases(
         sumfold_bases,
         &linear_weight_plan.row_weights,
@@ -3248,6 +3267,7 @@ fn build_sumfold_accumulators_phase<F>(
 where
     F: InnerTransparentField
         + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
         + ShaLinearAccumulatorField
         + ShaSuffixScannerField
         + Send

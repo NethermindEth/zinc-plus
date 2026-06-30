@@ -35,8 +35,8 @@ use tracing::{
 use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan};
 use zinc_piop::neutron_nova::{
     MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-    ShaBinaryFoldField, ShaLinearAccumulatorField, ShaPublicCol, ShaSuffixScannerField,
-    bit_slice_index,
+    ShaBinaryFoldField, ShaLinearAccumulatorField, ShaPublicCol, ShaSmallFieldDecode,
+    ShaSuffixScannerField, bit_slice_index,
 };
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
@@ -1393,6 +1393,8 @@ struct HyraxInstanceSweepRow {
     probe_commit_ms: f64,
     probe_sumfold_linear_ms: f64,
     probe_sumfold_booleanity_ms: f64,
+    probe_sumfold_group_ms: f64,
+    probe_sumfold_prove_rounds_ms: f64,
     probe_sumfold_ms: f64,
     probe_fold_ms: f64,
     probe_open_ms: f64,
@@ -1462,6 +1464,8 @@ struct Sha256CombinedInstanceSweepRow {
     probe_commit_ms: Option<f64>,
     probe_sumfold_linear_ms: Option<f64>,
     probe_sumfold_booleanity_ms: Option<f64>,
+    probe_sumfold_group_ms: Option<f64>,
+    probe_sumfold_prove_rounds_ms: Option<f64>,
     probe_sumfold_ms: Option<f64>,
     probe_fold_ms: Option<f64>,
     probe_open_ms: Option<f64>,
@@ -1510,6 +1514,8 @@ struct HyraxProvePhaseTimings {
     commit_ms: f64,
     sumfold_linear_ms: f64,
     sumfold_booleanity_ms: f64,
+    sumfold_group_ms: f64,
+    sumfold_prove_rounds_ms: f64,
     sumfold_ms: f64,
     fold_ms: f64,
     open_ms: f64,
@@ -1524,13 +1530,14 @@ enum ProvePhase {
     SumfoldAccumulators,
     SumfoldLinearAccumulator,
     SumfoldQuadraticPrefixAccumulator,
+    SumfoldGroup,
     SumfoldProve,
     FoldAfterSumfold,
     PcsOpening,
     PcsOpenCore,
 }
 
-const PROVE_PHASE_COUNT: usize = 10;
+const PROVE_PHASE_COUNT: usize = 11;
 
 impl ProvePhase {
     fn from_name(value: &str) -> Option<Self> {
@@ -1541,6 +1548,7 @@ impl ProvePhase {
             "sumfold_accumulators" => Self::SumfoldAccumulators,
             "sumfold_linear_accumulator" => Self::SumfoldLinearAccumulator,
             "sumfold_quadratic_prefix_accumulator" => Self::SumfoldQuadraticPrefixAccumulator,
+            "sumfold_group" => Self::SumfoldGroup,
             "sumfold_prove" => Self::SumfoldProve,
             "fold_after_sumfold" => Self::FoldAfterSumfold,
             "pcs_opening" => Self::PcsOpening,
@@ -1557,10 +1565,11 @@ impl ProvePhase {
             Self::SumfoldAccumulators => 3,
             Self::SumfoldLinearAccumulator => 4,
             Self::SumfoldQuadraticPrefixAccumulator => 5,
-            Self::SumfoldProve => 6,
-            Self::FoldAfterSumfold => 7,
-            Self::PcsOpening => 8,
-            Self::PcsOpenCore => 9,
+            Self::SumfoldGroup => 6,
+            Self::SumfoldProve => 7,
+            Self::FoldAfterSumfold => 8,
+            Self::PcsOpening => 9,
+            Self::PcsOpenCore => 10,
         }
     }
 }
@@ -1672,6 +1681,8 @@ impl PhaseTimingLayer {
                 &totals,
                 ProvePhase::SumfoldQuadraticPrefixAccumulator,
             ),
+            sumfold_group_ms: Self::phase_ms(&totals, ProvePhase::SumfoldGroup),
+            sumfold_prove_rounds_ms: Self::phase_ms(&totals, ProvePhase::SumfoldProve),
             sumfold_ms: Self::phase_ms(&totals, ProvePhase::SumfoldAccumulators)
                 + Self::phase_ms(&totals, ProvePhase::SumfoldProve),
             fold_ms: Self::phase_ms(&totals, ProvePhase::FoldAfterSumfold),
@@ -1823,6 +1834,8 @@ fn hyrax_instance_sweep_row(
         probe_commit_ms: prove_phases.commit_ms,
         probe_sumfold_linear_ms: prove_phases.sumfold_linear_ms,
         probe_sumfold_booleanity_ms: prove_phases.sumfold_booleanity_ms,
+        probe_sumfold_group_ms: prove_phases.sumfold_group_ms,
+        probe_sumfold_prove_rounds_ms: prove_phases.sumfold_prove_rounds_ms,
         probe_sumfold_ms: prove_phases.sumfold_ms,
         probe_fold_ms: prove_phases.fold_ms,
         probe_open_ms: prove_phases.open_ms,
@@ -2085,7 +2098,7 @@ fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
 
 fn write_hyrax_instance_sweep_csv(path: &Path, rows: &[HyraxInstanceSweepRow]) {
     let mut csv = String::from(
-        "algorithm,variant,instances,ell,l0,tail_vars,width,ecc_points_per_commitment,ecc_points_per_proof,trace_witness_ms,setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+        "algorithm,variant,instances,ell,l0,tail_vars,width,ecc_points_per_commitment,ecc_points_per_proof,trace_witness_ms,setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_group_ms,probe_sumfold_prove_rounds_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
         push_csv_row!(
@@ -2108,6 +2121,8 @@ fn write_hyrax_instance_sweep_csv(path: &Path, rows: &[HyraxInstanceSweepRow]) {
             row.probe_commit_ms,
             row.probe_sumfold_linear_ms,
             row.probe_sumfold_booleanity_ms,
+            row.probe_sumfold_group_ms,
+            row.probe_sumfold_prove_rounds_ms,
             row.probe_sumfold_ms,
             row.probe_fold_ms,
             row.probe_open_ms,
@@ -2164,7 +2179,7 @@ fn write_og_sha256_instance_sweep_csv(path: &Path, rows: &[OgSha256InstanceSweep
 
 fn write_sha256_combined_instance_sweep_csv(path: &Path, rows: &[Sha256CombinedInstanceSweepRow]) {
     let mut csv = String::from(
-        "algorithm,variant,status,error,instances,ell,l0,tail_vars,width,active_rows,domain_rows,num_vars,setup_ms,trace_witness_ms,pcs_setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+        "algorithm,variant,status,error,instances,ell,l0,tail_vars,width,active_rows,domain_rows,num_vars,setup_ms,trace_witness_ms,pcs_setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_group_ms,probe_sumfold_prove_rounds_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
         push_csv_row!(
@@ -2191,6 +2206,8 @@ fn write_sha256_combined_instance_sweep_csv(path: &Path, rows: &[Sha256CombinedI
             row.probe_commit_ms,
             row.probe_sumfold_linear_ms,
             row.probe_sumfold_booleanity_ms,
+            row.probe_sumfold_group_ms,
+            row.probe_sumfold_prove_rounds_ms,
             row.probe_sumfold_ms,
             row.probe_fold_ms,
             row.probe_open_ms,
@@ -3627,11 +3644,13 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
     if env_bool_or("SHA256_COMBINED_SWEEP_TRACE_ONCE", false) {
         eprintln!("ProjectionFold instance sweep tracing: instances={N}, l0={L0}");
         eprintln!(
-            "phase probe: prove={:.3} ms commit={:.3} ms sumfold_linear={:.3} ms sumfold_booleanity={:.3} ms sumfold={:.3} ms fold={:.3} ms open={:.3} ms open_core={:.3} ms",
+            "phase probe: prove={:.3} ms commit={:.3} ms sumfold_linear={:.3} ms sumfold_booleanity={:.3} ms sumfold_group={:.3} ms sumfold_prove_rounds={:.3} ms sumfold={:.3} ms fold={:.3} ms open={:.3} ms open_core={:.3} ms",
             prove_phases.prove_ms,
             prove_phases.commit_ms,
             prove_phases.sumfold_linear_ms,
             prove_phases.sumfold_booleanity_ms,
+            prove_phases.sumfold_group_ms,
+            prove_phases.sumfold_prove_rounds_ms,
             prove_phases.sumfold_ms,
             prove_phases.fold_ms,
             prove_phases.open_ms,
@@ -4200,6 +4219,8 @@ fn combined_row_from_og(row: OgSha256InstanceSweepRow) -> Sha256CombinedInstance
         probe_commit_ms: None,
         probe_sumfold_linear_ms: None,
         probe_sumfold_booleanity_ms: None,
+        probe_sumfold_group_ms: None,
+        probe_sumfold_prove_rounds_ms: None,
         probe_sumfold_ms: None,
         probe_fold_ms: None,
         probe_open_ms: None,
@@ -4244,6 +4265,8 @@ fn combined_row_from_l0(row: HyraxInstanceSweepRow) -> Sha256CombinedInstanceSwe
         probe_commit_ms: Some(row.probe_commit_ms),
         probe_sumfold_linear_ms: Some(row.probe_sumfold_linear_ms),
         probe_sumfold_booleanity_ms: Some(row.probe_sumfold_booleanity_ms),
+        probe_sumfold_group_ms: Some(row.probe_sumfold_group_ms),
+        probe_sumfold_prove_rounds_ms: Some(row.probe_sumfold_prove_rounds_ms),
         probe_sumfold_ms: Some(row.probe_sumfold_ms),
         probe_fold_ms: Some(row.probe_fold_ms),
         probe_open_ms: Some(row.probe_open_ms),
@@ -4293,6 +4316,8 @@ fn skipped_l0_combined_row(
         probe_commit_ms: None,
         probe_sumfold_linear_ms: None,
         probe_sumfold_booleanity_ms: None,
+        probe_sumfold_group_ms: None,
+        probe_sumfold_prove_rounds_ms: None,
         probe_sumfold_ms: None,
         probe_fold_ms: None,
         probe_open_ms: None,
@@ -5957,6 +5982,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
         + DelayedFieldProductSum
         + ShaBinaryFoldField
         + ShaLinearAccumulatorField
+        + ShaSmallFieldDecode
         + ShaSuffixScannerField
         + zip_plus::pcs::hyrax::HyraxFieldBridge<C>
         + Send

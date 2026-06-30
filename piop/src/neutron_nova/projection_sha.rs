@@ -14,10 +14,11 @@ use crate::{
     CombFn,
     sumcheck::multi_degree::{MultiDegreeSumcheckGroup, PrefixFastPath, PrefixRoundOutput},
 };
-use ark_ff::{MontBackend, MontConfig};
+use ark_ff::{MontBackend, MontConfig, PrimeField as ArkPrimeField};
 use crypto_primitives::{
-    PrimeField, ark_ff_fp::Fp as ArkFp, crypto_bigint_boxed_monty::BoxedMontyField,
-    crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    FromPrimitiveWithConfig, PrimeField, ark_ff_fp::Fp as ArkFp,
+    crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_monty::MontyField,
+    crypto_bigint_uint::Uint,
 };
 use num_traits::{ConstZero, Zero};
 #[cfg(feature = "parallel")]
@@ -386,6 +387,7 @@ pub struct LinearResidualCoeffTable<F: PrimeField> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedShaSumFoldBasis<F: PrimeField> {
     pub residual_basis: PreparedShaResidualBasis<F>,
+    pub small_residual_basis: Option<PreparedShaSmallResidualBasis>,
     pub booleanity_basis: PreparedShaBooleanityBasis,
 }
 
@@ -410,6 +412,29 @@ pub struct PreparedShaResidualFamily<F: PrimeField> {
 pub struct PreparedShaResidualTerm<F: PrimeField> {
     pub power: u8,
     pub coeff: F,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaSmallResidualBasis {
+    /// Indexed by SHA row.
+    pub rows: Vec<PreparedShaSmallResidualRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaSmallResidualRow {
+    /// Indexed by `ShaResidualFamily::index()`.
+    pub families: [PreparedShaSmallResidualFamily; NUM_SHA_RESIDUAL_FAMILIES],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaSmallResidualFamily {
+    pub terms: Box<[PreparedShaSmallResidualTerm]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedShaSmallResidualTerm {
+    pub power: u8,
+    pub coeff: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,6 +471,68 @@ impl PreparedCanonicalShaBooleanityBasis {
             return Err(ShaProjectionError::RowIndexOutOfRange { row });
         }
         Ok(((self.source_row_bits[source_idx] >> row) & 1) == 1)
+    }
+}
+
+#[doc(hidden)]
+pub trait ShaSmallFieldDecode: PrimeField + FromPrimitiveWithConfig {
+    fn unsigned_i64_if_small(value: &Self) -> Option<i64>;
+
+    fn signed_i64_if_small(value: &Self, field_cfg: &Self::Config) -> Option<i64> {
+        #[cfg(not(debug_assertions))]
+        let _ = field_cfg;
+        if Self::is_zero(value) {
+            return Some(0);
+        }
+        if let Some(candidate) = Self::unsigned_i64_if_small(value) {
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(Self::from_with_cfg(candidate, field_cfg), *value);
+            return Some(candidate);
+        }
+
+        let negated = -value.clone();
+        let magnitude = Self::unsigned_i64_if_small(&negated)?;
+        if magnitude == 0 {
+            return Some(0);
+        }
+        let candidate = -magnitude;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(Self::from_with_cfg(candidate, field_cfg), *value);
+        Some(candidate)
+    }
+}
+
+fn unsigned_i64_from_words(words: &[u64]) -> Option<i64> {
+    let Some((&low, high)) = words.split_first() else {
+        return Some(0);
+    };
+    if high.iter().any(|&word| word != 0) {
+        return None;
+    }
+    i64::try_from(low).ok()
+}
+
+impl<const LIMBS: usize> ShaSmallFieldDecode for MontyField<LIMBS> {
+    fn unsigned_i64_if_small(value: &Self) -> Option<i64> {
+        unsigned_i64_from_words(value.retrieve().as_words())
+    }
+}
+
+impl ShaSmallFieldDecode for BoxedMontyField {
+    fn unsigned_i64_if_small(value: &Self) -> Option<i64> {
+        let rendered = value.to_string();
+        let magnitude = rendered.split_ascii_whitespace().next()?;
+        magnitude.parse::<i64>().ok()
+    }
+}
+
+impl<M, const N: usize> ShaSmallFieldDecode for ArkFp<MontBackend<M, N>, N>
+where
+    M: MontConfig<N>,
+{
+    fn unsigned_i64_if_small(value: &Self) -> Option<i64> {
+        let words = (*value).into_inner().into_bigint().0;
+        unsigned_i64_from_words(&words)
     }
 }
 
@@ -3118,19 +3205,77 @@ pub fn prepare_sha_sumfold_basis<F>(
     field_cfg: &F::Config,
 ) -> Result<PreparedShaSumFoldBasis<F>, ShaProjectionError>
 where
-    F: PrimeField,
+    F: ShaSmallFieldDecode,
 {
     #[cfg(debug_assertions)]
     {
         validate_trace(trace)?;
         validate_public(public)?;
     }
+    let residual_basis = prepare_sha_residual_basis(trace, public, field_cfg)?;
+    let small_residual_basis = prepare_sha_small_residual_basis(&residual_basis, field_cfg);
     Ok(PreparedShaSumFoldBasis {
-        residual_basis: prepare_sha_residual_basis(trace, public, field_cfg)?,
+        residual_basis,
+        small_residual_basis,
         booleanity_basis: PreparedShaBooleanityBasis {
             canonical: prepare_canonical_sha_booleanity_basis(trace, field_cfg)?,
         },
     })
+}
+
+pub fn build_sha_sumfold_linear_accumulator_from_small_bases<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<Option<Vec<F>>, ShaProjectionError>
+where
+    F: PrimeField + DelayedFieldProductSum + FromPrimitiveWithConfig + Send + Sync,
+{
+    validate_prepared_linear_accumulator_inputs(bases, row_weights, a_powers, lambda_powers)?;
+    if bases
+        .iter()
+        .any(|basis| basis.small_residual_basis.is_none())
+    {
+        return Ok(None);
+    }
+
+    cfg_iter!(bases)
+        .map(|basis| {
+            let small_basis = basis.small_residual_basis.as_ref().ok_or(
+                ShaProjectionError::NonCanonicalProofObject(
+                    "prepared native-small residual cache is not available",
+                ),
+            )?;
+            if small_basis.rows.len() != SHA_ROW_COUNT {
+                return Err(ShaProjectionError::RowCount {
+                    got: small_basis.rows.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+            let mut instance_acc = F::zero_with_cfg(field_cfg);
+            for (row_idx, row) in small_basis.rows.iter().enumerate() {
+                let mut row_acc = F::zero_with_cfg(field_cfg);
+                for (family_idx, family) in row.families.iter().enumerate() {
+                    let mut residual_at_a = F::zero_with_cfg(field_cfg);
+                    for term in family.terms.iter() {
+                        let power = usize::from(term.power);
+                        add_signed_small_field_product(
+                            &mut residual_at_a,
+                            &a_powers[power],
+                            term.coeff,
+                            field_cfg,
+                        );
+                    }
+                    row_acc += residual_at_a * &lambda_powers[family_idx];
+                }
+                instance_acc += row_weights[row_idx].clone() * row_acc;
+            }
+            Ok(instance_acc)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()
+        .map(Some)
 }
 
 pub fn build_sha_sumfold_linear_accumulator_from_bases<F>(
@@ -3143,26 +3288,7 @@ pub fn build_sha_sumfold_linear_accumulator_from_bases<F>(
 where
     F: PrimeField + DelayedFieldProductSum + Send + Sync,
 {
-    if row_weights.len() != SHA_ROW_COUNT {
-        return Err(ShaProjectionError::ColumnRowCount {
-            kind: "row_weights",
-            col: 0,
-            got: row_weights.len(),
-            expected: SHA_ROW_COUNT,
-        });
-    }
-    if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
-        return Err(ShaProjectionError::MissingColumn {
-            kind: "a_powers",
-            col: a_powers.len(),
-        });
-    }
-    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
-        return Err(ShaProjectionError::MissingColumn {
-            kind: "lambda_powers",
-            col: lambda_powers.len(),
-        });
-    }
+    validate_prepared_linear_accumulator_inputs(bases, row_weights, a_powers, lambda_powers)?;
 
     cfg_iter!(bases)
         .map(|basis| {
@@ -3188,6 +3314,38 @@ where
             Ok(instance_acc)
         })
         .collect()
+}
+
+fn validate_prepared_linear_accumulator_inputs<F>(
+    _bases: &[&PreparedShaSumFoldBasis<F>],
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+) -> Result<(), ShaProjectionError>
+where
+    F: PrimeField,
+{
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "a_powers",
+            col: a_powers.len(),
+        });
+    }
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "lambda_powers",
+            col: lambda_powers.len(),
+        });
+    }
+    Ok(())
 }
 
 pub fn build_sha_sumfold_quadratic_prefix_accumulator_from_bases<F>(
@@ -3343,6 +3501,76 @@ where
         })
         .collect::<Result<Vec<_>, ShaProjectionError>>()?;
     Ok(PreparedShaResidualBasis { rows })
+}
+
+fn prepare_sha_small_residual_basis<F>(
+    residual_basis: &PreparedShaResidualBasis<F>,
+    field_cfg: &F::Config,
+) -> Option<PreparedShaSmallResidualBasis>
+where
+    F: ShaSmallFieldDecode,
+{
+    let rows = residual_basis
+        .rows
+        .iter()
+        .map(|row| {
+            let families: [Option<PreparedShaSmallResidualFamily>; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|family_idx| {
+                    let terms = row.families[family_idx]
+                        .terms
+                        .iter()
+                        .map(|term| {
+                            Some(PreparedShaSmallResidualTerm {
+                                power: term.power,
+                                coeff: F::signed_i64_if_small(&term.coeff, field_cfg)?,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?
+                        .into_boxed_slice();
+                    Some(PreparedShaSmallResidualFamily { terms })
+                });
+            let families: Option<[PreparedShaSmallResidualFamily; NUM_SHA_RESIDUAL_FAMILIES]> =
+                families
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()?
+                    .try_into()
+                    .ok();
+            families.map(|families| PreparedShaSmallResidualRow { families })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(PreparedShaSmallResidualBasis { rows })
+}
+
+fn add_signed_small_field_product<F>(acc: &mut F, value: &F, coeff: i64, field_cfg: &F::Config)
+where
+    F: PrimeField + FromPrimitiveWithConfig,
+{
+    if coeff == 0 {
+        return;
+    }
+    if coeff == 1 {
+        *acc += value;
+        return;
+    }
+    if coeff == -1 {
+        *acc += -value.clone();
+        return;
+    }
+
+    let abs = coeff.unsigned_abs();
+    if abs <= 16 {
+        let mut term = F::zero_with_cfg(field_cfg);
+        for _ in 0..abs {
+            term += value;
+        }
+        if coeff < 0 {
+            term = -term;
+        }
+        *acc += term;
+        return;
+    }
+
+    *acc += value.clone() * F::from_with_cfg(coeff, field_cfg);
 }
 
 fn prepare_canonical_sha_booleanity_basis<F>(
@@ -10460,8 +10688,73 @@ mod tests {
             &cfg,
         )
         .unwrap();
+        assert!(
+            bases
+                .iter()
+                .all(|basis| basis.small_residual_basis.is_some()),
+            "synthetic SHA residuals should be native-small"
+        );
+        let small_cached = build_sha_sumfold_linear_accumulator_from_small_bases(
+            &basis_refs,
+            &row_weights,
+            &a_powers,
+            &lambda_powers,
+            &cfg,
+        )
+        .unwrap()
+        .expect("small residual cache should be available");
 
         assert_eq!(cached, direct);
+        assert_eq!(small_cached, direct);
+    }
+
+    #[test]
+    fn prepared_small_residual_basis_roundtrips_to_field_basis() {
+        let cfg = test_config();
+        let a = f(5);
+        let trace = synthetic_boolean_trace(3, &a);
+        let public = zero_public();
+        let basis = prepare_sha_sumfold_basis(&trace, &public, &cfg).unwrap();
+        let small = basis
+            .small_residual_basis
+            .as_ref()
+            .expect("synthetic SHA residuals should be native-small");
+
+        assert_eq!(small.rows.len(), basis.residual_basis.rows.len());
+        for (small_row, field_row) in small.rows.iter().zip(&basis.residual_basis.rows) {
+            for (small_family, field_family) in small_row.families.iter().zip(&field_row.families) {
+                assert_eq!(small_family.terms.len(), field_family.terms.len());
+                for (small_term, field_term) in small_family.terms.iter().zip(&field_family.terms) {
+                    assert_eq!(small_term.power, field_term.power);
+                    assert_eq!(F::from_with_cfg(small_term.coeff, &cfg), field_term.coeff);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn small_linear_accumulator_falls_back_when_cache_missing() {
+        let cfg = test_config();
+        let a = f(5);
+        let trace = synthetic_boolean_trace(3, &a);
+        let public = zero_public();
+        let mut basis = prepare_sha_sumfold_basis(&trace, &public, &cfg).unwrap();
+        basis.small_residual_basis = None;
+        let basis_refs = vec![&basis, &basis];
+        let row_weights = vec![f(1); SHA_ROW_COUNT];
+        let a_powers = build_sha_residual_eval_powers(&f(11), &cfg);
+        let lambda_powers = build_sha_lambda_powers(&f(13), &cfg);
+
+        let small = build_sha_sumfold_linear_accumulator_from_small_bases(
+            &basis_refs,
+            &row_weights,
+            &a_powers,
+            &lambda_powers,
+            &cfg,
+        )
+        .unwrap();
+
+        assert!(small.is_none());
     }
 
     #[test]
