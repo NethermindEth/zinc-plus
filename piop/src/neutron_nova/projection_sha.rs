@@ -383,6 +383,72 @@ pub struct LinearResidualCoeffTable<F: PrimeField> {
     pub coeffs: Vec<DynamicPolynomialF<F>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaSumFoldBasis<F: PrimeField> {
+    pub residual_basis: PreparedShaResidualBasis<F>,
+    pub booleanity_basis: PreparedShaBooleanityBasis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaResidualBasis<F: PrimeField> {
+    /// Indexed by SHA row.
+    pub rows: Vec<PreparedShaResidualRow<F>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaResidualRow<F: PrimeField> {
+    /// Indexed by `ShaResidualFamily::index()`.
+    pub families: [PreparedShaResidualFamily<F>; NUM_SHA_RESIDUAL_FAMILIES],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaResidualFamily<F: PrimeField> {
+    pub terms: Box<[PreparedShaResidualTerm<F>]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaResidualTerm<F: PrimeField> {
+    pub power: u8,
+    pub coeff: F,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaBooleanityBasis {
+    pub canonical: Option<PreparedCanonicalShaBooleanityBasis>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedCanonicalShaBooleanityBasis {
+    /// Indexed by canonical production SHA booleanity source. Bit `row` stores
+    /// that source's value at the SHA row.
+    pub source_row_bits: Box<[u128]>,
+}
+
+impl PreparedShaBooleanityBasis {
+    pub fn has_canonical(&self) -> bool {
+        self.canonical.is_some()
+    }
+
+    pub fn canonical(&self) -> Option<&PreparedCanonicalShaBooleanityBasis> {
+        self.canonical.as_ref()
+    }
+}
+
+impl PreparedCanonicalShaBooleanityBasis {
+    pub fn bit(&self, source_idx: usize, row: usize) -> Result<bool, ShaProjectionError> {
+        if source_idx >= self.source_row_bits.len() {
+            return Err(ShaProjectionError::MissingColumn {
+                kind: "prepared_booleanity_source",
+                col: source_idx,
+            });
+        }
+        if row >= SHA_ROW_COUNT {
+            return Err(ShaProjectionError::RowIndexOutOfRange { row });
+        }
+        Ok(((self.source_row_bits[source_idx] >> row) & 1) == 1)
+    }
+}
+
 impl<F> LinearResidualCoeffTable<F>
 where
     F: PrimeField,
@@ -3044,6 +3110,306 @@ pub fn production_sha_booleanity_sources() -> Vec<ShaBooleanitySource> {
         sources.push(ShaBooleanitySource::VirtualMaj { bit });
     }
     sources
+}
+
+pub fn prepare_sha_sumfold_basis<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    field_cfg: &F::Config,
+) -> Result<PreparedShaSumFoldBasis<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    #[cfg(debug_assertions)]
+    {
+        validate_trace(trace)?;
+        validate_public(public)?;
+    }
+    Ok(PreparedShaSumFoldBasis {
+        residual_basis: prepare_sha_residual_basis(trace, public, field_cfg)?,
+        booleanity_basis: PreparedShaBooleanityBasis {
+            canonical: prepare_canonical_sha_booleanity_basis(trace, field_cfg)?,
+        },
+    })
+}
+
+pub fn build_sha_sumfold_linear_accumulator_from_bases<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    row_weights: &[F],
+    a_powers: &[F],
+    lambda_powers: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: PrimeField + DelayedFieldProductSum + Send + Sync,
+{
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if a_powers.len() < SHA_RESIDUAL_EVAL_POWER_COUNT {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "a_powers",
+            col: a_powers.len(),
+        });
+    }
+    if lambda_powers.len() != NUM_SHA_RESIDUAL_FAMILIES {
+        return Err(ShaProjectionError::MissingColumn {
+            kind: "lambda_powers",
+            col: lambda_powers.len(),
+        });
+    }
+
+    cfg_iter!(bases)
+        .map(|basis| {
+            if basis.residual_basis.rows.len() != SHA_ROW_COUNT {
+                return Err(ShaProjectionError::RowCount {
+                    got: basis.residual_basis.rows.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+            let mut instance_acc = F::zero_with_cfg(field_cfg);
+            for (row_idx, row) in basis.residual_basis.rows.iter().enumerate() {
+                let mut row_acc = F::zero_with_cfg(field_cfg);
+                for (family_idx, family) in row.families.iter().enumerate() {
+                    let mut residual_at_a = F::zero_with_cfg(field_cfg);
+                    for term in family.terms.iter() {
+                        let power = usize::from(term.power);
+                        residual_at_a += term.coeff.clone() * &a_powers[power];
+                    }
+                    row_acc += residual_at_a * &lambda_powers[family_idx];
+                }
+                instance_acc += row_weights[row_idx].clone() * row_acc;
+            }
+            Ok(instance_acc)
+        })
+        .collect()
+}
+
+pub fn build_sha_sumfold_quadratic_prefix_accumulator_from_bases<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    row_weights: &[F],
+    booleanity_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: PrimeField + Send + Sync,
+{
+    if bases.is_empty() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
+    }
+    if !bases.len().is_power_of_two() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: bases.len() });
+    }
+    if !is_canonical_production_booleanity_sources(booleanity_sources) {
+        return Err(ShaProjectionError::NonCanonicalProofObject(
+            "prepared booleanity cache requires canonical production SHA sources",
+        ));
+    }
+    if bases
+        .iter()
+        .any(|basis| !basis.booleanity_basis.has_canonical())
+    {
+        return Err(ShaProjectionError::NonCanonicalProofObject(
+            "prepared booleanity cache is not available for these witnesses",
+        ));
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+
+    let ell = usize::try_from(bases.len().trailing_zeros()).expect("trailing_zeros fits usize");
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        return Ok(Vec::new());
+    }
+
+    let prefix_len = binary_len(prefix_vars);
+    let tail_len = binary_len(ell - prefix_vars);
+    let ternary_len = checked_ternary_len(prefix_vars)?;
+    let coeff_plans = ternary_coeff_plans(prefix_vars)?;
+    let partials = cfg_chunks!(row_weights, 8)
+        .enumerate()
+        .map(|(chunk_idx, row_weight_chunk)| {
+            let row_offset = chunk_idx * 8;
+            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
+            let mut mask_weights = HashMap::new();
+            let mut touched_masks = Vec::new();
+
+            for tail in 0..tail_len {
+                for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
+                    let row = row_offset + row_in_chunk;
+                    for source_idx in 0..booleanity_sources.len() {
+                        add_booleanity_mask_weight(
+                            &mut mask_weights,
+                            &mut touched_masks,
+                            prefix_mask_from_prepared_booleanity(
+                                bases,
+                                source_idx,
+                                row,
+                                tail,
+                                prefix_vars,
+                                prefix_len,
+                            )?,
+                            &booleanity_weights[source_idx],
+                        );
+                    }
+                    flush_booleanity_mask_weights(
+                        &mut partial,
+                        tail,
+                        ternary_len,
+                        &coeff_plans,
+                        &mut mask_weights,
+                        &mut touched_masks,
+                        row_weight,
+                    );
+                }
+            }
+            Ok(partial)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+
+    let mut table = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
+    for partial in partials {
+        for (acc, value) in table.iter_mut().zip(partial) {
+            *acc += value;
+        }
+    }
+    Ok(table)
+}
+
+pub fn is_production_sha_booleanity_sources(booleanity_sources: &[ShaBooleanitySource]) -> bool {
+    is_canonical_production_booleanity_sources(booleanity_sources)
+}
+
+fn prepare_sha_residual_basis<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    field_cfg: &F::Config,
+) -> Result<PreparedShaResidualBasis<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let constants = ShaResidualPolyConstants::new(field_cfg);
+    let rows = (0..SHA_ROW_COUNT)
+        .map(|row| {
+            let residuals =
+                residual_polys_at_row_with_constants(trace, public, row, &constants, field_cfg)?;
+            let families = std::array::from_fn(|family_idx| {
+                let terms = residuals[family_idx]
+                    .coeffs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(power, coeff)| {
+                        if F::is_zero(coeff) {
+                            None
+                        } else {
+                            Some(PreparedShaResidualTerm {
+                                power: u8::try_from(power).expect("SHA residual degree fits in u8"),
+                                coeff: coeff.clone(),
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                PreparedShaResidualFamily { terms }
+            });
+            Ok(PreparedShaResidualRow { families })
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+    Ok(PreparedShaResidualBasis { rows })
+}
+
+fn prepare_canonical_sha_booleanity_basis<F>(
+    trace: &ProjectedTrace<F>,
+    field_cfg: &F::Config,
+) -> Result<Option<PreparedCanonicalShaBooleanityBasis>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let sources = production_sha_booleanity_sources();
+    let mut source_row_bits = vec![0u128; sources.len()];
+    let zero = F::zero_with_cfg(field_cfg);
+    let one = F::one_with_cfg(field_cfg);
+
+    for row in 0..SHA_ROW_COUNT {
+        let virtuals = reconstruct_virtual_ch_maj_at_row_unchecked(trace, row, field_cfg)?;
+        for (source_idx, source) in sources.iter().enumerate() {
+            let value = booleanity_source_value_at_row_with_virtuals(
+                trace,
+                row,
+                source,
+                Some(&virtuals),
+                field_cfg,
+            )?;
+            if value == one {
+                source_row_bits[source_idx] |= 1u128 << row;
+            } else if value != zero {
+                return Ok(None);
+            }
+        }
+    }
+
+    Ok(Some(PreparedCanonicalShaBooleanityBasis {
+        source_row_bits: source_row_bits.into_boxed_slice(),
+    }))
+}
+
+fn prefix_mask_from_prepared_booleanity<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    source_idx: usize,
+    row: usize,
+    tail: usize,
+    prefix_vars: usize,
+    prefix_len: usize,
+) -> Result<usize, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let mut mask = 0usize;
+    for prefix in 0..prefix_len {
+        let instance_idx = prefix + (tail << prefix_vars);
+        let basis = bases
+            .get(instance_idx)
+            .ok_or(ShaProjectionError::InstanceCountMismatch {
+                got: bases.len(),
+                expected: instance_idx + 1,
+            })?;
+        let canonical = basis.booleanity_basis.canonical().ok_or(
+            ShaProjectionError::NonCanonicalProofObject(
+                "prepared booleanity cache is not available for these witnesses",
+            ),
+        )?;
+        if canonical.bit(source_idx, row)? {
+            mask |= 1usize << prefix;
+        }
+    }
+    Ok(mask)
 }
 
 /// Evaluate the linear SHA residual scalarization at one row.
@@ -9880,6 +10246,47 @@ mod tests {
         }
     }
 
+    fn packed_booleanity_trace(instance_idx: u64, a: &F) -> ProjectedTrace<F> {
+        let cfg = test_config();
+        let zero = F::zero_with_cfg(&cfg);
+        let mut bits =
+            vec![vec![vec![zero.clone(); SHA_WORD_BITS]; SHA_ROW_COUNT]; ShaWordCol::COUNT];
+        for (col_idx, col_bits) in bits.iter_mut().enumerate() {
+            let col = ShaWordCol::ALL[col_idx];
+            if matches!(
+                col,
+                ShaWordCol::A
+                    | ShaWordCol::E
+                    | ShaWordCol::Uef
+                    | ShaWordCol::UNegEg
+                    | ShaWordCol::Maj
+                    | ShaWordCol::Ch2Comp
+                    | ShaWordCol::MajComp
+            ) {
+                continue;
+            }
+            for (row_idx, row) in col_bits.iter_mut().enumerate() {
+                for (bit_idx, bit) in row.iter_mut().enumerate() {
+                    let selector = instance_idx
+                        + u64::try_from(col_idx * 19 + row_idx * 5 + bit_idx)
+                            .expect("test selector fits u64");
+                    if selector % 2 == 1 {
+                        *bit = f(1);
+                    }
+                }
+            }
+        }
+        let bit_slices =
+            flatten_bit_columns(bits, SHA_WORD_BITS, SHA_ROW_VARS, "bit_slices").unwrap();
+        let scalarized = scalarize_bit_slices(&bit_slices, a, &cfg).unwrap();
+        ProjectedTrace {
+            bit_slices,
+            scalarized,
+            int_columns: zero_table(ShaIntCol::COUNT),
+            public_columns: zero_table(ShaPublicCol::COUNT),
+        }
+    }
+
     fn ark_zero_table(cols: usize) -> MleTable<ArkTestF> {
         mle_table_from_columns(
             vec![vec![ArkTestF::zero_with_cfg(&()); SHA_ROW_COUNT]; cols],
@@ -10012,6 +10419,126 @@ mod tests {
 
         for (value, poly) in residuals.iter().zip(polies.iter()) {
             assert_eq!(value, &poly.evaluate_at_point(&a).unwrap());
+        }
+    }
+
+    #[test]
+    fn prepared_sumfold_linear_accumulator_matches_direct_builder() {
+        let cfg = test_config();
+        let a = f(5);
+        let traces = (0..8)
+            .map(|idx| synthetic_boolean_trace(idx, &a))
+            .collect::<Vec<_>>();
+        let publics = (0..traces.len()).map(|_| zero_public()).collect::<Vec<_>>();
+        let bases = traces
+            .iter()
+            .zip(&publics)
+            .map(|(trace, public)| prepare_sha_sumfold_basis(trace, public, &cfg).unwrap())
+            .collect::<Vec<_>>();
+        let trace_refs = traces.iter().collect::<Vec<_>>();
+        let public_refs = publics.iter().collect::<Vec<_>>();
+        let basis_refs = bases.iter().collect::<Vec<_>>();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|idx| f(u64::try_from(idx + 2).unwrap()));
+        let row_weights = build_eq_x_r_vec(&r_ic, &cfg).unwrap();
+        let a_powers = build_sha_residual_eval_powers(&f(11), &cfg);
+        let lambda_powers = build_sha_lambda_powers(&f(13), &cfg);
+        let plan =
+            ShaLinearResidualWeightPlan::new(&row_weights, &a_powers, &lambda_powers).unwrap();
+
+        let direct = build_sha_sumfold_linear_accumulator_direct_with_weights(
+            &trace_refs,
+            &public_refs,
+            &plan,
+            &cfg,
+        )
+        .unwrap();
+        let cached = build_sha_sumfold_linear_accumulator_from_bases(
+            &basis_refs,
+            &row_weights,
+            &a_powers,
+            &lambda_powers,
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(cached, direct);
+    }
+
+    #[test]
+    fn prepared_booleanity_basis_matches_canonical_sources() {
+        let cfg = test_config();
+        let a = f(5);
+        let trace = packed_booleanity_trace(3, &a);
+        let public = zero_public();
+        let basis = prepare_sha_sumfold_basis(&trace, &public, &cfg).unwrap();
+        let canonical = basis
+            .booleanity_basis
+            .canonical()
+            .expect("packed trace has canonical booleanity basis");
+        let sources = production_sha_booleanity_sources();
+
+        for row in 0..SHA_ROW_COUNT {
+            let virtuals = reconstruct_virtual_ch_maj_at_row_unchecked(&trace, row, &cfg).unwrap();
+            for (source_idx, source) in sources.iter().enumerate() {
+                let expected = booleanity_source_value_at_row_with_virtuals(
+                    &trace,
+                    row,
+                    source,
+                    Some(&virtuals),
+                    &cfg,
+                )
+                .unwrap();
+                assert!(expected == f(0) || expected == f(1));
+                assert_eq!(canonical.bit(source_idx, row).unwrap(), expected == f(1));
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_booleanity_prefix_table_matches_trace_builder() {
+        let cfg = test_config();
+        let a = f(7);
+        let sources = production_sha_booleanity_sources();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|idx| f(u64::try_from(idx + 3).unwrap()));
+        let row_weights = build_eq_x_r_vec(&r_ic, &cfg).unwrap();
+        let booleanity_weights = build_booleanity_weights(&f(17), &f(19), sources.len(), &cfg);
+
+        for instance_count in [8usize, 32] {
+            let traces = (0..instance_count)
+                .map(|idx| packed_booleanity_trace(u64::try_from(idx).unwrap(), &a))
+                .collect::<Vec<_>>();
+            let publics = (0..instance_count)
+                .map(|_| zero_public())
+                .collect::<Vec<_>>();
+            let bases = traces
+                .iter()
+                .zip(&publics)
+                .map(|(trace, public)| prepare_sha_sumfold_basis(trace, public, &cfg).unwrap())
+                .collect::<Vec<_>>();
+            let trace_refs = traces.iter().collect::<Vec<_>>();
+            let basis_refs = bases.iter().collect::<Vec<_>>();
+
+            for prefix_vars in 1..=3 {
+                let direct = build_sha_sumfold_quadratic_prefix_accumulator(
+                    &trace_refs,
+                    &sources,
+                    prefix_vars,
+                    &row_weights,
+                    &booleanity_weights,
+                    &cfg,
+                )
+                .unwrap();
+                let cached = build_sha_sumfold_quadratic_prefix_accumulator_from_bases(
+                    &basis_refs,
+                    &sources,
+                    prefix_vars,
+                    &row_weights,
+                    &booleanity_weights,
+                    &cfg,
+                )
+                .unwrap();
+                assert_eq!(cached, direct);
+            }
         }
     }
 

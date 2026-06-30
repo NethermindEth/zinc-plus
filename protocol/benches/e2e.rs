@@ -1386,10 +1386,13 @@ struct HyraxInstanceSweepRow {
     ecc_points_per_proof: usize,
     trace_witness_ms: f64,
     setup_ms: f64,
+    prepare_sumfold_basis_ms: f64,
     prepare_ms: f64,
     setup_prepare_ms: f64,
     probe_prove_ms: f64,
     probe_commit_ms: f64,
+    probe_sumfold_linear_ms: f64,
+    probe_sumfold_booleanity_ms: f64,
     probe_sumfold_ms: f64,
     probe_fold_ms: f64,
     probe_open_ms: f64,
@@ -1452,10 +1455,13 @@ struct Sha256CombinedInstanceSweepRow {
     setup_ms: Option<f64>,
     trace_witness_ms: Option<f64>,
     pcs_setup_ms: Option<f64>,
+    prepare_sumfold_basis_ms: Option<f64>,
     prepare_ms: Option<f64>,
     setup_prepare_ms: Option<f64>,
     probe_prove_ms: Option<f64>,
     probe_commit_ms: Option<f64>,
+    probe_sumfold_linear_ms: Option<f64>,
+    probe_sumfold_booleanity_ms: Option<f64>,
     probe_sumfold_ms: Option<f64>,
     probe_fold_ms: Option<f64>,
     probe_open_ms: Option<f64>,
@@ -1493,6 +1499,7 @@ struct TimingStats {
 struct HyraxSetupPrepareTimings {
     trace_witness_ms: f64,
     setup_ms: f64,
+    prepare_sumfold_basis_ms: f64,
     prepare_ms: f64,
     setup_prepare_ms: f64,
 }
@@ -1501,6 +1508,8 @@ struct HyraxSetupPrepareTimings {
 struct HyraxProvePhaseTimings {
     prove_ms: f64,
     commit_ms: f64,
+    sumfold_linear_ms: f64,
+    sumfold_booleanity_ms: f64,
     sumfold_ms: f64,
     fold_ms: f64,
     open_ms: f64,
@@ -1509,23 +1518,29 @@ struct HyraxProvePhaseTimings {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProvePhase {
+    PrepareSumfoldBasis,
     FreshCommitMixedHyraxInstances,
     FreshCommitMixedHyraxInstance,
     SumfoldAccumulators,
+    SumfoldLinearAccumulator,
+    SumfoldQuadraticPrefixAccumulator,
     SumfoldProve,
     FoldAfterSumfold,
     PcsOpening,
     PcsOpenCore,
 }
 
-const PROVE_PHASE_COUNT: usize = 7;
+const PROVE_PHASE_COUNT: usize = 10;
 
 impl ProvePhase {
     fn from_name(value: &str) -> Option<Self> {
         Some(match value {
+            "prepare_sumfold_basis" => Self::PrepareSumfoldBasis,
             "fresh_commit_mixed_hyrax_instances" => Self::FreshCommitMixedHyraxInstances,
             "fresh_commit_mixed_hyrax_instance" => Self::FreshCommitMixedHyraxInstance,
             "sumfold_accumulators" => Self::SumfoldAccumulators,
+            "sumfold_linear_accumulator" => Self::SumfoldLinearAccumulator,
+            "sumfold_quadratic_prefix_accumulator" => Self::SumfoldQuadraticPrefixAccumulator,
             "sumfold_prove" => Self::SumfoldProve,
             "fold_after_sumfold" => Self::FoldAfterSumfold,
             "pcs_opening" => Self::PcsOpening,
@@ -1536,13 +1551,16 @@ impl ProvePhase {
 
     fn index(self) -> usize {
         match self {
-            Self::FreshCommitMixedHyraxInstances => 0,
-            Self::FreshCommitMixedHyraxInstance => 1,
-            Self::SumfoldAccumulators => 2,
-            Self::SumfoldProve => 3,
-            Self::FoldAfterSumfold => 4,
-            Self::PcsOpening => 5,
-            Self::PcsOpenCore => 6,
+            Self::PrepareSumfoldBasis => 0,
+            Self::FreshCommitMixedHyraxInstances => 1,
+            Self::FreshCommitMixedHyraxInstance => 2,
+            Self::SumfoldAccumulators => 3,
+            Self::SumfoldLinearAccumulator => 4,
+            Self::SumfoldQuadraticPrefixAccumulator => 5,
+            Self::SumfoldProve => 6,
+            Self::FoldAfterSumfold => 7,
+            Self::PcsOpening => 8,
+            Self::PcsOpenCore => 9,
         }
     }
 }
@@ -1557,6 +1575,8 @@ struct PhaseSpanTiming {
 struct PhaseTimingLayer {
     totals_ms: Arc<Mutex<[f64; PROVE_PHASE_COUNT]>>,
 }
+
+static PHASE_TIMING_LAYER: OnceLock<PhaseTimingLayer> = OnceLock::new();
 
 #[derive(Default)]
 struct PhaseFieldVisitor {
@@ -1609,12 +1629,31 @@ impl Visit for PhaseFieldVisitor {
         }
     }
 
-    fn record_debug(&mut self, _field: &TracingField, _value: &dyn Debug) {}
+    fn record_debug(&mut self, field: &TracingField, value: &dyn Debug) {
+        if field.name() == "phase" {
+            let value = format!("{value:?}");
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(&value);
+            self.phase = ProvePhase::from_name(value);
+        }
+    }
 }
 
 impl PhaseTimingLayer {
+    fn reset(&self) {
+        let mut totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
+        *totals = [0.0; PROVE_PHASE_COUNT];
+    }
+
     fn phase_ms(totals: &[f64; PROVE_PHASE_COUNT], phase: ProvePhase) -> f64 {
         totals[phase.index()]
+    }
+
+    fn total_ms(&self, phase: ProvePhase) -> f64 {
+        let totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
+        Self::phase_ms(&totals, phase)
     }
 
     fn snapshot(&self, prove_ms: f64) -> HyraxProvePhaseTimings {
@@ -1628,6 +1667,11 @@ impl PhaseTimingLayer {
             } else {
                 commit_instance_ms
             },
+            sumfold_linear_ms: Self::phase_ms(&totals, ProvePhase::SumfoldLinearAccumulator),
+            sumfold_booleanity_ms: Self::phase_ms(
+                &totals,
+                ProvePhase::SumfoldQuadraticPrefixAccumulator,
+            ),
             sumfold_ms: Self::phase_ms(&totals, ProvePhase::SumfoldAccumulators)
                 + Self::phase_ms(&totals, ProvePhase::SumfoldProve),
             fold_ms: Self::phase_ms(&totals, ProvePhase::FoldAfterSumfold),
@@ -1635,6 +1679,19 @@ impl PhaseTimingLayer {
             open_core_ms: Self::phase_ms(&totals, ProvePhase::PcsOpenCore),
         }
     }
+}
+
+fn phase_timing_layer() -> PhaseTimingLayer {
+    let layer = PHASE_TIMING_LAYER
+        .get_or_init(|| {
+            let layer = PhaseTimingLayer::default();
+            let subscriber = tracing_subscriber::registry().with(layer.clone());
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            layer
+        })
+        .clone();
+    layer.reset();
+    layer
 }
 
 impl<S> tracing_subscriber::Layer<S> for PhaseTimingLayer
@@ -1759,10 +1816,13 @@ fn hyrax_instance_sweep_row(
         ecc_points_per_proof,
         trace_witness_ms: setup_prepare.trace_witness_ms,
         setup_ms: setup_prepare.setup_ms,
+        prepare_sumfold_basis_ms: setup_prepare.prepare_sumfold_basis_ms,
         prepare_ms: setup_prepare.prepare_ms,
         setup_prepare_ms: setup_prepare.setup_prepare_ms,
         probe_prove_ms: prove_phases.prove_ms,
         probe_commit_ms: prove_phases.commit_ms,
+        probe_sumfold_linear_ms: prove_phases.sumfold_linear_ms,
+        probe_sumfold_booleanity_ms: prove_phases.sumfold_booleanity_ms,
         probe_sumfold_ms: prove_phases.sumfold_ms,
         probe_fold_ms: prove_phases.fold_ms,
         probe_open_ms: prove_phases.open_ms,
@@ -1907,19 +1967,16 @@ where
     DensePolyScalarLanes: zip_plus::pcs::hyrax::HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
     IntScalarLane: zip_plus::pcs::hyrax::HyraxLanes<C, Zt::Int, D>,
 {
-    let layer = PhaseTimingLayer::default();
-    let subscriber = tracing_subscriber::registry().with(layer.clone());
+    let layer = phase_timing_layer();
     let start = Instant::now();
-    tracing::subscriber::with_default(subscriber, || {
-        let mut transcript = Blake3Transcript::new();
-        prove_prepared_linear_ideal_fold_mixed_hyrax::<C, U, Zt, F, D>(
-            pp,
-            shape,
-            prepared_instances,
-            &mut transcript,
-        )
-        .expect("mixed Hyrax phase-timing probe failed");
-    });
+    let mut transcript = Blake3Transcript::new();
+    prove_prepared_linear_ideal_fold_mixed_hyrax::<C, U, Zt, F, D>(
+        pp,
+        shape,
+        prepared_instances,
+        &mut transcript,
+    )
+    .expect("mixed Hyrax phase-timing probe failed");
     layer.snapshot(elapsed_ms(start))
 }
 
@@ -2028,7 +2085,7 @@ fn write_hyrax_width_sweep_csv(path: &Path, rows: &[HyraxWidthSweepRow]) {
 
 fn write_hyrax_instance_sweep_csv(path: &Path, rows: &[HyraxInstanceSweepRow]) {
     let mut csv = String::from(
-        "algorithm,variant,instances,ell,l0,tail_vars,width,ecc_points_per_commitment,ecc_points_per_proof,trace_witness_ms,setup_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+        "algorithm,variant,instances,ell,l0,tail_vars,width,ecc_points_per_commitment,ecc_points_per_proof,trace_witness_ms,setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
         push_csv_row!(
@@ -2044,10 +2101,13 @@ fn write_hyrax_instance_sweep_csv(path: &Path, rows: &[HyraxInstanceSweepRow]) {
             row.ecc_points_per_proof,
             row.trace_witness_ms,
             row.setup_ms,
+            row.prepare_sumfold_basis_ms,
             row.prepare_ms,
             row.setup_prepare_ms,
             row.probe_prove_ms,
             row.probe_commit_ms,
+            row.probe_sumfold_linear_ms,
+            row.probe_sumfold_booleanity_ms,
             row.probe_sumfold_ms,
             row.probe_fold_ms,
             row.probe_open_ms,
@@ -2104,7 +2164,7 @@ fn write_og_sha256_instance_sweep_csv(path: &Path, rows: &[OgSha256InstanceSweep
 
 fn write_sha256_combined_instance_sweep_csv(path: &Path, rows: &[Sha256CombinedInstanceSweepRow]) {
     let mut csv = String::from(
-        "algorithm,variant,status,error,instances,ell,l0,tail_vars,width,active_rows,domain_rows,num_vars,setup_ms,trace_witness_ms,pcs_setup_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
+        "algorithm,variant,status,error,instances,ell,l0,tail_vars,width,active_rows,domain_rows,num_vars,setup_ms,trace_witness_ms,pcs_setup_ms,prepare_sumfold_basis_ms,prepare_ms,setup_prepare_ms,probe_prove_ms,probe_commit_ms,probe_sumfold_linear_ms,probe_sumfold_booleanity_ms,probe_sumfold_ms,probe_fold_ms,probe_open_ms,probe_open_core_ms,prover_median_ms,prover_mean_ms,prover_min_ms,prover_max_ms,prover_samples,verifier_median_ms,verifier_mean_ms,verifier_min_ms,verifier_max_ms,verifier_samples,proof_bytes,proof_zstd_bytes\n",
     );
     for row in rows {
         push_csv_row!(
@@ -2124,10 +2184,13 @@ fn write_sha256_combined_instance_sweep_csv(path: &Path, rows: &[Sha256CombinedI
             row.setup_ms,
             row.trace_witness_ms,
             row.pcs_setup_ms,
+            row.prepare_sumfold_basis_ms,
             row.prepare_ms,
             row.setup_prepare_ms,
             row.probe_prove_ms,
             row.probe_commit_ms,
+            row.probe_sumfold_linear_ms,
+            row.probe_sumfold_booleanity_ms,
             row.probe_sumfold_ms,
             row.probe_fold_ms,
             row.probe_open_ms,
@@ -3534,6 +3597,7 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
     let setup_ms = elapsed_ms(setup_phase_start);
 
     let prepare_start = Instant::now();
+    let prepare_layer = phase_timing_layer();
     let prepared_instances = prepare_linear_ideal_fold_witnesses::<
         U,
         RealEcdsaBenchZincTypes,
@@ -3542,10 +3606,12 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
     >(&shape, &witnesses, &pp.field_cfg)
     .expect("ProjectionFold instance-sweep SHA witness preparation should succeed");
     let prepare_ms = elapsed_ms(prepare_start);
+    let prepare_sumfold_basis_ms = prepare_layer.total_ms(ProvePhase::PrepareSumfoldBasis);
     let setup_prepare_ms = elapsed_ms(setup_start);
     let setup_prepare = HyraxSetupPrepareTimings {
         trace_witness_ms,
         setup_ms,
+        prepare_sumfold_basis_ms,
         prepare_ms,
         setup_prepare_ms,
     };
@@ -3561,9 +3627,11 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
     if env_bool_or("SHA256_COMBINED_SWEEP_TRACE_ONCE", false) {
         eprintln!("ProjectionFold instance sweep tracing: instances={N}, l0={L0}");
         eprintln!(
-            "phase probe: prove={:.3} ms commit={:.3} ms sumfold={:.3} ms fold={:.3} ms open={:.3} ms open_core={:.3} ms",
+            "phase probe: prove={:.3} ms commit={:.3} ms sumfold_linear={:.3} ms sumfold_booleanity={:.3} ms sumfold={:.3} ms fold={:.3} ms open={:.3} ms open_core={:.3} ms",
             prove_phases.prove_ms,
             prove_phases.commit_ms,
+            prove_phases.sumfold_linear_ms,
+            prove_phases.sumfold_booleanity_ms,
             prove_phases.sumfold_ms,
             prove_phases.fold_ms,
             prove_phases.open_ms,
@@ -4125,10 +4193,13 @@ fn combined_row_from_og(row: OgSha256InstanceSweepRow) -> Sha256CombinedInstance
         setup_ms: row.setup_ms,
         trace_witness_ms: None,
         pcs_setup_ms: None,
+        prepare_sumfold_basis_ms: None,
         prepare_ms: None,
         setup_prepare_ms: None,
         probe_prove_ms: None,
         probe_commit_ms: None,
+        probe_sumfold_linear_ms: None,
+        probe_sumfold_booleanity_ms: None,
         probe_sumfold_ms: None,
         probe_fold_ms: None,
         probe_open_ms: None,
@@ -4166,10 +4237,13 @@ fn combined_row_from_l0(row: HyraxInstanceSweepRow) -> Sha256CombinedInstanceSwe
         setup_ms: Some(row.setup_ms),
         trace_witness_ms: Some(row.trace_witness_ms),
         pcs_setup_ms: None,
+        prepare_sumfold_basis_ms: Some(row.prepare_sumfold_basis_ms),
         prepare_ms: Some(row.prepare_ms),
         setup_prepare_ms: Some(row.setup_prepare_ms),
         probe_prove_ms: Some(row.probe_prove_ms),
         probe_commit_ms: Some(row.probe_commit_ms),
+        probe_sumfold_linear_ms: Some(row.probe_sumfold_linear_ms),
+        probe_sumfold_booleanity_ms: Some(row.probe_sumfold_booleanity_ms),
         probe_sumfold_ms: Some(row.probe_sumfold_ms),
         probe_fold_ms: Some(row.probe_fold_ms),
         probe_open_ms: Some(row.probe_open_ms),
@@ -4212,10 +4286,13 @@ fn skipped_l0_combined_row(
         setup_ms: None,
         trace_witness_ms: None,
         pcs_setup_ms: None,
+        prepare_sumfold_basis_ms: None,
         prepare_ms: None,
         setup_prepare_ms: None,
         probe_prove_ms: None,
         probe_commit_ms: None,
+        probe_sumfold_linear_ms: None,
+        probe_sumfold_booleanity_ms: None,
         probe_sumfold_ms: None,
         probe_fold_ms: None,
         probe_open_ms: None,
