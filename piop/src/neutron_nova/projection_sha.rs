@@ -449,6 +449,22 @@ pub struct PreparedCanonicalShaBooleanityBasis {
     pub source_row_bits: Box<[u128]>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaPackedPrefixWorkspace {
+    pub prefix_vars: usize,
+    pub tail_len: usize,
+    pub source_row_count: usize,
+    /// Indexed as `[tail][source_row]`. Bit `p` stores the canonical
+    /// booleanity source value for prefix instance `p`.
+    pub masks: Box<[u16]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedShaQuadraticPrefixArtifacts<F: PrimeField> {
+    pub quadratic_prefix_accumulator: Vec<F>,
+    pub packed_prefix_workspace: Option<PreparedShaPackedPrefixWorkspace>,
+}
+
 impl PreparedShaBooleanityBasis {
     pub fn has_canonical(&self) -> bool {
         self.canonical.is_some()
@@ -471,6 +487,14 @@ impl PreparedCanonicalShaBooleanityBasis {
             return Err(ShaProjectionError::RowIndexOutOfRange { row });
         }
         Ok(((self.source_row_bits[source_idx] >> row) & 1) == 1)
+    }
+}
+
+impl PreparedShaPackedPrefixWorkspace {
+    fn mask(&self, tail: usize, source_row: usize) -> u16 {
+        debug_assert!(tail < self.tail_len);
+        debug_assert!(source_row < self.source_row_count);
+        self.masks[suffix_flat_index(tail, source_row, self.source_row_count)]
     }
 }
 
@@ -3461,6 +3485,281 @@ where
     Ok(table)
 }
 
+pub fn build_sha_sumfold_quadratic_prefix_artifacts_from_bases<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    row_weights: &[F],
+    booleanity_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<PreparedShaQuadraticPrefixArtifacts<F>, ShaProjectionError>
+where
+    F: PrimeField + Send + Sync,
+{
+    if bases.is_empty() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: 0 });
+    }
+    if !bases.len().is_power_of_two() {
+        return Err(ShaProjectionError::InstanceCountNotPowerOfTwo { got: bases.len() });
+    }
+    if !is_canonical_production_booleanity_sources(booleanity_sources) {
+        return Err(ShaProjectionError::NonCanonicalProofObject(
+            "prepared booleanity cache requires canonical production SHA sources",
+        ));
+    }
+    if bases
+        .iter()
+        .any(|basis| !basis.booleanity_basis.has_canonical())
+    {
+        return Err(ShaProjectionError::NonCanonicalProofObject(
+            "prepared booleanity cache is not available for these witnesses",
+        ));
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+
+    let ell = usize::try_from(bases.len().trailing_zeros()).expect("trailing_zeros fits usize");
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        return Ok(PreparedShaQuadraticPrefixArtifacts {
+            quadratic_prefix_accumulator: Vec::new(),
+            packed_prefix_workspace: None,
+        });
+    }
+
+    let prefix_len = binary_len(prefix_vars);
+    if prefix_len > u16::BITS as usize || prefix_vars >= ell {
+        return Ok(PreparedShaQuadraticPrefixArtifacts {
+            quadratic_prefix_accumulator:
+                build_sha_sumfold_quadratic_prefix_accumulator_from_bases(
+                    bases,
+                    booleanity_sources,
+                    prefix_vars,
+                    row_weights,
+                    booleanity_weights,
+                    field_cfg,
+                )?,
+            packed_prefix_workspace: None,
+        });
+    }
+
+    let tail_len = binary_len(ell - prefix_vars);
+    let source_row_count = booleanity_sources.len().checked_mul(SHA_ROW_COUNT).ok_or(
+        ShaProjectionError::InstanceCountMismatch {
+            got: booleanity_sources.len(),
+            expected: usize::MAX,
+        },
+    )?;
+    let mut masks = vec![
+        0u16;
+        tail_len.checked_mul(source_row_count).ok_or(
+            ShaProjectionError::InstanceCountMismatch {
+                got: tail_len,
+                expected: usize::MAX,
+            }
+        )?
+    ];
+
+    for tail in 0..tail_len {
+        for source_idx in 0..booleanity_sources.len() {
+            for row in 0..SHA_ROW_COUNT {
+                let source_row = source_idx * SHA_ROW_COUNT + row;
+                let mask = prefix_mask_from_prepared_booleanity(
+                    bases,
+                    source_idx,
+                    row,
+                    tail,
+                    prefix_vars,
+                    prefix_len,
+                )?;
+                masks[suffix_flat_index(tail, source_row, source_row_count)] = u16::try_from(mask)
+                    .map_err(|_| {
+                        ShaProjectionError::NonCanonicalProofObject(
+                            "prepared booleanity prefix mask does not fit u16",
+                        )
+                    })?;
+            }
+        }
+    }
+
+    let packed_prefix_workspace = PreparedShaPackedPrefixWorkspace {
+        prefix_vars,
+        tail_len,
+        source_row_count,
+        masks: masks.into_boxed_slice(),
+    };
+    let quadratic_prefix_accumulator =
+        build_sha_sumfold_quadratic_prefix_accumulator_from_workspace(
+            &packed_prefix_workspace,
+            row_weights,
+            booleanity_weights,
+            field_cfg,
+        )?;
+
+    Ok(PreparedShaQuadraticPrefixArtifacts {
+        quadratic_prefix_accumulator,
+        packed_prefix_workspace: Some(packed_prefix_workspace),
+    })
+}
+
+fn build_sha_sumfold_quadratic_prefix_accumulator_from_workspace<F>(
+    workspace: &PreparedShaPackedPrefixWorkspace,
+    row_weights: &[F],
+    booleanity_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<Vec<F>, ShaProjectionError>
+where
+    F: PrimeField + Send + Sync,
+{
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    let expected_source_row_count = booleanity_weights.len().checked_mul(SHA_ROW_COUNT).ok_or(
+        ShaProjectionError::InstanceCountMismatch {
+            got: booleanity_weights.len(),
+            expected: usize::MAX,
+        },
+    )?;
+    if workspace.source_row_count != expected_source_row_count {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "packed_prefix_workspace",
+            col: 0,
+            got: workspace.source_row_count,
+            expected: expected_source_row_count,
+        });
+    }
+
+    let ternary_len = checked_ternary_len(workspace.prefix_vars)?;
+    let coeff_plans = ternary_coeff_plans(workspace.prefix_vars)?;
+    let partials = cfg_chunks!(row_weights, 8)
+        .enumerate()
+        .map(|(chunk_idx, row_weight_chunk)| {
+            let row_offset = chunk_idx * 8;
+            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * workspace.tail_len];
+            let mut mask_weights = HashMap::new();
+            let mut touched_masks = Vec::new();
+
+            for tail in 0..workspace.tail_len {
+                for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
+                    let row = row_offset + row_in_chunk;
+                    for (source_idx, booleanity_weight) in booleanity_weights.iter().enumerate() {
+                        let source_row = source_idx * SHA_ROW_COUNT + row;
+                        add_booleanity_mask_weight(
+                            &mut mask_weights,
+                            &mut touched_masks,
+                            usize::from(workspace.mask(tail, source_row)),
+                            booleanity_weight,
+                        );
+                    }
+                    flush_booleanity_mask_weights(
+                        &mut partial,
+                        tail,
+                        ternary_len,
+                        &coeff_plans,
+                        &mut mask_weights,
+                        &mut touched_masks,
+                        row_weight,
+                    );
+                }
+            }
+            Ok(partial)
+        })
+        .collect::<Result<Vec<_>, ShaProjectionError>>()?;
+
+    let mut table = vec![F::zero_with_cfg(field_cfg); ternary_len * workspace.tail_len];
+    for partial in partials {
+        for (acc, value) in table.iter_mut().zip(partial) {
+            *acc += value;
+        }
+    }
+    Ok(table)
+}
+
+pub fn prepare_sha_packed_prefix_workspace_from_bases<F>(
+    bases: &[&PreparedShaSumFoldBasis<F>],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+) -> Option<PreparedShaPackedPrefixWorkspace>
+where
+    F: PrimeField,
+{
+    if bases.is_empty() || !bases.len().is_power_of_two() {
+        return None;
+    }
+    if !is_canonical_production_booleanity_sources(booleanity_sources) {
+        return None;
+    }
+    if bases
+        .iter()
+        .any(|basis| !basis.booleanity_basis.has_canonical())
+    {
+        return None;
+    }
+
+    let ell = usize::try_from(bases.len().trailing_zeros()).ok()?;
+    if prefix_vars == 0 || prefix_vars >= ell {
+        return None;
+    }
+    let prefix_len = binary_len(prefix_vars);
+    if prefix_len > u16::BITS as usize {
+        return None;
+    }
+    let tail_len = binary_len(ell - prefix_vars);
+    let source_row_count = booleanity_sources.len().checked_mul(SHA_ROW_COUNT)?;
+    let mut masks = vec![0u16; tail_len.checked_mul(source_row_count)?];
+
+    for tail in 0..tail_len {
+        for source_idx in 0..booleanity_sources.len() {
+            for row in 0..SHA_ROW_COUNT {
+                let source_row = source_idx * SHA_ROW_COUNT + row;
+                let mask = prefix_mask_from_prepared_booleanity(
+                    bases,
+                    source_idx,
+                    row,
+                    tail,
+                    prefix_vars,
+                    prefix_len,
+                )
+                .ok()?;
+                masks[suffix_flat_index(tail, source_row, source_row_count)] =
+                    u16::try_from(mask).ok()?;
+            }
+        }
+    }
+
+    Some(PreparedShaPackedPrefixWorkspace {
+        prefix_vars,
+        tail_len,
+        source_row_count,
+        masks: masks.into_boxed_slice(),
+    })
+}
+
 pub fn is_production_sha_booleanity_sources(booleanity_sources: &[ShaBooleanitySource]) -> bool {
     is_canonical_production_booleanity_sources(booleanity_sources)
 }
@@ -4754,6 +5053,32 @@ where
     where
         Trace: Borrow<ProjectedTrace<F>> + Sync,
     {
+        Self::new_with_owned_accumulators(
+            traces,
+            beta,
+            linear_values.to_vec(),
+            quadratic_values.to_vec(),
+            booleanity_sources.to_vec(),
+            prefix_vars,
+            true,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_owned_accumulators<Trace>(
+        traces: &[Trace],
+        beta: &[F],
+        linear_values: Vec<F>,
+        quadratic_values: Vec<F>,
+        booleanity_sources: Vec<ShaBooleanitySource>,
+        prefix_vars: usize,
+        retain_tail_traces: bool,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError>
+    where
+        Trace: Borrow<ProjectedTrace<F>> + Sync,
+    {
         let ell = validate_sha_sumfold_traces(traces, beta)?;
         if prefix_vars == 0 || prefix_vars > ell {
             return Err(SumFoldError::Ell0TooLarge {
@@ -4780,9 +5105,8 @@ where
             });
         }
 
-        let linear = BinaryPrefixTailTable::new(linear_values.to_vec(), prefix_vars, tail_len);
-        let booleanity =
-            TernaryPrefixTailTable::new(quadratic_values.to_vec(), prefix_vars, tail_len)?;
+        let linear = BinaryPrefixTailTable::new(linear_values, prefix_vars, tail_len);
+        let booleanity = TernaryPrefixTailTable::new(quadratic_values, prefix_vars, tail_len)?;
 
         let tail_eq_weights = eq_weights_or_one(&beta[prefix_vars..], field_cfg)?;
         let mut prefix_suffix_eq_weights = Vec::with_capacity(prefix_vars);
@@ -4791,7 +5115,7 @@ where
                 .push(eq_weights_or_one(&beta[round + 1..prefix_vars], field_cfg)?);
         }
 
-        let tail_traces = if tail_vars == 0 {
+        let tail_traces = if tail_vars == 0 || !retain_tail_traces {
             None
         } else {
             Some(
@@ -4806,7 +5130,7 @@ where
         Ok(Self {
             tail_traces,
             beta: beta.to_vec(),
-            booleanity_sources: booleanity_sources.to_vec(),
+            booleanity_sources,
             linear,
             booleanity,
             tail_eq_weights,
@@ -5059,6 +5383,7 @@ struct RelationSumFoldAllRoundsFastPath<F: PrimeField> {
     prefix: RelationSumFoldPrefixFastPath<F>,
     total_vars: usize,
     prefix_vars: usize,
+    packed_prefix_workspace: Option<PreparedShaPackedPrefixWorkspace>,
     live_linear: Option<LinearClaimTable<F>>,
     live_eq_weights: Option<CollapsedSuffixEqWeights<F>>,
     row_weights: Vec<F>,
@@ -5067,6 +5392,7 @@ struct RelationSumFoldAllRoundsFastPath<F: PrimeField> {
     current_claim: Option<F>,
     last_round_evaluations: Option<[F; 4]>,
     suffix: Option<RelationSumFoldSuffixState<F>>,
+    packed_suffix: Option<PackedShaSuffixState<F>>,
 }
 
 impl<F> RelationSumFoldAllRoundsFastPath<F>
@@ -5106,6 +5432,7 @@ where
             prefix,
             total_vars,
             prefix_vars,
+            packed_prefix_workspace: None,
             live_linear: None,
             live_eq_weights: None,
             row_weights,
@@ -5114,18 +5441,19 @@ where
             current_claim: None,
             last_round_evaluations: None,
             suffix: None,
+            packed_suffix: None,
         })
     }
 
     fn new_with_initial_claim(
-        prefix: RelationSumFoldPrefixFastPath<F>,
+        mut prefix: RelationSumFoldPrefixFastPath<F>,
         row_weights: Vec<F>,
         booleanity_weights: Vec<F>,
         initial_claim: F,
         field_cfg: &F::Config,
     ) -> Result<Self, ShaProjectionError> {
         let live_eq_weights = CollapsedSuffixEqWeights::new(&prefix.beta, field_cfg)?;
-        let live_linear = LinearClaimTable::new(prefix.linear.values.clone())?;
+        let live_linear = LinearClaimTable::new(std::mem::take(&mut prefix.linear.values))?;
         let mut out = Self::new(prefix, row_weights, booleanity_weights)?;
         out.current_claim = Some(initial_claim);
         out.live_linear = Some(live_linear);
@@ -5160,6 +5488,8 @@ where
             if self.prefix.booleanity.prefix_vars == 0 && self.prefix_vars < self.total_vars {
                 self.initialize_suffix(field_cfg)?;
             }
+        } else if let Some(suffix) = self.packed_suffix.as_mut() {
+            suffix.bind_previous_challenge(r, &current_claim, field_cfg);
         } else if let Some(suffix) = self.suffix.as_mut() {
             suffix.bind_previous_challenge(r, &current_claim, field_cfg);
         }
@@ -5185,11 +5515,27 @@ where
         let tail_len = binary_len(tail_vars);
         let linear_claims = self
             .live_linear
-            .as_ref()
-            .map(|linear| linear.values.clone())
-            .unwrap_or_else(|| self.prefix.linear.values.clone());
+            .take()
+            .map(|linear| linear.values)
+            .unwrap_or_else(|| std::mem::take(&mut self.prefix.linear.values));
         debug_assert_eq!(linear_claims.len(), tail_len);
         let prefix_weights = eq_weights_or_one(&self.prefix_challenges, field_cfg)?;
+        if let Some(workspace) = self.packed_prefix_workspace.take() {
+            self.packed_suffix = Some(PackedShaSuffixState::new(
+                self.prefix.beta.clone(),
+                self.prefix_vars,
+                self.prefix.eq_bound.clone(),
+                LinearClaimTable::new(linear_claims)?,
+                workspace,
+                prefix_weights,
+                self.row_weights.clone(),
+                self.booleanity_weights.clone(),
+                field_cfg,
+            )?);
+            self.live_eq_weights = None;
+            return Ok(());
+        }
+
         let traces = self
             .prefix
             .tail_traces
@@ -5214,7 +5560,6 @@ where
             self.booleanity_weights.clone(),
             field_cfg,
         )?);
-        self.live_linear = None;
         self.live_eq_weights = None;
         Ok(())
     }
@@ -5337,11 +5682,15 @@ where
             .as_ref()
             .expect("SHA suffix SumFold claim should be fixed by previous challenge")
             .clone();
-        let suffix = self
-            .suffix
-            .as_mut()
-            .expect("SHA suffix fast path should be initialized after L0");
-        let evaluations = suffix.prove_round(&current_claim, field_cfg);
+        let evaluations = if let Some(suffix) = self.packed_suffix.as_mut() {
+            suffix.prove_round(&current_claim, field_cfg)
+        } else {
+            let suffix = self
+                .suffix
+                .as_mut()
+                .expect("SHA suffix fast path should be initialized after L0");
+            suffix.prove_round(&current_claim, field_cfg)
+        };
         let [_p0, p1, p2, p3] = evaluations.clone();
         self.last_round_evaluations = Some(evaluations);
         PrefixRoundOutput {
@@ -5627,6 +5976,329 @@ where
             self.suffix_eq_weights.len() * self.booleanity_claims.source_row_count()
         );
     }
+}
+
+struct PackedShaSuffixState<F: PrimeField> {
+    beta: Vec<F>,
+    suffix_start: usize,
+    round: usize,
+    alpha: F,
+    linear_claims: LinearClaimTable<F>,
+    workspace: PreparedShaPackedPrefixWorkspace,
+    mask_weight_sums: Vec<F>,
+    active_tail_weights: Vec<Vec<(usize, F)>>,
+    source_row_weights: Vec<F>,
+    suffix_eq_weights: CollapsedSuffixEqWeights<F>,
+    prepared_round: Option<SuffixRoundBuckets<F>>,
+}
+
+impl<F> PackedShaSuffixState<F>
+where
+    F: PrimeField,
+{
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        beta: Vec<F>,
+        suffix_start: usize,
+        alpha: F,
+        linear_claims: LinearClaimTable<F>,
+        workspace: PreparedShaPackedPrefixWorkspace,
+        prefix_weights: Vec<F>,
+        row_weights: Vec<F>,
+        booleanity_weights: Vec<F>,
+        field_cfg: &F::Config,
+    ) -> Result<Self, ShaProjectionError> {
+        let suffix_vars = beta.len() - suffix_start;
+        let suffix_len = binary_len(suffix_vars);
+        if workspace.prefix_vars != suffix_start {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: workspace.prefix_vars,
+                expected: suffix_start,
+            });
+        }
+        if workspace.tail_len != suffix_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: workspace.tail_len,
+                expected: suffix_len,
+            });
+        }
+        if linear_claims.values.len() != suffix_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: linear_claims.values.len(),
+                expected: suffix_len,
+            });
+        }
+        if row_weights.len() != SHA_ROW_COUNT {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "row_weights",
+                col: 0,
+                got: row_weights.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        let expected_source_row_count = booleanity_weights.len() * SHA_ROW_COUNT;
+        if workspace.source_row_count != expected_source_row_count {
+            return Err(ShaProjectionError::ColumnRowCount {
+                kind: "packed_prefix_workspace",
+                col: 0,
+                got: workspace.source_row_count,
+                expected: expected_source_row_count,
+            });
+        }
+        let prefix_len = binary_len(workspace.prefix_vars);
+        if prefix_weights.len() != prefix_len {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: prefix_weights.len(),
+                expected: prefix_len,
+            });
+        }
+
+        let suffix_eq_weights = CollapsedSuffixEqWeights::new(&beta[suffix_start..], field_cfg)?;
+        let mut source_row_weights = Vec::with_capacity(expected_source_row_count);
+        for booleanity_weight in &booleanity_weights {
+            for row_weight in &row_weights {
+                source_row_weights.push(row_weight.clone() * booleanity_weight);
+            }
+        }
+        let one = F::one_with_cfg(field_cfg);
+        let active_tail_weights = (0..suffix_len)
+            .map(|tail| vec![(tail, one.clone())])
+            .collect();
+
+        Ok(Self {
+            beta,
+            suffix_start,
+            round: 0,
+            alpha,
+            linear_claims,
+            workspace,
+            mask_weight_sums: build_prefix_mask_weight_sums(&prefix_weights, field_cfg),
+            active_tail_weights,
+            source_row_weights,
+            suffix_eq_weights,
+            prepared_round: None,
+        })
+    }
+
+    fn prove_round(&mut self, current_claim: &F, field_cfg: &F::Config) -> [F; 4] {
+        debug_assert!(self.round < self.suffix_vars());
+        self.debug_assert_live_lengths();
+        let need_t_one = self.current_round_needs_direct_one(field_cfg);
+        let buckets = self
+            .prepared_round
+            .take()
+            .unwrap_or_else(|| self.scan_round_buckets(need_t_one, field_cfg));
+        let evaluations = self.round_evaluations_from_buckets(current_claim, &buckets, field_cfg);
+        self.round += 1;
+        evaluations
+    }
+
+    fn round_evaluations_from_buckets(
+        &self,
+        current_claim: &F,
+        buckets: &SuffixRoundBuckets<F>,
+        field_cfg: &F::Config,
+    ) -> [F; 4] {
+        let beta_idx = self.suffix_start + self.round;
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let two = one.clone() + &one;
+        let three = two.clone() + &one;
+        let e_zero = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &zero, field_cfg);
+        let e_one = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &one, field_cfg);
+        let t_zero = &buckets.t_zero;
+        let t_infinity = &buckets.t_infinity;
+        let t_one = if F::is_zero(&e_one) {
+            buckets
+                .t_one_direct
+                .clone()
+                .expect("zero e1 suffix round should carry a direct T1 bucket")
+        } else {
+            (current_claim.clone() - e_zero.clone() * buckets.t_zero.clone()) / e_one
+        };
+
+        let eval_at = |x: &F| {
+            let eq = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], x, field_cfg);
+            eq * eval_quadratic_from_zero_one_infinity(t_zero, &t_one, t_infinity, x, field_cfg)
+        };
+
+        let p0 = e_zero * t_zero.clone();
+        let p1 = eval_at(&one);
+        let p2 = eval_at(&two);
+        let p3 = eval_at(&three);
+        [p0, p1, p2, p3]
+    }
+
+    fn bind_previous_challenge(&mut self, r: &F, _current_claim: &F, field_cfg: &F::Config) {
+        debug_assert!(self.round > 0);
+        debug_assert!(self.prepared_round.is_none());
+        let beta_idx = self.suffix_start + self.round - 1;
+        self.alpha *= eq_one_var(&self.beta[beta_idx], r, field_cfg);
+
+        if self.round < self.suffix_vars() {
+            self.linear_claims.fold_in_place(r);
+            self.fold_active_tail_weights(r, field_cfg);
+            self.suffix_eq_weights.collapse_current_axis();
+            let need_t_one = self.current_round_needs_direct_one(field_cfg);
+            self.prepared_round = Some(self.scan_round_buckets(need_t_one, field_cfg));
+        } else {
+            self.linear_claims.fold_in_place(r);
+            self.fold_active_tail_weights(r, field_cfg);
+            self.suffix_eq_weights.collapse_current_axis();
+            self.prepared_round = None;
+        }
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn reduced_body_buckets(&self, field_cfg: &F::Config) -> (F, F) {
+        self.debug_assert_live_lengths();
+        let rest_len = self.suffix_eq_weights.len() >> 1;
+        let one = F::one_with_cfg(field_cfg);
+        let mut linear_zero = F::zero_with_cfg(field_cfg);
+        let mut quadratic_zero = F::zero_with_cfg(field_cfg);
+        let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
+
+        for rest in 0..rest_len {
+            let even_tail = rest << 1;
+            let odd_tail = even_tail + 1;
+            let weight = self.suffix_eq_weights.pair_weight(rest);
+            linear_zero += weight.clone() * self.linear_claims.values[even_tail].clone();
+
+            let mut source_zero = F::zero_with_cfg(field_cfg);
+            let mut source_infinity = F::zero_with_cfg(field_cfg);
+            for (source_row, scale) in self.source_row_weights.iter().enumerate() {
+                if F::is_zero(scale) {
+                    continue;
+                }
+                let even = self.source_value(even_tail, source_row, field_cfg);
+                let odd = self.source_value(odd_tail, source_row, field_cfg);
+                source_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
+                let delta = odd - even;
+                source_infinity += scale.clone() * delta.clone() * delta;
+            }
+
+            quadratic_zero += weight.clone() * source_zero;
+            quadratic_infinity += weight * source_infinity;
+        }
+
+        (linear_zero + quadratic_zero, quadratic_infinity)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn direct_one_body_bucket(&self, field_cfg: &F::Config) -> F {
+        self.debug_assert_live_lengths();
+        let rest_len = self.suffix_eq_weights.len() >> 1;
+        let one = F::one_with_cfg(field_cfg);
+        let mut acc = F::zero_with_cfg(field_cfg);
+
+        for rest in 0..rest_len {
+            let odd_tail = (rest << 1) + 1;
+            let weight = self.suffix_eq_weights.pair_weight(rest);
+            acc += weight.clone() * self.linear_claims.values[odd_tail].clone();
+
+            let mut source_one = F::zero_with_cfg(field_cfg);
+            for (source_row, scale) in self.source_row_weights.iter().enumerate() {
+                if F::is_zero(scale) {
+                    continue;
+                }
+                let odd = self.source_value(odd_tail, source_row, field_cfg);
+                source_one += scale.clone() * odd.clone() * (odd - one.clone());
+            }
+            acc += weight * source_one;
+        }
+
+        acc
+    }
+
+    fn scan_round_buckets(&self, need_t_one: bool, field_cfg: &F::Config) -> SuffixRoundBuckets<F> {
+        let (t_zero, t_infinity) = self.reduced_body_buckets(field_cfg);
+        let t_one_direct = need_t_one.then(|| self.direct_one_body_bucket(field_cfg));
+        SuffixRoundBuckets {
+            t_zero,
+            t_infinity,
+            t_one_direct,
+        }
+    }
+
+    fn current_round_needs_direct_one(&self, field_cfg: &F::Config) -> bool {
+        let beta_idx = self.suffix_start + self.round;
+        let one = F::one_with_cfg(field_cfg);
+        let e_one = self.alpha.clone() * eq_one_var(&self.beta[beta_idx], &one, field_cfg);
+        F::is_zero(&e_one)
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn source_value(&self, tail: usize, source_row: usize, field_cfg: &F::Config) -> F {
+        let mut acc = F::zero_with_cfg(field_cfg);
+        for (leaf_tail, fold_weight) in &self.active_tail_weights[tail] {
+            if F::is_zero(fold_weight) {
+                continue;
+            }
+            let mask = usize::from(self.workspace.mask(*leaf_tail, source_row));
+            if mask == 0 {
+                continue;
+            }
+            acc += fold_weight.clone() * &self.mask_weight_sums[mask];
+        }
+        acc
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn fold_active_tail_weights(&mut self, r: &F, field_cfg: &F::Config) {
+        debug_assert!(self.active_tail_weights.len().is_power_of_two());
+        debug_assert!(self.active_tail_weights.len() >= 2);
+        let half = self.active_tail_weights.len() >> 1;
+        let one = F::one_with_cfg(field_cfg);
+        let one_minus_r = one - r;
+        let mut next = Vec::with_capacity(half);
+
+        for idx in 0..half {
+            let even = &self.active_tail_weights[idx << 1];
+            let odd = &self.active_tail_weights[(idx << 1) + 1];
+            let mut combined = Vec::with_capacity(even.len() + odd.len());
+            for (leaf_tail, weight) in even {
+                combined.push((*leaf_tail, weight.clone() * &one_minus_r));
+            }
+            for (leaf_tail, weight) in odd {
+                combined.push((*leaf_tail, weight.clone() * r));
+            }
+            next.push(combined);
+        }
+
+        self.active_tail_weights = next;
+    }
+
+    fn suffix_vars(&self) -> usize {
+        self.beta.len() - self.suffix_start
+    }
+
+    fn debug_assert_live_lengths(&self) {
+        debug_assert_eq!(
+            self.linear_claims.values.len(),
+            self.suffix_eq_weights.len()
+        );
+        debug_assert_eq!(self.active_tail_weights.len(), self.suffix_eq_weights.len());
+        debug_assert_eq!(
+            self.source_row_weights.len(),
+            self.workspace.source_row_count
+        );
+    }
+}
+
+fn build_prefix_mask_weight_sums<F>(prefix_weights: &[F], field_cfg: &F::Config) -> Vec<F>
+where
+    F: PrimeField,
+{
+    let table_len = 1usize
+        .checked_shl(u32::try_from(prefix_weights.len()).expect("prefix length fits u32"))
+        .expect("prefix mask table fits usize");
+    let mut sums = vec![F::zero_with_cfg(field_cfg); table_len];
+    for mask in 1..table_len {
+        let bit = usize::try_from(mask.trailing_zeros()).expect("bit index fits usize");
+        let previous = mask ^ (1usize << bit);
+        sums[mask] = sums[previous].clone() + &prefix_weights[bit];
+    }
+    sums
 }
 
 fn eval_quadratic_from_zero_one_infinity<F>(
@@ -6001,10 +6673,8 @@ where
         booleanity_weights.to_vec(),
     )?;
 
-    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
         3,
-        Vec::new(),
-        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights.to_vec(), field_cfg),
         Box::new(fast_path),
     ))
 }
@@ -6104,10 +6774,230 @@ where
         field_cfg,
     )?;
 
-    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
         3,
-        Vec::new(),
-        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights.to_vec(), field_cfg),
+        Box::new(fast_path),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_production_sha_sumfold_group_from_prepared_prefix_accumulators_with_initial_claim<
+    F,
+    Trace,
+>(
+    traces: &[Trace],
+    sumfold_bases: &[&PreparedShaSumFoldBasis<F>],
+    beta: &[F],
+    beta_eq_weights: &[F],
+    row_weights: &[F],
+    linear_accumulator: &[F],
+    quadratic_prefix_accumulator: &[F],
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    initial_claim: &F,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let ell = validate_sha_sumfold_traces(traces, beta)?;
+    if sumfold_bases.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: sumfold_bases.len(),
+            expected: traces.len(),
+        });
+    }
+    if beta_eq_weights.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta_eq_weights.len(),
+            expected: traces.len(),
+        });
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if linear_accumulator.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_accumulator.len(),
+            expected: traces.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    if prefix_vars == 0 {
+        if !quadratic_prefix_accumulator.is_empty() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: quadratic_prefix_accumulator.len(),
+                expected: 0,
+            });
+        }
+        return build_dense_sha_sumfold_group_from_accumulators(
+            traces,
+            beta,
+            beta_eq_weights,
+            row_weights,
+            linear_accumulator,
+            booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        );
+    }
+
+    let quadratic_artifacts = PreparedShaQuadraticPrefixArtifacts {
+        quadratic_prefix_accumulator: quadratic_prefix_accumulator.to_vec(),
+        packed_prefix_workspace: prepare_sha_packed_prefix_workspace_from_bases(
+            sumfold_bases,
+            booleanity_sources,
+            prefix_vars,
+        ),
+    };
+    build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim(
+        traces,
+        beta,
+        beta_eq_weights,
+        row_weights,
+        linear_accumulator.to_vec(),
+        quadratic_artifacts,
+        booleanity_weights,
+        booleanity_sources,
+        prefix_vars,
+        initial_claim,
+        field_cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim<
+    F,
+    Trace,
+>(
+    traces: &[Trace],
+    beta: &[F],
+    beta_eq_weights: &[F],
+    row_weights: &[F],
+    linear_accumulator: Vec<F>,
+    quadratic_artifacts: PreparedShaQuadraticPrefixArtifacts<F>,
+    booleanity_weights: &[F],
+    booleanity_sources: &[ShaBooleanitySource],
+    prefix_vars: usize,
+    initial_claim: &F,
+    field_cfg: &F::Config,
+) -> Result<MultiDegreeSumcheckGroup<F>, ShaProjectionError>
+where
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaSuffixScannerField
+        + Send
+        + Sync
+        + 'static,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let ell = validate_sha_sumfold_traces(traces, beta)?;
+    if beta_eq_weights.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: beta_eq_weights.len(),
+            expected: traces.len(),
+        });
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if linear_accumulator.len() != traces.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: linear_accumulator.len(),
+            expected: traces.len(),
+        });
+    }
+    if booleanity_weights.len() != booleanity_sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "booleanity_weights",
+            col: 0,
+            got: booleanity_weights.len(),
+            expected: booleanity_sources.len(),
+        });
+    }
+    if prefix_vars > ell {
+        return Err(SumFoldError::Ell0TooLarge {
+            ell0: prefix_vars,
+            ell,
+        }
+        .into());
+    }
+    let PreparedShaQuadraticPrefixArtifacts {
+        quadratic_prefix_accumulator,
+        packed_prefix_workspace,
+    } = quadratic_artifacts;
+    if prefix_vars == 0 {
+        if !quadratic_prefix_accumulator.is_empty() {
+            return Err(ShaProjectionError::InstanceCountMismatch {
+                got: quadratic_prefix_accumulator.len(),
+                expected: 0,
+            });
+        }
+        return build_dense_sha_sumfold_group_from_accumulators(
+            traces,
+            beta,
+            beta_eq_weights,
+            row_weights,
+            &linear_accumulator,
+            booleanity_weights,
+            booleanity_sources,
+            field_cfg,
+        );
+    }
+
+    let retain_tail_traces = packed_prefix_workspace.is_none();
+    let prefix_fast_path = RelationSumFoldPrefixFastPath::new_with_owned_accumulators(
+        traces,
+        beta,
+        linear_accumulator,
+        quadratic_prefix_accumulator,
+        booleanity_sources.to_vec(),
+        prefix_vars,
+        retain_tail_traces,
+        field_cfg,
+    )?;
+    let mut fast_path = RelationSumFoldAllRoundsFastPath::new_with_initial_claim(
+        prefix_fast_path,
+        row_weights.to_vec(),
+        booleanity_weights.to_vec(),
+        initial_claim.clone(),
+        field_cfg,
+    )?;
+    fast_path.packed_prefix_workspace = packed_prefix_workspace;
+
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
+        3,
         Box::new(fast_path),
     ))
 }
@@ -6174,16 +7064,11 @@ where
         prefix_vars,
         field_cfg,
     )?;
-    let fast_path = RelationSumFoldAllRoundsFastPath::new(
-        prefix_fast_path,
-        row_weights.clone(),
-        booleanity_weights.clone(),
-    )?;
+    let fast_path =
+        RelationSumFoldAllRoundsFastPath::new(prefix_fast_path, row_weights, booleanity_weights)?;
 
-    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
         3,
-        Vec::new(),
-        sha_weighted_sumfold_comb_fn(row_weights, booleanity_weights, field_cfg),
         Box::new(fast_path),
     ))
 }
@@ -6326,10 +7211,8 @@ where
         booleanity_weights.clone(),
     )?;
 
-    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
         3,
-        Vec::new(),
-        sha_weighted_sumfold_comb_fn(row_weights.to_vec(), booleanity_weights, field_cfg),
         Box::new(fast_path),
     ))
 }
@@ -6443,16 +7326,11 @@ where
         prefix_vars,
         field_cfg,
     )?;
-    let fast_path = RelationSumFoldAllRoundsFastPath::new(
-        prefix_fast_path,
-        row_weights.clone(),
-        booleanity_weights.clone(),
-    )?;
+    let fast_path =
+        RelationSumFoldAllRoundsFastPath::new(prefix_fast_path, row_weights, booleanity_weights)?;
 
-    Ok(MultiDegreeSumcheckGroup::with_prefix_fast(
+    Ok(MultiDegreeSumcheckGroup::with_full_prefix_fast(
         3,
-        Vec::new(),
-        sha_weighted_sumfold_comb_fn(row_weights, booleanity_weights, field_cfg),
         Box::new(fast_path),
     ))
 }
@@ -10830,9 +11708,225 @@ mod tests {
                     &cfg,
                 )
                 .unwrap();
+                let artifacts = build_sha_sumfold_quadratic_prefix_artifacts_from_bases(
+                    &basis_refs,
+                    &sources,
+                    prefix_vars,
+                    &row_weights,
+                    &booleanity_weights,
+                    &cfg,
+                )
+                .unwrap();
                 assert_eq!(cached, direct);
+                assert_eq!(artifacts.quadratic_prefix_accumulator, direct);
             }
         }
+    }
+
+    #[test]
+    fn packed_prefix_workspace_matches_canonical_prefix_binding() {
+        let cfg = test_config();
+        let a = f(7);
+        let sources = production_sha_booleanity_sources();
+
+        for instance_count in [8usize, 32] {
+            let ell = usize::try_from(instance_count.trailing_zeros()).expect("ell fits usize");
+            let traces = (0..instance_count)
+                .map(|idx| packed_booleanity_trace(u64::try_from(idx).unwrap(), &a))
+                .collect::<Vec<_>>();
+            let publics = (0..instance_count)
+                .map(|_| zero_public())
+                .collect::<Vec<_>>();
+            let bases = traces
+                .iter()
+                .zip(&publics)
+                .map(|(trace, public)| prepare_sha_sumfold_basis(trace, public, &cfg).unwrap())
+                .collect::<Vec<_>>();
+            let basis_refs = bases.iter().collect::<Vec<_>>();
+
+            for prefix_vars in 1..ell {
+                let prefix_challenges = (0..prefix_vars)
+                    .map(|idx| f(u64::try_from(31 + idx * 6).unwrap()))
+                    .collect::<Vec<_>>();
+                let prefix_weights = eq_weights_or_one(&prefix_challenges, &cfg).unwrap();
+                let tail_len = binary_len(ell - prefix_vars);
+                let field_table = bind_canonical_sha_booleanity_sources_to_prefix(
+                    &traces,
+                    prefix_vars,
+                    tail_len,
+                    &prefix_weights,
+                    &cfg,
+                )
+                .unwrap();
+                let workspace = prepare_sha_packed_prefix_workspace_from_bases(
+                    &basis_refs,
+                    &sources,
+                    prefix_vars,
+                )
+                .expect("canonical packed basis should build a prefix workspace");
+                let mask_weight_sums = build_prefix_mask_weight_sums(&prefix_weights, &cfg);
+
+                assert_eq!(workspace.tail_len, tail_len);
+                assert_eq!(workspace.source_row_count, field_table.source_row_count());
+                for tail in 0..tail_len {
+                    for source_row in 0..workspace.source_row_count {
+                        let expected = field_table.value(tail, source_row);
+                        let actual =
+                            &mask_weight_sums[usize::from(workspace.mask(tail, source_row))];
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_suffix_state_matches_field_suffix_state_rounds() {
+        let cfg = test_config();
+        let a = f(7);
+        let ell = 3usize;
+        let prefix_vars = 1usize;
+        let sources = production_sha_booleanity_sources();
+        let traces = (0..binary_len(ell))
+            .map(|idx| packed_booleanity_trace(u64::try_from(idx).unwrap(), &a))
+            .collect::<Vec<_>>();
+        let publics = (0..traces.len()).map(|_| zero_public()).collect::<Vec<_>>();
+        let bases = traces
+            .iter()
+            .zip(&publics)
+            .map(|(trace, public)| prepare_sha_sumfold_basis(trace, public, &cfg).unwrap())
+            .collect::<Vec<_>>();
+        let basis_refs = bases.iter().collect::<Vec<_>>();
+        let workspace =
+            prepare_sha_packed_prefix_workspace_from_bases(&basis_refs, &sources, prefix_vars)
+                .expect("canonical packed basis should build a prefix workspace");
+        let prefix_challenges = vec![f(31)];
+        let prefix_weights = eq_weights_or_one(&prefix_challenges, &cfg).unwrap();
+        let tail_len = binary_len(ell - prefix_vars);
+        let booleanity_claims = bind_canonical_sha_booleanity_sources_to_prefix(
+            &traces,
+            prefix_vars,
+            tail_len,
+            &prefix_weights,
+            &cfg,
+        )
+        .unwrap();
+        let beta = vec![f(5), f(7), f(11)];
+        let alpha = f(13);
+        let linear_claims = vec![f(17), f(19), f(23), f(29)];
+        let mut row_weights = vec![F::zero_with_cfg(&cfg); SHA_ROW_COUNT];
+        row_weights[0] = f(37);
+        row_weights[1] = f(41);
+        let mut booleanity_weights = vec![F::zero_with_cfg(&cfg); sources.len()];
+        booleanity_weights[0] = f(43);
+        booleanity_weights[1] = f(47);
+        booleanity_weights[ShaWordCol::COUNT * SHA_WORD_BITS] = f(53);
+
+        let mut field_suffix = RelationSumFoldSuffixState::new(
+            beta.clone(),
+            prefix_vars,
+            alpha.clone(),
+            LinearClaimTable::new(linear_claims.clone()).unwrap(),
+            booleanity_claims,
+            row_weights.clone(),
+            booleanity_weights.clone(),
+            &cfg,
+        )
+        .unwrap();
+        let mut packed_suffix = PackedShaSuffixState::new(
+            beta,
+            prefix_vars,
+            alpha,
+            LinearClaimTable::new(linear_claims).unwrap(),
+            workspace,
+            prefix_weights,
+            row_weights,
+            booleanity_weights,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut current_claim = f(59);
+        for challenge in [f(61), f(67)] {
+            let field_evaluations = field_suffix.prove_round(&current_claim, &cfg);
+            let packed_evaluations = packed_suffix.prove_round(&current_claim, &cfg);
+            assert_eq!(packed_evaluations, field_evaluations);
+
+            current_claim =
+                eval_cubic_from_zero_one_two_three(&field_evaluations, &challenge, &cfg);
+            field_suffix.bind_previous_challenge(&challenge, &current_claim, &cfg);
+            packed_suffix.bind_previous_challenge(&challenge, &current_claim, &cfg);
+        }
+    }
+
+    #[test]
+    fn prepared_packed_sumfold_group_matches_dense_sumcheck() {
+        let cfg = test_config();
+        let ell = 2usize;
+        let prefix_vars = 1usize;
+        let a = f(7);
+        let traces = (0..binary_len(ell))
+            .map(|idx| packed_booleanity_trace(u64::try_from(idx).unwrap(), &a))
+            .collect::<Vec<_>>();
+        let publics = vec![zero_public(); traces.len()];
+        let bases = traces
+            .iter()
+            .zip(&publics)
+            .map(|(trace, public)| prepare_sha_sumfold_basis(trace, public, &cfg).unwrap())
+            .collect::<Vec<_>>();
+        let basis_refs = bases.iter().collect::<Vec<_>>();
+        let beta = vec![f(5), f(11)];
+        let beta_eq_weights = build_eq_x_r_vec(&beta, &cfg).unwrap();
+        let r_ic = [f(2), f(3), f(5), f(7), f(11), f(13), f(17)];
+        let row_weights = build_eq_x_r_vec(&r_ic, &cfg).unwrap();
+        let lambda = f(19);
+        let rho = f(23);
+        let xi = f(29);
+        let sources = production_sha_booleanity_sources();
+        let a_powers = build_sha_residual_eval_powers(&a, &cfg);
+        let lambda_powers = build_sha_lambda_powers(&lambda, &cfg);
+        let booleanity_weights = build_booleanity_weights(&rho, &xi, sources.len(), &cfg);
+        let coeff_tables =
+            build_linear_residual_coeff_tables(&traces, &publics, &r_ic, &cfg).unwrap();
+        let linear_accumulator =
+            build_sha_sumfold_linear_accumulator(&coeff_tables, &a_powers, &lambda_powers, &cfg)
+                .unwrap();
+        let quadratic_artifacts = build_sha_sumfold_quadratic_prefix_artifacts_from_bases(
+            &basis_refs,
+            &sources,
+            prefix_vars,
+            &row_weights,
+            &booleanity_weights,
+            &cfg,
+        )
+        .unwrap();
+
+        let dense = build_dense_sha_sumfold_group(
+            &traces, &publics, &beta, &r_ic, &a, &lambda, &rho, &xi, &sources, &cfg,
+        )
+        .unwrap();
+        let (dense_proof, dense_point, dense_expected) = prove_and_verify_sumfold(dense, ell);
+        let initial_claim = dense_proof.claimed_sums()[0].clone();
+        let packed =
+            build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim(
+                &traces,
+                &beta,
+                &beta_eq_weights,
+                &row_weights,
+                linear_accumulator,
+                quadratic_artifacts,
+                &booleanity_weights,
+                &sources,
+                prefix_vars,
+                &initial_claim,
+                &cfg,
+            )
+            .unwrap();
+        let (packed_proof, packed_point, packed_expected) = prove_and_verify_sumfold(packed, ell);
+
+        assert_eq!(packed_proof, dense_proof);
+        assert_eq!(packed_point, dense_point);
+        assert_eq!(packed_expected, dense_expected);
     }
 
     #[test]

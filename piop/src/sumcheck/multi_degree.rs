@@ -254,6 +254,19 @@ impl<F: PrimeField> MultiDegreeSumcheckGroup<F> {
         }
     }
 
+    /// Construct a group whose fast path covers all rounds. The standard
+    /// combiner is unreachable in this mode, so avoid capturing dense fallback
+    /// state during group construction.
+    pub fn with_full_prefix_fast(degree: usize, prefix_fast: Box<dyn PrefixFastPath<F>>) -> Self {
+        debug_assert!(prefix_fast.requires_full_prefix());
+        Self {
+            degree,
+            poly: Vec::new(),
+            comb_fn: Box::new(|_| panic!("full-prefix fast path should not call comb_fn")),
+            prefix_fast: Some(prefix_fast),
+        }
+    }
+
     /// Construct an opt-in equality-factorized group for
     /// `P(x) = eq(beta, x) * H(x)`.
     ///

@@ -43,19 +43,21 @@ use zinc_piop::{
     neutron_nova::SumFoldError,
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
-        NUM_SHA_RESIDUAL_FAMILIES, PreparedShaSumFoldBasis, ProjectedPublic, ProjectedTrace,
-        ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-        ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol,
-        ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol,
-        ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode, ShaSuffixScannerField,
-        ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
-        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
+        NUM_SHA_RESIDUAL_FAMILIES, PreparedShaQuadraticPrefixArtifacts, PreparedShaSumFoldBasis,
+        ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
+        SHA_WORD_BITS, ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource,
+        ShaIntCol, ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError,
+        ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode,
+        ShaSuffixScannerField, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
+        bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
+        build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
+        build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim,
         build_sha_lambda_powers, build_sha_residual_eval_powers,
         build_sha_sumfold_linear_accumulator, build_sha_sumfold_linear_accumulator_from_bases,
         build_sha_sumfold_linear_accumulator_from_small_bases,
         build_sha_sumfold_quadratic_prefix_accumulator,
-        build_sha_sumfold_quadratic_prefix_accumulator_from_bases, derive_instance_fold_claim,
+        build_sha_sumfold_quadratic_prefix_artifacts_from_bases, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
         folded_row_integrand_sum, is_production_sha_booleanity_sources, prepare_sha_sumfold_basis,
         production_sha_booleanity_sources, production_sha_nonzero_families,
@@ -670,7 +672,7 @@ type ProductionShaPackedHyraxFreshArtifacts<'a, C: AffineRepr, Zt, F, const D: u
     Vec<&'a ProjectedPublic<F>>,
 );
 
-type ProductionShaSumfoldAccumulators<F> = (Vec<F>, Vec<F>, MultiDegreeSumcheckGroup<F>);
+type ProductionShaSumfoldAccumulators<F> = MultiDegreeSumcheckGroup<F>;
 
 type ProductionShaFoldAfterSumfold<P, Zt, F, const D: usize> = (
     ProjectionFoldWitness<F>,
@@ -1827,21 +1829,20 @@ where
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
 
-    let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
-        build_sumfold_accumulators_phase(
-            &traces,
-            &publics,
-            &sumfold_bases,
-            &beta,
-            &beta_eq_weights,
-            &r_ic_eq_weights,
-            &linear_weight_plan,
-            &booleanity_weights,
-            &booleanity_sources,
-            pp.prefix_vars,
-            &initial_claim,
-            field_cfg,
-        )?;
+    let sumfold_group = build_sumfold_accumulators_phase(
+        &traces,
+        &publics,
+        &sumfold_bases,
+        &beta,
+        &beta_eq_weights,
+        &r_ic_eq_weights,
+        &linear_weight_plan,
+        &booleanity_weights,
+        &booleanity_sources,
+        pp.prefix_vars,
+        &initial_claim,
+        field_cfg,
+    )?;
 
     let (sumfold_proof, sumfold_r_b, sumfold_c_sf) = prove_sumfold_phase(
         transcript,
@@ -2063,21 +2064,20 @@ where
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
 
-    let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
-        build_sumfold_accumulators_phase(
-            &traces,
-            &publics,
-            &sumfold_bases,
-            &beta,
-            &beta_eq_weights,
-            &r_ic_eq_weights,
-            &linear_weight_plan,
-            &booleanity_weights,
-            &booleanity_sources,
-            pp.prefix_vars,
-            &initial_claim,
-            field_cfg,
-        )?;
+    let sumfold_group = build_sumfold_accumulators_phase(
+        &traces,
+        &publics,
+        &sumfold_bases,
+        &beta,
+        &beta_eq_weights,
+        &r_ic_eq_weights,
+        &linear_weight_plan,
+        &booleanity_weights,
+        &booleanity_sources,
+        pp.prefix_vars,
+        &initial_claim,
+        field_cfg,
+    )?;
 
     let (sumfold_proof, sumfold_r_b, sumfold_c_sf) = prove_sumfold_phase(
         transcript,
@@ -2300,21 +2300,20 @@ where
     let linear_weight_plan =
         ShaLinearResidualWeightPlan::new(&r_ic_eq_weights, &a_powers, &lambda_powers)?;
 
-    let (_linear_accumulator, _quadratic_prefix_accumulator, sumfold_group) =
-        build_sumfold_accumulators_phase(
-            &traces,
-            &publics,
-            &sumfold_bases,
-            &beta,
-            &beta_eq_weights,
-            &r_ic_eq_weights,
-            &linear_weight_plan,
-            &booleanity_weights,
-            &booleanity_sources,
-            pp.prefix_vars,
-            &initial_claim,
-            field_cfg,
-        )?;
+    let sumfold_group = build_sumfold_accumulators_phase(
+        &traces,
+        &publics,
+        &sumfold_bases,
+        &beta,
+        &beta_eq_weights,
+        &r_ic_eq_weights,
+        &linear_weight_plan,
+        &booleanity_weights,
+        &booleanity_sources,
+        pp.prefix_vars,
+        &initial_claim,
+        field_cfg,
+    )?;
 
     let (sumfold_proof, sumfold_r_b, sumfold_c_sf) = prove_sumfold_phase(
         transcript,
@@ -3208,7 +3207,7 @@ fn build_sumfold_quadratic_prefix_accumulator_phase<F>(
     booleanity_sources: &[ShaBooleanitySource],
     prefix_vars: usize,
     field_cfg: &F::Config,
-) -> Result<Vec<F>, ProductionShaError<F>>
+) -> Result<PreparedShaQuadraticPrefixArtifacts<F>, ProductionShaError<F>>
 where
     F: InnerTransparentField + DelayedFieldProductSum + Send + Sync + 'static,
 {
@@ -3217,7 +3216,7 @@ where
             .iter()
             .all(|basis| basis.booleanity_basis.has_canonical())
     {
-        return build_sha_sumfold_quadratic_prefix_accumulator_from_bases(
+        return build_sha_sumfold_quadratic_prefix_artifacts_from_bases(
             sumfold_bases,
             booleanity_sources,
             prefix_vars,
@@ -3234,6 +3233,12 @@ where
         r_ic_eq_weights,
         booleanity_weights,
         field_cfg,
+    )
+    .map(
+        |quadratic_prefix_accumulator| PreparedShaQuadraticPrefixArtifacts {
+            quadratic_prefix_accumulator,
+            packed_prefix_workspace: None,
+        },
     )
     .map_err(ProductionShaError::from)
 }
@@ -3274,7 +3279,7 @@ where
         + Sync
         + 'static,
 {
-    let (linear_accumulator, quadratic_prefix_accumulator) = cfg_join!(
+    let (linear_accumulator, quadratic_prefix_artifacts) = cfg_join!(
         build_sumfold_linear_accumulator_phase(sumfold_bases, linear_weight_plan, field_cfg),
         build_sumfold_quadratic_prefix_accumulator_phase(
             traces,
@@ -3287,7 +3292,7 @@ where
         ),
     );
     let linear_accumulator = linear_accumulator?;
-    let quadratic_prefix_accumulator = quadratic_prefix_accumulator?;
+    let quadratic_prefix_artifacts = quadratic_prefix_artifacts?;
     let sumfold_group = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "sumfold_group",
@@ -3295,13 +3300,13 @@ where
         phase = "sumfold_group",
     )
     .in_scope(|| {
-        build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim(
+        build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim(
             traces,
             beta,
             beta_eq_weights,
             r_ic_eq_weights,
-            &linear_accumulator,
-            &quadratic_prefix_accumulator,
+            linear_accumulator,
+            quadratic_prefix_artifacts,
             booleanity_weights,
             booleanity_sources,
             prefix_vars,
@@ -3309,11 +3314,7 @@ where
             field_cfg,
         )
     })?;
-    Ok((
-        linear_accumulator,
-        quadratic_prefix_accumulator,
-        sumfold_group,
-    ))
+    Ok(sumfold_group)
 }
 
 #[tracing::instrument(
