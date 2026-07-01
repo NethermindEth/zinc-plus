@@ -20,6 +20,7 @@ use zinc_utils::{cfg_chunks, cfg_iter};
 use rayon::prelude::*;
 
 const DEFAULT_BOOL_WINDOW_BITS: usize = 6;
+const SIGNED_I64_BUCKET_MAX_ABS: u64 = 4096;
 
 #[derive(Clone, Debug)]
 pub struct MsmCommitmentKey<C: AffineRepr> {
@@ -402,6 +403,7 @@ impl<const WINDOW_BITS: usize> BoolSubsetMsm<WINDOW_BITS> {
         Ok(acc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn msm_bool_rows_from_window_masks<C, const LANES: usize, M>(
         ck: &MsmCommitmentKey<C>,
         value_len: usize,
@@ -645,6 +647,10 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
         return Ok(C::Group::zero());
     }
 
+    if let Some(values_i64) = signed_int_i64_values(values)? {
+        return signed_i64_window_pippenger::<C>(&values_i64, bases);
+    }
+
     let signed_values = values
         .iter()
         .map(signed_int_abs)
@@ -663,8 +669,7 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
 
     let segments = <usize as Integer>::div_ceil(&max_bits, &window_bits);
     let bucket_len = (1usize << window_bits) - 1;
-    let mut positive_buckets = vec![C::Group::zero(); bucket_len];
-    let mut negative_buckets = vec![C::Group::zero(); bucket_len];
+    let mut buckets = vec![C::Group::zero(); bucket_len];
 
     let mut acc = C::Group::zero();
     for segment in (0..segments).rev() {
@@ -672,10 +677,7 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
             acc.double_in_place();
         }
 
-        for bucket in &mut positive_buckets {
-            *bucket = C::Group::zero();
-        }
-        for bucket in &mut negative_buckets {
+        for bucket in &mut buckets {
             *bucket = C::Group::zero();
         }
 
@@ -684,18 +686,148 @@ fn signed_int_window_pippenger<C: AffineRepr, const LIMBS: usize>(
             let digit = window_value_from_words(abs.as_uint().as_words(), offset, window_bits);
             if digit != 0 {
                 if *is_negative {
-                    negative_buckets[digit - 1] += base;
+                    buckets[digit - 1] -= base;
                 } else {
-                    positive_buckets[digit - 1] += base;
+                    buckets[digit - 1] += base;
                 }
             }
         }
 
-        acc += bucket_running_sum(&positive_buckets);
-        acc -= bucket_running_sum(&negative_buckets);
+        acc += bucket_running_sum(&buckets);
     }
 
     Ok(acc)
+}
+
+fn signed_i64_window_pippenger<C: AffineRepr>(
+    values: &[i64],
+    bases: &[C],
+) -> Result<C::Group, MsmError> {
+    if values.len() != bases.len() {
+        return Err(MsmError::BaseCountMismatch {
+            expected: values.len(),
+            actual: bases.len(),
+        });
+    }
+    if values.is_empty() {
+        return Ok(C::Group::zero());
+    }
+
+    let mut max_abs = 0u64;
+    for value in values {
+        max_abs = max_abs.max(value.unsigned_abs());
+    }
+    if max_abs == 0 {
+        return Ok(C::Group::zero());
+    }
+    if max_abs <= SIGNED_I64_BUCKET_MAX_ABS {
+        return signed_i64_bucket_msm::<C>(values, bases, max_abs);
+    }
+
+    let max_bits = u64::BITS as usize - max_abs.leading_zeros() as usize;
+    let window_bits = scalar_window_bits(values.len()).min(max_bits).max(1);
+    validate_window_bits(window_bits)?;
+
+    let segments = <usize as Integer>::div_ceil(&max_bits, &window_bits);
+    let bucket_len = (1usize << window_bits) - 1;
+    let mut buckets = vec![C::Group::zero(); bucket_len];
+
+    let mut acc = C::Group::zero();
+    for segment in (0..segments).rev() {
+        for _ in 0..window_bits {
+            acc.double_in_place();
+        }
+
+        for bucket in &mut buckets {
+            *bucket = C::Group::zero();
+        }
+
+        let offset = segment * window_bits;
+        for (value, base) in values.iter().zip(bases.iter()) {
+            let digit = window_value_from_u64(value.unsigned_abs(), offset, window_bits);
+            if digit != 0 {
+                if *value < 0 {
+                    buckets[digit - 1] -= base;
+                } else {
+                    buckets[digit - 1] += base;
+                }
+            }
+        }
+
+        acc += bucket_running_sum(&buckets);
+    }
+
+    Ok(acc)
+}
+
+fn signed_i64_bucket_msm<C: AffineRepr>(
+    values: &[i64],
+    bases: &[C],
+    max_abs: u64,
+) -> Result<C::Group, MsmError> {
+    let bucket_len = usize::try_from(max_abs).expect("small i64 bucket length must fit usize");
+    let mut buckets = vec![C::Group::zero(); bucket_len];
+
+    for (value, base) in values.iter().zip(bases.iter()) {
+        let abs = value.unsigned_abs();
+        if abs == 0 {
+            continue;
+        }
+        let bucket = usize::try_from(abs - 1).expect("small i64 bucket index must fit usize");
+        if *value < 0 {
+            buckets[bucket] -= base;
+        } else {
+            buckets[bucket] += base;
+        }
+    }
+
+    Ok(bucket_running_sum(&buckets))
+}
+
+fn signed_int_i64_values<const LIMBS: usize>(
+    values: &[Int<LIMBS>],
+) -> Result<Option<Vec<i64>>, MsmError> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let (abs, is_negative) = signed_int_abs(value)?;
+        let Some(magnitude) = words_to_u64_if_fits(abs.as_uint().as_words()) else {
+            return Ok(None);
+        };
+        if magnitude > i64::MAX as u64 {
+            return Ok(None);
+        }
+        let signed = if is_negative {
+            -(magnitude as i64)
+        } else {
+            magnitude as i64
+        };
+        out.push(signed);
+    }
+    Ok(Some(out))
+}
+
+fn words_to_u64_if_fits(words: &[crypto_bigint::Word]) -> Option<u64> {
+    let word_bits = core::mem::size_of::<crypto_bigint::Word>() * 8;
+    let mut magnitude = 0u64;
+
+    for (idx, word) in words.iter().copied().enumerate() {
+        if word == 0 {
+            continue;
+        }
+        let shift = idx.checked_mul(word_bits)?;
+        if shift >= u64::BITS as usize {
+            return None;
+        }
+        if word_bits == u64::BITS as usize && idx > 0 {
+            return None;
+        }
+        if word_bits < u64::BITS as usize && shift + word_bits > u64::BITS as usize {
+            return None;
+        }
+        magnitude |= (word as u64) << shift;
+    }
+
+    Some(magnitude)
 }
 
 fn signed_int_abs<const LIMBS: usize>(value: &Int<LIMBS>) -> Result<(Int<LIMBS>, bool), MsmError> {
@@ -775,6 +907,19 @@ fn window_value_from_words(words: &[crypto_bigint::Word], start: usize, width: u
             value
         }
     })
+}
+
+fn window_value_from_u64(value: u64, start: usize, width: usize) -> usize {
+    if start >= u64::BITS as usize {
+        return 0;
+    }
+    let width = width.min(u64::BITS as usize - start);
+    let mask = if width == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    ((value >> start) & mask) as usize
 }
 
 #[cfg(test)]

@@ -59,8 +59,9 @@ use zinc_piop::{
         build_sha_sumfold_quadratic_prefix_accumulator,
         build_sha_sumfold_quadratic_prefix_artifacts_from_bases, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
-        folded_row_integrand_sum, is_production_sha_booleanity_sources, prepare_sha_sumfold_basis,
-        production_sha_booleanity_sources, production_sha_nonzero_families,
+        folded_row_integrand_sum, is_production_sha_booleanity_sources,
+        prepare_sha_sumfold_basis_production_fast, production_sha_booleanity_sources,
+        production_sha_nonzero_families,
         sha_int_at_point_with_weights_unchecked, sha_public_at_point,
         sha_public_at_point_with_weights,
         sha_word_bits_at_point_with_weights_inner_product_unchecked,
@@ -1700,7 +1701,7 @@ where
                 side = "prepare",
                 phase = "prepare_sumfold_basis",
             )
-            .in_scope(|| prepare_sha_sumfold_basis(&trace, &public, field_cfg))?;
+            .in_scope(|| prepare_sha_sumfold_basis_production_fast(&trace, &public, field_cfg))?;
             Ok(PreparedProductionShaProverInstance {
                 public_trace: own_uair_trace(&public_trace),
                 instance: ProductionShaProverInstance {

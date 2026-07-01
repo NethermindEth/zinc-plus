@@ -601,11 +601,14 @@ impl<const N: usize> GenTranscribable for BigInt<N> {
     fn write_transcription_bytes_exact(&self, buf: &mut [u8]) {
         // ark_ff::BigInt stores u64 limbs in least-to-most significant order,
         // independent of the platform word width.
-        assert_eq!(buf.len(), Self::NUM_BYTES, "Buffer size mismatch for BigInt");
+        assert_eq!(
+            buf.len(),
+            Self::NUM_BYTES,
+            "Buffer size mismatch for BigInt"
+        );
         const LIMB_SIZE: usize = size_of::<u64>();
         for (i, limb) in self.0.iter().enumerate() {
-            buf[(i * LIMB_SIZE)..(i * LIMB_SIZE + LIMB_SIZE)]
-                .copy_from_slice(&limb.to_le_bytes());
+            buf[(i * LIMB_SIZE)..(i * LIMB_SIZE + LIMB_SIZE)].copy_from_slice(&limb.to_le_bytes());
         }
     }
 }

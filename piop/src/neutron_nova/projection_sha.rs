@@ -6,7 +6,7 @@
 //! fresh ideal checks -> SumFold over instances -> post-SumFold folding ->
 //! folded row check over the 128-row SHA domain.
 
-use std::{borrow::Borrow, collections::HashMap};
+use std::borrow::Borrow;
 
 use crate::ideal_check::batched_ideal_check;
 use crate::neutron_nova::SumFoldError;
@@ -55,6 +55,10 @@ const SHA_RESIDUAL_EVAL_POWER_COUNT: usize = 62;
 const SHA_DIRECT_ROW_CHUNK: usize = 8;
 const SHA_SUFFIX_DMR_PAIR_CHUNK: usize = 256;
 const SHA_SUFFIX_DMR_WEIGHT_CHUNK: usize = 512;
+#[cfg(feature = "parallel")]
+const SHA_SUFFIX_DMR_SOURCE_ROW_CHUNK: usize = 1024;
+#[cfg(feature = "parallel")]
+const SHA_SUFFIX_DMR_SOURCE_ROW_PAR_THRESHOLD: usize = 8192;
 
 pub type MleColumn<T> = DenseMultilinearExtension<T>;
 pub type MleTable<T> = Vec<MleColumn<T>>;
@@ -502,10 +506,18 @@ impl PreparedShaPackedPrefixWorkspace {
 pub trait ShaSmallFieldDecode: PrimeField + FromPrimitiveWithConfig {
     fn unsigned_i64_if_small(value: &Self) -> Option<i64>;
 
+    fn bit_if_canonical(value: &Self) -> Option<bool> {
+        match Self::unsigned_i64_if_small(value)? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
     fn signed_i64_if_small(value: &Self, field_cfg: &Self::Config) -> Option<i64> {
         #[cfg(not(debug_assertions))]
         let _ = field_cfg;
-        if Self::is_zero(value) {
+        if <Self as PrimeField>::is_zero(value) {
             return Some(0);
         }
         if let Some(candidate) = Self::unsigned_i64_if_small(value) {
@@ -536,9 +548,27 @@ fn unsigned_i64_from_words(words: &[u64]) -> Option<i64> {
     i64::try_from(low).ok()
 }
 
+fn bit_from_words(words: &[u64]) -> Option<bool> {
+    let Some((&low, high)) = words.split_first() else {
+        return Some(false);
+    };
+    if high.iter().any(|&word| word != 0) {
+        return None;
+    }
+    match low {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 impl<const LIMBS: usize> ShaSmallFieldDecode for MontyField<LIMBS> {
     fn unsigned_i64_if_small(value: &Self) -> Option<i64> {
         unsigned_i64_from_words(value.retrieve().as_words())
+    }
+
+    fn bit_if_canonical(value: &Self) -> Option<bool> {
+        bit_from_words(value.retrieve().as_words())
     }
 }
 
@@ -557,6 +587,16 @@ where
     fn unsigned_i64_if_small(value: &Self) -> Option<i64> {
         let words = (*value).into_inner().into_bigint().0;
         unsigned_i64_from_words(&words)
+    }
+
+    fn bit_if_canonical(value: &Self) -> Option<bool> {
+        if <Self as PrimeField>::is_zero(value) {
+            Some(false)
+        } else if *value == Self::from(1u64) {
+            Some(true)
+        } else {
+            None
+        }
     }
 }
 
@@ -1755,6 +1795,19 @@ where
         suffix_eq_weights.len() * source_row_count
     );
 
+    #[cfg(feature = "parallel")]
+    if source_row_count >= SHA_SUFFIX_DMR_SOURCE_ROW_PAR_THRESHOLD {
+        return suffix_reduced_body_buckets_flat_dmr_by_source_chunks(
+            product_sum,
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            field_cfg,
+        );
+    }
+
     let rest_len = suffix_eq_weights.len() >> 1;
     let one = F::one_with_cfg(field_cfg);
     let zero = F::zero_with_cfg(field_cfg);
@@ -1837,6 +1890,131 @@ where
         quadratic_infinity_total,
         quadratic_infinity_acc,
     );
+    (linear_zero + quadratic_zero, quadratic_infinity)
+}
+
+#[cfg(feature = "parallel")]
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_reduced_body_buckets_flat_dmr_by_source_chunks<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &[F],
+    booleanity_values: &[F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    field_cfg: &F::Config,
+) -> (F, F)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    let rest_len = suffix_eq_weights.len() >> 1;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut linear_total = zero.clone();
+    let mut linear_acc = product_sum.zero_accumulator();
+    for rest in 0..rest_len {
+        let even_tail = rest << 1;
+        let weight = suffix_pair_weight(suffix_eq_weights, rest);
+        add_product_sum4(
+            product_sum,
+            &mut linear_total,
+            &mut linear_acc,
+            &weight,
+            &linear_claims[even_tail],
+        );
+    }
+    let linear_zero = finish_product_sum4(product_sum, linear_total, linear_acc);
+
+    let chunk_buckets = source_row_weights
+        .par_chunks(SHA_SUFFIX_DMR_SOURCE_ROW_CHUNK)
+        .enumerate()
+        .map(|(chunk_idx, source_weight_chunk)| {
+            let product_sum = product_sum.clone();
+            let source_offset = chunk_idx * SHA_SUFFIX_DMR_SOURCE_ROW_CHUNK;
+            let mut quadratic_zero_total = zero.clone();
+            let mut quadratic_zero_acc = product_sum.zero_accumulator();
+            let mut quadratic_infinity_total = zero.clone();
+            let mut quadratic_infinity_acc = product_sum.zero_accumulator();
+
+            for rest in 0..rest_len {
+                let even_tail = rest << 1;
+                let odd_tail = even_tail + 1;
+                let weight = suffix_pair_weight(suffix_eq_weights, rest);
+                let mut source_zero_total = zero.clone();
+                let mut source_zero_acc = product_sum.zero_accumulator();
+                let mut source_infinity_total = zero.clone();
+                let mut source_infinity_acc = product_sum.zero_accumulator();
+
+                for (source_in_chunk, scale) in source_weight_chunk.iter().enumerate() {
+                    if F::is_zero(scale) {
+                        continue;
+                    }
+                    let source_row = source_offset + source_in_chunk;
+                    let even = booleanity_values
+                        [suffix_flat_index(even_tail, source_row, source_row_count)]
+                    .clone();
+                    let odd = booleanity_values
+                        [suffix_flat_index(odd_tail, source_row, source_row_count)]
+                    .clone();
+                    let zero_term = even.clone() * (even.clone() - one.clone());
+                    add_product_sum4(
+                        &product_sum,
+                        &mut source_zero_total,
+                        &mut source_zero_acc,
+                        scale,
+                        &zero_term,
+                    );
+
+                    let delta = odd - even;
+                    let infinity_term = delta.clone() * delta;
+                    add_product_sum4(
+                        &product_sum,
+                        &mut source_infinity_total,
+                        &mut source_infinity_acc,
+                        scale,
+                        &infinity_term,
+                    );
+                }
+
+                let source_zero =
+                    finish_product_sum4(&product_sum, source_zero_total, source_zero_acc);
+                add_product_sum4(
+                    &product_sum,
+                    &mut quadratic_zero_total,
+                    &mut quadratic_zero_acc,
+                    &weight,
+                    &source_zero,
+                );
+
+                let source_infinity =
+                    finish_product_sum4(&product_sum, source_infinity_total, source_infinity_acc);
+                add_product_sum4(
+                    &product_sum,
+                    &mut quadratic_infinity_total,
+                    &mut quadratic_infinity_acc,
+                    &weight,
+                    &source_infinity,
+                );
+            }
+
+            (
+                finish_product_sum4(&product_sum, quadratic_zero_total, quadratic_zero_acc),
+                finish_product_sum4(
+                    &product_sum,
+                    quadratic_infinity_total,
+                    quadratic_infinity_acc,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut quadratic_zero = zero.clone();
+    let mut quadratic_infinity = zero;
+    for (quadratic_zero_chunk, quadratic_infinity_chunk) in chunk_buckets {
+        quadratic_zero += quadratic_zero_chunk;
+        quadratic_infinity += quadratic_infinity_chunk;
+    }
+
     (linear_zero + quadratic_zero, quadratic_infinity)
 }
 
@@ -1924,6 +2102,21 @@ where
         suffix_eq_weights.len() * source_row_count
     );
     debug_assert_eq!(suffix_eq_weights.len() & 3, 0);
+
+    #[cfg(feature = "parallel")]
+    if source_row_count >= SHA_SUFFIX_DMR_SOURCE_ROW_PAR_THRESHOLD {
+        return suffix_fold_prepare_next_round_flat_dmr_by_source_chunks(
+            product_sum,
+            linear_claims,
+            booleanity_values,
+            source_row_count,
+            source_row_weights,
+            suffix_eq_weights,
+            r,
+            need_t_one,
+            field_cfg,
+        );
+    }
 
     let next_pair_count = suffix_eq_weights.len() >> 2;
     let one = F::one_with_cfg(field_cfg);
@@ -2057,6 +2250,208 @@ where
                 &pair_weight,
                 &source_one,
             );
+        }
+    }
+
+    let linear_zero = finish_product_sum4(product_sum, linear_zero_total, linear_zero_acc);
+    let quadratic_zero = finish_product_sum4(product_sum, quadratic_zero_total, quadratic_zero_acc);
+    let quadratic_infinity = finish_product_sum4(
+        product_sum,
+        quadratic_infinity_total,
+        quadratic_infinity_acc,
+    );
+    let t_one = if need_t_one {
+        let linear_one = finish_product_sum4(product_sum, linear_one_total, linear_one_acc);
+        let quadratic_one =
+            finish_product_sum4(product_sum, quadratic_one_total, quadratic_one_acc);
+        Some(linear_one + quadratic_one)
+    } else {
+        None
+    };
+
+    (linear_zero + quadratic_zero, quadratic_infinity, t_one)
+}
+
+#[cfg(feature = "parallel")]
+#[allow(clippy::arithmetic_side_effects)]
+fn suffix_fold_prepare_next_round_flat_dmr_by_source_chunks<F>(
+    product_sum: &MontgomeryProductSum4<'_, F>,
+    linear_claims: &mut [F],
+    booleanity_values: &mut [F],
+    source_row_count: usize,
+    source_row_weights: &[F],
+    suffix_eq_weights: &[F],
+    r: &F,
+    need_t_one: bool,
+    field_cfg: &F::Config,
+) -> (F, F, Option<F>)
+where
+    F: MontgomeryLimbs + Send + Sync,
+{
+    let next_pair_count = suffix_eq_weights.len() >> 2;
+    let one = F::one_with_cfg(field_cfg);
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut linear_zero_total = zero.clone();
+    let mut linear_zero_acc = product_sum.zero_accumulator();
+    let mut linear_one_total = zero.clone();
+    let mut linear_one_acc = product_sum.zero_accumulator();
+    let mut quadratic_zero_total = zero.clone();
+    let mut quadratic_zero_acc = product_sum.zero_accumulator();
+    let mut quadratic_infinity_total = zero.clone();
+    let mut quadratic_infinity_acc = product_sum.zero_accumulator();
+    let mut quadratic_one_total = zero.clone();
+    let mut quadratic_one_acc = product_sum.zero_accumulator();
+
+    for next_pair in 0..next_pair_count {
+        let old_base = next_pair << 2;
+        let folded_even = next_pair << 1;
+        let folded_odd = folded_even + 1;
+        let pair_weight = suffix_eq_weights[old_base].clone()
+            + &suffix_eq_weights[old_base + 1]
+            + &suffix_eq_weights[old_base + 2]
+            + &suffix_eq_weights[old_base + 3];
+
+        let l00 = linear_claims[old_base].clone();
+        let l01 = linear_claims[old_base + 1].clone();
+        let l10 = linear_claims[old_base + 2].clone();
+        let l11 = linear_claims[old_base + 3].clone();
+        let l0 = l00.clone() + r.clone() * (l01 - l00);
+        let l1 = l10.clone() + r.clone() * (l11 - l10);
+        linear_claims[folded_even] = l0.clone();
+        linear_claims[folded_odd] = l1.clone();
+        add_product_sum4(
+            product_sum,
+            &mut linear_zero_total,
+            &mut linear_zero_acc,
+            &pair_weight,
+            &l0,
+        );
+        if need_t_one {
+            add_product_sum4(
+                product_sum,
+                &mut linear_one_total,
+                &mut linear_one_acc,
+                &pair_weight,
+                &l1,
+            );
+        }
+
+        let chunk_outputs = source_row_weights
+            .par_chunks(SHA_SUFFIX_DMR_SOURCE_ROW_CHUNK)
+            .enumerate()
+            .map(|(chunk_idx, source_weight_chunk)| {
+                let product_sum = product_sum.clone();
+                let source_offset = chunk_idx * SHA_SUFFIX_DMR_SOURCE_ROW_CHUNK;
+                let mut folded_even_values = Vec::with_capacity(source_weight_chunk.len());
+                let mut folded_odd_values = Vec::with_capacity(source_weight_chunk.len());
+                let mut source_zero_total = zero.clone();
+                let mut source_zero_acc = product_sum.zero_accumulator();
+                let mut source_infinity_total = zero.clone();
+                let mut source_infinity_acc = product_sum.zero_accumulator();
+                let mut source_one_total = zero.clone();
+                let mut source_one_acc = product_sum.zero_accumulator();
+
+                for (source_in_chunk, scale) in source_weight_chunk.iter().enumerate() {
+                    let source_row = source_offset + source_in_chunk;
+                    let old_00 = suffix_flat_index(old_base, source_row, source_row_count);
+                    let old_01 = suffix_flat_index(old_base + 1, source_row, source_row_count);
+                    let old_10 = suffix_flat_index(old_base + 2, source_row, source_row_count);
+                    let old_11 = suffix_flat_index(old_base + 3, source_row, source_row_count);
+                    let d00 = booleanity_values[old_00].clone();
+                    let d01 = booleanity_values[old_01].clone();
+                    let d10 = booleanity_values[old_10].clone();
+                    let d11 = booleanity_values[old_11].clone();
+                    let d0 = d00.clone() + r.clone() * (d01 - d00);
+                    let d1 = d10.clone() + r.clone() * (d11 - d10);
+                    folded_even_values.push(d0.clone());
+                    folded_odd_values.push(d1.clone());
+
+                    if F::is_zero(scale) {
+                        continue;
+                    }
+                    let zero_term = d0.clone() * (d0.clone() - one.clone());
+                    add_product_sum4(
+                        &product_sum,
+                        &mut source_zero_total,
+                        &mut source_zero_acc,
+                        scale,
+                        &zero_term,
+                    );
+
+                    let delta = d1.clone() - d0;
+                    let infinity_term = delta.clone() * delta;
+                    add_product_sum4(
+                        &product_sum,
+                        &mut source_infinity_total,
+                        &mut source_infinity_acc,
+                        scale,
+                        &infinity_term,
+                    );
+
+                    if need_t_one {
+                        let one_term = d1.clone() * (d1 - one.clone());
+                        add_product_sum4(
+                            &product_sum,
+                            &mut source_one_total,
+                            &mut source_one_acc,
+                            scale,
+                            &one_term,
+                        );
+                    }
+                }
+
+                (
+                    source_offset,
+                    folded_even_values,
+                    folded_odd_values,
+                    finish_product_sum4(&product_sum, source_zero_total, source_zero_acc),
+                    finish_product_sum4(&product_sum, source_infinity_total, source_infinity_acc),
+                    need_t_one.then(|| {
+                        finish_product_sum4(&product_sum, source_one_total, source_one_acc)
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (
+            source_offset,
+            folded_even_values,
+            folded_odd_values,
+            source_zero,
+            source_infinity,
+            source_one,
+        ) in chunk_outputs
+        {
+            let even_start = suffix_flat_index(folded_even, source_offset, source_row_count);
+            let odd_start = suffix_flat_index(folded_odd, source_offset, source_row_count);
+            let even_end = even_start + folded_even_values.len();
+            let odd_end = odd_start + folded_odd_values.len();
+            booleanity_values[even_start..even_end].clone_from_slice(&folded_even_values);
+            booleanity_values[odd_start..odd_end].clone_from_slice(&folded_odd_values);
+
+            add_product_sum4(
+                product_sum,
+                &mut quadratic_zero_total,
+                &mut quadratic_zero_acc,
+                &pair_weight,
+                &source_zero,
+            );
+            add_product_sum4(
+                product_sum,
+                &mut quadratic_infinity_total,
+                &mut quadratic_infinity_acc,
+                &pair_weight,
+                &source_infinity,
+            );
+            if let Some(source_one) = source_one {
+                add_product_sum4(
+                    product_sum,
+                    &mut quadratic_one_total,
+                    &mut quadratic_one_acc,
+                    &pair_weight,
+                    &source_one,
+                );
+            }
         }
     }
 
@@ -3231,13 +3626,48 @@ pub fn prepare_sha_sumfold_basis<F>(
 where
     F: ShaSmallFieldDecode,
 {
+    prepare_sha_sumfold_basis_with_field_fallback(trace, public, field_cfg, true)
+}
+
+pub fn prepare_sha_sumfold_basis_production_fast<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    field_cfg: &F::Config,
+) -> Result<PreparedShaSumFoldBasis<F>, ShaProjectionError>
+where
+    F: ShaSmallFieldDecode,
+{
+    prepare_sha_sumfold_basis_with_field_fallback(trace, public, field_cfg, false)
+}
+
+fn prepare_sha_sumfold_basis_with_field_fallback<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    field_cfg: &F::Config,
+    retain_field_residual_basis: bool,
+) -> Result<PreparedShaSumFoldBasis<F>, ShaProjectionError>
+where
+    F: ShaSmallFieldDecode,
+{
     #[cfg(debug_assertions)]
     {
         validate_trace(trace)?;
         validate_public(public)?;
     }
-    let residual_basis = prepare_sha_residual_basis(trace, public, field_cfg)?;
-    let small_residual_basis = prepare_sha_small_residual_basis(&residual_basis, field_cfg);
+    let (residual_basis, small_residual_basis) = if let Some(small_residual_basis) =
+        prepare_sha_small_residual_basis_direct(trace, public, field_cfg)
+    {
+        let residual_basis = if retain_field_residual_basis {
+            residual_basis_from_small_residual_basis(&small_residual_basis, field_cfg)
+        } else {
+            PreparedShaResidualBasis { rows: Vec::new() }
+        };
+        (residual_basis, Some(small_residual_basis))
+    } else {
+        let residual_basis = prepare_sha_residual_basis(trace, public, field_cfg)?;
+        let small_residual_basis = prepare_sha_small_residual_basis(&residual_basis, field_cfg);
+        (residual_basis, small_residual_basis)
+    };
     Ok(PreparedShaSumFoldBasis {
         residual_basis,
         small_residual_basis,
@@ -3310,9 +3740,23 @@ pub fn build_sha_sumfold_linear_accumulator_from_bases<F>(
     field_cfg: &F::Config,
 ) -> Result<Vec<F>, ShaProjectionError>
 where
-    F: PrimeField + DelayedFieldProductSum + Send + Sync,
+    F: PrimeField + DelayedFieldProductSum + FromPrimitiveWithConfig + Send + Sync,
 {
     validate_prepared_linear_accumulator_inputs(bases, row_weights, a_powers, lambda_powers)?;
+    if bases
+        .iter()
+        .any(|basis| basis.residual_basis.rows.is_empty() && basis.small_residual_basis.is_some())
+    {
+        if let Some(values) = build_sha_sumfold_linear_accumulator_from_small_bases(
+            bases,
+            row_weights,
+            a_powers,
+            lambda_powers,
+            field_cfg,
+        )? {
+            return Ok(values);
+        }
+    }
 
     cfg_iter!(bases)
         .map(|basis| {
@@ -3432,6 +3876,7 @@ where
     }
 
     let prefix_len = binary_len(prefix_vars);
+    let mask_count = 1usize << prefix_len;
     let tail_len = binary_len(ell - prefix_vars);
     let ternary_len = checked_ternary_len(prefix_vars)?;
     let coeff_plans = ternary_coeff_plans(prefix_vars)?;
@@ -3439,8 +3884,9 @@ where
         .enumerate()
         .map(|(chunk_idx, row_weight_chunk)| {
             let row_offset = chunk_idx * 8;
-            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
-            let mut mask_weights = HashMap::new();
+            let zero = F::zero_with_cfg(field_cfg);
+            let mut partial = vec![zero.clone(); ternary_len * tail_len];
+            let mut mask_weights = vec![zero.clone(); mask_count];
             let mut touched_masks = Vec::new();
 
             for tail in 0..tail_len {
@@ -3469,6 +3915,7 @@ where
                         &mut mask_weights,
                         &mut touched_masks,
                         row_weight,
+                        &zero,
                     );
                 }
             }
@@ -3656,12 +4103,14 @@ where
 
     let ternary_len = checked_ternary_len(workspace.prefix_vars)?;
     let coeff_plans = ternary_coeff_plans(workspace.prefix_vars)?;
+    let mask_count = 1usize << binary_len(workspace.prefix_vars);
     let partials = cfg_chunks!(row_weights, 8)
         .enumerate()
         .map(|(chunk_idx, row_weight_chunk)| {
             let row_offset = chunk_idx * 8;
-            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * workspace.tail_len];
-            let mut mask_weights = HashMap::new();
+            let zero = F::zero_with_cfg(field_cfg);
+            let mut partial = vec![zero.clone(); ternary_len * workspace.tail_len];
+            let mut mask_weights = vec![zero.clone(); mask_count];
             let mut touched_masks = Vec::new();
 
             for tail in 0..workspace.tail_len {
@@ -3684,6 +4133,7 @@ where
                         &mut mask_weights,
                         &mut touched_masks,
                         row_weight,
+                        &zero,
                     );
                 }
             }
@@ -3840,6 +4290,560 @@ where
     Some(PreparedShaSmallResidualBasis { rows })
 }
 
+fn residual_basis_from_small_residual_basis<F>(
+    small_basis: &PreparedShaSmallResidualBasis,
+    field_cfg: &F::Config,
+) -> PreparedShaResidualBasis<F>
+where
+    F: PrimeField + FromPrimitiveWithConfig,
+{
+    let rows = small_basis
+        .rows
+        .iter()
+        .map(|row| {
+            let families = std::array::from_fn(|family_idx| {
+                let terms = row.families[family_idx]
+                    .terms
+                    .iter()
+                    .map(|term| PreparedShaResidualTerm {
+                        power: term.power,
+                        coeff: F::from_with_cfg(term.coeff, field_cfg),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                PreparedShaResidualFamily { terms }
+            });
+            PreparedShaResidualRow { families }
+        })
+        .collect();
+    PreparedShaResidualBasis { rows }
+}
+
+fn prepare_sha_small_residual_basis_direct<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    field_cfg: &F::Config,
+) -> Option<PreparedShaSmallResidualBasis>
+where
+    F: ShaSmallFieldDecode,
+{
+    let rows = (0..SHA_ROW_COUNT)
+        .map(|row| {
+            let residuals = small_residual_polys_at_row(trace, public, row, field_cfg)?;
+            let families: [Option<PreparedShaSmallResidualFamily>; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|family_idx| {
+                    Some(PreparedShaSmallResidualFamily {
+                        terms: residuals[family_idx].terms()?,
+                    })
+                });
+            let families: Option<[PreparedShaSmallResidualFamily; NUM_SHA_RESIDUAL_FAMILIES]> =
+                families
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()?
+                    .try_into()
+                    .ok();
+            families.map(|families| PreparedShaSmallResidualRow { families })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(PreparedShaSmallResidualBasis { rows })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SmallResidualPoly {
+    coeffs: [i128; SHA_RESIDUAL_EVAL_POWER_COUNT],
+    len: usize,
+}
+
+impl Default for SmallResidualPoly {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl SmallResidualPoly {
+    fn zero() -> Self {
+        Self {
+            coeffs: [0; SHA_RESIDUAL_EVAL_POWER_COUNT],
+            len: 0,
+        }
+    }
+
+    fn constant(value: i128) -> Self {
+        let mut out = Self::zero();
+        if value != 0 {
+            out.coeffs[0] = value;
+            out.len = 1;
+        }
+        out
+    }
+
+    fn add_scaled_assign(&mut self, rhs: &Self, scale: i128) {
+        if scale == 0 || rhs.len == 0 {
+            return;
+        }
+        self.ensure_len(rhs.len);
+        for idx in 0..rhs.len {
+            self.coeffs[idx] += rhs.coeffs[idx] * scale;
+        }
+        self.trim();
+    }
+
+    fn add_sparse_shifted_assign(&mut self, rhs: &Self, shifts: &[usize], scale: i128) {
+        if scale == 0 || rhs.len == 0 {
+            return;
+        }
+        for &shift in shifts {
+            let required = rhs.len + shift;
+            debug_assert!(required <= SHA_RESIDUAL_EVAL_POWER_COUNT);
+            self.ensure_len(required);
+            for idx in 0..rhs.len {
+                self.coeffs[idx + shift] += rhs.coeffs[idx] * scale;
+            }
+        }
+        self.trim();
+    }
+
+    fn scaled(&self, scale: i128) -> Self {
+        if scale == 0 || self.len == 0 {
+            return Self::zero();
+        }
+        let mut out = Self::zero();
+        out.len = self.len;
+        for idx in 0..self.len {
+            out.coeffs[idx] = self.coeffs[idx] * scale;
+        }
+        out.trim();
+        out
+    }
+
+    fn rot_c(&self, c: usize) -> Self {
+        debug_assert!(c < SHA_WORD_BITS);
+        if self.len == 0 {
+            return Self::zero();
+        }
+        let mut out = Self::zero();
+        out.len = SHA_WORD_BITS;
+        for i in 0..SHA_WORD_BITS {
+            if i < self.len {
+                out.coeffs[(i + c) % SHA_WORD_BITS] = self.coeffs[i];
+            }
+        }
+        out.trim();
+        out
+    }
+
+    fn shift_r_c(&self, c: usize) -> Self {
+        debug_assert!(c < SHA_WORD_BITS);
+        if self.len == 0 {
+            return Self::zero();
+        }
+        let mut out = Self::zero();
+        out.len = SHA_WORD_BITS - c;
+        for i in 0..(SHA_WORD_BITS - c) {
+            if i + c < self.len {
+                out.coeffs[i] = self.coeffs[i + c];
+            }
+        }
+        out.trim();
+        out
+    }
+
+    fn ensure_len(&mut self, len: usize) {
+        debug_assert!(len <= SHA_RESIDUAL_EVAL_POWER_COUNT);
+        if len > self.len {
+            for coeff in &mut self.coeffs[self.len..len] {
+                *coeff = 0;
+            }
+            self.len = len;
+        }
+    }
+
+    fn trim(&mut self) {
+        while self.len > 0 && self.coeffs[self.len - 1] == 0 {
+            self.len -= 1;
+        }
+    }
+
+    fn terms(&self) -> Option<Box<[PreparedShaSmallResidualTerm]>> {
+        self.coeffs
+            .iter()
+            .take(self.len)
+            .enumerate()
+            .filter_map(|(power, coeff)| {
+                if *coeff == 0 {
+                    None
+                } else {
+                    Some(i64::try_from(*coeff).ok().and_then(|coeff| {
+                        Some(PreparedShaSmallResidualTerm {
+                            power: u8::try_from(power).ok()?,
+                            coeff,
+                        })
+                    }))
+                }
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Vec::into_boxed_slice)
+    }
+}
+
+impl std::ops::Sub<&SmallResidualPoly> for SmallResidualPoly {
+    type Output = SmallResidualPoly;
+
+    fn sub(mut self, rhs: &SmallResidualPoly) -> Self::Output {
+        self.add_scaled_assign(rhs, -1);
+        self
+    }
+}
+
+fn small_residual_polys_at_row<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Option<[SmallResidualPoly; NUM_SHA_RESIDUAL_FAMILIES]>
+where
+    F: ShaSmallFieldDecode,
+{
+    let a = small_word_poly(trace, ShaWordCol::A, row, field_cfg)?;
+    let e = small_word_poly(trace, ShaWordCol::E, row, field_cfg)?;
+    let sigma0 = small_word_poly(trace, ShaWordCol::Sigma0, row, field_cfg)?;
+    let sigma1 = small_word_poly(trace, ShaWordCol::Sigma1, row, field_cfg)?;
+    let w = small_word_poly(trace, ShaWordCol::W, row, field_cfg)?;
+    let small_sigma0 = small_word_poly(trace, ShaWordCol::SmallSigma0, row, field_cfg)?;
+    let small_sigma1 = small_word_poly(trace, ShaWordCol::SmallSigma1, row, field_cfg)?;
+    let ov_sigma0 = small_word_poly(trace, ShaWordCol::OvSigma0, row, field_cfg)?;
+    let ov_sigma1 = small_word_poly(trace, ShaWordCol::OvSigma1, row, field_cfg)?;
+    let ov_small_sigma0 = small_word_poly(trace, ShaWordCol::OvSmallSigma0, row, field_cfg)?;
+    let ov_small_sigma1 = small_word_poly(trace, ShaWordCol::OvSmallSigma1, row, field_cfg)?;
+    let w_shift9 = small_word_poly_shifted(trace, ShaWordCol::W, row, 9, field_cfg)?;
+    let w_shift16 = small_word_poly_shifted(trace, ShaWordCol::W, row, 16, field_cfg)?;
+    let small_sigma0_shift1 =
+        small_word_poly_shifted(trace, ShaWordCol::SmallSigma0, row, 1, field_cfg)?;
+    let small_sigma1_shift14 =
+        small_word_poly_shifted(trace, ShaWordCol::SmallSigma1, row, 14, field_cfg)?;
+    let a_shift4 = small_word_poly_shifted(trace, ShaWordCol::A, row, 4, field_cfg)?;
+    let e_shift4 = small_word_poly_shifted(trace, ShaWordCol::E, row, 4, field_cfg)?;
+    let sigma0_shift3 = small_word_poly_shifted(trace, ShaWordCol::Sigma0, row, 3, field_cfg)?;
+    let sigma1_shift3 = small_word_poly_shifted(trace, ShaWordCol::Sigma1, row, 3, field_cfg)?;
+    let uef_shift3 = small_word_poly_shifted(trace, ShaWordCol::Uef, row, 3, field_cfg)?;
+    let uneg_eg_shift3 = small_word_poly_shifted(trace, ShaWordCol::UNegEg, row, 3, field_cfg)?;
+    let maj_shift3 = small_word_poly_shifted(trace, ShaWordCol::Maj, row, 3, field_cfg)?;
+    let public_k_shift3 = small_public_const_poly(public, ShaPublicCol::K, row + 3, field_cfg)?;
+    let comp_schedule = small_int_const_poly(trace, ShaIntCol::CompSchedule, row, field_cfg)?;
+    let comp_update_a = small_int_const_poly(trace, ShaIntCol::CompUpdateA, row, field_cfg)?;
+    let comp_update_e = small_int_const_poly(trace, ShaIntCol::CompUpdateE, row, field_cfg)?;
+    let comp_ff_a = small_int_const_poly(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)?;
+    let comp_ff_e = small_int_const_poly(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
+
+    let mut r0 = SmallResidualPoly::zero();
+    r0.add_sparse_shifted_assign(&a, &[10, 19, 30], 1);
+    r0.add_scaled_assign(&sigma0, -1);
+    r0.add_scaled_assign(&ov_sigma0, -2);
+
+    let mut r1 = SmallResidualPoly::zero();
+    r1.add_sparse_shifted_assign(&e, &[7, 21, 26], 1);
+    r1.add_scaled_assign(&sigma1, -1);
+    r1.add_scaled_assign(&ov_sigma1, -2);
+
+    let mut r2 = SmallResidualPoly::zero();
+    r2.add_scaled_assign(&w.rot_c(25), 1);
+    r2.add_scaled_assign(&w.rot_c(14), 1);
+    r2.add_scaled_assign(&w.shift_r_c(3), 1);
+    r2.add_scaled_assign(&small_sigma0, -1);
+    r2.add_scaled_assign(&ov_small_sigma0, -2);
+
+    let mut r3 = SmallResidualPoly::zero();
+    r3.add_scaled_assign(&w.rot_c(15), 1);
+    r3.add_scaled_assign(&w.rot_c(13), 1);
+    r3.add_scaled_assign(&w.shift_r_c(10), 1);
+    r3.add_scaled_assign(&small_sigma1, -1);
+    r3.add_scaled_assign(&ov_small_sigma1, -2);
+
+    let mu_packed = small_word_poly(trace, ShaWordCol::MuPacked, row, field_cfg)?;
+    let mu_shift2 = mu_packed.shift_r_c(2);
+    let mu_shift5 = mu_packed.shift_r_c(5);
+    let mu_shift8 = mu_packed.shift_r_c(8);
+    let mu_shift9 = mu_packed.shift_r_c(9);
+    let mu_shift10 = mu_packed.shift_r_c(10);
+    let mu = |low: &SmallResidualPoly, high: &SmallResidualPoly, high_coeff: i128| {
+        let mut out = low.scaled(1i128 << 32);
+        out.add_scaled_assign(high, -high_coeff);
+        out
+    };
+    let mu_w = mu(&mu_packed, &mu_shift2, 1i128 << 34);
+    let mu_a = mu(&mu_shift2, &mu_shift5, 1i128 << 35);
+    let mu_e = mu(&mu_shift5, &mu_shift8, 1i128 << 35);
+    let mu_ff_a = mu(&mu_shift8, &mu_shift9, 1i128 << 33);
+    let mu_ff_e = mu(&mu_shift9, &mu_shift10, 1i128 << 33);
+
+    let mut r4 = SmallResidualPoly::zero();
+    r4.add_scaled_assign(&w_shift16, 1);
+    r4.add_scaled_assign(&w, -1);
+    r4.add_scaled_assign(&small_sigma0_shift1, -1);
+    r4.add_scaled_assign(&w_shift9, -1);
+    r4.add_scaled_assign(&small_sigma1_shift14, -1);
+    r4.add_scaled_assign(&mu_w, 1);
+    r4.add_scaled_assign(&comp_schedule, 1);
+
+    let mut r5 = SmallResidualPoly::zero();
+    r5.add_scaled_assign(&a_shift4, 1);
+    r5.add_scaled_assign(&e, -1);
+    r5.add_scaled_assign(&sigma1_shift3, -1);
+    r5.add_scaled_assign(&uef_shift3, -1);
+    r5.add_scaled_assign(&uneg_eg_shift3, -1);
+    r5.add_scaled_assign(&public_k_shift3, -1);
+    r5.add_scaled_assign(&w, -1);
+    r5.add_scaled_assign(&sigma0_shift3, -1);
+    r5.add_scaled_assign(&maj_shift3, -1);
+    r5.add_scaled_assign(&mu_a, 1);
+    r5.add_scaled_assign(&comp_update_a, 1);
+
+    let mut r6 = SmallResidualPoly::zero();
+    r6.add_scaled_assign(&e_shift4, 1);
+    r6.add_scaled_assign(&a, -1);
+    r6.add_scaled_assign(&e, -1);
+    r6.add_scaled_assign(&sigma1_shift3, -1);
+    r6.add_scaled_assign(&uef_shift3, -1);
+    r6.add_scaled_assign(&uneg_eg_shift3, -1);
+    r6.add_scaled_assign(&public_k_shift3, -1);
+    r6.add_scaled_assign(&w, -1);
+    r6.add_scaled_assign(&mu_e, 1);
+    r6.add_scaled_assign(&comp_update_e, 1);
+
+    let s_init = small_public_scalar_shifted(public, ShaPublicCol::SInit, row, 0, field_cfg)?;
+    let s_msg = small_public_scalar_shifted(public, ShaPublicCol::SMsg, row, 0, field_cfg)?;
+    let s_sched = small_public_scalar_shifted(public, ShaPublicCol::SSched, row, 0, field_cfg)?;
+    let s_upd = small_public_scalar_shifted(public, ShaPublicCol::SUpd, row, 0, field_cfg)?;
+    let s_ff = small_public_scalar_shifted(public, ShaPublicCol::SFf, row, 0, field_cfg)?;
+    let s_out = small_public_scalar_shifted(public, ShaPublicCol::SOut, row, 0, field_cfg)?;
+
+    let mut r7 = SmallResidualPoly::zero();
+    let mut a_minus_pin =
+        a.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?;
+    r7.add_scaled_assign(&a_minus_pin, s_init);
+    a_minus_pin =
+        a.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PAOut, row, field_cfg)?;
+    r7.add_scaled_assign(&a_minus_pin, s_out);
+
+    let mut r8 = SmallResidualPoly::zero();
+    let mut e_minus_pin =
+        e.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?;
+    r8.add_scaled_assign(&e_minus_pin, s_init);
+    e_minus_pin =
+        e.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PEOut, row, field_cfg)?;
+    r8.add_scaled_assign(&e_minus_pin, s_out);
+
+    let mut r9 = SmallResidualPoly::zero();
+    r9.add_scaled_assign(&a_shift4, 1);
+    r9.add_scaled_assign(&a, -1);
+    r9.add_scaled_assign(
+        &small_public_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?,
+        -1,
+    );
+    r9.add_scaled_assign(&mu_ff_a, 1);
+    r9.add_scaled_assign(&comp_ff_a, 1);
+
+    let mut r10 = SmallResidualPoly::zero();
+    r10.add_scaled_assign(&e_shift4, 1);
+    r10.add_scaled_assign(&e, -1);
+    r10.add_scaled_assign(
+        &small_public_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?,
+        -1,
+    );
+    r10.add_scaled_assign(&mu_ff_e, 1);
+    r10.add_scaled_assign(&comp_ff_e, 1);
+
+    let mut r11_arg = w.clone();
+    r11_arg.add_scaled_assign(
+        &small_public_word_or_const_poly(public, ShaPublicCol::Message, row, field_cfg)?,
+        -1,
+    );
+    let r11 = r11_arg.scaled(s_msg);
+    let r12 = comp_schedule.scaled(s_sched);
+    let r13 = comp_update_a.scaled(s_upd);
+    let r14 = comp_update_e.scaled(s_upd);
+    let r15 = comp_ff_a.scaled(s_ff);
+    let r16 = comp_ff_e.scaled(s_ff);
+    let r17 = mu_shift10;
+
+    Some([
+        r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17,
+    ])
+}
+
+fn small_scalar_value<F>(value: &F, field_cfg: &F::Config) -> Option<i128>
+where
+    F: ShaSmallFieldDecode,
+{
+    F::signed_i64_if_small(value, field_cfg).map(i128::from)
+}
+
+fn small_bit_value<F>(value: &F, field_cfg: &F::Config) -> Option<i128>
+where
+    F: ShaSmallFieldDecode,
+{
+    #[cfg(not(debug_assertions))]
+    let _ = field_cfg;
+    let bit = F::bit_if_canonical(value)?;
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+        F::from_with_cfg(if bit { 1 } else { 0 }, field_cfg),
+        *value
+    );
+    Some(if bit { 1 } else { 0 })
+}
+
+fn small_bit_at_shifted_or_zero<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    row: usize,
+    shift: usize,
+    bit: usize,
+    field_cfg: &F::Config,
+) -> Option<i128>
+where
+    F: ShaSmallFieldDecode,
+{
+    if bit >= SHA_WORD_BITS {
+        return None;
+    }
+    let Some(shifted) = row.checked_add(shift) else {
+        return Some(0);
+    };
+    if shifted >= SHA_ROW_COUNT {
+        return Some(0);
+    }
+    let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+    let value = trace.bit_slices.get(table_idx)?.evaluations.get(shifted)?;
+    small_bit_value(value, field_cfg)
+}
+
+fn small_double_bool_or_mul(bit: i128) -> i128 {
+    bit * 2
+}
+
+fn small_word_poly<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Option<SmallResidualPoly>
+where
+    F: ShaSmallFieldDecode,
+{
+    if row >= SHA_ROW_COUNT {
+        return Some(SmallResidualPoly::zero());
+    }
+    let col_idx = col.index();
+    let mut out = SmallResidualPoly::zero();
+    out.len = SHA_WORD_BITS;
+    for bit in 0..SHA_WORD_BITS {
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        let value = trace.bit_slices.get(table_idx)?.evaluations.get(row)?;
+        out.coeffs[bit] = small_bit_value(value, field_cfg)?;
+    }
+    out.trim();
+    Some(out)
+}
+
+fn small_word_poly_shifted<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaWordCol,
+    row: usize,
+    shift: usize,
+    field_cfg: &F::Config,
+) -> Option<SmallResidualPoly>
+where
+    F: ShaSmallFieldDecode,
+{
+    match row.checked_add(shift) {
+        Some(shifted) if shifted < SHA_ROW_COUNT => small_word_poly(trace, col, shifted, field_cfg),
+        _ => Some(SmallResidualPoly::zero()),
+    }
+}
+
+fn small_int_const_poly<F>(
+    trace: &ProjectedTrace<F>,
+    col: ShaIntCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Option<SmallResidualPoly>
+where
+    F: ShaSmallFieldDecode,
+{
+    if row >= SHA_ROW_COUNT {
+        return Some(SmallResidualPoly::zero());
+    }
+    let value = trace.int_columns.get(col.index())?.evaluations.get(row)?;
+    Some(SmallResidualPoly::constant(small_scalar_value(
+        value, field_cfg,
+    )?))
+}
+
+fn small_public_scalar_shifted<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    shift: usize,
+    field_cfg: &F::Config,
+) -> Option<i128>
+where
+    F: ShaSmallFieldDecode,
+{
+    let Some(shifted) = row.checked_add(shift) else {
+        return Some(0);
+    };
+    if shifted >= SHA_ROW_COUNT {
+        return Some(0);
+    }
+    let value = public.columns.get(col.index())?.evaluations.get(shifted)?;
+    small_scalar_value(value, field_cfg)
+}
+
+fn small_public_const_poly<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Option<SmallResidualPoly>
+where
+    F: ShaSmallFieldDecode,
+{
+    Some(SmallResidualPoly::constant(small_public_scalar_shifted(
+        public, col, row, 0, field_cfg,
+    )?))
+}
+
+fn small_public_word_or_const_poly<F>(
+    public: &ProjectedPublic<F>,
+    col: ShaPublicCol,
+    row: usize,
+    field_cfg: &F::Config,
+) -> Option<SmallResidualPoly>
+where
+    F: ShaSmallFieldDecode,
+{
+    let Some(word_col) = col.public_word_col() else {
+        return small_public_const_poly(public, col, row, field_cfg);
+    };
+    let Some(bit_slices) = &public.bit_slices else {
+        return small_public_const_poly(public, col, row, field_cfg);
+    };
+    if row >= SHA_ROW_COUNT {
+        return Some(SmallResidualPoly::zero());
+    }
+    let col_idx = word_col.index();
+    let mut out = SmallResidualPoly::zero();
+    out.len = SHA_WORD_BITS;
+    for bit in 0..SHA_WORD_BITS {
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        let value = bit_slices.get(table_idx)?.evaluations.get(row)?;
+        out.coeffs[bit] = small_bit_value(value, field_cfg)?;
+    }
+    out.trim();
+    Some(out)
+}
+
 fn add_signed_small_field_product<F>(acc: &mut F, value: &F, coeff: i64, field_cfg: &F::Config)
 where
     F: PrimeField + FromPrimitiveWithConfig,
@@ -3877,27 +4881,79 @@ fn prepare_canonical_sha_booleanity_basis<F>(
     field_cfg: &F::Config,
 ) -> Result<Option<PreparedCanonicalShaBooleanityBasis>, ShaProjectionError>
 where
-    F: PrimeField,
+    F: ShaSmallFieldDecode,
 {
-    let sources = production_sha_booleanity_sources();
-    let mut source_row_bits = vec![0u128; sources.len()];
-    let zero = F::zero_with_cfg(field_cfg);
-    let one = F::one_with_cfg(field_cfg);
-
+    let source_count = ShaWordCol::COUNT * SHA_WORD_BITS + 3 * SHA_WORD_BITS;
+    let mut source_row_bits = vec![0u128; source_count];
     for row in 0..SHA_ROW_COUNT {
-        let virtuals = reconstruct_virtual_ch_maj_at_row_unchecked(trace, row, field_cfg)?;
-        for (source_idx, source) in sources.iter().enumerate() {
-            let value = booleanity_source_value_at_row_with_virtuals(
-                trace,
-                row,
-                source,
-                Some(&virtuals),
-                field_cfg,
-            )?;
-            if value == one {
-                source_row_bits[source_idx] |= 1u128 << row;
-            } else if value != zero {
-                return Ok(None);
+        for col_idx in 0..ShaWordCol::COUNT {
+            let col = ShaWordCol::ALL[col_idx];
+            for bit in 0..SHA_WORD_BITS {
+                let value = small_bit_at_shifted_or_zero(trace, col, row, 0, bit, field_cfg)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?;
+                if value == 1 {
+                    source_row_bits[col_idx * SHA_WORD_BITS + bit] |= 1u128 << row;
+                }
+            }
+        }
+
+        let virtual_base = ShaWordCol::COUNT * SHA_WORD_BITS;
+        for bit in 0..SHA_WORD_BITS {
+            let ch1 = small_bit_at_shifted_or_zero(trace, ShaWordCol::E, row, 2, bit, field_cfg)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero(trace, ShaWordCol::E, row, 1, bit, field_cfg)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero(trace, ShaWordCol::Uef, row, 2, bit, field_cfg)
+                        .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+            let ch2 = small_bit_at_shifted_or_zero(trace, ShaWordCol::E, row, 2, bit, field_cfg)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_bit_at_shifted_or_zero(trace, ShaWordCol::E, row, 0, bit, field_cfg)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero(trace, ShaWordCol::UNegEg, row, 2, bit, field_cfg)
+                        .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                )
+                + small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero(
+                        trace,
+                        ShaWordCol::Ch2Comp,
+                        row,
+                        0,
+                        bit,
+                        field_cfg,
+                    )
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+            let maj = small_bit_at_shifted_or_zero(trace, ShaWordCol::A, row, 0, bit, field_cfg)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero(trace, ShaWordCol::A, row, 1, bit, field_cfg)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero(trace, ShaWordCol::A, row, 2, bit, field_cfg)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero(trace, ShaWordCol::Maj, row, 2, bit, field_cfg)
+                        .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                )
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero(
+                        trace,
+                        ShaWordCol::MajComp,
+                        row,
+                        0,
+                        bit,
+                        field_cfg,
+                    )
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+
+            for (offset, value) in [ch1, ch2, maj].into_iter().enumerate() {
+                if value == 1 {
+                    source_row_bits[virtual_base + bit * 3 + offset] |= 1u128 << row;
+                } else if value != 0 {
+                    return Ok(None);
+                }
             }
         }
     }
@@ -5984,9 +7040,7 @@ struct PackedShaSuffixState<F: PrimeField> {
     round: usize,
     alpha: F,
     linear_claims: LinearClaimTable<F>,
-    workspace: PreparedShaPackedPrefixWorkspace,
-    mask_weight_sums: Vec<F>,
-    active_tail_weights: Vec<Vec<(usize, F)>>,
+    booleanity_claims: BooleanityClaimTable<F>,
     source_row_weights: Vec<F>,
     suffix_eq_weights: CollapsedSuffixEqWeights<F>,
     prepared_round: Option<SuffixRoundBuckets<F>>,
@@ -5994,7 +7048,7 @@ struct PackedShaSuffixState<F: PrimeField> {
 
 impl<F> PackedShaSuffixState<F>
 where
-    F: PrimeField,
+    F: ShaSuffixScannerField,
 {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -6053,6 +7107,8 @@ where
             });
         }
 
+        let booleanity_claims =
+            materialize_packed_prefix_workspace_claims(&workspace, &prefix_weights, field_cfg)?;
         let suffix_eq_weights = CollapsedSuffixEqWeights::new(&beta[suffix_start..], field_cfg)?;
         let mut source_row_weights = Vec::with_capacity(expected_source_row_count);
         for booleanity_weight in &booleanity_weights {
@@ -6060,10 +7116,6 @@ where
                 source_row_weights.push(row_weight.clone() * booleanity_weight);
             }
         }
-        let one = F::one_with_cfg(field_cfg);
-        let active_tail_weights = (0..suffix_len)
-            .map(|tail| vec![(tail, one.clone())])
-            .collect();
 
         Ok(Self {
             beta,
@@ -6071,9 +7123,7 @@ where
             round: 0,
             alpha,
             linear_claims,
-            workspace,
-            mask_weight_sums: build_prefix_mask_weight_sums(&prefix_weights, field_cfg),
-            active_tail_weights,
+            booleanity_claims,
             source_row_weights,
             suffix_eq_weights,
             prepared_round: None,
@@ -6136,14 +7186,30 @@ where
         self.alpha *= eq_one_var(&self.beta[beta_idx], r, field_cfg);
 
         if self.round < self.suffix_vars() {
-            self.linear_claims.fold_in_place(r);
-            self.fold_active_tail_weights(r, field_cfg);
-            self.suffix_eq_weights.collapse_current_axis();
             let need_t_one = self.current_round_needs_direct_one(field_cfg);
-            self.prepared_round = Some(self.scan_round_buckets(need_t_one, field_cfg));
+            let source_row_count = self.booleanity_claims.source_row_count();
+            let (t_zero, t_infinity, t_one_direct) = F::suffix_fold_prepare_next_round_flat(
+                &mut self.linear_claims.values,
+                self.booleanity_claims.values_mut(),
+                source_row_count,
+                &self.source_row_weights,
+                &self.suffix_eq_weights.values,
+                r,
+                need_t_one,
+                field_cfg,
+            );
+            let new_len = self.linear_claims.values.len() >> 1;
+            self.linear_claims.values.truncate(new_len);
+            self.booleanity_claims.truncate_tail_len(new_len);
+            self.suffix_eq_weights.collapse_current_axis();
+            self.prepared_round = Some(SuffixRoundBuckets {
+                t_zero,
+                t_infinity,
+                t_one_direct,
+            });
         } else {
             self.linear_claims.fold_in_place(r);
-            self.fold_active_tail_weights(r, field_cfg);
+            self.booleanity_claims.fold_in_place(r);
             self.suffix_eq_weights.collapse_current_axis();
             self.prepared_round = None;
         }
@@ -6152,62 +7218,27 @@ where
     #[allow(clippy::arithmetic_side_effects)]
     fn reduced_body_buckets(&self, field_cfg: &F::Config) -> (F, F) {
         self.debug_assert_live_lengths();
-        let rest_len = self.suffix_eq_weights.len() >> 1;
-        let one = F::one_with_cfg(field_cfg);
-        let mut linear_zero = F::zero_with_cfg(field_cfg);
-        let mut quadratic_zero = F::zero_with_cfg(field_cfg);
-        let mut quadratic_infinity = F::zero_with_cfg(field_cfg);
-
-        for rest in 0..rest_len {
-            let even_tail = rest << 1;
-            let odd_tail = even_tail + 1;
-            let weight = self.suffix_eq_weights.pair_weight(rest);
-            linear_zero += weight.clone() * self.linear_claims.values[even_tail].clone();
-
-            let mut source_zero = F::zero_with_cfg(field_cfg);
-            let mut source_infinity = F::zero_with_cfg(field_cfg);
-            for (source_row, scale) in self.source_row_weights.iter().enumerate() {
-                if F::is_zero(scale) {
-                    continue;
-                }
-                let even = self.source_value(even_tail, source_row, field_cfg);
-                let odd = self.source_value(odd_tail, source_row, field_cfg);
-                source_zero += scale.clone() * even.clone() * (even.clone() - one.clone());
-                let delta = odd - even;
-                source_infinity += scale.clone() * delta.clone() * delta;
-            }
-
-            quadratic_zero += weight.clone() * source_zero;
-            quadratic_infinity += weight * source_infinity;
-        }
-
-        (linear_zero + quadratic_zero, quadratic_infinity)
+        F::suffix_reduced_body_buckets_flat(
+            &self.linear_claims.values,
+            self.booleanity_claims.values(),
+            self.booleanity_claims.source_row_count(),
+            &self.source_row_weights,
+            &self.suffix_eq_weights.values,
+            field_cfg,
+        )
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn direct_one_body_bucket(&self, field_cfg: &F::Config) -> F {
         self.debug_assert_live_lengths();
-        let rest_len = self.suffix_eq_weights.len() >> 1;
-        let one = F::one_with_cfg(field_cfg);
-        let mut acc = F::zero_with_cfg(field_cfg);
-
-        for rest in 0..rest_len {
-            let odd_tail = (rest << 1) + 1;
-            let weight = self.suffix_eq_weights.pair_weight(rest);
-            acc += weight.clone() * self.linear_claims.values[odd_tail].clone();
-
-            let mut source_one = F::zero_with_cfg(field_cfg);
-            for (source_row, scale) in self.source_row_weights.iter().enumerate() {
-                if F::is_zero(scale) {
-                    continue;
-                }
-                let odd = self.source_value(odd_tail, source_row, field_cfg);
-                source_one += scale.clone() * odd.clone() * (odd - one.clone());
-            }
-            acc += weight * source_one;
-        }
-
-        acc
+        F::suffix_direct_one_body_bucket_flat(
+            &self.linear_claims.values,
+            self.booleanity_claims.values(),
+            self.booleanity_claims.source_row_count(),
+            &self.source_row_weights,
+            &self.suffix_eq_weights.values,
+            field_cfg,
+        )
     }
 
     fn scan_round_buckets(&self, need_t_one: bool, field_cfg: &F::Config) -> SuffixRoundBuckets<F> {
@@ -6227,47 +7258,6 @@ where
         F::is_zero(&e_one)
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
-    fn source_value(&self, tail: usize, source_row: usize, field_cfg: &F::Config) -> F {
-        let mut acc = F::zero_with_cfg(field_cfg);
-        for (leaf_tail, fold_weight) in &self.active_tail_weights[tail] {
-            if F::is_zero(fold_weight) {
-                continue;
-            }
-            let mask = usize::from(self.workspace.mask(*leaf_tail, source_row));
-            if mask == 0 {
-                continue;
-            }
-            acc += fold_weight.clone() * &self.mask_weight_sums[mask];
-        }
-        acc
-    }
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn fold_active_tail_weights(&mut self, r: &F, field_cfg: &F::Config) {
-        debug_assert!(self.active_tail_weights.len().is_power_of_two());
-        debug_assert!(self.active_tail_weights.len() >= 2);
-        let half = self.active_tail_weights.len() >> 1;
-        let one = F::one_with_cfg(field_cfg);
-        let one_minus_r = one - r;
-        let mut next = Vec::with_capacity(half);
-
-        for idx in 0..half {
-            let even = &self.active_tail_weights[idx << 1];
-            let odd = &self.active_tail_weights[(idx << 1) + 1];
-            let mut combined = Vec::with_capacity(even.len() + odd.len());
-            for (leaf_tail, weight) in even {
-                combined.push((*leaf_tail, weight.clone() * &one_minus_r));
-            }
-            for (leaf_tail, weight) in odd {
-                combined.push((*leaf_tail, weight.clone() * r));
-            }
-            next.push(combined);
-        }
-
-        self.active_tail_weights = next;
-    }
-
     fn suffix_vars(&self) -> usize {
         self.beta.len() - self.suffix_start
     }
@@ -6277,12 +7267,52 @@ where
             self.linear_claims.values.len(),
             self.suffix_eq_weights.len()
         );
-        debug_assert_eq!(self.active_tail_weights.len(), self.suffix_eq_weights.len());
+        debug_assert_eq!(
+            self.booleanity_claims.tail_len(),
+            self.suffix_eq_weights.len()
+        );
+        debug_assert_eq!(
+            self.booleanity_claims.values().len(),
+            self.suffix_eq_weights.len() * self.booleanity_claims.source_row_count()
+        );
         debug_assert_eq!(
             self.source_row_weights.len(),
-            self.workspace.source_row_count
+            self.booleanity_claims.source_row_count()
         );
     }
+}
+
+fn materialize_packed_prefix_workspace_claims<F>(
+    workspace: &PreparedShaPackedPrefixWorkspace,
+    prefix_weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<BooleanityClaimTable<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let prefix_len = binary_len(workspace.prefix_vars);
+    if prefix_weights.len() != prefix_len {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: prefix_weights.len(),
+            expected: prefix_len,
+        });
+    }
+
+    let mask_weight_sums = build_prefix_mask_weight_sums(prefix_weights, field_cfg);
+    let value_count = workspace
+        .tail_len
+        .checked_mul(workspace.source_row_count)
+        .ok_or(ShaProjectionError::InstanceCountMismatch {
+            got: workspace.tail_len,
+            expected: usize::MAX,
+        })?;
+    let mut values = Vec::with_capacity(value_count);
+    for tail in 0..workspace.tail_len {
+        for source_row in 0..workspace.source_row_count {
+            values.push(mask_weight_sums[usize::from(workspace.mask(tail, source_row))].clone());
+        }
+    }
+    BooleanityClaimTable::new(values, workspace.tail_len, workspace.source_row_count)
 }
 
 fn build_prefix_mask_weight_sums<F>(prefix_weights: &[F], field_cfg: &F::Config) -> Vec<F>
@@ -7757,6 +8787,7 @@ where
     let prefix_len = binary_len(prefix_vars);
     let ternary_len = checked_ternary_len(prefix_vars)?;
     let coeff_plans = ternary_coeff_plans(prefix_vars)?;
+    let mask_count = 1usize << prefix_len;
 
     let word_bit_count = ShaWordCol::COUNT * SHA_WORD_BITS;
     let one = F::one_with_cfg(field_cfg);
@@ -7764,11 +8795,12 @@ where
         .enumerate()
         .map(|(chunk_idx, row_weight_chunk)| {
             let row_offset = chunk_idx * 8;
-            let mut partial = vec![F::zero_with_cfg(field_cfg); ternary_len * tail_len];
-            let mut mask_weights = HashMap::new();
+            let zero = F::zero_with_cfg(field_cfg);
+            let mut partial = vec![zero.clone(); ternary_len * tail_len];
+            let mut mask_weights = vec![zero.clone(); mask_count];
             let mut touched_masks = Vec::new();
             let mut virtuals_by_prefix = Vec::with_capacity(prefix_len);
-            let mut generic_values = vec![F::zero_with_cfg(field_cfg); prefix_len];
+            let mut generic_values = vec![zero.clone(); prefix_len];
 
             for tail in 0..tail_len {
                 for (row_in_chunk, row_weight) in row_weight_chunk.iter().enumerate() {
@@ -7853,6 +8885,7 @@ where
                         &mut mask_weights,
                         &mut touched_masks,
                         row_weight,
+                        &zero,
                     );
                 }
             }
@@ -7870,7 +8903,7 @@ where
 }
 
 fn add_booleanity_mask_weight<F>(
-    mask_weights: &mut HashMap<usize, F>,
+    mask_weights: &mut [F],
     touched_masks: &mut Vec<usize>,
     mask_idx: usize,
     weight: &F,
@@ -7880,16 +8913,11 @@ fn add_booleanity_mask_weight<F>(
     if F::is_zero(weight) {
         return;
     }
-    use std::collections::hash_map::Entry;
-    match mask_weights.entry(mask_idx) {
-        Entry::Occupied(mut entry) => {
-            *entry.get_mut() += weight;
-        }
-        Entry::Vacant(entry) => {
-            touched_masks.push(mask_idx);
-            entry.insert(weight.clone());
-        }
+    debug_assert!(mask_idx < mask_weights.len());
+    if F::is_zero(&mask_weights[mask_idx]) {
+        touched_masks.push(mask_idx);
     }
+    mask_weights[mask_idx] += weight;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7898,16 +8926,16 @@ fn flush_booleanity_mask_weights<F>(
     tail: usize,
     ternary_len: usize,
     coeff_plans: &[TernaryCoeffPlan],
-    mask_weights: &mut HashMap<usize, F>,
+    mask_weights: &mut [F],
     touched_masks: &mut Vec<usize>,
     row_weight: &F,
+    zero: &F,
 ) where
     F: PrimeField,
 {
     for &mask_idx in touched_masks.iter() {
-        let Some(mask_weight) = mask_weights.remove(&mask_idx) else {
-            continue;
-        };
+        debug_assert!(mask_idx < mask_weights.len());
+        let mask_weight = std::mem::replace(&mut mask_weights[mask_idx], zero.clone());
         if F::is_zero(&mask_weight) {
             continue;
         }
@@ -10231,40 +11259,41 @@ fn residual_polys_at_row_with_constants<F>(
 where
     F: PrimeField,
 {
-    let a = word_poly(trace, ShaWordCol::A, row, field_cfg)?;
-    let e = word_poly(trace, ShaWordCol::E, row, field_cfg)?;
-    let sigma0 = word_poly(trace, ShaWordCol::Sigma0, row, field_cfg)?;
-    let sigma1 = word_poly(trace, ShaWordCol::Sigma1, row, field_cfg)?;
-    let w = word_poly(trace, ShaWordCol::W, row, field_cfg)?;
-    let small_sigma0 = word_poly(trace, ShaWordCol::SmallSigma0, row, field_cfg)?;
-    let small_sigma1 = word_poly(trace, ShaWordCol::SmallSigma1, row, field_cfg)?;
-    let ov_sigma0 = word_poly(trace, ShaWordCol::OvSigma0, row, field_cfg)?;
-    let ov_sigma1 = word_poly(trace, ShaWordCol::OvSigma1, row, field_cfg)?;
-    let ov_small_sigma0 = word_poly(trace, ShaWordCol::OvSmallSigma0, row, field_cfg)?;
-    let ov_small_sigma1 = word_poly(trace, ShaWordCol::OvSmallSigma1, row, field_cfg)?;
+    let a = word_poly_fast(trace, ShaWordCol::A, row, field_cfg);
+    let e = word_poly_fast(trace, ShaWordCol::E, row, field_cfg);
+    let sigma0 = word_poly_fast(trace, ShaWordCol::Sigma0, row, field_cfg);
+    let sigma1 = word_poly_fast(trace, ShaWordCol::Sigma1, row, field_cfg);
+    let w = word_poly_fast(trace, ShaWordCol::W, row, field_cfg);
+    let small_sigma0 = word_poly_fast(trace, ShaWordCol::SmallSigma0, row, field_cfg);
+    let small_sigma1 = word_poly_fast(trace, ShaWordCol::SmallSigma1, row, field_cfg);
+    let ov_sigma0 = word_poly_fast(trace, ShaWordCol::OvSigma0, row, field_cfg);
+    let ov_sigma1 = word_poly_fast(trace, ShaWordCol::OvSigma1, row, field_cfg);
+    let ov_small_sigma0 = word_poly_fast(trace, ShaWordCol::OvSmallSigma0, row, field_cfg);
+    let ov_small_sigma1 = word_poly_fast(trace, ShaWordCol::OvSmallSigma1, row, field_cfg);
     let w_rot25 = w.rot_c(25);
     let w_rot14 = w.rot_c(14);
     let w_rot15 = w.rot_c(15);
     let w_rot13 = w.rot_c(13);
     let w_shift3 = w.shift_r_c(3);
-    let w_shift9 = word_poly_shifted(trace, ShaWordCol::W, row, 9, field_cfg)?;
-    let w_shift16 = word_poly_shifted(trace, ShaWordCol::W, row, 16, field_cfg)?;
-    let small_sigma0_shift1 = word_poly_shifted(trace, ShaWordCol::SmallSigma0, row, 1, field_cfg)?;
+    let w_shift9 = word_poly_shifted_fast(trace, ShaWordCol::W, row, 9, field_cfg);
+    let w_shift16 = word_poly_shifted_fast(trace, ShaWordCol::W, row, 16, field_cfg);
+    let small_sigma0_shift1 =
+        word_poly_shifted_fast(trace, ShaWordCol::SmallSigma0, row, 1, field_cfg);
     let small_sigma1_shift14 =
-        word_poly_shifted(trace, ShaWordCol::SmallSigma1, row, 14, field_cfg)?;
-    let a_shift4 = word_poly_shifted(trace, ShaWordCol::A, row, 4, field_cfg)?;
-    let e_shift4 = word_poly_shifted(trace, ShaWordCol::E, row, 4, field_cfg)?;
-    let sigma0_shift3 = word_poly_shifted(trace, ShaWordCol::Sigma0, row, 3, field_cfg)?;
-    let sigma1_shift3 = word_poly_shifted(trace, ShaWordCol::Sigma1, row, 3, field_cfg)?;
-    let uef_shift3 = word_poly_shifted(trace, ShaWordCol::Uef, row, 3, field_cfg)?;
-    let uneg_eg_shift3 = word_poly_shifted(trace, ShaWordCol::UNegEg, row, 3, field_cfg)?;
-    let maj_shift3 = word_poly_shifted(trace, ShaWordCol::Maj, row, 3, field_cfg)?;
-    let public_k_shift3 = public_const_poly(public, ShaPublicCol::K, row + 3, field_cfg)?;
-    let comp_schedule = int_const_poly(trace, ShaIntCol::CompSchedule, row, field_cfg)?;
-    let comp_update_a = int_const_poly(trace, ShaIntCol::CompUpdateA, row, field_cfg)?;
-    let comp_update_e = int_const_poly(trace, ShaIntCol::CompUpdateE, row, field_cfg)?;
-    let comp_ff_a = int_const_poly(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)?;
-    let comp_ff_e = int_const_poly(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
+        word_poly_shifted_fast(trace, ShaWordCol::SmallSigma1, row, 14, field_cfg);
+    let a_shift4 = word_poly_shifted_fast(trace, ShaWordCol::A, row, 4, field_cfg);
+    let e_shift4 = word_poly_shifted_fast(trace, ShaWordCol::E, row, 4, field_cfg);
+    let sigma0_shift3 = word_poly_shifted_fast(trace, ShaWordCol::Sigma0, row, 3, field_cfg);
+    let sigma1_shift3 = word_poly_shifted_fast(trace, ShaWordCol::Sigma1, row, 3, field_cfg);
+    let uef_shift3 = word_poly_shifted_fast(trace, ShaWordCol::Uef, row, 3, field_cfg);
+    let uneg_eg_shift3 = word_poly_shifted_fast(trace, ShaWordCol::UNegEg, row, 3, field_cfg);
+    let maj_shift3 = word_poly_shifted_fast(trace, ShaWordCol::Maj, row, 3, field_cfg);
+    let public_k_shift3 = public_const_poly_fast(public, ShaPublicCol::K, row + 3, field_cfg);
+    let comp_schedule = int_const_poly_fast(trace, ShaIntCol::CompSchedule, row, field_cfg);
+    let comp_update_a = int_const_poly_fast(trace, ShaIntCol::CompUpdateA, row, field_cfg);
+    let comp_update_e = int_const_poly_fast(trace, ShaIntCol::CompUpdateE, row, field_cfg);
+    let comp_ff_a = int_const_poly_fast(trace, ShaIntCol::CompFeedForwardA, row, field_cfg);
+    let comp_ff_e = int_const_poly_fast(trace, ShaIntCol::CompFeedForwardE, row, field_cfg);
 
     let r0 = (&a * &constants.rho_sig0) - &sigma0 - &scale_poly(&ov_sigma0, &constants.two);
     let r1 = (&e * &constants.rho_sig1) - &sigma1 - &scale_poly(&ov_sigma1, &constants.two);
@@ -10275,7 +11304,7 @@ where
         - &small_sigma1
         - &scale_poly(&ov_small_sigma1, &constants.two);
 
-    let mu_packed = word_poly(trace, ShaWordCol::MuPacked, row, field_cfg)?;
+    let mu_packed = word_poly_fast(trace, ShaWordCol::MuPacked, row, field_cfg);
     let mu_shift2 = mu_packed.shift_r_c(2);
     let mu_shift5 = mu_packed.shift_r_c(5);
     let mu_shift8 = mu_packed.shift_r_c(8);
@@ -10317,36 +11346,36 @@ where
         + &mu_e
         + &comp_update_e;
 
-    let s_init = public_scalar(public, ShaPublicCol::SInit, row, field_cfg)?;
-    let s_msg = public_scalar(public, ShaPublicCol::SMsg, row, field_cfg)?;
-    let s_sched = public_scalar(public, ShaPublicCol::SSched, row, field_cfg)?;
-    let s_upd = public_scalar(public, ShaPublicCol::SUpd, row, field_cfg)?;
-    let s_ff = public_scalar(public, ShaPublicCol::SFf, row, field_cfg)?;
-    let s_out = public_scalar(public, ShaPublicCol::SOut, row, field_cfg)?;
+    let s_init = public_scalar_shifted_fast(public, ShaPublicCol::SInit, row, 0, field_cfg);
+    let s_msg = public_scalar_shifted_fast(public, ShaPublicCol::SMsg, row, 0, field_cfg);
+    let s_sched = public_scalar_shifted_fast(public, ShaPublicCol::SSched, row, 0, field_cfg);
+    let s_upd = public_scalar_shifted_fast(public, ShaPublicCol::SUpd, row, 0, field_cfg);
+    let s_ff = public_scalar_shifted_fast(public, ShaPublicCol::SFf, row, 0, field_cfg);
+    let s_out = public_scalar_shifted_fast(public, ShaPublicCol::SOut, row, 0, field_cfg);
 
     let r7 = scale_poly(
-        &(a.clone() - &public_word_or_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?),
+        &(a.clone() - &public_word_or_const_poly_fast(public, ShaPublicCol::PAIn, row, field_cfg)),
         &s_init,
     ) + &scale_poly(
-        &(a.clone() - &public_word_or_const_poly(public, ShaPublicCol::PAOut, row, field_cfg)?),
+        &(a.clone() - &public_word_or_const_poly_fast(public, ShaPublicCol::PAOut, row, field_cfg)),
         &s_out,
     );
     let r8 = scale_poly(
-        &(e.clone() - &public_word_or_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?),
+        &(e.clone() - &public_word_or_const_poly_fast(public, ShaPublicCol::PEIn, row, field_cfg)),
         &s_init,
     ) + &scale_poly(
-        &(e.clone() - &public_word_or_const_poly(public, ShaPublicCol::PEOut, row, field_cfg)?),
+        &(e.clone() - &public_word_or_const_poly_fast(public, ShaPublicCol::PEOut, row, field_cfg)),
         &s_out,
     );
 
-    let r9 = a_shift4 - &a - &public_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?
+    let r9 = a_shift4 - &a - &public_const_poly_fast(public, ShaPublicCol::PAIn, row, field_cfg)
         + &mu_ff_a
         + &comp_ff_a;
-    let r10 = e_shift4 - &e - &public_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?
+    let r10 = e_shift4 - &e - &public_const_poly_fast(public, ShaPublicCol::PEIn, row, field_cfg)
         + &mu_ff_e
         + &comp_ff_e;
     let r11 = scale_poly(
-        &(w - &public_word_or_const_poly(public, ShaPublicCol::Message, row, field_cfg)?),
+        &(w - &public_word_or_const_poly_fast(public, ShaPublicCol::Message, row, field_cfg)),
         &s_msg,
     );
 
@@ -10435,46 +11464,49 @@ fn validate_table<F>(
     Ok(())
 }
 
-fn word_poly<F>(
+fn word_poly_fast<F>(
     trace: &ProjectedTrace<F>,
     col: ShaWordCol,
     row: usize,
     field_cfg: &F::Config,
-) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+) -> DynamicPolynomialF<F>
 where
     F: PrimeField,
 {
     if row >= SHA_ROW_COUNT {
-        return Ok(DynamicPolynomialF::ZERO);
+        return DynamicPolynomialF::ZERO;
     }
     let col_idx = col.index();
     let mut coeffs = Vec::with_capacity(SHA_WORD_BITS);
     for bit in 0..SHA_WORD_BITS {
-        coeffs.push(scalar_from_table(
-            "bit_slices",
-            &trace.bit_slices,
-            bit_slice_index(col_idx, bit, SHA_WORD_BITS),
-            row,
-            field_cfg,
-        )?);
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        debug_assert!(table_idx < trace.bit_slices.len());
+        debug_assert!(row < trace.bit_slices[table_idx].evaluations.len());
+        coeffs.push(
+            trace
+                .bit_slices
+                .get(table_idx)
+                .and_then(|col| col.evaluations.get(row))
+                .cloned()
+                .unwrap_or_else(|| F::zero_with_cfg(field_cfg)),
+        );
     }
-    coeffs.resize(SHA_WORD_BITS, F::zero_with_cfg(field_cfg));
-    Ok(DynamicPolynomialF::new_trimmed(coeffs))
+    DynamicPolynomialF::new_trimmed(coeffs)
 }
 
-fn word_poly_shifted<F>(
+fn word_poly_shifted_fast<F>(
     trace: &ProjectedTrace<F>,
     col: ShaWordCol,
     row: usize,
     shift: usize,
     field_cfg: &F::Config,
-) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+) -> DynamicPolynomialF<F>
 where
     F: PrimeField,
 {
     match row.checked_add(shift) {
-        Some(shifted) if shifted < SHA_ROW_COUNT => word_poly(trace, col, shifted, field_cfg),
-        _ => Ok(DynamicPolynomialF::ZERO),
+        Some(shifted) if shifted < SHA_ROW_COUNT => word_poly_fast(trace, col, shifted, field_cfg),
+        _ => DynamicPolynomialF::ZERO,
     }
 }
 
@@ -10628,66 +11660,66 @@ where
     )
 }
 
-fn int_const_poly<F>(
+fn int_const_poly_fast<F>(
     trace: &ProjectedTrace<F>,
     col: ShaIntCol,
     row: usize,
     field_cfg: &F::Config,
-) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+) -> DynamicPolynomialF<F>
 where
     F: PrimeField,
 {
-    Ok(const_poly(
-        int_scalar(trace, col, row, field_cfg)?,
-        field_cfg,
-    ))
+    const_poly(int_scalar_fast(trace, col, row, field_cfg), field_cfg)
 }
 
-fn public_const_poly<F>(
+fn public_const_poly_fast<F>(
     public: &ProjectedPublic<F>,
     col: ShaPublicCol,
     row: usize,
     field_cfg: &F::Config,
-) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+) -> DynamicPolynomialF<F>
 where
     F: PrimeField,
 {
-    Ok(const_poly(
-        public_scalar(public, col, row, field_cfg)?,
+    const_poly(
+        public_scalar_shifted_fast(public, col, row, 0, field_cfg),
         field_cfg,
-    ))
+    )
 }
 
-fn public_word_or_const_poly<F>(
+fn public_word_or_const_poly_fast<F>(
     public: &ProjectedPublic<F>,
     col: ShaPublicCol,
     row: usize,
     field_cfg: &F::Config,
-) -> Result<DynamicPolynomialF<F>, ShaProjectionError>
+) -> DynamicPolynomialF<F>
 where
     F: PrimeField,
 {
     let Some(word_col) = col.public_word_col() else {
-        return public_const_poly(public, col, row, field_cfg);
+        return public_const_poly_fast(public, col, row, field_cfg);
     };
     let Some(bit_slices) = &public.bit_slices else {
-        return public_const_poly(public, col, row, field_cfg);
+        return public_const_poly_fast(public, col, row, field_cfg);
     };
     if row >= SHA_ROW_COUNT {
-        return Ok(DynamicPolynomialF::ZERO);
+        return DynamicPolynomialF::ZERO;
     }
     let col_idx = word_col.index();
     let mut bits = Vec::with_capacity(SHA_WORD_BITS);
     for bit in 0..SHA_WORD_BITS {
-        bits.push(scalar_from_table(
-            "public.bit_slices",
-            bit_slices,
-            bit_slice_index(col_idx, bit, SHA_WORD_BITS),
-            row,
-            field_cfg,
-        )?);
+        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
+        debug_assert!(table_idx < bit_slices.len());
+        debug_assert!(row < bit_slices[table_idx].evaluations.len());
+        bits.push(
+            bit_slices
+                .get(table_idx)
+                .and_then(|col| col.evaluations.get(row))
+                .cloned()
+                .unwrap_or_else(|| F::zero_with_cfg(field_cfg)),
+        );
     }
-    Ok(DynamicPolynomialF::new_trimmed(bits))
+    DynamicPolynomialF::new_trimmed(bits)
 }
 
 fn int_scalar<F>(
@@ -11764,16 +12796,25 @@ mod tests {
                     prefix_vars,
                 )
                 .expect("canonical packed basis should build a prefix workspace");
+                let materialized =
+                    materialize_packed_prefix_workspace_claims(&workspace, &prefix_weights, &cfg)
+                        .expect("packed prefix workspace should materialize claims");
                 let mask_weight_sums = build_prefix_mask_weight_sums(&prefix_weights, &cfg);
 
                 assert_eq!(workspace.tail_len, tail_len);
                 assert_eq!(workspace.source_row_count, field_table.source_row_count());
+                assert_eq!(materialized.tail_len(), field_table.tail_len());
+                assert_eq!(
+                    materialized.source_row_count(),
+                    field_table.source_row_count()
+                );
                 for tail in 0..tail_len {
                     for source_row in 0..workspace.source_row_count {
                         let expected = field_table.value(tail, source_row);
                         let actual =
                             &mask_weight_sums[usize::from(workspace.mask(tail, source_row))];
                         assert_eq!(actual, expected);
+                        assert_eq!(materialized.value(tail, source_row), expected);
                     }
                 }
             }

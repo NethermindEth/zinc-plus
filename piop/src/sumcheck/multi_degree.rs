@@ -543,11 +543,11 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
         assert!(!groups.is_empty(), "need at least one degree group");
 
         let num_groups = groups.len();
-        let mut buf = vec![0; F::zero_with_cfg(config).inner().get_num_bytes()];
+        let (mut buf, modulus_buf) = transcript_field_buffers::<F>(config);
         let nvars_field = F::from_with_cfg(num_vars as u64, config);
         let ngroups_field = F::from_with_cfg(num_groups as u64, config);
-        transcript.absorb_random_field(&nvars_field, &mut buf);
-        transcript.absorb_random_field(&ngroups_field, &mut buf);
+        absorb_random_field_cached(transcript, &nvars_field, &mut buf, &modulus_buf);
+        absorb_random_field_cached(transcript, &ngroups_field, &mut buf, &modulus_buf);
 
         let mut group_messages: Vec<Vec<SumcheckProverMsg<F>>> = (0..num_groups)
             .map(|_| Vec::with_capacity(num_vars))
@@ -560,7 +560,7 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             Vec::with_capacity(num_groups);
         for group in groups {
             let degree_field = F::from_with_cfg(group.degree as u64, config);
-            transcript.absorb_random_field(&degree_field, &mut buf);
+            absorb_random_field_cached(transcript, &degree_field, &mut buf, &modulus_buf);
             if let Some(ref fp) = group.prefix_fast {
                 assert!(
                     fp.prefix_len() > 0 && fp.prefix_len() <= num_vars,
@@ -618,14 +618,19 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             }
 
             for msg in &round_msgs {
-                transcript.absorb_random_field_slice(&msg.0.tail_evaluations, &mut buf);
+                absorb_random_field_slice_cached(
+                    transcript,
+                    &msg.0.tail_evaluations,
+                    &mut buf,
+                    &modulus_buf,
+                );
             }
             for (j, msg) in round_msgs.into_iter().enumerate() {
                 group_messages[j].push(msg);
             }
 
             let challenge: F = transcript.get_transcribable_field_challenge(config);
-            transcript.absorb_random_field(&challenge, &mut buf);
+            absorb_random_field_cached(transcript, &challenge, &mut buf, &modulus_buf);
 
             for group_idx in 0..num_groups {
                 let should_finish = fast_paths[group_idx]
@@ -843,6 +848,58 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
             point: shared_point.expect("at least one group"),
             expected_evaluations,
         })
+    }
+}
+
+fn transcript_field_buffers<F>(config: &F::Config) -> (Vec<u8>, Vec<u8>)
+where
+    F: PrimeField,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+{
+    let zero = F::zero_with_cfg(config);
+    let inner_len = zero.inner().get_num_bytes();
+    debug_assert_eq!(F::Inner::LENGTH_NUM_BYTES, F::Modulus::LENGTH_NUM_BYTES);
+    debug_assert_eq!(inner_len, F::Modulus::get_num_bytes(&zero.modulus()));
+    let mut modulus_buf = vec![0u8; inner_len];
+    zero.modulus()
+        .write_transcription_bytes_exact(&mut modulus_buf);
+    (vec![0u8; inner_len], modulus_buf)
+}
+
+fn absorb_random_field_cached<F>(
+    transcript: &mut impl Transcript,
+    value: &F,
+    value_buf: &mut [u8],
+    modulus_buf: &[u8],
+) where
+    F: PrimeField,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+{
+    debug_assert_eq!(value_buf.len(), modulus_buf.len());
+    transcript.absorb_inner(&[0x3]);
+    transcript.absorb_inner(modulus_buf);
+    transcript.absorb_inner(&[0x5]);
+
+    transcript.absorb_inner(&[0x1]);
+    value.inner().write_transcription_bytes_exact(value_buf);
+    transcript.absorb_inner(value_buf);
+    transcript.absorb_inner(&[0x3]);
+}
+
+fn absorb_random_field_slice_cached<F>(
+    transcript: &mut impl Transcript,
+    values: &[F],
+    value_buf: &mut [u8],
+    modulus_buf: &[u8],
+) where
+    F: PrimeField,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+{
+    for value in values {
+        absorb_random_field_cached(transcript, value, value_buf, modulus_buf);
     }
 }
 
