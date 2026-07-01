@@ -311,18 +311,20 @@ where
 
     /// Prover side: Spartan's two sumchecks over the $\mathbb{Q}[X]$ family.
     ///
-    /// 1. Assemble the full witness $z = z_{\text{pub}} + z_{\text{wit}}$ (the
-    ///    committed witness from `projected_traces[0]` plus the public prefix
-    ///    $[1, \text{io}]$).
-    /// 2. **Outer** (degree 3): squeeze $\tau$ (length $s_x$), then prove
-    ///    $\sum_x \mathrm{eq}(\tau, x)(\widetilde{Az} \cdot \widetilde{Bz} -
-    ///    \widetilde{Cz})(x) = 0$ over the constraint hypercube, yielding $r_x$
-    ///    internally; send $\widetilde{Az}, \widetilde{Bz}, \widetilde{Cz}$ at
-    ///    $r_x$.
-    /// 3. **Inner** (degree 2): bind those three evals, squeeze $r_A, r_B,
-    ///    r_C$, then prove $\sum_y m_{\text{row}}(y) \tilde z(y) = r_A az_{rx}
-    ///    + r_B bz_{rx} + r_C cz_{rx}$ over the variable hypercube, yielding
-    ///    $r_y = r_0$; send $\tilde z(r_y)$.
+    /// First, assemble the full witness $z = z_{\text{pub}} + z_{\text{wit}}$
+    /// (the committed witness from `projected_traces[0]` plus the public prefix
+    /// $[1, \text{io}]$).
+    ///
+    /// The **outer** sumcheck (degree 3) squeezes $\tau$ (length $s_x$) and
+    /// proves $\sum_x \mathrm{eq}(\tau, x)(\widetilde{Az} \cdot \widetilde{Bz} -
+    /// \widetilde{Cz})(x) = 0$ over the constraint hypercube, yielding $r_x$
+    /// internally; it then sends $\widetilde{Az}, \widetilde{Bz},
+    /// \widetilde{Cz}$ at $r_x$.
+    ///
+    /// The **inner** sumcheck (degree 2) binds those three evals, squeezes
+    /// $r_A, r_B, r_C$, and proves $\sum_y m_{\text{row}}(y) \tilde z(y) = r_A
+    /// az_{rx} + r_B bz_{rx} + r_C cz_{rx}$ over the variable hypercube, yielding
+    /// $r_y = r_0$; it sends $\tilde z(r_y)$.
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     fn prove_constraints(
         &self,

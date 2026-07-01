@@ -1,5 +1,37 @@
 # Plan: R1CS variant of UCS — a Spartan-style `ConstraintSystem` frontend
 
+## Status (as of implementation)
+
+**Milestone M1 (stages 1–3) is implemented and green** in
+`protocol/src/r1cs_frontend.rs` (+ e2e tests in `protocol/src/lib.rs`). R1CS is
+provable/verifiable end-to-end over \(\mathbb{Q}[X]\) with the zero ideal through
+the full substrate, reusing it exactly as UAIR does. **Both open risks (f) and
+(g) are resolved** (see the Open-risks section). The substrate required **zero
+signature changes**; the only seam additions were `Layout::new` and
+`ProtocolError::R1cs`.
+
+- **Stage 1 (scaffolding + seam plumbing):** done. `Layout::new`,
+  `ProtocolError::R1cs(String)`, and the `r1cs_frontend` module with all types +
+  `Transcribable` + the `ConstraintSystem` surface.
+- **Stage 2 (two-sumcheck argument, frontend-only):** done. `prove_constraints`
+  / `verify_constraints` / `verify_lifted_evals` fully implemented; 7 frontend
+  tests (satisfiable ±public input, 4 negatives, serialization round-trip).
+- **Stage 3 (full-substrate integration):** done. 4 e2e tests via
+  `ZincPlusPiop::<_, R1csFrontend<i64,F>, _, _, _>::prove/verify` (2 satisfiable,
+  2 tamper negatives).
+- **Stages 4 (M2, ideal membership) and 5 (M3, F_q/F_q[X] multi-prime):** not
+  started.
+
+Test gate: `cargo test -p zinc-protocol --lib` (41 tests: 30 UAIR + 11 R1CS),
+`cargo check --all-targets`, `cargo clippy` (no new warnings).
+
+**Notable deviations from the original sketch below** (all recorded inline in
+the relevant sections): M1 witnesses are **scalars committed as one `int`
+column** (not poly-valued — that is M3); the frontend stores **`public_values`**
+and `new` takes them (the seam does not pass `io`); a handful of free helper
+functions were added (`constraint_axis_vars`, `mz_inner`, `matrix_mle_eval`,
+`witness_column_scalars`).
+
 ## Context
 
 `zinc-plus`'s `protocol` crate now proves/verifies over a generic `ConstraintSystem`
@@ -70,9 +102,15 @@ pub struct R1csInstance<S> {            // public index data
 
 pub struct R1csFrontend<S, F: PrimeField> {
     instance: R1csInstance<S>,          // the O(nnz) verifier index (analog of UAIR's signature)
+    public_values: Vec<S>,              // the `io` (len = num_public_inputs); see note below
     layout: Layout<F::Integer>,         // 1 int witness col, 0 public cols, 0 primes
     _marker: PhantomData<F>,
 }
+// AS BUILT: `new(instance, public_values)` (asserts public_values.len() ==
+// num_public_inputs). `public_values` is stored because the seam does not pass
+// `io` and both prover and verifier need it to build z_pub. Derives Clone/Debug
+// (F: PrimeField ⟹ Clone+Debug via Semiring; no manual impls). Both prover and
+// verifier build an identical frontend.
 
 pub struct R1csConstraintProof<F: PrimeField> {   // : Transcribable (mirror UairConstraintProof)
     pub outer_sumcheck: MultiDegreeSumcheckProof<F>,  // degree 3, one group
@@ -117,6 +155,22 @@ signature changes needed**). `needs_decoupled_pcs_prime` keeps its default (`fal
    `r_y = state.point()`, `z_ry = z_full_mle.eval(r_y)`.
 4. **Return** `(proof, ConstraintEndpoints::new(r_y, vec![]))`.
 
+**AS BUILT (M1 = scalars, not \(\mathbb{Q}[X]\) polys).** For M1 the witness is
+**scalars in \(F\)** committed as one `int` column; poly-valued witnesses
+(\(\mathbb{Z}[X]/\mathbb{F}_q[X]\)) are M3. Consequences baked into the code:
+- The projected `int`-column entries are **degree-0** `DynamicPolynomialF<F>`;
+  `witness_column_scalars` extracts each scalar via `evaluate_at_point(&0)`
+  (Horner ⇒ constant term). Handles both `RowMajor` and `ColumnMajor` traces.
+- The **committed** witness column has the public prefix (indices \(0..=\ell\))
+  **zeroed**; `prove_constraints` re-adds \([1, \text{io}]\) to form the full
+  \(z\) (so \(z = z_{\text{pub,padded}} + z_{\text{wit,padded}}\), MLE-linear).
+- Matrix-entry / public-value projection \(S \to F\) is `F::from_with_cfg(&s,
+  cfg)` — impl bound `F: for<'a> FromWithConfig<&'a S>`. Constraint count must be
+  a power of two \(\ge 2\) (`constraint_axis_vars` errors otherwise, since the
+  outer sumcheck needs \(s_x \ge 1\)); helper `mz_inner` builds \(Mz\).
+- Challenges are drawn with `transcript.get_field_challenges::<F>(n, cfg)` and
+  the three `az/bz/cz` are bound via `absorb_random_field` — see risk (g).
+
 ## `verify_constraints` + `verify_lifted_evals`
 
 - **`verify_constraints`** replays the identical FS order: squeeze `τ`; replay outer
@@ -156,7 +210,11 @@ Stages 1–3 are milestone **M1** (ℚ[X], zero ideal); stages 4–5 are **M2/M3
 The frontend is written generic over `Semiring S` from stage 1 even though only the
 ℚ[X]/zero-ideal instantiation is exercised until M3.
 
-### Stage 1 — Scaffolding + seam plumbing  *(M1)*
+### Stage 1 — Scaffolding + seam plumbing  *(M1)* — ✅ DONE
+Landed as planned. `R1csFrontend` uses **derived** `Clone`/`Debug` (not manual —
+`F: PrimeField ⟹ Clone+Debug`); the byte-offset multiply in the `Transcribable`
+impl uses the `mul!` macro (crate denies `arithmetic_side_effects`).
+
 The only stage that touches shared, UAIR-adjacent files; kept small and purely additive
 so it lands with zero behavioural change.
 - **Entry state:** current `main`; substrate already generic over `CS: ConstraintSystem`.
@@ -172,7 +230,14 @@ so it lands with zero behavioural change.
 - **Gate:** shared gate (nothing calls the stubs yet). No new behavioural test.
 - **Unblocks:** the type surface + seam glue for the argument.
 
-### Stage 2 — Two-sumcheck argument, frontend-only  *(M1 — the algorithmic heart)*
+### Stage 2 — Two-sumcheck argument, frontend-only  *(M1 — the algorithmic heart)* — ✅ DONE
+Landed as planned. Risk (g) resolved (see Open-risks). Frontend stores
+`public_values` and `new` takes them (the constant `1` at z[0] is always public;
+`public_values` are the additional `io`). 7 tests: satisfiable (no-public &
+with-public), 4 negatives (non-satisfying, tampered `z_ry`, tampered matrix
+cell, tampered lift), serialization round-trip. `comb_fn`s use `.clone() * &…`
+(field ops are `Mul<&Self>`, not `Mul<Self>`).
+
 Implements the actual protocol; fully testable without the substrate.
 - **Entry state:** stage 1 merged.
 - **Scope:** implement `prove_constraints` (outer degree-3 + inner degree-2 sumchecks
@@ -190,7 +255,16 @@ Implements the actual protocol; fully testable without the substrate.
 - **Unblocks:** the argument is proven correct in isolation; stage 3 only has to confirm
   the substrate feeds it the witness eval it expects.
 
-### Stage 3 — Full-substrate integration  *(M1 — completes the milestone)*
+### Stage 3 — Full-substrate integration  *(M1 — completes the milestone)* — ✅ DONE
+Landed as planned; **risk (f) confirmed — no code change needed** (see
+Open-risks). 4 e2e tests in `lib.rs` (`do_r1cs_test` harness reusing
+`TestZincTypesIprs`/`setup_pp`/`make_iprs`): `test_e2e_r1cs`,
+`test_e2e_r1cs_with_public_input`, and tamper negatives on `z_ry` and on
+`witness_lifted_evals[0][0]`. The hand-built `UairTrace` has empty
+`binary_poly`/`arbitrary_poly` and one `int` witness column; the public
+`UairTrace` is entirely empty (R1CS declares 0 substrate public columns). The
+three `project_*` closures passed to `verify` are `|_, _| unreachable!()`.
+
 Additive test-wiring; the substrate needs no signature changes.
 - **Entry state:** stage 2 merged (frontend proven in isolation).
 - **Scope:** an e2e test (style of `lib.rs` e2e): build `R1csInstance` + `R1csFrontend::new`,
@@ -227,14 +301,35 @@ Additive test-wiring; the substrate needs no signature changes.
 `1 → 2 → 3 (= M1)  →  4 (M2)  →  5 (M3)`. Stages 4 and 5 are optional follow-ons; M1
 is a self-contained, shippable deliverable.
 
+## Open risks — both RESOLVED in M1
+
+- **(f) lifted-eval vs scalar `z̃_wit(r_y)` — RESOLVED, no code change.** Confirmed
+  against the substrate (`verifier.rs` `finish_verify`): with 0 substrate public
+  columns, `recompute_public_lifted` returns empty and `assemble_all` yields
+  `per_family_all_lifted[0] = [witness_lifted_evals[0][0]]` — the single `int`
+  column's lift, a **degree-0** `DynamicPolynomialF<F>` = the scalar `z̃_wit(r_y)`,
+  with **no ψ_a projecting element** (zero ideal). `verify_lifted_evals` extracts
+  it via `evaluate_at_point(&0)`; `test_e2e_r1cs_tamper_lifted_eval` exercises
+  this exact path end-to-end.
+- **(g) Fiat–Shamir squeeze positions — RESOLVED.** `MultiDegreeSumcheck::
+  prove/verify_as_subprotocol` absorb their metadata `(num_vars, num_families,
+  per-group degrees)` at the very start (`multi_degree.rs:344–390` / `540–581`).
+  So `τ` is squeezed **before** the outer call and `r_A,r_B,r_C` **between** the
+  two calls (never interleaved with a sumcheck's own rounds). `az/bz/cz(r_x)` are
+  bound via `absorb_random_field` before `r_A,r_B,r_C`. Prover and verifier use
+  the identical `get_field_challenges` / `absorb_random_field` calls, so the
+  transcript is byte-identical (validated by every passing test).
+
 ## Critical files
 
-- `protocol/src/constraint_system.rs` — seam trait; add `Layout::new`.
-- `protocol/src/r1cs_frontend.rs` — **new**; mirror `uair_frontend.rs`.
-- `protocol/src/lib.rs` — `pub mod r1cs_frontend;`, optional `ProtocolError::R1cs`.
+- `protocol/src/constraint_system.rs` — seam trait; `Layout::new` ✅ added.
+- `protocol/src/r1cs_frontend.rs` — the frontend + 7 frontend-only tests ✅.
+- `protocol/src/lib.rs` — `pub mod r1cs_frontend;` + `ProtocolError::R1cs` ✅;
+  R1CS e2e tests live in its `mod tests` (`do_r1cs_test` + 4 tests).
 - `piop/src/sumcheck/multi_degree.rs` — the sumcheck primitive for BOTH sumchecks.
-- `poly/src/utils.rs` — `build_eq_x_r_inner`/`build_eq_x_r_vec`/`eq_eval`.
-- `crypto-primitives/src/matrix.rs` — `SparseMatrix` fixed-density row iteration (`O(nnz)`).
+- `poly/src/utils.rs` — `build_eq_x_r_inner`/`build_eq_x_r_vec`/`eq_eval`/`mle_eval_with_eq_table`.
+- `crypto-primitives/src/matrix.rs` — `SparseMatrix` fixed-density row iteration (`O(nnz)`);
+  needs the `Matrix` trait in scope for `.cells()`.
 
 ---
 

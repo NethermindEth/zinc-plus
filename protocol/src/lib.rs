@@ -1693,4 +1693,141 @@ mod tests {
             },
         );
     }
+
+    //
+    // R1CS frontend end-to-end tests (stage 3): drive the full substrate
+    // (commit / phi_q-projection / lift-and-project / Zip+ PCS) with the
+    // Spartan-style `R1csFrontend` instead of `UairFrontend`.
+    //
+
+    /// Build the tiny satisfiable R1CS `z = [1, x, w]`, `w = x * x` (with `x=3`,
+    /// `w=9`), commit its witness column as a single unfolded `int` column, and
+    /// run the full `ZincPlusPiop` prove/verify. `num_public` chooses how much of
+    /// the public prefix `[1, x]` is treated as verifier-known `io` (the
+    /// constant `1` at z[0] is always public). `tamper` mutates the proof before
+    /// verification; `check` inspects the verifier result.
+    fn do_r1cs_test(
+        num_public: usize,
+        tamper: impl Fn(&mut Proof<F, crate::r1cs_frontend::R1csConstraintProof<F>>),
+        check: impl Fn(Result<(), ProtocolError<F>>),
+    ) {
+        use crate::r1cs_frontend::{R1csFrontend, R1csInstance};
+        use crypto_primitives::SparseMatrix;
+        use std::borrow::Cow;
+        use zinc_uair::UairTrace;
+
+        let num_vars = 8usize;
+        let n = 1usize << num_vars;
+        let (x, w) = (3i64, 9i64);
+
+        // A z = z[1], B z = z[1], C z = z[2]; row 1 is the trivial 0 = 0
+        // constraint (so #constraints = 2, s_x = 1 >= 1).
+        let mat = |col: usize| SparseMatrix::<i64> {
+            num_rows: 2,
+            num_cols: n,
+            density: 1,
+            cells: vec![(col, 1i64), (0, 0i64)],
+        };
+        let instance = R1csInstance {
+            a: mat(1),
+            b: mat(1),
+            c: mat(2),
+            num_public_inputs: num_public,
+        };
+        let public_values = [1i64, x, w][1..=num_public].to_vec();
+        let frontend = R1csFrontend::<i64, F>::new(instance, public_values);
+
+        // Committed witness int column: z with the public prefix [0..=num_public]
+        // (constant + io) zeroed; the frontend re-adds it inside the argument.
+        let mut z_wit = vec![0i64; n];
+        z_wit[1] = x;
+        z_wit[2] = w;
+        for slot in z_wit.iter_mut().take(num_public + 1) {
+            *slot = 0;
+        }
+        let witness_col = DenseMultilinearExtension::from_evaluations_vec(num_vars, z_wit, 0i64);
+        let trace: UairTrace<'static, ZtInt, ZtInt, D, D> = UairTrace {
+            binary_poly: Cow::Owned(vec![]),
+            arbitrary_poly: Cow::Owned(vec![]),
+            int: Cow::Owned(vec![witness_col]),
+        };
+        // R1CS declares no substrate public columns, so the public trace is empty.
+        let public_trace: UairTrace<'static, ZtInt, ZtInt, D, D> = UairTrace {
+            binary_poly: Cow::Owned(vec![]),
+            arbitrary_poly: Cow::Owned(vec![]),
+            int: Cow::Owned(vec![]),
+        };
+
+        let pp = setup_pp::<TestZincTypesIprs>(
+            num_vars,
+            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+        );
+
+        type Piop = ZincPlusPiop<TestZincTypesIprs, R1csFrontend<i64, F>, F, D, QUARTER_D>;
+        type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
+
+        let mut proof =
+            Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, &frontend).expect("R1CS prove");
+        tamper(&mut proof);
+
+        // The three projection closures are never invoked (zero ideal, no psi_a).
+        let res = Piop::verify::<Ideal, CHECKED>(
+            &pp,
+            proof,
+            &public_trace,
+            num_vars,
+            &frontend,
+            |_, _| unreachable!("R1CS M1: no psi_a scalar projection"),
+            |_, _| unreachable!("R1CS M1: no ideal projection"),
+            |_, _| unreachable!("R1CS M1: no fq-ideal projection"),
+        );
+        check(res);
+    }
+
+    /// End-to-end over the full substrate: R1CS with only the constant public.
+    #[test]
+    fn test_e2e_r1cs() {
+        do_r1cs_test(0, |_| {}, |res| res.expect("R1CS verify"));
+    }
+
+    /// End-to-end with one genuine public input (`x` at z[1]) — exercises the
+    /// nonzero `z_pub(r_y)` reconciliation against the substrate witness lift.
+    #[test]
+    fn test_e2e_r1cs_with_public_input() {
+        do_r1cs_test(1, |_| {}, |res| res.expect("R1CS verify (public input)"));
+    }
+
+    /// Tamper negative: perturbing the frontend's `z_ry` breaks the inner
+    /// sumcheck's `M~(r_x, r_y) * z_ry` consistency check.
+    #[test]
+    fn test_e2e_r1cs_tamper_z_ry() {
+        do_r1cs_test(
+            0,
+            |proof| {
+                let cfg = *proof.constraint_proof.z_ry.cfg();
+                proof.constraint_proof.z_ry += &F::one_with_cfg(&cfg);
+            },
+            |res| assert!(res.is_err(), "tampered z_ry must be rejected"),
+        );
+    }
+
+    /// Tamper negative: perturbing the substrate-assembled witness lift breaks
+    /// `verify_lifted_evals`' `z(r_y) == z_pub(r_y) + z_wit(r_y)` reconciliation
+    /// (the resolved risk-(f) path).
+    #[test]
+    fn test_e2e_r1cs_tamper_lifted_eval() {
+        do_r1cs_test(
+            0,
+            |proof| {
+                let cfg = *proof.constraint_proof.z_ry.cfg();
+                let lift = &mut proof.witness_lifted_evals[0][0];
+                if lift.coeffs.is_empty() {
+                    lift.coeffs.push(F::one_with_cfg(&cfg));
+                } else {
+                    lift.coeffs[0] += &F::one_with_cfg(&cfg);
+                }
+            },
+            |res| assert!(res.is_err(), "tampered witness lift must be rejected"),
+        );
+    }
 }
