@@ -26,6 +26,7 @@
 pub mod constraint_system;
 pub mod fold;
 pub mod prover;
+pub mod r1cs_frontend;
 pub mod shared_challenge;
 pub mod uair_frontend;
 pub mod verifier;
@@ -393,6 +394,12 @@ pub enum ProtocolError<F: PrimeField> {
         got: usize,
         expected: usize,
     },
+    /// The R1CS/Spartan constraint-argument frontend
+    /// ([`R1csFrontend`](crate::r1cs_frontend::R1csFrontend)) failed. Carries a
+    /// human-readable description of the failing check (sumcheck consistency,
+    /// matrix-MLE mismatch, witness-eval reconciliation, ...).
+    #[error("R1CS constraint argument failed: {0}")]
+    R1cs(String),
 }
 
 //

@@ -89,6 +89,29 @@ impl<P> Layout<P> {
         &self.primes
     }
 
+    /// Directly assemble a substrate-only [`Layout`] from explicit column
+    /// layouts and declared primes.
+    ///
+    /// Complements [`from_signature`](Self::from_signature) for frontends that
+    /// do not carry a [`UairSignature`] and therefore cannot go through it —
+    /// e.g. the R1CS/Spartan frontend, which declares a single `int` witness
+    /// column and no primes. Purely a field constructor; unlike
+    /// [`from_signature`](Self::from_signature) it needs no `P: Semiring`
+    /// bound since it stores the provided values verbatim.
+    pub fn new(
+        total_cols: TotalColumnLayout,
+        public_cols: PublicColumnLayout,
+        witness_cols: WitnessColumnLayout,
+        primes: Vec<P>,
+    ) -> Self {
+        Self {
+            total_cols,
+            public_cols,
+            witness_cols,
+            primes,
+        }
+    }
+
     /// Build a substrate-only [`Layout`] from a UAIR [`UairSignature`],
     /// cloning only the column layouts and declared primes (dropping
     /// `shifts` / `bit_op_specs` / `lookup_specs` / `affine_virtual_specs` /
