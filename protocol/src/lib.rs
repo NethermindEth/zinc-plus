@@ -27,6 +27,7 @@ pub mod constraint_system;
 pub mod fold;
 pub mod prover;
 pub mod r1cs_frontend;
+pub mod r1cs_sparse_matrix;
 pub mod shared_challenge;
 pub mod uair_frontend;
 pub mod verifier;
