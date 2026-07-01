@@ -7,21 +7,28 @@ that ProveKit actually defines provable* — plain R1CS over a **fixed prime fie
 zero ideal, scalar witnesses — reusing the Zinc+ substrate. All ideal /
 polynomial / multi-prime machinery that ProveKit's R1CS does **not** use is
 **postponed** (kept in [§Postponed](#postponed-original-general-ucs-plan) for the
-future general-UCS work) and its speculative code scaffolding is to be **dropped**
+future general-UCS work) and its speculative code scaffolding was **dropped**
 (see [§What to drop from code](#what-to-drop-from-code)).
 
-**What already exists (the reusable base).** The two-sumcheck Spartan argument
-(`protocol/src/r1cs_frontend.rs`) and its substrate wiring are implemented and
-green — this was "M1" (R1CS, zero ideal, scalar witnesses) with **integer**
-matrix entries projected to the substrate's **randomly-sampled** prime. The pivot
-**refactors** that base:
+**DONE (R1–R3).** The pivot is implemented and green: our variable-density
+sparse matrix (R1), the fixed-field `F`-native frontend + `working_field`
+substrate hook (R2), and this cleanup/finalize pass (R3). 46 protocol-lib tests
+pass (30 UAIR + 16 R1CS: 5 sparse-matrix + 7 frontend + 4 e2e), no new clippy
+warnings. The one deferred capability is **P1** (large-value witnesses — the e2e
+still commits a small-int column); deferred by request, tracked in
+[§Open questions](#open-questions-to-resolve-during-implementation).
 
-| Aspect | M1 as-built (base) | Pivot target |
+**Base that was refactored.** The two-sumcheck Spartan argument
+(`protocol/src/r1cs_frontend.rs`) was originally built as "M1" (R1CS, zero ideal,
+scalar witnesses) with **integer** matrix entries projected to the substrate's
+**randomly-sampled** prime. The pivot refactored that base:
+
+| Aspect | was (M1 base) | now (done) |
 |---|---|---|
-| Matrix entries | generic `S` (`i64` in tests), projected `S→F` | native field elements, stored as **`F`** |
-| Matrix type | crypto-primitives fixed-density `SparseMatrix<S>` | **our own variable-density CSR** (ProveKit shape) |
-| Field | substrate **samples** a random prime `q0` | **fixed** known prime field `F` (the R1CS field) |
-| Soundness basis | integer-relation via random-prime projection | native large-field R1CS (Zinc+ "add-on", `R = F_q`) |
+| Matrix entries | generic `S` (`i64`), projected `S→F` | native field elements, stored as **`F`** ✅ |
+| Matrix type | crypto-primitives fixed-density `SparseMatrix<S>` | **our own variable-density CSR** ✅ |
+| Field | substrate **samples** a random prime `q0` | **fixed** field `F` via `working_field` ✅ |
+| Soundness basis | integer-relation via random-prime projection | native large-field R1CS (Zinc+ "add-on", `R = F_q`) ✅ |
 
 The **argument itself does not change** — only the entry/field/type surface and
 one substrate hook. Both previously-open risks (f)/(g) remain resolved
@@ -118,11 +125,11 @@ constraint hypercube (`s_x`, `τ`, `r_x`) never crosses the seam.
     ProveKit instance drops in unchanged).
 - **`num_virtual`** — solver-only, uncommitted, not in matrices: **ignored**.
 
-## Architecture (revised types) — `protocol/src/r1cs_frontend.rs`
+## Architecture (types) — `r1cs_frontend.rs` + `r1cs_sparse_matrix.rs`
 
 ```rust
-// Our own variable-density sparse matrix (module-local; NOT crypto-primitives').
-// Generic over the value type as a plain container; instantiated at `F`.
+// Our own variable-density sparse matrix, in `protocol/src/r1cs_sparse_matrix.rs`
+// (NOT crypto-primitives'). Generic value type as a plain container; used at `F`.
 pub struct SparseMatrix<T> {
     pub num_rows: usize,
     pub num_cols: usize,
@@ -163,10 +170,10 @@ its default (`false`); `layout()` is one `int` witness column, no primes.
 projection (`FromWithConfig<&S>`) **drops out** — `mz_inner` / `matrix_mle_eval`
 use the stored `F` values directly. `public_values: Vec<F>`.
 
-## The two-sumcheck argument (unchanged — reuse the base)
+## The two-sumcheck argument (unchanged by the pivot)
 
 `prove_constraints` / `verify_constraints` / `verify_lifted_evals` are exactly as
-implemented (the "M1" argument). Summary:
+implemented (the pivot left the argument logic untouched). Summary:
 
 - **Assemble** `z = z_pub + z_wit`: read the committed (private) witness column
   from `projected_traces[0]` (degree-0 int-column lift → `F` scalar via
@@ -188,7 +195,7 @@ implemented (the "M1" argument). Summary:
 The `O(nnz)` matrix-MLE evaluation `M̃(r_x,r_y) = Σ_{(i,j,val)}
 eq_rx[i]·eq_ry[j]·val` now reads `val ∈ F` directly (no projection).
 
-## Substrate field-fixing (the one non-additive-behavior change)
+## Substrate field-fixing (the one non-additive-behavior change) — DONE
 
 The frontend's matrices/witness live in the fixed `F`; the substrate must
 therefore **use `F` as its working field** rather than sampling a random `q0`
@@ -197,27 +204,29 @@ arithmetic is inconsistent). This is *required* — it is what makes Option 1
 (entries as `F`) coherent, and re-projecting `F`-entries to a random `q0` would be
 the unsound mod-p path.
 
-Plan:
-1. **Add a seam method** to `ConstraintSystem`, e.g.
-   `fn working_field(&self) -> Option<F::Config> { None }` (default `None`).
-   `R1csFrontend` returns `Some(self.field_cfg.clone())`; `UairFrontend` keeps the
-   default `None`.
-2. **Substrate uses it** where it currently samples: `prover.rs` `project_common`
-   and `verifier.rs` `step1_prime_projection` do
-   `let field_cfg = cs.working_field().unwrap_or_else(|| sample_random_prime());`.
-   **UAIR path unchanged** (`None` ⇒ samples as before) — additive in effect.
+As implemented:
+1. **Seam method** `ConstraintSystem::working_field(&self) -> Option<F::Config>`
+   (default `None`). `R1csFrontend` returns `Some(self.field_cfg.clone())`;
+   `UairFrontend` keeps the default `None`.
+2. **Substrate uses it** where it sampled: `prover.rs` `project_common`
+   (threaded via `ProverFolded`/`ProverCommitted`) and `verifier.rs`
+   `step1_prime_projection` (via `VerifierTranscriptReconstructed`) do
+   `working_field().unwrap_or_else(|| sample_random_prime())`. **UAIR path
+   unchanged** (`None` ⇒ samples as before) — additive in effect; both parties
+   take the same branch, so the transcript stays in sync whether or not the draw
+   happens.
 3. **`q''` needs no change:** with `primes = []` (R1CS layout) the substrate
    already aliases `q'' := q0`, so the PCS opens over `F` too.
 4. **Witness commitment:** the witness column is committed via the existing `int`
-   group with `Int = F::Integer` (canonical field-element reps in `[0,p)`); since
-   `q0 = F`'s prime, the substrate's `φ_{q0}` projection is the identity, so
-   `projected_traces[0]` carries the `F`-element witness the argument expects.
-5. **FS binding (soundness hygiene):** absorb the fixed field modulus (and,
-   ideally, a digest of `A,B,C`) into the transcript so the statement is bound —
-   the random-prime path got the field "for free" from the transcript; a fixed
-   field is public input and should be absorbed. (Confirm placement; the matrices
-   being public-but-unabsorbed is a pre-existing property of the non-succinct
-   verifier — decide whether to harden here or note it.)
+   group; since `q0 = F`'s prime, the substrate's `φ_{q0}` projection is the
+   identity, so `projected_traces[0]` carries the `F`-element witness the argument
+   expects. **Current instantiation uses `Int = i64`** (small witness values);
+   full-width values (`Int = F::Integer`) are deferred — see **P1**.
+5. **FS binding:** the fixed field modulus is **not** absorbed into the
+   transcript. It is a fixed public parameter (like the public matrices, which
+   the non-succinct verifier also does not absorb), so this is sound; sync is
+   preserved because both parties skip the sampling draw identically. Revisit
+   under **P3** if adaptive-statement hardening is wanted.
 
 ## Staged steps (revised)
 
@@ -225,62 +234,64 @@ Atomic = after the step, the workspace builds and the UAIR suite + this step's
 tests pass. The argument (proof types, sumcheck logic) is inherited from the base
 and does not change; these steps are the **refactor + substrate hook**.
 
-### Step R1 — Own variable-density sparse matrix *(additive, standalone)*
-- New `SparseMatrix<T>` (variable-density CSR) in the r1cs module, **not yet
-  wired** into `R1csInstance`. Builder, `iter_row`/`iter`/`num_entries`,
-  right-multiply, `Clone/Debug/(Eq/PartialEq)`, unit tests (build, iterate,
-  multiply, empty/short rows).
-- **Gate:** shared gate; new matrix unit tests pass. Purely additive.
+### Step R1 — Own variable-density sparse matrix *(additive, standalone)* — ✅ DONE
+`SparseMatrix<T>` (variable-density CSR) in `protocol/src/r1cs_sparse_matrix.rs`:
+`from_rows` (sorts each row, rejects duplicate/out-of-bounds columns),
+`iter_row`/`iter`/`num_entries`, `mul_vector` (right-multiply), derives
+`Clone/Debug/Eq/PartialEq`. 5 unit tests. Purely additive.
 
-### Step R2 — Refactor frontend to fixed-field `F` + substrate hook *(the pivot core)*
-Coupled by necessity (types + field must move together for e2e).
-- Drop generic `S`; `R1csInstance<F>` / `R1csFrontend<F>` use `SparseMatrix<F>` and
-  store `field_cfg`; `public_values: Vec<F>`. Drop the `FromWithConfig<&S>`
-  projection in `mz_inner` / `matrix_mle_eval` (use `F` directly).
-- Add `ConstraintSystem::working_field` (default `None`); return `Some(cfg)` from
-  `R1csFrontend`; wire the `unwrap_or_else(sample)` in prover/verifier.
-- Instantiate the witness `int` group with `Int = F::Integer`; absorb the field
-  modulus into the transcript.
-- Update **frontend-only** tests (build over a fixed large `F`, `F`-element
-  entries) and the **e2e** tests (fixed-field `Zt`, large `Int`).
-- **Gate:** shared gate; all frontend-only + e2e R1CS tests pass; UAIR green.
-- **Risks to resolve here:** large-field `Zt`/Zip+ instantiation (see open
-  questions); ProveKit public-input placement.
+### Step R2 — Refactor frontend to fixed-field `F` + substrate hook *(the pivot core)* — ✅ DONE
+- Dropped generic `S`; `R1csInstance<F>` / `R1csFrontend<F>` use `SparseMatrix<F>`
+  and store `field_cfg`; `public_values: Vec<F>`; `mz_inner` / `matrix_mle_eval`
+  read `F` entries directly (projection gone).
+- Added `ConstraintSystem::working_field` (default `None`); `R1csFrontend` returns
+  `Some(cfg)`; prover (`project_common`, via `ProverFolded`/`ProverCommitted`) and
+  verifier (`step1_prime_projection`, via `VerifierTranscriptReconstructed`) use
+  `working_field().unwrap_or_else(sample)`. UAIR path unchanged.
+- Frontend-only + e2e tests build over a fixed `F` (e2e samples a deterministic
+  large prime as the fixed field). **Deviation:** the witness `int` group stays
+  `Int = i64` (small witness values) — the `Int = F::Integer` / large-value path
+  is deferred (P1). The fixed field modulus is **not** absorbed into the
+  transcript (fixed public parameter, like the matrices — see P3).
+- **Gate met:** 46 lib tests, no new warnings.
 
-### Step R3 — Cleanup & finalize
-- Remove any remaining base scaffolding oriented at the postponed generality
-  (see [§What to drop](#what-to-drop-from-code)); confirm no dead `S`/projection
-  paths remain.
-- Update inline docs and this plan's status.
-- **Gate:** shared gate; clippy clean.
+### Step R3 — Cleanup & finalize — ✅ DONE
+- Confirmed no dead `S`/projection/fixed-density paths remain (the R2 refactor
+  already removed them).
+- Refreshed inline docs (module header, method docs, test comments) to the
+  fixed-field framing; updated this plan's status.
+- **Gate met:** shared gate; clippy clean (only 2 pre-existing warnings).
 
 ### Dependency chain
-`R1 → R2 → R3`. R1 is a safe additive warm-up; R2 is the substantive change.
+`R1 → R2 → R3` — all complete.
 
-## What to drop from code
+## What was dropped from code (done in R2)
 
-Purely the base's speculative generality that ProveKit R1CS does not use:
+The base's speculative generality that ProveKit R1CS does not use:
 - The generic **`S`** matrix-entry parameter and the `F: for<'a>
-  FromWithConfig<&'a S>` projection (entries are `F`).
+  FromWithConfig<&'a S>` projection (entries are `F`). ✅
 - Use of crypto-primitives' **fixed-density** `SparseMatrix` (and the `Matrix`
-  trait import) → our variable-density type.
-- Integer-entry (`i64`) test instances → fixed-field `F` instances.
+  trait import) → our variable-density type. ✅
+- Integer-entry (`i64`) test instances → fixed-field `F` instances. ✅
 - (Nothing ideal/poly-specific was ever implemented; `IdealSource` etc. **stay
   `()`** — they are trait-required for UAIR and merely ignored here.)
 
-## Open questions to resolve during implementation
+## Open questions / remaining work
 
-- **(P1) Large-field `Zt` / Zip+ instantiation.** Committing the witness `int`
-  column with `Int = F::Integer` (~256-bit) needs `ZipTypes`/linear-code params
-  that handle the width. Confirm the existing IPRS/RAA codes + inner-product
-  types instantiate at that size, or add the needed `Zt`. (This is the main
-  integration risk — the substrate's PCS is integer-oriented; we reuse it with a
-  fixed prime = `F`, per the paper's "field IOPP" reading.)
+- **(P1) Large-value witnesses — DEFERRED (by request).** The e2e currently commits
+  the witness `int` column with `Int = i64`, so only R1CS with *small* witness
+  values is exercised (the field is large, but values fit `i64`). Proving
+  arbitrary ProveKit instances (full-width field-element witnesses) needs a `Zt`
+  with `Int = F::Integer` (~256-bit) and IPRS/RAA codes + inner-product types that
+  handle that width, or a field-native commitment. This is the main gap between
+  "ProveKit *shape* provable" and "real ProveKit instances provable"; it is an
+  integration/instantiation task, not a protocol change. Deferred for now.
 - **(P2) Public-input placement** in `z` vs ProveKit's witness solver
-  (`[1, io, private]` assumed).
-- **(P3) FS binding** of the fixed field modulus (and possibly a matrix digest) —
-  decide the exact absorb point; weigh hardening the (pre-existing) unabsorbed
-  public matrices.
+  (`[1, io, private]` assumed) — confirm before ingesting a real instance.
+- **(P3) FS binding** of the fixed field modulus (and possibly a matrix digest).
+  Currently **not** absorbed — defensible, as the field and matrices are fixed
+  public parameters (the non-succinct verifier already treats the matrices this
+  way). Revisit if adaptive-statement hardening is wanted.
 
 ## Resolved risks (carried over from the base)
 
@@ -298,13 +309,15 @@ Purely the base's speculative generality that ProveKit R1CS does not use:
 
 ## Critical files
 
-- `protocol/src/r1cs_frontend.rs` — the frontend + our `SparseMatrix<T>` + tests.
-- `protocol/src/constraint_system.rs` — seam trait; `Layout::new` (done); add
-  `working_field` default method (R2).
+- `protocol/src/r1cs_frontend.rs` — the frontend + 7 frontend-only tests.
+- `protocol/src/r1cs_sparse_matrix.rs` — our variable-density `SparseMatrix<T>`
+  + 5 unit tests.
+- `protocol/src/constraint_system.rs` — seam trait; `Layout::new`,
+  `working_field` default method.
 - `protocol/src/prover.rs`, `protocol/src/verifier.rs` — the `working_field`
-  hook at the prime-sampling step (R2; UAIR path unchanged).
-- `protocol/src/lib.rs` — `pub mod r1cs_frontend;`, `ProtocolError::R1cs` (done);
-  e2e tests in `mod tests`.
+  hook at the prime-sampling step (UAIR path unchanged).
+- `protocol/src/lib.rs` — `pub mod r1cs_frontend; pub mod r1cs_sparse_matrix;`,
+  `ProtocolError::R1cs`; 4 e2e tests in `mod tests`.
 - `piop/src/sumcheck/multi_degree.rs` — the sumcheck primitive for both sumchecks.
 - `poly/src/utils.rs` — `build_eq_x_r_inner`/`build_eq_x_r_vec`/`eq_eval`/`mle_eval_with_eq_table`.
 - **Reference (do not import):** `provekit/provekit/common/src/{r1cs.rs,sparse_matrix.rs}`.
@@ -382,7 +395,9 @@ Read from the tree; symbol names are stable (grep). Line numbers may drift.
   ) -> Result<(), ProtocolError<Self::Field>>;
   ```
   For R1CS the three `project_*` closures are ignored, `IdealOverF` never
-  instantiated. **R2 adds** `fn working_field(&self) -> Option<F::Config> { None }`.
+  instantiated. The trait also has `fn working_field(&self) ->
+  Option<<Self::Field as HasPrimeFieldConfig>::Config> { None }` (R1CS returns
+  `Some(field_cfg)`; UAIR keeps the default).
 - **`Layout<P>`:** private fields; accessors `total_cols/public_cols/witness_cols/
   primes`; `from_signature`; **`new(total_cols, public_cols, witness_cols, primes)`**
   (added). Column wrappers `TotalColumnLayout::new(n_bin,n_arb,n_int)` etc.
@@ -427,20 +442,21 @@ DenseMultilinearExtension::from_evaluations_vec(num_vars, evals: Vec<T>, zero: T
 DynamicPolynomialF::evaluate_at_point(&F) -> Result<F, _>   // Horner; at 0 ⇒ constant term
 ```
 
-## A.4 Our sparse matrix (to build in R1) — `protocol/src/r1cs_frontend.rs`
+## A.4 Our sparse matrix — `protocol/src/r1cs_sparse_matrix.rs`
 
-Variable-density CSR mirroring ProveKit (no interner, no delta serde). Sketch:
+Variable-density CSR mirroring ProveKit (no interner, no delta serde):
 ```rust
 pub struct SparseMatrix<T> { pub num_rows, pub num_cols, row_starts: Vec<usize>, entries: Vec<(usize, T)> }
 impl<T> SparseMatrix<T> {
-    fn from_rows(num_cols, rows: impl IntoIterator<Item = Vec<(usize, T)>>) -> Self;  // sorts each row by col
-    fn iter_row(&self, r) -> impl Iterator<Item = (usize, &T)>;
-    fn iter(&self) -> impl Iterator<Item = (usize, usize, &T)>;
-    fn num_entries(&self) -> usize;
+    pub fn from_rows(num_cols, rows: impl IntoIterator<Item = Vec<(usize, T)>>) -> Self; // sorts each row by col; rejects dup/OOB cols
+    pub fn iter_row(&self, r) -> impl Iterator<Item = (usize, &T)>;
+    pub fn iter(&self) -> impl Iterator<Item = (usize, usize, &T)>;
+    pub fn num_entries(&self) -> usize;
 }
+impl<F: PrimeField> SparseMatrix<F> { pub fn mul_vector(&self, z: &[F], cfg) -> Vec<F>; }
 ```
-Building `Az` and `M̃(r_x,r_y)` now reads `value ∈ F` directly (no projection);
-the outer sumcheck needs `#constraints` a power of two `≥ 2` (`s_x ≥ 1`).
+Building `Az` and `M̃(r_x,r_y)` reads `value ∈ F` directly (no projection); the
+outer sumcheck needs `#constraints` a power of two `≥ 2` (`s_x ≥ 1`).
 
 # Appendix B — reference reading
 

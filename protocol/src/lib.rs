@@ -1788,9 +1788,9 @@ mod tests {
             &public_trace,
             num_vars,
             &frontend,
-            |_, _| unreachable!("R1CS M1: no psi_a scalar projection"),
-            |_, _| unreachable!("R1CS M1: no ideal projection"),
-            |_, _| unreachable!("R1CS M1: no fq-ideal projection"),
+            |_, _| unreachable!("R1CS: no psi_a scalar projection"),
+            |_, _| unreachable!("R1CS: no ideal projection"),
+            |_, _| unreachable!("R1CS: no fq-ideal projection"),
         );
         check(res);
     }

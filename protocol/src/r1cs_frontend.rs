@@ -1,12 +1,20 @@
 //! R1CS (Spartan-style) adapter for the
-//! [`ConstraintSystem`](crate::constraint_system::ConstraintSystem) seam.
+//! [`ConstraintSystem`](crate::constraint_system::ConstraintSystem) seam,
+//! shaped after ProveKit's plain-field R1CS (`provekit/.../r1cs.rs`).
 //!
-//! [`R1csFrontend`] implements the UCS specialization of R1CS described in the
-//! paper (`zinc-plus-paper/UCS/structural_instantiations.tex`): matrices
-//! $A, B, C \in R_0^{n \times m}$, a witness vector $z = (1, \text{public},
-//! \text{private})$, and the constraint $(Az) \circ (Bz) - (Cz) \in
-//! \mathfrak{n}$ component-wise (ideal membership generalizing $= 0$). Unlike
-//! UAIR — whose constraints are *local* and fold into a single combined
+//! [`R1csFrontend`] proves R1CS over a **fixed prime field** $F$: matrices
+//! $A, B, C \in F^{n \times m}$, a witness vector $z = (1, \text{public},
+//! \text{private})$, and the exact constraint $(Az) \circ (Bz) - (Cz) = 0$
+//! component-wise (the **zero ideal**). This is the Zinc+ "add-on" /
+//! $R = \mathbb{F}_q$ case (`zinc-plus-paper/crypto/crypto_piop.tex`): the
+//! relation is native over $F$, so the substrate uses $F$ directly as its
+//! working field (via [`ConstraintSystem::working_field`]) rather than sampling
+//! a random prime. Soundness needs $F$ to be a large prime
+//! ($|F| = \Omega(2^\lambda)$); see `docs/r1cs-frontend-plan.md`. Ideal
+//! membership / polynomial witnesses / multi-prime families are **postponed**
+//! (kept in that doc's "Postponed" section).
+//!
+//! Unlike UAIR — whose constraints are *local* and fold into a single combined
 //! sumcheck — R1CS constraints are *global* (a row of $Az$ touches every entry
 //! of $z$), so this frontend proves satisfiability with **Spartan's two
 //! sumchecks**: an outer sumcheck over the constraint hypercube reducing to a
@@ -26,18 +34,6 @@
 //! / [`verify_constraints`](ConstraintSystem::verify_constraints) and never
 //! crosses the seam. Hence `num_vars = log2(#witnesses)`, `r_0 = r_y`, and
 //! `r_0_fq = vec![]`.
-//!
-//! # Milestone status
-//!
-//! This is the **stage-1 scaffolding**: the data types, their
-//! [`Transcribable`] serialization, and the [`ConstraintSystem`] impl surface.
-//! The three protocol methods are stubbed to return
-//! [`ProtocolError::R1cs`](crate::ProtocolError::R1cs); stage 2 fills in the
-//! two-sumcheck argument and stage 3 wires it through the full substrate. The
-//! frontend is generic over a [`Semiring`] `S` (the matrix-entry type) so it
-//! later covers $\mathbb{Z}$, $\mathbb{Z}[X]$, $\mathbb{F}_q$, and
-//! $\mathbb{F}_q[X]$; only the $\mathbb{Q}[X]$ / zero-ideal instantiation is
-//! exercised in M1.
 
 use crate::{
     MultiDegreeSumcheckProof, ProtocolError,
@@ -310,7 +306,7 @@ where
         Some(self.field_cfg.clone())
     }
 
-    /// Prover side: Spartan's two sumchecks over the $\mathbb{Q}[X]$ family.
+    /// Prover side: Spartan's two sumchecks over the fixed field $F$.
     ///
     /// First, assemble the full witness $z = z_{\text{pub}} + z_{\text{wit}}$
     /// (the committed witness from `projected_traces[0]` plus the public prefix
@@ -622,11 +618,11 @@ where
         field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
     ) -> Result<(), ProtocolError<Self::Field>> {
         let cfg = &field_cfgs[0];
-        let q_lifted = per_family_all_lifted
+        let family = per_family_all_lifted
             .first()
-            .ok_or_else(|| ProtocolError::R1cs("no lifted evals for Q[X] family".to_owned()))?;
-        let z_wit = q_lifted.first().ok_or_else(|| {
-            ProtocolError::R1cs("Q[X] family has no witness-column lift".to_owned())
+            .ok_or_else(|| ProtocolError::R1cs("no lifted evals for the R1CS family".to_owned()))?;
+        let z_wit = family.first().ok_or_else(|| {
+            ProtocolError::R1cs("R1CS family has no witness-column lift".to_owned())
         })?;
         // The int-column lift is degree-0, so its value at any point is the
         // scalar z_wit(r_y) (confirmed against the substrate; no psi_a
@@ -669,9 +665,9 @@ fn constraint_axis_vars<F: PrimeField>(
 }
 
 /// Extract the single `int` witness column from a projected trace as scalars in
-/// `F`. The committed witness entries are degree-0 ($\phi_q$ of an int column),
-/// so each `DynamicPolynomialF<F>` collapses to its constant term (its value at
-/// $0$).
+/// `F`. The committed witness entries are degree-0 (the substrate's projection
+/// of an int column), so each `DynamicPolynomialF<F>` collapses to its constant
+/// term (its value at $0$).
 fn witness_column_scalars<F: PrimeField>(
     trace: &ProjectedTrace<F>,
     cfg: &F::Config,
@@ -762,12 +758,12 @@ mod tests {
         F::make_cfg(&FMod::from(0xFFFF_FFFF_FFFF_FFC5_u64)).expect("prime modulus")
     }
 
-    // R1CS M1 uses the zero ideal; these projections are never invoked.
+    // R1CS uses the zero ideal; these projections are never invoked.
     fn no_ideal(_: &(), _: &Cfg) -> IdealOrZero<DegreeOneIdeal<F>> {
-        unreachable!("R1CS M1 uses the zero ideal; projection never invoked")
+        unreachable!("R1CS uses the zero ideal; projection never invoked")
     }
     fn no_scalar(_: &(), _: &Cfg) -> DynamicPolynomialF<F> {
-        unreachable!("R1CS M1 has no psi_a scalar projection")
+        unreachable!("R1CS has no psi_a scalar projection")
     }
 
     /// The satisfiable instance `z = [1, x, w]` with the single (nontrivial)
