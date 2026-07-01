@@ -42,12 +42,9 @@
 use crate::{
     MultiDegreeSumcheckProof, ProtocolError,
     constraint_system::{ConstraintEndpoints, ConstraintSystem, Layout},
+    r1cs_sparse_matrix::SparseMatrix,
 };
-use core::marker::PhantomData;
-use crypto_primitives::{
-    FromPrimitiveWithConfig, FromWithConfig, HasPrimeFieldConfig, Matrix, PrimeField, Semiring,
-    SparseMatrix,
-};
+use crypto_primitives::{FromPrimitiveWithConfig, HasPrimeFieldConfig, PrimeField};
 use num_traits::Zero;
 use zinc_piop::{
     CombFn,
@@ -68,29 +65,30 @@ use zinc_uair::{
 use zinc_utils::{inner_transparent_field::InnerTransparentField, mul};
 
 /// The public R1CS index: the three constraint matrices and the public-input
-/// count.
+/// count, shaped after ProveKit's `R1CS` (`a/b/c`, `num_public_inputs`).
 ///
 /// The matrices are the verifier's $O(\text{nnz})$ index (the non-succinct
 /// analog of UAIR's [`UairSignature`](zinc_uair::UairSignature)): the verifier
-/// evaluates $\tilde A, \tilde B, \tilde C$ at $(r_x, r_y)$ directly from
-/// `cells`, so no sparse-matrix (Spark) commitment is needed. Rows index the
+/// evaluates $\tilde A, \tilde B, \tilde C$ at $(r_x, r_y)$ directly from the
+/// entries, so no sparse-matrix (Spark) commitment is needed. Rows index the
 /// constraint axis (`num_rows = 2^{s_x}`) and columns the variable axis
-/// (`num_cols = 2^{\text{num\_vars}}`); [`SparseMatrix`] is fixed-density, so
-/// hand-built matrices pad each row to `density` with `(0, S::zero())` fillers.
+/// (`num_cols = 2^{\text{num\_vars}}`). Entries are **field elements** in the
+/// fixed R1CS field `F` (ProveKit stores field elements; we mirror that), held
+/// in our variable-density [`SparseMatrix`](crate::r1cs_sparse_matrix::SparseMatrix).
 ///
 /// `num_public_inputs` counts the public entries of $z$ **after** the leading
 /// constant $1$ at index `0`; the committed witness carries only the private
 /// tail, and [`verify_lifted_evals`](ConstraintSystem::verify_lifted_evals)
 /// reconciles $\tilde z(r_y) = \tilde z_{\text{pub}}(r_y) + \tilde
 /// z_{\text{wit}}(r_y)$ (Spartan-standard public-input binding).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct R1csInstance<S> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R1csInstance<F: PrimeField> {
     /// Left multiplication matrix $A$.
-    pub a: SparseMatrix<S>,
+    pub a: SparseMatrix<F>,
     /// Right multiplication matrix $B$.
-    pub b: SparseMatrix<S>,
+    pub b: SparseMatrix<F>,
     /// Output matrix $C$.
-    pub c: SparseMatrix<S>,
+    pub c: SparseMatrix<F>,
     /// Number of public inputs, excluding the constant $1$ at $z[0]$.
     pub num_public_inputs: usize,
 }
@@ -98,46 +96,49 @@ pub struct R1csInstance<S> {
 /// Adapter exposing an [`R1csInstance`] as a
 /// [`ConstraintSystem`](crate::constraint_system::ConstraintSystem).
 ///
-/// Type parameters:
-/// - `S` — the matrix-entry [`Semiring`] ($\mathbb{Z}$, $\mathbb{Z}[X]$,
-///   $\mathbb{F}_q$, $\mathbb{F}_q[X]$, ...).
-/// - `F` — the projection field (becomes [`ConstraintSystem::Field`]); fixed on
-///   the type so the impl can require the extra field bounds the argument
-///   needs.
+/// `F` — the **fixed** prime field the R1CS lives over (becomes
+/// [`ConstraintSystem::Field`]). The relation is native over `F` (ProveKit's
+/// `R = F_q` / Zinc+ "add-on" case): the frontend supplies `F` to the substrate
+/// via [`ConstraintSystem::working_field`], so the substrate uses `F` as its
+/// working field instead of sampling a random prime. `F` must be a large prime
+/// for soundness (`docs/r1cs-frontend-plan.md`).
 ///
-/// Carries the public [`R1csInstance`] (the verifier index) and the minimal
-/// substrate-facing [`Layout`] — a single `int` witness column and no declared
-/// primes.
+/// Carries the public [`R1csInstance`] (the verifier index), the public-input
+/// values, the fixed field cfg, and the minimal substrate-facing [`Layout`] —
+/// a single `int` witness column and no declared primes.
 #[derive(Clone, Debug)]
-pub struct R1csFrontend<S, F: PrimeField> {
+pub struct R1csFrontend<F: PrimeField> {
     /// The public R1CS index ($A$, $B$, $C$, public-input count).
-    instance: R1csInstance<S>,
+    instance: R1csInstance<F>,
     /// The public-input values $[\text{io}_1, \dots, \text{io}_\ell]$ (the
     /// `io` part of $z$, **excluding** the constant $1$ at $z[0]$). Length must
     /// equal `instance.num_public_inputs`. Part of the public statement, so
     /// both prover and verifier hold it; the seam does not pass it, so it lives
     /// on the frontend. The full public prefix of $z$ is $[1, \text{io}_1,
     /// \dots, \text{io}_\ell]$ occupying indices $0..=\ell$.
-    public_values: Vec<S>,
+    public_values: Vec<F>,
+    /// The fixed R1CS field, handed to the substrate via `working_field`.
+    field_cfg: F::Config,
     /// The minimal substrate-only layout: one `int` witness column, no primes.
     layout: Layout<F::Integer>,
-    _marker: PhantomData<F>,
 }
 
-impl<S, F: PrimeField> R1csFrontend<S, F> {
-    /// Build an R1CS frontend from its public index and public-input values.
+impl<F: PrimeField> R1csFrontend<F> {
+    /// Build an R1CS frontend from its public index, public-input values, and
+    /// fixed field.
     ///
     /// `public_values` are the $\ell = $ `instance.num_public_inputs` public
     /// inputs (the `io` of $z$, excluding the constant $1$ at $z[0]$); the full
     /// public prefix is $[1] \mathbin{+\!+} \text{public\_values}$. The witness
     /// (private) part of $z$ is committed as a single `int` column (with the
     /// public prefix slots zeroed in the committed column); public inputs are
-    /// bound *inside* the argument, not via substrate public columns. No
-    /// $\mathbb{F}_q[X]$ families are declared (M1 is $\mathbb{Q}[X]$-only).
+    /// bound *inside* the argument, not via substrate public columns. `field_cfg`
+    /// is the fixed prime field the relation lives over (and that the substrate
+    /// will use as its working field).
     ///
     /// # Panics
     /// If `public_values.len() != instance.num_public_inputs`.
-    pub fn new(instance: R1csInstance<S>, public_values: Vec<S>) -> Self {
+    pub fn new(instance: R1csInstance<F>, public_values: Vec<F>, field_cfg: F::Config) -> Self {
         assert_eq!(
             public_values.len(),
             instance.num_public_inputs,
@@ -152,13 +153,13 @@ impl<S, F: PrimeField> R1csFrontend<S, F> {
         Self {
             instance,
             public_values,
+            field_cfg,
             layout,
-            _marker: PhantomData,
         }
     }
 
     /// The public R1CS index this frontend proves against.
-    pub fn instance(&self) -> &R1csInstance<S> {
+    pub fn instance(&self) -> &R1csInstance<F> {
         &self.instance
     }
 }
@@ -281,24 +282,18 @@ pub struct R1csVerifierClaims<F: PrimeField> {
     z_pub_ry: F,
 }
 
-impl<S, F> ConstraintSystem for R1csFrontend<S, F>
+impl<F> ConstraintSystem for R1csFrontend<F>
 where
-    S: Semiring,
-    F: InnerTransparentField
-        + FromPrimitiveWithConfig
-        + Send
-        + Sync
-        + 'static
-        + for<'a> FromWithConfig<&'a S>,
+    F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync + 'static,
     F::Integer: ConstTranscribable + Zero,
 {
     type Prime = F::Integer;
     type Field = F;
     type ConstraintProof = R1csConstraintProof<F>;
     type VerifierClaims = R1csVerifierClaims<F>;
-    // R1CS over the zero ideal (M1): no ideal-membership check, no `psi_a`
-    // scalar projection. The three `project_*` closures on `verify_constraints`
-    // are never called and `IdealOverF` is never instantiated, so these source
+    // R1CS over the zero ideal: no ideal-membership check, no `psi_a` scalar
+    // projection. The three `project_*` closures on `verify_constraints` are
+    // never called and `IdealOverF` is never instantiated, so these source
     // types are all `()` and the `IdealOverF: Ideal + IdealCheck` bound is
     // satisfied vacuously.
     type IdealSource = ();
@@ -307,6 +302,12 @@ where
 
     fn layout(&self) -> &Layout<Self::Prime> {
         &self.layout
+    }
+
+    /// The relation is native over the fixed field `F`; hand it to the substrate
+    /// so it uses `F` as the working field rather than sampling a random prime.
+    fn working_field(&self) -> Option<<Self::Field as HasPrimeFieldConfig>::Config> {
+        Some(self.field_cfg.clone())
     }
 
     /// Prover side: Spartan's two sumchecks over the $\mathbb{Q}[X]$ family.
@@ -325,7 +326,11 @@ where
     /// $r_A, r_B, r_C$, and proves $\sum_y m_{\text{row}}(y) \tilde z(y) = r_A
     /// az_{rx} + r_B bz_{rx} + r_C cz_{rx}$ over the variable hypercube, yielding
     /// $r_y = r_0$; it sends $\tilde z(r_y)$.
-    #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::too_many_lines,
+        clippy::needless_range_loop
+    )]
     fn prove_constraints(
         &self,
         transcript: &mut impl Transcript,
@@ -336,7 +341,7 @@ where
     {
         let instance = &self.instance;
         let cfg = &field_cfgs[0];
-        let s_x = constraint_axis_vars::<S, F>(instance)?;
+        let s_x = constraint_axis_vars::<F>(instance)?;
         let z_len = 1usize << num_vars;
 
         // ---- assemble the full witness z = z_pub + z_wit -------------------
@@ -355,7 +360,7 @@ where
         let one = F::one_with_cfg(cfg);
         z_full[0] += &one;
         for (k, iv) in self.public_values.iter().enumerate() {
-            z_full[k + 1] += &F::from_with_cfg(iv, cfg);
+            z_full[k + 1] += iv;
         }
 
         // ---- outer sumcheck (degree 3) -------------------------------------
@@ -364,9 +369,9 @@ where
         let eq_tau = build_eq_x_r_inner(&tau, cfg)
             .map_err(|e| ProtocolError::R1cs(format!("eq(tau, .) build failed: {e}")))?;
 
-        let az_inner = mz_inner::<S, F>(&instance.a, &z_full, cfg);
-        let bz_inner = mz_inner::<S, F>(&instance.b, &z_full, cfg);
-        let cz_inner = mz_inner::<S, F>(&instance.c, &z_full, cfg);
+        let az_inner = mz_inner::<F>(&instance.a, &z_full, cfg);
+        let bz_inner = mz_inner::<F>(&instance.b, &z_full, cfg);
+        let cz_inner = mz_inner::<F>(&instance.c, &z_full, cfg);
 
         let zero_inner = F::zero_with_cfg(cfg).into_inner();
         // eq_tau * (Az * Bz - Cz)
@@ -421,17 +426,17 @@ where
         let (r_a, r_b, r_c) = (batch[0].clone(), batch[1].clone(), batch[2].clone());
 
         // ---- inner sumcheck (degree 2) -------------------------------------
-        // m_row[j] = sum_i eq_rx[i] * phi_q((r_A A + r_B B + r_C C)[i][j]).
+        // m_row[j] = sum_i eq_rx[i] * (r_A A + r_B B + r_C C)[i][j].
         let mut m_row = vec![F::zero_with_cfg(cfg); z_len];
         for (matrix, coeff) in [
             (&instance.a, &r_a),
             (&instance.b, &r_b),
             (&instance.c, &r_c),
         ] {
-            for (i, row) in matrix.cells().enumerate() {
+            for i in 0..matrix.num_rows {
                 let w = coeff.clone() * &eq_rx[i];
-                for (j, val) in row {
-                    let term = w.clone() * &F::from_with_cfg(val, cfg);
+                for (j, val) in matrix.iter_row(i) {
+                    let term = w.clone() * val;
                     m_row[j] += &term;
                 }
             }
@@ -511,7 +516,7 @@ where
     {
         let instance = &self.instance;
         let cfg = &field_cfgs[0];
-        let s_x = constraint_axis_vars::<S, F>(instance)?;
+        let s_x = constraint_axis_vars::<F>(instance)?;
 
         // ---- outer sumcheck replay -----------------------------------------
         let tau = transcript.get_field_challenges::<F>(s_x, cfg);
@@ -581,9 +586,9 @@ where
             .map_err(|e| ProtocolError::R1cs(format!("eq(r_x, .) build failed: {e}")))?;
         let eq_ry = build_eq_x_r_vec(&r_y, cfg)
             .map_err(|e| ProtocolError::R1cs(format!("eq(r_y, .) build failed: {e}")))?;
-        let a_eval = matrix_mle_eval::<S, F>(&instance.a, &eq_rx, &eq_ry, cfg);
-        let b_eval = matrix_mle_eval::<S, F>(&instance.b, &eq_rx, &eq_ry, cfg);
-        let c_eval = matrix_mle_eval::<S, F>(&instance.c, &eq_rx, &eq_ry, cfg);
+        let a_eval = matrix_mle_eval::<F>(&instance.a, &eq_rx, &eq_ry, cfg);
+        let b_eval = matrix_mle_eval::<F>(&instance.b, &eq_rx, &eq_ry, cfg);
+        let c_eval = matrix_mle_eval::<F>(&instance.c, &eq_rx, &eq_ry, cfg);
         let m_eval = r_a * &a_eval + &(r_b * &b_eval) + &(r_c * &c_eval);
         if inner.expected_evaluations()[0] != m_eval * &proof.z_ry {
             return Err(ProtocolError::R1cs(
@@ -594,7 +599,7 @@ where
         // ---- public prefix: z_pub(r_y) = eq_ry[0]*1 + sum_k eq_ry[k+1]*io[k] --
         let mut z_pub_ry = eq_ry[0].clone();
         for (k, iv) in self.public_values.iter().enumerate() {
-            z_pub_ry += &(eq_ry[k + 1].clone() * &F::from_with_cfg(iv, cfg));
+            z_pub_ry += &(eq_ry[k + 1].clone() * iv);
         }
 
         Ok((
@@ -623,9 +628,9 @@ where
         let z_wit = q_lifted.first().ok_or_else(|| {
             ProtocolError::R1cs("Q[X] family has no witness-column lift".to_owned())
         })?;
-        // M1: the int-column lift is degree-0, so its value at any point is the
-        // scalar z_wit(r_y). (Stage 3 confirms this against the substrate; no
-        // psi_a projecting element is applied for the zero ideal.)
+        // The int-column lift is degree-0, so its value at any point is the
+        // scalar z_wit(r_y) (confirmed against the substrate; no psi_a
+        // projecting element is applied for the zero ideal).
         let z_wit_ry = z_wit
             .evaluate_at_point(&F::zero_with_cfg(cfg))
             .map_err(|e| ProtocolError::R1cs(format!("witness lift eval failed: {e}")))?;
@@ -646,8 +651,8 @@ where
 /// Constraint-axis variable count $s_x = \log_2(\text{num\\_rows})$, validating
 /// that $A, B, C$ share a row count that is a power of two $\ge 2$ (the outer
 /// sumcheck needs $s_x \ge 1$).
-fn constraint_axis_vars<S, F: PrimeField>(
-    instance: &R1csInstance<S>,
+fn constraint_axis_vars<F: PrimeField>(
+    instance: &R1csInstance<F>,
 ) -> Result<usize, ProtocolError<F>> {
     let n = instance.a.num_rows;
     if n < 2 || !n.is_power_of_two() {
@@ -664,9 +669,9 @@ fn constraint_axis_vars<S, F: PrimeField>(
 }
 
 /// Extract the single `int` witness column from a projected trace as scalars in
-/// `F`. For M1 the committed witness entries are degree-0 ($\phi_q$ of an int
-/// column), so each `DynamicPolynomialF<F>` collapses to its constant term
-/// (its value at $0$).
+/// `F`. The committed witness entries are degree-0 ($\phi_q$ of an int column),
+/// so each `DynamicPolynomialF<F>` collapses to its constant term (its value at
+/// $0$).
 fn witness_column_scalars<F: PrimeField>(
     trace: &ProjectedTrace<F>,
     cfg: &F::Config,
@@ -695,22 +700,19 @@ fn witness_column_scalars<F: PrimeField>(
     }
 }
 
-/// Compute the length-`num_rows` vector `M z` as `F::Inner` evaluations,
-/// projecting each matrix entry `S -> F` via $\phi_q$
-/// ([`FromWithConfig`]) and multiplying by the (already-field) witness.
+/// Compute the length-`num_rows` vector `M z` as `F::Inner` evaluations, with
+/// field-element matrix entries multiplied by the (field) witness.
 #[allow(clippy::arithmetic_side_effects)]
-fn mz_inner<S, F>(matrix: &SparseMatrix<S>, z_full: &[F], cfg: &F::Config) -> Vec<F::Inner>
+fn mz_inner<F>(matrix: &SparseMatrix<F>, z_full: &[F], cfg: &F::Config) -> Vec<F::Inner>
 where
-    S: Semiring,
-    F: InnerTransparentField + for<'a> FromWithConfig<&'a S>,
+    F: InnerTransparentField,
 {
     let zero = F::zero_with_cfg(cfg);
-    matrix
-        .cells()
-        .map(|row| {
+    (0..matrix.num_rows)
+        .map(|i| {
             let mut acc = zero.clone();
-            for (j, val) in row {
-                acc += &(F::from_with_cfg(val, cfg) * &z_full[j]);
+            for (j, val) in matrix.iter_row(i) {
+                acc += &(val.clone() * &z_full[j]);
             }
             acc.into_inner()
         })
@@ -718,21 +720,18 @@ where
 }
 
 /// Evaluate the matrix MLE $\tilde M(r_x, r_y) = \sum_{(i, j)}
-/// \mathrm{eq}_{r_x}[i] \cdot \mathrm{eq}_{r_y}[j] \cdot \phi_q(M[i][j])$
-/// directly in $O(\text{nnz})$.
+/// \mathrm{eq}_{r_x}[i] \cdot \mathrm{eq}_{r_y}[j] \cdot M[i][j]$ directly in
+/// $O(\text{nnz})$ (field-element entries).
 #[allow(clippy::arithmetic_side_effects)]
-fn matrix_mle_eval<S, F>(matrix: &SparseMatrix<S>, eq_rx: &[F], eq_ry: &[F], cfg: &F::Config) -> F
+fn matrix_mle_eval<F>(matrix: &SparseMatrix<F>, eq_rx: &[F], eq_ry: &[F], cfg: &F::Config) -> F
 where
-    S: Semiring,
-    F: PrimeField + for<'a> FromWithConfig<&'a S>,
+    F: PrimeField,
 {
     let mut acc = F::zero_with_cfg(cfg);
-    for (i, row) in matrix.cells().enumerate() {
-        for (j, val) in row {
-            let mut term = eq_rx[i].clone() * &eq_ry[j];
-            term *= &F::from_with_cfg(val, cfg);
-            acc += &term;
-        }
+    for (i, j, val) in matrix.iter() {
+        let mut term = eq_rx[i].clone() * &eq_ry[j];
+        term *= val;
+        acc += &term;
     }
     acc
 }
@@ -747,7 +746,9 @@ where
 mod tests {
     use super::*;
     use crypto_bigint::U64;
-    use crypto_primitives::{Field, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint};
+    use crypto_primitives::{
+        Field, FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
+    };
     use zinc_transcript::Blake3Transcript;
     use zinc_uair::{ideal::DegreeOneIdeal, ideal_collector::IdealOrZero};
 
@@ -779,30 +780,12 @@ mod tests {
     /// `0..=num_public`, and `public_values` carries `z[1..=num_public]`.
     struct Setup {
         cfg: Cfg,
-        instance: R1csInstance<i64>,
-        public_values: Vec<i64>,
+        instance: R1csInstance<F>,
+        public_values: Vec<F>,
         projected: Vec<ProjectedTrace<F>>,
         /// The committed witness column in `F` (public slots zeroed).
         z_wit: Vec<F>,
         num_vars: usize,
-    }
-
-    fn sparse(num_cols: usize, rows: &[&[(usize, i64)]]) -> SparseMatrix<i64> {
-        let density = rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
-        let mut cells = Vec::with_capacity(rows.len() * density);
-        for row in rows {
-            cells.extend_from_slice(row);
-            // Pad short rows to fixed density with a harmless `0 * z[0]` filler.
-            for _ in row.len()..density {
-                cells.push((0, 0));
-            }
-        }
-        SparseMatrix {
-            num_rows: rows.len(),
-            num_cols,
-            density,
-            cells,
-        }
     }
 
     fn build(x: i64, w: i64, num_public: usize) -> Setup {
@@ -812,15 +795,14 @@ mod tests {
         let f = |v: i64| F::from_with_cfg(&v, &cfg);
         let zero = F::zero_with_cfg(&cfg);
 
-        let z_i64 = [1i64, x, w, 0];
-        let z_full: Vec<F> = z_i64.iter().map(|&v| f(v)).collect();
+        let z_full = [f(1), f(x), f(w), zero.clone()];
 
         // Committed witness: zero the public prefix [0..=num_public].
-        let mut z_wit = z_full.clone();
+        let mut z_wit: Vec<F> = z_full.to_vec();
         for slot in z_wit.iter_mut().take(num_public + 1) {
             *slot = zero.clone();
         }
-        let public_values: Vec<i64> = z_i64[1..=num_public].to_vec();
+        let public_values: Vec<F> = z_full[1..=num_public].to_vec();
 
         // Projected trace: one column-major `int` witness column of degree-0
         // (constant) DynamicPolynomialF entries.
@@ -834,13 +816,11 @@ mod tests {
         let projected = vec![ProjectedTrace::ColumnMajor(vec![col])];
 
         // A z = x, B z = x, C z = w; second row is the trivial 0 = 0 constraint.
-        let a = sparse(n, &[&[(1, 1)], &[]]);
-        let b = sparse(n, &[&[(1, 1)], &[]]);
-        let c = sparse(n, &[&[(2, 1)], &[]]);
+        let mat = |col: usize, val: F| SparseMatrix::from_rows(n, vec![vec![(col, val)], Vec::new()]);
         let instance = R1csInstance {
-            a,
-            b,
-            c,
+            a: mat(1, f(1)),
+            b: mat(1, f(1)),
+            c: mat(2, f(1)),
             num_public_inputs: num_public,
         };
 
@@ -864,8 +844,11 @@ mod tests {
     }
 
     fn prove(setup: &Setup) -> (R1csConstraintProof<F>, Vec<F>) {
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut pt = Blake3Transcript::new();
         let (proof, endpoints) = frontend
             .prove_constraints(&mut pt, &setup.projected, &[setup.cfg], setup.num_vars)
@@ -881,8 +864,11 @@ mod tests {
         let setup = build(3, 9, 0);
         let (proof, r_y_prover) = prove(&setup);
 
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut vt = Blake3Transcript::new();
         let (endpoints, claims) = frontend
             .verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(
@@ -908,11 +894,14 @@ mod tests {
     #[test]
     fn r1cs_prove_verify_with_public_input() {
         let setup = build(3, 9, 1);
-        assert_eq!(setup.public_values, vec![3]);
+        assert_eq!(setup.public_values.len(), 1, "one public input (x)");
         let (proof, _) = prove(&setup);
 
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut vt = Blake3Transcript::new();
         let (endpoints, claims) = frontend
             .verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(
@@ -939,8 +928,11 @@ mod tests {
         let setup = build(3, 10, 0); // 3*3 = 9 != 10
         let (proof, _) = prove(&setup);
 
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut vt = Blake3Transcript::new();
         let res = frontend.verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(
             &mut vt,
@@ -962,8 +954,11 @@ mod tests {
         let (mut proof, _) = prove(&setup);
         proof.z_ry += &F::one_with_cfg(&setup.cfg);
 
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut vt = Blake3Transcript::new();
         let res = frontend.verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(
             &mut vt,
@@ -978,15 +973,19 @@ mod tests {
     }
 
     /// Negative: verifying against a different matrix than the prover used
-    /// (a tampered `C` cell) breaks the inner `M~(r_x, r_y)` evaluation.
+    /// (a `C` with a perturbed coefficient) breaks the inner `M~(r_x, r_y)`
+    /// evaluation.
     #[test]
     fn r1cs_rejects_tampered_matrix() {
         let setup = build(3, 9, 0);
         let (proof, _) = prove(&setup);
 
+        // Rebuild the instance with C's coefficient 1 -> 2 at (row 0, col 2).
+        let n = 1usize << setup.num_vars;
+        let f = |v: i64| F::from_with_cfg(&v, &setup.cfg);
         let mut bad = setup.instance.clone();
-        bad.c.cells[0].1 += 1; // corrupt C[0][2] = 1 -> 2
-        let frontend = R1csFrontend::<i64, F>::new(bad, setup.public_values.clone());
+        bad.c = SparseMatrix::from_rows(n, vec![vec![(2usize, f(2))], Vec::new()]);
+        let frontend = R1csFrontend::<F>::new(bad, setup.public_values.clone(), setup.cfg);
         let mut vt = Blake3Transcript::new();
         let res = frontend.verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(
             &mut vt,
@@ -1007,8 +1006,11 @@ mod tests {
         let setup = build(3, 9, 0);
         let (proof, _) = prove(&setup);
 
-        let frontend =
-            R1csFrontend::<i64, F>::new(setup.instance.clone(), setup.public_values.clone());
+        let frontend = R1csFrontend::<F>::new(
+            setup.instance.clone(),
+            setup.public_values.clone(),
+            setup.cfg,
+        );
         let mut vt = Blake3Transcript::new();
         let (endpoints, claims) = frontend
             .verify_constraints::<IdealOrZero<DegreeOneIdeal<F>>>(

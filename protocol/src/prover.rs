@@ -35,6 +35,9 @@ pub struct ProverFolded<
     layout: Layout<Zt::Fmod>,
     original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
+    /// Fixed working field from `cs.working_field()` (`None` ⇒ sample a random
+    /// prime at step 2, as UAIR does).
+    working_field: Option<F::Config>,
 
     _phantom: PhantomData<(&'a u8, CS, F)>,
 }
@@ -68,6 +71,8 @@ pub struct ProverCommitted<
     commitment_bin: ZipPlusCommitment,
     commitment_arb: ZipPlusCommitment,
     commitment_int: ZipPlusCommitment,
+    /// Fixed working field (see [`ProverFolded::working_field`]).
+    working_field: Option<F::Config>,
 
     _phantom: PhantomData<(CS, F)>,
 }
@@ -240,6 +245,7 @@ where
         cs: &CS,
     ) -> Result<ProverFolded<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         let layout: Layout<Zt::Fmod> = cs.layout().clone();
+        let working_field = cs.working_field();
         let witness_trace = layout.witness_of(trace);
 
         let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)
@@ -256,6 +262,7 @@ where
             layout,
             original_trace: trace,
             folded_witness_trace,
+            working_field,
             _phantom: PhantomData,
         })
     }
@@ -314,6 +321,7 @@ impl_with_type_bounds!(ProverFolded
             commitment_bin,
             commitment_arb,
             commitment_int,
+            working_field: self.working_field,
             _phantom: PhantomData,
         })
     }
@@ -329,11 +337,17 @@ impl_with_type_bounds!(ProverCommitted
     where
         P: for<'b> Fn(&'b UairTrace<'static, Zt::Int, Zt::Int, D, D>, &'b F::Config) -> ProjectedTrace<F>
     {
-        // Sample the random Q[X] prime q_0 and build the per-family field configs [q_0, q_1, .., q_n].
-        let field_cfg = self
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
+        // Working field q_0: either the constraint system's fixed field (R1CS
+        // add-on / R = F_q), or a fresh random Ω(λ)-bit prime (UAIR / Q path).
+        // Both prover and verifier take the same branch, so the transcript stays
+        // in sync whether or not the sampling draw happens.
+        let field_cfg = match &self.working_field {
+            Some(cfg) => cfg.clone(),
+            None => self
+                .pcs_transcript
+                .fs_transcript
+                .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>(),
+        };
         let all_field_cfgs = build_all_cfgs::<F>(&self.layout, field_cfg);
 
         let projected_traces = all_field_cfgs

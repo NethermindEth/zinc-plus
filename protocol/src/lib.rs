@@ -1712,34 +1712,44 @@ mod tests {
         tamper: impl Fn(&mut Proof<F, crate::r1cs_frontend::R1csConstraintProof<F>>),
         check: impl Fn(Result<(), ProtocolError<F>>),
     ) {
-        use crate::r1cs_frontend::{R1csFrontend, R1csInstance};
-        use crypto_primitives::SparseMatrix;
+        use crate::{
+            r1cs_frontend::{R1csFrontend, R1csInstance},
+            r1cs_sparse_matrix::SparseMatrix,
+        };
         use std::borrow::Cow;
+        use zinc_transcript::Blake3Transcript;
         use zinc_uair::UairTrace;
 
         let num_vars = 8usize;
         let n = 1usize << num_vars;
         let (x, w) = (3i64, 9i64);
 
-        // A z = z[1], B z = z[1], C z = z[2]; row 1 is the trivial 0 = 0
-        // constraint (so #constraints = 2, s_x = 1 >= 1).
-        let mat = |col: usize| SparseMatrix::<i64> {
-            num_rows: 2,
-            num_cols: n,
-            density: 1,
-            cells: vec![(col, 1i64), (0, 0i64)],
+        // Fixed R1CS field: a deterministic large prime (the substrate uses it as
+        // the working field via `working_field`, instead of sampling). Sampled
+        // off a throwaway transcript so it is reproducible and Ω(λ)-sized.
+        let field_cfg = {
+            let mut t = Blake3Transcript::new();
+            t.get_random_field_cfg::<F, ZtFmod, MillerRabin>()
         };
+        let f = |v: i64| F::from_with_cfg(&v, &field_cfg);
+
+        // A z = z[1], B z = z[1], C z = z[2]; row 1 is the trivial 0 = 0
+        // constraint (so #constraints = 2, s_x = 1 >= 1). Entries are field
+        // elements in our variable-density sparse matrix.
         let instance = R1csInstance {
-            a: mat(1),
-            b: mat(1),
-            c: mat(2),
+            a: SparseMatrix::from_rows(n, vec![vec![(1usize, f(1))], Vec::new()]),
+            b: SparseMatrix::from_rows(n, vec![vec![(1usize, f(1))], Vec::new()]),
+            c: SparseMatrix::from_rows(n, vec![vec![(2usize, f(1))], Vec::new()]),
             num_public_inputs: num_public,
         };
-        let public_values = [1i64, x, w][1..=num_public].to_vec();
-        let frontend = R1csFrontend::<i64, F>::new(instance, public_values);
+        let public_values: Vec<F> = [1i64, x, w][1..=num_public].iter().map(|&v| f(v)).collect();
+        let frontend = R1csFrontend::<F>::new(instance, public_values, field_cfg);
 
         // Committed witness int column: z with the public prefix [0..=num_public]
         // (constant + io) zeroed; the frontend re-adds it inside the argument.
+        // The witness values are small, so the substrate's `int` group (Zt::Int =
+        // i64) holds their canonical reps directly; the substrate projects them to
+        // the fixed field via phi (the identity here since q0 = the field).
         let mut z_wit = vec![0i64; n];
         z_wit[1] = x;
         z_wit[2] = w;
@@ -1764,7 +1774,7 @@ mod tests {
             (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
         );
 
-        type Piop = ZincPlusPiop<TestZincTypesIprs, R1csFrontend<i64, F>, F, D, QUARTER_D>;
+        type Piop = ZincPlusPiop<TestZincTypesIprs, R1csFrontend<F>, F, D, QUARTER_D>;
         type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
 
         let mut proof =

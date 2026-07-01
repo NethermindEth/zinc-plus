@@ -71,6 +71,9 @@ pub struct VerifierTranscriptReconstructed<
     /// $q'' := q_0$ and thus `proof_witness_lifted_evals[0]` is used for
     /// PCS verification.
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
+    /// Fixed working field from `cs.working_field()` (`None` ⇒ sample at step 1,
+    /// as UAIR does). Mirror of the prover's `ProverFolded::working_field`.
+    working_field: Option<F::Config>,
     _phantom: PhantomData<IdealOverF>,
 }
 
@@ -176,6 +179,7 @@ where
             constraint_proof: proof.constraint_proof,
             proof_witness_lifted_evals: proof.witness_lifted_evals,
             proof_witness_lifted_evals_pp: proof.witness_lifted_evals_pp,
+            working_field: cs.working_field(),
             _phantom: PhantomData,
         })
     }
@@ -199,11 +203,16 @@ where
     pub fn step1_prime_projection(
         mut self,
     ) -> Result<VerifierPrimeProjected<'a, Zt, CS, F, IdealOverF, D, FD>, ProtocolError<F>> {
-        let field_cfg = self
-            .base
-            .pcs_transcript
-            .fs_transcript
-            .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>();
+        // Mirror the prover: use the fixed working field if the constraint
+        // system supplies one, else sample a fresh random prime.
+        let field_cfg = match self.working_field.take() {
+            Some(cfg) => cfg,
+            None => self
+                .base
+                .pcs_transcript
+                .fs_transcript
+                .get_random_field_cfg::<F, Zt::Fmod, Zt::PrimeTest>(),
+        };
 
         Ok(VerifierPrimeProjected {
             base: self.base,

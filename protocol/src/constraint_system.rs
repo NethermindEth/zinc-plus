@@ -276,6 +276,22 @@ pub trait ConstraintSystem: Clone + Debug {
         !self.layout().primes().is_empty()
     }
 
+    /// The fixed working field this constraint system operates over, if any.
+    ///
+    /// Default `None`: the substrate samples a fresh random $\Omega(\lambda)$-bit
+    /// prime $q_0$ (the UAIR / $\mathbb{Q}$ path, where the random prime is what
+    /// makes the integer-relation projection sound). A frontend whose relation is
+    /// **native over a specific prime field** — e.g. R1CS over a fixed $F$ (the
+    /// Zinc+ "add-on" / $R = \mathbb{F}_q$ case) — returns `Some(cfg)`, and the
+    /// substrate uses it as the working field ($q_0$, and $q''$ since it aliases
+    /// when there are no declared primes) instead of sampling.
+    ///
+    /// Soundness of the fixed-field route requires $F$ to be a large prime
+    /// ($|F| = \Omega(2^\lambda)$); see `docs/r1cs-frontend-plan.md`.
+    fn working_field(&self) -> Option<<Self::Field as HasPrimeFieldConfig>::Config> {
+        None
+    }
+
     /// Prover side of the constraint argument.
     ///
     /// Inputs are the substrate-produced, field-projected data; the UAIR impl
