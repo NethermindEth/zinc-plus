@@ -23,6 +23,7 @@ use zinc_primality::{MillerRabin, PrimalityTest};
 use zinc_protocol::{
     Proof, ZincPlusPiop, ZincTypes,
     fold::{FoldBinaryTrace4x, FoldTrace},
+    uair_frontend::UairFrontend,
 };
 use zinc_test_uair::{
     BigLinearUair, BigLinearUairWithPublicInput, BinaryDecompositionUair, GenerateRandomTrace,
@@ -356,19 +357,19 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
 
     macro_rules! zinc_plus {
         () => {
-            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
+            ZincPlusPiop::<Zt, UairFrontend<U, F, D, QUARTER_D>, F, D, QUARTER_D>
         };
     }
+
+    // Prove-side constraint frontend, borrowing the trace's witness columns.
+    let cs = UairFrontend::<U, F, D, QUARTER_D>::from_trace(trace, project_scalar);
 
     macro_rules! bench_prove {
         ($label:literal, $mle_first:expr) => {
             group.bench_function(BenchmarkId::new($label, &params), |bench| {
                 bench.iter(|| {
                     black_box(<zinc_plus!()>::prove::<{ $mle_first }, PERFORM_CHECKS>(
-                        pp,
-                        trace,
-                        num_vars,
-                        project_scalar,
+                        pp, trace, num_vars, &cs,
                     ))
                     .expect("Prover failed");
                 });
@@ -379,12 +380,14 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
     bench_prove!("Prove (Combined)", false);
     bench_prove!("Prove (MLE-first)", true);
 
-    let proof: Proof<F> =
-        <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
-            .expect("proof generation for verifier bench");
+    let proof: Proof<F> = <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, &cs)
+        .expect("proof generation for verifier bench");
 
     let sig = U::signature();
     let public_trace = trace.public(&sig);
+
+    // Verify-side frontend (no witness columns held in the clear).
+    let cs_v = UairFrontend::<U, F, D, QUARTER_D>::new_verifier();
 
     group.bench_function(BenchmarkId::new("Verify", &params), |bench| {
         bench.iter_batched(
@@ -395,6 +398,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
                     proof,
                     &public_trace,
                     num_vars,
+                    &cs_v,
                     project_scalar,
                     project_ideal,
                     |_, _| unreachable!("bench UAIR has no F_q[X] constraints"),
@@ -466,7 +470,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
 
     macro_rules! piop {
         () => {
-            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
+            ZincPlusPiop::<Zt, UairFrontend<U, F, D, QUARTER_D>, F, D, QUARTER_D>
         };
     }
 
@@ -474,22 +478,22 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     // Prover per-step benchmarks
     //
 
+    // Prove-side constraint frontend, borrowing the trace's witness columns.
+    let cs = UairFrontend::<U, F, D, QUARTER_D>::from_trace(trace, project_scalar);
+
     // Build the chain once; each bench clones the cached state.
 
-    let p_folded = <piop!()>::step0_fold(trace).unwrap();
+    let p_folded = <piop!()>::step0_fold(trace, &cs).unwrap();
     let p_committed = p_folded.clone().step1_commit(pp, num_vars).unwrap();
     let p_projected = p_committed.clone().step2_combined().unwrap();
     let p_projected_mle = p_committed.clone().step2_mle_first().unwrap();
-    let p_constrained = p_projected
-        .clone()
-        .step_constraints(project_scalar)
-        .unwrap();
+    let p_constrained = p_projected.clone().step_constraints(&cs).unwrap();
     let p_lifted = p_constrained.clone().step7_lift_and_project().unwrap();
 
     step_bench!(
         "Prove" / "0: Fold",
         setup = || {},
-        run = |_s| <piop!()>::step0_fold(trace),
+        run = |_s| <piop!()>::step0_fold(trace, &cs),
     );
 
     step_bench!(
@@ -513,13 +517,13 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Prove" / "3-6: Constraint argument + multi-point eval (Combined)",
         setup = || p_projected.clone(),
-        run = |s| s.step_constraints(project_scalar),
+        run = |s| s.step_constraints(&cs),
     );
 
     step_bench!(
         "Prove" / "3-6: Constraint argument + multi-point eval (MLE-first)",
         setup = || p_projected_mle.clone(),
-        run = |s| s.step_constraints(project_scalar),
+        run = |s| s.step_constraints(&cs),
     );
 
     step_bench!(
@@ -538,18 +542,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     // Verifier per-step benchmarks
     //
 
-    macro_rules! zinc_plus {
-        () => {
-            ZincPlusPiop::<Zt, U, F, D, QUARTER_D>
-        };
-    }
-
-    let proof: Proof<F> =
-        <zinc_plus!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, project_scalar)
-            .expect("proof generation for verifier bench");
+    let proof: Proof<F> = <piop!()>::prove::<false, PERFORM_CHECKS>(pp, trace, num_vars, &cs)
+        .expect("proof generation for verifier bench");
 
     let sig = U::signature();
     let public_trace = trace.public(&sig);
+
+    // Verify-side frontend (no witness columns held in the clear).
+    let cs_v = UairFrontend::<U, F, D, QUARTER_D>::new_verifier();
 
     let project_fq_ideal =
         |_: &IdealOrZero<U::FqIdeal>, _: &<F as HasPrimeFieldConfig>::Config| -> IdealOverF {
@@ -561,6 +561,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         proof.clone(),
         &public_trace,
         num_vars,
+        &cs_v,
     )
     .unwrap();
     let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
@@ -573,6 +574,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
             proof,
             &public_trace,
             num_vars,
+            &cs_v,
         ),
     );
 
@@ -588,8 +590,12 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     step_bench!(
         "Verify" / "2-7: Constraint verify + lift + PCS",
         setup = || v_prime_projected.clone(),
-        run =
-            |s| s.finish_verify::<PERFORM_CHECKS>(project_scalar, project_ideal, project_fq_ideal,),
+        run = |s| s.finish_verify::<PERFORM_CHECKS>(
+            &cs_v,
+            project_scalar,
+            project_ideal,
+            project_fq_ideal,
+        ),
     );
 }
 

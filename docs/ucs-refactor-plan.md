@@ -1,6 +1,6 @@
 # Plan: abstract UAIR behind a UCS constraint-system trait
 
-Status: **in progress** — Phases 1–3, 3.5, and 4a done (§12): **both** prover and verifier now route their constraint argument through the `UairFrontend` `ConstraintSystem` seam (`prove_constraints` / `verify_constraints` + `verify_lifted_evals`), proof-preserving (full 30-test suite green, incl. all tamper/soundness negatives). The seam hands the substrate only the shared endpoint `r_0` (`ConstraintEndpoints`); the substrate's post-constraint job is lift-and-project + the PCS open (+ assembling the per-family lifted evals the verifier's `verify_lifted_evals` binds). **Remaining (Phase 4b):** genericize `ZincPlusPiop` over `CS` (drop the `U` pin) and embed `UairConstraintProof` inside `Proof<F>` (retiring the flat fields + the repack/unpack on both sides). Revise freely. Owner: Alexander.
+Status: **core goal DONE** — Phases 1–4 complete (§12): `protocol` proves/verifies over a generic `ConstraintSystem`. `ZincPlusPiop<Zt, CS, F, D, FD>` is `CS`-generic (the `U: Uair` pin is gone); `Proof<F, CP = UairConstraintProof<F>>` embeds the frontend sub-proof (flat fields + repack/unpack retired); both `prove(pp, trace, num_vars, cs)` and `verify(.., cs, projections)` route the constraint argument through `UairFrontend` (`prove_constraints` / `verify_constraints` + `verify_lifted_evals`), with the substrate reduced to fold/commit/`phi_q`/lift/PCS. Proof-preserving throughout (30-test suite green incl. all tamper/soundness negatives). **Only optional Phase 5 (crate/module reorg — move CPR/IdealCheck/etc. out of `piop` next to `UairFrontend`) remains, plus the deferred R1CS frontend.** Revise freely. Owner: Alexander.
 
 > **Self-containment note.** This document is written to survive a context reset:
 > the Background, Repository map, Current pipeline, Authoring-layer, and
@@ -306,7 +306,7 @@ trait ConstraintSystem {
     type FqIdealSource;                    // UAIR: IdealOrZero<U::FqIdeal> (F_q[X] families)
     type Scalar;                           // UAIR: U::Scalar               (psi_a scalar projection)
 
-    fn layout(&self) -> &Layout<Self::Prime>;            // Layout = alias of UairSignature
+    fn layout(&self) -> &Layout<Self::Prime>;            // Layout = minimal substrate-only struct (cols + primes)
     fn needs_decoupled_pcs_prime(&self) -> bool {        // default reproduces UAIR (decision 6)
         !self.layout().primes().is_empty()
     }
@@ -377,28 +377,35 @@ struct UairFrontend<'a, U: Uair, F, const D: usize, const FD: usize> { /* borrow
 
 | Type | Today | Role |
 |---|---|---|
-| `Layout<Prime>` | `UairSignature` (column layout + `shifts` + `primes`) | What the substrate needs for commit / projection / lift. **Bit-ops, lookups, shifts stay frontend-internal** (the frontend's own MP-eval consumes them; they never surface across the seam). |
+| `Layout<Prime>` | a **distinct** `protocol` struct `{ total_cols, public_cols, witness_cols, primes }` (+ `public_of`/`witness_of` trace-slicing helpers) | What the substrate needs for commit / projection / lift. No longer an alias of `UairSignature`: `shifts` / `bit_op_specs` / `lookup_specs` / `down_cols` / `affine_virtual_specs` stay frontend-internal (on `UairFrontend`'s own `UairSignature`) and **genuinely never surface across the seam**. A future R1CS frontend builds a `Layout` directly without touching `UairSignature`. |
 | `ConstraintEndpoints<F>` | `{ r_0: Vec<F>, r_0_fq: Vec<Vec<F>> }` (`#[non_exhaustive]`) | The single shared evaluation point the frontend's multipoint-eval reduced all per-family claims to. The substrate's lift-and-project + PCS open bind the commitment to it. R1CS/Spartan returns its single terminating point here directly. |
 | `Self::ConstraintProof` | `{ ic_proof(+_fq), cpr_proof(+_fq), combined_sumcheck(+_fq), multipoint_eval(+_fq), booleanity_proof, lookup_proof }` | Frontend sub-proof; embedded in the substrate `Proof`. **Includes the MP-eval proofs as of Phase 3.5.** |
 | `Self::VerifierClaims` (verifier only) | UAIR: `{ mp_subclaim(+_fq), projecting_elements, alpha_prime }` (opaque to substrate) | Frontend verifier tail-state from `verify_constraints` → `verify_lifted_evals`. The substrate carries it uninterpreted. |
 | `per_family_all_lifted` (verifier only) | `&[Vec<DynamicPolynomialF<F>>]` | Substrate → frontend: each family's FULL (public-recomputed + sent-witness, layout-interleaved) lifted evals at `r_0`, which `verify_lifted_evals` binds via `verify_subclaim`. |
 
-The substrate `Proof<F>` **will** become (Phase 4b, not yet):
-`{ commitments, zip, witness_lifted_evals(+_pp), constraint_proof: CS::ConstraintProof }`
-(the `multipoint_eval(+_fq)` proofs now live *inside* `ConstraintProof`).
+The substrate `Proof` is now (Phase 4b, landed):
+```rust
+pub struct Proof<F: PrimeField, CP = UairConstraintProof<F>> {
+    commitments, zip, witness_lifted_evals(+_pp), constraint_proof: CP,
+}
+pub type UairProof<F> = Proof<F, UairConstraintProof<F>>;
+```
+The default `CP = UairConstraintProof<F>` keeps most `Proof<F>` mentions compiling. Its
+`GenTranscribable`/`Transcribable` serialize the substrate fields then `constraint_proof`
+via `CP: Transcribable`'s subset methods (order is free — the FS transcript does *not*
+depend on `Proof` serialization). No repack/unpack anymore: prover `finish` stores the
+frontend sub-proof whole, verifier `step0` reads `proof.constraint_proof` directly.
 
 **Landed:** `ConstraintEndpoints<F>` is in `constraint_system.rs`; `VerifierClaims`/
 `IdealSource`/`FqIdealSource`/`Scalar` are trait associated types (UAIR:
 `UairVerifierClaims<F>`, `IdealOrZero<U::Ideal>`, `IdealOrZero<U::FqIdeal>`, `U::Scalar`).
 `FamilyEvalClaims<F>` moved into `uair_frontend.rs` as a **private** struct (`new(..)` +
 `as_inputs(&self) -> MultipointEvalFamilyInputs<'_, F>`); it is now internal scaffolding
-for the frontend's multipoint-eval, not a seam type. `UairConstraintProof<F>` carries
-`multipoint_eval` + `multipoint_evals_fq`, with a hand-written
-`GenTranscribable`/`Transcribable` that faithfully mirrors the `Proof<F>` byte layout.
-**Still not exercised (Phase 4b):** the substrate `Proof` remains flat and
-hand-serialized; both sides repack (prover `finish` unpacks the frontend sub-proof into
-`Proof`, verifier `step0` repacks the flat `Proof` into a `&UairConstraintProof`).
-`ConstraintProof` is the trait's associated type bounded `Transcribable`.
+for the frontend's multipoint-eval, not a seam type. `UairConstraintProof<F>` carries the
+constraint-arg fields + `multipoint_eval(+_fq)`, with a hand-written
+`GenTranscribable`/`Transcribable`; it is now the `CP` embedded in `Proof` and is
+exercised by the full suite. `ConstraintProof` is the trait's associated type bounded
+`Transcribable`.
 
 ---
 
@@ -486,7 +493,8 @@ Verifier mirror (Phase 4a, landed):
 ## 12. Refactor sequence (each phase behavior-preserving, `test_e2e_*` green)
 
 **Phase 1 — carve contract types. ✓ DONE.**
-`Layout` (alias of `UairSignature`), `FamilyEvalClaims` (owned mirror of
+`Layout` (initially an alias of `UairSignature`; **since made a distinct minimal
+substrate-only struct** — see §9 / §13), `FamilyEvalClaims` (owned mirror of
 `MultipointEvalFamilyInputs` + `as_inputs()` view), and the `ConstraintProof`
 associated type — all in `protocol/src/constraint_system.rs`.
 
@@ -554,13 +562,27 @@ clippy clean.
   the tamper-replay tests keep a **duplicated** step-2/3 ordering in
   `#[cfg(test)] test_helpers`.
 
-**Phase 4b — genericize + embed (LAST). NOT STARTED.** Genericize
-`ZincPlusPiop<Zt, U, F, D, FD>` over `CS: ConstraintSystem` (drop the `U` pin) and embed
-`UairConstraintProof` inside `Proof<F>` — retiring the flat `Proof` fields and the
-repack/unpack on both sides, and exercising `UairConstraintProof`'s
-`GenTranscribable`/`Transcribable` (currently written but unused). Both prove and verify
-already route through the seam, so this is now purely a struct-generics + serialization
-change (no algorithm change).
+**Phase 4b — genericize + embed. ✓ DONE.** `ZincPlusPiop<Zt, CS, F, D, FD>` is now
+generic over `CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>` (the `U` pin dropped;
+`F` kept explicit via the equality bound to minimize signature churn). `Proof<F, CP =
+UairConstraintProof<F>>` embeds the frontend sub-proof (flat fields retired; default
+type param keeps `Proof<F>` ergonomic). `prove(pp, trace, num_vars, cs) -> Proof<F,
+CS::ConstraintProof>` (the caller builds `cs`; `UairFrontend::from_trace(&trace,
+project_scalar)` slices the witness-bin columns for it) and `verify(vp, proof,
+public_trace, num_vars, cs, project_scalar, project_ideal, project_fq_ideal)` take the
+`cs` and carry the sub-proof whole (no repack/unpack). Pure type-level surgery — **no
+protocol-logic or transcript change** — validated by the full 30-test suite (incl.
+serialization roundtrip + all tamper/soundness negatives), clippy clean.
+
+  *Notes:* the post-constraint prover states and post-`step0` verifier states carry
+  `CS::ConstraintProof`, so their `Clone`/`Debug` are hand-written (the derive couldn't
+  express `CS::ConstraintProof: Clone`); `UairFrontend` also got manual `Clone`/`Debug`
+  so the pre-constraint states keep `#[derive]`. The stale `[step7_pcs_verify]` doclink
+  and the `constraint_system.rs` "verifier todo"/"PROPOSED" wording were cleaned up.
+
+**Refactor status: the abstraction goal is met.** `protocol` is `ConstraintSystem`-generic
+end-to-end with UAIR as the sole implementation. What's left is optional: Phase 5 (below)
+and the deferred R1CS/Spartan frontend (design-only per §14).
 
 **Phase 5 — crate/module reorg (optional, can trail).**
 Keep generic primitives in `piop` (sumcheck, mp_eval, shift_predicate, booleanity,
@@ -587,10 +609,16 @@ reject paths.
   after the substrate lifts at `r_0` — which `verify_constraints` produces): hence the
   **two-phase** verifier seam (`verify_constraints` → `r_0`+`VerifierClaims`; substrate
   lift; `verify_lifted_evals`). This is the one irreducible asymmetry vs the prover.
-- **Shifts live in `Layout`** (= `UairSignature`), consumed by the frontend's own
-  MP-eval shift predicate — now fully frontend-internal (the substrate's lift no longer
-  reads them). Harmless for R1CS (empty list). A later cleanup could drop `shifts` from
-  the shared `Layout` entirely.
+- **Shifts (+ bit-op / lookup / down / affine specs) no longer in the shared `Layout`. ✓
+  RESOLVED.** `Layout` is now a distinct minimal `protocol` struct (`{ total_cols,
+  public_cols, witness_cols, primes }` + `public_of`/`witness_of` slicing); all UAIR-only
+  specs stay on the frontend's `UairSignature`. Done entirely within `protocol` — the
+  `uair` crate is untouched (`UairSignature`/`UairTrace` unchanged; the substrate just
+  uses `Layout::{public_of,witness_of}` instead of `UairTrace::{public,witness}`).
+  Those specs are **WIP**, so they are kept UAIR-only rather than promoted to the generic
+  seam: UAIR-side consumers reach them via the concrete `UairFrontend::signature() ->
+  &UairSignature` accessor (the generic `cs.layout()` stays spec-free / R1CS-agnostic).
+  Promotion to the seam — if ever — waits until the specs stabilize.
 - **`D`/`FD` const-generic threading** through trait methods — mechanical but noisy.
 - **`Proof<F>` serialization** (`GenTranscribable`/`Transcribable`) must follow the
   `ConstraintProof` associated type cleanly; today it hand-serializes every field.
@@ -617,7 +645,8 @@ reject paths.
 ## 15. Open sub-decisions (recommendations; revise as you like)
 
 1. **Names:** trait `ConstraintSystem`; adapter `UairFrontend<U, F, D, FD>`; shared
-   layout `Layout` (alias of `UairSignature`). — *landed as written.*
+   layout `Layout` (now a distinct minimal substrate-only struct, not a `UairSignature`
+   alias — §9/§13). — *landed.*
 2. **Where CPR/IdealCheck live after reorg:** move to the UAIR frontend (now
    UAIR-specific) vs leave in `piop`. — *rec: move, but only in Phase 5.*
 3. **Verifier virtual-eval hook shape.** — *✓ resolved (Phase 4a): the

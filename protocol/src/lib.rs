@@ -33,18 +33,15 @@ pub mod verifier;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::fold::FoldTrace;
+use crate::{constraint_system::Layout, fold::FoldTrace};
 use crypto_primitives::{ConstIntRing, ConstIntSemiring, FromWithConfig, PrimeField, Semiring};
 use std::{fmt::Debug, iter, marker::PhantomData};
 use thiserror::Error;
 use zinc_piop::{
     combined_poly_resolver::{CombinedPolyResolverError, Proof as CombinedPolyResolverProof},
     ideal_check::{IdealCheckError, Proof as IdealCheckProof},
-    lookup::{
-        BatchedLookupProof, LookupError,
-        booleanity::{BooleanityError, BooleanityProof},
-    },
-    multipoint_eval::{MultipointEvalError, Proof as MultipointEvalProof},
+    lookup::{LookupError, booleanity::BooleanityError},
+    multipoint_eval::MultipointEvalError,
     projections::ProjectedTrace,
     sumcheck::multi_degree::MultiDegreeSumcheckProof,
 };
@@ -59,7 +56,6 @@ use zinc_poly::{
 };
 use zinc_primality::PrimalityTest;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
-use zinc_uair::{Uair, UairSignature};
 use zinc_utils::{cfg_extend, cfg_into_iter, cfg_iter, from_ref::FromRef, named::Named, powers};
 use zip_plus::{
     ZipError,
@@ -82,20 +78,11 @@ use zip_plus::{
 /// verifier reads each family's lifts under that family's field cfg, no
 /// per-coefficient `from_with_cfg` projection is needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F: PrimeField, CP = crate::uair_frontend::UairConstraintProof<F>> {
     /// Zip+ commitments to the witness columns.
     pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
-    /// Randomized ideal check proof (Q[X] family).
-    pub ideal_check: IdealCheckProof<F>,
-    /// Combined polynomial resolver proof (up_evals + down_evals).
-    pub cpr_proof: CombinedPolyResolverProof<F>,
-    /// Multi-degree sumcheck proof (CPR group + lookup groups).
-    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    /// Multi-point evaluation sumcheck proof (combines up_evals and
-    /// down_evals at `r*` into a single evaluation point `r_0`).
-    pub multipoint_eval: MultipointEvalProof<F>,
     /// Witness-only polynomial MLE evaluations at $r_0$, **per constraint
     /// family**.
     ///
@@ -116,28 +103,6 @@ pub struct Proof<F: PrimeField> {
     /// `projecting_elements[family_idx]` for the per-family MP-eval
     /// consistency check.
     pub witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
-    /// Lookup argument proof. `None` when the UAIR has no lookup specs.
-    pub lookup_proof: Option<BatchedLookupProof<F>>,
-    /// Binary-polynomial booleanity argument proof. `None` when the UAIR
-    /// has no witness binary-poly columns (the argument is omitted from
-    /// the multi-degree sumcheck in that case).
-    pub booleanity_proof: Option<BooleanityProof<F>>,
-    /// Per-prime $F_{q_i}[X]$ ideal-check proofs, one per declared
-    /// prime in [`zinc_uair::UairSignature::primes`], in the same order.
-    /// Empty for UAIRs with $Q[X]$-only constraints.
-    pub ideal_checks_fq: Vec<IdealCheckProof<F>>,
-    /// Per-prime CPR proofs, one per declared prime, produced by the
-    /// lockstep sumcheck in step 5. Empty for UAIRs with $Q[X]$ only
-    /// constraints.
-    pub cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
-    /// Per-prime multi-degree sumcheck proofs, one per declared prime,
-    /// produced by the lockstep sumcheck driver in step 5.
-    /// Empty for UAIRs with $Q[X]$ only constraints.
-    pub combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
-    /// Per-prime multipoint-eval proofs, one per declared prime, produced
-    /// by the lockstep multipoint-eval in step 6.
-    /// Empty for UAIRs with $Q[X]$ only constraints.
-    pub multipoint_evals_fq: Vec<MultipointEvalProof<F>>,
     /// Witness-only lifted MLE evaluations under the **PCS-only prime
     /// $q''$**, sampled fresh at step 7 start. Length equals the number of
     /// witness columns. The verifier uses these directly for the PCS
@@ -151,12 +116,26 @@ pub struct Proof<F: PrimeField> {
     /// If no $F_q[X]$ constraints are present, this will be `None` to indicate
     /// $q'' := q_0$ and this is identical to `witness_lifted_evals`.
     pub witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
+    /// The constraint-argument sub-proof produced by the
+    /// [`ConstraintSystem`](crate::constraint_system::ConstraintSystem)
+    /// frontend (for UAIR:
+    /// [`UairConstraintProof`](crate::uair_frontend::UairConstraintProof) —
+    /// the ideal-check / CPR / multi-degree-sumcheck / multipoint-eval bundle
+    /// plus the optional booleanity / lookup arguments, for the $Q[X]$ family
+    /// and each declared prime).
+    pub constraint_proof: CP,
 }
 
-impl<F> GenTranscribable for Proof<F>
+/// The UAIR specialization of [`Proof`], carrying a
+/// [`UairConstraintProof`](crate::uair_frontend::UairConstraintProof) as its
+/// constraint sub-proof. This is the default type parameter for [`Proof`].
+pub type UairProof<F> = Proof<F, crate::uair_frontend::UairConstraintProof<F>>;
+
+impl<F, CP> GenTranscribable for Proof<F, CP>
 where
     F: PrimeField,
     F::Integer: ConstTranscribable,
+    CP: Transcribable,
 {
     fn read_transcription_bytes_exact(bytes: &[u8]) -> Self {
         let (commit0, bytes) = ZipPlusCommitment::read_transcription_bytes_subset(bytes);
@@ -167,14 +146,6 @@ where
         let zip_len = usize::try_from(zip_len).expect("zip length must fit into usize");
         let (zip_bytes, bytes) = bytes.split_at(zip_len);
         let zip = zip_bytes.to_vec();
-
-        let (ideal_check, bytes) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
-        let (resolver, bytes) =
-            CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
-        let (combined_sumcheck, bytes) =
-            MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
-        let (multipoint_eval, bytes) =
-            MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
 
         // witness_lifted_evals: u32 count (= n + 1, one per constraint
         // family) + length-prefixed DynamicPolyVecF entries. Each entry
@@ -188,60 +159,6 @@ where
             bytes = rest;
         }
 
-        // booleanity_proof: presence flag (u32: 0 = absent, 1 = present)
-        // followed by the proof body (length-prefixed) when present.
-        let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
-        let (booleanity_proof, bytes) = if presence != 0 {
-            let (p, rest) = BooleanityProof::<F>::read_transcription_bytes_subset(bytes);
-            (Some(p), rest)
-        } else {
-            (None, bytes)
-        };
-
-        // ideal_checks_fq: u32 count, then that many length-prefixed
-        // IdealCheckProof entries (one per declared prime).
-        let (n_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
-        let n_fq = usize::try_from(n_fq).expect("n_fq must fit into usize");
-        let mut ideal_checks_fq: Vec<IdealCheckProof<F>> = Vec::with_capacity(n_fq);
-        for _ in 0..n_fq {
-            let (ic, rest) = IdealCheckProof::<F>::read_transcription_bytes_subset(bytes);
-            ideal_checks_fq.push(ic);
-            bytes = rest;
-        }
-
-        // cpr_proofs_fq: u32 count + length-prefixed entries.
-        let (n_cpr_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
-        let n_cpr_fq = usize::try_from(n_cpr_fq).expect("n_cpr_fq must fit into usize");
-        let mut cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>> = Vec::with_capacity(n_cpr_fq);
-        for _ in 0..n_cpr_fq {
-            let (cpr, rest) =
-                CombinedPolyResolverProof::<F>::read_transcription_bytes_subset(bytes);
-            cpr_proofs_fq.push(cpr);
-            bytes = rest;
-        }
-
-        // combined_sumchecks_fq: u32 count + length-prefixed entries.
-        let (n_sum_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
-        let n_sum_fq = usize::try_from(n_sum_fq).expect("n_sum_fq must fit into usize");
-        let mut combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>> =
-            Vec::with_capacity(n_sum_fq);
-        for _ in 0..n_sum_fq {
-            let (sumcheck, rest) =
-                MultiDegreeSumcheckProof::<F>::read_transcription_bytes_subset(bytes);
-            combined_sumchecks_fq.push(sumcheck);
-            bytes = rest;
-        }
-
-        // multipoint_evals_fq: u32 count + length-prefixed entries.
-        let (n_mp_fq, mut bytes) = u32::read_transcription_bytes_subset(bytes);
-        let n_mp_fq = usize::try_from(n_mp_fq).expect("n_mp_fq must fit into usize");
-        let mut multipoint_evals_fq: Vec<MultipointEvalProof<F>> = Vec::with_capacity(n_mp_fq);
-        for _ in 0..n_mp_fq {
-            let (mp, rest) = MultipointEvalProof::<F>::read_transcription_bytes_subset(bytes);
-            multipoint_evals_fq.push(mp);
-            bytes = rest;
-        }
-
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
         // length-prefixed DynamicPolyVecF (q'' family).
         let (presence, bytes) = u32::read_transcription_bytes_subset(bytes);
@@ -252,25 +169,17 @@ where
             (None, bytes)
         };
 
-        // TODO: deserialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
+        // constraint_proof: length-prefixed sub-proof body.
+        let (constraint_proof, bytes) = CP::read_transcription_bytes_subset(bytes);
+
         assert!(bytes.is_empty(), "All bytes should be consumed");
 
         Self {
             commitments: (commit0, commit1, commit2),
             zip,
-            ideal_check,
-            cpr_proof: resolver,
-            combined_sumcheck,
-            multipoint_eval,
             witness_lifted_evals,
-            lookup_proof: None,
-            booleanity_proof,
-            ideal_checks_fq,
-            cpr_proofs_fq,
-            combined_sumchecks_fq,
-            multipoint_evals_fq,
             witness_lifted_evals_pp,
+            constraint_proof,
         }
     }
 
@@ -286,18 +195,6 @@ where
         buf[..self.zip.len()].copy_from_slice(&self.zip);
         buf = &mut buf[self.zip.len()..];
 
-        // ideal_check: u32 length prefix + data
-        buf = self.ideal_check.write_transcription_bytes_subset(buf);
-
-        // resolver: u32 length prefix + data
-        buf = self.cpr_proof.write_transcription_bytes_subset(buf);
-
-        // combined_sumcheck: u32 length prefix + data
-        buf = self.combined_sumcheck.write_transcription_bytes_subset(buf);
-
-        // multipoint_eval: u32 length prefix + data
-        buf = self.multipoint_eval.write_transcription_bytes_subset(buf);
-
         // witness_lifted_evals (per constraint family, n + 1 entries):
         // u32 count + per-family DynamicPolyVecF (each carries its own
         // field-cfg header). Index 0 is Q[X] / q_0, indices 1..=n are
@@ -309,46 +206,6 @@ where
             buf = DynamicPolyVecF::reinterpret(wlf).write_transcription_bytes_subset(buf);
         }
 
-        // booleanity_proof: u32 presence flag, then (optionally) the body
-        // with its own length prefix.
-        let presence = u32::from(self.booleanity_proof.is_some());
-        buf = presence.write_transcription_bytes_subset(buf);
-        if let Some(ref bp) = self.booleanity_proof {
-            buf = bp.write_transcription_bytes_subset(buf);
-        }
-
-        // ideal_checks_fq: u32 count + that many length-prefixed entries.
-        let n_fq = u32::try_from(self.ideal_checks_fq.len())
-            .expect("ideal_checks_fq length must fit into u32");
-        buf = n_fq.write_transcription_bytes_subset(buf);
-        for ic in &self.ideal_checks_fq {
-            buf = ic.write_transcription_bytes_subset(buf);
-        }
-
-        // cpr_proofs_fq: u32 count + length-prefixed entries.
-        let n_cpr_fq = u32::try_from(self.cpr_proofs_fq.len())
-            .expect("cpr_proofs_fq length must fit into u32");
-        buf = n_cpr_fq.write_transcription_bytes_subset(buf);
-        for cpr in &self.cpr_proofs_fq {
-            buf = cpr.write_transcription_bytes_subset(buf);
-        }
-
-        // combined_sumchecks_fq: u32 count + length-prefixed entries.
-        let n_sum_fq = u32::try_from(self.combined_sumchecks_fq.len())
-            .expect("combined_sumchecks_fq length must fit into u32");
-        buf = n_sum_fq.write_transcription_bytes_subset(buf);
-        for sumcheck in &self.combined_sumchecks_fq {
-            buf = sumcheck.write_transcription_bytes_subset(buf);
-        }
-
-        // multipoint_evals_fq: u32 count + length-prefixed entries.
-        let n_mp_fq = u32::try_from(self.multipoint_evals_fq.len())
-            .expect("multipoint_evals_fq length must fit into u32");
-        buf = n_mp_fq.write_transcription_bytes_subset(buf);
-        for mp in &self.multipoint_evals_fq {
-            buf = mp.write_transcription_bytes_subset(buf);
-        }
-
         // witness_lifted_evals_pp: u32 presence flag, then (optionally) single
         // length-prefixed DynamicPolyVecF (q'' family).
         let presence = u32::from(self.witness_lifted_evals_pp.is_some());
@@ -357,43 +214,21 @@ where
             buf = DynamicPolyVecF::reinterpret(lifted_pp).write_transcription_bytes_subset(buf);
         }
 
-        // TODO: serialize lookup_proof once BatchedLookupProof gets
-        // Transcribable impls (lookup is not yet implemented).
+        // constraint_proof: length-prefixed sub-proof body.
+        buf = self.constraint_proof.write_transcription_bytes_subset(buf);
+
         let _ = buf;
     }
 }
 
-impl<F> Transcribable for Proof<F>
+impl<F, CP> Transcribable for Proof<F, CP>
 where
     F: PrimeField,
     F::Integer: ConstTranscribable,
+    CP: Transcribable,
 {
     #[allow(clippy::arithmetic_side_effects)]
     fn get_num_bytes(&self) -> usize {
-        let booleanity_bytes = match &self.booleanity_proof {
-            Some(bp) => BooleanityProof::<F>::LENGTH_NUM_BYTES + bp.get_num_bytes(),
-            None => 0,
-        };
-        let ideal_checks_fq_bytes: usize = self
-            .ideal_checks_fq
-            .iter()
-            .map(|ic| IdealCheckProof::<F>::LENGTH_NUM_BYTES + ic.get_num_bytes())
-            .sum();
-        let cpr_proofs_fq_bytes: usize = self
-            .cpr_proofs_fq
-            .iter()
-            .map(|cpr| CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES + cpr.get_num_bytes())
-            .sum();
-        let combined_sumchecks_fq_bytes: usize = self
-            .combined_sumchecks_fq
-            .iter()
-            .map(|sc| MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES + sc.get_num_bytes())
-            .sum();
-        let multipoint_evals_fq_bytes: usize = self
-            .multipoint_evals_fq
-            .iter()
-            .map(|mp| MultipointEvalProof::<F>::LENGTH_NUM_BYTES + mp.get_num_bytes())
-            .sum();
         let witness_lifted_evals_bytes: usize = self
             .witness_lifted_evals
             .iter()
@@ -412,38 +247,15 @@ where
         3 * ZipPlusCommitment::NUM_BYTES
             + u32::NUM_BYTES
             + self.zip.len()
-            + IdealCheckProof::<F>::LENGTH_NUM_BYTES
-            + self.ideal_check.get_num_bytes()
-            + CombinedPolyResolverProof::<F>::LENGTH_NUM_BYTES
-            + self.cpr_proof.get_num_bytes()
-            + MultiDegreeSumcheckProof::<F>::LENGTH_NUM_BYTES
-            + self.combined_sumcheck.get_num_bytes()
-            + MultipointEvalProof::<F>::LENGTH_NUM_BYTES
-            + self.multipoint_eval.get_num_bytes()
-            // TODO: add lookup_proof size once BatchedLookupProof gets
-            // Transcribable impls (lookup is not yet implemented).
-            //
             // witness_lifted_evals: count + sum of (length-prefix + body) per family
             + u32::NUM_BYTES
             + witness_lifted_evals_bytes
-            // booleanity presence flag + optional payload
-            + u32::NUM_BYTES
-            + booleanity_bytes
-            // ideal_checks_fq: count + sum of (length-prefix + body) per entry
-            + u32::NUM_BYTES
-            + ideal_checks_fq_bytes
-            // cpr_proofs_fq: count + sum of (length-prefix + body) per entry
-            + u32::NUM_BYTES
-            + cpr_proofs_fq_bytes
-            // combined_sumchecks_fq: count + sum of (length-prefix + body) per entry
-            + u32::NUM_BYTES
-            + combined_sumchecks_fq_bytes
-            // multipoint_evals_fq: count + sum of (length-prefix + body) per entry
-            + u32::NUM_BYTES
-            + multipoint_evals_fq_bytes
-            // witness_lifted_evals_pp: single length-prefixed body
+            // witness_lifted_evals_pp: presence flag + optional length-prefixed body
             + u32::NUM_BYTES
             + witness_lifted_evals_pp_bytes
+            // constraint_proof: length-prefix + body
+            + CP::LENGTH_NUM_BYTES
+            + self.constraint_proof.get_num_bytes()
     }
 }
 
@@ -529,12 +341,16 @@ pub trait ZincTypes<const DEGREE_PLUS_ONE: usize, const FOLDED_DEG_PLUS_ONE: usi
 /// (Note that type parameters are further constrained in the impl blocks for
 /// the prover and verifier)
 #[derive(Copy, Clone, Default, Debug)]
-pub struct ZincPlusPiop<Zt, U, F, const DEGREE_PLUS_ONE: usize, const FOLDED_DEGREE_PLUS_ONE: usize>(
-    PhantomData<(Zt, U, F)>,
-)
+pub struct ZincPlusPiop<
+    Zt,
+    CS,
+    F,
+    const DEGREE_PLUS_ONE: usize,
+    const FOLDED_DEGREE_PLUS_ONE: usize,
+>(PhantomData<(Zt, CS, F)>)
 where
     Zt: ZincTypes<DEGREE_PLUS_ONE, FOLDED_DEGREE_PLUS_ONE>,
-    U: Uair,
+    CS: crate::constraint_system::ConstraintSystem,
     F: PrimeField;
 
 /// Error type for error happening during the protocol execution (prover and
@@ -737,7 +553,7 @@ where
 /// Build the list of per-family [`F::Config`]'s in family order:
 /// `prime_cfgs[0]` is the $Q[X]$ family's sampled prime $q_0$,
 /// `prime_cfgs[1..=n]` are the declared $q_1, ..., q_n$ in
-/// [`zinc_uair::UairSignature::primes`] order.
+/// [`Layout::primes`](crate::constraint_system::Layout::primes) order.
 ///
 /// The family indexing convention follows the paper's
 /// `prot:zincplus-ucs-pior`: family 0 = $Q[X]$,
@@ -745,13 +561,14 @@ where
 ///
 /// Primality is the UAIR author's responsibility (the UAIR is part of the
 /// pre-agreed relation index); no runtime check needed here.
-fn build_all_cfgs<F>(sig: &UairSignature<F::Integer>, qx_cfg: F::Config) -> Vec<F::Config>
+fn build_all_cfgs<F>(layout: &Layout<F::Integer>, qx_cfg: F::Config) -> Vec<F::Config>
 where
     F: PrimeField,
 {
     iter::once(qx_cfg)
         .chain(
-            sig.primes()
+            layout
+                .primes()
                 .iter()
                 .map(|q| F::make_cfg(q).expect("declared prime is assumed prime")),
         )
@@ -771,7 +588,7 @@ where
 )]
 mod tests {
     use super::*;
-    use crate::fold::FoldBinaryTrace4x;
+    use crate::{fold::FoldBinaryTrace4x, uair_frontend::UairFrontend};
     use crypto_bigint::U64;
     use crypto_primitives::{
         Field, HasPrimeFieldConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField,
@@ -789,7 +606,8 @@ mod tests {
         TestUairNoMultiplication, TestUairSimpleMultiplication,
     };
     use zinc_uair::{
-        constraint_counter::count_constraints, ideal::DegreeOneIdeal, ideal_collector::IdealOrZero,
+        Uair, constraint_counter::count_constraints, ideal::DegreeOneIdeal,
+        ideal_collector::IdealOrZero,
     };
     use zinc_utils::{
         CHECKED,
@@ -1036,11 +854,13 @@ mod tests {
 
         macro_rules! run_protocol {
             ($mle_first:ident) => {
-                let mut proof = ZincPlusPiop::<Zt, U, F, D, QUARTER_D>::prove::<
-                    { $mle_first },
-                    CHECKED,
-                >(&pp, &trace, num_vars, project_scalar_fn)
-                .expect("Prover failed");
+                let cs = UairFrontend::<U, F, D, QUARTER_D>::from_trace(&trace, project_scalar_fn);
+                let mut proof =
+                    ZincPlusPiop::<Zt, UairFrontend<U, F, D, QUARTER_D>, F, D, QUARTER_D>::prove::<
+                        { $mle_first },
+                        CHECKED,
+                    >(&pp, &trace, num_vars, &cs)
+                    .expect("Prover failed");
 
                 // Checking that the proof can be properly serialized and deserialized
                 let mut transcript = PcsProverTranscript::new_from_commitments(std::iter::empty());
@@ -1053,16 +873,23 @@ mod tests {
 
                 tamper(&mut proof);
 
-                let verification_result =
-                    ZincPlusPiop::<Zt, U, F, D, QUARTER_D>::verify::<_, CHECKED>(
-                        &pp,
-                        proof,
-                        &public_trace,
-                        num_vars,
-                        project_scalar_fn,
-                        project_ideal,
-                        project_fq_ideal,
-                    );
+                let cs_v = UairFrontend::<U, F, D, QUARTER_D>::new_verifier();
+                let verification_result = ZincPlusPiop::<
+                    Zt,
+                    UairFrontend<U, F, D, QUARTER_D>,
+                    F,
+                    D,
+                    QUARTER_D,
+                >::verify::<_, CHECKED>(
+                    &pp,
+                    proof,
+                    &public_trace,
+                    num_vars,
+                    &cs_v,
+                    project_scalar_fn,
+                    project_ideal,
+                    project_fq_ideal,
+                );
                 check_verification(verification_result);
             };
         }
@@ -1383,7 +1210,7 @@ mod tests {
             |proof| {
                 // Family 1 = declared prime q_1. Source column 0 is `w`, the
                 // source of the UAIR's single bit-op virtual `ShR(w, 3)`.
-                let cfg = *proof.cpr_proofs_fq[0].up_evals[0].cfg();
+                let cfg = *proof.constraint_proof.cpr_proofs_fq[0].up_evals[0].cfg();
                 let one = F::one_with_cfg(&cfg);
                 let lifted = &mut proof.witness_lifted_evals[1][0];
                 if lifted.coeffs.is_empty() {
@@ -1420,7 +1247,7 @@ mod tests {
             default_project_ideal!(),
             |ideal, field_cfg| ideal.map(|i| DegreeOneIdeal::from_with_cfg(i, field_cfg)),
             |proof| {
-                let bit_op_eval = &mut proof.cpr_proofs_fq[0].bit_op_evals[0];
+                let bit_op_eval = &mut proof.constraint_proof.cpr_proofs_fq[0].bit_op_evals[0];
                 let cfg = *bit_op_eval.cfg();
                 *bit_op_eval += F::one_with_cfg(&cfg);
             },
@@ -1511,7 +1338,7 @@ mod tests {
             ),
             default_project_ideal!(),
             default_project_fq_ideal!(),
-            |proof| proof.cpr_proof.up_evals.swap(0, 1),
+            |proof| proof.constraint_proof.cpr_proof.up_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1535,7 +1362,7 @@ mod tests {
             ),
             default_project_ideal!(),
             default_project_fq_ideal!(),
-            |proof| proof.cpr_proof.down_evals.swap(0, 1),
+            |proof| proof.constraint_proof.cpr_proof.down_evals.swap(0, 1),
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
@@ -1596,6 +1423,7 @@ mod tests {
             default_project_fq_ideal!(),
             |proof| {
                 let bp = proof
+                    .constraint_proof
                     .booleanity_proof
                     .as_mut()
                     .expect("BigLinearUair has binary-poly witnesses");
@@ -1633,6 +1461,7 @@ mod tests {
             default_project_fq_ideal!(),
             |proof| {
                 let bp = proof
+                    .constraint_proof
                     .booleanity_proof
                     .as_mut()
                     .expect("BigLinearUair has binary-poly witnesses");
@@ -1662,7 +1491,7 @@ mod tests {
             default_project_ideal!(),
             default_project_fq_ideal!(),
             |proof| {
-                proof.booleanity_proof = None;
+                proof.constraint_proof.booleanity_proof = None;
             },
             |res| {
                 assert!(matches!(
@@ -1697,10 +1526,17 @@ mod tests {
             combined_poly_resolver::CombinedPolyResolver, lookup::booleanity::BooleanityChecker,
         };
 
-        type Piop = ZincPlusPiop<TestZincTypesIprs, BigLinearUair<ZtInt, ZtFmod>, F, D, QUARTER_D>;
+        type Uair = BigLinearUair<ZtInt, ZtFmod>;
+        type Piop<'a> = ZincPlusPiop<
+            TestZincTypesIprs,
+            UairFrontend<'a, Uair, F, D, QUARTER_D>,
+            F,
+            D,
+            QUARTER_D,
+        >;
         type Ideal = IdealOrZero<DegreeOneIdeal<F>>;
 
-        let num_constraints = count_constraints::<BigLinearUair<ZtInt, ZtFmod>>();
+        let num_constraints = count_constraints::<Uair>();
 
         let num_vars = 8;
         let iprs = (
@@ -1709,10 +1545,12 @@ mod tests {
             make_iprs(num_vars),
         );
         let pp = setup_pp::<TestZincTypesIprs>(num_vars, iprs);
-        let trace = BigLinearUair::<ZtInt, ZtFmod>::generate_random_trace(num_vars, &mut rng());
-        let public_trace = trace.public(&BigLinearUair::<ZtInt, ZtFmod>::signature());
-        let mut proof =
-            Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, project_scalar_fn).expect("prove");
+        let trace = Uair::generate_random_trace(num_vars, &mut rng());
+        let public_trace = trace.public(&Uair::signature());
+        // Prove-side frontend borrows the trace (needed for booleanity + the
+        // alpha' bridge); it is reused for step0 replay and verify.
+        let cs = UairFrontend::<Uair, F, D, QUARTER_D>::from_trace(&trace, project_scalar_fn);
+        let mut proof = Piop::prove::<false, CHECKED>(&pp, &trace, num_vars, &cs).expect("prove");
 
         // Recover `a` and `\alpha` by replaying steps 0..=3 on a proof
         // clone, then advancing the transcript through CPR + booleanity
@@ -1723,6 +1561,7 @@ mod tests {
                 proof.clone(),
                 &public_trace,
                 num_vars,
+                &cs,
             )
             .and_then(|s| s.step1_prime_projection())
             .and_then(|s| {
@@ -1738,9 +1577,9 @@ mod tests {
             let proof_cpr = v3.proof_cpr().clone();
             let ic_subclaim = v3.ic_subclaim().clone();
 
-            let sig = v3.uair_signature().clone();
-            let num_wit_bin =
-                sig.total_cols().num_binary_poly_cols() - sig.public_cols().num_binary_poly_cols();
+            let layout = v3.layout().clone();
+            let num_wit_bin = layout.total_cols().num_binary_poly_cols()
+                - layout.public_cols().num_binary_poly_cols();
             let transcript = v3.fs_transcript_mut();
 
             let folding_challenge: F = transcript.get_field_challenge(&cfg);
@@ -1779,6 +1618,7 @@ mod tests {
         let alpha_over_a_sq: F = alpha_over_a.clone() * &a_inv;
 
         let bp = proof
+            .constraint_proof
             .booleanity_proof
             .as_mut()
             .expect("BigLinearUair has binary-poly witnesses");
@@ -1807,6 +1647,7 @@ mod tests {
             proof,
             &public_trace,
             num_vars,
+            &cs,
             project_scalar_fn,
             default_project_ideal!(),
             default_project_fq_ideal!(),
@@ -1833,7 +1674,13 @@ mod tests {
             ),
             default_project_ideal!(),
             default_project_fq_ideal!(),
-            |proof| proof.ideal_check.combined_mle_values.swap(0, 1),
+            |proof| {
+                proof
+                    .constraint_proof
+                    .ideal_check
+                    .combined_mle_values
+                    .swap(0, 1)
+            },
             |res| {
                 assert!(matches!(res.unwrap_err(), ProtocolError::IdealCheck(..)));
             },

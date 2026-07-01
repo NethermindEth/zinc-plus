@@ -15,9 +15,12 @@
 //! point, which keeps it constraint-system-agnostic (a future R1CS/Spartan
 //! frontend terminates at a single point directly).
 //!
-//! Verifier-side methods are still `todo!` — wiring them is the later verifier
-//! phase and does not modify the existing verifier (Phase 4 of
-//! `docs/ucs-refactor-plan.md`).
+//! Both the prover ([`ConstraintSystem::prove_constraints`]) and verifier
+//! ([`ConstraintSystem::verify_constraints`] +
+//! [`ConstraintSystem::verify_lifted_evals`]) route their constraint argument
+//! through this seam, and [`ZincPlusPiop`](crate::ZincPlusPiop) is generic over
+//! `CS: ConstraintSystem` (no `U: Uair` pin). The substrate `Proof` embeds the
+//! frontend sub-proof as [`ConstraintSystem::ConstraintProof`].
 //!
 //! ## Why `Field` is an associated type (not a method generic)
 //!
@@ -29,28 +32,115 @@
 //! generic over `F` could not add those bounds in the impl. Exposing the field
 //! as `type Field: PrimeField` lets the concrete impl (`UairFrontend<U, F, …>`)
 //! pick an `F` that already satisfies every extra bound, exactly as
-//! `ZincPlusPiop<Zt, U, F, D, FD>` is monomorphized today.
+//! `ZincPlusPiop<Zt, CS, F, D, FD>` is monomorphized today.
 
 use crypto_primitives::{HasPrimeFieldConfig, PrimeField, Semiring};
+use std::{borrow::Cow, fmt::Debug};
 use zinc_piop::projections::ProjectedTrace;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{Transcribable, Transcript};
 use zinc_uair::{
-    UairSignature,
+    PublicColumnLayout, TotalColumnLayout, UairSignature, UairTrace, WitnessColumnLayout,
     ideal::{Ideal, IdealCheck},
 };
 
 use crate::ProtocolError;
 
-/// The trace/column layout the substrate needs to commit, project, lift, and
-/// run multipoint-eval over.
+/// The minimal, substrate-only trace/column layout the substrate needs to
+/// commit, project, lift, and run its lift-and-project + PCS open over.
 ///
-/// Kept identical to [`UairSignature`] for now — the 3-group
-/// `binary_poly` / `arbitrary_poly` / `int` layout plus `shifts` and `primes`
-/// (the "keep 3 groups" decision in `docs/ucs-refactor-plan.md`). Bit-op and
-/// lookup specs stay *inside* the frontend; they never surface across the seam
-/// (the frontend's own multipoint-eval consumes them).
-pub type Layout<P> = UairSignature<P>;
+/// This is intentionally a *distinct* type from [`UairSignature`], carrying
+/// only what the substrate actually consumes: the 3-group
+/// `binary_poly` / `arbitrary_poly` / `int` column counts
+/// (`total` / `public` / `witness`, the "keep 3 groups" decision in
+/// `docs/ucs-refactor-plan.md`) plus the declared `primes`. Frontend-internal
+/// specs (`shifts`, `bit_op_specs`, `lookup_specs`, `affine_virtual_specs`,
+/// `down_cols`) never surface across the seam — the frontend keeps its own
+/// [`UairSignature`] for those, and its multipoint-eval consumes them there.
+/// Keeping [`Layout`] minimal lets a future non-UAIR frontend (e.g. R1CS)
+/// supply the same substrate-facing type without speaking [`UairSignature`].
+#[derive(Clone, Debug)]
+pub struct Layout<P> {
+    total_cols: TotalColumnLayout,
+    public_cols: PublicColumnLayout,
+    witness_cols: WitnessColumnLayout,
+    primes: Vec<P>,
+}
+
+impl<P> Layout<P> {
+    /// Column-type layout of all (public + witness) columns.
+    pub fn total_cols(&self) -> &TotalColumnLayout {
+        &self.total_cols
+    }
+
+    /// Public column subset.
+    pub fn public_cols(&self) -> &PublicColumnLayout {
+        &self.public_cols
+    }
+
+    /// Witness column counts (total minus public) per type.
+    pub fn witness_cols(&self) -> &WitnessColumnLayout {
+        &self.witness_cols
+    }
+
+    /// Prime-power tuple `(q_1, ..., q_n)` declared by the constraint system.
+    /// Empty for a `Q[X]`-only layout.
+    pub fn primes(&self) -> &[P] {
+        &self.primes
+    }
+
+    /// Build a substrate-only [`Layout`] from a UAIR [`UairSignature`],
+    /// cloning only the column layouts and declared primes (dropping
+    /// `shifts` / `bit_op_specs` / `lookup_specs` / `affine_virtual_specs` /
+    /// `down_cols`, which the substrate never reads).
+    pub fn from_signature(sig: &UairSignature<P>) -> Self
+    where
+        P: Semiring,
+    {
+        Self {
+            total_cols: sig.total_cols().clone(),
+            public_cols: sig.public_cols().clone(),
+            witness_cols: sig.witness_cols().clone(),
+            primes: sig.primes().to_vec(),
+        }
+    }
+
+    /// Sub-trace containing only the public columns (borrowed from `trace`).
+    ///
+    /// Reimplements [`UairTrace::public`]'s body against this layout's
+    /// [`public_cols`](Self::public_cols) so the substrate can slice public
+    /// columns without holding a [`UairSignature`]. Column-slicing semantics
+    /// are identical to [`UairTrace::public`].
+    pub fn public_of<'t, PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize>(
+        &self,
+        trace: &'t UairTrace<'static, PolyCoeff, Int, DB, DA>,
+    ) -> UairTrace<'t, PolyCoeff, Int, DB, DA> {
+        let p = &self.public_cols;
+        UairTrace {
+            binary_poly: Cow::Borrowed(&trace.binary_poly[0..p.num_binary_poly_cols()]),
+            arbitrary_poly: Cow::Borrowed(&trace.arbitrary_poly[0..p.num_arbitrary_poly_cols()]),
+            int: Cow::Borrowed(&trace.int[0..p.num_int_cols()]),
+        }
+    }
+
+    /// Sub-trace containing only the witness columns (borrowed from `trace`).
+    ///
+    /// Reimplements [`UairTrace::witness`]'s body against this layout's
+    /// [`public_cols`](Self::public_cols) so the substrate can slice witness
+    /// columns without holding a [`UairSignature`]. Column-slicing semantics
+    /// are identical to [`UairTrace::witness`].
+    pub fn witness_of<'t, PolyCoeff: Clone, Int: Clone, const DB: usize, const DA: usize>(
+        &self,
+        trace: &'t UairTrace<'static, PolyCoeff, Int, DB, DA>,
+    ) -> UairTrace<'t, PolyCoeff, Int, DB, DA> {
+        let p = &self.public_cols;
+        UairTrace {
+            binary_poly: Cow::Borrowed(&trace.binary_poly[p.num_binary_poly_cols()..]),
+            arbitrary_poly: Cow::Borrowed(&trace.arbitrary_poly[p.num_arbitrary_poly_cols()..]),
+            int: Cow::Borrowed(&trace.int[p.num_int_cols()..]),
+        }
+    }
+}
 
 /// The single evaluation endpoint the constraint argument reduces all of its
 /// per-family claims down to.
@@ -106,7 +196,7 @@ impl<F: PrimeField> ConstraintEndpoints<F> {
 ///
 /// Families are ordered `[Q[X] (q0), q_1, .., q_n]` with `q_1..q_n =
 /// self.layout().primes()`.
-pub trait ConstraintSystem {
+pub trait ConstraintSystem: Clone + Debug {
     /// Prime-power type carried by the layout (`UairSignature::primes()`),
     /// e.g. the field integer type `Zt::Fmod`.
     type Prime: Semiring;
@@ -116,11 +206,13 @@ pub trait ConstraintSystem {
     /// module docs); the trait only requires `PrimeField`.
     type Field: PrimeField;
 
-    /// Frontend sub-proof, embedded in the substrate `Proof`.
+    /// Frontend sub-proof, embedded in the substrate
+    /// [`Proof`](crate::Proof) as its `constraint_proof` field.
     ///
-    /// PROPOSED: bound is `Transcribable` here; Phase 2 may also require
-    /// `GenTranscribable` once (de)serialization is wired through the substrate
-    /// `Proof`.
+    /// Bounded `Transcribable` only: the substrate `Proof`'s
+    /// (de)serialization delegates to this type's `Transcribable` subset
+    /// methods. `GenTranscribable` is a deserialization-dedup detail, not part
+    /// of the seam contract.
     type ConstraintProof: Transcribable;
 
     /// Opaque frontend verifier tail-state, carried from

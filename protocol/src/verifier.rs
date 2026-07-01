@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    constraint_system::{ConstraintEndpoints, ConstraintSystem},
-    uair_frontend::{UairConstraintProof, UairFrontend, UairVerifierClaims},
-};
+use crate::constraint_system::{ConstraintEndpoints, ConstraintSystem, Layout};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use itertools::Itertools;
 use std::io::Cursor;
@@ -13,9 +10,8 @@ use zinc_transcript::{
     traits::{ConstTranscribable, Transcript},
 };
 use zinc_uair::{
-    Uair, UairSignature, UairTrace,
+    UairTrace,
     ideal::{Ideal, IdealCheck},
-    ideal_collector::IdealOrZero,
 };
 use zinc_utils::{
     add, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
@@ -34,7 +30,7 @@ use zip_plus::{
 #[derive(Clone, Debug)]
 pub struct VerifierBase<'a, Zt: ZincTypes<D, FD>, const D: usize, const FD: usize> {
     num_vars: usize,
-    uair_signature: UairSignature<Zt::Fmod>,
+    layout: Layout<Zt::Fmod>,
     pcs_transcript: PcsVerifierTranscript,
     public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
 
@@ -48,14 +44,14 @@ pub struct VerifierBase<'a, Zt: ZincTypes<D, FD>, const D: usize, const FD: usiz
 // Type-state structs
 //
 
-/// After step 0 (transcript reconstruction). Holds the unpacked substrate
-/// [`Proof`] fields that later steps repack into a [`UairConstraintProof`] for
-/// the constraint frontend.
+/// After step 0 (transcript reconstruction). Holds the constraint sub-proof
+/// (`CS::ConstraintProof`) plus the substrate [`Proof`] leftovers the later
+/// steps consume.
 #[derive(Clone, Debug)]
 pub struct VerifierTranscriptReconstructed<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS: ConstraintSystem,
     F: PrimeField,
     IdealOverF,
     const D: usize,
@@ -65,7 +61,7 @@ pub struct VerifierTranscriptReconstructed<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    constraint_proof: UairConstraintProof<F>,
+    constraint_proof: CS::ConstraintProof,
     /// Per-constraint-family witness-only lifted MLE evals. Layout:
     /// `[0]` = Q-family ($q_0$), `[i]` = declared prime $i - 1$ for
     /// $i = 1, \ldots, n$. Length = `1 + n_fq`.
@@ -75,7 +71,7 @@ pub struct VerifierTranscriptReconstructed<
     /// $q'' := q_0$ and thus `proof_witness_lifted_evals[0]` is used for
     /// PCS verification.
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
-    _phantom: PhantomData<(U, IdealOverF)>,
+    _phantom: PhantomData<IdealOverF>,
 }
 
 /// After step 1 (prime projection).
@@ -83,7 +79,7 @@ pub struct VerifierTranscriptReconstructed<
 pub struct VerifierPrimeProjected<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS: ConstraintSystem,
     F: PrimeField,
     IdealOverF,
     const D: usize,
@@ -94,28 +90,32 @@ pub struct VerifierPrimeProjected<
 
     // Proof leftovers
     proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
-    constraint_proof: UairConstraintProof<F>,
+    constraint_proof: CS::ConstraintProof,
     /// Per-constraint-family witness-only lifted MLE evals (see
     /// [`VerifierTranscriptReconstructed`] doc). Length = `1 + n_fq`.
     proof_witness_lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// Witness-only lifted MLE evals for $q''$ prime (see
     /// [`VerifierTranscriptReconstructed`] doc)
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
-    _phantom: PhantomData<(U, IdealOverF)>,
+    _phantom: PhantomData<IdealOverF>,
 }
 
 //
 // Step implementations
 //
 
-impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
+impl<Zt, CS, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, CS, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    U: Uair<Prime = Zt::Fmod>,
+    CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
     F: PrimeField<Integer = Zt::Fmod>,
 {
     /// Step 0: Verifier entry point.
     /// Reconstruct Fiat-Shamir transcript from commitments and public data.
+    ///
+    /// The constraint sub-proof (`proof.constraint_proof`) is moved straight
+    /// into the type-state; there is no longer any repacking of flat `Proof`
+    /// fields.
     #[allow(clippy::type_complexity)]
     pub fn step0_reconstruct_transcript<'a, IdealOverF>(
         (vp_bin, vp_arb, vp_int): &'a (
@@ -123,10 +123,11 @@ where
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        mut proof: Proof<F>,
+        mut proof: Proof<F, CS::ConstraintProof>,
         public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-    ) -> Result<VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>>
+        cs: &CS,
+    ) -> Result<VerifierTranscriptReconstructed<'a, Zt, CS, F, IdealOverF, D, FD>, ProtocolError<F>>
     where
         IdealOverF: Ideal,
     {
@@ -137,7 +138,7 @@ where
         let zip_proof = std::mem::take(&mut proof.zip);
         let mut base = VerifierBase {
             num_vars,
-            uair_signature: U::signature(),
+            layout: cs.layout().clone(),
             public_trace,
             pcs_transcript: PcsVerifierTranscript {
                 fs_transcript: Blake3Transcript::default(),
@@ -169,25 +170,10 @@ where
             &base.public_trace.int,
         );
 
-        // Repack the flat `Proof` fields into the frontend's opaque
-        // constraint-argument sub-proof (mirror of `prover::finish` unpacking).
-        let constraint_proof = UairConstraintProof {
-            ideal_check: proof.ideal_check,
-            ideal_checks_fq: proof.ideal_checks_fq,
-            cpr_proof: proof.cpr_proof,
-            cpr_proofs_fq: proof.cpr_proofs_fq,
-            combined_sumcheck: proof.combined_sumcheck,
-            combined_sumchecks_fq: proof.combined_sumchecks_fq,
-            multipoint_eval: proof.multipoint_eval,
-            multipoint_evals_fq: proof.multipoint_evals_fq,
-            booleanity_proof: proof.booleanity_proof,
-            lookup_proof: proof.lookup_proof,
-        };
-
         Ok(VerifierTranscriptReconstructed {
             base,
             proof_commitments: proof.commitments,
-            constraint_proof,
+            constraint_proof: proof.constraint_proof,
             proof_witness_lifted_evals: proof.witness_lifted_evals,
             proof_witness_lifted_evals_pp: proof.witness_lifted_evals_pp,
             _phantom: PhantomData,
@@ -195,8 +181,8 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
-    VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, FD>
+impl<'a, Zt, CS, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierTranscriptReconstructed<'a, Zt, CS, F, IdealOverF, D, FD>
 where
     Zt: ZincTypes<D, FD>,
     F: InnerTransparentField<Integer = Zt::Fmod>
@@ -205,14 +191,14 @@ where
         + Send
         + Sync
         + 'static,
-    U: Uair,
+    CS: ConstraintSystem<Field = F>,
     IdealOverF: Ideal,
 {
     /// Step 1: Prime projection. Samples the random field configuration.
     #[allow(clippy::type_complexity)]
     pub fn step1_prime_projection(
         mut self,
-    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>> {
+    ) -> Result<VerifierPrimeProjected<'a, Zt, CS, F, IdealOverF, D, FD>, ProtocolError<F>> {
         let field_cfg = self
             .base
             .pcs_transcript
@@ -231,8 +217,8 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
-    VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>
+impl<'a, Zt, CS, F, IdealOverF, const D: usize, const FD: usize>
+    VerifierPrimeProjected<'a, Zt, CS, F, IdealOverF, D, FD>
 where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
@@ -250,7 +236,7 @@ where
         + Send
         + Sync
         + 'static,
-    U: Uair<Prime = Zt::Fmod> + 'static,
+    CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     F::Integer: Ord + num_traits::Zero + Default + Send + Sync,
 {
@@ -287,28 +273,28 @@ where
     #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     pub fn finish_verify<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-        project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F::Config) -> IdealOverF,
+        cs: &CS,
+        project_scalar: impl Fn(&CS::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_ideal: impl Fn(&CS::IdealSource, &F::Config) -> IdealOverF,
+        project_fq_ideal: impl Fn(&CS::FqIdealSource, &F::Config) -> IdealOverF,
     ) -> Result<(), ProtocolError<F>> {
         let num_vars = self.base.num_vars;
 
         // Per-family field configs [q_0, q_1, .., q_n].
-        let all_field_cfgs = build_all_cfgs::<F>(&self.base.uair_signature, self.field_cfg.clone());
+        let all_field_cfgs = build_all_cfgs::<F>(&self.base.layout, self.field_cfg.clone());
         let n_fq = all_field_cfgs.len().saturating_sub(1);
 
         // ---- Constraint argument (former verifier steps 2--5). ----
-        let frontend = UairFrontend::<U, F, D, FD>::new_verifier();
-        let (endpoints, claims): (ConstraintEndpoints<F>, UairVerifierClaims<F>) = frontend
+        let (endpoints, claims): (ConstraintEndpoints<F>, CS::VerifierClaims) = cs
             .verify_constraints::<IdealOverF>(
-            &mut self.base.pcs_transcript.fs_transcript,
-            &self.constraint_proof,
-            &all_field_cfgs,
-            num_vars,
-            project_ideal,
-            project_fq_ideal,
-            project_scalar,
-        )?;
+                &mut self.base.pcs_transcript.fs_transcript,
+                &self.constraint_proof,
+                &all_field_cfgs,
+                num_vars,
+                project_ideal,
+                project_fq_ideal,
+                project_scalar,
+            )?;
         let ConstraintEndpoints { r_0, r_0_fq } = endpoints;
 
         // ---- Step 6: lift-and-project (substrate). ----
@@ -328,12 +314,12 @@ where
             });
         }
 
-        let pub_cols = self.base.uair_signature.public_cols();
+        let pub_cols = self.base.layout.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
         let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
         let num_pub_int = pub_cols.num_int_cols();
 
-        let wit_cols = self.base.uair_signature.witness_cols();
+        let wit_cols = self.base.layout.witness_cols();
         let num_wit_bin = wit_cols.num_binary_poly_cols();
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
         let num_wit_int = wit_cols.num_int_cols();
@@ -443,7 +429,7 @@ where
         }
 
         // Close every per-family multipoint-eval subclaim (frontend seam).
-        frontend.verify_lifted_evals(&claims, &per_family_all_lifted, &all_field_cfgs)?;
+        cs.verify_lifted_evals(&claims, &per_family_all_lifted, &all_field_cfgs)?;
 
         // Absorb all families' coefficients into the FS transcript in the same
         // uniform order as the prover.
@@ -504,7 +490,7 @@ where
         q_pp_cfg: &F::Config,
         r_star: &[F],
     ) -> Result<(), ProtocolError<F>> {
-        let wit_cols = base.uair_signature.witness_cols();
+        let wit_cols = base.layout.witness_cols();
         let num_wit_bin = wit_cols.num_binary_poly_cols();
         let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
 
@@ -626,7 +612,7 @@ where
 // verify() wrapper
 //
 
-impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
+impl<Zt, CS, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, CS, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
@@ -645,15 +631,15 @@ where
         + Sync
         + 'static,
     F::Integer: Ord + num_traits::Zero + Default + Send + Sync,
-    U: Uair<Prime = Zt::Fmod> + 'static,
+    CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
 {
     /// Zinc+ full PIOP verifier.
     ///
     /// Runs all verification steps in sequence and returns `Ok(())` on
     /// success. Steps 0--1 (transcript reconstruct + prime projection) are
     /// substrate; steps 2--5 (constraint argument) are delegated to the
-    /// [`UairFrontend`](crate::uair_frontend::UairFrontend) seam; steps 6--7
-    /// (lift-and-project + PCS verify) return to the substrate.
+    /// [`ConstraintSystem`] seam; steps 6--7 (lift-and-project + PCS verify)
+    /// return to the substrate.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn verify<IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
         vp: &(
@@ -661,24 +647,27 @@ where
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        proof: Proof<F>,
+        proof: Proof<F, CS::ConstraintProof>,
         public_trace: &UairTrace<Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F>,
-        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-        project_fq_ideal: impl Fn(&IdealOrZero<U::FqIdeal>, &F::Config) -> IdealOverF,
+        cs: &CS,
+        project_scalar: impl Fn(&CS::Scalar, &F::Config) -> DynamicPolynomialF<F>,
+        project_ideal: impl Fn(&CS::IdealSource, &F::Config) -> IdealOverF,
+        project_fq_ideal: impl Fn(&CS::FqIdealSource, &F::Config) -> IdealOverF,
     ) -> Result<(), ProtocolError<F>>
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
     {
-        ZincPlusPiop::<Zt, U, F, D, FD>::step0_reconstruct_transcript::<IdealOverF>(
+        ZincPlusPiop::<Zt, CS, F, D, FD>::step0_reconstruct_transcript::<IdealOverF>(
             vp,
             proof,
             public_trace,
             num_vars,
+            cs,
         )?
         .step1_prime_projection()?
         .finish_verify::<CHECK_FOR_OVERFLOW>(
+            cs,
             project_scalar,
             project_ideal,
             project_fq_ideal,
@@ -693,11 +682,12 @@ where
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
+    use crate::uair_frontend::{UairConstraintProof, UairFrontend};
     use zinc_piop::{
         ideal_check::{self, IdealCheckProtocol},
         projections::{ProjectedScalars, project_scalars, project_scalars_to_field},
     };
-    use zinc_uair::constraint_counter::count_constraints;
+    use zinc_uair::{Uair, constraint_counter::count_constraints, ideal_collector::IdealOrZero};
 
     /// After the (test-only) stepwise ideal check.
     pub struct VerifierIdealChecked<
@@ -744,8 +734,8 @@ pub mod test_helpers {
         _phantom: PhantomData<(U, IdealOverF)>,
     }
 
-    impl<'a, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
-        VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, FD>
+    impl<'a, 'cs, Zt, U, F, IdealOverF, const D: usize, const FD: usize>
+        VerifierPrimeProjected<'a, Zt, UairFrontend<'cs, U, F, D, FD>, F, IdealOverF, D, FD>
     where
         Zt: ZincTypes<D, FD>,
         Zt::Int: ProjectableToField<F>,
@@ -762,7 +752,7 @@ pub mod test_helpers {
             + 'static,
         U: Uair<Prime = Zt::Fmod> + 'static,
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
-        F::Integer: Ord,
+        F::Integer: Ord + num_traits::Zero + Default + Send + Sync,
     {
         /// Step 2 (test-only): ideal check verification. Mirrors
         /// [`UairFrontend::verify_constraints`](crate::uair_frontend::UairFrontend)'s
@@ -775,8 +765,7 @@ pub mod test_helpers {
         ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, FD>, ProtocolError<F>>
         {
             let num_constraints = count_constraints::<U>();
-            let all_field_cfgs =
-                build_all_cfgs::<F>(&self.base.uair_signature, self.field_cfg.clone());
+            let all_field_cfgs = build_all_cfgs::<F>(&self.base.layout, self.field_cfg.clone());
             let q_star_idx = shared_challenge::compute_q_star_idx::<F>(&all_field_cfgs);
             let q_star_cfg = &all_field_cfgs[q_star_idx];
             let shared_eval_points: Vec<Vec<F>> =
@@ -938,8 +927,8 @@ pub mod test_helpers {
             self.base.num_vars
         }
 
-        pub fn uair_signature(&self) -> &UairSignature<Zt::Fmod> {
-            &self.base.uair_signature
+        pub fn layout(&self) -> &Layout<Zt::Fmod> {
+            &self.base.layout
         }
     }
 }

@@ -54,7 +54,7 @@ use zinc_poly::{
 };
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{
-    Uair, UairSignature,
+    Uair, UairSignature, UairTrace,
     constraint_counter::count_constraints,
     degree_counter::count_max_degree,
     ideal::{Ideal, IdealCheck},
@@ -72,12 +72,11 @@ use zinc_utils::{
 /// the per-prime `F_{q_i}[X]` mirrors, and the optional booleanity / lookup
 /// arguments.
 ///
-/// The [`GenTranscribable`] / [`Transcribable`] impls mirror, field-for-field
-/// and byte-for-byte, the corresponding slices of the substrate `Proof`'s
-/// (de)serialization (`protocol/src/lib.rs`). They are not exercised in
-/// Phase 3 (the substrate still hand-serializes the unpacked fields) but are
-/// required by the trait's `ConstraintProof: Transcribable` bound and become
-/// the Phase-4 serialization.
+/// The [`GenTranscribable`] / [`Transcribable`] impls serialize the full
+/// constraint-argument bundle; the substrate [`Proof`](crate::Proof) embeds
+/// this type as its `constraint_proof` field and delegates the sub-proof
+/// bytes to these impls (via the trait's `ConstraintProof: Transcribable`
+/// bound).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UairConstraintProof<F: PrimeField> {
     /// Randomized ideal check proof ($Q[X]$ constraint family).
@@ -315,8 +314,11 @@ pub struct UairVerifierClaims<F: PrimeField> {
 ///
 /// It borrows the original (un-projected) witness binary-poly columns from the
 /// trace — needed for the booleanity argument and the `alpha'` booleanity
-/// bridge — and carries the `project_scalar` projection map and the
-/// [`UairSignature`] (so [`ConstraintSystem::layout`] can hand back a borrow).
+/// bridge — and carries the `project_scalar` projection map, the full
+/// [`UairSignature`] (for the frontend's own `shifts()` / `bit_op_specs()` /
+/// column access), and the minimal substrate-only [`Layout`] (so
+/// [`ConstraintSystem::layout`] can hand back a borrow that carries no
+/// frontend-internal specs).
 pub struct UairFrontend<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> {
     /// The original (un-projected) witness binary-poly columns, borrowed from
     /// the trace. Used for booleanity + the `alpha'` bridge.
@@ -325,9 +327,42 @@ pub struct UairFrontend<'a, U: Uair, F: PrimeField, const D: usize, const FD: us
     /// per-family field cfg). Internalized here so the seam stays
     /// constraint-system-agnostic.
     project_scalar: fn(&U::Scalar, &<F as HasPrimeFieldConfig>::Config) -> DynamicPolynomialF<F>,
-    /// The UAIR layout, stored so `layout()` can return a borrow.
+    /// The full UAIR signature, kept for the frontend's own use (`shifts()`,
+    /// `bit_op_specs()`, column layouts) — data the substrate never reads.
     signature: UairSignature<U::Prime>,
+    /// The minimal substrate-only layout, derived from `signature`, returned by
+    /// [`ConstraintSystem::layout`].
+    layout: Layout<U::Prime>,
     _marker: PhantomData<F>,
+}
+
+// Manual `Clone` / `Debug` bounding only the concretely-stored types (never
+// `U` or `F` themselves): the borrowed slice is `Copy`, the fn pointer is
+// `Copy`, and the signature is `Clone`/`Debug` since `U::Prime: Semiring`.
+// This lets the prover's substrate type-states derive `Clone`/`Debug` with a
+// plain `CS: Clone`/`Debug` bound.
+impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> Clone
+    for UairFrontend<'a, U, F, D, FD>
+{
+    fn clone(&self) -> Self {
+        Self {
+            witness_binary_cols: self.witness_binary_cols,
+            project_scalar: self.project_scalar,
+            signature: self.signature.clone(),
+            layout: self.layout.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> core::fmt::Debug
+    for UairFrontend<'a, U, F, D, FD>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UairFrontend")
+            .field("signature", &self.signature)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> UairFrontend<'a, U, F, D, FD> {
@@ -343,12 +378,39 @@ impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> UairFrontend<'
             &<F as HasPrimeFieldConfig>::Config,
         ) -> DynamicPolynomialF<F>,
     ) -> Self {
+        let signature = U::signature();
+        let layout = Layout::from_signature(&signature);
         Self {
             witness_binary_cols,
             project_scalar,
-            signature: U::signature(),
+            signature,
+            layout,
             _marker: PhantomData,
         }
+    }
+
+    /// Build a prove-side UAIR frontend directly from the caller's trace.
+    ///
+    /// Slices the original (un-projected) witness binary-poly columns out of
+    /// `trace` — `&trace.binary_poly[num_pub_bin..num_total_bin]`, using
+    /// [`U::signature`](Uair::signature) for the column counts — and forwards
+    /// to [`new`](Self::new). This lets callers build the prove-side
+    /// frontend without hand-slicing.
+    ///
+    /// Generic over the trace's coefficient/int types (they never surface in
+    /// [`UairFrontend`], which only borrows the binary-poly columns).
+    pub fn from_trace<'t, PolyCoeff: Clone, Int: Clone>(
+        trace: &'t UairTrace<'static, PolyCoeff, Int, D, D>,
+        project_scalar: fn(
+            &U::Scalar,
+            &<F as HasPrimeFieldConfig>::Config,
+        ) -> DynamicPolynomialF<F>,
+    ) -> UairFrontend<'t, U, F, D, FD> {
+        let sig = U::signature();
+        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
+        let num_total_bin = sig.total_cols().num_binary_poly_cols();
+        let witness_binary_cols = &trace.binary_poly[num_pub_bin..num_total_bin];
+        UairFrontend::new(witness_binary_cols, project_scalar)
     }
 
     /// Build a verify-side UAIR frontend.
@@ -367,12 +429,29 @@ impl<'a, U: Uair, F: PrimeField, const D: usize, const FD: usize> UairFrontend<'
         ) -> DynamicPolynomialF<F> {
             unreachable!("verify-side UairFrontend never invokes the stored project_scalar")
         }
+        let signature = U::signature();
+        let layout = Layout::from_signature(&signature);
         Self {
             witness_binary_cols: &[],
             project_scalar: unreachable_project_scalar::<U, F>,
-            signature: U::signature(),
+            signature,
+            layout,
             _marker: PhantomData,
         }
+    }
+
+    /// The frontend's full UAIR signature — including the UAIR-specific
+    /// `shifts` / `bit_op_specs` / `lookup_specs` / `down_cols` /
+    /// `affine_virtual_specs` that are deliberately **not** exposed on the
+    /// generic seam ([`ConstraintSystem::layout`] returns the minimal
+    /// substrate-facing [`Layout`], which carries only column layouts +
+    /// primes).
+    ///
+    /// UAIR-side consumers reach those specs through this concrete accessor
+    /// rather than the generic seam, keeping the seam R1CS-agnostic while the
+    /// specs remain UAIR-only.
+    pub fn signature(&self) -> &UairSignature<U::Prime> {
+        &self.signature
     }
 }
 
@@ -397,7 +476,7 @@ where
     type Scalar = U::Scalar;
 
     fn layout(&self) -> &Layout<Self::Prime> {
-        &self.signature
+        &self.layout
     }
 
     /// Prover side of the UAIR constraint argument.

@@ -1,16 +1,13 @@
 use super::*;
-use crate::constraint_system::ConstraintSystem;
+use crate::constraint_system::{ConstraintEndpoints, ConstraintSystem, Layout};
 use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig};
 use std::{borrow::Cow, fmt::Debug};
-use zinc_piop::{
-    multipoint_eval::Proof as MultipointEvalProof,
-    projections::{self, ProjectedTrace},
-};
+use zinc_piop::projections::{self, ProjectedTrace};
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::dynamic::over_field::DynamicPolynomialF,
 };
 use zinc_transcript::traits::{ConstTranscribable, Transcript};
-use zinc_uair::{Uair, UairSignature, UairTrace};
+use zinc_uair::UairTrace;
 use zinc_utils::{
     add, cfg_join, from_ref::FromRef, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
@@ -30,16 +27,16 @@ use zip_plus::{
 pub struct ProverFolded<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
-    uair_signature: UairSignature<Zt::Fmod>,
+    layout: Layout<Zt::Fmod>,
     original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
 
-    _phantom: PhantomData<(&'a u8, U, F)>,
+    _phantom: PhantomData<(&'a u8, CS, F)>,
 }
 
 /// Persistent prover infrastructure carried across every subsequent
@@ -50,13 +47,13 @@ pub struct ProverFolded<
 pub struct ProverCommitted<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
     num_vars: usize,
-    uair_signature: UairSignature<Zt::Fmod>,
+    layout: Layout<Zt::Fmod>,
     original_trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
     folded_witness_trace: UairTrace<'a, Zt::Int, Zt::Int, FD, D>,
     pcs_transcript: PcsProverTranscript,
@@ -72,7 +69,7 @@ pub struct ProverCommitted<
     commitment_arb: ZipPlusCommitment,
     commitment_int: ZipPlusCommitment,
 
-    _phantom: PhantomData<(U, F)>,
+    _phantom: PhantomData<(CS, F)>,
 }
 
 /// After step 2 (prime projection, `\phi_q`). Scalar-free: the substrate no
@@ -86,12 +83,12 @@ pub struct ProverCommitted<
 pub struct ProverProjected<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
-    base: ProverCommitted<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, CS, F, D, FD>,
     /// Field configs for all constraint families, starting with randomly
     /// sampled `field_cfg` (for $Q[X]$ constraints, always present) followed by
     /// config for each $q_i$ for $F_{q_i}[X]$ constraints.
@@ -100,14 +97,13 @@ pub struct ProverProjected<
     /// `[0] = Q[X]`, `[i] = q_i`. Layout (row- vs column-major) matches the
     /// variant chosen at step 2.
     projected_traces: Vec<ProjectedTrace<F>>,
-    _phantom: PhantomData<U>,
+    _phantom: PhantomData<CS>,
 }
 
-/// After the constraint argument (`UairFrontend::prove_constraints`), which now
+/// After the constraint argument (`CS::prove_constraints`), which now
 /// also runs the lockstep multipoint-eval (former step 6) internally.
 ///
-/// Carries the constraint sub-proof outputs (unpacked into the existing
-/// `Proof` field shapes, multipoint-eval proofs included) plus the
+/// Carries the WHOLE constraint sub-proof (`CS::ConstraintProof`) plus the
 /// multipoint-eval endpoints and the retained per-family
 /// $\phi_{q_i}$-projected traces for step 7's lift.
 #[allow(clippy::type_complexity)]
@@ -115,12 +111,12 @@ pub struct ProverProjected<
 pub struct ProverConstrained<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS: ConstraintSystem,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
-    base: ProverCommitted<'a, Zt, U, F, D, FD>,
+    base: ProverCommitted<'a, Zt, CS, F, D, FD>,
     field_cfg: F::Config,
     /// Per-family field configs (carried for downstream steps).
     all_field_cfgs: Vec<F::Config>,
@@ -128,23 +124,14 @@ pub struct ProverConstrained<
     /// (`[0]` = Q[X]). Retained for step 7's lift-and-project.
     projected_traces: Vec<ProjectedTrace<F>>,
 
-    // Constraint sub-proof (unpacked from `UairConstraintProof`).
-    ic_proof: IdealCheckProof<F>,
-    ic_proof_fq: Vec<IdealCheckProof<F>>,
-    cpr_proof: CombinedPolyResolverProof<F>,
-    combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
-    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
-    booleanity_proof: Option<BooleanityProof<F>>,
+    /// The whole constraint-argument sub-proof returned by the frontend.
+    constraint_proof: CS::ConstraintProof,
 
-    // Multipoint-eval outputs.
-    mp_proof: MultipointEvalProof<F>,
+    /// Shared evaluation endpoint the frontend's multipoint-eval reduced to,
+    /// received via `ConstraintEndpoints` (NOT computed here — the substrate
+    /// no longer runs MP-eval). Consumed by step 7's lift-and-project.
     r_0: Vec<F>,
-    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
     r_0_fq: Vec<Vec<F>>,
-
-    _phantom: PhantomData<U>,
 }
 
 /// After step 7 (lift-and-project).
@@ -152,29 +139,19 @@ pub struct ProverConstrained<
 pub struct ProverLifted<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS: ConstraintSystem,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
-    base: ProverCommitted<'a, Zt, U, F, D, FD>,
-    ic_proof: IdealCheckProof<F>,
-    ic_proof_fq: Vec<IdealCheckProof<F>>,
-    cpr_proof: CombinedPolyResolverProof<F>,
-    combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
-    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
-    booleanity_proof: Option<BooleanityProof<F>>,
-    mp_proof: MultipointEvalProof<F>,
-    /// Per-prime multipoint-eval proofs threaded forward from
-    /// `ProverMultipointEvaled`.
-    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
+    base: ProverCommitted<'a, Zt, CS, F, D, FD>,
+    /// The whole constraint-argument sub-proof returned by the frontend.
+    constraint_proof: CS::ConstraintProof,
 
     /// Per-constraint-family **witness-only** lifted MLE evaluations at
     /// $r_0$ (or family-specific $r_0^{(i)}$). Layout: index `0` is the
     /// Q-family ($q_0$); indices `1..=n` are the declared primes in
-    /// `UairSignature::primes()` order. Length = `1 + r_0_fq.len()`.
+    /// `UairSignature::primes()` order. Length = `1 + n`.
     /// The verifier recomputes the public-column half per family.
     lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// $q''$-family lifted MLE evaluations at $r_0 \bmod q''$, witness
@@ -200,26 +177,17 @@ pub struct ProverLifted<
 pub struct ProverPcsOpened<
     'a,
     Zt: ZincTypes<D, FD>,
-    U: Uair,
+    CS: ConstraintSystem,
     F: PrimeField,
     const D: usize,
     const FD: usize,
 > {
-    base: ProverCommitted<'a, Zt, U, F, D, FD>,
-    ic_proof: IdealCheckProof<F>,
-    ic_proof_fq: Vec<IdealCheckProof<F>>,
-    cpr_proof: CombinedPolyResolverProof<F>,
-    combined_sumcheck: MultiDegreeSumcheckProof<F>,
-    cpr_proofs_fq: Vec<CombinedPolyResolverProof<F>>,
-    combined_sumchecks_fq: Vec<MultiDegreeSumcheckProof<F>>,
-    lookup_proof: Option<BatchedLookupProof<F>>,
-    booleanity_proof: Option<BooleanityProof<F>>,
-    mp_proof: MultipointEvalProof<F>,
-    /// Per-prime multipoint-eval proofs threaded forward.
-    mp_proofs_fq: Vec<MultipointEvalProof<F>>,
+    base: ProverCommitted<'a, Zt, CS, F, D, FD>,
+    /// The whole constraint-argument sub-proof returned by the frontend.
+    constraint_proof: CS::ConstraintProof,
     /// Per-constraint-family witness-only lifted evals. Index `0` is the
     /// Q-family; indices `1..=n` are the declared primes (in
-    /// `UairSignature::primes()` order). Length = `1 + mp_proofs_fq.len()`.
+    /// `UairSignature::primes()` order). Length = `1 + n`.
     lifted_evals: Vec<Vec<DynamicPolynomialF<F>>>,
     /// $q''$-family witness-only lifted evals (PCS-only family).
     lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
@@ -233,12 +201,12 @@ pub struct ProverPcsOpened<
 /// define them
 macro_rules! impl_with_type_bounds {
     ($type_name:ident { $($code:tt)* }) => {
-        impl<'a, Zt, U, F, const D: usize, const FD: usize> $type_name<'a, Zt, U, F, D, FD>
+        impl<'a, Zt, CS, F, const D: usize, const FD: usize> $type_name<'a, Zt, CS, F, D, FD>
         where
             Zt: ZincTypes<D, FD>,
             Zt::Int: ProjectableToField<F>,
             <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
-            U: Uair<Prime = Zt::Fmod> + 'static,
+            CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
             F: InnerTransparentField<Integer = Zt::Fmod>
                 + FromPrimitiveWithConfig
                 + for<'b> FromWithConfig<&'b Zt::Int>
@@ -255,20 +223,24 @@ macro_rules! impl_with_type_bounds {
     };
 }
 
-impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
+impl<Zt, CS, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, CS, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
-    U: Uair<Prime = Zt::Fmod>,
+    CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
     F: PrimeField,
     F::Integer: ConstTranscribable,
 {
     /// Step 0: Folding the trace.
+    ///
+    /// Uses the layout from the constraint system (`cs.layout()`) to slice the
+    /// witness columns out of the caller-provided trace.
     #[allow(clippy::type_complexity)]
     pub fn step0_fold<'a>(
         trace: &'a UairTrace<'static, Zt::Int, Zt::Int, D, D>,
-    ) -> Result<ProverFolded<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        let uair_signature = U::signature();
-        let witness_trace = trace.witness(&uair_signature);
+        cs: &CS,
+    ) -> Result<ProverFolded<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
+        let layout: Layout<Zt::Fmod> = cs.layout().clone();
+        let witness_trace = layout.witness_of(trace);
 
         let folded_bin_witness_trace = cfg_iter!(witness_trace.binary_poly)
             .map(Zt::BinaryFold::fold_trace_mle)
@@ -281,7 +253,7 @@ where
         };
 
         Ok(ProverFolded {
-            uair_signature,
+            layout,
             original_trace: trace,
             folded_witness_trace,
             _phantom: PhantomData,
@@ -303,9 +275,9 @@ impl_with_type_bounds!(ProverFolded
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
         num_vars: usize,
-    ) -> Result<ProverCommitted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
-        let sig = &self.uair_signature;
-        let public_trace = self.original_trace.public(sig);
+    ) -> Result<ProverCommitted<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
+        let layout = &self.layout;
+        let public_trace = layout.public_of(self.original_trace);
 
         let (res_bin, (res_arb, res_int)) = cfg_join!(
             commit_optionally(pp_bin, &self.folded_witness_trace.binary_poly),
@@ -329,7 +301,7 @@ impl_with_type_bounds!(ProverFolded
 
         Ok(ProverCommitted {
             num_vars,
-            uair_signature: self.uair_signature,
+            layout: self.layout,
             original_trace: self.original_trace,
             folded_witness_trace: self.folded_witness_trace,
             pcs_transcript,
@@ -353,7 +325,7 @@ impl_with_type_bounds!(ProverCommitted
     fn project_common<P>(
         mut self,
         project_trace_coeffs: P,
-    ) -> Result<ProverProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>>
+    ) -> Result<ProverProjected<'a, Zt, CS, F, D, FD>, ProtocolError<F>>
     where
         P: for<'b> Fn(&'b UairTrace<'static, Zt::Int, Zt::Int, D, D>, &'b F::Config) -> ProjectedTrace<F>
     {
@@ -362,7 +334,7 @@ impl_with_type_bounds!(ProverCommitted
             .pcs_transcript
             .fs_transcript
             .get_random_field_cfg::<F, F::Integer, Zt::PrimeTest>();
-        let all_field_cfgs = build_all_cfgs::<F>(&self.uair_signature, field_cfg);
+        let all_field_cfgs = build_all_cfgs::<F>(&self.layout, field_cfg);
 
         let projected_traces = all_field_cfgs
             .iter()
@@ -384,7 +356,7 @@ impl_with_type_bounds!(ProverCommitted
     /// Works for both linear and non-linear constraints.
     pub fn step2_combined(
         self,
-    ) -> Result<ProverProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+    ) -> Result<ProverProjected<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         self.project_common(|original_trace, cfg| {
             let proj = projections::project_trace_coeffs_row_major(original_trace, cfg);
             ProjectedTrace::RowMajor(proj)
@@ -396,7 +368,7 @@ impl_with_type_bounds!(ProverCommitted
     /// full trace using the column-major layout, per family.
     pub fn step2_mle_first(
         self,
-    ) -> Result<ProverProjected<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+    ) -> Result<ProverProjected<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         self.project_common(|original_trace, cfg| {
             let proj = projections::project_trace_coeffs_column_major(original_trace, cfg);
             ProjectedTrace::ColumnMajor(proj)
@@ -408,65 +380,34 @@ impl_with_type_bounds!(ProverProjected
 {
     /// Constraint argument (substrate side).
     ///
-    /// Hands the per-family `phi_q`-projected traces to the UAIR constraint
-    /// frontend's [`UairFrontend::prove_constraints`](crate::uair_frontend::UairFrontend),
-    /// which runs the (relocated) ideal-check / `psi_a` scalar & bit-op /
-    /// constraint-sumcheck + booleanity argument **and** the lockstep
-    /// multipoint-eval (former step 6) that reduces every per-family claim to
-    /// the shared endpoint $r_0$. The substrate receives the sub-proof and the
+    /// Hands the per-family `phi_q`-projected traces to the constraint system's
+    /// [`ConstraintSystem::prove_constraints`], which runs the (relocated)
+    /// ideal-check / `psi_a` scalar & bit-op / constraint-sumcheck + booleanity
+    /// argument **and** the lockstep multipoint-eval (former step 6) that
+    /// reduces every per-family claim to the shared endpoint $r_0$. The
+    /// substrate receives the whole sub-proof and the
     /// [`ConstraintEndpoints`](crate::constraint_system::ConstraintEndpoints)
     /// ($r_0$ and the per-prime $r_0^{(i)}$); its remaining job is step 7's
     /// lift-and-project + step 8's PCS open at that point.
     ///
-    /// The per-family projected traces are *retained* (the frontend borrows
-    /// them) for step 7's lift-and-project.
+    /// The per-family projected traces are *retained* for step 7's
+    /// lift-and-project.
     #[allow(clippy::type_complexity)]
     pub fn step_constraints(
         mut self,
-        project_scalar: fn(
-            &U::Scalar,
-            &<F as crypto_primitives::HasPrimeFieldConfig>::Config,
-        ) -> DynamicPolynomialF<F>,
-    ) -> Result<ProverConstrained<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+        cs: &CS,
+    ) -> Result<ProverConstrained<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         let num_vars = self.base.num_vars;
 
-        // The original (un-projected) witness binary-poly columns the frontend
-        // needs for booleanity + the alpha' bridge. `original_trace` is a `&'a`
-        // reference, so slicing through it yields a `'a`-lifetime borrow that
-        // does not alias `self.base` (we can still mutably use the transcript).
-        let orig_trace = self.base.original_trace;
-        let sig = &self.base.uair_signature;
-        let num_pub_bin = sig.public_cols().num_binary_poly_cols();
-        let num_total_bin = sig.total_cols().num_binary_poly_cols();
-        let witness_binary_cols = &orig_trace.binary_poly[num_pub_bin..num_total_bin];
-
-        let frontend = crate::uair_frontend::UairFrontend::<U, F, D, FD>::new(
-            witness_binary_cols,
-            project_scalar,
-        );
-
         // --- Constraint argument (former steps 3--6, multipoint-eval incl.). ---
-        let (constraint_proof, endpoints) = frontend.prove_constraints(
+        let (constraint_proof, endpoints) = cs.prove_constraints(
             &mut self.base.pcs_transcript.fs_transcript,
             &self.projected_traces,
             &self.all_field_cfgs,
             num_vars,
         )?;
 
-        let uair_frontend::UairConstraintProof {
-            ideal_check,
-            cpr_proof,
-            combined_sumcheck,
-            multipoint_eval,
-            ideal_checks_fq,
-            cpr_proofs_fq,
-            combined_sumchecks_fq,
-            multipoint_evals_fq,
-            booleanity_proof,
-            lookup_proof,
-        } = constraint_proof;
-
-        let constraint_system::ConstraintEndpoints { r_0, r_0_fq } = endpoints;
+        let ConstraintEndpoints { r_0, r_0_fq } = endpoints;
 
         let field_cfg = self.all_field_cfgs[0].clone();
 
@@ -475,19 +416,9 @@ impl_with_type_bounds!(ProverProjected
             field_cfg,
             all_field_cfgs: self.all_field_cfgs,
             projected_traces: self.projected_traces,
-            ic_proof: ideal_check,
-            ic_proof_fq: ideal_checks_fq,
-            cpr_proof,
-            combined_sumcheck,
-            cpr_proofs_fq,
-            combined_sumchecks_fq,
-            lookup_proof,
-            booleanity_proof,
-            mp_proof: multipoint_eval,
+            constraint_proof,
             r_0,
-            mp_proofs_fq: multipoint_evals_fq,
             r_0_fq,
-            _phantom: PhantomData,
         })
     }
 });
@@ -530,7 +461,7 @@ impl_with_type_bounds!(ProverConstrained
     #[allow(clippy::arithmetic_side_effects)]
     pub fn step7_lift_and_project(
         mut self,
-    ) -> Result<ProverLifted<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+    ) -> Result<ProverLifted<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         let n_fq = self.r_0_fq.len();
 
         // --- Sample q'' (PCS-only prime) ---
@@ -556,7 +487,7 @@ impl_with_type_bounds!(ProverConstrained
         // Witness-col extraction helper. UAIR's column layout interleaves
         // public and witness blocks per type (bin / arb / int), so we slice
         // out the witness sub-blocks and concatenate.
-        let sig = self.base.uair_signature.clone();
+        let sig = self.base.layout.clone();
         let pub_cols = sig.public_cols();
         let num_pub_bin = pub_cols.num_binary_poly_cols();
         let num_pub_arb = pub_cols.num_arbitrary_poly_cols();
@@ -659,16 +590,7 @@ impl_with_type_bounds!(ProverConstrained
 
         Ok(ProverLifted {
             base: self.base,
-            ic_proof: self.ic_proof,
-            ic_proof_fq: self.ic_proof_fq,
-            cpr_proof: self.cpr_proof,
-            combined_sumcheck: self.combined_sumcheck,
-            cpr_proofs_fq: self.cpr_proofs_fq,
-            combined_sumchecks_fq: self.combined_sumchecks_fq,
-            lookup_proof: self.lookup_proof,
-            booleanity_proof: self.booleanity_proof,
-            mp_proof: self.mp_proof,
-            mp_proofs_fq: self.mp_proofs_fq,
+            constraint_proof: self.constraint_proof,
             lifted_evals,
             lifted_evals_pp,
             q_pp_cfg,
@@ -691,11 +613,11 @@ impl_with_type_bounds!(ProverLifted
     /// **Transcript ordering**: $q''$ was already sampled at the start of
     /// step 7 (so that the $q''$-family lifted evals could be computed and
     /// sent there). Step 8 only samples the binary folding challenges
-    /// under $q''$, then calls the PCS opens. Mirrored in
-    /// [`step7_pcs_verify`](crate::ZincPlusPiop::step7_pcs_verify).
+    /// under $q''$, then calls the PCS opens. Mirrored by the substrate PCS
+    /// verify inside the verifier's `finish_verify`.
     pub fn step8_pcs_open<const CHECK_FOR_OVERFLOW: bool>(
         mut self,
-    ) -> Result<ProverPcsOpened<'a, Zt, U, F, D, FD>, ProtocolError<F>> {
+    ) -> Result<ProverPcsOpened<'a, Zt, CS, F, D, FD>, ProtocolError<F>> {
         let witness_trace = &self.base.folded_witness_trace;
         let q_pp_cfg = &self.q_pp_cfg;
         let r_star = &self.r_star;
@@ -744,16 +666,7 @@ impl_with_type_bounds!(ProverLifted
 
         Ok(ProverPcsOpened {
             base: self.base,
-            ic_proof: self.ic_proof,
-            ic_proof_fq: self.ic_proof_fq,
-            cpr_proof: self.cpr_proof,
-            combined_sumcheck: self.combined_sumcheck,
-            cpr_proofs_fq: self.cpr_proofs_fq,
-            combined_sumchecks_fq: self.combined_sumchecks_fq,
-            lookup_proof: self.lookup_proof,
-            booleanity_proof: self.booleanity_proof,
-            mp_proof: self.mp_proof,
-            mp_proofs_fq: self.mp_proofs_fq,
+            constraint_proof: self.constraint_proof,
             lifted_evals: self.lifted_evals,
             lifted_evals_pp: self.lifted_evals_pp,
         })
@@ -763,7 +676,7 @@ impl_with_type_bounds!(ProverLifted
 impl_with_type_bounds!(ProverPcsOpened
 {
     /// Assemble the final proof from accumulated state.
-    pub fn finish(self) -> Result<Proof<F>, ProtocolError<F>> {
+    pub fn finish(self) -> Result<Proof<F, CS::ConstraintProof>, ProtocolError<F>> {
         let zip_proof = self.base.pcs_transcript.stream.into_inner();
         let commitments = (
             self.base.commitment_bin,
@@ -773,19 +686,10 @@ impl_with_type_bounds!(ProverPcsOpened
 
         Ok(Proof {
             commitments,
-            ideal_check: self.ic_proof,
-            cpr_proof: self.cpr_proof,
-            combined_sumcheck: self.combined_sumcheck,
-            multipoint_eval: self.mp_proof,
             zip: zip_proof,
             witness_lifted_evals: self.lifted_evals,
-            lookup_proof: self.lookup_proof,
-            booleanity_proof: self.booleanity_proof,
-            ideal_checks_fq: self.ic_proof_fq,
-            cpr_proofs_fq: self.cpr_proofs_fq,
-            combined_sumchecks_fq: self.combined_sumchecks_fq,
-            multipoint_evals_fq: self.mp_proofs_fq,
             witness_lifted_evals_pp: self.lifted_evals_pp,
+            constraint_proof: self.constraint_proof,
         })
     }
 });
@@ -794,7 +698,7 @@ impl_with_type_bounds!(ProverPcsOpened
 // prove() wrapper
 //
 
-impl<Zt, U, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, U, F, D, FD>
+impl<Zt, CS, F, const D: usize, const FD: usize> ZincPlusPiop<Zt, CS, F, D, FD>
 where
     Zt: ZincTypes<D, FD>,
     Zt::Int: ProjectableToField<F>,
@@ -810,13 +714,18 @@ where
         + Send
         + Sync
         + 'static,
-    U: Uair<Prime = Zt::Fmod> + 'static,
+    CS: ConstraintSystem<Field = F, Prime = Zt::Fmod>,
 {
     /// Zinc+ full PIOP prover.
     ///
     /// Runs all protocol steps in sequence and returns the assembled proof.
     /// For per-step control, start with [`Self::step0_fold`] and chain the
     /// individual `stepN_*` methods.
+    ///
+    /// The constraint argument (former `project_scalar` closure and the
+    /// ideal-check / sumcheck / multipoint-eval engine) lives inside the
+    /// caller-built `cs` frontend; the prover routes through the
+    /// [`ConstraintSystem`] seam.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn prove<const MLE_FIRST: bool, const CHECK_FOR_OVERFLOW: bool>(
         pp: &(
@@ -826,12 +735,9 @@ where
         ),
         trace: &UairTrace<'static, Zt::Int, Zt::Int, D, D>,
         num_vars: usize,
-        project_scalar: fn(
-            &U::Scalar,
-            &<F as crypto_primitives::HasPrimeFieldConfig>::Config,
-        ) -> DynamicPolynomialF<F>,
-    ) -> Result<Proof<F>, ProtocolError<F>> {
-        let committed = Self::step0_fold(trace)?.step1_commit(pp, num_vars)?;
+        cs: &CS,
+    ) -> Result<Proof<F, CS::ConstraintProof>, ProtocolError<F>> {
+        let committed = Self::step0_fold(trace, cs)?.step1_commit(pp, num_vars)?;
 
         let projected = if MLE_FIRST {
             committed.step2_mle_first()?
@@ -840,7 +746,7 @@ where
         };
 
         projected
-            .step_constraints(project_scalar)?
+            .step_constraints(cs)?
             .step7_lift_and_project()?
             .step8_pcs_open::<CHECK_FOR_OVERFLOW>()?
             .finish()
