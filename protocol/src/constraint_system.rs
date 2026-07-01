@@ -35,7 +35,10 @@ use crypto_primitives::{HasPrimeFieldConfig, PrimeField, Semiring};
 use zinc_piop::projections::ProjectedTrace;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_transcript::traits::{Transcribable, Transcript};
-use zinc_uair::UairSignature;
+use zinc_uair::{
+    UairSignature,
+    ideal::{Ideal, IdealCheck},
+};
 
 use crate::ProtocolError;
 
@@ -120,6 +123,30 @@ pub trait ConstraintSystem {
     /// `Proof`.
     type ConstraintProof: Transcribable;
 
+    /// Opaque frontend verifier tail-state, carried from
+    /// [`verify_constraints`](Self::verify_constraints) to
+    /// [`verify_lifted_evals`](Self::verify_lifted_evals).
+    ///
+    /// It holds whatever the frontend's multipoint-eval verify produced that
+    /// the per-family lifted-eval consistency check needs but the substrate
+    /// does not interpret (for UAIR: the multipoint-eval subclaims, the
+    /// per-family $\psi$-projecting elements, and the booleanity `alpha'`
+    /// challenge).
+    type VerifierClaims;
+
+    /// Source ideal type the frontend's projection closure maps into the field
+    /// ideal `IdealOverF` (UAIR: `IdealOrZero<U::Ideal>` for the $Q[X]$
+    /// family).
+    type IdealSource;
+
+    /// Source ideal type for the per-prime $F_q[X]$ families (UAIR:
+    /// `IdealOrZero<U::FqIdeal>`).
+    type FqIdealSource;
+
+    /// Source scalar type the frontend's `psi_a` scalar projection consumes
+    /// (UAIR: `U::Scalar`).
+    type Scalar;
+
     /// The trace/column layout (drives substrate commit / projection / lift /
     /// multipoint-eval). See [`Layout`].
     fn layout(&self) -> &Layout<Self::Prime>;
@@ -153,36 +180,67 @@ pub trait ConstraintSystem {
         projected_traces: &[ProjectedTrace<Self::Field>],
         field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
         num_vars: usize,
-    ) -> Result<
-        (Self::ConstraintProof, ConstraintEndpoints<Self::Field>),
-        ProtocolError<Self::Field>,
-    >;
+    ) -> Result<(Self::ConstraintProof, ConstraintEndpoints<Self::Field>), ProtocolError<Self::Field>>;
 
-    /// Verifier side: re-derive the shared evaluation endpoint(s) from the
-    /// sub-proof (running the frontend's multipoint-eval verify), for the
-    /// substrate to bind via lift-and-project + PCS verify.
+    /// Verifier side of the constraint argument (mirror of
+    /// [`prove_constraints`](Self::prove_constraints)).
     ///
-    /// PROPOSED — see [`Self::prove_constraints`]. (Wiring this is part of the
-    /// later verifier work; declaring it here does not modify the verifier.)
-    fn verify_constraints(
+    /// Runs the ideal-check verify, the `psi_a` scalar projection, the
+    /// constraint sumcheck + booleanity verify, and the lockstep
+    /// multipoint-eval verify — re-deriving the shared evaluation endpoint
+    /// [`ConstraintEndpoints`] the substrate binds via lift-and-project + PCS
+    /// verify. The opaque [`VerifierClaims`](Self::VerifierClaims) tail-state
+    /// carries the multipoint-eval subclaims (and, for UAIR, the per-family
+    /// projecting elements + `alpha'`) forward to
+    /// [`verify_lifted_evals`](Self::verify_lifted_evals).
+    ///
+    /// The `project_ideal` / `project_fq_ideal` / `project_scalar` closures are
+    /// frontend-specific projections (mirroring the current `verify()`
+    /// wrapper): they map the source ideal/scalar types into the field.
+    /// They are passed as params (not stored) so a verify-side frontend
+    /// need not be constructed with the prover's scalar map.
+    ///
+    /// `field_cfgs` are indexed by family (`[0] = Q[X]`, `[i] = q_i`).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn verify_constraints<IdealOverF>(
         &self,
         transcript: &mut impl Transcript,
         proof: &Self::ConstraintProof,
         field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
         num_vars: usize,
-    ) -> Result<ConstraintEndpoints<Self::Field>, ProtocolError<Self::Field>>;
+        project_ideal: impl Fn(
+            &Self::IdealSource,
+            &<Self::Field as HasPrimeFieldConfig>::Config,
+        ) -> IdealOverF,
+        project_fq_ideal: impl Fn(
+            &Self::FqIdealSource,
+            &<Self::Field as HasPrimeFieldConfig>::Config,
+        ) -> IdealOverF,
+        project_scalar: impl Fn(
+            &Self::Scalar,
+            &<Self::Field as HasPrimeFieldConfig>::Config,
+        ) -> DynamicPolynomialF<Self::Field>,
+    ) -> Result<(ConstraintEndpoints<Self::Field>, Self::VerifierClaims), ProtocolError<Self::Field>>
+    where
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<Self::Field>>;
 
-    /// Verifier hook: reconstruct the frontend-defined *virtual* column
-    /// evaluations (bit-op virtuals, booleanity `alpha'` bridge) at the
-    /// substrate's multipoint-eval endpoint `r_0`, from the committed columns'
-    /// lifted evaluations there.
+    /// Verifier hook: close the per-family multipoint-eval subclaims against
+    /// the substrate-assembled lifted evaluations at the shared endpoint `r_0`.
     ///
-    /// Virtual columns are not committed; this closes their subclaim at `r_0`.
-    /// A frontend without virtual columns (e.g. R1CS) returns an empty vector.
-    /// PROPOSED.
-    fn reconstruct_virtual_evals(
+    /// `per_family_all_lifted[i]` is family `i`'s FULL (public + witness,
+    /// layout-interleaved) lifted evals at `r_0`, assembled by the substrate.
+    /// The frontend runs, per family: the `psi_a` projection at its projecting
+    /// element, the bit-op-virtual reconstruction + the `alpha'` bridge append
+    /// (Q-family) / zero-pad (fq families), and
+    /// `MultipointEval::verify_subclaim`.
+    ///
+    /// A frontend without virtual columns (e.g. R1CS) still uses this to close
+    /// its single-family subclaim (or is a no-op if it terminates at a single
+    /// point directly).
+    fn verify_lifted_evals(
         &self,
-        committed_lifted_at_r0: &[DynamicPolynomialF<Self::Field>],
-        field_cfg: &<Self::Field as HasPrimeFieldConfig>::Config,
-    ) -> Vec<DynamicPolynomialF<Self::Field>>;
+        claims: &Self::VerifierClaims,
+        per_family_all_lifted: &[Vec<DynamicPolynomialF<Self::Field>>],
+        field_cfgs: &[<Self::Field as HasPrimeFieldConfig>::Config],
+    ) -> Result<(), ProtocolError<Self::Field>>;
 }

@@ -348,6 +348,7 @@ fn do_bench_e2e<Zt, U, IdealOverF>(
         + Send
         + Sync
         + 'static,
+    Zt::Fmod: Ord + num_traits::Zero + Default + Send + Sync,
     U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -440,6 +441,7 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         + Send
         + Sync
         + 'static,
+    Zt::Fmod: Ord + num_traits::Zero + Default + Send + Sync,
     U: Uair<Prime = Zt::Fmod> + 'static,
     IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
 {
@@ -549,6 +551,11 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     let sig = U::signature();
     let public_trace = trace.public(&sig);
 
+    let project_fq_ideal =
+        |_: &IdealOrZero<U::FqIdeal>, _: &<F as HasPrimeFieldConfig>::Config| -> IdealOverF {
+            unreachable!("bench UAIR has no F_q[X] constraints")
+        };
+
     let v_transcript = <piop!()>::step0_reconstruct_transcript::<IdealOverF>(
         pp,
         proof.clone(),
@@ -557,19 +564,6 @@ fn do_bench_steps<Zt, U, IdealOverF>(
     )
     .unwrap();
     let v_prime_projected = v_transcript.clone().step1_prime_projection().unwrap();
-    let v_ideal_checked = v_prime_projected
-        .clone()
-        .step2_ideal_check(project_ideal, |_, _| {
-            unreachable!("bench UAIR has no F_q[X] constraints")
-        })
-        .unwrap();
-    let v_eval_projected = v_ideal_checked
-        .clone()
-        .step3_eval_projection(project_scalar)
-        .unwrap();
-    let v_sumchecked = v_eval_projected.clone().step4_sumcheck_verify().unwrap();
-    let v_mp_evaled = v_sumchecked.clone().step5_multipoint_eval::<U>().unwrap();
-    let v_lifted = v_mp_evaled.clone().step6_lifted_evals::<U>().unwrap();
 
     step_bench!(
         "Verify" / "0: Transcript reconstruct",
@@ -588,42 +582,14 @@ fn do_bench_steps<Zt, U, IdealOverF>(
         run = |s| s.step1_prime_projection(),
     );
 
+    // Steps 2--7 now run behind the constraint-system seam + substrate
+    // lift/PCS (`finish_verify`): the granular per-step verifier states were
+    // collapsed in the UCS verifier refactor, so they are benched as one.
     step_bench!(
-        "Verify" / "2: Ideal check",
+        "Verify" / "2-7: Constraint verify + lift + PCS",
         setup = || v_prime_projected.clone(),
-        run = |s| s.step2_ideal_check(project_ideal, |_, _| {
-            unreachable!("bench UAIR has no F_q[X] constraints")
-        }),
-    );
-
-    step_bench!(
-        "Verify" / "3: Eval projection",
-        setup = || v_ideal_checked.clone(),
-        run = |s| s.step3_eval_projection(project_scalar),
-    );
-
-    step_bench!(
-        "Verify" / "4: Sumcheck verify",
-        setup = || v_eval_projected.clone(),
-        run = |s| s.step4_sumcheck_verify(),
-    );
-
-    step_bench!(
-        "Verify" / "5: Multi-point eval",
-        setup = || v_sumchecked.clone(),
-        run = |s| s.step5_multipoint_eval::<U>(),
-    );
-
-    step_bench!(
-        "Verify" / "6: Lifted evals",
-        setup = || v_mp_evaled.clone(),
-        run = |s| s.step6_lifted_evals::<U>(),
-    );
-
-    step_bench!(
-        "Verify" / "7: PCS verify",
-        setup = || v_lifted.clone(),
-        run = |s| s.step7_pcs_verify::<U, PERFORM_CHECKS>(),
+        run =
+            |s| s.finish_verify::<PERFORM_CHECKS>(project_scalar, project_ideal, project_fq_ideal,),
     );
 }
 
