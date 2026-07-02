@@ -11,7 +11,7 @@ use crypto_primitives::{
     ConstIntSemiring, Field, FromPrimitiveWithConfig, crypto_bigint_monty::MontyField,
 };
 use num_traits::Zero;
-use rand::{Rng, rng};
+use rand::prelude::*;
 use zinc_piop::random_field_sumcheck::{RFSumcheck, RFSumcheckProof};
 use zinc_poly::{
     mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
@@ -33,7 +33,7 @@ pub fn bench_simple_product<F, const LIMBS: usize>(
     MillerRabin: PrimalityTest<F::Integer>,
     for<'a> &'a F: Mul<&'a F, Output = F>,
 {
-    let mut rng = rng();
+    let mut rng = rand::rng();
     let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
     let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
     let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();

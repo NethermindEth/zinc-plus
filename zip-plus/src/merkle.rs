@@ -438,16 +438,15 @@ mod tests {
     use super::*;
     use crypto_bigint::Random;
     use crypto_primitives::crypto_bigint_int::Int;
-    use rand::rng;
 
     #[test]
     #[cfg_attr(miri, ignore)] // long running
     fn test_merkle_proof() {
         const N: usize = 3;
         let leaves_len = 1024;
-        let mut rng = rng();
+        let mut rng = rand::rng();
         let leaves_data = (0..leaves_len)
-            .map(|_| Int::random(&mut rng))
+            .map(|_| Int::random_from_rng(&mut rng))
             .collect::<Vec<Int<N>>>();
 
         let merkle_tree = MerkleTree::new(&[leaves_data.as_slice()]);

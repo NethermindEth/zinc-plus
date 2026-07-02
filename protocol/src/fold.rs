@@ -253,7 +253,7 @@ fn mle_eval_msb_first<F: PrimeField>(values: Vec<F>, gammas: &[F], one: &F) -> F
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, rng};
+    use rand::prelude::*;
     use zinc_transcript::traits::GenTranscribable;
 
     /// Build two MLEs (`BinaryRefPoly<D>` and `BinaryU64Poly<D>`) carrying the
@@ -337,7 +337,7 @@ mod tests {
         }
 
         // 4-entry input: enumerate all 16^4 = 65536 patterns is too much; sample.
-        let mut rng = rng();
+        let mut rng = rand::rng();
         for _ in 0..32 {
             let bits_list: Vec<u64> = (0..4).map(|_| rng.random::<u64>() & 0xF).collect();
             assert_split_matches::<4, 2>(bits_list);
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn split_ref_and_u64_match_random() {
-        let mut rng = rng();
+        let mut rng = rand::rng();
 
         for n_log in 0..=3 {
             let n = 1usize << n_log;

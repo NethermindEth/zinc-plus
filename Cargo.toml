@@ -24,14 +24,14 @@ publish = false
 
 blake3 = "1.8"
 criterion = "0.7.0"
-crypto-bigint = { version = "= 0.7.0-rc.9", features = ["zeroize"] }
-crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", rev = "aa65fab", features = ["std", "crypto_bigint", "rand"] }
+crypto-bigint = { version = "= 0.7.5", features = ["zeroize"] }
+crypto-primitives = { git = "https://github.com/NethermindEth/crypto-primitives.git", rev = "06d4276", features = ["std", "crypto_bigint", "rand"] }
 derive_more = { version = "2.1.1", features = ["full"] }
 itertools = "0.14"
 num-traits = "0.2"
 proptest = "1.9.0"
-rand = "0.9"
-rand_core = "0.9"
+rand = "0.10"
+rand_core = "0.10"
 rayon = { version = "1.10" }
 thiserror = "2.0"
 zinc-piop = { path = "piop/" }

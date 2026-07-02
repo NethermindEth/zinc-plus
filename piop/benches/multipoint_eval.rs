@@ -6,7 +6,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use crypto_primitives::{
     FromWithConfig, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
 };
-use rand::{Rng, rng};
+use rand::prelude::*;
 use zinc_piop::multipoint_eval::{MultipointEval, MultipointEvalFamilyInputs};
 
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
@@ -18,7 +18,7 @@ const FIELD_LIMBS: usize = 4;
 type F = MontyField<FIELD_LIMBS>;
 
 fn bench_multipoint_eval(c: &mut Criterion, num_vars: usize, num_cols: usize) {
-    let mut rng = rng();
+    let mut rng = rand::rng();
     let n = 1usize << num_vars;
     let params = format!("nvars={}/cols={}", num_vars, num_cols);
 

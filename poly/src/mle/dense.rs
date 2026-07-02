@@ -15,7 +15,6 @@ use crate::{
 };
 use crypto_primitives::{HasPrimeFieldConfig, Matrix, PrimeField, Ring, Semiring};
 use rand::{distr::StandardUniform, prelude::*};
-use rand_core::RngCore;
 use zinc_utils::{
     CHECKED, add, cfg_into_iter, inner_transparent_field::InnerTransparentField,
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField, sub,
@@ -365,7 +364,7 @@ where
     R: Send + Clone + Default,
     StandardUniform: Distribution<R>,
 {
-    fn rand<Rng: RngCore + ?Sized>(num_vars: usize, rng: &mut Rng) -> Self {
+    fn rand<G: Rng + ?Sized>(num_vars: usize, rng: &mut G) -> Self {
         (0..1 << num_vars).map(|_| rng.random::<R>()).collect()
     }
 }

@@ -138,7 +138,7 @@ mod tests {
     use crypto_primitives::{
         Field, FromWithConfig, HasPrimeFieldConfig, crypto_bigint_monty::MontyField,
     };
-    use rand::Rng;
+    use rand::prelude::*;
     use zinc_poly::utils::{build_eq_x_r_inner, build_next_c_r_mle};
 
     type F = MontyField<4>;

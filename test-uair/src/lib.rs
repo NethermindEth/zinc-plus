@@ -73,9 +73,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let mut a: Vec<DynamicPolynomialFS<R>> =
             vec![DynamicPolynomialFS::new(vec![R::from(rng.random::<i8>())])];
@@ -185,9 +185,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let a: DenseMultilinearExtension<DensePolynomial<R, 32>> =
             DenseMultilinearExtension::rand(num_vars, rng)
@@ -320,9 +320,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let int_col_u32: DenseMultilinearExtension<u32> =
             DenseMultilinearExtension::rand(num_vars, rng);
@@ -412,14 +412,14 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         /// Generate a random binary polynomial with the given number of 1-bits.
         fn random_binary_poly_with_popcount(
             popcount: u32,
-            rng: &mut (impl rand::RngCore + ?Sized),
+            rng: &mut (impl rand::Rng + ?Sized),
         ) -> BinaryPoly<32> {
             let mut positions: [u8; 32] =
                 core::array::from_fn(|i| u8::try_from(i).expect("can't fail"));
@@ -533,9 +533,9 @@ where
     type PolyCoeff = <BigLinearUair<R, P> as GenerateRandomTrace<32>>::PolyCoeff;
     type Int = <BigLinearUair<R, P> as GenerateRandomTrace<32>>::Int;
 
-    fn generate_random_trace<Rng: RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, Self::PolyCoeff, Self::Int, 32, 32> {
         BigLinearUair::<R, P>::generate_random_trace(num_vars, rng)
     }
@@ -655,14 +655,14 @@ where
     type Int = R;
 
     #[allow(clippy::needless_range_loop)]
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         /// Generate a random binary polynomial with the given number of 1-bits.
         fn random_binary_poly_with_popcount(
             popcount: u32,
-            rng: &mut (impl rand::RngCore + ?Sized),
+            rng: &mut (impl rand::Rng + ?Sized),
         ) -> BinaryPoly<32> {
             let mut positions: [u8; 32] =
                 core::array::from_fn(|i| u8::try_from(i).expect("can't fail"));
@@ -865,9 +865,9 @@ where
     type Int = R;
 
     // Witness: random b, derive a from a[i+1] = a[i] + b[i], set c[i] = b[i+2].
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let n = 1 << num_vars;
 
@@ -968,9 +968,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let n = 1usize << num_vars;
 
@@ -1070,9 +1070,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         let n = 1usize << num_vars;
         let w_u32: Vec<u32> = (0..n).map(|_| rng.next_u32()).collect();
@@ -1173,9 +1173,9 @@ where
     type PolyCoeff = R;
     type Int = R;
 
-    fn generate_random_trace<Rng: rand::RngCore + ?Sized>(
+    fn generate_random_trace<G: Rng + ?Sized>(
         num_vars: usize,
-        rng: &mut Rng,
+        rng: &mut G,
     ) -> UairTrace<'static, R, R, 32, 32> {
         // Build the witness column: random polynomials whose constant term
         // is forced to zero (so `phi_q(a)(0) = 0` regardless of `q`).
