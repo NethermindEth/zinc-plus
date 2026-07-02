@@ -19,10 +19,7 @@ const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
 
 type F = ConstMontyField<Params, { U128::LIMBS }>;
 
-fn generate_sumcheck_proof(
-    num_vars: usize,
-    mut rng: &mut impl Rng,
-) -> (usize, SumcheckProof<F>) {
+fn generate_sumcheck_proof(num_vars: usize, mut rng: &mut impl Rng) -> (usize, SumcheckProof<F>) {
     let mut transcript = Blake3Transcript::default();
 
     let ((poly_mles, poly_degree), products, _) =

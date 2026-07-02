@@ -14,10 +14,10 @@
 //!
 //! # Layout status
 //!
-//! Step R1 of `docs/r1cs-frontend-plan.md`: this type is defined and unit-tested
-//! standalone; [`R1csInstance`](crate::r1cs_frontend::R1csInstance) is switched
-//! over to it in step R2 (replacing the fixed-density matrix + the generic
-//! matrix-entry parameter).
+//! Step R1 of `docs/r1cs-frontend-plan.md`: this type is defined and
+//! unit-tested standalone; [`R1csInstance`](crate::r1cs_frontend::R1csInstance)
+//! is switched over to it in step R2 (replacing the fixed-density matrix + the
+//! generic matrix-entry parameter).
 
 use crypto_primitives::PrimeField;
 use zinc_utils::{add, sub};
@@ -96,7 +96,9 @@ impl<T> SparseMatrix<T> {
     pub fn iter_row(&self, r: usize) -> impl Iterator<Item = (usize, &T)> {
         let start = self.row_starts[r];
         let end = self.row_starts[add!(r, 1)];
-        self.entries[start..end].iter().map(|(col, val)| (*col, val))
+        self.entries[start..end]
+            .iter()
+            .map(|(col, val)| (*col, val))
     }
 
     /// Iterate all `(row, column, &value)` entries in row-major, column-sorted
@@ -190,10 +192,7 @@ mod tests {
         let f = |x: i64| F::from_with_cfg(&x, &cfg);
 
         // 2x3 matrix: row0 = 3*z0 + 5*z2, row1 = 7*z1.
-        let m = SparseMatrix::from_rows(
-            3,
-            vec![vec![(0usize, f(3)), (2, f(5))], vec![(1, f(7))]],
-        );
+        let m = SparseMatrix::from_rows(3, vec![vec![(0usize, f(3)), (2, f(5))], vec![(1, f(7))]]);
         let z = vec![f(2), f(4), f(6)];
         // row0: 3*2 + 5*6 = 36 ; row1: 7*4 = 28.
         assert_eq!(m.mul_vector(&z, &cfg), vec![f(36), f(28)]);

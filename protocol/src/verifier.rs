@@ -71,8 +71,9 @@ pub struct VerifierTranscriptReconstructed<
     /// $q'' := q_0$ and thus `proof_witness_lifted_evals[0]` is used for
     /// PCS verification.
     proof_witness_lifted_evals_pp: Option<Vec<DynamicPolynomialF<F>>>,
-    /// Fixed working field from `cs.working_field()` (`None` ⇒ sample at step 1,
-    /// as UAIR does). Mirror of the prover's `ProverFolded::working_field`.
+    /// Fixed working field from `cs.working_field()` (`None` ⇒ sample at step
+    /// 1, as UAIR does). Mirror of the prover's
+    /// `ProverFolded::working_field`.
     working_field: Option<F::Config>,
     _phantom: PhantomData<IdealOverF>,
 }

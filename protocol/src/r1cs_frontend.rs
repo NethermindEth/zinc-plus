@@ -70,7 +70,8 @@ use zinc_utils::{inner_transparent_field::InnerTransparentField, mul};
 /// constraint axis (`num_rows = 2^{s_x}`) and columns the variable axis
 /// (`num_cols = 2^{\text{num\_vars}}`). Entries are **field elements** in the
 /// fixed R1CS field `F` (ProveKit stores field elements; we mirror that), held
-/// in our variable-density [`SparseMatrix`](crate::r1cs_sparse_matrix::SparseMatrix).
+/// in our variable-density
+/// [`SparseMatrix`](crate::r1cs_sparse_matrix::SparseMatrix).
 ///
 /// `num_public_inputs` counts the public entries of $z$ **after** the leading
 /// constant $1$ at index `0`; the committed witness carries only the private
@@ -128,9 +129,9 @@ impl<F: PrimeField> R1csFrontend<F> {
     /// public prefix is $[1] \mathbin{+\!+} \text{public\_values}$. The witness
     /// (private) part of $z$ is committed as a single `int` column (with the
     /// public prefix slots zeroed in the committed column); public inputs are
-    /// bound *inside* the argument, not via substrate public columns. `field_cfg`
-    /// is the fixed prime field the relation lives over (and that the substrate
-    /// will use as its working field).
+    /// bound *inside* the argument, not via substrate public columns.
+    /// `field_cfg` is the fixed prime field the relation lives over (and
+    /// that the substrate will use as its working field).
     ///
     /// # Panics
     /// If `public_values.len() != instance.num_public_inputs`.
@@ -300,8 +301,9 @@ where
         &self.layout
     }
 
-    /// The relation is native over the fixed field `F`; hand it to the substrate
-    /// so it uses `F` as the working field rather than sampling a random prime.
+    /// The relation is native over the fixed field `F`; hand it to the
+    /// substrate so it uses `F` as the working field rather than sampling a
+    /// random prime.
     fn working_field(&self) -> Option<<Self::Field as HasPrimeFieldConfig>::Config> {
         Some(self.field_cfg.clone())
     }
@@ -313,15 +315,15 @@ where
     /// $[1, \text{io}]$).
     ///
     /// The **outer** sumcheck (degree 3) squeezes $\tau$ (length $s_x$) and
-    /// proves $\sum_x \mathrm{eq}(\tau, x)(\widetilde{Az} \cdot \widetilde{Bz} -
-    /// \widetilde{Cz})(x) = 0$ over the constraint hypercube, yielding $r_x$
-    /// internally; it then sends $\widetilde{Az}, \widetilde{Bz},
+    /// proves $\sum_x \mathrm{eq}(\tau, x)(\widetilde{Az} \cdot \widetilde{Bz}
+    /// - \widetilde{Cz})(x) = 0$ over the constraint hypercube, yielding
+    /// $r_x$ internally; it then sends $\widetilde{Az}, \widetilde{Bz},
     /// \widetilde{Cz}$ at $r_x$.
     ///
     /// The **inner** sumcheck (degree 2) binds those three evals, squeezes
     /// $r_A, r_B, r_C$, and proves $\sum_y m_{\text{row}}(y) \tilde z(y) = r_A
-    /// az_{rx} + r_B bz_{rx} + r_C cz_{rx}$ over the variable hypercube, yielding
-    /// $r_y = r_0$; it sends $\tilde z(r_y)$.
+    /// az_{rx} + r_B bz_{rx} + r_C cz_{rx}$ over the variable hypercube,
+    /// yielding $r_y = r_0$; it sends $\tilde z(r_y)$.
     #[allow(
         clippy::arithmetic_side_effects,
         clippy::too_many_lines,
@@ -812,7 +814,8 @@ mod tests {
         let projected = vec![ProjectedTrace::ColumnMajor(vec![col])];
 
         // A z = x, B z = x, C z = w; second row is the trivial 0 = 0 constraint.
-        let mat = |col: usize, val: F| SparseMatrix::from_rows(n, vec![vec![(col, val)], Vec::new()]);
+        let mat =
+            |col: usize, val: F| SparseMatrix::from_rows(n, vec![vec![(col, val)], Vec::new()]);
         let instance = R1csInstance {
             a: mat(1, f(1)),
             b: mat(1, f(1)),

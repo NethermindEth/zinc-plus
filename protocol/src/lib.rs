@@ -1701,12 +1701,13 @@ mod tests {
     // Spartan-style `R1csFrontend` instead of `UairFrontend`.
     //
 
-    /// Build the tiny satisfiable R1CS `z = [1, x, w]`, `w = x * x` (with `x=3`,
-    /// `w=9`), commit its witness column as a single unfolded `int` column, and
-    /// run the full `ZincPlusPiop` prove/verify. `num_public` chooses how much of
-    /// the public prefix `[1, x]` is treated as verifier-known `io` (the
-    /// constant `1` at z[0] is always public). `tamper` mutates the proof before
-    /// verification; `check` inspects the verifier result.
+    /// Build the tiny satisfiable R1CS `z = [1, x, w]`, `w = x * x` (with
+    /// `x=3`, `w=9`), commit its witness column as a single unfolded `int`
+    /// column, and run the full `ZincPlusPiop` prove/verify. `num_public`
+    /// chooses how much of the public prefix `[1, x]` is treated as
+    /// verifier-known `io` (the constant `1` at z[0] is always public).
+    /// `tamper` mutates the proof before verification; `check` inspects the
+    /// verifier result.
     fn do_r1cs_test(
         num_public: usize,
         tamper: impl Fn(&mut Proof<F, crate::r1cs_frontend::R1csConstraintProof<F>>),
@@ -1771,7 +1772,11 @@ mod tests {
 
         let pp = setup_pp::<TestZincTypesIprs>(
             num_vars,
-            (make_iprs(num_vars), make_iprs(num_vars), make_iprs(num_vars)),
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
         );
 
         type Piop = ZincPlusPiop<TestZincTypesIprs, R1csFrontend<F>, F, D, QUARTER_D>;
@@ -1823,8 +1828,8 @@ mod tests {
     }
 
     /// Tamper negative: perturbing the substrate-assembled witness lift breaks
-    /// `verify_lifted_evals`' `z(r_y) == z_pub(r_y) + z_wit(r_y)` reconciliation
-    /// (the resolved risk-(f) path).
+    /// `verify_lifted_evals`' `z(r_y) == z_pub(r_y) + z_wit(r_y)`
+    /// reconciliation (the resolved risk-(f) path).
     #[test]
     fn test_e2e_r1cs_tamper_lifted_eval() {
         do_r1cs_test(
