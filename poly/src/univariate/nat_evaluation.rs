@@ -183,7 +183,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crypto_bigint::{Odd, modular::MontyParams};
+    use crypto_bigint::{Odd, modular::FixedMontyParams};
     use crypto_primitives::{FromWithConfig, crypto_bigint_monty::F256};
     use itertools::Itertools;
 
@@ -192,12 +192,12 @@ mod tests {
     const LIMBS: usize = 4;
     type F = F256;
 
-    fn test_config() -> MontyParams<LIMBS> {
+    fn test_config() -> FixedMontyParams<LIMBS> {
         let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
             "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
         );
         let modulus = Odd::new(modulus).expect("modulus should be odd");
-        MontyParams::new(modulus)
+        FixedMontyParams::new(modulus)
     }
 
     #[test]

@@ -3,15 +3,15 @@ use std::ops::Range;
 use crypto_bigint::Random;
 use crypto_primitives::PrimeField;
 use itertools::Itertools;
-use rand::{Rng, RngCore};
+use rand::prelude::*;
 use zinc_poly::{mle::DenseMultilinearExtension, utils::ArithErrors};
 
 #[allow(clippy::arithmetic_side_effects, clippy::type_complexity)]
-pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
+pub(crate) fn rand_poly<F: PrimeField + Random, G: Rng>(
     nv: usize,
     num_multiplicands_range: Range<usize>,
     num_products: usize,
-    rng: &mut Rn,
+    rng: &mut G,
     config: &F::Config,
 ) -> Result<
     (
@@ -31,7 +31,7 @@ pub(crate) fn rand_poly<F: PrimeField + Random, Rn: RngCore>(
         degree = num_multiplicands.max(degree);
         let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng, config.clone());
 
-        let coefficient = F::try_random(rng).expect("sampling coefficient failed");
+        let coefficient = F::try_random_from_rng(rng).expect("sampling coefficient failed");
         mles.extend(product);
         sum += &(product_sum * &coefficient);
 
@@ -81,10 +81,10 @@ pub fn rand_poly_comb_fn<F: PrimeField>(
 /// Returns
 /// - the list of polynomials,
 /// - its sum of polynomial evaluations over the boolean hypercube.
-pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
+pub fn random_mle_list<F: PrimeField + Random, G: Rng>(
     nv: usize,
     degree: usize,
-    rng: &mut Rn,
+    rng: &mut G,
     config: F::Config,
 ) -> (Vec<DenseMultilinearExtension<F>>, F) {
     let mut multiplicands = (0..degree)
@@ -96,7 +96,7 @@ pub fn random_mle_list<F: PrimeField + Random, Rn: RngCore>(
         let mut product = F::one_with_cfg(&config);
 
         for e in multiplicands.iter_mut() {
-            let val = F::try_random(rng).expect("sampling random value failed");
+            let val = F::try_random_from_rng(rng).expect("sampling random value failed");
             e.push(val.clone());
             product *= &val;
         }

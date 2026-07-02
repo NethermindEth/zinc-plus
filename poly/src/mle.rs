@@ -65,5 +65,5 @@ pub trait MultilinearExtensionWithConfig<F: PrimeField> {
 pub trait MultilinearExtensionRand<T> {
     /// Outputs an `l`-variate multilinear extension where value of evaluations
     /// are sampled uniformly at random.
-    fn rand<R: RngCore + ?Sized>(num_vars: usize, rng: &mut R) -> Self;
+    fn rand<R: Rng + ?Sized>(num_vars: usize, rng: &mut R) -> Self;
 }

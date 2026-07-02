@@ -3,7 +3,7 @@ mod utils;
 use crypto_bigint::{U128, const_monty_params};
 use crypto_primitives::{Field, crypto_bigint_const_monty::ConstMontyField};
 use num_traits::{ConstOne, ConstZero, Zero};
-use rand::RngCore;
+use rand::prelude::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 use zinc_transcript::{Blake3Transcript, traits::Transcript};
 use zinc_utils::inner_transparent_field::InnerTransparentField;
@@ -19,9 +19,9 @@ const_monty_params!(Params, U128, "00000000b933426489189cb5b47d567f");
 
 type F = ConstMontyField<Params, { U128::LIMBS }>;
 
-fn generate_sumcheck_proof<Rn: RngCore>(
+fn generate_sumcheck_proof(
     num_vars: usize,
-    mut rng: &mut Rn,
+    mut rng: &mut impl Rng,
 ) -> (usize, SumcheckProof<F>) {
     let mut transcript = Blake3Transcript::default();
 

@@ -7,7 +7,7 @@ use crate::{
         project_trace_coeffs_column_major, project_trace_coeffs_row_major,
     },
 };
-use crypto_bigint::{Odd, modular::MontyParams};
+use crypto_bigint::{Odd, modular::FixedMontyParams};
 use crypto_primitives::{FromWithConfig, crypto_bigint_int::Int, crypto_bigint_monty::MontyField};
 use zinc_poly::univariate::{dense::DensePolynomial, dynamic::over_field::DynamicPolynomialF};
 use zinc_test_uair::GenerateRandomTrace;
@@ -16,12 +16,12 @@ use zinc_uair::{Uair, UairTrace, constraint_counter::count_constraints};
 
 pub const LIMBS: usize = 4;
 
-pub fn test_config() -> MontyParams<LIMBS> {
+pub fn test_config() -> FixedMontyParams<LIMBS> {
     let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
         "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
     );
     let modulus = Odd::new(modulus).expect("modulus should be odd");
-    MontyParams::new(modulus)
+    FixedMontyParams::new(modulus)
 }
 
 type F = MontyField<4>;

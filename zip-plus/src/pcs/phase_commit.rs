@@ -199,7 +199,7 @@ mod tests {
     };
     use itertools::Itertools;
     use num_traits::Zero;
-    use rand::{Rng, rng};
+    use rand::prelude::*;
     use std::sync::LazyLock;
     use zinc_poly::{mle::DenseMultilinearExtension, univariate::binary::BinaryPoly};
     use zinc_utils::CHECKED;
@@ -785,7 +785,7 @@ mod tests {
 
         type F = MontyField<K>;
 
-        let mut rng = rng();
+        let mut rng = rand::rng();
         let num_vars = 10;
         let poly_size: usize = 1 << num_vars;
         let param = TestZip::setup(poly_size, C.clone());
@@ -795,7 +795,7 @@ mod tests {
         let mle =
             DenseMultilinearExtension::from_evaluations_slice(num_vars, &evaluations, Zero::zero());
         let point: Vec<_> = (0..num_vars)
-            .map(|_| <Zt as ZipTypes>::Pt::random(&mut rng))
+            .map(|_| <Zt as ZipTypes>::Pt::random_from_rng(&mut rng))
             .collect();
 
         let (hint, comm) = TestZip::commit_single(&param, &mle).unwrap();

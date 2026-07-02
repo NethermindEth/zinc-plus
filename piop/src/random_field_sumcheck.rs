@@ -147,7 +147,7 @@ impl<F: PrimeField> From<SumCheckError<F>> for RFSumcheckError<F> {
 mod tests {
     use crypto_primitives::{Field, FromWithConfig, crypto_bigint_monty::MontyField};
     use num_traits::Zero;
-    use rand::{Rng, rng};
+    use rand::prelude::*;
     use zinc_poly::{
         mle::DenseMultilinearExtension, univariate::binary::BinaryPoly, utils::build_eq_x_r_inner,
     };
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_simple_product_random_field_sumcheck() {
         let witness_size = 1 << 3;
-        let mut rng = rng();
+        let mut rng = rand::rng();
         let a: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
         let b: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();
         let c: Vec<u32> = (0..witness_size).map(|_| rng.random()).collect();

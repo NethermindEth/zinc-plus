@@ -6,30 +6,30 @@ use std::hint::black_box;
 use criterion::{
     AxisScale, BenchmarkId, Criterion, PlotConfiguration, criterion_group, criterion_main,
 };
-use crypto_bigint::{Odd, modular::MontyParams};
+use crypto_bigint::{Odd, modular::FixedMontyParams};
 use crypto_primitives::{FromWithConfig, PrimeField, crypto_bigint_monty::F256};
 use itertools::Itertools;
 use num_traits::ConstZero;
-use rand::{Rng, rng};
+use rand::prelude::*;
 use zinc_poly::mle::{DenseMultilinearExtension, MultilinearExtensionWithConfig};
 
 const LIMBS: usize = 4;
 
 type F = F256;
 
-fn bench_config() -> MontyParams<LIMBS> {
+fn bench_config() -> FixedMontyParams<LIMBS> {
     let modulus = crypto_bigint::Uint::<LIMBS>::from_be_hex(
         "0000000000000000000000000000000000860995AE68FC80E1B1BD1E39D54B33",
     );
     let modulus = Odd::new(modulus).expect("modulus should be odd");
-    MontyParams::new(modulus)
+    FixedMontyParams::new(modulus)
 }
 
 #[allow(clippy::arithmetic_side_effects)]
 fn bench_dense_mle_evaluation(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
 ) {
-    let mut rng = rng();
+    let mut rng = rand::rng();
     for i in 0..20 {
         let v = DenseMultilinearExtension::from_evaluations_vec(
             i,
