@@ -375,6 +375,18 @@ pub struct ProjectedPublic<F> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedProductionShaNativeView {
+    /// Indexed as `[word_col][bit]`. Bit `row` stores that source bit.
+    pub word_bits: Box<[[u128; SHA_WORD_BITS]; ShaWordCol::COUNT]>,
+    /// Indexed as `[int_col][row]`.
+    pub int_values: Box<[[i64; SHA_ROW_COUNT]; ShaIntCol::COUNT]>,
+    /// Indexed as `[public_word_col][bit]`. Bit `row` stores that source bit.
+    pub public_word_bits: Box<[[u128; SHA_WORD_BITS]; ShaPublicWordCol::COUNT]>,
+    /// Indexed as `[public_col][row]`.
+    pub public_values: Box<[[i64; SHA_ROW_COUNT]; ShaPublicCol::COUNT]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreshIdealEvaluationCache<F: PrimeField> {
     pub r_ic: [F; SHA_ROW_VARS],
     pub ideal_polys: Vec<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES]>,
@@ -3640,6 +3652,28 @@ where
     prepare_sha_sumfold_basis_with_field_fallback(trace, public, field_cfg, false)
 }
 
+pub fn prepare_sha_sumfold_basis_from_native_view<F>(
+    native: &PreparedProductionShaNativeView,
+    field_cfg: &F::Config,
+) -> Result<PreparedShaSumFoldBasis<F>, ShaProjectionError>
+where
+    F: PrimeField,
+{
+    let _ = field_cfg;
+    let small_residual_basis = prepare_sha_small_residual_basis_direct_from_native(native).ok_or(
+        ShaProjectionError::NonCanonicalProofObject(
+            "prepared production SHA native residuals do not fit i64",
+        ),
+    )?;
+    Ok(PreparedShaSumFoldBasis {
+        residual_basis: PreparedShaResidualBasis { rows: Vec::new() },
+        small_residual_basis: Some(small_residual_basis),
+        booleanity_basis: PreparedShaBooleanityBasis {
+            canonical: prepare_canonical_sha_booleanity_basis_from_native(native)?,
+        },
+    })
+}
+
 fn prepare_sha_sumfold_basis_with_field_fallback<F>(
     trace: &ProjectedTrace<F>,
     public: &ProjectedPublic<F>,
@@ -4348,6 +4382,33 @@ where
     Some(PreparedShaSmallResidualBasis { rows })
 }
 
+fn prepare_sha_small_residual_basis_direct_from_native(
+    native: &PreparedProductionShaNativeView,
+) -> Option<PreparedShaSmallResidualBasis> {
+    let rows = (0..SHA_ROW_COUNT)
+        .map(|row| {
+            let residuals = small_residual_polys_at_row_from_source(
+                &NativeSmallShaResidualSource { native },
+                row,
+            )?;
+            let families: [Option<PreparedShaSmallResidualFamily>; NUM_SHA_RESIDUAL_FAMILIES] =
+                std::array::from_fn(|family_idx| {
+                    Some(PreparedShaSmallResidualFamily {
+                        terms: residuals[family_idx].terms()?,
+                    })
+                });
+            let families: Option<[PreparedShaSmallResidualFamily; NUM_SHA_RESIDUAL_FAMILIES]> =
+                families
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()?
+                    .try_into()
+                    .ok();
+            families.map(|families| PreparedShaSmallResidualRow { families })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(PreparedShaSmallResidualBasis { rows })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SmallResidualPoly {
     coeffs: [i128; SHA_RESIDUAL_EVAL_POWER_COUNT],
@@ -4495,6 +4556,122 @@ impl std::ops::Sub<&SmallResidualPoly> for SmallResidualPoly {
     }
 }
 
+trait SmallShaResidualSource {
+    fn word_bit(&self, col: ShaWordCol, row: usize, bit: usize) -> Option<i128>;
+
+    fn int_value(&self, col: ShaIntCol, row: usize) -> Option<i128>;
+
+    fn public_value(&self, col: ShaPublicCol, row: usize) -> Option<i128>;
+
+    fn has_public_word_bits(&self) -> bool {
+        false
+    }
+
+    fn public_word_bit(&self, _col: ShaPublicWordCol, _row: usize, _bit: usize) -> Option<i128> {
+        None
+    }
+}
+
+struct ProjectedSmallShaResidualSource<'a, F: ShaSmallFieldDecode> {
+    trace: &'a ProjectedTrace<F>,
+    public: &'a ProjectedPublic<F>,
+    field_cfg: &'a F::Config,
+}
+
+impl<F> SmallShaResidualSource for ProjectedSmallShaResidualSource<'_, F>
+where
+    F: ShaSmallFieldDecode,
+{
+    fn word_bit(&self, col: ShaWordCol, row: usize, bit: usize) -> Option<i128> {
+        if bit >= SHA_WORD_BITS || row >= SHA_ROW_COUNT {
+            return None;
+        }
+        let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+        let value = self.trace.bit_slices.get(table_idx)?.evaluations.get(row)?;
+        small_bit_value(value, self.field_cfg)
+    }
+
+    fn int_value(&self, col: ShaIntCol, row: usize) -> Option<i128> {
+        if row >= SHA_ROW_COUNT {
+            return None;
+        }
+        let value = self
+            .trace
+            .int_columns
+            .get(col.index())?
+            .evaluations
+            .get(row)?;
+        small_scalar_value(value, self.field_cfg)
+    }
+
+    fn public_value(&self, col: ShaPublicCol, row: usize) -> Option<i128> {
+        if row >= SHA_ROW_COUNT {
+            return None;
+        }
+        let value = self.public.columns.get(col.index())?.evaluations.get(row)?;
+        small_scalar_value(value, self.field_cfg)
+    }
+
+    fn has_public_word_bits(&self) -> bool {
+        self.public.bit_slices.is_some()
+    }
+
+    fn public_word_bit(&self, col: ShaPublicWordCol, row: usize, bit: usize) -> Option<i128> {
+        if bit >= SHA_WORD_BITS || row >= SHA_ROW_COUNT {
+            return None;
+        }
+        let bit_slices = self.public.bit_slices.as_ref()?;
+        let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+        let value = bit_slices.get(table_idx)?.evaluations.get(row)?;
+        small_bit_value(value, self.field_cfg)
+    }
+}
+
+struct NativeSmallShaResidualSource<'a> {
+    native: &'a PreparedProductionShaNativeView,
+}
+
+fn packed_bit(mask: u128, row: usize) -> Option<i128> {
+    if row >= SHA_ROW_COUNT {
+        return None;
+    }
+    Some(((mask >> row) & 1) as i128)
+}
+
+impl SmallShaResidualSource for NativeSmallShaResidualSource<'_> {
+    fn word_bit(&self, col: ShaWordCol, row: usize, bit: usize) -> Option<i128> {
+        if bit >= SHA_WORD_BITS {
+            return None;
+        }
+        packed_bit(self.native.word_bits[col.index()][bit], row)
+    }
+
+    fn int_value(&self, col: ShaIntCol, row: usize) -> Option<i128> {
+        if row >= SHA_ROW_COUNT {
+            return None;
+        }
+        Some(i128::from(self.native.int_values[col.index()][row]))
+    }
+
+    fn public_value(&self, col: ShaPublicCol, row: usize) -> Option<i128> {
+        if row >= SHA_ROW_COUNT {
+            return None;
+        }
+        Some(i128::from(self.native.public_values[col.index()][row]))
+    }
+
+    fn has_public_word_bits(&self) -> bool {
+        true
+    }
+
+    fn public_word_bit(&self, col: ShaPublicWordCol, row: usize, bit: usize) -> Option<i128> {
+        if bit >= SHA_WORD_BITS {
+            return None;
+        }
+        packed_bit(self.native.public_word_bits[col.index()][bit], row)
+    }
+}
+
 fn small_residual_polys_at_row<F>(
     trace: &ProjectedTrace<F>,
     public: &ProjectedPublic<F>,
@@ -4504,36 +4681,53 @@ fn small_residual_polys_at_row<F>(
 where
     F: ShaSmallFieldDecode,
 {
-    let a = small_word_poly(trace, ShaWordCol::A, row, field_cfg)?;
-    let e = small_word_poly(trace, ShaWordCol::E, row, field_cfg)?;
-    let sigma0 = small_word_poly(trace, ShaWordCol::Sigma0, row, field_cfg)?;
-    let sigma1 = small_word_poly(trace, ShaWordCol::Sigma1, row, field_cfg)?;
-    let w = small_word_poly(trace, ShaWordCol::W, row, field_cfg)?;
-    let small_sigma0 = small_word_poly(trace, ShaWordCol::SmallSigma0, row, field_cfg)?;
-    let small_sigma1 = small_word_poly(trace, ShaWordCol::SmallSigma1, row, field_cfg)?;
-    let ov_sigma0 = small_word_poly(trace, ShaWordCol::OvSigma0, row, field_cfg)?;
-    let ov_sigma1 = small_word_poly(trace, ShaWordCol::OvSigma1, row, field_cfg)?;
-    let ov_small_sigma0 = small_word_poly(trace, ShaWordCol::OvSmallSigma0, row, field_cfg)?;
-    let ov_small_sigma1 = small_word_poly(trace, ShaWordCol::OvSmallSigma1, row, field_cfg)?;
-    let w_shift9 = small_word_poly_shifted(trace, ShaWordCol::W, row, 9, field_cfg)?;
-    let w_shift16 = small_word_poly_shifted(trace, ShaWordCol::W, row, 16, field_cfg)?;
+    small_residual_polys_at_row_from_source(
+        &ProjectedSmallShaResidualSource {
+            trace,
+            public,
+            field_cfg,
+        },
+        row,
+    )
+}
+
+fn small_residual_polys_at_row_from_source<S>(
+    source: &S,
+    row: usize,
+) -> Option<[SmallResidualPoly; NUM_SHA_RESIDUAL_FAMILIES]>
+where
+    S: SmallShaResidualSource,
+{
+    let a = small_word_poly_from_source(source, ShaWordCol::A, row)?;
+    let e = small_word_poly_from_source(source, ShaWordCol::E, row)?;
+    let sigma0 = small_word_poly_from_source(source, ShaWordCol::Sigma0, row)?;
+    let sigma1 = small_word_poly_from_source(source, ShaWordCol::Sigma1, row)?;
+    let w = small_word_poly_from_source(source, ShaWordCol::W, row)?;
+    let small_sigma0 = small_word_poly_from_source(source, ShaWordCol::SmallSigma0, row)?;
+    let small_sigma1 = small_word_poly_from_source(source, ShaWordCol::SmallSigma1, row)?;
+    let ov_sigma0 = small_word_poly_from_source(source, ShaWordCol::OvSigma0, row)?;
+    let ov_sigma1 = small_word_poly_from_source(source, ShaWordCol::OvSigma1, row)?;
+    let ov_small_sigma0 = small_word_poly_from_source(source, ShaWordCol::OvSmallSigma0, row)?;
+    let ov_small_sigma1 = small_word_poly_from_source(source, ShaWordCol::OvSmallSigma1, row)?;
+    let w_shift9 = small_word_poly_shifted_from_source(source, ShaWordCol::W, row, 9)?;
+    let w_shift16 = small_word_poly_shifted_from_source(source, ShaWordCol::W, row, 16)?;
     let small_sigma0_shift1 =
-        small_word_poly_shifted(trace, ShaWordCol::SmallSigma0, row, 1, field_cfg)?;
+        small_word_poly_shifted_from_source(source, ShaWordCol::SmallSigma0, row, 1)?;
     let small_sigma1_shift14 =
-        small_word_poly_shifted(trace, ShaWordCol::SmallSigma1, row, 14, field_cfg)?;
-    let a_shift4 = small_word_poly_shifted(trace, ShaWordCol::A, row, 4, field_cfg)?;
-    let e_shift4 = small_word_poly_shifted(trace, ShaWordCol::E, row, 4, field_cfg)?;
-    let sigma0_shift3 = small_word_poly_shifted(trace, ShaWordCol::Sigma0, row, 3, field_cfg)?;
-    let sigma1_shift3 = small_word_poly_shifted(trace, ShaWordCol::Sigma1, row, 3, field_cfg)?;
-    let uef_shift3 = small_word_poly_shifted(trace, ShaWordCol::Uef, row, 3, field_cfg)?;
-    let uneg_eg_shift3 = small_word_poly_shifted(trace, ShaWordCol::UNegEg, row, 3, field_cfg)?;
-    let maj_shift3 = small_word_poly_shifted(trace, ShaWordCol::Maj, row, 3, field_cfg)?;
-    let public_k_shift3 = small_public_const_poly(public, ShaPublicCol::K, row + 3, field_cfg)?;
-    let comp_schedule = small_int_const_poly(trace, ShaIntCol::CompSchedule, row, field_cfg)?;
-    let comp_update_a = small_int_const_poly(trace, ShaIntCol::CompUpdateA, row, field_cfg)?;
-    let comp_update_e = small_int_const_poly(trace, ShaIntCol::CompUpdateE, row, field_cfg)?;
-    let comp_ff_a = small_int_const_poly(trace, ShaIntCol::CompFeedForwardA, row, field_cfg)?;
-    let comp_ff_e = small_int_const_poly(trace, ShaIntCol::CompFeedForwardE, row, field_cfg)?;
+        small_word_poly_shifted_from_source(source, ShaWordCol::SmallSigma1, row, 14)?;
+    let a_shift4 = small_word_poly_shifted_from_source(source, ShaWordCol::A, row, 4)?;
+    let e_shift4 = small_word_poly_shifted_from_source(source, ShaWordCol::E, row, 4)?;
+    let sigma0_shift3 = small_word_poly_shifted_from_source(source, ShaWordCol::Sigma0, row, 3)?;
+    let sigma1_shift3 = small_word_poly_shifted_from_source(source, ShaWordCol::Sigma1, row, 3)?;
+    let uef_shift3 = small_word_poly_shifted_from_source(source, ShaWordCol::Uef, row, 3)?;
+    let uneg_eg_shift3 = small_word_poly_shifted_from_source(source, ShaWordCol::UNegEg, row, 3)?;
+    let maj_shift3 = small_word_poly_shifted_from_source(source, ShaWordCol::Maj, row, 3)?;
+    let public_k_shift3 = small_public_const_poly_from_source(source, ShaPublicCol::K, row + 3)?;
+    let comp_schedule = small_int_const_poly_from_source(source, ShaIntCol::CompSchedule, row)?;
+    let comp_update_a = small_int_const_poly_from_source(source, ShaIntCol::CompUpdateA, row)?;
+    let comp_update_e = small_int_const_poly_from_source(source, ShaIntCol::CompUpdateE, row)?;
+    let comp_ff_a = small_int_const_poly_from_source(source, ShaIntCol::CompFeedForwardA, row)?;
+    let comp_ff_e = small_int_const_poly_from_source(source, ShaIntCol::CompFeedForwardE, row)?;
 
     let mut r0 = SmallResidualPoly::zero();
     r0.add_sparse_shifted_assign(&a, &[10, 19, 30], 1);
@@ -4559,7 +4753,7 @@ where
     r3.add_scaled_assign(&small_sigma1, -1);
     r3.add_scaled_assign(&ov_small_sigma1, -2);
 
-    let mu_packed = small_word_poly(trace, ShaWordCol::MuPacked, row, field_cfg)?;
+    let mu_packed = small_word_poly_from_source(source, ShaWordCol::MuPacked, row)?;
     let mu_shift2 = mu_packed.shift_r_c(2);
     let mu_shift5 = mu_packed.shift_r_c(5);
     let mu_shift8 = mu_packed.shift_r_c(8);
@@ -4610,34 +4804,34 @@ where
     r6.add_scaled_assign(&mu_e, 1);
     r6.add_scaled_assign(&comp_update_e, 1);
 
-    let s_init = small_public_scalar_shifted(public, ShaPublicCol::SInit, row, 0, field_cfg)?;
-    let s_msg = small_public_scalar_shifted(public, ShaPublicCol::SMsg, row, 0, field_cfg)?;
-    let s_sched = small_public_scalar_shifted(public, ShaPublicCol::SSched, row, 0, field_cfg)?;
-    let s_upd = small_public_scalar_shifted(public, ShaPublicCol::SUpd, row, 0, field_cfg)?;
-    let s_ff = small_public_scalar_shifted(public, ShaPublicCol::SFf, row, 0, field_cfg)?;
-    let s_out = small_public_scalar_shifted(public, ShaPublicCol::SOut, row, 0, field_cfg)?;
+    let s_init = small_public_scalar_shifted_from_source(source, ShaPublicCol::SInit, row, 0)?;
+    let s_msg = small_public_scalar_shifted_from_source(source, ShaPublicCol::SMsg, row, 0)?;
+    let s_sched = small_public_scalar_shifted_from_source(source, ShaPublicCol::SSched, row, 0)?;
+    let s_upd = small_public_scalar_shifted_from_source(source, ShaPublicCol::SUpd, row, 0)?;
+    let s_ff = small_public_scalar_shifted_from_source(source, ShaPublicCol::SFf, row, 0)?;
+    let s_out = small_public_scalar_shifted_from_source(source, ShaPublicCol::SOut, row, 0)?;
 
     let mut r7 = SmallResidualPoly::zero();
     let mut a_minus_pin =
-        a.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?;
+        a.clone() - &small_public_word_or_const_poly_from_source(source, ShaPublicCol::PAIn, row)?;
     r7.add_scaled_assign(&a_minus_pin, s_init);
     a_minus_pin =
-        a.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PAOut, row, field_cfg)?;
+        a.clone() - &small_public_word_or_const_poly_from_source(source, ShaPublicCol::PAOut, row)?;
     r7.add_scaled_assign(&a_minus_pin, s_out);
 
     let mut r8 = SmallResidualPoly::zero();
     let mut e_minus_pin =
-        e.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?;
+        e.clone() - &small_public_word_or_const_poly_from_source(source, ShaPublicCol::PEIn, row)?;
     r8.add_scaled_assign(&e_minus_pin, s_init);
     e_minus_pin =
-        e.clone() - &small_public_word_or_const_poly(public, ShaPublicCol::PEOut, row, field_cfg)?;
+        e.clone() - &small_public_word_or_const_poly_from_source(source, ShaPublicCol::PEOut, row)?;
     r8.add_scaled_assign(&e_minus_pin, s_out);
 
     let mut r9 = SmallResidualPoly::zero();
     r9.add_scaled_assign(&a_shift4, 1);
     r9.add_scaled_assign(&a, -1);
     r9.add_scaled_assign(
-        &small_public_const_poly(public, ShaPublicCol::PAIn, row, field_cfg)?,
+        &small_public_const_poly_from_source(source, ShaPublicCol::PAIn, row)?,
         -1,
     );
     r9.add_scaled_assign(&mu_ff_a, 1);
@@ -4647,7 +4841,7 @@ where
     r10.add_scaled_assign(&e_shift4, 1);
     r10.add_scaled_assign(&e, -1);
     r10.add_scaled_assign(
-        &small_public_const_poly(public, ShaPublicCol::PEIn, row, field_cfg)?,
+        &small_public_const_poly_from_source(source, ShaPublicCol::PEIn, row)?,
         -1,
     );
     r10.add_scaled_assign(&mu_ff_e, 1);
@@ -4655,7 +4849,7 @@ where
 
     let mut r11_arg = w.clone();
     r11_arg.add_scaled_assign(
-        &small_public_word_or_const_poly(public, ShaPublicCol::Message, row, field_cfg)?,
+        &small_public_word_or_const_poly_from_source(source, ShaPublicCol::Message, row)?,
         -1,
     );
     let r11 = r11_arg.scaled(s_msg);
@@ -4686,10 +4880,7 @@ where
     let _ = field_cfg;
     let bit = F::bit_if_canonical(value)?;
     #[cfg(debug_assertions)]
-    debug_assert_eq!(
-        F::from_with_cfg(if bit { 1 } else { 0 }, field_cfg),
-        *value
-    );
+    debug_assert_eq!(F::from_with_cfg(if bit { 1 } else { 0 }, field_cfg), *value);
     Some(if bit { 1 } else { 0 })
 }
 
@@ -4718,77 +4909,91 @@ where
     small_bit_value(value, field_cfg)
 }
 
+fn small_bit_at_shifted_or_zero_from_source<S>(
+    source: &S,
+    col: ShaWordCol,
+    row: usize,
+    shift: usize,
+    bit: usize,
+) -> Option<i128>
+where
+    S: SmallShaResidualSource,
+{
+    if bit >= SHA_WORD_BITS {
+        return None;
+    }
+    let Some(shifted) = row.checked_add(shift) else {
+        return Some(0);
+    };
+    if shifted >= SHA_ROW_COUNT {
+        return Some(0);
+    }
+    source.word_bit(col, shifted, bit)
+}
+
 fn small_double_bool_or_mul(bit: i128) -> i128 {
     bit * 2
 }
 
-fn small_word_poly<F>(
-    trace: &ProjectedTrace<F>,
+fn small_word_poly_from_source<S>(
+    source: &S,
     col: ShaWordCol,
     row: usize,
-    field_cfg: &F::Config,
 ) -> Option<SmallResidualPoly>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
     if row >= SHA_ROW_COUNT {
         return Some(SmallResidualPoly::zero());
     }
-    let col_idx = col.index();
     let mut out = SmallResidualPoly::zero();
     out.len = SHA_WORD_BITS;
     for bit in 0..SHA_WORD_BITS {
-        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
-        let value = trace.bit_slices.get(table_idx)?.evaluations.get(row)?;
-        out.coeffs[bit] = small_bit_value(value, field_cfg)?;
+        out.coeffs[bit] = source.word_bit(col, row, bit)?;
     }
     out.trim();
     Some(out)
 }
 
-fn small_word_poly_shifted<F>(
-    trace: &ProjectedTrace<F>,
+fn small_word_poly_shifted_from_source<S>(
+    source: &S,
     col: ShaWordCol,
     row: usize,
     shift: usize,
-    field_cfg: &F::Config,
 ) -> Option<SmallResidualPoly>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
     match row.checked_add(shift) {
-        Some(shifted) if shifted < SHA_ROW_COUNT => small_word_poly(trace, col, shifted, field_cfg),
+        Some(shifted) if shifted < SHA_ROW_COUNT => {
+            small_word_poly_from_source(source, col, shifted)
+        }
         _ => Some(SmallResidualPoly::zero()),
     }
 }
 
-fn small_int_const_poly<F>(
-    trace: &ProjectedTrace<F>,
+fn small_int_const_poly_from_source<S>(
+    source: &S,
     col: ShaIntCol,
     row: usize,
-    field_cfg: &F::Config,
 ) -> Option<SmallResidualPoly>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
     if row >= SHA_ROW_COUNT {
         return Some(SmallResidualPoly::zero());
     }
-    let value = trace.int_columns.get(col.index())?.evaluations.get(row)?;
-    Some(SmallResidualPoly::constant(small_scalar_value(
-        value, field_cfg,
-    )?))
+    Some(SmallResidualPoly::constant(source.int_value(col, row)?))
 }
 
-fn small_public_scalar_shifted<F>(
-    public: &ProjectedPublic<F>,
+fn small_public_scalar_shifted_from_source<S>(
+    source: &S,
     col: ShaPublicCol,
     row: usize,
     shift: usize,
-    field_cfg: &F::Config,
 ) -> Option<i128>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
     let Some(shifted) = row.checked_add(shift) else {
         return Some(0);
@@ -4796,49 +5001,43 @@ where
     if shifted >= SHA_ROW_COUNT {
         return Some(0);
     }
-    let value = public.columns.get(col.index())?.evaluations.get(shifted)?;
-    small_scalar_value(value, field_cfg)
+    source.public_value(col, shifted)
 }
 
-fn small_public_const_poly<F>(
-    public: &ProjectedPublic<F>,
+fn small_public_const_poly_from_source<S>(
+    source: &S,
     col: ShaPublicCol,
     row: usize,
-    field_cfg: &F::Config,
 ) -> Option<SmallResidualPoly>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
-    Some(SmallResidualPoly::constant(small_public_scalar_shifted(
-        public, col, row, 0, field_cfg,
-    )?))
+    Some(SmallResidualPoly::constant(
+        small_public_scalar_shifted_from_source(source, col, row, 0)?,
+    ))
 }
 
-fn small_public_word_or_const_poly<F>(
-    public: &ProjectedPublic<F>,
+fn small_public_word_or_const_poly_from_source<S>(
+    source: &S,
     col: ShaPublicCol,
     row: usize,
-    field_cfg: &F::Config,
 ) -> Option<SmallResidualPoly>
 where
-    F: ShaSmallFieldDecode,
+    S: SmallShaResidualSource,
 {
     let Some(word_col) = col.public_word_col() else {
-        return small_public_const_poly(public, col, row, field_cfg);
+        return small_public_const_poly_from_source(source, col, row);
     };
-    let Some(bit_slices) = &public.bit_slices else {
-        return small_public_const_poly(public, col, row, field_cfg);
+    if !source.has_public_word_bits() {
+        return small_public_const_poly_from_source(source, col, row);
     };
     if row >= SHA_ROW_COUNT {
         return Some(SmallResidualPoly::zero());
     }
-    let col_idx = word_col.index();
     let mut out = SmallResidualPoly::zero();
     out.len = SHA_WORD_BITS;
     for bit in 0..SHA_WORD_BITS {
-        let table_idx = bit_slice_index(col_idx, bit, SHA_WORD_BITS);
-        let value = bit_slices.get(table_idx)?.evaluations.get(row)?;
-        out.coeffs[bit] = small_bit_value(value, field_cfg)?;
+        out.coeffs[bit] = source.public_word_bit(word_col, row, bit)?;
     }
     out.trim();
     Some(out)
@@ -4944,6 +5143,89 @@ where
                         0,
                         bit,
                         field_cfg,
+                    )
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+
+            for (offset, value) in [ch1, ch2, maj].into_iter().enumerate() {
+                if value == 1 {
+                    source_row_bits[virtual_base + bit * 3 + offset] |= 1u128 << row;
+                } else if value != 0 {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    Ok(Some(PreparedCanonicalShaBooleanityBasis {
+        source_row_bits: source_row_bits.into_boxed_slice(),
+    }))
+}
+
+fn prepare_canonical_sha_booleanity_basis_from_native(
+    native: &PreparedProductionShaNativeView,
+) -> Result<Option<PreparedCanonicalShaBooleanityBasis>, ShaProjectionError> {
+    let source_count = ShaWordCol::COUNT * SHA_WORD_BITS + 3 * SHA_WORD_BITS;
+    let mut source_row_bits = vec![0u128; source_count];
+    for col_idx in 0..ShaWordCol::COUNT {
+        for bit in 0..SHA_WORD_BITS {
+            source_row_bits[col_idx * SHA_WORD_BITS + bit] = native.word_bits[col_idx][bit];
+        }
+    }
+
+    let source = NativeSmallShaResidualSource { native };
+    let virtual_base = ShaWordCol::COUNT * SHA_WORD_BITS;
+    for row in 0..SHA_ROW_COUNT {
+        for bit in 0..SHA_WORD_BITS {
+            let ch1 = small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::E, row, 2, bit)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::E, row, 1, bit)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::Uef, row, 2, bit)
+                        .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+            let ch2 = small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::E, row, 2, bit)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::E, row, 0, bit)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero_from_source(
+                        &source,
+                        ShaWordCol::UNegEg,
+                        row,
+                        2,
+                        bit,
+                    )
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                )
+                + small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero_from_source(
+                        &source,
+                        ShaWordCol::Ch2Comp,
+                        row,
+                        0,
+                        bit,
+                    )
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                );
+            let maj = small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::A, row, 0, bit)
+                .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::A, row, 1, bit)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                + small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::A, row, 2, bit)
+                    .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero_from_source(&source, ShaWordCol::Maj, row, 2, bit)
+                        .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
+                )
+                - small_double_bool_or_mul(
+                    small_bit_at_shifted_or_zero_from_source(
+                        &source,
+                        ShaWordCol::MajComp,
+                        row,
+                        0,
+                        bit,
                     )
                     .ok_or(ShaProjectionError::BitIndexOutOfRange { bit })?,
                 );

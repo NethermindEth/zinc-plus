@@ -43,14 +43,14 @@ use zinc_piop::{
     neutron_nova::SumFoldError,
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
-        NUM_SHA_RESIDUAL_FAMILIES, PreparedShaQuadraticPrefixArtifacts, PreparedShaSumFoldBasis,
-        ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
-        SHA_WORD_BITS, ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource,
-        ShaIntCol, ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError,
-        ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode,
-        ShaSuffixScannerField, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
-        bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
-        build_folded_row_sumcheck_group,
+        NUM_SHA_RESIDUAL_FAMILIES, PreparedProductionShaNativeView,
+        PreparedShaQuadraticPrefixArtifacts, PreparedShaSumFoldBasis, ProjectedPublic,
+        ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
+        ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol,
+        ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol,
+        ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode, ShaSuffixScannerField,
+        ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
+        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
         build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim,
         build_sha_lambda_powers, build_sha_residual_eval_powers,
@@ -60,8 +60,8 @@ use zinc_piop::{
         build_sha_sumfold_quadratic_prefix_artifacts_from_bases, derive_instance_fold_claim,
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
         folded_row_integrand_sum, is_production_sha_booleanity_sources,
-        prepare_sha_sumfold_basis_production_fast, production_sha_booleanity_sources,
-        production_sha_nonzero_families,
+        prepare_sha_sumfold_basis_from_native_view, prepare_sha_sumfold_basis_production_fast,
+        production_sha_booleanity_sources, production_sha_nonzero_families,
         sha_int_at_point_with_weights_unchecked, sha_public_at_point,
         sha_public_at_point_with_weights,
         sha_word_bits_at_point_with_weights_inner_product_unchecked,
@@ -368,6 +368,28 @@ where
     >
     where
         Self: Sized;
+
+    fn project_production_sha_witness_with_native_view(
+        shape: &UairShape<Self>,
+        public_trace: &UairTrace<'_, Zt::Int, Zt::Int, D>,
+        witness_trace: &UairTrace<'_, Zt::Int, Zt::Int, D>,
+        field_cfg: &F::Config,
+    ) -> Result<
+        (
+            ProjectedTrace<F>,
+            ProjectedPublic<F>,
+            ProductionShaWitnessPolys<Zt, D>,
+            Option<PreparedProductionShaNativeView>,
+        ),
+        ProductionShaError<F>,
+    >
+    where
+        Self: Sized,
+    {
+        let (trace, public, witness_polys) =
+            Self::project_production_sha_witness(shape, public_trace, witness_trace, field_cfg)?;
+        Ok((trace, public, witness_polys, None))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1693,15 +1715,26 @@ where
         .map(|witness| {
             let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
             let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
-            let (trace, public, witness_polys) =
-                U::project_production_sha_witness(shape, &public_trace, &witness_trace, field_cfg)?;
+            let (trace, public, witness_polys, native_view) =
+                U::project_production_sha_witness_with_native_view(
+                    shape,
+                    &public_trace,
+                    &witness_trace,
+                    field_cfg,
+                )?;
             let sumfold_basis = tracing::info_span!(
                 target: "zinc_protocol::production_sha",
                 "prepare_sumfold_basis",
                 side = "prepare",
                 phase = "prepare_sumfold_basis",
             )
-            .in_scope(|| prepare_sha_sumfold_basis_production_fast(&trace, &public, field_cfg))?;
+            .in_scope(|| {
+                if let Some(native_view) = native_view.as_ref() {
+                    prepare_sha_sumfold_basis_from_native_view(native_view, field_cfg)
+                } else {
+                    prepare_sha_sumfold_basis_production_fast(&trace, &public, field_cfg)
+                }
+            })?;
             Ok(PreparedProductionShaProverInstance {
                 public_trace: own_uair_trace(&public_trace),
                 instance: ProductionShaProverInstance {
@@ -10564,7 +10597,7 @@ mod tests {
     };
     use zinc_piop::neutron_nova::{
         SHA_ROW_COUNT, SHA_WORD_BITS, expression_folded_row_sum,
-        expression_folded_row_sum_with_vectors, fold_projected_traces,
+        expression_folded_row_sum_with_vectors, fold_projected_traces, prepare_sha_sumfold_basis,
     };
     use zinc_poly::mle::MultilinearExtensionWithConfig;
     use zinc_poly::univariate::{binary::BinaryPolyInnerProduct, dense::DensePolyInnerProduct};
@@ -10951,6 +10984,162 @@ mod tests {
         mle_table_from_columns(columns)
     }
 
+    fn sha_int_to_i64<G: PrimeField>(value: &ShaInt) -> Result<i64, ProductionShaError<G>> {
+        use crypto_primitives::IntRing;
+        let (abs, is_negative) = if value.is_negative() {
+            (
+                value
+                    .checked_abs()
+                    .ok_or(ProductionShaError::NonCanonicalProofObject(
+                        "production SHA native int value does not fit i64",
+                    ))?,
+                true,
+            )
+        } else {
+            (*value, false)
+        };
+        let mut magnitude = 0u64;
+        for (idx, &word) in abs.as_uint().as_words().iter().enumerate() {
+            let word = word as u64;
+            if idx == 0 {
+                magnitude = word;
+            } else if word != 0 {
+                return Err(ProductionShaError::NonCanonicalProofObject(
+                    "production SHA native int value does not fit i64",
+                ));
+            }
+        }
+        let magnitude = i64::try_from(magnitude).map_err(|_| {
+            ProductionShaError::NonCanonicalProofObject(
+                "production SHA native int value does not fit i64",
+            )
+        })?;
+        if is_negative {
+            magnitude
+                .checked_neg()
+                .ok_or(ProductionShaError::NonCanonicalProofObject(
+                    "production SHA native int value does not fit i64",
+                ))
+        } else {
+            Ok(magnitude)
+        }
+    }
+
+    fn project_binary_source_with_bits<F: PrimeField>(
+        col: &DenseMultilinearExtension<BinaryPoly<TEST_DEGREE_PLUS_ONE>>,
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> Result<(Vec<Vec<F>>, [u128; SHA_WORD_BITS]), ProductionShaError<F>> {
+        if col.evaluations.len() < SHA_ROW_COUNT {
+            return Err(ProductionShaError::LengthMismatch {
+                label: "SHA binary source rows",
+                got: col.evaluations.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let mut packed = [0u128; SHA_WORD_BITS];
+        let mut projected = Vec::with_capacity(SHA_ROW_COUNT);
+        for (row, poly) in col.evaluations.iter().take(SHA_ROW_COUNT).enumerate() {
+            let mut row_bits = Vec::with_capacity(SHA_WORD_BITS);
+            let mut seen_bits = 0usize;
+            for (bit_idx, bit) in poly.iter().take(SHA_WORD_BITS).enumerate() {
+                seen_bits += 1;
+                if bit.into_inner() {
+                    packed[bit_idx] |= 1u128 << row;
+                    row_bits.push(one.clone());
+                } else {
+                    row_bits.push(zero.clone());
+                }
+            }
+            if seen_bits != SHA_WORD_BITS {
+                return Err(ProductionShaError::LengthMismatch {
+                    label: "SHA binary source bits",
+                    got: seen_bits,
+                    expected: SHA_WORD_BITS,
+                });
+            }
+            projected.push(row_bits);
+        }
+        Ok((projected, packed))
+    }
+
+    fn project_int_source_with_values<F: TestShaField>(
+        col: &DenseMultilinearExtension<ShaInt>,
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> Result<(Vec<F>, [i64; SHA_ROW_COUNT]), ProductionShaError<F>> {
+        if col.evaluations.len() < SHA_ROW_COUNT {
+            return Err(ProductionShaError::LengthMismatch {
+                label: "SHA int source rows",
+                got: col.evaluations.len(),
+                expected: SHA_ROW_COUNT,
+            });
+        }
+        let mut projected = Vec::with_capacity(SHA_ROW_COUNT);
+        let mut native = [0i64; SHA_ROW_COUNT];
+        for (row, value) in col.evaluations.iter().take(SHA_ROW_COUNT).enumerate() {
+            projected.push(F::from_sha_int(value, field_cfg));
+            native[row] = sha_int_to_i64::<F>(value)?;
+        }
+        Ok((projected, native))
+    }
+
+    fn packed_word_row_value(bits: &[u128; SHA_WORD_BITS], row: usize) -> i64 {
+        let mut value = 0i64;
+        for (bit, mask) in bits.iter().enumerate() {
+            if ((mask >> row) & 1) == 1 {
+                value |= 1i64 << bit;
+            }
+        }
+        value
+    }
+
+    fn production_sha_selector_expected_i64(selector: ShaPublicCol, row: usize) -> i64 {
+        match selector {
+            ShaPublicCol::SInit if row < 4 => 1,
+            ShaPublicCol::SMsg if row < 16 => 1,
+            ShaPublicCol::SSched if row < 48 => 1,
+            ShaPublicCol::SUpd if row < 64 => 1,
+            ShaPublicCol::SFf if (64..68).contains(&row) => 1,
+            ShaPublicCol::SOut if (68..72).contains(&row) => 1,
+            _ => 0,
+        }
+    }
+
+    fn native_public_values_from_bits(
+        pa_a: &[u128; SHA_WORD_BITS],
+        pa_e: &[u128; SHA_WORD_BITS],
+        message: &[u128; SHA_WORD_BITS],
+    ) -> [[i64; SHA_ROW_COUNT]; ShaPublicCol::COUNT] {
+        let mut columns = [[0i64; SHA_ROW_COUNT]; ShaPublicCol::COUNT];
+        for row in 0..SHA_ROW_COUNT {
+            columns[ShaPublicCol::K.index()][row] = if (3..67).contains(&row) {
+                i64::from(SHA256_ROUND_CONSTANTS[row - 3])
+            } else {
+                0
+            };
+            columns[ShaPublicCol::PAIn.index()][row] = packed_word_row_value(pa_a, row);
+            columns[ShaPublicCol::PEIn.index()][row] = packed_word_row_value(pa_e, row);
+            columns[ShaPublicCol::PAOut.index()][row] = packed_word_row_value(pa_a, row);
+            columns[ShaPublicCol::PEOut.index()][row] = packed_word_row_value(pa_e, row);
+            columns[ShaPublicCol::Message.index()][row] = packed_word_row_value(message, row);
+        }
+        for selector in [
+            ShaPublicCol::SInit,
+            ShaPublicCol::SMsg,
+            ShaPublicCol::SSched,
+            ShaPublicCol::SUpd,
+            ShaPublicCol::SFf,
+            ShaPublicCol::SOut,
+        ] {
+            for row in 0..SHA_ROW_COUNT {
+                columns[selector.index()][row] =
+                    production_sha_selector_expected_i64(selector, row);
+            }
+        }
+        columns
+    }
+
     impl<F: TestShaField> ProductionShaProjectionAdapter<TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>
         for Sha256CompressionSliceUair<ShaInt>
     {
@@ -11104,6 +11293,167 @@ mod tests {
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 },
+            ))
+        }
+
+        fn project_production_sha_witness_with_native_view(
+            _shape: &UairShape<Self>,
+            public_trace: &UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
+            witness_trace: &UairTrace<'_, ShaInt, ShaInt, TEST_DEGREE_PLUS_ONE>,
+            field_cfg: &<F as PrimeField>::Config,
+        ) -> Result<
+            (
+                ProjectedTrace<F>,
+                ProjectedPublic<F>,
+                ProductionShaWitnessPolys<TestShaZincTypes, TEST_DEGREE_PLUS_ONE>,
+                Option<PreparedProductionShaNativeView>,
+            ),
+            ProductionShaError<F>,
+        > {
+            let word_sources = [
+                sha256_cols::W_A,
+                sha256_cols::W_E,
+                sha256_cols::W_SIG0,
+                sha256_cols::W_SIG1,
+                sha256_cols::W_W,
+                sha256_cols::W_LSIG0,
+                sha256_cols::W_LSIG1,
+                sha256_cols::W_U_EF,
+                sha256_cols::W_U_NEG_E_G,
+                sha256_cols::W_MAJ,
+                sha256_cols::W_MU_PACKED,
+                sha256_cols::PA_OV_SIG0,
+                sha256_cols::PA_OV_SIG1,
+                sha256_cols::PA_OV_LSIG0,
+                sha256_cols::PA_OV_LSIG1,
+                sha256_cols::PA_R_CH2_COMP,
+                sha256_cols::PA_R_MAJ_COMP,
+            ];
+            let int_sources = [
+                sha256_cols::PA_C_C7,
+                sha256_cols::PA_C_C8,
+                sha256_cols::PA_C_C9,
+                sha256_cols::PA_C_FF_A,
+                sha256_cols::PA_C_FF_E,
+            ];
+
+            let word_projection = word_sources
+                .iter()
+                .map(|&col| {
+                    project_binary_source_with_bits(
+                        sha_binary_col(public_trace, witness_trace, col)?,
+                        field_cfg,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (bit_columns, word_bit_vec): (Vec<_>, Vec<_>) = word_projection.into_iter().unzip();
+            let word_bits: [[u128; SHA_WORD_BITS]; ShaWordCol::COUNT] = word_bit_vec
+                .try_into()
+                .map_err(
+                    |bits: Vec<[u128; SHA_WORD_BITS]>| ProductionShaError::LengthMismatch {
+                        label: "SHA native word columns",
+                        got: bits.len(),
+                        expected: ShaWordCol::COUNT,
+                    },
+                )?;
+
+            let bit_slices = flatten_bit_columns(bit_columns);
+            let scalarized = scalarize_bit_slices_plain(
+                &bit_slices,
+                &F::from_with_cfg(2u64, field_cfg),
+                field_cfg,
+            )?;
+            let (pa_a, pa_a_bits) = project_binary_source_with_bits(
+                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_A)?,
+                field_cfg,
+            )?;
+            let (pa_e, pa_e_bits) = project_binary_source_with_bits(
+                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_E)?,
+                field_cfg,
+            )?;
+            let (message, message_bits) = project_binary_source_with_bits(
+                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_M)?,
+                field_cfg,
+            )?;
+            let public_columns = projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
+
+            let int_projection = int_sources
+                .iter()
+                .map(|&col| {
+                    project_int_source_with_values(
+                        sha_int_col(public_trace, witness_trace, col)?,
+                        field_cfg,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (int_columns, int_value_vec): (Vec<_>, Vec<_>) = int_projection.into_iter().unzip();
+            let int_values: [[i64; SHA_ROW_COUNT]; ShaIntCol::COUNT] = int_value_vec
+                .try_into()
+                .map_err(|values: Vec<[i64; SHA_ROW_COUNT]>| {
+                    ProductionShaError::LengthMismatch {
+                        label: "SHA native int columns",
+                        got: values.len(),
+                        expected: ShaIntCol::COUNT,
+                    }
+                })?;
+
+            let trace = ProjectedTrace {
+                bit_slices,
+                scalarized,
+                int_columns: mle_table_from_columns(int_columns),
+                public_columns: public_columns.clone(),
+            };
+            let public = ProjectedPublic {
+                columns: public_columns,
+                bit_slices: Some(flatten_bit_columns(vec![
+                    pa_a.clone(),
+                    pa_e.clone(),
+                    pa_a,
+                    pa_e,
+                    message,
+                ])),
+            };
+            let native_view = PreparedProductionShaNativeView {
+                word_bits: Box::new(word_bits),
+                int_values: Box::new(int_values),
+                public_word_bits: Box::new([
+                    pa_a_bits,
+                    pa_e_bits,
+                    pa_a_bits,
+                    pa_e_bits,
+                    message_bits,
+                ]),
+                public_values: Box::new(native_public_values_from_bits(
+                    &pa_a_bits,
+                    &pa_e_bits,
+                    &message_bits,
+                )),
+            };
+            Ok((
+                trace,
+                public,
+                ProductionShaWitnessPolys {
+                    binary: word_sources
+                        .iter()
+                        .map(|&col| {
+                            truncate_sha_row_domain(
+                                sha_binary_col(public_trace, witness_trace, col)?,
+                                "SHA binary witness row-domain projection",
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    arbitrary: Vec::new(),
+                    int: int_sources
+                        .iter()
+                        .map(|&col| {
+                            truncate_sha_row_domain(
+                                sha_int_col(public_trace, witness_trace, col)?,
+                                "SHA int witness row-domain projection",
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+                Some(native_view),
             ))
         }
     }
@@ -11417,6 +11767,100 @@ mod tests {
             }
         }
         claimed
+    }
+
+    #[test]
+    fn production_sha_native_view_matches_projection_and_reference_basis() {
+        type TestF = ArkF;
+        type U = Sha256CompressionSliceUair<ShaInt>;
+
+        let field_cfg = ();
+        let message = vec!["hello world"; 40].join(" ");
+        let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("test message should canonically pad to 8 SHA-256 blocks");
+        let (witnesses, _final_state) =
+            synthesize_sha256_chain_witnesses::<ShaInt, 8>(SHA256_INITIAL_STATE, message_blocks)
+                .expect("SHA-256 UAIR witnesses synthesize");
+        let shape = UairShape::<U>::new(SHA_ROW_VARS);
+        let witness = &witnesses[0];
+        let public_trace = public_uair_trace_view::<ShaInt, ShaInt, TestF, TEST_DEGREE_PLUS_ONE>(
+            &witness.trace,
+            &shape.signature,
+        )
+        .unwrap();
+        let witness_trace = witness_uair_trace_view::<ShaInt, ShaInt, TestF, TEST_DEGREE_PLUS_ONE>(
+            &witness.trace,
+            &shape.signature,
+        )
+        .unwrap();
+        let (trace, public, _witness_polys, native_view) =
+            <U as ProductionShaProjectionAdapter<
+                TestShaZincTypes,
+                TestF,
+                TEST_DEGREE_PLUS_ONE,
+            >>::project_production_sha_witness_with_native_view(
+                &shape,
+                &public_trace,
+                &witness_trace,
+                &field_cfg,
+            )
+            .unwrap();
+        let native_view = native_view.expect("production adapter should provide native view");
+        let one = TestF::one_with_cfg(&field_cfg);
+
+        for col in ShaWordCol::ALL {
+            for bit in 0..SHA_WORD_BITS {
+                let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+                for row in 0..SHA_ROW_COUNT {
+                    let projected = trace.bit_slices[table_idx].evaluations[row] == one;
+                    let native = ((native_view.word_bits[col.index()][bit] >> row) & 1) == 1;
+                    assert_eq!(native, projected, "word {col:?} bit {bit} row {row}");
+                }
+            }
+        }
+        for col in ShaIntCol::ALL {
+            for row in 0..SHA_ROW_COUNT {
+                let encoded =
+                    TestF::from_with_cfg(native_view.int_values[col.index()][row], &field_cfg);
+                assert_eq!(
+                    encoded,
+                    trace.int_columns[col.index()].evaluations[row],
+                    "int {col:?} row {row}"
+                );
+            }
+        }
+        let public_bits = public
+            .bit_slices
+            .as_ref()
+            .expect("production public projection includes word bits");
+        for col in ShaPublicWordCol::ALL {
+            for bit in 0..SHA_WORD_BITS {
+                let table_idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+                for row in 0..SHA_ROW_COUNT {
+                    let projected = public_bits[table_idx].evaluations[row] == one;
+                    let native = ((native_view.public_word_bits[col.index()][bit] >> row) & 1) == 1;
+                    assert_eq!(native, projected, "public word {col:?} bit {bit} row {row}");
+                }
+            }
+        }
+        for col in ShaPublicCol::ALL {
+            for row in 0..SHA_ROW_COUNT {
+                let encoded =
+                    TestF::from_with_cfg(native_view.public_values[col.index()][row], &field_cfg);
+                assert_eq!(
+                    encoded,
+                    public.columns[col.index()].evaluations[row],
+                    "public {col:?} row {row}"
+                );
+            }
+        }
+
+        let direct =
+            prepare_sha_sumfold_basis_from_native_view::<TestF>(&native_view, &field_cfg).unwrap();
+        let reference = prepare_sha_sumfold_basis(&trace, &public, &field_cfg).unwrap();
+        assert!(direct.residual_basis.rows.is_empty());
+        assert_eq!(direct.small_residual_basis, reference.small_residual_basis);
+        assert_eq!(direct.booleanity_basis, reference.booleanity_basis);
     }
 
     #[test]
