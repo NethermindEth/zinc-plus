@@ -10919,6 +10919,84 @@ mod tests {
         mle_table_from_columns(flattened)
     }
 
+    fn mle_bit_slices_from_native_word_bits<F, const COLS: usize>(
+        word_bits: &[[u128; SHA_WORD_BITS]; COLS],
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> MleTable<F>
+    where
+        F: PrimeField,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let mut columns = Vec::with_capacity(COLS * SHA_WORD_BITS);
+        for bits in word_bits {
+            for &mask in bits {
+                let mut evaluations = Vec::with_capacity(SHA_ROW_COUNT);
+                for row in 0..SHA_ROW_COUNT {
+                    evaluations.push(if ((mask >> row) & 1) == 1 {
+                        one.clone()
+                    } else {
+                        zero.clone()
+                    });
+                }
+                columns.push(evaluations);
+            }
+        }
+        mle_table_from_columns(columns)
+    }
+
+    fn project_binary_sources_to_native_word_bits<F>(
+        cols: &[&DenseMultilinearExtension<BinaryPoly<TEST_DEGREE_PLUS_ONE>>],
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> Result<(MleTable<F>, Vec<[u128; SHA_WORD_BITS]>), ProductionShaError<F>>
+    where
+        F: PrimeField,
+    {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let mut flat_columns = (0..cols.len() * SHA_WORD_BITS)
+            .map(|_| Vec::with_capacity(SHA_ROW_COUNT))
+            .collect::<Vec<_>>();
+        let mut packed_columns = Vec::with_capacity(cols.len());
+
+        for (col_idx, col) in cols.iter().copied().enumerate() {
+            if col.evaluations.len() < SHA_ROW_COUNT {
+                return Err(ProductionShaError::LengthMismatch {
+                    label: "SHA binary source rows",
+                    got: col.evaluations.len(),
+                    expected: SHA_ROW_COUNT,
+                });
+            }
+
+            let mut packed = [0u128; SHA_WORD_BITS];
+            for (row, poly) in col.evaluations.iter().take(SHA_ROW_COUNT).enumerate() {
+                let mut seen_bits = 0usize;
+                for (bit_idx, bit) in poly.iter().take(SHA_WORD_BITS).enumerate() {
+                    seen_bits += 1;
+                    let value = bit.into_inner();
+                    if value {
+                        packed[bit_idx] |= 1u128 << row;
+                    }
+                    flat_columns[bit_slice_index(col_idx, bit_idx, SHA_WORD_BITS)].push(if value {
+                        one.clone()
+                    } else {
+                        zero.clone()
+                    });
+                }
+                if seen_bits != SHA_WORD_BITS {
+                    return Err(ProductionShaError::LengthMismatch {
+                        label: "SHA binary source bits",
+                        got: seen_bits,
+                        expected: SHA_WORD_BITS,
+                    });
+                }
+            }
+            packed_columns.push(packed);
+        }
+
+        Ok((mle_table_from_columns(flat_columns), packed_columns))
+    }
+
     fn scalarize_bit_slices_plain<F: PrimeField>(
         bit_slices: &MleTable<F>,
         a: &F,
@@ -11025,10 +11103,9 @@ mod tests {
         }
     }
 
-    fn project_binary_source_with_bits<F: PrimeField>(
+    fn pack_binary_source_bits<F: PrimeField>(
         col: &DenseMultilinearExtension<BinaryPoly<TEST_DEGREE_PLUS_ONE>>,
-        field_cfg: &<F as PrimeField>::Config,
-    ) -> Result<(Vec<Vec<F>>, [u128; SHA_WORD_BITS]), ProductionShaError<F>> {
+    ) -> Result<[u128; SHA_WORD_BITS], ProductionShaError<F>> {
         if col.evaluations.len() < SHA_ROW_COUNT {
             return Err(ProductionShaError::LengthMismatch {
                 label: "SHA binary source rows",
@@ -11036,20 +11113,13 @@ mod tests {
                 expected: SHA_ROW_COUNT,
             });
         }
-        let zero = F::zero_with_cfg(field_cfg);
-        let one = F::one_with_cfg(field_cfg);
         let mut packed = [0u128; SHA_WORD_BITS];
-        let mut projected = Vec::with_capacity(SHA_ROW_COUNT);
         for (row, poly) in col.evaluations.iter().take(SHA_ROW_COUNT).enumerate() {
-            let mut row_bits = Vec::with_capacity(SHA_WORD_BITS);
             let mut seen_bits = 0usize;
             for (bit_idx, bit) in poly.iter().take(SHA_WORD_BITS).enumerate() {
                 seen_bits += 1;
                 if bit.into_inner() {
                     packed[bit_idx] |= 1u128 << row;
-                    row_bits.push(one.clone());
-                } else {
-                    row_bits.push(zero.clone());
                 }
             }
             if seen_bits != SHA_WORD_BITS {
@@ -11059,9 +11129,8 @@ mod tests {
                     expected: SHA_WORD_BITS,
                 });
             }
-            projected.push(row_bits);
         }
-        Ok((projected, packed))
+        Ok(packed)
     }
 
     fn project_int_source_with_values<F: TestShaField>(
@@ -11078,8 +11147,8 @@ mod tests {
         let mut projected = Vec::with_capacity(SHA_ROW_COUNT);
         let mut native = [0i64; SHA_ROW_COUNT];
         for (row, value) in col.evaluations.iter().take(SHA_ROW_COUNT).enumerate() {
-            projected.push(F::from_sha_int(value, field_cfg));
             native[row] = sha_int_to_i64::<F>(value)?;
+            projected.push(F::from_with_cfg(native[row], field_cfg));
         }
         Ok((projected, native))
     }
@@ -11138,6 +11207,44 @@ mod tests {
             }
         }
         columns
+    }
+
+    fn mle_table_from_native_i64_columns<F, const COLS: usize>(
+        columns: &[[i64; SHA_ROW_COUNT]; COLS],
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> MleTable<F>
+    where
+        F: PrimeField + FromPrimitiveWithConfig,
+    {
+        mle_table_from_columns(
+            columns
+                .iter()
+                .map(|column| {
+                    column
+                        .iter()
+                        .map(|&value| F::from_with_cfg(value, field_cfg))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    fn scalarized_from_native_word_bits<F>(
+        word_bits: &[[u128; SHA_WORD_BITS]; ShaWordCol::COUNT],
+        field_cfg: &<F as PrimeField>::Config,
+    ) -> MleTable<F>
+    where
+        F: PrimeField + FromPrimitiveWithConfig,
+    {
+        let columns = word_bits
+            .iter()
+            .map(|bits| {
+                (0..SHA_ROW_COUNT)
+                    .map(|row| F::from_with_cfg(packed_word_row_value(bits, row), field_cfg))
+                    .collect()
+            })
+            .collect();
+        mle_table_from_columns(columns)
     }
 
     impl<F: TestShaField> ProductionShaProjectionAdapter<TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>
@@ -11337,16 +11444,12 @@ mod tests {
                 sha256_cols::PA_C_FF_E,
             ];
 
-            let word_projection = word_sources
+            let word_cols = word_sources
                 .iter()
-                .map(|&col| {
-                    project_binary_source_with_bits(
-                        sha_binary_col(public_trace, witness_trace, col)?,
-                        field_cfg,
-                    )
-                })
+                .map(|&col| sha_binary_col(public_trace, witness_trace, col))
                 .collect::<Result<Vec<_>, _>>()?;
-            let (bit_columns, word_bit_vec): (Vec<_>, Vec<_>) = word_projection.into_iter().unzip();
+            let (bit_slices, word_bit_vec) =
+                project_binary_sources_to_native_word_bits::<F>(&word_cols, field_cfg)?;
             let word_bits: [[u128; SHA_WORD_BITS]; ShaWordCol::COUNT] = word_bit_vec
                 .try_into()
                 .map_err(
@@ -11357,25 +11460,33 @@ mod tests {
                     },
                 )?;
 
-            let bit_slices = flatten_bit_columns(bit_columns);
-            let scalarized = scalarize_bit_slices_plain(
-                &bit_slices,
-                &F::from_with_cfg(2u64, field_cfg),
+            let scalarized = scalarized_from_native_word_bits::<F>(&word_bits, field_cfg);
+            let pa_a_bits = pack_binary_source_bits::<F>(sha_binary_col(
+                public_trace,
+                witness_trace,
+                sha256_cols::PA_A,
+            )?)?;
+            let pa_e_bits = pack_binary_source_bits::<F>(sha_binary_col(
+                public_trace,
+                witness_trace,
+                sha256_cols::PA_E,
+            )?)?;
+            let message_bits = pack_binary_source_bits::<F>(sha_binary_col(
+                public_trace,
+                witness_trace,
+                sha256_cols::PA_M,
+            )?)?;
+            let public_word_bits = [pa_a_bits, pa_e_bits, pa_a_bits, pa_e_bits, message_bits];
+            let public_bit_slices = mle_bit_slices_from_native_word_bits::<
+                F,
+                { ShaPublicWordCol::COUNT },
+            >(&public_word_bits, field_cfg);
+            let public_values =
+                native_public_values_from_bits(&pa_a_bits, &pa_e_bits, &message_bits);
+            let public_columns = mle_table_from_native_i64_columns::<F, { ShaPublicCol::COUNT }>(
+                &public_values,
                 field_cfg,
-            )?;
-            let (pa_a, pa_a_bits) = project_binary_source_with_bits(
-                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_A)?,
-                field_cfg,
-            )?;
-            let (pa_e, pa_e_bits) = project_binary_source_with_bits(
-                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_E)?,
-                field_cfg,
-            )?;
-            let (message, message_bits) = project_binary_source_with_bits(
-                sha_binary_col(public_trace, witness_trace, sha256_cols::PA_M)?,
-                field_cfg,
-            )?;
-            let public_columns = projected_public_from_sources(&pa_a, &pa_e, &message, field_cfg);
+            );
 
             let int_projection = int_sources
                 .iter()
@@ -11405,29 +11516,13 @@ mod tests {
             };
             let public = ProjectedPublic {
                 columns: public_columns,
-                bit_slices: Some(flatten_bit_columns(vec![
-                    pa_a.clone(),
-                    pa_e.clone(),
-                    pa_a,
-                    pa_e,
-                    message,
-                ])),
+                bit_slices: Some(public_bit_slices),
             };
             let native_view = PreparedProductionShaNativeView {
                 word_bits: Box::new(word_bits),
                 int_values: Box::new(int_values),
-                public_word_bits: Box::new([
-                    pa_a_bits,
-                    pa_e_bits,
-                    pa_a_bits,
-                    pa_e_bits,
-                    message_bits,
-                ]),
-                public_values: Box::new(native_public_values_from_bits(
-                    &pa_a_bits,
-                    &pa_e_bits,
-                    &message_bits,
-                )),
+                public_word_bits: Box::new(public_word_bits),
+                public_values: Box::new(public_values),
             };
             Ok((
                 trace,
