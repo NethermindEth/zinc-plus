@@ -260,8 +260,9 @@ impl ShaSourceMasks {
     #[allow(clippy::arithmetic_side_effects)]
     fn build<F, Trace>(traces: &[Trace], field_cfg: &F::Config) -> Option<Self>
     where
-        F: PrimeField,
-        Trace: Borrow<ProjectedTrace<F>>,
+        F: PrimeField + Send + Sync,
+        F::Config: Sync,
+        Trace: Borrow<ProjectedTrace<F>> + Sync,
     {
         let n = traces.len();
         if n == 0 || n > MASK_LANES {
@@ -272,29 +273,55 @@ impl ShaSourceMasks {
         } else {
             (1u128 << n) - 1
         };
-        let zero = F::zero_with_cfg(field_cfg);
         let one = F::one_with_cfg(field_cfg);
         let slots = ShaWordCol::COUNT * SHA_WORD_BITS;
         let mut real = vec![0u128; slots * SHA_ROW_COUNT];
         let mut non_binary = vec![false; slots * SHA_ROW_COUNT];
-        for slot in 0..slots {
-            for row in 0..SHA_ROW_COUNT {
+
+        // `is_zero` avoids the full `PartialEq` (which also compares field
+        // parameters); the `== one` compare only runs for set bits.
+        let fill_slot = |slot: usize, real_rows: &mut [u128], nb_rows: &mut [bool]| {
+            for (row, (mask_out, nb_out)) in
+                real_rows.iter_mut().zip(nb_rows.iter_mut()).enumerate()
+            {
                 let mut mask = 0u128;
                 let mut bad = false;
                 for (j, trace) in traces.iter().enumerate() {
                     let value = &trace.borrow().bit_slices[slot].evaluations[row];
+                    if F::is_zero(value) {
+                        continue;
+                    }
                     if *value == one {
                         mask |= 1u128 << j;
-                    } else if *value != zero {
+                    } else {
                         bad = true;
                         break;
                     }
                 }
-                let idx = slot * SHA_ROW_COUNT + row;
-                real[idx] = mask;
-                non_binary[idx] = bad;
+                *mask_out = mask;
+                *nb_out = bad;
+            }
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            real.par_chunks_mut(SHA_ROW_COUNT)
+                .zip(non_binary.par_chunks_mut(SHA_ROW_COUNT))
+                .enumerate()
+                .for_each(|(slot, (real_rows, nb_rows))| fill_slot(slot, real_rows, nb_rows));
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            for (slot, (real_rows, nb_rows)) in real
+                .chunks_mut(SHA_ROW_COUNT)
+                .zip(non_binary.chunks_mut(SHA_ROW_COUNT))
+                .enumerate()
+            {
+                fill_slot(slot, real_rows, nb_rows);
             }
         }
+
         Some(Self {
             real,
             non_binary,
@@ -405,12 +432,12 @@ where
                     let mut mk = mask;
                     while mk != 0 {
                         let k = mk.trailing_zeros() as usize;
-                        h[k] += omega.clone();
+                        h[k] += &omega;
                         // j ≤ k, j in mask (diagonal included).
                         let mut mj = mask & (((1u128 << k) - 1) | (1u128 << k));
                         while mj != 0 {
                             let j = mj.trailing_zeros() as usize;
-                            g[tri(j, k)] += omega.clone();
+                            g[tri(j, k)] += &omega;
                             mj &= mj - 1;
                         }
                         mk &= mk - 1;
@@ -483,7 +510,7 @@ where
     #[cfg(feature = "parallel")]
     let (mut g, mut h, fallback) = {
         use rayon::prelude::*;
-        const ROW_CHUNK: usize = 16;
+        const ROW_CHUNK: usize = 4;
         let chunks: Vec<_> = (0..SHA_ROW_COUNT.div_ceil(ROW_CHUNK))
             .map(|c| c * ROW_CHUNK..((c + 1) * ROW_CHUNK).min(SHA_ROW_COUNT))
             .collect();
