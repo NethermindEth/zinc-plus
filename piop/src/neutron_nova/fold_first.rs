@@ -324,9 +324,9 @@ impl ShaSourceMasks {
     ///
     /// - ch1 = E[z+2] + E[z+1] − 2·Uef[z+2]  ∈ {0,1} iff Uef = E₂∧E₁, value E₂⊕E₁
     /// - ch2 = E[z+2] − E[z] + 2·UNegEg[z+2] + 2·Ch2Comp[z]
-    ///        ∈ {0,1} iff UNegEg+Ch2Comp = ¬E₂∧E₀ (no double-count), value E₂⊕E₀
+    ///   ∈ {0,1} iff UNegEg+Ch2Comp = ¬E₂∧E₀ (no double-count), value E₂⊕E₀
     /// - maj = A[z]+A[z+1]+A[z+2] − 2·Maj[z+2] − 2·MajComp[z]
-    ///        ∈ {0,1} iff Maj+MajComp = majority(A₀,A₁,A₂), value A₀⊕A₁⊕A₂
+    ///   ∈ {0,1} iff Maj+MajComp = majority(A₀,A₁,A₂), value A₀⊕A₁⊕A₂
     #[allow(clippy::arithmetic_side_effects)]
     fn resolve(&self, source: &ShaBooleanitySource, row: usize) -> Option<u128> {
         let lane = self.lane;
@@ -1634,7 +1634,6 @@ mod tests {
                 let row_weights = row_weights.clone();
                 let rho_powers = rho_powers.clone();
                 let sources = sources.clone();
-                let cfg = cfg.clone();
                 best(
                     Box::new(move || {
                         accumulate_booleanity_gram(
@@ -1654,7 +1653,6 @@ mod tests {
                 let traces = traces.clone();
                 let publics = publics.clone();
                 let sources = sources.clone();
-                let cfg = cfg.clone();
                 best(
                     Box::new(move || {
                         let mut transcript = Blake3Transcript::new();
@@ -1675,9 +1673,8 @@ mod tests {
                 let traces = traces.clone();
                 let publics = publics.clone();
                 let sources = sources.clone();
-                let cfg = cfg.clone();
                 let rho = rho.clone();
-                let beta: Vec<F> = (0..log_n as u64).map(|i| f(5 + 2 * i)).collect();
+                let beta: Vec<F> = (0..u64::from(log_n)).map(|i| f(5 + 2 * i)).collect();
                 best(
                     Box::new(move || {
                         let mut transcript = Blake3Transcript::new();
