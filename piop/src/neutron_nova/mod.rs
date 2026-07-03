@@ -19,6 +19,12 @@ pub use booleanity::{
     ExtendedPrefixPoint, build_booleanity_prefix_table, extended_point_from_index,
     extended_point_index, ternary_domain_size,
 };
+pub use fold_first::{
+    FoldFirstError, FoldFirstProverArtifacts, FoldFirstSkipRoundProof, FoldFirstSumFoldProof,
+    FoldFirstVerifierClaims, GramAccumulator, SkipDomain, SkipRoundVerdict,
+    absorb_fold_first_ideal_polys, accumulate_booleanity_gram, prove_fold_first_sha_sumfold,
+    prove_skip_round, sha_nonzero_target_at, verify_fold_first_sha_sumfold, verify_skip_round,
+};
 pub use linear_cpr::{
     CoeffClass, LinearBinarySource, LinearCprAccumulatorError, LinearCprScalarWeights,
     LinearCprWeights, LinearFamilySpec, LinearTermSpec, SumFoldEqWeights,
@@ -60,14 +66,14 @@ pub use projection_sha::{
     build_sha_sumfold_quadratic_prefix_artifacts_from_bases, check_fresh_sha_ideal_cache,
     check_sha_ideal_values, derive_instance_fold_claim, evaluate_fresh_sha_targets,
     expression_folded_row_sum, expression_folded_row_sum_with_row_weights,
-    expression_folded_row_sum_with_vectors, fold_projected_traces, folded_row_integrand_sum,
-    folded_row_integrand_values, folded_row_integrand_values_with_row_weights,
-    folded_row_integrand_values_with_vectors, is_production_sha_booleanity_sources,
-    prepare_sha_sumfold_basis, prepare_sha_sumfold_basis_from_native_view,
-    prepare_sha_sumfold_basis_production_fast, production_sha_booleanity_sources,
-    production_sha_nonzero_families, production_sha_nonzero_ideals,
-    reconstruct_virtual_ch_maj_at_row, scalarize_bit_slices, sha_int_at_point,
-    sha_int_at_point_with_weights, sha_int_at_point_with_weights_unchecked,
+    expression_folded_row_sum_with_vectors, fold_projected_traces,
+    fold_projected_traces_with_weights, folded_row_integrand_sum, folded_row_integrand_values,
+    folded_row_integrand_values_with_row_weights, folded_row_integrand_values_with_vectors,
+    is_production_sha_booleanity_sources, prepare_sha_sumfold_basis,
+    prepare_sha_sumfold_basis_from_native_view, prepare_sha_sumfold_basis_production_fast,
+    production_sha_booleanity_sources, production_sha_nonzero_families,
+    production_sha_nonzero_ideals, reconstruct_virtual_ch_maj_at_row, scalarize_bit_slices,
+    sha_int_at_point, sha_int_at_point_with_weights, sha_int_at_point_with_weights_unchecked,
     sha_linear_residual_row_value, sha_linear_residual_sum, sha_public_at_point,
     sha_public_at_point_with_weights, sha_scalarized_word_at_point,
     sha_scalarized_word_at_point_with_weights, sha_word_bits_at_point,
@@ -77,11 +83,5 @@ pub use projection_sha::{
     validate_projected_trace, verify_folded_row_sumcheck_claim, verify_folded_scalarization_links,
     verify_folded_scalarization_links_at_point, verify_folded_shifted_scalarization_link_at_point,
     verify_fresh_sha_ideal_polys,
-};
-pub use fold_first::{
-    FoldFirstError, FoldFirstProverArtifacts, FoldFirstSkipRoundProof, FoldFirstSumFoldProof,
-    FoldFirstVerifierClaims, GramAccumulator, SkipDomain, SkipRoundVerdict,
-    accumulate_booleanity_gram, prove_fold_first_sha_sumfold, prove_skip_round,
-    sha_nonzero_target_at, verify_fold_first_sha_sumfold, verify_skip_round,
 };
 pub use sumfold::{LinearInstanceClaims, LinearPrefixTable, SumFoldError};

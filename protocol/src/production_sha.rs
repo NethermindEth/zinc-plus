@@ -19,7 +19,7 @@ use crate::{
     },
 };
 use ark_ec::AffineRepr;
-use crypto_primitives::{FromPrimitiveWithConfig, PrimeField};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
 use num_traits::{ConstZero, Zero};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -41,6 +41,12 @@ use zinc_piop::{
         Subclaim as MultipointSubclaim,
     },
     neutron_nova::SumFoldError,
+    neutron_nova::{
+        FoldFirstSkipRoundProof, SkipDomain, absorb_fold_first_ideal_polys,
+        accumulate_booleanity_gram, build_sha_ideal_values_at_point,
+        fold_projected_traces_with_weights, prove_skip_round, sha_nonzero_target_at,
+        verify_skip_round,
+    },
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
         NUM_SHA_RESIDUAL_FAMILIES, PreparedProductionShaNativeView,
@@ -84,7 +90,7 @@ use zinc_poly::{
     utils::{ArithErrors, build_eq_x_r_vec, eq_eval},
 };
 use zinc_transcript::Blake3Transcript;
-use zinc_transcript::traits::{GenTranscribable, Transcribable, Transcript};
+use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
     UNCHECKED, cfg_into_iter, cfg_iter, cfg_join, delayed_reduction::DelayedFieldProductSum,
@@ -281,6 +287,25 @@ where
     pub instance_commitments: Vec<HyraxMixedCommitment<C>>,
     pub ideal_check: IdealCheckProof<F>,
     pub sumfold_proof: MultiDegreeSumcheckProof<F>,
+    pub resolver: CombinedPolyResolverProof<F>,
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    pub multipoint_eval: MultipointEvalProof<F>,
+    pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    pub opening_proof: Vec<u8>,
+}
+
+/// Fold-first (V2) mixed-Hyrax proof: the booleanity skip-round message and
+/// the folded ideal polynomials replace the V1 aggregate-ideal and SumFold
+/// proofs; the row-sumcheck / endpoint / opening tail is shared with V1.
+#[derive(Clone, Debug)]
+pub struct FoldFirstShaMixedHyraxProof<C, F>
+where
+    C: AffineRepr,
+    F: PrimeField,
+{
+    pub instance_commitments: Vec<HyraxMixedCommitment<C>>,
+    pub skip_round: FoldFirstSkipRoundProof<F>,
+    pub folded_ideal_polys: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
     pub resolver: CombinedPolyResolverProof<F>,
     pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
     pub multipoint_eval: MultipointEvalProof<F>,
@@ -2499,7 +2524,10 @@ where
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
     let publics = verify_mixed_hyrax_public_projection_phase::<C, U, Zt, F, D>(
-        vs, instances, proof, transcript,
+        vs,
+        instances,
+        &proof.instance_commitments,
+        transcript,
     )?;
 
     let booleanity_sources = production_sha_booleanity_sources();
@@ -2539,7 +2567,9 @@ where
         verify_fold_publics_phase(&publics, sumfold_output.eq_instance_weights(), field_cfg)?;
     let subclaim = verify_mixed_hyrax_endpoint_multipoint_phase(
         transcript,
-        proof,
+        &proof.resolver,
+        &proof.multipoint_eval,
+        &proof.witness_lifted_evals,
         &folded_public,
         &row_output,
         &r_ic,
@@ -2563,6 +2593,370 @@ where
 
     Ok(FoldedLinearIdealInstance {
         target: sumfold_output.final_round_sumcheck_claim().clone(),
+        commitments: (),
+        public: folded_public,
+    })
+}
+
+/// Transcript domain label separating the fold-first (V2) flow from V1.
+const FOLD_FIRST_SHA_DOMAIN_LABEL: &[u8] = b"PF_CONCISE_SHA256_FRESH_BATCH_V2";
+
+/// Fold-first (V2) mixed-Hyrax prover: booleanity univariate-skip zerocheck
+/// over the instance axis, Lagrange-weight fold, folded IdealCheck (once,
+/// before sampling `a`), then the shared row-sumcheck / endpoint / opening
+/// tail with the assembled target `T' = sum lambda^f E'_f(a) + xi*B_star`.
+///
+/// Unlike V1 this path has no power-of-two instance-count requirement.
+#[allow(clippy::too_many_lines)]
+pub fn prove_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    transcript: &mut impl Transcript,
+) -> Result<
+    LinearIdealFoldProveOutput<
+        UairInstance<'static, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>,
+        FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>,
+        FoldedLinearIdealWitness<ProductionShaMixedHyraxFoldedWitness<C, F>>,
+        FoldFirstShaMixedHyraxProof<C, F>,
+    >,
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<u64>
+        + HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
+    F::Inner: Transcribable + ConstTranscribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+{
+    let field_cfg = &pp.field_cfg;
+    ensure_production_sha_word_degree::<F, D>()?;
+    let instance_count = prepared_instances.len();
+    if instance_count < 2 {
+        return Err(ProductionShaError::InstanceCountTooSmall(instance_count));
+    }
+
+    let booleanity_sources = production_sha_booleanity_sources();
+    absorb_production_sha_statement_metadata(transcript);
+    transcript.absorb_slice(FOLD_FIRST_SHA_DOMAIN_LABEL);
+    absorb_uair_shape_metadata(transcript, shape);
+
+    let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
+        prove_prepared_mixed_hyrax_fresh_instances_phase::<C, Zt, F, D>(
+            &pp.pcs_params,
+            prepared_instances,
+            transcript,
+            field_cfg,
+        )?;
+    #[cfg(debug_assertions)]
+    validate_production_sha_publics(&publics, field_cfg)?;
+
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "absorb_fresh_commitments",
+        side = "prove",
+        phase = "absorb_fresh_commitments",
+    )
+    .in_scope(|| {
+        absorb_mixed_hyrax_production_sha_commitments(
+            transcript,
+            b"production_sha_fresh_commitments",
+            &instance_commitments,
+        )
+    });
+    tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "absorb_projected_publics",
+        side = "prove",
+        phase = "absorb_projected_publics",
+    )
+    .in_scope(|| absorb_projected_sha_publics(transcript, &publics, field_cfg));
+
+    let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
+    let r_ic_eq_weights = build_eq_x_r_vec(&r_ic, field_cfg)?;
+    let rho: F = transcript.get_transcribable_field_challenge(field_cfg);
+    // The gamma zerocheck weights are consumed by the verifier only; the
+    // prover samples the challenge to keep the transcripts aligned.
+    let _gamma: F = transcript.get_transcribable_field_challenge(field_cfg);
+
+    let domain = SkipDomain::new(instance_count, field_cfg).map_err(ProductionShaError::from)?;
+    let rho_powers = zinc_utils::powers(
+        rho.clone(),
+        F::one_with_cfg(field_cfg),
+        booleanity_sources.len(),
+    );
+    let gram = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_first_gram",
+        side = "prove",
+        phase = "fold_first_gram",
+    )
+    .in_scope(|| {
+        accumulate_booleanity_gram(
+            &traces,
+            &r_ic_eq_weights,
+            &rho_powers,
+            &booleanity_sources,
+            field_cfg,
+        )
+    })?;
+    let (skip_round, verdict) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_first_skip_round",
+        side = "prove",
+        phase = "fold_first_skip_round",
+    )
+    .in_scope(|| prove_skip_round(&gram, &domain, transcript, field_cfg))
+    .map_err(ProductionShaError::from)?;
+
+    let (folded, folded_public) = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_projected_traces",
+        side = "prove",
+        phase = "fold_projected_traces",
+    )
+    .in_scope(|| {
+        fold_projected_traces_with_weights(&traces, &publics, &verdict.theta, field_cfg)
+    })?;
+    let folded_ideal_polys = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_first_folded_ideal",
+        side = "prove",
+        phase = "fold_first_folded_ideal",
+    )
+    .in_scope(|| {
+        build_sha_ideal_values_at_point(&folded.trace, &folded_public, &r_ic, field_cfg)
+    })?;
+    absorb_fold_first_ideal_polys(&folded_ideal_polys, transcript, field_cfg);
+
+    let a: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let lambda: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let xi: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let a_powers = build_sha_residual_eval_powers(&a, field_cfg);
+    let lambda_powers = build_sha_lambda_powers(&lambda, field_cfg);
+    let booleanity_weights =
+        build_booleanity_weights(&rho, &xi, booleanity_sources.len(), field_cfg);
+
+    let target = sha_nonzero_target_at(&folded_ideal_polys, &a, &lambda, field_cfg)
+        + xi.clone() * &verdict.b_star;
+    let fold_claim = InstanceFoldClaim {
+        r_b: vec![verdict.alpha.clone()],
+        c_sf: target.clone(),
+        final_round_sumcheck_claim: target.clone(),
+        eq_instance_weights: verdict.theta.clone(),
+    };
+
+    let folded_prover_data = tracing::info_span!(
+        target: "zinc_protocol::production_sha",
+        "fold_prover_data",
+        side = "prove",
+        phase = "fold_prover_data",
+    )
+    .in_scope(|| {
+        fold_mixed_hyrax_prover_data::<C, Zt, F, D>(
+            &instance_prover_data,
+            fold_claim.eq_instance_weights(),
+            field_cfg,
+        )
+    })?;
+    absorb_derived_mixed_hyrax_production_sha_commitments(
+        transcript,
+        b"fold_first_sha_derived_folded_commitments",
+        &instance_commitments,
+        fold_claim.eq_instance_weights(),
+        field_cfg,
+    );
+
+    let (combined_sumcheck, row_output) = prove_row_sumcheck_phase(
+        transcript,
+        &folded.trace,
+        &folded_public,
+        &r_ic,
+        &r_ic_eq_weights,
+        &a_powers,
+        &lambda_powers,
+        &booleanity_weights,
+        &booleanity_sources,
+        &target,
+        field_cfg,
+    )?;
+
+    let (resolver, _resolver_endpoint_evals, multipoint_eval, r_0) =
+        prove_endpoint_multipoint_phase(
+            transcript,
+            &folded.trace,
+            &folded_public,
+            &row_output,
+            &r_ic,
+            &a,
+            &a_powers,
+            &lambda_powers,
+            &booleanity_weights,
+            &booleanity_sources,
+            field_cfg,
+        )?;
+
+    let r_0_eq_weights = build_eq_x_r_vec(&r_0, field_cfg)?;
+    let (witness_lifted_evals, opening_proof) = prove_mixed_hyrax_pcs_opening_phase::<C, Zt, F, D>(
+        transcript,
+        &folded.trace,
+        &instance_commitments,
+        fold_claim.eq_instance_weights(),
+        &folded_prover_data,
+        &r_0,
+        &r_0_eq_weights,
+        &pp.pcs_params,
+        field_cfg,
+    )?;
+
+    Ok(LinearIdealFoldProveOutput {
+        fresh_instances,
+        folded_instance: FoldedLinearIdealInstance {
+            target: target.clone(),
+            commitments: (),
+            public: folded_public,
+        },
+        folded_witness: FoldedLinearIdealWitness {
+            witness: ProductionShaMixedHyraxFoldedWitness {
+                trace: folded.trace,
+                opening_witness: folded_prover_data,
+            },
+        },
+        proof: FoldFirstShaMixedHyraxProof {
+            instance_commitments,
+            skip_round,
+            folded_ideal_polys,
+            resolver,
+            combined_sumcheck,
+            multipoint_eval,
+            witness_lifted_evals,
+            opening_proof,
+        },
+    })
+}
+
+/// Fold-first (V2) mixed-Hyrax verifier: mirrors
+/// [`prove_prepared_fold_first_mixed_hyrax`].
+pub fn verify_fold_first_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
+    vs: &VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>],
+    proof: &FoldFirstShaMixedHyraxProof<C, F>,
+    transcript: &mut impl Transcript,
+) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + FromPrimitiveWithConfig
+        + FromWithConfig<u64>
+        + HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static
+        + ShaSuffixScannerField,
+    F::Inner: Transcribable + ConstTranscribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+{
+    let field_cfg = &vs.field_cfg;
+    ensure_production_sha_word_degree::<F, D>()?;
+    if instances.len() < 2 {
+        return Err(ProductionShaError::InstanceCountTooSmall(instances.len()));
+    }
+    if proof.instance_commitments.len() != instances.len() {
+        return Err(ProductionShaError::LengthMismatch {
+            label: "proof commitments/instances",
+            got: proof.instance_commitments.len(),
+            expected: instances.len(),
+        });
+    }
+    absorb_production_sha_statement_metadata(transcript);
+    transcript.absorb_slice(FOLD_FIRST_SHA_DOMAIN_LABEL);
+    absorb_uair_shape_metadata(transcript, &vs.shape);
+
+    let publics = verify_mixed_hyrax_public_projection_phase::<C, U, Zt, F, D>(
+        vs,
+        instances,
+        &proof.instance_commitments,
+        transcript,
+    )?;
+
+    let booleanity_sources = production_sha_booleanity_sources();
+
+    let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
+    let rho: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let gamma: F = transcript.get_transcribable_field_challenge(field_cfg);
+
+    let domain = SkipDomain::new(instances.len(), field_cfg).map_err(ProductionShaError::from)?;
+    let verdict = verify_skip_round(&proof.skip_round, &gamma, &domain, transcript, field_cfg)
+        .map_err(ProductionShaError::from)?;
+
+    verify_fresh_sha_ideal_polys(std::slice::from_ref(&proof.folded_ideal_polys), field_cfg)?;
+    absorb_fold_first_ideal_polys(&proof.folded_ideal_polys, transcript, field_cfg);
+
+    let a: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let lambda: F = transcript.get_transcribable_field_challenge(field_cfg);
+    let xi: F = transcript.get_transcribable_field_challenge(field_cfg);
+
+    let target = sha_nonzero_target_at(&proof.folded_ideal_polys, &a, &lambda, field_cfg)
+        + xi.clone() * &verdict.b_star;
+
+    absorb_derived_mixed_hyrax_production_sha_commitments(
+        transcript,
+        b"fold_first_sha_derived_folded_commitments",
+        &proof.instance_commitments,
+        &verdict.theta,
+        field_cfg,
+    );
+
+    let row_output =
+        verify_row_sumcheck_phase(transcript, &proof.combined_sumcheck, &target, field_cfg)?;
+
+    let folded_public = verify_fold_publics_phase(&publics, &verdict.theta, field_cfg)?;
+    let subclaim = verify_mixed_hyrax_endpoint_multipoint_phase(
+        transcript,
+        &proof.resolver,
+        &proof.multipoint_eval,
+        &proof.witness_lifted_evals,
+        &folded_public,
+        &row_output,
+        &r_ic,
+        &a,
+        &lambda,
+        &rho,
+        &xi,
+        &booleanity_sources,
+        field_cfg,
+    )?;
+    verify_mixed_hyrax_pcs_phase::<C, Zt, F, D>(
+        transcript,
+        &vs.pcs_params,
+        &proof.instance_commitments,
+        &verdict.theta,
+        &subclaim.sumcheck_subclaim.point,
+        &proof.witness_lifted_evals,
+        &proof.opening_proof,
+        field_cfg,
+    )?;
+
+    Ok(FoldedLinearIdealInstance {
+        target,
         commitments: (),
         public: folded_public,
     })
@@ -4822,7 +5216,7 @@ where
 fn verify_mixed_hyrax_public_projection_phase<C, U, Zt, F, const D: usize>(
     vs: &VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>],
-    proof: &ProductionShaMixedHyraxProof<C, F>,
+    proof_commitments: &[HyraxMixedCommitment<C>],
     transcript: &mut impl Transcript,
 ) -> Result<Vec<ProjectedPublic<F>>, ProductionShaError<F>>
 where
@@ -4842,7 +5236,7 @@ where
             &instance.public_trace,
             &vs.shape.signature,
         )?;
-        if instance.commitments != proof.instance_commitments[instance_idx] {
+        if instance.commitments != proof_commitments[instance_idx] {
             return Err(ProductionShaError::NonCanonicalProofObject(
                 "instance mixed Hyrax commitment does not match proof commitment",
             ));
@@ -4863,7 +5257,7 @@ where
     absorb_mixed_hyrax_production_sha_commitments(
         transcript,
         b"production_sha_fresh_commitments",
-        &proof.instance_commitments,
+        proof_commitments,
     );
     absorb_projected_sha_publics(transcript, &publics, field_cfg);
     Ok(publics)
@@ -5133,9 +5527,11 @@ where
     fields(side = "verify", phase = "endpoint_multipoint_verify")
 )]
 #[allow(clippy::too_many_arguments)]
-fn verify_mixed_hyrax_endpoint_multipoint_phase<C, F>(
+fn verify_mixed_hyrax_endpoint_multipoint_phase<F>(
     transcript: &mut impl Transcript,
-    proof: &ProductionShaMixedHyraxProof<C, F>,
+    resolver: &CombinedPolyResolverProof<F>,
+    multipoint_eval: &MultipointEvalProof<F>,
+    witness_lifted_evals: &[DynamicPolynomialF<F>],
     folded_public: &ProjectedPublic<F>,
     row_output: &FoldedRowSumcheckOutput<F>,
     r_ic: &[F; SHA_ROW_VARS],
@@ -5147,7 +5543,6 @@ fn verify_mixed_hyrax_endpoint_multipoint_phase<C, F>(
     field_cfg: &F::Config,
 ) -> Result<MultipointSubclaim<F>, ProductionShaError<F>>
 where
-    C: AffineRepr,
     F: InnerTransparentField
         + DelayedFieldProductSum
         + FromPrimitiveWithConfig
@@ -5157,9 +5552,9 @@ where
     F::Inner: Transcribable + Default + Send + Sync,
     F::Modulus: Transcribable,
 {
-    absorb_sha_resolver_proof(transcript, &proof.resolver, field_cfg);
+    absorb_sha_resolver_proof(transcript, resolver, field_cfg);
     let endpoint_binding_challenge = sample_endpoint_binding_challenge(transcript, field_cfg);
-    let endpoint_evals = sha_endpoint_evals_from_resolver(&proof.resolver, a, field_cfg)?;
+    let endpoint_evals = sha_endpoint_evals_from_resolver(resolver, a, field_cfg)?;
     let terminal = reconstruct_folded_row_terminal_from_endpoints(
         &endpoint_evals,
         folded_public,
@@ -5176,7 +5571,7 @@ where
 
     let (subclaim, shift_specs) = verify_sha_endpoint_multipoint(
         transcript,
-        &proof.multipoint_eval,
+        multipoint_eval,
         &endpoint_evals,
         folded_public,
         &row_output.r_star,
@@ -5186,7 +5581,7 @@ where
     let endpoint_binding_powers =
         build_sha_endpoint_binding_powers(&endpoint_binding_challenge, field_cfg);
     let open_evals = multipoint_open_evals_from_pcs_lifted(
-        &proof.witness_lifted_evals,
+        witness_lifted_evals,
         &production_sha_multipoint_layout(),
         folded_public,
         &subclaim.sumcheck_subclaim.point,

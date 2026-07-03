@@ -63,9 +63,10 @@ use zinc_protocol::{
         ProductionShaMixedHyraxProof, ProductionShaPackedHyraxProof,
         ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
         VerifiedLinearIdealFoldSetup, packed_sha_layout, prepare_linear_ideal_fold_witnesses,
-        prove_prepared_linear_ideal_fold_mixed_hyrax,
+        prove_prepared_fold_first_mixed_hyrax, prove_prepared_linear_ideal_fold_mixed_hyrax,
         prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold_mixed_hyrax,
-        setup_verify_linear_ideal_fold_packed_hyrax, verify_linear_ideal_fold_mixed_hyrax,
+        setup_verify_linear_ideal_fold_packed_hyrax,
+        verify_fold_first_linear_ideal_fold_mixed_hyrax, verify_linear_ideal_fold_mixed_hyrax,
         verify_linear_ideal_fold_packed_hyrax,
     },
 };
@@ -2346,6 +2347,39 @@ where
     out
 }
 
+fn fold_first_mixed_hyrax_proof_raw_bytes<C, Fp>(
+    proof: &zinc_protocol::production_sha::FoldFirstShaMixedHyraxProof<C, Fp>,
+) -> Vec<u8>
+where
+    C: AffineRepr,
+    Fp: PrimeField,
+    zinc_piop::combined_poly_resolver::Proof<Fp>: Transcribable,
+    zinc_piop::multipoint_eval::Proof<Fp>: Transcribable,
+    zinc_piop::sumcheck::multi_degree::MultiDegreeSumcheckProof<Fp>: Transcribable,
+    DynamicPolyVecF<Fp>: Transcribable,
+{
+    let mut out = Vec::new();
+    out.extend_from_slice(&(proof.instance_commitments.len() as u64).to_le_bytes());
+    for commitment in &proof.instance_commitments {
+        commitment.write_bytes(&mut out);
+    }
+    let skip_round_values = vec![DynamicPolynomialF {
+        coeffs: proof.skip_round.node_values.clone(),
+    }];
+    append_transcribable_bytes(&mut out, DynamicPolyVecF::reinterpret(&skip_round_values));
+    let folded_ideal_polys = proof.folded_ideal_polys.to_vec();
+    append_transcribable_bytes(&mut out, DynamicPolyVecF::reinterpret(&folded_ideal_polys));
+    append_transcribable_bytes(&mut out, &proof.resolver);
+    append_transcribable_bytes(&mut out, &proof.combined_sumcheck);
+    append_transcribable_bytes(&mut out, &proof.multipoint_eval);
+    append_transcribable_bytes(
+        &mut out,
+        DynamicPolyVecF::reinterpret(&proof.witness_lifted_evals),
+    );
+    append_len_prefixed_bytes(&mut out, &proof.opening_proof);
+    out
+}
+
 fn measure_warmed<T>(
     warmup_runs: usize,
     sample_count: usize,
@@ -4173,6 +4207,136 @@ fn measure_projectionfold_mixed_hyrax_instances<const N: usize, const L0: usize>
     )
 }
 
+fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
+    warmup_runs: usize,
+    sample_count: usize,
+    width: usize,
+) -> HyraxInstanceSweepRow {
+    type C = ark_bn254::G1Affine;
+    type HyraxF = ArkFBn254;
+    type P = AllHyraxPCSTypes<C>;
+    type U = ProjectionShaBenchUair<RealEcdsaInt>;
+
+    let ell = log2_power_of_two(N);
+
+    let setup_start = Instant::now();
+    let trace_start = Instant::now();
+    let message_blocks = exact_sha256_chain_blocks::<N>();
+    let num_vars = SHA_ROW_VARS + ell;
+    let (_mono_trace, mono_final_state) = synthesize_sha256_chain_trace::<RealEcdsaInt, N>(
+        num_vars,
+        SHA256_INITIAL_STATE,
+        message_blocks,
+    )
+    .expect("monolithic fold-first sweep SHA trace synthesis should succeed");
+    let (witnesses, projection_final_state) =
+        synthesize_sha256_chain_witnesses::<RealEcdsaInt, N>(SHA256_INITIAL_STATE, message_blocks)
+            .expect("fold-first sweep SHA witness synthesis should succeed");
+    assert_eq!(mono_final_state, projection_final_state);
+    let trace_witness_ms = elapsed_ms(trace_start);
+
+    let setup_phase_start = Instant::now();
+    let shape = UairShape::<U>::new(SHA_ROW_VARS);
+    let field_cfg = HyraxF::curve_field_cfg::<C>();
+    let (pcs_params, _) = projection_sha_bn254_hyrax_pcs_params(width);
+    let pp =
+        LinearIdealFoldProverParams::<P, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>::new(
+            pcs_params,
+            field_cfg.clone(),
+            0,
+        );
+    let vs = projection_sha_bn254_mixed_hyrax_verifier_setup(width);
+    let setup_ms = elapsed_ms(setup_phase_start);
+
+    let prepare_start = Instant::now();
+    let prepared_instances = prepare_linear_ideal_fold_witnesses::<
+        U,
+        RealEcdsaBenchZincTypes,
+        HyraxF,
+        DEGREE_PLUS_ONE,
+    >(&shape, &witnesses, &pp.field_cfg)
+    .expect("fold-first sweep SHA witness preparation should succeed");
+    let prepare_ms = elapsed_ms(prepare_start);
+    let setup_prepare = HyraxSetupPrepareTimings {
+        trace_witness_ms,
+        setup_ms,
+        prepare_sumfold_basis_ms: 0.0,
+        prepare_ms,
+        setup_prepare_ms: elapsed_ms(setup_start),
+    };
+
+    let measured_prover_warmups = warmup_runs.saturating_sub(1);
+    let (output, prover_stats) = measure_warmed(measured_prover_warmups, sample_count, || {
+        let mut transcript = Blake3Transcript::new();
+        prove_prepared_fold_first_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >(&pp, &shape, &prepared_instances, &mut transcript)
+        .expect("fold-first sweep mixed Hyrax prover failed")
+    });
+    let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
+        let mut transcript = Blake3Transcript::new();
+        verify_fold_first_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
+        .expect("fold-first sweep mixed Hyrax verifier failed")
+    });
+    let raw = fold_first_mixed_hyrax_proof_raw_bytes(&output.proof);
+    let ecc_points_per_commitment = output
+        .proof
+        .instance_commitments
+        .first()
+        .map(|commitment| {
+            commitment.binary.group_point_count() + commitment.int.group_point_count()
+        })
+        .unwrap_or_default();
+    let ecc_points_per_proof = output
+        .proof
+        .instance_commitments
+        .iter()
+        .map(|commitment| {
+            commitment.binary.group_point_count() + commitment.int.group_point_count()
+        })
+        .sum();
+
+    let prove_phases = HyraxProvePhaseTimings {
+        prove_ms: prover_stats.median_ms,
+        ..Default::default()
+    };
+    let mut row = hyrax_instance_sweep_row(
+        N,
+        ell,
+        0,
+        width,
+        ecc_points_per_commitment,
+        ecc_points_per_proof,
+        setup_prepare,
+        prove_phases,
+        prover_stats,
+        verifier_stats,
+        raw.len(),
+        zstd_len(&raw),
+    );
+    row.variant = format!("fold-first instances {N}");
+    row
+}
+
+fn combined_row_from_fold_first(row: HyraxInstanceSweepRow) -> Sha256CombinedInstanceSweepRow {
+    let mut combined = combined_row_from_l0(row);
+    combined.algorithm = "Fold-First SumFold ProjectionFold Mixed Hyrax".to_string();
+    combined.variant = "fold-first".to_string();
+    combined.l0 = None;
+    combined.tail_vars = None;
+    combined
+}
+
 fn env_usize_or(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -4821,6 +4985,16 @@ fn push_sha256_combined_instance<const N: usize>(
         pcs_width,
         enabled_l0s
     );
+
+    if env_bool_or("SHA256_COMBINED_SWEEP_INCLUDE_FOLD_FIRST", true) {
+        rows.push(combined_row_from_fold_first(
+            measure_foldfirst_mixed_hyrax_instances_with_samples::<N>(
+                warmup_runs,
+                sample_count,
+                pcs_width,
+            ),
+        ));
+    }
 }
 
 fn measure_sha256_combined_instance_rows(

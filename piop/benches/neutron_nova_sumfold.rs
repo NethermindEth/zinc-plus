@@ -9,7 +9,7 @@ use zinc_piop::{
         MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
         ShaBooleanitySource, ShaIntCol, ShaPublicCol, ShaWordCol, bit_slice_index,
         build_dense_sha_sumfold_group, build_production_sha_sumfold_group_owned,
-        scalarize_bit_slices,
+        prove_fold_first_sha_sumfold, scalarize_bit_slices,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -220,6 +220,31 @@ fn neutron_nova_sumfold_benches(c: &mut Criterion) {
                         &cfg,
                     );
                     black_box(proof.claimed_sums()[0].clone())
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    // Fold-first V2: this block replaces the V1 aggregate-ideal + SumFold +
+    // fold phases AND includes the folded IdealCheck, post-fold
+    // scalarization, and the folded row sumcheck, so it covers strictly more
+    // of the prover than the two builders above.
+    group.bench_function(
+        BenchmarkId::new("fold_first_full_block", 1usize << ell),
+        |bench| {
+            bench.iter_batched(
+                Blake3Transcript::new,
+                |mut transcript| {
+                    let (proof, artifacts) = prove_fold_first_sha_sumfold(
+                        &traces,
+                        &publics,
+                        &sources,
+                        &mut transcript,
+                        &cfg,
+                    )
+                    .unwrap();
+                    black_box((proof.skip_round.node_values.len(), artifacts.target))
                 },
                 BatchSize::SmallInput,
             );
