@@ -3114,15 +3114,31 @@ where
     Trace: Borrow<ProjectedTrace<F>>,
     Public: Borrow<ProjectedPublic<F>>,
 {
+    fold_projected_traces_with_weights(traces, publics, &sumfold.eq_instance_weights, field_cfg)
+}
+
+/// Fold traces and publics with explicit weights (fold-first path: the
+/// Lagrange weights `θ_j = L_j(α)` from the skip round).
+pub fn fold_projected_traces_with_weights<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
+    weights: &[F],
+    field_cfg: &F::Config,
+) -> Result<(ProjectionFoldWitness<F>, ProjectedPublic<F>), ShaProjectionError>
+where
+    F: ShaBinaryFoldField,
+    Trace: Borrow<ProjectedTrace<F>>,
+    Public: Borrow<ProjectedPublic<F>>,
+{
     if traces.len() != publics.len() {
         return Err(ShaProjectionError::InstanceCountMismatch {
             got: publics.len(),
             expected: traces.len(),
         });
     }
-    if sumfold.eq_instance_weights.len() != traces.len() {
+    if weights.len() != traces.len() {
         return Err(ShaProjectionError::FoldingWeightCount {
-            got: sumfold.eq_instance_weights.len(),
+            got: weights.len(),
             expected: traces.len(),
         });
     }
@@ -3139,26 +3155,26 @@ where
     let folded_public_columns = fold_mle_tables(
         "public.columns",
         publics.iter().map(|public| &public.borrow().columns),
-        &sumfold.eq_instance_weights,
+        weights,
         field_cfg,
     )?;
     let folded_trace = ProjectedTrace {
         bit_slices: fold_binary_mle_tables(
             "bit_slices",
             traces.iter().map(|trace| &trace.borrow().bit_slices),
-            &sumfold.eq_instance_weights,
+            weights,
             field_cfg,
         )?,
         scalarized: fold_mle_tables(
             "scalarized",
             traces.iter().map(|trace| &trace.borrow().scalarized),
-            &sumfold.eq_instance_weights,
+            weights,
             field_cfg,
         )?,
         int_columns: fold_mle_tables(
             "int_columns",
             traces.iter().map(|trace| &trace.borrow().int_columns),
-            &sumfold.eq_instance_weights,
+            weights,
             field_cfg,
         )?,
         public_columns: folded_public_columns.clone(),
@@ -3170,7 +3186,7 @@ where
             publics
                 .iter()
                 .map(|public| public.borrow().bit_slices.as_ref()),
-            &sumfold.eq_instance_weights,
+            weights,
             field_cfg,
         )?,
     };

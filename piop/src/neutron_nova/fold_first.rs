@@ -856,6 +856,32 @@ mod tests {
     }
 
     #[test]
+    fn b_star_equals_folded_booleanity_row_sum() {
+        use crate::neutron_nova::projection_sha::fold_projected_traces_with_weights;
+        let cfg = test_config();
+        let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let row_weights = test_row_weights(&cfg);
+        let sources = small_sources();
+        let rho_powers = powers(f(29), F::one_with_cfg(&cfg), sources.len());
+        let domain = SkipDomain::<F>::new(traces.len(), &cfg).unwrap();
+        let gram =
+            accumulate_booleanity_gram(&traces, &row_weights, &rho_powers, &sources, &cfg).unwrap();
+
+        let mut transcript = Blake3Transcript::new();
+        let (_, verdict) = prove_skip_round(&gram, &domain, &mut transcript, &cfg).unwrap();
+
+        // Fold with the Lagrange weights θ = L(α); the booleanity residue of
+        // the folded trace must equal q(α): packing evaluation commutes with
+        // folding because D̂_q(α, z) = Σ_j L_j(α)·D_{j,q}(z) = D'_q(z).
+        let (folded, _folded_public) =
+            fold_projected_traces_with_weights(&traces, &publics, &verdict.theta, &cfg).unwrap();
+        let direct =
+            direct_instance_residue(&folded.trace, &row_weights, &rho_powers, &sources);
+        assert_eq!(verdict.b_star, direct);
+    }
+
+    #[test]
     fn skip_round_roundtrip_agrees() {
         let cfg = test_config();
         let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
