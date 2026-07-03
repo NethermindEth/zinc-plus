@@ -4299,6 +4299,31 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
             probe_layer.total_ms(ProvePhase::FreshCommitMixedHyraxInstance)
         }
     };
+    if env_bool_or("SHA256_COMBINED_SWEEP_TRACE_ONCE", false) {
+        eprintln!("fold-first stage tracing: instances={N}");
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_target(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut transcript = Blake3Transcript::new();
+            let (_fresh, fold_output) = fold_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(&pp, &shape, &prepared_instances, &mut transcript)
+            .expect("traced fold-first fold stage failed");
+            decide_fold_first_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>(
+                &pp,
+                &fold_output,
+                &mut transcript,
+            )
+            .expect("traced fold-first decide stage failed");
+        });
+    }
 
     let measured_prover_warmups = warmup_runs.saturating_sub(1);
     let (output, prover_stats) = measure_warmed(measured_prover_warmups, sample_count, || {

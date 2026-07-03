@@ -2884,14 +2884,6 @@ where
             field_cfg,
         )
     })?;
-    absorb_derived_mixed_hyrax_production_sha_commitments(
-        transcript,
-        b"fold_first_sha_derived_folded_commitments",
-        &instance_commitments,
-        fold_claim.eq_instance_weights(),
-        field_cfg,
-    );
-
     Ok((
         fresh_instances,
         FoldFirstShaFoldOutput {
@@ -2950,6 +2942,17 @@ where
     let lambda_powers = build_sha_lambda_powers(&fold.lambda, field_cfg);
     let booleanity_weights =
         build_booleanity_weights(&fold.rho, &fold.xi, booleanity_sources.len(), field_cfg);
+
+    // The C' homomorphic fold is EC work the folding step never needs; it is
+    // absorbed here, at the same transcript position as before (nothing
+    // intervenes between the end of the fold stage and this point).
+    absorb_derived_mixed_hyrax_production_sha_commitments(
+        transcript,
+        b"fold_first_sha_derived_folded_commitments",
+        &fold.instance_commitments,
+        &fold.theta,
+        field_cfg,
+    );
 
     let (combined_sumcheck, row_output) = prove_row_sumcheck_phase(
         transcript,
