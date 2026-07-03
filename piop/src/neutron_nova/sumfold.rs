@@ -36,6 +36,12 @@ pub enum SumFoldError {
     HybridPrefixNeedsTail { ell0: usize, ell: usize },
     #[error("equality table construction failed: {0}")]
     EqTable(#[from] ArithErrors),
+    #[error("fold-first skip round needs at least two instances, got {got}")]
+    SkipRoundTooFewInstances { got: usize },
+    #[error("fold-first skip round message length mismatch: got {got}, expected {expected}")]
+    SkipRoundMessageLength { got: usize, expected: usize },
+    #[error("fold-first skip round gamma-weighted zero-check failed")]
+    SkipRoundZeroCheckFailed,
 }
 
 /// Dense per-instance linear claims.

@@ -3340,7 +3340,7 @@ where
     }
 }
 
-fn reconstruct_virtual_ch_maj_at_row_unchecked<F>(
+pub(crate) fn reconstruct_virtual_ch_maj_at_row_unchecked<F>(
     trace: &ProjectedTrace<F>,
     row: usize,
     field_cfg: &F::Config,
@@ -9716,7 +9716,7 @@ fn ternary_point_parts(mut index: usize, prefix_vars: usize) -> (usize, usize) {
     (support_mask, finite_bits)
 }
 
-fn sources_need_virtuals(booleanity_sources: &[ShaBooleanitySource]) -> bool {
+pub(crate) fn sources_need_virtuals(booleanity_sources: &[ShaBooleanitySource]) -> bool {
     booleanity_sources.iter().any(|source| {
         matches!(
             source,
@@ -12317,7 +12317,7 @@ where
     scalar_from_table("scalarized", &trace.scalarized, col_idx, shifted, field_cfg)
 }
 
-fn booleanity_source_value_at_row_with_virtuals<F>(
+pub(crate) fn booleanity_source_value_at_row_with_virtuals<F>(
     trace: &ProjectedTrace<F>,
     row: usize,
     source: &ShaBooleanitySource,

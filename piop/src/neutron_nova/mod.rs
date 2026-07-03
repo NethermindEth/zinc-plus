@@ -6,6 +6,7 @@
 
 pub mod accumulator;
 pub mod booleanity;
+pub mod fold_first;
 pub mod linear_cpr;
 pub mod projection_sha;
 pub mod sumfold;
@@ -76,5 +77,9 @@ pub use projection_sha::{
     validate_projected_trace, verify_folded_row_sumcheck_claim, verify_folded_scalarization_links,
     verify_folded_scalarization_links_at_point, verify_folded_shifted_scalarization_link_at_point,
     verify_fresh_sha_ideal_polys,
+};
+pub use fold_first::{
+    FoldFirstSkipRoundProof, GramAccumulator, SkipDomain, SkipRoundVerdict,
+    accumulate_booleanity_gram, prove_skip_round, verify_skip_round,
 };
 pub use sumfold::{LinearInstanceClaims, LinearPrefixTable, SumFoldError};
