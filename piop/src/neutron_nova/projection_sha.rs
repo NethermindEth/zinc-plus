@@ -12509,7 +12509,7 @@ where
     acc
 }
 
-fn fold_optional_binary_mle_tables<'a, F, I>(
+pub(crate) fn fold_optional_binary_mle_tables<'a, F, I>(
     kind: &'static str,
     tables: I,
     theta: &[F],
@@ -12533,7 +12533,7 @@ where
     fold_binary_mle_tables(kind, present, theta, field_cfg).map(Some)
 }
 
-fn fold_mle_tables<'a, F, I>(
+pub(crate) fn fold_mle_tables<'a, F, I>(
     kind: &'static str,
     tables: I,
     theta: &[F],

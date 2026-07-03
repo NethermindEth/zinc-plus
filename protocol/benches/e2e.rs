@@ -62,7 +62,8 @@ use zinc_protocol::{
         PreparedProductionShaProverInstance, ProductionShaError, ProductionShaMixedHyraxPcs,
         ProductionShaMixedHyraxProof, ProductionShaPackedHyraxProof,
         ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
-        VerifiedLinearIdealFoldSetup, packed_sha_layout,
+        VerifiedLinearIdealFoldSetup, decide_fold_first_mixed_hyrax,
+        fold_prepared_fold_first_mixed_hyrax, packed_sha_layout,
         prepare_fold_first_linear_ideal_fold_witnesses, prepare_linear_ideal_fold_witnesses,
         prove_prepared_fold_first_mixed_hyrax, prove_prepared_linear_ideal_fold_mixed_hyrax,
         prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold_mixed_hyrax,
@@ -4266,6 +4267,39 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
         setup_prepare_ms: elapsed_ms(setup_start),
     };
 
+    // Per-stage probe: fold stage (with the commit span isolated by the
+    // phase-timing layer) and the deferred decider, on one untimed pass.
+    let probe_layer = phase_timing_layer();
+    let (fold_stage_ms, decide_stage_ms) = {
+        let mut transcript = Blake3Transcript::new();
+        let fold_start = Instant::now();
+        let (_fresh, fold_output) = fold_prepared_fold_first_mixed_hyrax::<
+            C,
+            U,
+            RealEcdsaBenchZincTypes,
+            HyraxF,
+            DEGREE_PLUS_ONE,
+        >(&pp, &shape, &prepared_instances, &mut transcript)
+        .expect("fold-first sweep fold stage failed");
+        let fold_stage_ms = elapsed_ms(fold_start);
+        let decide_start = Instant::now();
+        decide_fold_first_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>(
+            &pp,
+            &fold_output,
+            &mut transcript,
+        )
+        .expect("fold-first sweep decide stage failed");
+        (fold_stage_ms, elapsed_ms(decide_start))
+    };
+    let probe_commit_ms = {
+        let wall = probe_layer.total_ms(ProvePhase::FreshCommitMixedHyraxInstances);
+        if wall > 0.0 {
+            wall
+        } else {
+            probe_layer.total_ms(ProvePhase::FreshCommitMixedHyraxInstance)
+        }
+    };
+
     let measured_prover_warmups = warmup_runs.saturating_sub(1);
     let (output, prover_stats) = measure_warmed(measured_prover_warmups, sample_count, || {
         let mut transcript = Blake3Transcript::new();
@@ -4307,8 +4341,15 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
         })
         .sum();
 
+    // Column mapping for the fold-first rows: probe_commit = fresh commits,
+    // probe_sumfold = folding core (fold stage minus commits),
+    // probe_fold = fold-stage wall total, probe_open = deferred decider.
     let prove_phases = HyraxProvePhaseTimings {
         prove_ms: prover_stats.median_ms,
+        commit_ms: probe_commit_ms,
+        sumfold_ms: (fold_stage_ms - probe_commit_ms).max(0.0),
+        fold_ms: fold_stage_ms,
+        open_ms: decide_stage_ms,
         ..Default::default()
     };
     let mut row = hyrax_instance_sweep_row(

@@ -20,25 +20,32 @@
 //! bit-packing and delayed-reduction accumulators are later optimizations;
 //! this module is the correctness-first reference).
 
-use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
+use crypto_primitives::{
+    FromPrimitiveWithConfig, FromWithConfig, PrimeField, crypto_bigint_uint::Uint,
+};
+use num_traits::Zero;
 use std::borrow::Borrow;
 use thiserror::Error;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
 use zinc_poly::utils::build_eq_x_r_vec;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
 use zinc_utils::{
-    delayed_reduction::{DelayedFieldProductSum, MontgomeryLimbs},
+    delayed_reduction::{
+        BarrettDelayedReduction, DelayedFieldProductSum, DelayedModularReductionAlgorithm,
+        MontgomeryLimbs,
+    },
     inner_transparent_field::InnerTransparentField,
     powers,
 };
 
 use crate::neutron_nova::SumFoldError;
 use crate::neutron_nova::projection_sha::{
-    NONZERO_SHA_FAMILIES, NUM_NONZERO_SHA_FAMILIES, NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic,
-    ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-    ShaBinaryFoldField, ShaBooleanitySource, ShaProjectionError, ShaWordCol, VirtualChMajValues,
-    booleanity_source_value_at_row_with_virtuals, build_folded_row_sumcheck_group,
-    build_sha_ideal_values_at_point, fold_projected_traces_with_weights,
+    MleColumn, MleTable, NONZERO_SHA_FAMILIES, NUM_NONZERO_SHA_FAMILIES, NUM_SHA_RESIDUAL_FAMILIES,
+    ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
+    SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanitySource, ShaProjectionError, ShaWordCol,
+    VirtualChMajValues, booleanity_source_value_at_row_with_virtuals,
+    build_folded_row_sumcheck_group, build_sha_ideal_values_at_point, fold_mle_tables,
+    fold_optional_binary_mle_tables, fold_projected_traces_with_weights,
     folded_row_integrand_values, reconstruct_virtual_ch_maj_at_row_unchecked, scalarize_bit_slices,
     sources_need_virtuals, verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
 };
@@ -249,7 +256,7 @@ const MASK_LANES: usize = 128;
 /// (O-10): for each `(word_col, bit, row)` slot, bit `j` of the mask is
 /// instance `j`'s value. Slots where any instance holds a non-0/1 value are
 /// flagged so the accumulator falls back to the general field path there.
-struct ShaSourceMasks {
+pub struct ShaSourceMasks {
     /// Indexed `slot * SHA_ROW_COUNT + row`, `slot = col * SHA_WORD_BITS + bit`.
     real: Vec<u128>,
     non_binary: Vec<bool>,
@@ -257,8 +264,10 @@ struct ShaSourceMasks {
 }
 
 impl ShaSourceMasks {
+    /// Build the instance-major masks, or `None` when the batch does not fit
+    /// the `u128` lanes (`n > 128`).
     #[allow(clippy::arithmetic_side_effects)]
-    fn build<F, Trace>(traces: &[Trace], field_cfg: &F::Config) -> Option<Self>
+    pub fn build<F, Trace>(traces: &[Trace], field_cfg: &F::Config) -> Option<Self>
     where
         F: PrimeField + Send + Sync,
         F::Config: Sync,
@@ -413,15 +422,54 @@ fn gram_fast_rows<F>(
     rho_powers: &[F],
     sources: &[ShaBooleanitySource],
     n: usize,
+    reducer: &BarrettDelayedReduction<'_, F>,
     field_cfg: &F::Config,
 ) -> (Vec<F>, Vec<F>, Vec<(usize, usize)>)
 where
-    F: PrimeField,
+    F: PrimeField + MontgomeryLimbs,
 {
+    // O-14: unreduced 5-limb accumulators with the reducer's flush contract
+    // (DEFAULT_DMR_FLUSH_ADDS for 4-limb moduli — never hit at our sizes;
+    // every add for small test moduli). Reduced once per entry at worker end.
+    let entries = tri(n - 1, n - 1) + 1;
     let zero = F::zero_with_cfg(field_cfg);
-    let mut g = vec![zero.clone(); tri(n - 1, n - 1) + 1];
-    let mut h = vec![zero; n];
+    let flush_adds = reducer.flush_adds();
+    let mut g_buckets = vec![Uint::<5>::zero(); entries];
+    let mut g_pending = vec![0usize; entries];
+    let mut g_acc = vec![zero.clone(); entries];
+    let mut h_buckets = vec![Uint::<5>::zero(); n];
+    let mut h_pending = vec![0usize; n];
+    let mut h_acc = vec![zero; n];
     let mut fallback = Vec::new();
+
+    #[inline(always)]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn bucket_add<F>(
+        reducer: &BarrettDelayedReduction<'_, F>,
+        flush_adds: usize,
+        bucket: &mut Uint<5>,
+        pending: &mut usize,
+        acc: &mut F,
+        omega: &F,
+    ) where
+        F: PrimeField + MontgomeryLimbs,
+    {
+        // Small-modulus configs (flush_adds == 1) reduce on every add; a
+        // plain field add is strictly cheaper there. Real 4-limb moduli
+        // (flush_adds = 2^20) never flush at our sizes.
+        if flush_adds <= 1 {
+            *acc += omega.clone();
+            return;
+        }
+        reducer.add(bucket, omega);
+        *pending += 1;
+        if *pending >= flush_adds {
+            let full = std::mem::replace(bucket, Uint::zero());
+            *acc += reducer.reduce(full);
+            *pending = 0;
+        }
+    }
+
     for row in rows {
         let row_weight = &row_weights[row];
         for (source_idx, source) in sources.iter().enumerate() {
@@ -432,12 +480,27 @@ where
                     let mut mk = mask;
                     while mk != 0 {
                         let k = mk.trailing_zeros() as usize;
-                        h[k] += &omega;
+                        bucket_add(
+                            reducer,
+                            flush_adds,
+                            &mut h_buckets[k],
+                            &mut h_pending[k],
+                            &mut h_acc[k],
+                            &omega,
+                        );
                         // j ≤ k, j in mask (diagonal included).
                         let mut mj = mask & (((1u128 << k) - 1) | (1u128 << k));
                         while mj != 0 {
                             let j = mj.trailing_zeros() as usize;
-                            g[tri(j, k)] += &omega;
+                            let entry = tri(j, k);
+                            bucket_add(
+                                reducer,
+                                flush_adds,
+                                &mut g_buckets[entry],
+                                &mut g_pending[entry],
+                                &mut g_acc[entry],
+                                &omega,
+                            );
                             mj &= mj - 1;
                         }
                         mk &= mk - 1;
@@ -447,7 +510,18 @@ where
             }
         }
     }
-    (g, h, fallback)
+
+    for (bucket, acc) in g_buckets.into_iter().zip(g_acc.iter_mut()) {
+        if !bucket.is_zero() {
+            *acc += reducer.reduce(bucket);
+        }
+    }
+    for (bucket, acc) in h_buckets.into_iter().zip(h_acc.iter_mut()) {
+        if !bucket.is_zero() {
+            *acc += reducer.reduce(bucket);
+        }
+    }
+    (g_acc, h_acc, fallback)
 }
 
 /// One streaming pass over `(source, row)` items across all instances.
@@ -467,7 +541,7 @@ pub fn accumulate_booleanity_gram<F, Trace>(
     field_cfg: &F::Config,
 ) -> Result<GramAccumulator<F>, ShaProjectionError>
 where
-    F: PrimeField + Send + Sync,
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
     F::Config: Sync,
     Trace: Borrow<ProjectedTrace<F>> + Sync,
 {
@@ -506,6 +580,50 @@ where
             field_cfg,
         );
     };
+    accumulate_booleanity_gram_with_masks(
+        traces,
+        &masks,
+        row_weights,
+        rho_powers,
+        sources,
+        field_cfg,
+    )
+}
+
+/// Mask-packed Gram pass with caller-provided masks (build them once with
+/// [`ShaSourceMasks::build`] and reuse for [`fold_projected_traces_with_theta_masks`]).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn accumulate_booleanity_gram_with_masks<F, Trace>(
+    traces: &[Trace],
+    masks: &ShaSourceMasks,
+    row_weights: &[F],
+    rho_powers: &[F],
+    sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<GramAccumulator<F>, ShaProjectionError>
+where
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
+    F::Config: Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let n = traces.len();
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if rho_powers.len() != sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "rho_powers",
+            col: 0,
+            got: rho_powers.len(),
+            expected: sources.len(),
+        });
+    }
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
 
     #[cfg(feature = "parallel")]
     let (mut g, mut h, fallback) = {
@@ -517,7 +635,16 @@ where
         chunks
             .into_par_iter()
             .map(|rows| {
-                gram_fast_rows(rows, &masks, row_weights, rho_powers, sources, n, field_cfg)
+                gram_fast_rows(
+                    rows,
+                    &masks,
+                    row_weights,
+                    rho_powers,
+                    sources,
+                    n,
+                    &reducer,
+                    field_cfg,
+                )
             })
             .reduce(
                 || {
@@ -548,6 +675,7 @@ where
         rho_powers,
         sources,
         n,
+        &reducer,
         field_cfg,
     );
 
@@ -887,6 +1015,154 @@ where
     })
 }
 
+/// Fold the binary bit-slice tables with `θ` through the instance masks:
+/// `folded[slot][row] = Σ_{j: mask bit set} θ_j` (unreduced 5-limb subset
+/// sums, one Barrett per output), with per-(slot, row) fallback to the naive
+/// weighted fold for non-binary values.
+#[allow(clippy::arithmetic_side_effects)]
+fn fold_bit_slices_with_masks<F, Trace>(
+    traces: &[Trace],
+    masks: &ShaSourceMasks,
+    theta: &[F],
+    field_cfg: &F::Config,
+) -> MleTable<F>
+where
+    F: PrimeField + MontgomeryLimbs + Send + Sync,
+    F::Config: Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let reducer = BarrettDelayedReduction::<F>::new(field_cfg);
+    let slots = ShaWordCol::COUNT * SHA_WORD_BITS;
+    let fold_slot = |slot: usize| -> MleColumn<F> {
+        let mut evaluations = Vec::with_capacity(SHA_ROW_COUNT);
+        for row in 0..SHA_ROW_COUNT {
+            let idx = slot * SHA_ROW_COUNT + row;
+            if masks.non_binary[idx] {
+                let mut acc = F::zero_with_cfg(field_cfg);
+                for (trace, weight) in traces.iter().zip(theta) {
+                    let value = &trace.borrow().bit_slices[slot].evaluations[row];
+                    if !F::is_zero(value) {
+                        acc += weight.clone() * value;
+                    }
+                }
+                evaluations.push(acc);
+                continue;
+            }
+            let mut mask = masks.real[idx];
+            if mask == 0 {
+                evaluations.push(F::zero_with_cfg(field_cfg));
+                continue;
+            }
+            let mut acc = F::zero_with_cfg(field_cfg);
+            if reducer.flush_adds() <= 1 {
+                while mask != 0 {
+                    let j = mask.trailing_zeros() as usize;
+                    acc += theta[j].clone();
+                    mask &= mask - 1;
+                }
+            } else {
+                let mut bucket = Uint::<5>::zero();
+                while mask != 0 {
+                    let j = mask.trailing_zeros() as usize;
+                    reducer.add(&mut bucket, &theta[j]);
+                    mask &= mask - 1;
+                }
+                if !bucket.is_zero() {
+                    acc = reducer.reduce(bucket);
+                }
+            }
+            evaluations.push(acc);
+        }
+        MleColumn {
+            evaluations,
+            num_vars: SHA_ROW_VARS,
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        (0..slots).into_par_iter().map(fold_slot).collect()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        (0..slots).map(fold_slot).collect()
+    }
+}
+
+/// [`fold_projected_traces_with_weights`] with the binary bit-slice fold
+/// routed through pre-built instance masks (O-10 reuse: the same masks the
+/// Gram pass consumes).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn fold_projected_traces_with_theta_masks<F, Trace, Public>(
+    traces: &[Trace],
+    publics: &[Public],
+    theta: &[F],
+    masks: &ShaSourceMasks,
+    field_cfg: &F::Config,
+) -> Result<(ProjectionFoldWitness<F>, ProjectedPublic<F>), ShaProjectionError>
+where
+    F: ShaBinaryFoldField + MontgomeryLimbs,
+    F::Config: Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+    Public: Borrow<ProjectedPublic<F>>,
+{
+    if traces.len() != publics.len() {
+        return Err(ShaProjectionError::InstanceCountMismatch {
+            got: publics.len(),
+            expected: traces.len(),
+        });
+    }
+    if theta.len() != traces.len() {
+        return Err(ShaProjectionError::FoldingWeightCount {
+            got: theta.len(),
+            expected: traces.len(),
+        });
+    }
+
+    let bit_slices = fold_bit_slices_with_masks(traces, masks, theta, field_cfg);
+    let folded_public_columns = fold_mle_tables(
+        "public.columns",
+        publics.iter().map(|public| &public.borrow().columns),
+        theta,
+        field_cfg,
+    )?;
+    let folded_trace = ProjectedTrace {
+        bit_slices,
+        scalarized: fold_mle_tables(
+            "scalarized",
+            traces.iter().map(|trace| &trace.borrow().scalarized),
+            theta,
+            field_cfg,
+        )?,
+        int_columns: fold_mle_tables(
+            "int_columns",
+            traces.iter().map(|trace| &trace.borrow().int_columns),
+            theta,
+            field_cfg,
+        )?,
+        public_columns: folded_public_columns.clone(),
+    };
+    let folded_public = ProjectedPublic {
+        columns: folded_public_columns,
+        bit_slices: fold_optional_binary_mle_tables(
+            "public.bit_slices",
+            publics
+                .iter()
+                .map(|public| public.borrow().bit_slices.as_ref()),
+            theta,
+            field_cfg,
+        )?,
+    };
+
+    Ok((
+        ProjectionFoldWitness {
+            trace: folded_trace,
+        },
+        folded_public,
+    ))
+}
+
 /// Fold-first orchestration errors.
 #[derive(Debug, Error)]
 pub enum FoldFirstError {
@@ -999,6 +1275,7 @@ where
         + Send
         + Sync
         + 'static,
+    F::Config: Sync,
     F::Inner: Transcribable + ConstTranscribable,
     F::Modulus: Transcribable,
 {
@@ -1012,11 +1289,36 @@ where
 
     let row_weights = build_eq_x_r_vec(&r_ic, field_cfg).map_err(ShaProjectionError::from)?;
     let rho_powers = powers(rho.clone(), F::one_with_cfg(field_cfg), sources.len());
-    let gram = accumulate_booleanity_gram(traces, &row_weights, &rho_powers, sources, field_cfg)?;
+    let masks = ShaSourceMasks::build(traces, field_cfg);
+    let gram = match &masks {
+        Some(masks) => accumulate_booleanity_gram_with_masks(
+            traces,
+            masks,
+            &row_weights,
+            &rho_powers,
+            sources,
+            field_cfg,
+        )?,
+        None => accumulate_booleanity_gram_reference(
+            traces,
+            &row_weights,
+            &rho_powers,
+            sources,
+            field_cfg,
+        )?,
+    };
     let (skip_round, verdict) = prove_skip_round(&gram, &domain, transcript, field_cfg)?;
 
-    let (mut folded_witness, folded_public) =
-        fold_projected_traces_with_weights(traces, publics, &verdict.theta, field_cfg)?;
+    let (mut folded_witness, folded_public) = match &masks {
+        Some(masks) => fold_projected_traces_with_theta_masks(
+            traces,
+            publics,
+            &verdict.theta,
+            masks,
+            field_cfg,
+        )?,
+        None => fold_projected_traces_with_weights(traces, publics, &verdict.theta, field_cfg)?,
+    };
     let folded_ideal_polys =
         build_sha_ideal_values_at_point(&folded_witness.trace, &folded_public, &r_ic, field_cfg)?;
     absorb_fold_first_ideal_polys(&folded_ideal_polys, transcript, field_cfg);
@@ -1778,6 +2080,27 @@ mod tests {
         // outside {0,1}.
         let traces: Vec<_> = (0..4).map(synthetic_boolean_trace).collect();
         assert_gram_matches_reference(&traces, &production_sha_booleanity_sources());
+    }
+
+    #[test]
+    fn masked_fold_matches_weighted_fold() {
+        use crate::neutron_nova::projection_sha::fold_projected_traces_with_weights;
+        let cfg = test_config();
+        let mut traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        // Include a non-binary slot so the per-(slot,row) fallback is hit.
+        let idx = bit_slice_index(ShaWordCol::W.index(), 11, SHA_WORD_BITS);
+        traces[2].bit_slices[idx].evaluations[40] = f(5);
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let theta: Vec<F> = (0..4u64).map(|i| f(101 + 7 * i)).collect();
+        let masks = ShaSourceMasks::build(&traces, &cfg).unwrap();
+
+        let (masked, masked_public) =
+            fold_projected_traces_with_theta_masks(&traces, &publics, &theta, &masks, &cfg)
+                .unwrap();
+        let (reference, reference_public) =
+            fold_projected_traces_with_weights(&traces, &publics, &theta, &cfg).unwrap();
+        assert_eq!(masked.trace, reference.trace);
+        assert_eq!(masked_public, reference_public);
     }
 
     #[test]

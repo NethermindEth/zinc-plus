@@ -42,8 +42,9 @@ use zinc_piop::{
     },
     neutron_nova::SumFoldError,
     neutron_nova::{
-        FoldFirstSkipRoundProof, SkipDomain, absorb_fold_first_ideal_polys,
-        accumulate_booleanity_gram, build_sha_ideal_values_at_point,
+        FoldFirstSkipRoundProof, ShaSourceMasks, SkipDomain, absorb_fold_first_ideal_polys,
+        accumulate_booleanity_gram, accumulate_booleanity_gram_with_masks,
+        build_sha_ideal_values_at_point, fold_projected_traces_with_theta_masks,
         fold_projected_traces_with_weights, prove_skip_round, sha_nonzero_target_at,
         verify_skip_round,
     },
@@ -94,8 +95,10 @@ use zinc_transcript::Blake3Transcript;
 use zinc_transcript::traits::{ConstTranscribable, GenTranscribable, Transcribable, Transcript};
 use zinc_uair::{ShiftSpec, Uair, UairSignature, UairTrace, UairWitness};
 use zinc_utils::{
-    UNCHECKED, cfg_into_iter, cfg_iter, cfg_join, delayed_reduction::DelayedFieldProductSum,
-    inner_product::FieldFieldInnerProduct, inner_product::InnerProduct,
+    UNCHECKED, cfg_into_iter, cfg_iter, cfg_join,
+    delayed_reduction::{DelayedFieldProductSum, MontgomeryLimbs},
+    inner_product::FieldFieldInnerProduct,
+    inner_product::InnerProduct,
     inner_transparent_field::InnerTransparentField,
 };
 use zip_plus::{
@@ -2655,25 +2658,62 @@ where
 /// Transcript domain label separating the fold-first (V2) flow from V1.
 const FOLD_FIRST_SHA_DOMAIN_LABEL: &[u8] = b"PF_CONCISE_SHA256_FRESH_BATCH_V2";
 
-/// Fold-first (V2) mixed-Hyrax prover: booleanity univariate-skip zerocheck
-/// over the instance axis, Lagrange-weight fold, folded IdealCheck (once,
-/// before sampling `a`), then the shared row-sumcheck / endpoint / opening
-/// tail with the assembled target `T' = sum lambda^f E'_f(a) + xi*B_star`.
+/// Everything the fold stage of the fold-first (V2) flow produces. The
+/// decider (row sumcheck + endpoints + PCS opening) consumes this later —
+/// possibly much later — via [`decide_fold_first_mixed_hyrax`] on the same
+/// transcript. No opening work happens during folding.
+#[derive(Clone, Debug)]
+pub struct FoldFirstShaFoldOutput<C, F>
+where
+    C: AffineRepr,
+    F: PrimeField,
+{
+    pub instance_commitments: Vec<HyraxMixedCommitment<C>>,
+    pub skip_round: FoldFirstSkipRoundProof<F>,
+    pub folded_ideal_polys: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
+    pub theta: Vec<F>,
+    pub target: F,
+    pub folded: ProjectionFoldWitness<F>,
+    pub folded_public: ProjectedPublic<F>,
+    pub folded_prover_data: HyraxMixedProverData<C>,
+    pub r_ic: [F; SHA_ROW_VARS],
+    pub a: F,
+    pub lambda: F,
+    pub rho: F,
+    pub xi: F,
+}
+
+/// Decider-stage outputs: the proof pieces the opening layer contributes.
+#[derive(Clone, Debug)]
+pub struct FoldFirstShaDecideOutput<F>
+where
+    F: PrimeField,
+{
+    pub combined_sumcheck: MultiDegreeSumcheckProof<F>,
+    pub resolver: CombinedPolyResolverProof<F>,
+    pub multipoint_eval: MultipointEvalProof<F>,
+    pub witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
+    pub opening_proof: Vec<u8>,
+}
+
+/// Fold stage of the fold-first (V2) flow: commit-and-absorb, booleanity
+/// univariate-skip zerocheck, Lagrange-weight fold, folded IdealCheck (once,
+/// before sampling `a`), and the assembled target
+/// `T' = sum lambda^f E'_f(a) + xi*B_star`. Produces the accumulator-shaped
+/// [`FoldFirstShaFoldOutput`]; no row sumcheck, endpoints, or opening.
 ///
 /// Unlike V1 this path has no power-of-two instance-count requirement.
 #[allow(clippy::too_many_lines)]
-pub fn prove_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
+pub fn fold_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
     pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
     transcript: &mut impl Transcript,
 ) -> Result<
-    LinearIdealFoldProveOutput<
-        UairInstance<'static, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>,
-        FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>,
-        FoldedLinearIdealWitness<ProductionShaMixedHyraxFoldedWitness<C, F>>,
-        FoldFirstShaMixedHyraxProof<C, F>,
-    >,
+    (
+        Vec<UairInstance<'static, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>>,
+        FoldFirstShaFoldOutput<C, F>,
+    ),
     LinearIdealFoldError<F>,
 >
 where
@@ -2688,8 +2728,10 @@ where
         + Send
         + Sync
         + 'static
+        + MontgomeryLimbs
         + ShaLinearAccumulatorField
         + ShaSuffixScannerField,
+    F::Config: Sync,
     F::Inner: Transcribable + ConstTranscribable + Default + Send + Sync,
     F::Modulus: Transcribable,
     C: ProductionShaMixedHyraxPcs<Zt, F, D>,
@@ -2752,20 +2794,29 @@ where
         F::one_with_cfg(field_cfg),
         booleanity_sources.len(),
     );
+    let masks = ShaSourceMasks::build(&traces, field_cfg);
     let gram = tracing::info_span!(
         target: "zinc_protocol::production_sha",
         "fold_first_gram",
         side = "prove",
         phase = "fold_first_gram",
     )
-    .in_scope(|| {
-        accumulate_booleanity_gram(
+    .in_scope(|| match &masks {
+        Some(masks) => accumulate_booleanity_gram_with_masks(
+            &traces,
+            masks,
+            &r_ic_eq_weights,
+            &rho_powers,
+            &booleanity_sources,
+            field_cfg,
+        ),
+        None => accumulate_booleanity_gram(
             &traces,
             &r_ic_eq_weights,
             &rho_powers,
             &booleanity_sources,
             field_cfg,
-        )
+        ),
     })?;
     let (skip_round, verdict) = tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -2782,8 +2833,15 @@ where
         side = "prove",
         phase = "fold_projected_traces",
     )
-    .in_scope(|| {
-        fold_projected_traces_with_weights(&traces, &publics, &verdict.theta, field_cfg)
+    .in_scope(|| match &masks {
+        Some(masks) => fold_projected_traces_with_theta_masks(
+            &traces,
+            &publics,
+            &verdict.theta,
+            masks,
+            field_cfg,
+        ),
+        None => fold_projected_traces_with_weights(&traces, &publics, &verdict.theta, field_cfg),
     })?;
     let folded_ideal_polys = tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -2834,28 +2892,87 @@ where
         field_cfg,
     );
 
+    Ok((
+        fresh_instances,
+        FoldFirstShaFoldOutput {
+            instance_commitments,
+            skip_round,
+            folded_ideal_polys,
+            theta: verdict.theta,
+            target,
+            folded,
+            folded_public,
+            folded_prover_data,
+            r_ic,
+            a,
+            lambda,
+            rho,
+            xi,
+        },
+    ))
+}
+
+/// Decider stage of the fold-first (V2) flow: folded row sumcheck against
+/// the fold stage's assembled target, endpoint/multipoint reduction, and the
+/// mixed-Hyrax PCS opening. Run once, after any number of deferred folds'
+/// worth of other work — the transcript continues from the fold stage.
+pub fn decide_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    fold: &FoldFirstShaFoldOutput<C, F>,
+    transcript: &mut impl Transcript,
+) -> Result<FoldFirstShaDecideOutput<F>, LinearIdealFoldError<F>>
+where
+    U: Uair,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<u64>
+        + HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static
+        + MontgomeryLimbs
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
+    F::Config: Sync,
+    F::Inner: Transcribable + ConstTranscribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+{
+    let field_cfg = &pp.field_cfg;
+    let booleanity_sources = production_sha_booleanity_sources();
+    let r_ic_eq_weights = build_eq_x_r_vec(&fold.r_ic, field_cfg)?;
+    let a_powers = build_sha_residual_eval_powers(&fold.a, field_cfg);
+    let lambda_powers = build_sha_lambda_powers(&fold.lambda, field_cfg);
+    let booleanity_weights =
+        build_booleanity_weights(&fold.rho, &fold.xi, booleanity_sources.len(), field_cfg);
+
     let (combined_sumcheck, row_output) = prove_row_sumcheck_phase(
         transcript,
-        &folded.trace,
-        &folded_public,
-        &r_ic,
+        &fold.folded.trace,
+        &fold.folded_public,
+        &fold.r_ic,
         &r_ic_eq_weights,
         &a_powers,
         &lambda_powers,
         &booleanity_weights,
         &booleanity_sources,
-        &target,
+        &fold.target,
         field_cfg,
     )?;
 
     let (resolver, _resolver_endpoint_evals, multipoint_eval, r_0) =
         prove_endpoint_multipoint_phase(
             transcript,
-            &folded.trace,
-            &folded_public,
+            &fold.folded.trace,
+            &fold.folded_public,
             &row_output,
-            &r_ic,
-            &a,
+            &fold.r_ic,
+            &fold.a,
             &a_powers,
             &lambda_powers,
             &booleanity_weights,
@@ -2866,38 +2983,94 @@ where
     let r_0_eq_weights = build_eq_x_r_vec(&r_0, field_cfg)?;
     let (witness_lifted_evals, opening_proof) = prove_mixed_hyrax_pcs_opening_phase::<C, Zt, F, D>(
         transcript,
-        &folded.trace,
-        &instance_commitments,
-        fold_claim.eq_instance_weights(),
-        &folded_prover_data,
+        &fold.folded.trace,
+        &fold.instance_commitments,
+        &fold.theta,
+        &fold.folded_prover_data,
         &r_0,
         &r_0_eq_weights,
         &pp.pcs_params,
         field_cfg,
     )?;
 
+    Ok(FoldFirstShaDecideOutput {
+        combined_sumcheck,
+        resolver,
+        multipoint_eval,
+        witness_lifted_evals,
+        opening_proof,
+    })
+}
+
+/// Fold-first (V2) mixed-Hyrax prover: the fold stage immediately followed
+/// by the decider. Splittable via [`fold_prepared_fold_first_mixed_hyrax`] +
+/// [`decide_fold_first_mixed_hyrax`] when the opening should happen later.
+pub fn prove_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
+    pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
+    shape: &UairShape<U>,
+    prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    transcript: &mut impl Transcript,
+) -> Result<
+    LinearIdealFoldProveOutput<
+        UairInstance<'static, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>,
+        FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>,
+        FoldedLinearIdealWitness<ProductionShaMixedHyraxFoldedWitness<C, F>>,
+        FoldFirstShaMixedHyraxProof<C, F>,
+    >,
+    LinearIdealFoldError<F>,
+>
+where
+    U: Uair,
+    Zt: ZincTypes<D>,
+    F: InnerTransparentField
+        + DelayedFieldProductSum
+        + ShaBinaryFoldField
+        + FromPrimitiveWithConfig
+        + FromWithConfig<u64>
+        + HyraxFieldBridge<C>
+        + Send
+        + Sync
+        + 'static
+        + MontgomeryLimbs
+        + ShaLinearAccumulatorField
+        + ShaSuffixScannerField,
+    F::Config: Sync,
+    F::Inner: Transcribable + ConstTranscribable + Default + Send + Sync,
+    F::Modulus: Transcribable,
+    C: ProductionShaMixedHyraxPcs<Zt, F, D>,
+    DensePolyScalarLanes: HyraxLanes<C, DensePolynomial<Zt::Int, D>, D>,
+    IntScalarLane: HyraxLanes<C, Zt::Int, D>,
+{
+    let (fresh_instances, fold) = fold_prepared_fold_first_mixed_hyrax::<C, U, Zt, F, D>(
+        pp,
+        shape,
+        prepared_instances,
+        transcript,
+    )?;
+    let decide = decide_fold_first_mixed_hyrax::<C, U, Zt, F, D>(pp, &fold, transcript)?;
+
     Ok(LinearIdealFoldProveOutput {
         fresh_instances,
         folded_instance: FoldedLinearIdealInstance {
-            target: target.clone(),
+            target: fold.target.clone(),
             commitments: (),
-            public: folded_public,
+            public: fold.folded_public,
         },
         folded_witness: FoldedLinearIdealWitness {
             witness: ProductionShaMixedHyraxFoldedWitness {
-                trace: folded.trace,
-                opening_witness: folded_prover_data,
+                trace: fold.folded.trace,
+                opening_witness: fold.folded_prover_data,
             },
         },
         proof: FoldFirstShaMixedHyraxProof {
-            instance_commitments,
-            skip_round,
-            folded_ideal_polys,
-            resolver,
-            combined_sumcheck,
-            multipoint_eval,
-            witness_lifted_evals,
-            opening_proof,
+            instance_commitments: fold.instance_commitments,
+            skip_round: fold.skip_round,
+            folded_ideal_polys: fold.folded_ideal_polys,
+            resolver: decide.resolver,
+            combined_sumcheck: decide.combined_sumcheck,
+            multipoint_eval: decide.multipoint_eval,
+            witness_lifted_evals: decide.witness_lifted_evals,
+            opening_proof: decide.opening_proof,
         },
     })
 }
