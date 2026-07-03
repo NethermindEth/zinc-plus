@@ -44,9 +44,9 @@ use zinc_piop::{
     neutron_nova::{
         FoldFirstSkipRoundProof, ShaSourceMasks, SkipDomain, absorb_fold_first_ideal_polys,
         accumulate_booleanity_gram, accumulate_booleanity_gram_with_masks,
-        build_sha_ideal_values_at_point, fold_projected_traces_with_theta_masks,
-        fold_projected_traces_with_weights, prove_skip_round, sha_nonzero_target_at,
-        verify_skip_round,
+        build_fold_first_ideal_polys, build_sha_ideal_values_at_point,
+        fold_projected_traces_with_theta_masks, fold_projected_traces_with_weights,
+        prove_skip_round, sha_nonzero_target_at, verify_skip_round,
     },
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
@@ -2849,9 +2849,7 @@ where
         side = "prove",
         phase = "fold_first_folded_ideal",
     )
-    .in_scope(|| {
-        build_sha_ideal_values_at_point(&folded.trace, &folded_public, &r_ic, field_cfg)
-    })?;
+    .in_scope(|| build_fold_first_ideal_polys(&folded.trace, &folded_public, &r_ic, field_cfg))?;
     absorb_fold_first_ideal_polys(&folded_ideal_polys, transcript, field_cfg);
 
     let a: F = transcript.get_transcribable_field_challenge(field_cfg);

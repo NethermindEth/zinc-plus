@@ -24,6 +24,7 @@ pub use fold_first::{
     FoldFirstVerifierClaims, GramAccumulator, ShaSourceMasks, SkipDomain, SkipRoundVerdict,
     absorb_fold_first_ideal_polys, accumulate_booleanity_gram,
     accumulate_booleanity_gram_reference, accumulate_booleanity_gram_with_masks,
+    build_fold_first_ideal_polys,
     fold_projected_traces_with_theta_masks, prove_fold_first_sha_sumfold, prove_skip_round,
     sha_nonzero_target_at, verify_fold_first_sha_sumfold, verify_skip_round,
 };

@@ -44,10 +44,11 @@ use crate::neutron_nova::projection_sha::{
     ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
     SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanitySource, ShaProjectionError, ShaWordCol,
     VirtualChMajValues, booleanity_source_value_at_row_with_virtuals,
-    build_folded_row_sumcheck_group, build_sha_ideal_values_at_point, fold_mle_tables,
+    build_folded_row_sumcheck_group, fold_mle_tables,
     fold_optional_binary_mle_tables, fold_projected_traces_with_weights,
-    folded_row_integrand_values, reconstruct_virtual_ch_maj_at_row_unchecked, scalarize_bit_slices,
-    sources_need_virtuals, verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
+    folded_row_integrand_values, reconstruct_virtual_ch_maj_at_row_unchecked,
+    residual_polys_at_row, scalarize_bit_slices, sources_need_virtuals,
+    verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
 };
 use crate::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 
@@ -414,7 +415,7 @@ impl ShaSourceMasks {
 /// Fast-path worker (O-12/O-15): accumulate all mask-resolvable `(q, z)`
 /// items in `rows` into thread-local `(g, h)`; items that need the general
 /// field path are returned for the sequential fallback pass.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn gram_fast_rows<F>(
     rows: std::ops::Range<usize>,
     masks: &ShaSourceMasks,
@@ -637,7 +638,7 @@ where
             .map(|rows| {
                 gram_fast_rows(
                     rows,
-                    &masks,
+                    masks,
                     row_weights,
                     rho_powers,
                     sources,
@@ -670,7 +671,7 @@ where
     #[cfg(not(feature = "parallel"))]
     let (mut g, mut h, fallback) = gram_fast_rows(
         0..SHA_ROW_COUNT,
-        &masks,
+        masks,
         row_weights,
         rho_powers,
         sources,
@@ -1206,6 +1207,82 @@ where
     acc
 }
 
+/// Parallel, allocation-lean construction of the folded ideal polynomials
+/// `E'_f(X) = Σ_z eq(r_ic, z)·C_f(z, X; w', y')` for the nonzero families.
+/// Row-chunked with per-thread coefficient accumulators; equivalent to
+/// [`build_sha_ideal_values_at_point`] (differentially tested).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_fold_first_ideal_polys<F>(
+    trace: &ProjectedTrace<F>,
+    public: &ProjectedPublic<F>,
+    r_ic: &[F; SHA_ROW_VARS],
+    field_cfg: &F::Config,
+) -> Result<[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES], ShaProjectionError>
+where
+    F: PrimeField + Send + Sync,
+    F::Config: Sync,
+{
+    let row_weights = build_eq_x_r_vec(r_ic, field_cfg).map_err(ShaProjectionError::from)?;
+    let zero = F::zero_with_cfg(field_cfg);
+
+    let accumulate_rows =
+        |rows: std::ops::Range<usize>| -> Result<Vec<Vec<F>>, ShaProjectionError> {
+            let mut acc: Vec<Vec<F>> = (0..NUM_NONZERO_SHA_FAMILIES).map(|_| Vec::new()).collect();
+            for row in rows {
+                let row_weight = &row_weights[row];
+                let residuals = residual_polys_at_row(trace, public, row, field_cfg)?;
+                for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
+                    let coeffs = &residuals[family.index()].coeffs;
+                    let out = &mut acc[slot];
+                    if out.len() < coeffs.len() {
+                        out.resize(coeffs.len(), zero.clone());
+                    }
+                    for (target, coeff) in out.iter_mut().zip(coeffs) {
+                        if !F::is_zero(coeff) {
+                            *target += row_weight.clone() * coeff;
+                        }
+                    }
+                }
+            }
+            Ok(acc)
+        };
+
+    #[cfg(feature = "parallel")]
+    let merged: Vec<Vec<F>> = {
+        use rayon::prelude::*;
+        const ROW_CHUNK: usize = 16;
+        let partials = (0..SHA_ROW_COUNT.div_ceil(ROW_CHUNK))
+            .into_par_iter()
+            .map(|c| accumulate_rows(c * ROW_CHUNK..((c + 1) * ROW_CHUNK).min(SHA_ROW_COUNT)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut merged: Vec<Vec<F>> = (0..NUM_NONZERO_SHA_FAMILIES).map(|_| Vec::new()).collect();
+        for partial in partials {
+            for (slot, coeffs) in partial.into_iter().enumerate() {
+                let out = &mut merged[slot];
+                if out.len() < coeffs.len() {
+                    out.resize(coeffs.len(), zero.clone());
+                }
+                for (target, coeff) in out.iter_mut().zip(coeffs) {
+                    *target += coeff;
+                }
+            }
+        }
+        merged
+    };
+    #[cfg(not(feature = "parallel"))]
+    let merged = accumulate_rows(0..SHA_ROW_COUNT)?;
+
+    let mut out: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES] =
+        std::array::from_fn(|_| DynamicPolynomialF { coeffs: Vec::new() });
+    for (slot, mut coeffs) in merged.into_iter().enumerate() {
+        while coeffs.last().is_some_and(|coeff| F::is_zero(coeff)) {
+            coeffs.pop();
+        }
+        out[slot] = DynamicPolynomialF { coeffs };
+    }
+    Ok(out)
+}
+
 /// The fold-first SumFold proof: skip-round message, folded ideal
 /// polynomials, and the folded row sumcheck.
 #[derive(Clone, Debug)]
@@ -1320,7 +1397,7 @@ where
         None => fold_projected_traces_with_weights(traces, publics, &verdict.theta, field_cfg)?,
     };
     let folded_ideal_polys =
-        build_sha_ideal_values_at_point(&folded_witness.trace, &folded_public, &r_ic, field_cfg)?;
+        build_fold_first_ideal_polys(&folded_witness.trace, &folded_public, &r_ic, field_cfg)?;
     absorb_fold_first_ideal_polys(&folded_ideal_polys, transcript, field_cfg);
 
     let a: F = transcript.get_field_challenge(field_cfg);
@@ -1436,7 +1513,7 @@ mod tests {
     use super::*;
     use crate::neutron_nova::projection_sha::{
         MleTable, ProjectedPublic, SHA_ROW_VARS, SHA_WORD_BITS, ShaIntCol, ShaPublicCol,
-        ShaWordCol, bit_slice_index, scalarize_bit_slices,
+        ShaWordCol, bit_slice_index, build_sha_ideal_values_at_point, scalarize_bit_slices,
     };
     use crate::test_utils::test_config;
     use crypto_primitives::crypto_bigint_monty::MontyField;
@@ -2080,6 +2157,24 @@ mod tests {
         // outside {0,1}.
         let traces: Vec<_> = (0..4).map(synthetic_boolean_trace).collect();
         assert_gram_matches_reference(&traces, &production_sha_booleanity_sources());
+    }
+
+    #[test]
+    fn parallel_ideal_polys_match_reference() {
+        let cfg = test_config();
+        let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let theta: Vec<F> = (0..4u64).map(|i| f(31 + 5 * i)).collect();
+        let masks = ShaSourceMasks::build(&traces, &cfg).unwrap();
+        let (folded, folded_public) =
+            fold_projected_traces_with_theta_masks(&traces, &publics, &theta, &masks, &cfg)
+                .unwrap();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|i| f(11 + 2 * i as u64));
+        let fast =
+            build_fold_first_ideal_polys(&folded.trace, &folded_public, &r_ic, &cfg).unwrap();
+        let reference =
+            build_sha_ideal_values_at_point(&folded.trace, &folded_public, &r_ic, &cfg).unwrap();
+        assert_eq!(fast, reference);
     }
 
     #[test]
