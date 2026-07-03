@@ -62,7 +62,8 @@ use zinc_protocol::{
         PreparedProductionShaProverInstance, ProductionShaError, ProductionShaMixedHyraxPcs,
         ProductionShaMixedHyraxProof, ProductionShaPackedHyraxProof,
         ProductionShaProjectionAdapter, ProductionShaWitnessPolys, UairShape,
-        VerifiedLinearIdealFoldSetup, packed_sha_layout, prepare_linear_ideal_fold_witnesses,
+        VerifiedLinearIdealFoldSetup, packed_sha_layout,
+        prepare_fold_first_linear_ideal_fold_witnesses, prepare_linear_ideal_fold_witnesses,
         prove_prepared_fold_first_mixed_hyrax, prove_prepared_linear_ideal_fold_mixed_hyrax,
         prove_prepared_linear_ideal_fold_packed_hyrax, setup_verify_linear_ideal_fold_mixed_hyrax,
         setup_verify_linear_ideal_fold_packed_hyrax,
@@ -4249,7 +4250,7 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
     let setup_ms = elapsed_ms(setup_phase_start);
 
     let prepare_start = Instant::now();
-    let prepared_instances = prepare_linear_ideal_fold_witnesses::<
+    let prepared_instances = prepare_fold_first_linear_ideal_fold_witnesses::<
         U,
         RealEcdsaBenchZincTypes,
         HyraxF,

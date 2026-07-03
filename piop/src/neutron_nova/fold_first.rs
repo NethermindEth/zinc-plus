@@ -35,12 +35,12 @@ use zinc_utils::{
 use crate::neutron_nova::SumFoldError;
 use crate::neutron_nova::projection_sha::{
     NONZERO_SHA_FAMILIES, NUM_NONZERO_SHA_FAMILIES, NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic,
-    ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, ShaBinaryFoldField,
-    ShaBooleanitySource, ShaProjectionError, booleanity_source_value_at_row_with_virtuals,
-    build_folded_row_sumcheck_group, build_sha_ideal_values_at_point,
-    fold_projected_traces_with_weights, folded_row_integrand_values,
-    reconstruct_virtual_ch_maj_at_row_unchecked, scalarize_bit_slices, sources_need_virtuals,
-    verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
+    ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
+    ShaBinaryFoldField, ShaBooleanitySource, ShaProjectionError, ShaWordCol, VirtualChMajValues,
+    booleanity_source_value_at_row_with_virtuals, build_folded_row_sumcheck_group,
+    build_sha_ideal_values_at_point, fold_projected_traces_with_weights,
+    folded_row_integrand_values, reconstruct_virtual_ch_maj_at_row_unchecked, scalarize_bit_slices,
+    sources_need_virtuals, verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
 };
 use crate::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 
@@ -71,13 +71,39 @@ where
     }
 }
 
+/// Montgomery batch inversion: replaces `values[i]` with `values[i]⁻¹` using
+/// one field inversion and `3(n−1)` multiplications. Panics on zero inputs
+/// (never produced here: Lagrange denominators over distinct nodes).
+#[allow(clippy::arithmetic_side_effects)]
+fn batch_invert<F>(values: &mut [F], field_cfg: &F::Config)
+where
+    F: PrimeField,
+{
+    if values.is_empty() {
+        return;
+    }
+    let one = F::one_with_cfg(field_cfg);
+    let mut prefix = Vec::with_capacity(values.len());
+    let mut acc = one.clone();
+    for value in values.iter() {
+        prefix.push(acc.clone());
+        acc *= value.clone();
+    }
+    let mut inv = one / acc;
+    for (value, pre) in values.iter_mut().zip(prefix).rev() {
+        let next = inv.clone() * value.clone();
+        *value = inv * pre;
+        inv = next;
+    }
+}
+
 #[allow(clippy::arithmetic_side_effects)]
 fn inverse_lagrange_denominators<F>(points: &[F], field_cfg: &F::Config) -> Vec<F>
 where
     F: PrimeField,
 {
     let one = F::one_with_cfg(field_cfg);
-    points
+    let mut denoms: Vec<F> = points
         .iter()
         .enumerate()
         .map(|(j, u_j)| {
@@ -87,9 +113,11 @@ where
                     denom *= u_j.clone() - u_i;
                 }
             }
-            one.clone() / denom
+            denom
         })
-        .collect()
+        .collect();
+    batch_invert(&mut denoms, field_cfg);
+    denoms
 }
 
 /// Lagrange basis values `{L_j(x)}_j` for the given interpolation points.
@@ -215,12 +243,382 @@ pub struct GramAccumulator<F> {
     n_instances: usize,
 }
 
+const MASK_LANES: usize = 128;
+
+/// Instance-major bit-packed view of the real SHA booleanity sources
+/// (O-10): for each `(word_col, bit, row)` slot, bit `j` of the mask is
+/// instance `j`'s value. Slots where any instance holds a non-0/1 value are
+/// flagged so the accumulator falls back to the general field path there.
+struct ShaSourceMasks {
+    /// Indexed `slot * SHA_ROW_COUNT + row`, `slot = col * SHA_WORD_BITS + bit`.
+    real: Vec<u128>,
+    non_binary: Vec<bool>,
+    lane: u128,
+}
+
+impl ShaSourceMasks {
+    #[allow(clippy::arithmetic_side_effects)]
+    fn build<F, Trace>(traces: &[Trace], field_cfg: &F::Config) -> Option<Self>
+    where
+        F: PrimeField,
+        Trace: Borrow<ProjectedTrace<F>>,
+    {
+        let n = traces.len();
+        if n == 0 || n > MASK_LANES {
+            return None;
+        }
+        let lane = if n == MASK_LANES {
+            u128::MAX
+        } else {
+            (1u128 << n) - 1
+        };
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let slots = ShaWordCol::COUNT * SHA_WORD_BITS;
+        let mut real = vec![0u128; slots * SHA_ROW_COUNT];
+        let mut non_binary = vec![false; slots * SHA_ROW_COUNT];
+        for slot in 0..slots {
+            for row in 0..SHA_ROW_COUNT {
+                let mut mask = 0u128;
+                let mut bad = false;
+                for (j, trace) in traces.iter().enumerate() {
+                    let value = &trace.borrow().bit_slices[slot].evaluations[row];
+                    if *value == one {
+                        mask |= 1u128 << j;
+                    } else if *value != zero {
+                        bad = true;
+                        break;
+                    }
+                }
+                let idx = slot * SHA_ROW_COUNT + row;
+                real[idx] = mask;
+                non_binary[idx] = bad;
+            }
+        }
+        Some(Self {
+            real,
+            non_binary,
+            lane,
+        })
+    }
+
+    /// Mask of a real slot at a (possibly out-of-range) shifted row.
+    /// `None` when any instance's value there is non-binary.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn real_at(&self, col: ShaWordCol, bit: usize, row: usize) -> Option<u128> {
+        if row >= SHA_ROW_COUNT {
+            return Some(0);
+        }
+        let idx = (col.index() * SHA_WORD_BITS + bit) * SHA_ROW_COUNT + row;
+        if self.non_binary[idx] {
+            None
+        } else {
+            Some(self.real[idx])
+        }
+    }
+
+    /// Resolve a booleanity source at `row` into an instance mask, or `None`
+    /// when the general path must handle it (non-binary inputs, or a virtual
+    /// expression outside {0,1} for some instance). Virtual recipes mirror
+    /// `reconstruct_virtual_ch_maj_at_row`:
+    ///
+    /// - ch1 = E[z+2] + E[z+1] − 2·Uef[z+2]  ∈ {0,1} iff Uef = E₂∧E₁, value E₂⊕E₁
+    /// - ch2 = E[z+2] − E[z] + 2·UNegEg[z+2] + 2·Ch2Comp[z]
+    ///        ∈ {0,1} iff UNegEg+Ch2Comp = ¬E₂∧E₀ (no double-count), value E₂⊕E₀
+    /// - maj = A[z]+A[z+1]+A[z+2] − 2·Maj[z+2] − 2·MajComp[z]
+    ///        ∈ {0,1} iff Maj+MajComp = majority(A₀,A₁,A₂), value A₀⊕A₁⊕A₂
+    #[allow(clippy::arithmetic_side_effects)]
+    fn resolve(&self, source: &ShaBooleanitySource, row: usize) -> Option<u128> {
+        let lane = self.lane;
+        match source {
+            ShaBooleanitySource::WordBit { col, bit } => self.real_at(*col, *bit, row),
+            ShaBooleanitySource::VirtualCh1 { bit } => {
+                let e2 = self.real_at(ShaWordCol::E, *bit, row + 2)?;
+                let e1 = self.real_at(ShaWordCol::E, *bit, row + 1)?;
+                let u = self.real_at(ShaWordCol::Uef, *bit, row + 2)?;
+                let valid = !(u ^ (e2 & e1)) & lane;
+                if valid != lane {
+                    return None;
+                }
+                Some(e2 ^ e1)
+            }
+            ShaBooleanitySource::VirtualCh2 { bit } => {
+                let e2 = self.real_at(ShaWordCol::E, *bit, row + 2)?;
+                let e0 = self.real_at(ShaWordCol::E, *bit, row)?;
+                let u = self.real_at(ShaWordCol::UNegEg, *bit, row + 2)?;
+                let c = self.real_at(ShaWordCol::Ch2Comp, *bit, row)?;
+                let t = !e2 & e0 & lane;
+                let one_of = (u ^ c) & !(u & c) & lane;
+                let none_of = !(u | c) & lane;
+                let valid = (t & one_of) | (!t & lane & none_of);
+                if valid != lane {
+                    return None;
+                }
+                Some(e2 ^ e0)
+            }
+            ShaBooleanitySource::VirtualMaj { bit } => {
+                let a0 = self.real_at(ShaWordCol::A, *bit, row)?;
+                let a1 = self.real_at(ShaWordCol::A, *bit, row + 1)?;
+                let a2 = self.real_at(ShaWordCol::A, *bit, row + 2)?;
+                let m = self.real_at(ShaWordCol::Maj, *bit, row + 2)?;
+                let mc = self.real_at(ShaWordCol::MajComp, *bit, row)?;
+                let maj3 = (a0 & a1) | (a0 & a2) | (a1 & a2);
+                let one_of = (m ^ mc) & !(m & mc) & lane;
+                let none_of = !(m | mc) & lane;
+                let valid = (maj3 & one_of) | (!maj3 & lane & none_of);
+                if valid != lane {
+                    return None;
+                }
+                Some(a0 ^ a1 ^ a2)
+            }
+        }
+    }
+}
+
+/// Fast-path worker (O-12/O-15): accumulate all mask-resolvable `(q, z)`
+/// items in `rows` into thread-local `(g, h)`; items that need the general
+/// field path are returned for the sequential fallback pass.
+#[allow(clippy::arithmetic_side_effects)]
+fn gram_fast_rows<F>(
+    rows: std::ops::Range<usize>,
+    masks: &ShaSourceMasks,
+    row_weights: &[F],
+    rho_powers: &[F],
+    sources: &[ShaBooleanitySource],
+    n: usize,
+    field_cfg: &F::Config,
+) -> (Vec<F>, Vec<F>, Vec<(usize, usize)>)
+where
+    F: PrimeField,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    let mut g = vec![zero.clone(); tri(n - 1, n - 1) + 1];
+    let mut h = vec![zero; n];
+    let mut fallback = Vec::new();
+    for row in rows {
+        let row_weight = &row_weights[row];
+        for (source_idx, source) in sources.iter().enumerate() {
+            match masks.resolve(source, row) {
+                Some(0) => {}
+                Some(mask) => {
+                    let omega = rho_powers[source_idx].clone() * row_weight;
+                    let mut mk = mask;
+                    while mk != 0 {
+                        let k = mk.trailing_zeros() as usize;
+                        h[k] += omega.clone();
+                        // j ≤ k, j in mask (diagonal included).
+                        let mut mj = mask & (((1u128 << k) - 1) | (1u128 << k));
+                        while mj != 0 {
+                            let j = mj.trailing_zeros() as usize;
+                            g[tri(j, k)] += omega.clone();
+                            mj &= mj - 1;
+                        }
+                        mk &= mk - 1;
+                    }
+                }
+                None => fallback.push((source_idx, row)),
+            }
+        }
+    }
+    (g, h, fallback)
+}
+
 /// One streaming pass over `(source, row)` items across all instances.
+///
+/// Dispatches to the mask-packed fast path (O-10/O-12/O-15) whenever every
+/// instance fits a `u128` lane; per-item fallbacks handle non-binary values
+/// and virtual expressions outside {0,1} exactly like the reference path.
 ///
 /// `row_weights` must be the `eq(r_ic, ·)` table over the 128 SHA rows and
 /// `rho_powers` must have one entry per booleanity source (`ρ^idx(q)`).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn accumulate_booleanity_gram<F, Trace>(
+    traces: &[Trace],
+    row_weights: &[F],
+    rho_powers: &[F],
+    sources: &[ShaBooleanitySource],
+    field_cfg: &F::Config,
+) -> Result<GramAccumulator<F>, ShaProjectionError>
+where
+    F: PrimeField + Send + Sync,
+    F::Config: Sync,
+    Trace: Borrow<ProjectedTrace<F>> + Sync,
+{
+    let n = traces.len();
+    if n == 0 {
+        return accumulate_booleanity_gram_reference(
+            traces,
+            row_weights,
+            rho_powers,
+            sources,
+            field_cfg,
+        );
+    }
+    if row_weights.len() != SHA_ROW_COUNT {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "row_weights",
+            col: 0,
+            got: row_weights.len(),
+            expected: SHA_ROW_COUNT,
+        });
+    }
+    if rho_powers.len() != sources.len() {
+        return Err(ShaProjectionError::ColumnRowCount {
+            kind: "rho_powers",
+            col: 0,
+            got: rho_powers.len(),
+            expected: sources.len(),
+        });
+    }
+    let Some(masks) = ShaSourceMasks::build(traces, field_cfg) else {
+        return accumulate_booleanity_gram_reference(
+            traces,
+            row_weights,
+            rho_powers,
+            sources,
+            field_cfg,
+        );
+    };
+
+    #[cfg(feature = "parallel")]
+    let (mut g, mut h, fallback) = {
+        use rayon::prelude::*;
+        const ROW_CHUNK: usize = 16;
+        let chunks: Vec<_> = (0..SHA_ROW_COUNT.div_ceil(ROW_CHUNK))
+            .map(|c| c * ROW_CHUNK..((c + 1) * ROW_CHUNK).min(SHA_ROW_COUNT))
+            .collect();
+        chunks
+            .into_par_iter()
+            .map(|rows| {
+                gram_fast_rows(rows, &masks, row_weights, rho_powers, sources, n, field_cfg)
+            })
+            .reduce(
+                || {
+                    let zero = F::zero_with_cfg(field_cfg);
+                    (
+                        vec![zero.clone(); tri(n - 1, n - 1) + 1],
+                        vec![zero; n],
+                        Vec::new(),
+                    )
+                },
+                |(mut g_a, mut h_a, mut f_a), (g_b, h_b, f_b)| {
+                    for (a, b) in g_a.iter_mut().zip(g_b) {
+                        *a += b;
+                    }
+                    for (a, b) in h_a.iter_mut().zip(h_b) {
+                        *a += b;
+                    }
+                    f_a.extend(f_b);
+                    (g_a, h_a, f_a)
+                },
+            )
+    };
+    #[cfg(not(feature = "parallel"))]
+    let (mut g, mut h, fallback) = gram_fast_rows(
+        0..SHA_ROW_COUNT,
+        &masks,
+        row_weights,
+        rho_powers,
+        sources,
+        n,
+        field_cfg,
+    );
+
+    // General field path for the few items the masks could not certify.
+    if !fallback.is_empty() {
+        let zero = F::zero_with_cfg(field_cfg);
+        let one = F::one_with_cfg(field_cfg);
+        let needs_virtuals = sources_need_virtuals(sources);
+        let mut values = vec![zero.clone(); n];
+        let mut virtuals_cache: std::collections::HashMap<usize, Vec<VirtualChMajValues<F>>> =
+            std::collections::HashMap::new();
+        for (source_idx, row) in fallback {
+            let source = &sources[source_idx];
+            let is_virtual = !matches!(source, ShaBooleanitySource::WordBit { .. });
+            let virtuals_row = if needs_virtuals && is_virtual {
+                Some(match virtuals_cache.entry(row) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let computed = traces
+                            .iter()
+                            .map(|trace| {
+                                reconstruct_virtual_ch_maj_at_row_unchecked(
+                                    trace.borrow(),
+                                    row,
+                                    field_cfg,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        entry.insert(computed)
+                    }
+                })
+            } else {
+                None
+            };
+            let mut any_nonzero = false;
+            for (j, trace) in traces.iter().enumerate() {
+                let value = booleanity_source_value_at_row_with_virtuals(
+                    trace.borrow(),
+                    row,
+                    source,
+                    virtuals_row.as_ref().map(|v| &v[j]),
+                    field_cfg,
+                )?;
+                any_nonzero |= value != zero;
+                values[j] = value;
+            }
+            if !any_nonzero {
+                continue;
+            }
+            let omega = rho_powers[source_idx].clone() * &row_weights[row];
+            accumulate_general_item(&values, &omega, &zero, &one, &mut g, &mut h);
+        }
+    }
+
+    Ok(GramAccumulator {
+        g,
+        h,
+        n_instances: n,
+    })
+}
+
+/// Shared general-path pair accumulation for one `(q, z)` item.
+#[allow(clippy::arithmetic_side_effects)]
+fn accumulate_general_item<F>(values: &[F], omega: &F, zero: &F, one: &F, g: &mut [F], h: &mut [F])
+where
+    F: PrimeField,
+{
+    let n = values.len();
+    for k in 0..n {
+        if values[k] == *zero {
+            continue;
+        }
+        let omega_k = if values[k] == *one {
+            omega.clone()
+        } else {
+            omega.clone() * &values[k]
+        };
+        h[k] += omega_k.clone();
+        for j in 0..=k {
+            if values[j] == *zero {
+                continue;
+            }
+            if values[j] == *one {
+                g[tri(j, k)] += omega_k.clone();
+            } else {
+                g[tri(j, k)] += omega_k.clone() * &values[j];
+            }
+        }
+    }
+}
+
+/// Reference (correctness-first) implementation of the Gram pass. Kept for
+/// differential tests and as the fallback for `n > 128` instances.
+///
+/// `row_weights` must be the `eq(r_ic, ·)` table over the 128 SHA rows and
+/// `rho_powers` must have one entry per booleanity source (`ρ^idx(q)`).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn accumulate_booleanity_gram_reference<F, Trace>(
     traces: &[Trace],
     row_weights: &[F],
     rho_powers: &[F],
@@ -1310,6 +1708,62 @@ mod tests {
 
             eprintln!("{n:>4}  {gram_ms:>12.2}  {v2_ms:>12.2}  {v1_ms:>12.2}");
         }
+    }
+
+    fn assert_gram_matches_reference(
+        traces: &[ProjectedTrace<F>],
+        sources: &[ShaBooleanitySource],
+    ) {
+        let cfg = test_config();
+        let row_weights = test_row_weights(&cfg);
+        let rho_powers = powers(f(29), F::one_with_cfg(&cfg), sources.len());
+        let fast =
+            accumulate_booleanity_gram(traces, &row_weights, &rho_powers, sources, &cfg).unwrap();
+        let reference =
+            accumulate_booleanity_gram_reference(traces, &row_weights, &rho_powers, sources, &cfg)
+                .unwrap();
+        assert_eq!(fast.g, reference.g);
+        assert_eq!(fast.h, reference.h);
+    }
+
+    #[test]
+    fn mask_fast_path_matches_reference_on_honest_virtuals() {
+        use crate::neutron_nova::projection_sha::production_sha_booleanity_sources;
+        let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        assert_gram_matches_reference(&traces, &production_sha_booleanity_sources());
+    }
+
+    #[test]
+    fn mask_fast_path_matches_reference_with_non_binary_fallback() {
+        use crate::neutron_nova::projection_sha::production_sha_booleanity_sources;
+        let mut traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        // Non-binary real bits force per-item fallbacks in real and virtual
+        // sources that read these slots.
+        let idx_a = bit_slice_index(ShaWordCol::A.index(), 5, SHA_WORD_BITS);
+        traces[1].bit_slices[idx_a].evaluations[10] = f(7);
+        let idx_e = bit_slice_index(ShaWordCol::E.index(), 9, SHA_WORD_BITS);
+        traces[3].bit_slices[idx_e].evaluations[33] = f(2);
+        assert_gram_matches_reference(&traces, &production_sha_booleanity_sources());
+    }
+
+    #[test]
+    fn mask_fast_path_matches_reference_on_invalid_virtual_relations() {
+        use crate::neutron_nova::projection_sha::production_sha_booleanity_sources;
+        // Random bits: every bit is 0/1 but the Uef/UNegEg/Maj relations do
+        // not hold, so virtual sources take the fallback path with values
+        // outside {0,1}.
+        let traces: Vec<_> = (0..4).map(synthetic_boolean_trace).collect();
+        assert_gram_matches_reference(&traces, &production_sha_booleanity_sources());
+    }
+
+    #[test]
+    fn batch_invert_matches_individual_inversion() {
+        let cfg = test_config();
+        let one = F::one_with_cfg(&cfg);
+        let mut values: Vec<F> = (2u64..12).map(f).collect();
+        let expected: Vec<F> = values.iter().map(|v| one.clone() / v.clone()).collect();
+        batch_invert(&mut values, &cfg);
+        assert_eq!(values, expected);
     }
 
     #[test]

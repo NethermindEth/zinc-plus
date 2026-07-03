@@ -49,14 +49,15 @@ use zinc_piop::{
     },
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
-        NUM_SHA_RESIDUAL_FAMILIES, PreparedProductionShaNativeView,
-        PreparedShaQuadraticPrefixArtifacts, PreparedShaSumFoldBasis, ProjectedPublic,
-        ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-        ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource, ShaIntCol,
-        ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError, ShaPublicCol,
-        ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode, ShaSuffixScannerField,
-        ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights, bit_slice_index,
-        build_booleanity_weights, build_dense_sha_sumfold_group, build_folded_row_sumcheck_group,
+        NUM_SHA_RESIDUAL_FAMILIES, PreparedProductionShaNativeView, PreparedShaBooleanityBasis,
+        PreparedShaQuadraticPrefixArtifacts, PreparedShaResidualBasis, PreparedShaSumFoldBasis,
+        ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
+        SHA_WORD_BITS, ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource,
+        ShaIntCol, ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError,
+        ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode,
+        ShaSuffixScannerField, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
+        bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
+        build_folded_row_sumcheck_group,
         build_production_sha_sumfold_group_from_prefix_accumulators_with_initial_claim,
         build_production_sha_sumfold_group_from_prepared_prefix_artifacts_with_initial_claim,
         build_sha_lambda_powers, build_sha_residual_eval_powers,
@@ -1771,6 +1772,59 @@ where
             })
         })
         .collect()
+}
+
+/// Witness preparation for the fold-first (V2) path: identical projection to
+/// [`prepare_linear_ideal_fold_witnesses`] but with no power-of-two instance
+/// requirement and no V1 SumFold basis (the fold-first prover packs its own
+/// instance-major masks from the projected trace).
+pub fn prepare_fold_first_linear_ideal_fold_witnesses<U, Zt, F, const D: usize>(
+    shape: &UairShape<U>,
+    witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    field_cfg: &F::Config,
+) -> Result<Vec<PreparedProductionShaProverInstance<Zt, F, D>>, LinearIdealFoldError<F>>
+where
+    U: Uair + ProductionShaProjectionAdapter<Zt, F, D> + Sync,
+    Zt: ZincTypes<D>,
+    F: PrimeField + FromPrimitiveWithConfig + ShaSmallFieldDecode + Send + Sync,
+{
+    if witnesses.len() < 2 {
+        return Err(ProductionShaError::InstanceCountTooSmall(witnesses.len()));
+    }
+
+    cfg_iter!(witnesses)
+        .map(|witness| {
+            let public_trace = public_uair_trace_view(&witness.trace, &shape.signature)?;
+            let witness_trace = witness_uair_trace_view(&witness.trace, &shape.signature)?;
+            let (trace, public, witness_polys, _native_view) =
+                U::project_production_sha_witness_with_native_view(
+                    shape,
+                    &public_trace,
+                    &witness_trace,
+                    field_cfg,
+                )?;
+            Ok(PreparedProductionShaProverInstance {
+                public_trace: own_uair_trace(&public_trace),
+                instance: ProductionShaProverInstance {
+                    trace,
+                    public,
+                    witness_polys,
+                },
+                sumfold_basis: empty_fold_first_sumfold_basis(),
+            })
+        })
+        .collect()
+}
+
+fn empty_fold_first_sumfold_basis<F>() -> PreparedShaSumFoldBasis<F>
+where
+    F: PrimeField,
+{
+    PreparedShaSumFoldBasis {
+        residual_basis: PreparedShaResidualBasis { rows: Vec::new() },
+        small_residual_basis: None,
+        booleanity_basis: PreparedShaBooleanityBasis { canonical: None },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
