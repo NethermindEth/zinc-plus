@@ -108,7 +108,7 @@ where
     }
 }
 
-const NONZERO_SHA_FAMILIES: [ShaResidualFamily; NUM_NONZERO_SHA_FAMILIES] = [
+pub(crate) const NONZERO_SHA_FAMILIES: [ShaResidualFamily; NUM_NONZERO_SHA_FAMILIES] = [
     ShaResidualFamily::R0BigSigmaA,
     ShaResidualFamily::R1BigSigmaE,
     ShaResidualFamily::R4Schedule,

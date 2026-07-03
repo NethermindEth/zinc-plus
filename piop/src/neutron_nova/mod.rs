@@ -79,7 +79,9 @@ pub use projection_sha::{
     verify_fresh_sha_ideal_polys,
 };
 pub use fold_first::{
-    FoldFirstSkipRoundProof, GramAccumulator, SkipDomain, SkipRoundVerdict,
-    accumulate_booleanity_gram, prove_skip_round, verify_skip_round,
+    FoldFirstError, FoldFirstProverArtifacts, FoldFirstSkipRoundProof, FoldFirstSumFoldProof,
+    FoldFirstVerifierClaims, GramAccumulator, SkipDomain, SkipRoundVerdict,
+    accumulate_booleanity_gram, prove_fold_first_sha_sumfold, prove_skip_round,
+    sha_nonzero_target_at, verify_fold_first_sha_sumfold, verify_skip_round,
 };
 pub use sumfold::{LinearInstanceClaims, LinearPrefixTable, SumFoldError};

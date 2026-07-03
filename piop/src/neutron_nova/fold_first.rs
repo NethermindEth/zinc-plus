@@ -20,16 +20,28 @@
 //! bit-packing and delayed-reduction accumulators are later optimizations;
 //! this module is the correctness-first reference).
 
-use crypto_primitives::{FromWithConfig, PrimeField};
+use crypto_primitives::{FromPrimitiveWithConfig, FromWithConfig, PrimeField};
+use thiserror::Error;
+use zinc_poly::univariate::dynamic::over_field::DynamicPolynomialF;
+use zinc_poly::utils::build_eq_x_r_vec;
 use zinc_transcript::traits::{ConstTranscribable, Transcribable, Transcript};
-use zinc_utils::powers;
+use zinc_utils::{
+    delayed_reduction::{DelayedFieldProductSum, MontgomeryLimbs},
+    inner_transparent_field::InnerTransparentField,
+    powers,
+};
 
 use crate::neutron_nova::SumFoldError;
 use crate::neutron_nova::projection_sha::{
-    ProjectedTrace, SHA_ROW_COUNT, ShaBooleanitySource, ShaProjectionError,
-    booleanity_source_value_at_row_with_virtuals, reconstruct_virtual_ch_maj_at_row_unchecked,
-    sources_need_virtuals,
+    NONZERO_SHA_FAMILIES, NUM_NONZERO_SHA_FAMILIES, NUM_SHA_RESIDUAL_FAMILIES, ProjectedPublic,
+    ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS, ShaBinaryFoldField,
+    ShaBooleanitySource, ShaProjectionError, booleanity_source_value_at_row_with_virtuals,
+    build_folded_row_sumcheck_group, build_sha_ideal_values_at_point,
+    fold_projected_traces_with_weights, folded_row_integrand_values,
+    reconstruct_virtual_ch_maj_at_row_unchecked, scalarize_bit_slices, sources_need_virtuals,
+    verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
 };
+use crate::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 
 /// Symmetric-integer packing domain for the univariate skip round.
 ///
@@ -71,7 +83,7 @@ where
             let mut denom = one.clone();
             for (i, u_i) in points.iter().enumerate() {
                 if i != j {
-                    denom = denom * (u_j.clone() - u_i);
+                    denom *= u_j.clone() - u_i;
                 }
             }
             one.clone() / denom
@@ -338,7 +350,7 @@ where
             for k in 0..n {
                 // Diagonal term L_k²·G[k,k] − L_k·h[k].
                 acc += basis[k].clone() * &basis[k] * &self.g[tri(k, k)];
-                acc = acc - basis[k].clone() * &self.h[k];
+                acc -= basis[k].clone() * &self.h[k];
                 // Off-diagonal terms counted twice.
                 for j in 0..k {
                     let cross = basis[j].clone() * &basis[k] * &self.g[tri(j, k)];
@@ -447,7 +459,252 @@ where
     })
 }
 
+/// Fold-first orchestration errors.
+#[derive(Debug, Error)]
+pub enum FoldFirstError {
+    #[error(transparent)]
+    Projection(#[from] ShaProjectionError),
+    #[error(transparent)]
+    SumFold(#[from] SumFoldError),
+    #[error("fold-first row sumcheck verification failed")]
+    RowSumcheck,
+    #[error("fold-first row sumcheck claimed sum does not match the assembled target")]
+    TargetMismatch,
+}
+
+/// `Σ_{f∈F≠0} λ^f · E'_f(a)` — the linear part of the assembled
+/// row-sumcheck target, computed from the transmitted folded ideal
+/// polynomials.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn sha_nonzero_target_at<F>(
+    ideal_polys: &[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
+    a: &F,
+    lambda: &F,
+    field_cfg: &F::Config,
+) -> F
+where
+    F: PrimeField,
+{
+    let zero = F::zero_with_cfg(field_cfg);
+    let lambda_powers = powers(
+        lambda.clone(),
+        F::one_with_cfg(field_cfg),
+        NUM_SHA_RESIDUAL_FAMILIES,
+    );
+    let mut acc = zero.clone();
+    for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
+        let mut value = zero.clone();
+        for coeff in ideal_polys[slot].coeffs.iter().rev() {
+            value = value * a + coeff;
+        }
+        acc += lambda_powers[family.index()].clone() * value;
+    }
+    acc
+}
+
+/// The fold-first SumFold proof: skip-round message, folded ideal
+/// polynomials, and the folded row sumcheck.
+#[derive(Clone, Debug)]
+pub struct FoldFirstSumFoldProof<F: PrimeField> {
+    pub skip_round: FoldFirstSkipRoundProof<F>,
+    pub folded_ideal_polys: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
+    pub row_sumcheck: MultiDegreeSumcheckProof<F>,
+}
+
+/// Prover-side outputs alongside the proof.
+#[derive(Clone, Debug)]
+pub struct FoldFirstProverArtifacts<F: PrimeField> {
+    pub theta: Vec<F>,
+    pub folded_witness: ProjectionFoldWitness<F>,
+    pub folded_public: ProjectedPublic<F>,
+    pub b_star: F,
+    pub target: F,
+}
+
+/// Verifier-side outputs: the fold weights, the assembled target, and the
+/// row-sumcheck endpoint claim to be discharged by the opening layer.
+#[derive(Clone, Debug)]
+pub struct FoldFirstVerifierClaims<F: PrimeField> {
+    pub theta: Vec<F>,
+    pub b_star: F,
+    pub target: F,
+    pub row_point: Vec<F>,
+    pub expected_row_eval: F,
+}
+
+fn absorb_ideal_polys<F>(
+    ideal_polys: &[DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
+    transcript: &mut impl Transcript,
+    field_cfg: &F::Config,
+) where
+    F: PrimeField + FromWithConfig<u64>,
+    F::Inner: Transcribable,
+    F::Modulus: Transcribable,
+{
+    for poly in ideal_polys {
+        let len = u64::try_from(poly.coeffs.len()).expect("coefficient count fits u64");
+        transcript
+            .absorb_random_field_owned(&<F as FromWithConfig<u64>>::from_with_cfg(len, field_cfg));
+        transcript.absorb_random_field_slice_owned(&poly.coeffs);
+    }
+}
+
+/// Prover side of the fold-first SumFold (V2) flow:
+/// r_ic, ρ, γ → booleanity skip round → θ-fold → folded IdealCheck →
+/// a, λ, ξ → folded row sumcheck with the assembled target
+/// `T' = Σ λ^f E'_f(a) + ξ·B★`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn prove_fold_first_sha_sumfold<F>(
+    traces: &[ProjectedTrace<F>],
+    publics: &[ProjectedPublic<F>],
+    sources: &[ShaBooleanitySource],
+    transcript: &mut impl Transcript,
+    field_cfg: &F::Config,
+) -> Result<(FoldFirstSumFoldProof<F>, FoldFirstProverArtifacts<F>), FoldFirstError>
+where
+    F: ShaBinaryFoldField
+        + InnerTransparentField
+        + DelayedFieldProductSum
+        + MontgomeryLimbs
+        + FromWithConfig<u64>
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync
+        + 'static,
+    F::Inner: Transcribable + ConstTranscribable,
+    F::Modulus: Transcribable,
+{
+    let domain = SkipDomain::new(traces.len(), field_cfg)?;
+    let r_ic: [F; SHA_ROW_VARS] =
+        std::array::from_fn(|_| transcript.get_field_challenge(field_cfg));
+    let rho: F = transcript.get_field_challenge(field_cfg);
+    // γ is the verifier's zerocheck batching challenge; the prover samples it
+    // only to keep the transcripts aligned.
+    let _gamma: F = transcript.get_field_challenge(field_cfg);
+
+    let row_weights = build_eq_x_r_vec(&r_ic, field_cfg).map_err(ShaProjectionError::from)?;
+    let rho_powers = powers(rho.clone(), F::one_with_cfg(field_cfg), sources.len());
+    let gram = accumulate_booleanity_gram(traces, &row_weights, &rho_powers, sources, field_cfg)?;
+    let (skip_round, verdict) = prove_skip_round(&gram, &domain, transcript, field_cfg)?;
+
+    let (mut folded_witness, folded_public) =
+        fold_projected_traces_with_weights(traces, publics, &verdict.theta, field_cfg)?;
+    let folded_ideal_polys = build_sha_ideal_values_at_point(
+        &folded_witness.trace,
+        &folded_public,
+        &r_ic,
+        field_cfg,
+    )?;
+    absorb_ideal_polys(&folded_ideal_polys, transcript, field_cfg);
+
+    let a: F = transcript.get_field_challenge(field_cfg);
+    let lambda: F = transcript.get_field_challenge(field_cfg);
+    let xi: F = transcript.get_field_challenge(field_cfg);
+
+    // Scalarization happens exactly once, on the folded trace, after `a`.
+    folded_witness.trace.scalarized =
+        scalarize_bit_slices(&folded_witness.trace.bit_slices, &a, field_cfg)?;
+
+    let target = sha_nonzero_target_at(&folded_ideal_polys, &a, &lambda, field_cfg)
+        + xi.clone() * &verdict.b_star;
+
+    let integrand = folded_row_integrand_values(
+        &folded_witness.trace,
+        &folded_public,
+        &r_ic,
+        &a,
+        &lambda,
+        &rho,
+        &xi,
+        sources,
+        field_cfg,
+    )?;
+    // Completeness identity (tested, not asserted, so tamper tests can drive
+    // this prover with invalid witnesses): for traces whose zero-family
+    // residuals vanish, `folded_row_integrand_sum(&integrand) == target`.
+    let group = build_folded_row_sumcheck_group(&integrand, field_cfg)?;
+    let (row_sumcheck, _) =
+        MultiDegreeSumcheck::prove_as_subprotocol(transcript, vec![group], SHA_ROW_VARS, field_cfg);
+
+    Ok((
+        FoldFirstSumFoldProof {
+            skip_round,
+            folded_ideal_polys,
+            row_sumcheck,
+        },
+        FoldFirstProverArtifacts {
+            theta: verdict.theta,
+            folded_witness,
+            folded_public,
+            b_star: verdict.b_star,
+            target,
+        },
+    ))
+}
+
+/// Verifier side of the fold-first SumFold (V2) flow. Mirrors the prover's
+/// transcript, enforces the γ-weighted zerocheck, the folded ideal
+/// membership, and the row-sumcheck target `T' = Σ λ^f E'_f(a) + ξ·B★`, and
+/// returns the endpoint claim for the opening layer.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn verify_fold_first_sha_sumfold<F>(
+    proof: &FoldFirstSumFoldProof<F>,
+    n_instances: usize,
+    transcript: &mut impl Transcript,
+    field_cfg: &F::Config,
+) -> Result<FoldFirstVerifierClaims<F>, FoldFirstError>
+where
+    F: PrimeField
+        + InnerTransparentField
+        + FromWithConfig<u64>
+        + FromPrimitiveWithConfig
+        + Send
+        + Sync,
+    F::Inner: Transcribable + ConstTranscribable,
+    F::Modulus: Transcribable,
+{
+    let domain = SkipDomain::new(n_instances, field_cfg)?;
+    let _r_ic: [F; SHA_ROW_VARS] =
+        std::array::from_fn(|_| transcript.get_field_challenge(field_cfg));
+    let _rho: F = transcript.get_field_challenge(field_cfg);
+    let gamma: F = transcript.get_field_challenge(field_cfg);
+
+    let verdict = verify_skip_round(&proof.skip_round, &gamma, &domain, transcript, field_cfg)?;
+
+    verify_fresh_sha_ideal_polys(
+        std::slice::from_ref(&proof.folded_ideal_polys),
+        field_cfg,
+    )?;
+    absorb_ideal_polys(&proof.folded_ideal_polys, transcript, field_cfg);
+
+    let a: F = transcript.get_field_challenge(field_cfg);
+    let lambda: F = transcript.get_field_challenge(field_cfg);
+    let xi: F = transcript.get_field_challenge(field_cfg);
+
+    let target = sha_nonzero_target_at(&proof.folded_ideal_polys, &a, &lambda, field_cfg)
+        + xi * &verdict.b_star;
+
+    let subclaims =
+        MultiDegreeSumcheck::verify_as_subprotocol(transcript, SHA_ROW_VARS, &proof.row_sumcheck, field_cfg)
+            .map_err(|_| FoldFirstError::RowSumcheck)?;
+    let claimed_sums = proof.row_sumcheck.claimed_sums();
+    if claimed_sums.len() != 1 {
+        return Err(FoldFirstError::RowSumcheck);
+    }
+    verify_folded_row_sumcheck_claim(&claimed_sums[0], &target)
+        .map_err(|_| FoldFirstError::TargetMismatch)?;
+
+    Ok(FoldFirstVerifierClaims {
+        theta: verdict.theta,
+        b_star: verdict.b_star,
+        target,
+        row_point: subclaims.point().to_vec(),
+        expected_row_eval: subclaims.expected_evaluations()[0].clone(),
+    })
+}
+
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::needless_range_loop)]
 mod tests {
     use super::*;
     use crate::neutron_nova::projection_sha::{
@@ -931,6 +1188,241 @@ mod tests {
         let err = verify_skip_round(&proof, &gamma, &domain, &mut verifier_transcript, &cfg)
             .expect_err("tampered witness must fail the gamma zero-check");
         assert!(matches!(err, SumFoldError::SkipRoundZeroCheckFailed));
+    }
+
+    #[test]
+    fn zero_trace_folded_ideal_polys_pass_membership() {
+        let cfg = test_config();
+        let trace = zero_trace();
+        let public = zero_public();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|i| f(11 + 2 * i as u64));
+        let polys = build_sha_ideal_values_at_point(&trace, &public, &r_ic, &cfg).unwrap();
+        verify_fresh_sha_ideal_polys(std::slice::from_ref(&polys), &cfg).unwrap();
+    }
+
+    #[test]
+    fn synthetic_trace_ideal_polys_fail_membership() {
+        let cfg = test_config();
+        let trace = boolean_virtuals_trace(0);
+        let public = zero_public();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|i| f(11 + 2 * i as u64));
+        let polys = build_sha_ideal_values_at_point(&trace, &public, &r_ic, &cfg).unwrap();
+        assert!(verify_fresh_sha_ideal_polys(std::slice::from_ref(&polys), &cfg).is_err());
+    }
+
+    #[test]
+    fn nonzero_target_matches_manual_lambda_sum() {
+        use crate::neutron_nova::projection_sha::NUM_SHA_RESIDUAL_FAMILIES;
+        let cfg = test_config();
+        let trace = boolean_virtuals_trace(1);
+        let public = zero_public();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|i| f(11 + 2 * i as u64));
+        let polys = build_sha_ideal_values_at_point(&trace, &public, &r_ic, &cfg).unwrap();
+        let a = f(19);
+        let lambda = f(23);
+        let lambda_powers = powers(lambda.clone(), F::one_with_cfg(&cfg), NUM_SHA_RESIDUAL_FAMILIES);
+        let mut expected = F::zero_with_cfg(&cfg);
+        for (slot, family) in NONZERO_SHA_FAMILIES.iter().enumerate() {
+            let mut value = F::zero_with_cfg(&cfg);
+            let a_powers = powers(a.clone(), F::one_with_cfg(&cfg), polys[slot].coeffs.len());
+            for (coeff, power) in polys[slot].coeffs.iter().zip(&a_powers) {
+                value += coeff.clone() * power;
+            }
+            expected += lambda_powers[family.index()].clone() * value;
+        }
+        assert_eq!(sha_nonzero_target_at(&polys, &a, &lambda, &cfg), expected);
+    }
+
+    #[test]
+    fn fold_first_zero_traces_prove_and_verify() {
+        let cfg = test_config();
+        let traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let sources = small_sources();
+
+        let mut prover_transcript = Blake3Transcript::new();
+        let (proof, artifacts) = prove_fold_first_sha_sumfold(
+            &traces,
+            &publics,
+            &sources,
+            &mut prover_transcript,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let claims = verify_fold_first_sha_sumfold(
+            &proof,
+            traces.len(),
+            &mut verifier_transcript,
+            &cfg,
+        )
+        .unwrap();
+
+        let zero = F::zero_with_cfg(&cfg);
+        assert_eq!(claims.theta, artifacts.theta);
+        assert_eq!(claims.b_star, zero);
+        assert_eq!(claims.target, zero);
+        assert_eq!(claims.target, artifacts.target);
+        // All-zero folded integrand: the endpoint claim is zero as well.
+        assert_eq!(claims.expected_row_eval, zero);
+        assert_eq!(claims.row_point.len(), SHA_ROW_VARS);
+    }
+
+    #[test]
+    fn fold_first_algebraic_identity_on_synthetic_traces() {
+        use crate::neutron_nova::projection_sha::{
+            NUM_SHA_RESIDUAL_FAMILIES, ShaResidualFamily, folded_row_integrand_sum,
+            folded_row_integrand_values, residual_polys_at_row,
+        };
+        let cfg = test_config();
+        let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let sources = small_sources();
+        let r_ic: [F; SHA_ROW_VARS] = std::array::from_fn(|i| f(11 + 2 * i as u64));
+        let rho = f(29);
+        let row_weights = build_eq_x_r_vec(&r_ic, &cfg).unwrap();
+        let rho_powers = powers(rho.clone(), F::one_with_cfg(&cfg), sources.len());
+        let domain = SkipDomain::<F>::new(traces.len(), &cfg).unwrap();
+        let gram =
+            accumulate_booleanity_gram(&traces, &row_weights, &rho_powers, &sources, &cfg).unwrap();
+        let mut transcript = Blake3Transcript::new();
+        let (_, verdict) = prove_skip_round(&gram, &domain, &mut transcript, &cfg).unwrap();
+
+        let (mut folded, folded_public) = crate::neutron_nova::projection_sha::fold_projected_traces_with_weights(
+            &traces,
+            &publics,
+            &verdict.theta,
+            &cfg,
+        )
+        .unwrap();
+        let polys =
+            build_sha_ideal_values_at_point(&folded.trace, &folded_public, &r_ic, &cfg).unwrap();
+
+        let a = f(19);
+        let lambda = f(23);
+        let xi = f(31);
+        folded.trace.scalarized = scalarize_bit_slices(&folded.trace.bit_slices, &a, &cfg).unwrap();
+
+        let integrand = folded_row_integrand_values(
+            &folded.trace,
+            &folded_public,
+            &r_ic,
+            &a,
+            &lambda,
+            &rho,
+            &xi,
+            &sources,
+            &cfg,
+        )
+        .unwrap();
+        let total = folded_row_integrand_sum(&integrand, &cfg).unwrap();
+
+        // Zero-family correction: synthetic traces have nonzero zero-family
+        // residuals; honest SHA traces zero this term out.
+        let lambda_powers = powers(lambda.clone(), F::one_with_cfg(&cfg), NUM_SHA_RESIDUAL_FAMILIES);
+        let mut zero_family_term = F::zero_with_cfg(&cfg);
+        for (row, row_weight) in row_weights.iter().enumerate() {
+            let residuals = residual_polys_at_row(&folded.trace, &folded_public, row, &cfg).unwrap();
+            for (family_idx, poly) in residuals.iter().enumerate() {
+                if ShaResidualFamily::ALL[family_idx].is_nonzero_ideal() {
+                    continue;
+                }
+                let a_powers = powers(a.clone(), F::one_with_cfg(&cfg), poly.coeffs.len());
+                let mut value = F::zero_with_cfg(&cfg);
+                for (coeff, power) in poly.coeffs.iter().zip(&a_powers) {
+                    value += coeff.clone() * power;
+                }
+                zero_family_term += row_weight.clone() * &lambda_powers[family_idx] * value;
+            }
+        }
+
+        let assembled = sha_nonzero_target_at(&polys, &a, &lambda, &cfg)
+            + xi.clone() * &verdict.b_star
+            + zero_family_term;
+        assert_eq!(total, assembled);
+    }
+
+    #[test]
+    fn fold_first_rejects_tampered_bit() {
+        let cfg = test_config();
+        let mut traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        // A single set W bit breaks the (X−2) message-schedule membership of
+        // the folded ideal polys while keeping booleanity honest.
+        let idx = bit_slice_index(ShaWordCol::W.index(), 3, SHA_WORD_BITS);
+        traces[1].bit_slices[idx].evaluations[20] = f(1);
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let sources = small_sources();
+
+        let mut prover_transcript = Blake3Transcript::new();
+        let (proof, _) = prove_fold_first_sha_sumfold(
+            &traces,
+            &publics,
+            &sources,
+            &mut prover_transcript,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        assert!(
+            verify_fold_first_sha_sumfold(&proof, traces.len(), &mut verifier_transcript, &cfg)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fold_first_rejects_non_boolean_bit() {
+        let cfg = test_config();
+        let mut traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        let idx = bit_slice_index(ShaWordCol::A.index(), 0, SHA_WORD_BITS);
+        traces[2].bit_slices[idx].evaluations[7] = f(2);
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let sources = small_sources();
+
+        let mut prover_transcript = Blake3Transcript::new();
+        let (proof, _) = prove_fold_first_sha_sumfold(
+            &traces,
+            &publics,
+            &sources,
+            &mut prover_transcript,
+            &cfg,
+        )
+        .unwrap();
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        let err =
+            verify_fold_first_sha_sumfold(&proof, traces.len(), &mut verifier_transcript, &cfg)
+                .expect_err("non-boolean bit must be rejected");
+        assert!(matches!(
+            err,
+            FoldFirstError::SumFold(SumFoldError::SkipRoundZeroCheckFailed)
+        ));
+    }
+
+    #[test]
+    fn fold_first_rejects_wrong_ideal_poly() {
+        let cfg = test_config();
+        let traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+        let sources = small_sources();
+
+        let mut prover_transcript = Blake3Transcript::new();
+        let (mut proof, _) = prove_fold_first_sha_sumfold(
+            &traces,
+            &publics,
+            &sources,
+            &mut prover_transcript,
+            &cfg,
+        )
+        .unwrap();
+        proof.folded_ideal_polys[0].coeffs = vec![f(1)];
+
+        let mut verifier_transcript = Blake3Transcript::new();
+        assert!(
+            verify_fold_first_sha_sumfold(&proof, traces.len(), &mut verifier_transcript, &cfg)
+                .is_err()
+        );
     }
 
     #[test]
