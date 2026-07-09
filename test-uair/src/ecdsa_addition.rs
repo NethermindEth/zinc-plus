@@ -54,8 +54,7 @@ use rand::RngCore;
 use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
     ConstraintBuilder, PublicColumnLayout, TotalColumnLayout, TraceRow, Uair, UairSignature,
-    UairTrace,
-    ideal::ImpossibleIdeal,
+    UairTrace, ideal::ImpossibleIdeal,
 };
 
 use crate::GenerateRandomTrace;
@@ -311,10 +310,7 @@ fn rand_fp<Rng: RngCore + ?Sized>(rng: &mut Rng) -> CbUint<EC_FP_INT_LIMBS> {
     raw.rem_vartime(&p_nz)
 }
 
-fn mul_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn mul_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = a.widening_mul(b).into();
     let p_wide: CbUint<{ EC_FP_INT_LIMBS * 2 }> = SECP256K1_P_UINT.resize();
     let p_wide_nz = NonZero::new(p_wide).expect("p is nonzero");
@@ -339,10 +335,7 @@ fn p_geq(a: &CbUint<EC_FP_INT_LIMBS>) -> bool {
     a.checked_sub(&SECP256K1_P_UINT).is_some().into()
 }
 
-fn sub_mod_p(
-    a: &CbUint<EC_FP_INT_LIMBS>,
-    b: &CbUint<EC_FP_INT_LIMBS>,
-) -> CbUint<EC_FP_INT_LIMBS> {
+fn sub_mod_p(a: &CbUint<EC_FP_INT_LIMBS>, b: &CbUint<EC_FP_INT_LIMBS>) -> CbUint<EC_FP_INT_LIMBS> {
     let p_nz = NonZero::new(SECP256K1_P_UINT).expect("p is nonzero");
     if a.checked_sub(b).is_some().into() {
         a.wrapping_sub(b).rem_vartime(&p_nz)

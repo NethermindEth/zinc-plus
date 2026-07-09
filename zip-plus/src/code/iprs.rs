@@ -51,8 +51,7 @@ where
 
         let target_base_len = 1 << MAX_BASE_COLS_LOG2;
         // We want depth to be at least 1.
-        let base_depth =
-            1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
+        let base_depth = 1.max(((1.max(row_len / target_base_len)).ilog2() as usize).div_ceil(3));
         let extra = if REP >= 16 {
             2
         } else if REP >= 8 {

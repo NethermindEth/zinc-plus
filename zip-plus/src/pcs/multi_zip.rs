@@ -50,9 +50,7 @@ pub struct MultiZipHint3<R0, R1, R2> {
 
 /// Three-instance Zip+ wrapper sharing a single Merkle tree across three
 /// independent Zip+ commitments.
-pub struct MultiZip3<Zt0, Zt1, Zt2, Lc0, Lc1, Lc2>(
-    PhantomData<(Zt0, Zt1, Zt2, Lc0, Lc1, Lc2)>,
-)
+pub struct MultiZip3<Zt0, Zt1, Zt2, Lc0, Lc1, Lc2>(PhantomData<(Zt0, Zt1, Zt2, Lc0, Lc1, Lc2)>)
 where
     Zt0: ZipTypes,
     Zt1: ZipTypes,
@@ -94,8 +92,8 @@ where
         ),
         ZipError,
     > {
-        let nonempty = (!polys0.is_empty()) as u8 + (!polys1.is_empty()) as u8
-            + (!polys2.is_empty()) as u8;
+        let nonempty =
+            (!polys0.is_empty()) as u8 + (!polys1.is_empty()) as u8 + (!polys2.is_empty()) as u8;
         assert!(
             nonempty >= 2,
             "MultiZip3::commit requires at least two non-empty batches \
@@ -239,23 +237,26 @@ where
         let eval0 = if polys0.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt0, Lc0>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp0, polys0, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt0, Lc0>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp0, polys0, point, field_cfg)?)
         };
         let eval1 = if polys1.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt1, Lc1>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp1, polys1, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt1, Lc1>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp1, polys1, point, field_cfg)?)
         };
         let eval2 = if polys2.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt2, Lc2>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp2, polys2, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt2, Lc2>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp2, polys2, point, field_cfg)?)
         };
 
         for _ in 0..Zt0::NUM_COLUMN_OPENINGS {
@@ -353,9 +354,10 @@ where
         let eval0 = if polys0.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt0, Lc0>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp0, polys0, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt0, Lc0>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp0, polys0, point, field_cfg)?)
         };
         let p1 = pos(transcript);
         bd0.combined_row.extend(snapshot(transcript, p0, p1));
@@ -363,9 +365,10 @@ where
         let eval1 = if polys1.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt1, Lc1>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp1, polys1, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt1, Lc1>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp1, polys1, point, field_cfg)?)
         };
         let p2 = pos(transcript);
         bd1.combined_row.extend(snapshot(transcript, p1, p2));
@@ -373,9 +376,10 @@ where
         let eval2 = if polys2.is_empty() {
             None
         } else {
-            Some(ZipPlus::<Zt2, Lc2>::prove_pre_open_f::<F, CHECK_FOR_OVERFLOW>(
-                transcript, pp2, polys2, point, field_cfg,
-            )?)
+            Some(ZipPlus::<Zt2, Lc2>::prove_pre_open_f::<
+                F,
+                CHECK_FOR_OVERFLOW,
+            >(transcript, pp2, polys2, point, field_cfg)?)
         };
         let p3 = pos(transcript);
         bd2.combined_row.extend(snapshot(transcript, p2, p3));

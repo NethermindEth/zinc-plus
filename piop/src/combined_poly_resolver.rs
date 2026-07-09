@@ -5,6 +5,7 @@ mod structs;
 
 pub use structs::*;
 
+use crate::projections::ScalarMap;
 use crate::{
     CombFn,
     combined_poly_resolver::{
@@ -23,7 +24,6 @@ use itertools::Itertools;
 use num_traits::Zero;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::projections::ScalarMap;
 use std::{cell::RefCell, marker::PhantomData, slice};
 use thiserror::Error;
 use zinc_poly::{
@@ -283,8 +283,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
             // `scalar_proj_cache` for details. Lazily initialized — UAIRs
             // that never invoke `from_ref`/`mbs` pay only the Option's
             // discriminant write per call.
-            let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> =
-                RefCell::new(None);
+            let cache: RefCell<Option<ScalarProjCache<U::Scalar, F>>> = RefCell::new(None);
             let project = |scalar: &U::Scalar| -> F {
                 if let Some(v) = cache.borrow().as_ref().and_then(|c| c.get(scalar)) {
                     return v;
@@ -573,11 +572,7 @@ impl<F: InnerTransparentField + FromPrimitiveWithConfig + Send + Sync> CombinedP
                 &proof.up_evals,
                 uair_sig.total_cols().as_column_layout(),
             ),
-            TraceRow::from_slice_with_layout_and_bit_op(
-                &down_combined,
-                down_layout,
-                bit_op_count,
-            ),
+            TraceRow::from_slice_with_layout_and_bit_op(&down_combined, down_layout, bit_op_count),
             project,
             |x, y| Some(project(y) * x),
             ImpossibleIdeal::from_ref,
@@ -735,22 +730,23 @@ mod tests {
             project_scalars_to_field(projected_scalars, &projecting_element).unwrap();
 
         // Prover: prepare → MultiDegreeSumcheck → finalize
-        let (cpr_group, cpr_ancillary) = CombinedPolyResolver::prepare_sumcheck_group::<U, DEGREE_PLUS_ONE>(
-            &mut prover_transcript,
-            evaluate_trace_to_column_mles(
-                &ProjectedTrace::RowMajor(projected_trace),
+        let (cpr_group, cpr_ancillary) =
+            CombinedPolyResolver::prepare_sumcheck_group::<U, DEGREE_PLUS_ONE>(
+                &mut prover_transcript,
+                evaluate_trace_to_column_mles(
+                    &ProjectedTrace::RowMajor(projected_trace),
+                    &projecting_element,
+                ),
+                &ic_prover_state.evaluation_point,
+                &projected_scalars,
+                num_constraints,
+                num_vars,
+                max_degree,
+                &test_config(),
+                &trace.binary_poly,
                 &projecting_element,
-            ),
-            &ic_prover_state.evaluation_point,
-            &projected_scalars,
-            num_constraints,
-            num_vars,
-            max_degree,
-            &test_config(),
-            &trace.binary_poly,
-            &projecting_element,
-        )
-        .expect("CPR prepare failed");
+            )
+            .expect("CPR prepare failed");
 
         let (md_proof, states) = MultiDegreeSumcheck::prove_as_subprotocol(
             &mut prover_transcript,

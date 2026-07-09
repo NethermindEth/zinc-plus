@@ -338,11 +338,8 @@ mod tests {
     fn split_preserves_reconstruction() {
         // v[i](X=2) = u[i](2) + 2^16 * w[i](2)
         let val: u32 = 0xABCD_1234;
-        let col = DenseMultilinearExtension::from_evaluations_vec(
-            0,
-            vec![bp32(val)],
-            BinaryPoly::zero(),
-        );
+        let col =
+            DenseMultilinearExtension::from_evaluations_vec(0, vec![bp32(val)], BinaryPoly::zero());
 
         let split = split_column::<32, 16>(&col);
         assert_eq!(split.evaluations.len(), 2);

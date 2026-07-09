@@ -67,10 +67,7 @@ use core::marker::PhantomData;
 
 use crypto_primitives::ConstSemiring;
 use rand::RngCore;
-use zinc_poly::{
-    mle::DenseMultilinearExtension,
-    univariate::dense::DensePolynomial,
-};
+use zinc_poly::{mle::DenseMultilinearExtension, univariate::dense::DensePolynomial};
 use zinc_uair::{
     BitOp, BitOpSpec, ConstraintBuilder, LookupColumnSpec, PublicColumnLayout,
     PublicStructureError, ShiftSpec, ShiftedBitSliceSpec, TotalColumnLayout, TraceRow, Uair,
@@ -281,11 +278,11 @@ where
         // for the full mapping (`Rot(c)` ≡ `ROTR^{32-c}` ≡ multiplication
         // by `X^c mod (X^32 − 1)`). All six specs target FLAT_W_W.
         let bit_op_specs: Vec<BitOpSpec> = vec![
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)),    // σ_0: ROTR^7
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)),    // σ_0: ROTR^18
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)),  // σ_0: SHR^3
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)),    // σ_1: ROTR^17
-            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)),    // σ_1: ROTR^19
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(25)), // σ_0: ROTR^7
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(14)), // σ_0: ROTR^18
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(3)), // σ_0: SHR^3
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(15)), // σ_1: ROTR^17
+            BitOpSpec::new(cols::FLAT_W_W, BitOp::Rot(13)), // σ_1: ROTR^19
             BitOpSpec::new(cols::FLAT_W_W, BitOp::ShiftR(10)), // σ_1: SHR^10
             // Bit-op virtuals over W_MU_PACKED for extracting the 5
             // chained-comp carries. See sha256.rs cols doc.
@@ -534,8 +531,7 @@ where
         let const_2_to_34 = const_scalar::<R>(pow_two::<R>(34));
         let const_2_to_35 = const_scalar::<R>(pow_two::<R>(35));
 
-        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32)
-            .expect("2^32 · w_mu_packed overflow")
+        let mu_w_contrib = mbs(w_mu_packed, &const_2_to_32).expect("2^32 · w_mu_packed overflow")
             - &mbs(down_w_mu_packed_shr2, &const_2_to_34)
                 .expect("2^34 · ShiftR(2)(w_mu_packed) overflow");
         let mu_a_contrib = mbs(down_w_mu_packed_shr2, &const_2_to_32)
@@ -557,14 +553,16 @@ where
 
         // C1: Sigma_0 rotation
         b.assert_in_ideal(
-            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow") - w_sig0
+            mbs(w_a, &rho_sig0).expect("a · rho_sig0 overflow")
+                - w_sig0
                 - &mbs(pa_ov_sig0, &two_scalar_sha).expect("2 · ov_sig0 overflow"),
             &ideal_rot_xw1,
         );
 
         // C2: Sigma_1 rotation
         b.assert_in_ideal(
-            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow") - w_sig1
+            mbs(w_e, &rho_sig1).expect("e · rho_sig1 overflow")
+                - w_sig1
                 - &mbs(pa_ov_sig1, &two_scalar_sha).expect("2 · ov_sig1 overflow"),
             &ideal_rot_xw1,
         );
@@ -575,26 +573,25 @@ where
         // and the C3/C5 right-shift decompositions go away.
         //   ROT^25(W) + ROT^14(W) + SHIFTR^3(W) − lsig0 − 2 · pa_ov_lsig0 == 0
         b.assert_zero(
-            down_w_rot25.clone() + down_w_rot14 + down_w_shr3 - w_lsig0
+            down_w_rot25.clone() + down_w_rot14 + down_w_shr3
+                - w_lsig0
                 - &mbs(pa_ov_lsig0, &two_scalar_sha).expect("2 · ov_lsig0 overflow"),
         );
 
         // C6 (was σ_1 (X^32 − 1) ideal-lift): σ_1 analogue of C4.
         //   ROT^15(W) + ROT^13(W) + SHIFTR^10(W) − lsig1 − 2 · pa_ov_lsig1 == 0
         b.assert_zero(
-            down_w_rot15.clone() + down_w_rot13 + down_w_shr10 - w_lsig1
+            down_w_rot15.clone() + down_w_rot13 + down_w_shr10
+                - w_lsig1
                 - &mbs(pa_ov_lsig1, &two_scalar_sha).expect("2 · ov_lsig1 overflow"),
         );
 
         // C7: Message-schedule modular sum. mu_W from up.w_mu_packed
         // bits 0-1 via mu_w_contrib (chained-comp re-anchoring stores
         // each carry at its constraint's anchor row).
-        let sched_inner = down_w_w_sh16.clone()
-            - w_big_w
-            - down_w_lsig0_sh1
-            - down_w_w_sh9
-            - down_w_lsig1_sh14
-            + &mu_w_contrib;
+        let sched_inner =
+            down_w_w_sh16.clone() - w_big_w - down_w_lsig0_sh1 - down_w_w_sh9 - down_w_lsig1_sh14
+                + &mu_w_contrib;
         b.assert_in_ideal(sched_inner + pa_c_c7, &ideal_rot_x2);
 
         // C8: Register-update for `a`. mu_a from bits 2-4 of W_MU_PACKED.
@@ -646,16 +643,10 @@ where
         //   down.w_a^↓4       = w_a[k+4] = H_{i+1}, j-th component (pinned by C10)
         //   up.sha_w_mu_junction_a = carry ∈ {0, 1}
         // mu_ff_a / mu_ff_e from bits 8 / 9 of W_MU_PACKED.
-        let ff_a_inner = down_w_a_sh4.clone()
-            - w_a
-            - pa_a
-            + &mu_ff_a_contrib;
+        let ff_a_inner = down_w_a_sh4.clone() - w_a - pa_a + &mu_ff_a_contrib;
         b.assert_in_ideal(ff_a_inner + pa_c_ff_a, &ideal_rot_x2);
 
-        let ff_e_inner = down_w_e_sh4.clone()
-            - w_e
-            - pa_e
-            + &mu_ff_e_contrib;
+        let ff_e_inner = down_w_e_sh4.clone() - w_e - pa_e + &mu_ff_e_contrib;
         b.assert_in_ideal(ff_e_inner + pa_c_ff_e, &ideal_rot_x2);
 
         // C16: message init (Table 9 row 77). Pin w_W to public message
@@ -739,15 +730,12 @@ where
         b.assert_zero(e_s_active.clone() * &d3_inner);
 
         let x3_y_sq = x_sq.clone() * &x_y_sq;
-        let twelve_x3_y_sq =
-            mbs(&x3_y_sq, &twelve_scalar).expect("12·X³·Y² overflow");
+        let twelve_x3_y_sq = mbs(&x3_y_sq, &twelve_scalar).expect("12·X³·Y² overflow");
         let x_sq_x_pa = x_sq.clone() * e_x_pa;
-        let three_x2_xpa =
-            mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
+        let three_x2_xpa = mbs(&x_sq_x_pa, &three_scalar).expect("3·X²·X_pa overflow");
         let y_pow4 = e_y_sq.clone() * &e_y_sq;
         let eight_y_pow4 = mbs(&y_pow4, &eight_scalar).expect("8·Y⁴ overflow");
-        let d4_inner =
-            e_y_pa.clone() - &twelve_x3_y_sq + &three_x2_xpa + &eight_y_pow4;
+        let d4_inner = e_y_pa.clone() - &twelve_x3_y_sq + &three_x2_xpa + &eight_y_pow4;
         b.assert_zero(e_s_active.clone() * &d4_inner);
 
         // === In-circuit affine addend selection ===
@@ -797,12 +785,10 @@ where
         // Y: down.Y − Y_pa − S_ADD·(3·D·X_pa·C² + D·C³ − D³ − Y_pa·C³ − Y_pa) = 0
         let d_cube = e_d.clone() * &d_sq;
         let d_x_pa_c_sq = e_d.clone() * &e_x_pa_c_sq;
-        let three_d_x_pa_c_sq =
-            mbs(&d_x_pa_c_sq, &three_scalar).expect("3·D·X_pa·C² overflow");
+        let three_d_x_pa_c_sq = mbs(&d_x_pa_c_sq, &three_scalar).expect("3·D·X_pa·C² overflow");
         let d_c_cube = e_d.clone() * &e_c_cube;
         let y_pa_c_cube = e_y_pa.clone() * &e_c_cube;
-        let y_add_minus_y_pa =
-            three_d_x_pa_c_sq + &d_c_cube - &d_cube - &y_pa_c_cube - e_y_pa;
+        let y_add_minus_y_pa = three_d_x_pa_c_sq + &d_c_cube - &d_cube - &y_pa_c_cube - e_y_pa;
         let s_add_y = e_s_add.clone() * &y_add_minus_y_pa;
         let o2_inner = down_ecdsa_y_sh1.clone() - e_y_pa - &s_add_y;
         b.assert_zero(e_s_active.clone() * &o2_inner);
@@ -933,10 +919,12 @@ where
             "ShaEcdsa UAIR needs > {FINAL_ROW} rows; got {n_rows}",
         );
 
-        let sha_trace = <Sha256CompressionSliceUair<R> as GenerateRandomTrace<32>>::
-            generate_random_trace(num_vars, rng);
-        let ecdsa_trace = <super::EcdsaUair<R> as GenerateRandomTrace<32>>::
-            generate_random_trace(num_vars, rng);
+        let sha_trace =
+            <Sha256CompressionSliceUair<R> as GenerateRandomTrace<32>>::generate_random_trace(
+                num_vars, rng,
+            );
+        let ecdsa_trace =
+            <super::EcdsaUair<R> as GenerateRandomTrace<32>>::generate_random_trace(num_vars, rng);
 
         // Sanity: column counts match the standalone UAIRs.
         assert_eq!(sha_trace.binary_poly.len(), sha256::cols::NUM_BIN);
@@ -944,8 +932,7 @@ where
         assert_eq!(ecdsa_trace.int.len(), ecdsa::cols::NUM_INT);
 
         // Binary_poly: copy SHA's directly (ECDSA contributes nothing).
-        let binary_poly: Vec<DenseMultilinearExtension<_>> =
-            sha_trace.binary_poly.into_owned();
+        let binary_poly: Vec<DenseMultilinearExtension<_>> = sha_trace.binary_poly.into_owned();
 
         // Int section: merge per the layout in `cols`.
         //
@@ -1016,8 +1003,14 @@ mod tests {
         // some deg-2 (boundaries + chaining + the compensator-zero pins),
         // some deg-1 (SHA C1, C2, C4, C6 — including the new row-local
         // σ_0/σ_1 equalities).
-        assert!(degrees.iter().any(|&d| d == 7), "expected deg-7 from ECDSA C-A2");
-        assert!(degrees.iter().filter(|&&d| d == 2).count() >= 3, "expected ≥3 deg-2");
+        assert!(
+            degrees.iter().any(|&d| d == 7),
+            "expected deg-7 from ECDSA C-A2"
+        );
+        assert!(
+            degrees.iter().filter(|&&d| d == 2).count() >= 3,
+            "expected ≥3 deg-2"
+        );
     }
 
     /// The merged trace builder produces a trace with the right column
@@ -1027,8 +1020,10 @@ mod tests {
     fn merged_trace_shape() {
         let num_vars = 9;
         let mut r = rng();
-        let trace = <ShaEcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::
-            generate_random_trace(num_vars, &mut r);
+        let trace =
+            <ShaEcdsaUair<Int<EC_FP_INT_LIMBS>> as GenerateRandomTrace<32>>::generate_random_trace(
+                num_vars, &mut r,
+            );
 
         assert_eq!(trace.binary_poly.len(), cols::NUM_BIN);
         assert_eq!(trace.int.len(), cols::NUM_INT);

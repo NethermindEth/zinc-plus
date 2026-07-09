@@ -30,9 +30,7 @@ use zinc_uair::{
     ShiftedBitSliceSpec, VirtualBinaryPolySource, VirtualBinaryPolySpec, VirtualBoolSource,
     VirtualBoolSpec,
 };
-use zinc_utils::{
-    cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField, powers,
-};
+use zinc_utils::{cfg_into_iter, cfg_iter, inner_transparent_field::InnerTransparentField, powers};
 
 /// Build the F::Inner-valued shifted bit-slice MLEs for each
 /// `ShiftedBitSliceSpec`, in flat layout `spec*D + bit`. Each MLE has
@@ -218,19 +216,15 @@ where
                     VirtualBoolSource::SelfBitSlice {
                         witness_col_idx,
                         bit_idx,
-                    } => &self_bit_slices[*witness_col_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &self_bit_slices[*witness_col_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::ShiftedBitSlice {
                         shifted_spec_idx,
                         bit_idx,
-                    } => &shifted_bit_slice_mles
-                        [*shifted_spec_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &shifted_bit_slice_mles[*shifted_spec_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::PublicBitSlice {
                         public_col_idx,
                         bit_idx,
-                    } => &public_bit_slices[*public_col_idx * D + *bit_idx]
-                        .evaluations,
+                    } => &public_bit_slices[*public_col_idx * D + *bit_idx].evaluations,
                     VirtualBoolSource::IntCol { witness_col_idx } => {
                         &int_witness_cols[*witness_col_idx].evaluations
                     }
@@ -242,43 +236,38 @@ where
                 match *coeff {
                     1 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     -1 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     2 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
-                            evals[t] =
-                                F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     -2 => {
                         for t in 0..n {
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
-                            evals[t] =
-                                F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
+                            evals[t] = F::sub_inner(&evals[t], &src[t], field_cfg);
                         }
                     }
                     c => {
                         for t in 0..n {
-                            let term =
-                                apply_coeff_inner::<F>(c, &src[t], field_cfg);
-                            evals[t] =
-                                F::add_inner(&evals[t], &term, field_cfg);
+                            let term = apply_coeff_inner::<F>(c, &src[t], field_cfg);
+                            evals[t] = F::add_inner(&evals[t], &term, field_cfg);
                         }
                     }
                 }
             }
-            DenseMultilinearExtension { evaluations: evals, num_vars }
+            DenseMultilinearExtension {
+                evaluations: evals,
+                num_vars,
+            }
         })
         .collect()
 }
@@ -314,13 +303,11 @@ where
                     VirtualBoolSource::ShiftedBitSlice {
                         shifted_spec_idx,
                         bit_idx,
-                    } => &shifted_bit_slice_evals
-                        [*shifted_spec_idx * D + *bit_idx],
+                    } => &shifted_bit_slice_evals[*shifted_spec_idx * D + *bit_idx],
                     VirtualBoolSource::PublicBitSlice {
                         public_col_idx,
                         bit_idx,
-                    } => &public_bit_slice_evals
-                        [*public_col_idx * D + *bit_idx],
+                    } => &public_bit_slice_evals[*public_col_idx * D + *bit_idx],
                     VirtualBoolSource::IntCol { witness_col_idx } => {
                         &int_witness_up_evals[*witness_col_idx]
                     }
@@ -456,7 +443,10 @@ where
                 }
                 evaluations.push(BinaryPoly::<D>::new(coeffs.as_slice()));
             }
-            DenseMultilinearExtension { evaluations, num_vars }
+            DenseMultilinearExtension {
+                evaluations,
+                num_vars,
+            }
         })
         .collect()
 }
@@ -729,9 +719,8 @@ where
         let r1_inner = r1.inner().clone();
         let one_minus_r1_inner = one_minus_r1.inner().clone();
 
-        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> = Vec::with_capacity(
-            1 + self.binary_cols.len() * D + self.extra_bit_cols.len(),
-        );
+        let mut mles: Vec<DenseMultilinearExtension<F::Inner>> =
+            Vec::with_capacity(1 + self.binary_cols.len() * D + self.extra_bit_cols.len());
         mles.push(eq_folded);
 
         // BinaryPoly<D> does not impl Index<usize> on every backend
@@ -880,8 +869,7 @@ where
     let one = F::one_with_cfg(field_cfg);
 
     let folding_challenge: F = transcript.get_field_challenge(field_cfg);
-    let folding_challenge_powers: Vec<F> =
-        powers(folding_challenge, one.clone(), num_bit_slices);
+    let folding_challenge_powers: Vec<F> = powers(folding_challenge, one.clone(), num_bit_slices);
 
     // Pre-build E_other = eq(b', ic_evaluation_point[1..]) for the
     // round-1 fast path. The full-size eq_r is only needed for rounds
@@ -1125,13 +1113,12 @@ pub fn verify_bit_decomposition_consistency<F: PrimeField>(
 
     for (col_idx, parent_eval) in parent_evals_per_col.iter().enumerate() {
         let base = col_idx * bits_per_col;
-        let recombined =
-            bit_slice_evals[base..base + bits_per_col]
-                .iter()
-                .zip(&a_powers)
-                .fold(zero.clone(), |acc, (bit_eval, a_pow)| {
-                    acc + bit_eval.clone() * a_pow
-                });
+        let recombined = bit_slice_evals[base..base + bits_per_col]
+            .iter()
+            .zip(&a_powers)
+            .fold(zero.clone(), |acc, (bit_eval, a_pow)| {
+                acc + bit_eval.clone() * a_pow
+            });
 
         if &recombined != parent_eval {
             return Err(BooleanityError::ConsistencyMismatch {
@@ -1147,9 +1134,7 @@ pub fn verify_bit_decomposition_consistency<F: PrimeField>(
 
 #[derive(Debug, Error)]
 pub enum BooleanityError<F: PrimeField> {
-    #[error(
-        "wrong bit-slice evaluation count: got {got}, expected {expected}"
-    )]
+    #[error("wrong bit-slice evaluation count: got {got}, expected {expected}")]
     WrongBitSliceEvalCount { got: usize, expected: usize },
     #[error(
         "bit-decomposition consistency mismatch on binary_poly column {col_idx}: got Σ a^i·bᵢ = {got:?}, expected parent eval {expected:?}"
@@ -1168,9 +1153,7 @@ pub enum BooleanityError<F: PrimeField> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::{
-        FromWithConfig, boolean::Boolean, crypto_bigint_monty::MontyField,
-    };
+    use crypto_primitives::{FromWithConfig, boolean::Boolean, crypto_bigint_monty::MontyField};
 
     type F = MontyField<4>;
 
@@ -1183,8 +1166,7 @@ mod tests {
         let evaluations: Vec<BinaryPoly<8>> = patterns
             .iter()
             .map(|&p| {
-                let coeffs: [Boolean; 8] =
-                    array::from_fn(|i| Boolean::new((p >> i) & 1 != 0));
+                let coeffs: [Boolean; 8] = array::from_fn(|i| Boolean::new((p >> i) & 1 != 0));
                 BinaryPoly::<8>::new(coeffs)
             })
             .collect();
@@ -1214,7 +1196,10 @@ mod tests {
                 } else {
                     zero.clone()
                 };
-                assert_eq!(bit_slices[bit].evaluations[row], want, "row {row} bit {bit}");
+                assert_eq!(
+                    bit_slices[bit].evaluations[row], want,
+                    "row {row} bit {bit}"
+                );
             }
         }
     }
@@ -1239,13 +1224,8 @@ mod tests {
             a_pow = a_pow * a.clone();
         }
 
-        verify_bit_decomposition_consistency(
-            std::slice::from_ref(&parent_eval),
-            &bit_evals,
-            &a,
-            8,
-        )
-        .expect("honest decomposition should satisfy consistency check");
+        verify_bit_decomposition_consistency(std::slice::from_ref(&parent_eval), &bit_evals, &a, 8)
+            .expect("honest decomposition should satisfy consistency check");
     }
 
     #[test]
@@ -1277,7 +1257,10 @@ mod tests {
             &a,
             4,
         );
-        assert!(matches!(res, Err(BooleanityError::ConsistencyMismatch { .. })));
+        assert!(matches!(
+            res,
+            Err(BooleanityError::ConsistencyMismatch { .. })
+        ));
     }
 
     #[test]
@@ -1306,8 +1289,14 @@ mod tests {
         // Mix of fully-zero, fully-one, and varying patterns to exercise all
         // four (A, B) cases for the XOR fold structure.
         let binary_cols = vec![
-            col_from_u8s(&[0b00000000, 0b00010001, 0b00100010, 0b00110011, 0b01000100, 0b01010101, 0b01100110, 0b01110111]),
-            col_from_u8s(&[0b11110000, 0b11100001, 0b11010010, 0b11000011, 0b10110100, 0b10100101, 0b10010110, 0b10000111]),
+            col_from_u8s(&[
+                0b00000000, 0b00010001, 0b00100010, 0b00110011, 0b01000100, 0b01010101, 0b01100110,
+                0b01110111,
+            ]),
+            col_from_u8s(&[
+                0b11110000, 0b11100001, 0b11010010, 0b11000011, 0b10110100, 0b10100101, 0b10010110,
+                0b10000111,
+            ]),
         ];
         let num_vars = 3;
         const D: usize = 8;
@@ -1430,7 +1419,8 @@ mod tests {
         let mut std_eq_r = eq_r_full;
         std_eq_r.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
         assert_eq!(
-            fast_mles[0].num_vars, num_vars - 1,
+            fast_mles[0].num_vars,
+            num_vars - 1,
             "fast-path eq_r_folded must have num_vars - 1 variables"
         );
         assert_eq!(
@@ -1441,7 +1431,8 @@ mod tests {
         for (idx, mut bit_mle) in bit_slices_full.into_iter().enumerate() {
             bit_mle.fix_variables_with_config(slice::from_ref(&r_1), &cfg);
             assert_eq!(
-                fast_mles[1 + idx].evaluations, bit_mle.evaluations,
+                fast_mles[1 + idx].evaluations,
+                bit_mle.evaluations,
                 "fast-path bit-slice {idx} folded value must match standard fix_variables"
             );
         }
@@ -1454,6 +1445,9 @@ mod tests {
         let parent_evals = vec![one.clone()];
         let bit_evals: Vec<F> = vec![one.clone(), one.clone()];
         let res = verify_bit_decomposition_consistency(&parent_evals, &bit_evals, &one, 8);
-        assert!(matches!(res, Err(BooleanityError::WrongBitSliceEvalCount { .. })));
+        assert!(matches!(
+            res,
+            Err(BooleanityError::WrongBitSliceEvalCount { .. })
+        ));
     }
 }

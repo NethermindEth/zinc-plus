@@ -38,9 +38,14 @@ use zinc_utils::{
     mul_by_scalar::MulByScalar, projectable_to_field::ProjectableToField,
 };
 use zip_plus::{
-    pcs::structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    pcs::{
+        generic::PCS,
+        structs::{ZipPlus, ZipPlusParams, ZipTypes},
+    },
     pcs_transcript::PcsVerifierTranscript,
 };
+
+use crate::pcs::{AllZipPCSTypes, PCSCommitments, PCSVerifierParams, ZincPCSTypes};
 
 /// Drop the witness binary_poly column evals the UAIR opted out of
 /// (sorted, dedup'd `skip_indices` relative to the witness slice). The
@@ -68,16 +73,22 @@ fn filter_skipped_parent_evals<F: Clone>(
 
 /// Persistent verifier infrastructure carried across every step.
 #[derive(Clone, Debug)]
-pub struct VerifierBase<'a, Zt: ZincTypes<D>, const D: usize> {
+pub struct VerifierBase<
+    'a,
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
     num_vars: usize,
     uair_signature: UairSignature,
     pcs_transcript: PcsVerifierTranscript,
     public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D>,
 
     // Commitment info
-    vp_bin: &'a ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
-    vp_arb: &'a ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
-    vp_int: &'a ZipPlusParams<Zt::IntZt, Zt::IntLc>,
+    vp: PCSVerifierParams<P, Zt, F, D>,
+
+    _phantom: PhantomData<(F, P)>,
 }
 
 //
@@ -93,11 +104,12 @@ pub struct VerifierTranscriptReconstructed<
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, F, D, P>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_ideal_check: IdealCheckProof<F>,
     proof_resolver: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -116,12 +128,13 @@ pub struct VerifierPrimeProjected<
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_ideal_check: IdealCheckProof<F>,
     proof_resolver: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
@@ -140,13 +153,14 @@ pub struct VerifierIdealChecked<
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_resolver: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
@@ -164,15 +178,16 @@ pub struct VerifierEvalProjected<
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
     ic_subclaim: ideal_check::VerifierSubclaim<F>,
     projecting_element_f: F,
     projected_scalars_f: ScalarMap<U::Scalar, F>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_resolver: CombinedPolyResolverProof<F>,
     proof_combined_sumcheck: MultiDegreeSumcheckProof<F>,
     proof_multipoint_eval: MultipointEvalProof<F>,
@@ -183,14 +198,21 @@ pub struct VerifierEvalProjected<
 
 /// After step 4 (sumcheck verify).
 #[derive(Clone, Debug)]
-pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, const D: usize> {
-    base: VerifierBase<'a, Zt, D>,
+pub struct VerifierSumchecked<
+    'a,
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    IdealOverF,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
     projecting_element_f: F,
     cpr_subclaim: combined_poly_resolver::VerifierSubclaim<F>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_multipoint_eval: MultipointEvalProof<F>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
@@ -199,15 +221,21 @@ pub struct VerifierSumchecked<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, c
 
 /// After step 5 (multi-point eval).
 #[derive(Clone, Debug)]
-pub struct VerifierMultipointEvaled<'a, Zt: ZincTypes<D>, F: PrimeField, IdealOverF, const D: usize>
-{
-    base: VerifierBase<'a, Zt, D>,
+pub struct VerifierMultipointEvaled<
+    'a,
+    Zt: ZincTypes<D>,
+    F: PrimeField,
+    IdealOverF,
+    const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
+> {
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
     projecting_element_f: F,
     mp_subclaim: multipoint_eval::Subclaim<F>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_witness_lifted_evals: Vec<DynamicPolynomialF<F>>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
@@ -222,14 +250,15 @@ pub struct VerifierLiftedEvalsChecked<
     F: PrimeField,
     IdealOverF,
     const D: usize,
+    P: ZincPCSTypes<Zt, F, D> = AllZipPCSTypes,
 > {
-    base: VerifierBase<'a, Zt, D>,
+    base: VerifierBase<'a, Zt, F, D, P>,
     field_cfg: F::Config,
     mp_subclaim: multipoint_eval::Subclaim<F>,
     all_lifted_evals: Vec<DynamicPolynomialF<F>>,
 
     // Proof leftovers
-    proof_commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    proof_commitments: PCSCommitments<P, Zt, F, D>,
     proof_lookup_proof: Option<BatchedLookupProof<F>>,
     _phantom: PhantomData<IdealOverF>,
 }
@@ -249,19 +278,27 @@ impl<Zt, U, F, const D: usize> ZincPlusPiop<Zt, U, F, D>
 where
     Zt: ZincTypes<D>,
     U: Uair,
-    F: PrimeField,
+    F: PrimeField
+        + FromPrimitiveWithConfig
+        + for<'b> FromWithConfig<&'b <Zt::BinaryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::ArbitraryZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b <Zt::IntZt as ZipTypes>::CombR>
+        + for<'b> FromWithConfig<&'b Zt::Chal>
+        + for<'b> MulByScalar<&'b F>
+        + FromRef<F>,
     F::Inner: ConstTranscribable,
+    F::Modulus: FromRef<Zt::Fmod>,
 {
     /// Step 0: Verifier entry point.
     /// Reconstruct Fiat-Shamir transcript from commitments and public data.
     #[allow(clippy::type_complexity)]
     pub fn step0_reconstruct_transcript<'a, IdealOverF>(
-        (vp_bin, vp_arb, vp_int): &'a (
+        (vp_bin, vp_arb, vp_int): &(
             ZipPlusParams<Zt::BinaryZt, Zt::BinaryLc>,
             ZipPlusParams<Zt::ArbitraryZt, Zt::ArbitraryLc>,
             ZipPlusParams<Zt::IntZt, Zt::IntLc>,
         ),
-        mut proof: Proof<F>,
+        proof: Proof<F>,
         public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D>,
         num_vars: usize,
     ) -> Result<
@@ -269,6 +306,57 @@ where
         ProtocolError<F, IdealOverF>,
     >
     where
+        IdealOverF: Ideal,
+        AllZipPCSTypes: ZincPCSTypes<
+                Zt,
+                F,
+                D,
+                BinaryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::BinaryZt, Zt::BinaryLc>,
+                ArbitraryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+                IntPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::IntZt, Zt::IntLc>,
+            >,
+    {
+        let pcs_vp = PCSVerifierParams::<AllZipPCSTypes, Zt, F, D> {
+            binary: vp_bin.clone(),
+            arbitrary: vp_arb.clone(),
+            int: vp_int.clone(),
+        };
+        let commitments = proof.commitments;
+        let proof = Proof {
+            commitments: PCSCommitments::<AllZipPCSTypes, Zt, F, D> {
+                binary: commitments.0,
+                arbitrary: commitments.1,
+                int: commitments.2,
+            },
+            zip: proof.zip,
+            ideal_check: proof.ideal_check,
+            resolver: proof.resolver,
+            combined_sumcheck: proof.combined_sumcheck,
+            multipoint_eval: proof.multipoint_eval,
+            witness_lifted_evals: proof.witness_lifted_evals,
+            lookup_proof: proof.lookup_proof,
+        };
+        Self::step0_reconstruct_transcript_with_pcs::<IdealOverF, AllZipPCSTypes>(
+            &pcs_vp,
+            proof,
+            public_trace,
+            num_vars,
+        )
+    }
+
+    /// Step 0 with an explicit PCS bundle.
+    #[allow(clippy::type_complexity)]
+    pub fn step0_reconstruct_transcript_with_pcs<'a, IdealOverF, P>(
+        vp: &PCSVerifierParams<P, Zt, F, D>,
+        mut proof: Proof<F, PCSCommitments<P, Zt, F, D>>,
+        public_trace: &'a UairTrace<'a, Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+    ) -> Result<
+        VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, P>,
+        ProtocolError<F, IdealOverF>,
+    >
+    where
+        P: ZincPCSTypes<Zt, F, D>,
         IdealOverF: Ideal,
     {
         let zip_proof = std::mem::take(&mut proof.zip);
@@ -280,18 +368,22 @@ where
                 fs_transcript: Blake3Transcript::default(),
                 stream: Cursor::new(zip_proof),
             },
-            vp_bin,
-            vp_arb,
-            vp_int,
+            vp: vp.clone(),
+            _phantom: PhantomData,
         };
 
-        for comm in [
-            &proof.commitments.0,
-            &proof.commitments.1,
-            &proof.commitments.2,
-        ] {
-            base.pcs_transcript.fs_transcript.absorb_slice(&comm.root);
-        }
+        P::BinaryPCS::absorb_commitment(
+            &mut base.pcs_transcript.fs_transcript,
+            &proof.commitments.binary,
+        );
+        P::ArbitraryPCS::absorb_commitment(
+            &mut base.pcs_transcript.fs_transcript,
+            &proof.commitments.arbitrary,
+        );
+        P::IntPCS::absorb_commitment(
+            &mut base.pcs_transcript.fs_transcript,
+            &proof.commitments.int,
+        );
 
         absorb_public_columns(
             &mut base.pcs_transcript.fs_transcript,
@@ -320,10 +412,11 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize>
-    VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, P>
+    VerifierTranscriptReconstructed<'a, Zt, U, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -335,13 +428,21 @@ where
     #[allow(clippy::type_complexity)]
     pub fn step1_prime_projection(
         self,
-    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
     {
         // `fixed-prime` branch: use the secp256k1 base field prime as the
         // projecting prime instead of drawing one from the transcript.
         // See `crate::fixed_prime` for the soundness caveat.
         let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
 
+        self.step1_prime_projection_with_field_cfg(field_cfg)
+    }
+
+    pub fn step1_prime_projection_with_field_cfg(
+        self,
+        field_cfg: F::Config,
+    ) -> Result<VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
+    {
         Ok(VerifierPrimeProjected {
             base: self.base,
             field_cfg,
@@ -357,9 +458,11 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, P>
+    VerifierPrimeProjected<'a, Zt, U, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -384,7 +487,7 @@ where
     pub fn step2_ideal_check(
         mut self,
         project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
-    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
     {
         let num_constraints = count_constraints::<U>();
 
@@ -412,9 +515,11 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, P>
+    VerifierIdealChecked<'a, Zt, U, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     F: InnerTransparentField
         + for<'b> FromWithConfig<&'b Zt::Chal>
         + FromRef<F>
@@ -430,7 +535,7 @@ where
     pub fn step3_eval_projection(
         mut self,
         project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
-    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
     {
         let projecting_element: Zt::Chal = self.base.pcs_transcript.fs_transcript.get_challenge();
         let projecting_element_f: F = F::from_with_cfg(&projecting_element, &self.field_cfg);
@@ -457,9 +562,11 @@ where
     }
 }
 
-impl<'a, Zt, U, F, IdealOverF, const D: usize> VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D>
+impl<'a, Zt, U, F, IdealOverF, const D: usize, P>
+    VerifierEvalProjected<'a, Zt, U, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -482,31 +589,26 @@ where
     /// Step 4: Sumcheck verification (CPR + algebraic booleanity).
     pub fn step4_sumcheck_verify(
         mut self,
-    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>> {
+    ) -> Result<VerifierSumchecked<'a, Zt, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>> {
         let num_constraints = count_constraints::<U>();
         let num_pub_bin = self
             .base
             .uair_signature
             .public_cols()
             .num_binary_poly_cols();
-        let num_total_bin =
-            self.base.uair_signature.total_cols().num_binary_poly_cols();
+        let num_total_bin = self.base.uair_signature.total_cols().num_binary_poly_cols();
         let bool_skip = self.base.uair_signature.booleanity_skip_indices();
         // Booleanity covers: witness binary_poly cols (minus
         // `booleanity_skip_indices`), packed virtual binary_poly cols,
         // declared int bit cols, and virtual booleanity linear-combo cols.
-        let num_int_bit_cols =
-            self.base.uair_signature.int_witness_bit_cols().len();
-        let num_virtual_cols =
-            self.base.uair_signature.virtual_booleanity_cols().len();
-        let num_virtual_bp_cols =
-            self.base.uair_signature.virtual_binary_poly_cols().len();
+        let num_int_bit_cols = self.base.uair_signature.int_witness_bit_cols().len();
+        let num_virtual_cols = self.base.uair_signature.virtual_booleanity_cols().len();
+        let num_virtual_bp_cols = self.base.uair_signature.virtual_binary_poly_cols().len();
         let num_bit_slices = ((num_total_bin - num_pub_bin) - bool_skip.len()) * D
             + num_virtual_bp_cols * D
             + num_int_bit_cols
             + num_virtual_cols;
-        let num_shifted_bit_slices =
-            self.base.uair_signature.shifted_bit_slice_specs().len() * D;
+        let num_shifted_bit_slices = self.base.uair_signature.shifted_bit_slice_specs().len() * D;
 
         let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
             &mut self.base.pcs_transcript.fs_transcript,
@@ -524,8 +626,7 @@ where
         // 4b: Booleanity verifier prep — samples α_b, validates that the
         // booleanity group's claimed sum is zero (zerocheck).
         let bool_verifier_ancillary_opt = if num_bit_slices > 0 {
-            let bool_claimed_sum =
-                self.proof_combined_sumcheck.claimed_sums()[1].clone();
+            let bool_claimed_sum = self.proof_combined_sumcheck.claimed_sums()[1].clone();
             prepare_booleanity_verifier::<F>(
                 &mut self.base.pcs_transcript.fs_transcript,
                 bool_claimed_sum,
@@ -564,7 +665,11 @@ where
         // booleanity-bound MLE to the committed sources without a
         // separate equality check.
         let int_offset = self.base.uair_signature.total_cols().num_binary_poly_cols()
-            + self.base.uair_signature.total_cols().num_arbitrary_poly_cols();
+            + self
+                .base
+                .uair_signature
+                .total_cols()
+                .num_arbitrary_poly_cols();
         let num_pub_int = self.base.uair_signature.public_cols().num_int_cols();
         let num_wit_int = self.base.uair_signature.witness_cols().num_int_cols();
         let num_binary_bit_slices_for_overrides = (num_total_bin - num_pub_bin) * D;
@@ -574,21 +679,20 @@ where
         // Public binary_poly bit slice evals at the shared sumcheck
         // point — verifier computes locally from public_trace; reused
         // by both virtual-bool and virtual-binary-poly overrides.
-        let public_bit_slice_evals: Vec<F> = if !virtual_bp_specs.is_empty()
-            || !virtual_specs.is_empty()
-        {
-            let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
-                &self.base.public_trace.binary_poly,
-                &self.field_cfg,
-            );
-            public_bit_slice_mles
-                .into_iter()
-                .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &self.field_cfg))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(ProtocolError::ShiftedBitSliceEval)?
-        } else {
-            Vec::new()
-        };
+        let public_bit_slice_evals: Vec<F> =
+            if !virtual_bp_specs.is_empty() || !virtual_specs.is_empty() {
+                let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
+                    &self.base.public_trace.binary_poly,
+                    &self.field_cfg,
+                );
+                public_bit_slice_mles
+                    .into_iter()
+                    .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &self.field_cfg))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(ProtocolError::ShiftedBitSliceEval)?
+            } else {
+                Vec::new()
+            };
 
         // closing_overrides_tail layout (in trailing-position order):
         //   [virtual_binary_poly_per_bit (V_b * D),
@@ -617,9 +721,7 @@ where
         );
         if !virtual_specs.is_empty() {
             let int_witness_up_evals: Vec<F> = (0..num_wit_int)
-                .map(|i| {
-                    cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone()
-                })
+                .map(|i| cpr_subclaim.up_evals[int_offset + num_pub_int + i].clone())
                 .collect();
             let virtual_overrides = compute_virtual_closing_overrides::<F, D>(
                 virtual_specs,
@@ -670,8 +772,7 @@ where
         // Shifted bit-slice consistency: tie each spec's emitted bit
         // slices to the corresponding `down_eval` (= parent col at
         // shifted point) via the same projection-element trick.
-        let shifted_down_indices =
-            self.base.uair_signature.shifted_bit_slice_down_indices();
+        let shifted_down_indices = self.base.uair_signature.shifted_bit_slice_down_indices();
         let shifted_parent_evals: Vec<F> = shifted_down_indices
             .iter()
             .map(|&i| cpr_subclaim.down_evals[i].clone())
@@ -700,9 +801,10 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierSumchecked<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, P> VerifierSumchecked<'a, Zt, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     F: InnerTransparentField + FromPrimitiveWithConfig + FromRef<F> + Send + Sync + 'static,
     F::Inner: ConstIntSemiring + ConstTranscribable + Send + Sync + Zero + Default,
     F::Modulus: ConstTranscribable + FromRef<Zt::Fmod>,
@@ -719,7 +821,7 @@ where
     /// lifted eval (free arithmetic in F_q[X]).
     pub fn step5_multipoint_eval<U: Uair>(
         mut self,
-    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
     {
         let cpr_eval_point = self.cpr_subclaim.evaluation_point.clone();
 
@@ -750,9 +852,10 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, P> VerifierMultipointEvaled<'a, Zt, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
     F: InnerTransparentField
@@ -781,7 +884,7 @@ where
     /// `MultipointEval(ClaimMismatch)` from `verify_subclaim`.
     pub fn step6_lifted_evals<U: Uair>(
         mut self,
-    ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>, ProtocolError<F, IdealOverF>>
+    ) -> Result<VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, P>, ProtocolError<F, IdealOverF>>
     {
         let r_0 = &self.mp_subclaim.sumcheck_subclaim.point;
 
@@ -869,9 +972,11 @@ where
     }
 }
 
-impl<'a, Zt, F, IdealOverF, const D: usize> VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D>
+impl<'a, Zt, F, IdealOverF, const D: usize, P>
+    VerifierLiftedEvalsChecked<'a, Zt, F, IdealOverF, D, P>
 where
     Zt: ZincTypes<D>,
+    P: ZincPCSTypes<Zt, F, D>,
     Zt::Int: ProjectableToField<F>,
     <Zt::BinaryZt as ZipTypes>::Cw: ProjectableToField<F>,
     <Zt::ArbitraryZt as ZipTypes>::Eval: ProjectableToField<F>,
@@ -913,60 +1018,33 @@ where
         let field_cfg = &self.field_cfg;
         let all_lifted_evals = &self.all_lifted_evals;
 
-        macro_rules! verify_pcs_batch {
-            ($Zt:ty, $Lc:ty, $vp:expr, $idx:tt, [$evals_range:expr]) => {{
-                let comm = &commitments.$idx;
-                if comm.batch_size > 0 {
-                    let per_poly_alphas = ZipPlus::<$Zt, $Lc>::sample_alphas(
-                        &mut pcs_transcript.fs_transcript,
-                        comm.batch_size,
-                    );
-                    let mut eval_f = F::zero_with_cfg(field_cfg);
-                    for (bar_u, alphas) in all_lifted_evals[$evals_range]
-                        .iter()
-                        .zip(per_poly_alphas.iter())
-                    {
-                        for (coeff, alpha) in bar_u.coeffs.iter().zip(alphas.iter()) {
-                            let mut term = F::from_with_cfg(alpha, field_cfg);
-                            term *= coeff;
-                            eval_f += &term;
-                        }
-                    }
-                    ZipPlus::<$Zt, $Lc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
-                        pcs_transcript,
-                        $vp,
-                        comm,
-                        field_cfg,
-                        r_0,
-                        &eval_f,
-                        &per_poly_alphas,
-                    )
-                    .map_err(|e| ProtocolError::PcsVerification($idx, e))?;
-                }
-            }};
-        }
-
-        verify_pcs_batch!(
-            Zt::BinaryZt,
-            Zt::BinaryLc,
-            self.base.vp_bin,
-            0,
-            [num_pub_bin..num_total_bin]
-        );
-        verify_pcs_batch!(
-            Zt::ArbitraryZt,
-            Zt::ArbitraryLc,
-            self.base.vp_arb,
-            1,
-            [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
-        );
-        verify_pcs_batch!(
-            Zt::IntZt,
-            Zt::IntLc,
-            self.base.vp_int,
-            2,
-            [add!(add!(num_total_bin, num_total_arb), num_pub_int)..]
-        );
+        P::BinaryPCS::verify_open::<CHECK_FOR_OVERFLOW>(
+            pcs_transcript,
+            &self.base.vp.binary,
+            &commitments.binary,
+            r_0,
+            &all_lifted_evals[num_pub_bin..num_total_bin],
+            field_cfg,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(0, e))?;
+        P::ArbitraryPCS::verify_open::<CHECK_FOR_OVERFLOW>(
+            pcs_transcript,
+            &self.base.vp.arbitrary,
+            &commitments.arbitrary,
+            r_0,
+            &all_lifted_evals[add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)],
+            field_cfg,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(1, e))?;
+        P::IntPCS::verify_open::<CHECK_FOR_OVERFLOW>(
+            pcs_transcript,
+            &self.base.vp.int,
+            &commitments.int,
+            r_0,
+            &all_lifted_evals[add!(add!(num_total_bin, num_total_arb), num_pub_int)..],
+            field_cfg,
+        )
+        .map_err(|e| ProtocolError::PcsVerification(2, e))?;
 
         Ok(VerifierPcsVerified {
             _phantom: PhantomData,
@@ -1028,24 +1106,95 @@ where
     ) -> Result<(), ProtocolError<F, IdealOverF>>
     where
         IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+        AllZipPCSTypes: ZincPCSTypes<
+                Zt,
+                F,
+                D,
+                BinaryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::BinaryZt, Zt::BinaryLc>,
+                ArbitraryPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::ArbitraryZt, Zt::ArbitraryLc>,
+                IntPCS = zip_plus::pcs::generic::ZipPlusPCS<Zt::IntZt, Zt::IntLc>,
+            >,
     {
-        // Verifier-side public-column structural checks. UAIRs that
-        // need to enforce structural properties of public columns
-        // (compensator-zero on active rows, tail-corrector-zero on
-        // inner rows, etc.) discharge them here, by direct row-wise
-        // inspection of public_trace, before any algebraic check
-        // begins. Default impl is a no-op for UAIRs that don't need
-        // such checks.
+        let pcs_vp = PCSVerifierParams::<AllZipPCSTypes, Zt, F, D> {
+            binary: vp.0.clone(),
+            arbitrary: vp.1.clone(),
+            int: vp.2.clone(),
+        };
+        let commitments = proof.commitments;
+        let proof = Proof {
+            commitments: PCSCommitments::<AllZipPCSTypes, Zt, F, D> {
+                binary: commitments.0,
+                arbitrary: commitments.1,
+                int: commitments.2,
+            },
+            zip: proof.zip,
+            ideal_check: proof.ideal_check,
+            resolver: proof.resolver,
+            combined_sumcheck: proof.combined_sumcheck,
+            multipoint_eval: proof.multipoint_eval,
+            witness_lifted_evals: proof.witness_lifted_evals,
+            lookup_proof: proof.lookup_proof,
+        };
+
+        Self::verify_with_pcs::<AllZipPCSTypes, IdealOverF, CHECK_FOR_OVERFLOW>(
+            &pcs_vp,
+            proof,
+            public_trace,
+            num_vars,
+            project_scalar,
+            project_ideal,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn verify_with_pcs<P, IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &PCSVerifierParams<P, Zt, F, D>,
+        proof: Proof<F, PCSCommitments<P, Zt, F, D>>,
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+    ) -> Result<(), ProtocolError<F, IdealOverF>>
+    where
+        P: ZincPCSTypes<Zt, F, D>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    {
+        let field_cfg = crate::fixed_prime::secp256k1_field_cfg::<F, Zt::Fmod>();
+        Self::verify_with_pcs_and_field_cfg::<P, IdealOverF, CHECK_FOR_OVERFLOW>(
+            vp,
+            proof,
+            public_trace,
+            num_vars,
+            project_scalar,
+            project_ideal,
+            field_cfg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn verify_with_pcs_and_field_cfg<P, IdealOverF, const CHECK_FOR_OVERFLOW: bool>(
+        vp: &PCSVerifierParams<P, Zt, F, D>,
+        proof: Proof<F, PCSCommitments<P, Zt, F, D>>,
+        public_trace: &UairTrace<Zt::Int, Zt::Int, D>,
+        num_vars: usize,
+        project_scalar: impl Fn(&U::Scalar, &F::Config) -> DynamicPolynomialF<F> + Sync,
+        project_ideal: impl Fn(&IdealOrZero<U::Ideal>, &F::Config) -> IdealOverF,
+        field_cfg: F::Config,
+    ) -> Result<(), ProtocolError<F, IdealOverF>>
+    where
+        P: ZincPCSTypes<Zt, F, D>,
+        IdealOverF: Ideal + IdealCheck<DynamicPolynomialF<F>>,
+    {
         U::verify_public_structure(public_trace, num_vars)
             .map_err(ProtocolError::PublicStructure)?;
 
-        ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript::<IdealOverF>(
+        ZincPlusPiop::<Zt, U, F, D>::step0_reconstruct_transcript_with_pcs::<IdealOverF, P>(
             vp,
             proof,
             public_trace,
             num_vars,
         )?
-        .step1_prime_projection()?
+        .step1_prime_projection_with_field_cfg(field_cfg)?
         .step2_ideal_check(project_ideal)?
         .step3_eval_projection(project_scalar)?
         .step4_sumcheck_verify()?
@@ -1116,8 +1265,7 @@ where
     // Verifier-side public-column structural checks (compensator/
     // corrector zero-pinning, etc.). UAIRs that don't need extra
     // structural checks fall through this with a no-op default impl.
-    U::verify_public_structure(public_trace, num_vars)
-        .map_err(ProtocolError::PublicStructure)?;
+    U::verify_public_structure(public_trace, num_vars).map_err(ProtocolError::PublicStructure)?;
 
     // ── Step 0: Reconstruct transcript ──────────────────────────────────
     let zip_proof = std::mem::take(&mut proof.zip);
@@ -1164,9 +1312,8 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-    let projected_scalars_f =
-        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
 
     // ── Step 4: Sumcheck verify (CPR + algebraic booleanity) ────────────
     let num_pub_bin = uair_signature.public_cols().num_binary_poly_cols();
@@ -1179,8 +1326,7 @@ where
         + num_virtual_bp_cols * D
         + num_int_bit_cols
         + num_virtual_cols;
-    let num_shifted_bit_slices =
-        uair_signature.shifted_bit_slice_specs().len() * D;
+    let num_shifted_bit_slices = uair_signature.shifted_bit_slice_specs().len() * D;
     let cpr_verifier_ancillary = CombinedPolyResolver::prepare_verifier::<U>(
         &mut pcs_transcript.fs_transcript,
         &proof.resolver,
@@ -1234,21 +1380,18 @@ where
     let num_binary_bit_slices = (num_total_bin - num_pub_bin) * D;
     let virtual_bp_specs = uair_signature.virtual_binary_poly_cols();
     let virtual_specs = uair_signature.virtual_booleanity_cols();
-    let public_bit_slice_evals: Vec<F> = if !virtual_bp_specs.is_empty()
-        || !virtual_specs.is_empty()
-    {
-        let public_bit_slice_mles = compute_bit_slices_flat::<F, D>(
-            &public_trace.binary_poly,
-            &field_cfg,
-        );
-        public_bit_slice_mles
-            .into_iter()
-            .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &field_cfg))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProtocolError::ShiftedBitSliceEval)?
-    } else {
-        Vec::new()
-    };
+    let public_bit_slice_evals: Vec<F> =
+        if !virtual_bp_specs.is_empty() || !virtual_specs.is_empty() {
+            let public_bit_slice_mles =
+                compute_bit_slices_flat::<F, D>(&public_trace.binary_poly, &field_cfg);
+            public_bit_slice_mles
+                .into_iter()
+                .map(|mle| mle.evaluate_with_config(md_subclaims.point(), &field_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(ProtocolError::ShiftedBitSliceEval)?
+        } else {
+            Vec::new()
+        };
     let mut closing_overrides_tail: Vec<F> = Vec::new();
     if !virtual_bp_specs.is_empty() {
         let virtual_bp_overrides = compute_virtual_binary_poly_closing_overrides::<F, D>(
@@ -1428,11 +1571,10 @@ where
     {
         let comm = &proof.commitments.0;
         if comm.batch_size > 0 {
-            let per_poly_alphas =
-                ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    comm.batch_size,
-                );
+            let per_poly_alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                comm.batch_size,
+            );
 
             let one = F::one_with_cfg(&field_cfg);
             let one_minus_gamma = one - gamma.clone();
@@ -1485,11 +1627,10 @@ where
     {
         let comm = &proof.commitments.1;
         if comm.batch_size > 0 {
-            let per_poly_alphas =
-                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    comm.batch_size,
-                );
+            let per_poly_alphas = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                comm.batch_size,
+            );
             let mut eval_f = F::zero_with_cfg(&field_cfg);
             for (bar_u, alphas) in all_lifted_evals
                 [add!(num_total_bin, num_pub_arb)..add!(num_total_bin, num_total_arb)]
@@ -1585,7 +1726,6 @@ where
 // induced by chained 2× splits. `eval_f` is the sum across all binary
 // witness columns.
 //
-
 
 /// Per-region wall-time breakdown of a single [`verify_folded_4x`] run,
 /// populated by [`verify_folded_4x_with_timings`]. Mirrors
@@ -1894,9 +2034,8 @@ where
     let projecting_element_f: F = F::from_with_cfg(&projecting_element, &field_cfg);
 
     let projected_scalars_fx = project_scalars::<F, U>(|s| project_scalar(s, &field_cfg));
-    let projected_scalars_f =
-        project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
-            .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
+    let projected_scalars_f = project_scalars_to_field(projected_scalars_fx, &projecting_element_f)
+        .map_err(|(_s, _f, e)| ProtocolError::ScalarProjection(e))?;
     if let Some(t) = timings.as_mut() {
         t.step3_eval_projection = _t_step3.elapsed();
     }
@@ -2081,11 +2220,10 @@ where
     let num_wit_arb = wit_cols.num_arbitrary_poly_cols();
 
     let public_lifted = if add!(add!(num_pub_bin, num_pub_arb), num_pub_int) > 0 {
-        let projected_public =
-            project_trace_coeffs_row_major::<F, Int<INT_LIMBS>, Int<INT_LIMBS>, D>(
-                public_trace,
-                &field_cfg,
-            );
+        let projected_public = project_trace_coeffs_row_major::<F, Int<INT_LIMBS>, Int<INT_LIMBS>, D>(
+            public_trace,
+            &field_cfg,
+        );
         let mut lifted = crate::compute_lifted_evals::<F, D>(
             &r_0,
             &public_trace.binary_poly,
@@ -2093,12 +2231,11 @@ where
             &field_cfg,
         );
         if num_pub_int > 0 {
-            let int_4coeff =
-                crate::compute_int_fold_4x_lifted_evals::<F, INT_LIMBS, INT_QUARTER_LIMBS>(
-                    &r_0,
-                    &public_trace.int,
-                    &field_cfg,
-                );
+            let int_4coeff = crate::compute_int_fold_4x_lifted_evals::<
+                F,
+                INT_LIMBS,
+                INT_QUARTER_LIMBS,
+            >(&r_0, &public_trace.int, &field_cfg);
             let int_off = num_pub_bin + num_pub_arb;
             for (i, bar_u) in int_4coeff.into_iter().enumerate() {
                 lifted[int_off + i] = bar_u;
@@ -2233,7 +2370,10 @@ where
     // Closure: compute eval_f for the binary path's 4× fold.
     let bin_eval_f = |alphas: &[Vec<<ZtF::BinaryZt as ZipTypes>::Chal>]| -> F {
         let mut eval_f = zero.clone();
-        for (bar_u, a) in all_lifted_evals[bin_range.clone()].iter().zip(alphas.iter()) {
+        for (bar_u, a) in all_lifted_evals[bin_range.clone()]
+            .iter()
+            .zip(alphas.iter())
+        {
             debug_assert_eq!(a.len(), QUARTER_D);
             let mut c00 = zero.clone();
             let mut c10 = zero.clone();
@@ -2283,7 +2423,10 @@ where
     // c00=α·c[0], c10=α·c[2], c01=α·c[1], c11=α·c[3].
     let int_eval_f = |alphas: &[Vec<<ZtF::IntZt as ZipTypes>::Chal>]| -> F {
         let mut eval_f = zero.clone();
-        for (bar_u, a) in all_lifted_evals[int_range.clone()].iter().zip(alphas.iter()) {
+        for (bar_u, a) in all_lifted_evals[int_range.clone()]
+            .iter()
+            .zip(alphas.iter())
+        {
             debug_assert_eq!(a.len(), 1);
             let a_0: F = F::from_with_cfg(&a[0], &field_cfg);
             let z = || F::zero_with_cfg(&field_cfg);
@@ -2326,7 +2469,10 @@ where
     // Closure: arb's eval_f (standard <a, coeffs>).
     let arb_eval_f = |alphas: &[Vec<<ZtF::ArbitraryZt as ZipTypes>::Chal>]| -> F {
         let mut eval_f = F::zero_with_cfg(&field_cfg);
-        for (bar_u, a) in all_lifted_evals[arb_range.clone()].iter().zip(alphas.iter()) {
+        for (bar_u, a) in all_lifted_evals[arb_range.clone()]
+            .iter()
+            .zip(alphas.iter())
+        {
             for (coeff, alpha) in bar_u.coeffs.iter().zip(a.iter()) {
                 let mut term = F::from_with_cfg(alpha, &field_cfg);
                 term *= coeff;
@@ -2423,7 +2569,9 @@ where
                         ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_pre_open_finalize::<
                             F,
                             CHECK_FOR_OVERFLOW,
-                        >(vp_bin_split2, &field_cfg, &r0_ext, &eval_f, reads)
+                        >(
+                            vp_bin_split2, &field_cfg, &r0_ext, &eval_f, reads
+                        )
                         .map_err(|e| ProtocolError::PcsVerification(0, e))?,
                     )),
                     _ => Ok(None),
@@ -2448,7 +2596,9 @@ where
                             ZipPlus::<ZtF::IntZt, ZtF::IntLc>::verify_pre_open_finalize::<
                                 F,
                                 CHECK_FOR_OVERFLOW,
-                            >(vp_int_split4, &field_cfg, &r0_ext, &eval_f, reads)
+                            >(
+                                vp_int_split4, &field_cfg, &r0_ext, &eval_f, reads
+                            )
                             .map_err(|e| ProtocolError::PcsVerification(2, e))?,
                         )),
                         _ => Ok(None),
@@ -2486,11 +2636,10 @@ where
     } else {
         // Per-instance fallback.
         if proof.commitments.0.batch_size > 0 {
-            let alphas =
-                ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    proof.commitments.0.batch_size,
-                );
+            let alphas = ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                proof.commitments.0.batch_size,
+            );
             let eval_f = bin_eval_f(&alphas);
             ZipPlus::<ZtF::BinaryZt, ZtF::BinaryLc>::verify_with_alphas::<F, CHECK_FOR_OVERFLOW>(
                 &mut pcs_transcript,
@@ -2504,11 +2653,10 @@ where
             .map_err(|e| ProtocolError::PcsVerification(0, e))?;
         }
         if proof.commitments.1.batch_size > 0 {
-            let alphas =
-                ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
-                    &mut pcs_transcript.fs_transcript,
-                    proof.commitments.1.batch_size,
-                );
+            let alphas = ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::sample_alphas(
+                &mut pcs_transcript.fs_transcript,
+                proof.commitments.1.batch_size,
+            );
             let eval_f = arb_eval_f(&alphas);
             ZipPlus::<ZtF::ArbitraryZt, ZtF::ArbitraryLc>::verify_with_alphas::<
                 F,

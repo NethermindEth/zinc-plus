@@ -18,6 +18,7 @@
 //! - Step 7: Zip+ PCS open/verify at r_0
 
 pub mod fixed_prime;
+pub mod pcs;
 pub mod prover;
 pub mod verifier;
 
@@ -60,9 +61,9 @@ use zip_plus::{
 
 /// Full proof produced by the Zinc+ PIOP for UCS.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F: PrimeField, Commitments = pcs::ZipPCSCommitments> {
     /// Zip+ commitments to the witness columns.
-    pub commitments: (ZipPlusCommitment, ZipPlusCommitment, ZipPlusCommitment),
+    pub commitments: Commitments,
     /// Serialized PCS proof data (Zip+ proving transcripts).
     pub zip: Vec<u8>,
     /// Randomized ideal check proof.
@@ -542,7 +543,10 @@ pub fn compute_lifted_evals_capped<F: PrimeField, const D: usize>(
     // can (a) skip entries that are identically zero, and (b) walk only
     // the SET bits via `trailing_zeros` + Brian Kernighan's clear-lowest
     // instead of branching on every slot.
-    debug_assert!(D <= 64, "compute_lifted_evals: bitmask packing assumes D <= 64");
+    debug_assert!(
+        D <= 64,
+        "compute_lifted_evals: bitmask packing assumes D <= 64"
+    );
     let mut result: Vec<DynamicPolynomialF<F>> = cfg_iter!(trace_bin_poly)
         .map(|col| {
             let mut coeffs = vec![zero.clone(); D];
@@ -636,8 +640,7 @@ pub fn compute_int_fold_lifted_evals<F, const H: usize, const HALF_H: usize>(
     field_cfg: &F::Config,
 ) -> Vec<DynamicPolynomialF<F>>
 where
-    F: PrimeField
-        + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<HALF_H>>,
+    F: PrimeField + for<'a> FromWithConfig<&'a crypto_primitives::crypto_bigint_int::Int<HALF_H>>,
 {
     use crypto_primitives::crypto_bigint_int::Int;
     assert!(HALF_H >= 2);
@@ -777,6 +780,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        fixed_prime::field_cfg_from_curve_scalar,
+        pcs::{AllZipPCSTypes, BinaryHyraxZipRest, PCSParams, PCSVerifierParams, ZincPCSTypes},
+    };
+    use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
     use crypto_bigint::U64;
     use crypto_primitives::{
         Field, crypto_bigint_int::Int, crypto_bigint_monty::MontyField, crypto_bigint_uint::Uint,
@@ -806,10 +814,15 @@ mod tests {
     };
     use zip_plus::{
         code::{
+            LinearCode,
             iprs::{IprsCode, PnttConfigF65537},
             raa::{RaaCode, RaaConfig},
         },
-        pcs::structs::{ZipPlus, ZipPlusParams},
+        pcs::{
+            generic::ZipPlusPCS,
+            hyrax::{BinaryLanes, HyraxPCS},
+            structs::{ZipPlus, ZipPlusParams},
+        },
         pcs_transcript::PcsProverTranscript,
     };
 
@@ -1355,9 +1368,7 @@ mod tests {
             |res| {
                 assert!(matches!(
                     res.unwrap_err(),
-                    ProtocolError::Resolver(
-                        CombinedPolyResolverError::WrongSumcheckSum { .. }
-                    )
+                    ProtocolError::Resolver(CombinedPolyResolverError::WrongSumcheckSum { .. })
                 ));
             },
         );
@@ -1806,10 +1817,7 @@ mod tests {
 
         tamper(&mut proof);
 
-        let verification_result = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<
-            _,
-            CHECKED,
-        >(
+        let verification_result = ZincPlusPiop::<Zt, U, F, DEGREE_PLUS_ONE>::verify::<_, CHECKED>(
             &pp,
             proof,
             &public_trace,
@@ -1818,6 +1826,179 @@ mod tests {
             sha256_test_project_ideal,
         );
         check_verification(verification_result);
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn sha256_zip_pcs_params(
+        num_vars: usize,
+    ) -> (
+        PCSParams<AllZipPCSTypes, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+        PCSVerifierParams<AllZipPCSTypes, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+    ) {
+        let pp = setup_pp::<TestShaEcdsaZincTypes>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        (
+            PCSParams::<AllZipPCSTypes, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE> {
+                binary: pp.0.clone(),
+                arbitrary: pp.1.clone(),
+                int: pp.2.clone(),
+            },
+            PCSVerifierParams::<AllZipPCSTypes, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE> {
+                binary: pp.0,
+                arbitrary: pp.1,
+                int: pp.2,
+            },
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn sha256_hyrax_pcs_params<C: AffineRepr>(
+        num_vars: usize,
+    ) -> (
+        PCSParams<BinaryHyraxZipRest<C>, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+        PCSVerifierParams<BinaryHyraxZipRest<C>, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+    )
+    where
+        BinaryHyraxZipRest<C>: ZincPCSTypes<
+                TestShaEcdsaZincTypes,
+                F,
+                DEGREE_PLUS_ONE,
+                BinaryPCS = HyraxPCS<C, BinaryLanes>,
+                ArbitraryPCS = ZipPlusPCS<
+                    <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryZt,
+                    <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::ArbitraryLc,
+                >,
+                IntPCS = ZipPlusPCS<
+                    <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntZt,
+                    <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::IntLc,
+                >,
+            >,
+    {
+        let pp = setup_pp::<TestShaEcdsaZincTypes>(
+            num_vars,
+            (
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+                make_iprs(num_vars),
+            ),
+        );
+        let width = pp.0.linear_code.row_len();
+        let generator = C::Group::generator();
+        let bases = (1..=width)
+            .map(|idx| {
+                let scalar =
+                    C::ScalarField::from(u64::try_from(idx).expect("basis index fits in u64"));
+                (generator * scalar).into_affine()
+            })
+            .collect();
+        let h_scalar =
+            C::ScalarField::from(u64::try_from(width + 1).expect("basis index fits in u64"));
+        let (binary, binary_vk) =
+            HyraxPCS::<C, BinaryLanes>::setup_from_bases(width, bases, generator * h_scalar)
+                .expect("Hyrax setup must be valid");
+        (
+            PCSParams::<BinaryHyraxZipRest<C>, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE> {
+                binary,
+                arbitrary: pp.1.clone(),
+                int: pp.2.clone(),
+            },
+            PCSVerifierParams::<BinaryHyraxZipRest<C>, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE> {
+                binary: binary_vk,
+                arbitrary: pp.1,
+                int: pp.2,
+            },
+        )
+    }
+
+    fn run_sha256_pcs_round_trip<P>(
+        pp: &PCSParams<P, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+        vp: &PCSVerifierParams<P, TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+        field_cfg: <F as PrimeField>::Config,
+    ) where
+        P: ZincPCSTypes<TestShaEcdsaZincTypes, F, DEGREE_PLUS_ONE>,
+    {
+        type U = Sha256CompressionSliceUair<ShaEcdsaInt>;
+
+        const NUM_VARS: usize = 9;
+
+        let mut rng = rng();
+        let trace = U::generate_random_trace(NUM_VARS, &mut rng);
+        let public_trace = trace.public(&U::signature());
+
+        let proof =
+            ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::prove_with_pcs_and_field_cfg::<
+                P,
+                false,
+                CHECKED,
+            >(pp, &trace, NUM_VARS, project_scalar_fn, field_cfg.clone())
+            .expect("SHA PCS prover failed");
+
+        ZincPlusPiop::<TestShaEcdsaZincTypes, U, F, DEGREE_PLUS_ONE>::verify_with_pcs_and_field_cfg::<
+            P,
+            Sha256Ideal<F>,
+            CHECKED,
+        >(
+            vp,
+            proof,
+            &public_trace,
+            NUM_VARS,
+            project_scalar_fn,
+            sha256_test_project_ideal,
+            field_cfg,
+        )
+        .expect("SHA PCS verifier rejected an honest proof");
+    }
+
+    #[test]
+    fn test_real_sha256_pcs_variants_round_trip() {
+        const NUM_VARS: usize = 9;
+
+        let bn_field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_bn254::G1Affine,
+        >();
+        let (zip_bn_pp, zip_bn_vp) = sha256_zip_pcs_params(NUM_VARS);
+        run_sha256_pcs_round_trip::<AllZipPCSTypes>(&zip_bn_pp, &zip_bn_vp, bn_field_cfg);
+
+        let secp_field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_secp256k1::Affine,
+        >();
+        let (zip_secp_pp, zip_secp_vp) = sha256_zip_pcs_params(NUM_VARS);
+        run_sha256_pcs_round_trip::<AllZipPCSTypes>(&zip_secp_pp, &zip_secp_vp, secp_field_cfg);
+
+        let bn_field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_bn254::G1Affine,
+        >();
+        let (hyrax_bn_pp, hyrax_bn_vp) = sha256_hyrax_pcs_params::<ark_bn254::G1Affine>(NUM_VARS);
+        run_sha256_pcs_round_trip::<BinaryHyraxZipRest<ark_bn254::G1Affine>>(
+            &hyrax_bn_pp,
+            &hyrax_bn_vp,
+            bn_field_cfg,
+        );
+
+        let secp_field_cfg = field_cfg_from_curve_scalar::<
+            F,
+            <TestShaEcdsaZincTypes as ZincTypes<DEGREE_PLUS_ONE>>::Fmod,
+            ark_secp256k1::Affine,
+        >();
+        let (hyrax_secp_pp, hyrax_secp_vp) =
+            sha256_hyrax_pcs_params::<ark_secp256k1::Affine>(NUM_VARS);
+        run_sha256_pcs_round_trip::<BinaryHyraxZipRest<ark_secp256k1::Affine>>(
+            &hyrax_secp_pp,
+            &hyrax_secp_vp,
+            secp_field_cfg,
+        );
     }
 
     /// `num_vars` for SHA-ECDSA tests. ECDSA's Shamir scalar
@@ -1900,9 +2081,7 @@ mod tests {
             serialized_len.div_ceil(1024),
         );
         let mut transcript = transcript.into_verification_transcript();
-        let proof_2 = transcript
-            .read()
-            .expect("Failed to deserialize proof");
+        let proof_2 = transcript.read().expect("Failed to deserialize proof");
         assert_eq!(proof, proof_2);
 
         verify_folded_4x::<
@@ -2122,7 +2301,7 @@ mod tests {
                 HALF_DEGREE_PLUS_ONE,
             >>::IntLc,
         >,
-    ) {
+    ){
         let split_size = 1 << (num_vars + 1);
         let normal_size = 1 << num_vars;
         (
@@ -2219,5 +2398,4 @@ mod tests {
         >;
         type ArrCombRDotChal = MBSInnerProduct;
     }
-
 }

@@ -478,7 +478,9 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         let coeffs = if pp.num_rows == 1 {
             vec![Zt::Chal::ONE]
         } else {
-            transcript.fs_transcript.get_challenges::<Zt::Chal>(num_rows)
+            transcript
+                .fs_transcript
+                .get_challenges::<Zt::Chal>(num_rows)
         };
 
         let combined_row: Vec<Zt::CombR> = {
