@@ -3631,9 +3631,89 @@ where
 /// three virtual Ch/Maj residual families. The virtual values are reconstructed
 /// from source bit slices; they are never independent witness columns.
 pub fn production_sha_booleanity_sources() -> Vec<ShaBooleanitySource> {
-    let mut sources = Vec::with_capacity(ShaWordCol::COUNT * SHA_WORD_BITS + 3 * SHA_WORD_BITS);
-    for col_idx in 0..ShaWordCol::COUNT {
-        let col = ShaWordCol::ALL[col_idx];
+    production_sha_booleanity_sources_for(ShaBooleanityCatalog::Full)
+}
+
+/// Selects which committed word columns receive direct per-bit booleanity
+/// checks. The three virtual Ch/Maj families are always checked; the reduced
+/// tiers rely on them plus residual ideal membership to bind the dropped
+/// columns, per
+/// `documentation/fold-first-sumfold-doc/booleanity-reduction-soundness.md`.
+///
+/// A, E, W, MuPacked and the four overflow columns are never droppable: they
+/// carry the XOR-gadget uniqueness and carry semantics the reduction lemma
+/// assumes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShaBooleanityCatalog {
+    /// Every word column is directly checked (640 sources).
+    Full,
+    /// Drops the Ch/Maj auxiliary columns Uef, UNegEg, Maj, Ch2Comp and
+    /// MajComp (480 sources). Soundness: Tier 1 of the reduction lemma.
+    Tier1DropChMajAux,
+    /// Tier 1 plus the XOR result columns Sigma0, Sigma1, SmallSigma0 and
+    /// SmallSigma1, which R0..R3 pin pointwise (352 sources). Soundness:
+    /// Tier 2 of the reduction lemma.
+    Tier2DropXorResults,
+}
+
+const TIER1_DROPPED_WORD_COLS: [ShaWordCol; 5] = [
+    ShaWordCol::Uef,
+    ShaWordCol::UNegEg,
+    ShaWordCol::Maj,
+    ShaWordCol::Ch2Comp,
+    ShaWordCol::MajComp,
+];
+
+const TIER2_DROPPED_WORD_COLS: [ShaWordCol; 9] = [
+    ShaWordCol::Sigma0,
+    ShaWordCol::Sigma1,
+    ShaWordCol::SmallSigma0,
+    ShaWordCol::SmallSigma1,
+    ShaWordCol::Uef,
+    ShaWordCol::UNegEg,
+    ShaWordCol::Maj,
+    ShaWordCol::Ch2Comp,
+    ShaWordCol::MajComp,
+];
+
+impl ShaBooleanityCatalog {
+    /// Word columns whose direct per-bit checks this catalog drops.
+    pub fn dropped_word_cols(self) -> &'static [ShaWordCol] {
+        match self {
+            Self::Full => &[],
+            Self::Tier1DropChMajAux => &TIER1_DROPPED_WORD_COLS,
+            Self::Tier2DropXorResults => &TIER2_DROPPED_WORD_COLS,
+        }
+    }
+
+    /// Number of sources `production_sha_booleanity_sources_for` yields.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn source_count(self) -> usize {
+        (ShaWordCol::COUNT - self.dropped_word_cols().len() + 3) * SHA_WORD_BITS
+    }
+
+    /// Stable identifier absorbed into transcripts to bind the catalog.
+    pub fn transcript_id(self) -> u64 {
+        match self {
+            Self::Full => 0,
+            Self::Tier1DropChMajAux => 1,
+            Self::Tier2DropXorResults => 2,
+        }
+    }
+}
+
+/// Booleanity sources for `catalog`: the direct word-bit checks it keeps (a
+/// contiguous leading run in `ShaWordCol::ALL` order) followed by the per-bit
+/// virtual Ch/Maj families.
+pub fn production_sha_booleanity_sources_for(
+    catalog: ShaBooleanityCatalog,
+) -> Vec<ShaBooleanitySource> {
+    let dropped = catalog.dropped_word_cols();
+    let mut sources = Vec::with_capacity(catalog.source_count());
+    for col in ShaWordCol::ALL {
+        if dropped.contains(&col) {
+            continue;
+        }
         for bit in 0..SHA_WORD_BITS {
             sources.push(ShaBooleanitySource::WordBit { col, bit });
         }
@@ -12630,6 +12710,69 @@ mod tests {
 
     fn word_bit(trace: &ProjectedTrace<F>, col: ShaWordCol, row: usize, bit: usize) -> &F {
         &trace.bit_slices[bit_slice_index(col.index(), bit, SHA_WORD_BITS)].evaluations[row]
+    }
+
+    #[test]
+    #[allow(clippy::arithmetic_side_effects)]
+    fn booleanity_catalog_layouts() {
+        let never_droppable = [
+            ShaWordCol::A,
+            ShaWordCol::E,
+            ShaWordCol::W,
+            ShaWordCol::MuPacked,
+            ShaWordCol::OvSigma0,
+            ShaWordCol::OvSigma1,
+            ShaWordCol::OvSmallSigma0,
+            ShaWordCol::OvSmallSigma1,
+        ];
+        for catalog in [
+            ShaBooleanityCatalog::Full,
+            ShaBooleanityCatalog::Tier1DropChMajAux,
+            ShaBooleanityCatalog::Tier2DropXorResults,
+        ] {
+            let sources = production_sha_booleanity_sources_for(catalog);
+            assert_eq!(sources.len(), catalog.source_count());
+            for col in never_droppable {
+                assert!(!catalog.dropped_word_cols().contains(&col));
+            }
+            // Word bits form one contiguous leading run in ShaWordCol::ALL
+            // order, followed by the per-bit virtual families.
+            let word_bits = sources
+                .iter()
+                .take_while(|source| matches!(source, ShaBooleanitySource::WordBit { .. }))
+                .count();
+            let kept: Vec<ShaWordCol> = ShaWordCol::ALL
+                .into_iter()
+                .filter(|col| !catalog.dropped_word_cols().contains(col))
+                .collect();
+            assert_eq!(word_bits, kept.len() * SHA_WORD_BITS);
+            for (idx, source) in sources.iter().take(word_bits).enumerate() {
+                let ShaBooleanitySource::WordBit { col, bit } = source else {
+                    panic!("expected word bit at {idx}");
+                };
+                assert_eq!(*col, kept[idx / SHA_WORD_BITS]);
+                assert_eq!(*bit, idx % SHA_WORD_BITS);
+            }
+            assert_eq!(sources.len() - word_bits, 3 * SHA_WORD_BITS);
+        }
+
+        assert_eq!(ShaBooleanityCatalog::Full.source_count(), 640);
+        assert_eq!(ShaBooleanityCatalog::Tier1DropChMajAux.source_count(), 480);
+        assert_eq!(
+            ShaBooleanityCatalog::Tier2DropXorResults.source_count(),
+            352
+        );
+
+        // Only the Full catalog matches the canonical positional layout.
+        assert!(is_production_sha_booleanity_sources(
+            &production_sha_booleanity_sources()
+        ));
+        assert!(!is_production_sha_booleanity_sources(
+            &production_sha_booleanity_sources_for(ShaBooleanityCatalog::Tier1DropChMajAux)
+        ));
+        assert!(!is_production_sha_booleanity_sources(
+            &production_sha_booleanity_sources_for(ShaBooleanityCatalog::Tier2DropXorResults)
+        ));
     }
 
     fn zero_trace() -> ProjectedTrace<F> {

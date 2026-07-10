@@ -7,9 +7,9 @@ use crypto_primitives::{Field, FromWithConfig, PrimeField, crypto_bigint_monty::
 use zinc_piop::{
     neutron_nova::{
         MleTable, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT, SHA_ROW_VARS, SHA_WORD_BITS,
-        ShaBooleanitySource, ShaIntCol, ShaPublicCol, ShaWordCol, bit_slice_index,
-        build_dense_sha_sumfold_group, build_production_sha_sumfold_group_owned,
-        prove_fold_first_sha_sumfold, scalarize_bit_slices,
+        ShaBooleanityCatalog, ShaBooleanitySource, ShaIntCol, ShaPublicCol, ShaWordCol,
+        bit_slice_index, build_dense_sha_sumfold_group, build_production_sha_sumfold_group_owned,
+        production_sha_booleanity_sources_for, prove_fold_first_sha_sumfold, scalarize_bit_slices,
     },
     sumcheck::multi_degree::MultiDegreeSumcheck,
 };
@@ -229,27 +229,35 @@ fn neutron_nova_sumfold_benches(c: &mut Criterion) {
     // Fold-first V2: this block replaces the V1 aggregate-ideal + SumFold +
     // fold phases AND includes the folded IdealCheck, post-fold
     // scalarization, and the folded row sumcheck, so it covers strictly more
-    // of the prover than the two builders above.
-    group.bench_function(
-        BenchmarkId::new("fold_first_full_block", 1usize << ell),
-        |bench| {
-            bench.iter_batched(
-                Blake3Transcript::new,
-                |mut transcript| {
-                    let (proof, artifacts) = prove_fold_first_sha_sumfold(
-                        &traces,
-                        &publics,
-                        &sources,
-                        &mut transcript,
-                        &cfg,
-                    )
-                    .unwrap();
-                    black_box((proof.skip_round.node_values.len(), artifacts.target))
-                },
-                BatchSize::SmallInput,
-            );
-        },
-    );
+    // of the prover than the two builders above. One variant per booleanity
+    // catalog tier to A/B the reduced-constraint configurations.
+    for (tier_label, catalog) in [
+        ("full", ShaBooleanityCatalog::Full),
+        ("tier1", ShaBooleanityCatalog::Tier1DropChMajAux),
+        ("tier2", ShaBooleanityCatalog::Tier2DropXorResults),
+    ] {
+        let catalog_sources = production_sha_booleanity_sources_for(catalog);
+        group.bench_function(
+            BenchmarkId::new(format!("fold_first_full_block_{tier_label}"), 1usize << ell),
+            |bench| {
+                bench.iter_batched(
+                    Blake3Transcript::new,
+                    |mut transcript| {
+                        let (proof, artifacts) = prove_fold_first_sha_sumfold(
+                            &traces,
+                            &publics,
+                            &catalog_sources,
+                            &mut transcript,
+                            &cfg,
+                        )
+                        .unwrap();
+                        black_box((proof.skip_round.node_values.len(), artifacts.target))
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
 
     group.finish();
 }

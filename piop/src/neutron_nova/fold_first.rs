@@ -44,11 +44,10 @@ use crate::neutron_nova::projection_sha::{
     ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
     SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanitySource, ShaProjectionError, ShaWordCol,
     VirtualChMajValues, booleanity_source_value_at_row_with_virtuals,
-    build_folded_row_sumcheck_group, fold_mle_tables,
-    fold_optional_binary_mle_tables, fold_projected_traces_with_weights,
-    folded_row_integrand_values, reconstruct_virtual_ch_maj_at_row_unchecked,
-    residual_polys_at_row, scalarize_bit_slices, sources_need_virtuals,
-    verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
+    build_folded_row_sumcheck_group, fold_mle_tables, fold_optional_binary_mle_tables,
+    fold_projected_traces_with_weights, folded_row_integrand_values,
+    reconstruct_virtual_ch_maj_at_row_unchecked, residual_polys_at_row, scalarize_bit_slices,
+    sources_need_virtuals, verify_folded_row_sumcheck_claim, verify_fresh_sha_ideal_polys,
 };
 use crate::sumcheck::multi_degree::{MultiDegreeSumcheck, MultiDegreeSumcheckProof};
 
@@ -2160,6 +2159,38 @@ mod tests {
     }
 
     #[test]
+    fn mask_fast_path_matches_reference_on_reduced_catalogs() {
+        use crate::neutron_nova::projection_sha::{
+            ShaBooleanityCatalog, production_sha_booleanity_sources_for,
+        };
+        let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+        for catalog in [
+            ShaBooleanityCatalog::Tier1DropChMajAux,
+            ShaBooleanityCatalog::Tier2DropXorResults,
+        ] {
+            assert_gram_matches_reference(&traces, &production_sha_booleanity_sources_for(catalog));
+        }
+    }
+
+    #[test]
+    fn mask_fast_path_matches_reference_with_non_binary_dropped_columns() {
+        use crate::neutron_nova::projection_sha::{
+            ShaBooleanityCatalog, production_sha_booleanity_sources_for,
+        };
+        // A dropped column keeps no direct WordBit source, but its slots still
+        // feed the virtual recipes; a non-binary value there must route the
+        // affected virtual items through the general field fallback.
+        let catalog = ShaBooleanityCatalog::Tier2DropXorResults;
+        let sources = production_sha_booleanity_sources_for(catalog);
+        for col in catalog.dropped_word_cols() {
+            let mut traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
+            let idx = bit_slice_index(col.index(), 6, SHA_WORD_BITS);
+            traces[2].bit_slices[idx].evaluations[12] = f(9);
+            assert_gram_matches_reference(&traces, &sources);
+        }
+    }
+
+    #[test]
     fn parallel_ideal_polys_match_reference() {
         let cfg = test_config();
         let traces: Vec<_> = (0..4).map(boolean_virtuals_trace).collect();
@@ -2280,6 +2311,39 @@ mod tests {
         // All-zero folded integrand: the endpoint claim is zero as well.
         assert_eq!(claims.expected_row_eval, zero);
         assert_eq!(claims.row_point.len(), SHA_ROW_VARS);
+    }
+
+    #[test]
+    fn fold_first_prove_and_verify_on_reduced_catalogs() {
+        use crate::neutron_nova::projection_sha::{
+            ShaBooleanityCatalog, production_sha_booleanity_sources_for,
+        };
+        let cfg = test_config();
+        for catalog in [
+            ShaBooleanityCatalog::Tier1DropChMajAux,
+            ShaBooleanityCatalog::Tier2DropXorResults,
+        ] {
+            let traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+            let publics: Vec<_> = (0..4).map(|_| zero_public()).collect();
+            let sources = production_sha_booleanity_sources_for(catalog);
+
+            let mut prover_transcript = Blake3Transcript::new();
+            let (proof, artifacts) = prove_fold_first_sha_sumfold(
+                &traces,
+                &publics,
+                &sources,
+                &mut prover_transcript,
+                &cfg,
+            )
+            .unwrap();
+
+            let mut verifier_transcript = Blake3Transcript::new();
+            let claims =
+                verify_fold_first_sha_sumfold(&proof, traces.len(), &mut verifier_transcript, &cfg)
+                    .unwrap();
+            assert_eq!(claims.theta, artifacts.theta);
+            assert_eq!(claims.target, artifacts.target);
+        }
     }
 
     #[test]
@@ -2407,6 +2471,82 @@ mod tests {
             err,
             FoldFirstError::SumFold(SumFoldError::SkipRoundZeroCheckFailed)
         ));
+    }
+
+    /// Prove with `sources`, then require verification to fail. The prover is
+    /// deliberately tamper-tolerant, so rejection must come from the verifier
+    /// checks (gamma zerocheck or folded ideal membership).
+    fn assert_tampered_witness_rejected(
+        traces: &[ProjectedTrace<F>],
+        sources: &[ShaBooleanitySource],
+        context: &str,
+    ) {
+        let cfg = test_config();
+        let publics: Vec<_> = (0..traces.len()).map(|_| zero_public()).collect();
+        let mut prover_transcript = Blake3Transcript::new();
+        let (proof, _) =
+            prove_fold_first_sha_sumfold(traces, &publics, sources, &mut prover_transcript, &cfg)
+                .unwrap();
+        let mut verifier_transcript = Blake3Transcript::new();
+        assert!(
+            verify_fold_first_sha_sumfold(&proof, traces.len(), &mut verifier_transcript, &cfg)
+                .is_err(),
+            "tampered witness must be rejected: {context}"
+        );
+    }
+
+    #[test]
+    fn reduced_catalog_rejects_tampering_in_every_dropped_column() {
+        use crate::neutron_nova::projection_sha::{
+            ShaBooleanityCatalog, production_sha_booleanity_sources_for,
+        };
+        let cfg = test_config();
+        let catalog = ShaBooleanityCatalog::Tier2DropXorResults;
+        let sources = production_sha_booleanity_sources_for(catalog);
+        let one = F::one_with_cfg(&cfg);
+        let two = f(2);
+        let half = one.clone() / &two;
+
+        // Aux columns (no direct check under Tier 1/2): a set bit flips the
+        // virtual ch/maj value out of {0,1}; the gamma zerocheck fires. The
+        // sigma columns (dropped in Tier 2) feed no virtual; their rejection
+        // comes from R0..R3 leaving the rotation ideals instead.
+        for col in catalog.dropped_word_cols() {
+            for (label, value) in [("boolean", one.clone()), ("non-binary", f(7))] {
+                let mut traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+                let idx = bit_slice_index(col.index(), 6, SHA_WORD_BITS);
+                traces[1].bit_slices[idx].evaluations[12] = value;
+                assert_tampered_witness_rejected(
+                    &traces,
+                    &sources,
+                    &format!("{col:?} {label} tamper"),
+                );
+            }
+        }
+
+        // Half-integer malleability probe: Uef = 1/2 with the ch1 inputs at
+        // zero leaves ch1 = -1, non-boolean, so the zerocheck rejects. (The
+        // e + f = 1 configuration needs a relation-satisfying witness and is
+        // exercised by the soundness-lemma argument + protocol-level tests.)
+        let mut traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        let idx = bit_slice_index(ShaWordCol::Uef.index(), 6, SHA_WORD_BITS);
+        traces[2].bit_slices[idx].evaluations[12] = half;
+        assert_tampered_witness_rejected(&traces, &sources, "Uef half-integer tamper");
+    }
+
+    #[test]
+    fn reduced_catalog_still_rejects_kept_column_tampering() {
+        use crate::neutron_nova::projection_sha::{
+            ShaBooleanityCatalog, production_sha_booleanity_sources_for,
+        };
+        let sources =
+            production_sha_booleanity_sources_for(ShaBooleanityCatalog::Tier2DropXorResults);
+        // E keeps its direct WordBit check in every tier; a non-binary value
+        // must still fail the zerocheck.
+        let mut traces: Vec<_> = (0..4).map(|_| zero_trace()).collect();
+        let idx = bit_slice_index(ShaWordCol::E.index(), 3, SHA_WORD_BITS);
+        traces[3].bit_slices[idx].evaluations[9] = f(5);
+        assert_tampered_witness_rejected(&traces, &sources, "E non-binary tamper");
     }
 
     #[test]
