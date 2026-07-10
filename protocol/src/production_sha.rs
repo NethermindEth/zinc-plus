@@ -44,18 +44,18 @@ use zinc_piop::{
     neutron_nova::{
         FoldFirstSkipRoundProof, ShaSourceMasks, SkipDomain, absorb_fold_first_ideal_polys,
         accumulate_booleanity_gram, accumulate_booleanity_gram_with_masks,
-        build_fold_first_ideal_polys, build_sha_ideal_values_at_point,
-        fold_projected_traces_with_theta_masks, fold_projected_traces_with_weights,
-        prove_skip_round, sha_nonzero_target_at, verify_skip_round,
+        build_fold_first_ideal_polys, fold_projected_traces_with_theta_masks,
+        fold_projected_traces_with_weights, prove_skip_round, sha_nonzero_target_at,
+        verify_skip_round,
     },
     neutron_nova::{
         InstanceFoldClaim, LinearResidualCoeffTable, MleTable, NUM_NONZERO_SHA_FAMILIES,
         NUM_SHA_RESIDUAL_FAMILIES, PreparedProductionShaNativeView, PreparedShaBooleanityBasis,
         PreparedShaQuadraticPrefixArtifacts, PreparedShaResidualBasis, PreparedShaSumFoldBasis,
         ProjectedPublic, ProjectedTrace, ProjectionFoldWitness, SHA_ROW_COUNT, SHA_ROW_VARS,
-        SHA_WORD_BITS, ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanitySource,
-        ShaIntCol, ShaLinearAccumulatorField, ShaLinearResidualWeightPlan, ShaProjectionError,
-        ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode,
+        SHA_WORD_BITS, ShaAggregateIdealWeightPlan, ShaBinaryFoldField, ShaBooleanityCatalog,
+        ShaBooleanitySource, ShaIntCol, ShaLinearAccumulatorField, ShaLinearResidualWeightPlan,
+        ShaProjectionError, ShaPublicCol, ShaPublicWordCol, ShaResidualFamily, ShaSmallFieldDecode,
         ShaSuffixScannerField, ShaWordCol, beta_aggregate_nonzero_ideal_polys_direct_with_weights,
         bit_slice_index, build_booleanity_weights, build_dense_sha_sumfold_group,
         build_folded_row_sumcheck_group,
@@ -69,7 +69,7 @@ use zinc_piop::{
         expression_folded_row_sum_with_row_weights, fold_projected_traces,
         folded_row_integrand_sum, is_production_sha_booleanity_sources,
         prepare_sha_sumfold_basis_from_native_view, prepare_sha_sumfold_basis_production_fast,
-        production_sha_booleanity_sources, production_sha_nonzero_families,
+        production_sha_booleanity_sources_for, production_sha_nonzero_families,
         sha_int_at_point_with_weights_unchecked, sha_public_at_point,
         sha_public_at_point_with_weights,
         sha_word_bits_at_point_with_weights_inner_product_unchecked,
@@ -496,6 +496,48 @@ pub const PACKED_SHA_INT_SOURCE_COUNT: usize = ShaIntCol::COUNT;
 pub const PACKED_SHA_SOURCE_COUNT: usize =
     PACKED_SHA_WORD_SOURCE_COUNT + PACKED_SHA_INT_SOURCE_COUNT;
 pub const PACKED_SHA_VALUES_PER_INSTANCE: usize = PACKED_SHA_SOURCE_COUNT * SHA_ROW_COUNT;
+
+/// Word columns that are DERIVED, not committed, on the mixed-Hyrax paths:
+/// each is a fixed linear map of committed columns
+/// (`sigma = rotation-sum(parent) - 2*overflow`), so the verifier
+/// reconstructs their endpoint evaluations from the parents' openings the
+/// same way the virtual Ch/Maj values are reconstructed. The prover still
+/// materializes them in its working `ProjectedTrace`; the row-sumcheck
+/// residuals R0-R3 bind that trace copy to the committed parents.
+pub const SHA_DERIVED_WORD_COLS: [ShaWordCol; 4] = [
+    ShaWordCol::Sigma0,
+    ShaWordCol::Sigma1,
+    ShaWordCol::SmallSigma0,
+    ShaWordCol::SmallSigma1,
+];
+
+/// Word columns committed on the mixed-Hyrax paths, in `ShaWordCol::ALL`
+/// order with the derived sigma columns removed.
+pub const COMMITTED_SHA_WORD_COLS: [ShaWordCol; NUM_COMMITTED_SHA_WORD_COLS] = [
+    ShaWordCol::A,
+    ShaWordCol::E,
+    ShaWordCol::W,
+    ShaWordCol::Uef,
+    ShaWordCol::UNegEg,
+    ShaWordCol::Maj,
+    ShaWordCol::MuPacked,
+    ShaWordCol::OvSigma0,
+    ShaWordCol::OvSigma1,
+    ShaWordCol::OvSmallSigma0,
+    ShaWordCol::OvSmallSigma1,
+    ShaWordCol::Ch2Comp,
+    ShaWordCol::MajComp,
+];
+
+pub const NUM_COMMITTED_SHA_WORD_COLS: usize = ShaWordCol::COUNT - SHA_DERIVED_WORD_COLS.len();
+
+/// Dense commitment slot of a word column on the mixed-Hyrax paths, or
+/// `None` for the derived sigma columns.
+pub fn committed_sha_word_slot(col: ShaWordCol) -> Option<usize> {
+    COMMITTED_SHA_WORD_COLS
+        .iter()
+        .position(|candidate| *candidate == col)
+}
 const PRODUCTION_SHA_BOOLEANITY_SOURCE_COUNT: usize = (ShaWordCol::COUNT + 3) * SHA_WORD_BITS;
 #[cfg(feature = "parallel")]
 const PRODUCTION_SHA_PUBLIC_PROJECTION_MIN_PAR_LEN: usize = 4;
@@ -1684,6 +1726,7 @@ pub fn prove_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     pp: &LinearIdealFoldProverParams<P, U, Zt, F, D>,
     shape: &UairShape<U>,
     witnesses: &[UairWitness<'_, Zt::Int, Zt::Int, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     LinearIdealFoldProveOutput<
@@ -1718,7 +1761,13 @@ where
     let field_cfg = &pp.field_cfg;
     ensure_production_sha_word_degree::<F, D>()?;
     let prepared = prepare_linear_ideal_fold_witnesses::<U, Zt, F, D>(shape, witnesses, field_cfg)?;
-    prove_prepared_linear_ideal_fold::<P, U, Zt, F, D>(pp, shape, &prepared, transcript)
+    prove_prepared_linear_ideal_fold::<P, U, Zt, F, D>(
+        pp,
+        shape,
+        &prepared,
+        booleanity_catalog,
+        transcript,
+    )
 }
 
 pub fn prepare_linear_ideal_fold_witnesses<U, Zt, F, const D: usize>(
@@ -1835,6 +1884,7 @@ pub fn prove_prepared_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     pp: &LinearIdealFoldProverParams<P, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     LinearIdealFoldProveOutput<
@@ -1877,8 +1927,9 @@ where
         ));
     }
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, shape);
 
     let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
@@ -2071,6 +2122,7 @@ pub fn prove_prepared_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>
     pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     LinearIdealFoldProveOutput<
@@ -2112,8 +2164,9 @@ where
         ));
     }
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, shape);
 
     let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
@@ -2306,6 +2359,7 @@ pub fn prove_prepared_linear_ideal_fold_packed_hyrax<C, U, Zt, F, const D: usize
     pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     LinearIdealFoldProveOutput<
@@ -2348,8 +2402,9 @@ where
         ));
     }
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, shape);
 
     let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
@@ -2541,6 +2596,7 @@ pub fn verify_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usize>(
     vs: &VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>],
     proof: &ProductionShaMixedHyraxProof<C, F>,
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
 where
@@ -2578,6 +2634,7 @@ where
         });
     }
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
     let publics = verify_mixed_hyrax_public_projection_phase::<C, U, Zt, F, D>(
@@ -2587,7 +2644,7 @@ where
         transcript,
     )?;
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let beta = sample_instance_batch_challenge(transcript, instances.len(), field_cfg)?;
@@ -2658,6 +2715,16 @@ where
 /// Transcript domain label separating the fold-first (V2) flow from V1.
 const FOLD_FIRST_SHA_DOMAIN_LABEL: &[u8] = b"PF_CONCISE_SHA256_FRESH_BATCH_V2";
 
+/// Binds the booleanity catalog choice (and its source count) into the
+/// transcript. Must land before any catalog-dependent challenge (rho, xi) is
+/// sampled so a prover/verifier catalog mismatch diverges the transcript
+/// immediately.
+fn absorb_sha_booleanity_catalog(transcript: &mut impl Transcript, catalog: ShaBooleanityCatalog) {
+    transcript.absorb_slice(b"sha_booleanity_catalog");
+    transcript.absorb_slice(&catalog.transcript_id().to_le_bytes());
+    transcript.absorb_slice(&(catalog.source_count() as u64).to_le_bytes());
+}
+
 /// Everything the fold stage of the fold-first (V2) flow produces. The
 /// decider (row sumcheck + endpoints + PCS opening) consumes this later —
 /// possibly much later — via [`decide_fold_first_mixed_hyrax`] on the same
@@ -2668,6 +2735,7 @@ where
     C: AffineRepr,
     F: PrimeField,
 {
+    pub booleanity_catalog: ShaBooleanityCatalog,
     pub instance_commitments: Vec<HyraxMixedCommitment<C>>,
     pub skip_round: FoldFirstSkipRoundProof<F>,
     pub folded_ideal_polys: [DynamicPolynomialF<F>; NUM_NONZERO_SHA_FAMILIES],
@@ -2708,6 +2776,7 @@ pub fn fold_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
     pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     (
@@ -2745,9 +2814,10 @@ where
         return Err(ProductionShaError::InstanceCountTooSmall(instance_count));
     }
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
     absorb_production_sha_statement_metadata(transcript);
     transcript.absorb_slice(FOLD_FIRST_SHA_DOMAIN_LABEL);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, shape);
 
     let (fresh_instances, instance_commitments, instance_prover_data, traces, publics) =
@@ -2855,10 +2925,6 @@ where
     let a: F = transcript.get_transcribable_field_challenge(field_cfg);
     let lambda: F = transcript.get_transcribable_field_challenge(field_cfg);
     let xi: F = transcript.get_transcribable_field_challenge(field_cfg);
-    let a_powers = build_sha_residual_eval_powers(&a, field_cfg);
-    let lambda_powers = build_sha_lambda_powers(&lambda, field_cfg);
-    let booleanity_weights =
-        build_booleanity_weights(&rho, &xi, booleanity_sources.len(), field_cfg);
 
     let target = sha_nonzero_target_at(&folded_ideal_polys, &a, &lambda, field_cfg)
         + xi.clone() * &verdict.b_star;
@@ -2885,6 +2951,7 @@ where
     Ok((
         fresh_instances,
         FoldFirstShaFoldOutput {
+            booleanity_catalog,
             instance_commitments,
             skip_round,
             folded_ideal_polys,
@@ -2934,7 +3001,7 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     let field_cfg = &pp.field_cfg;
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(fold.booleanity_catalog);
     let r_ic_eq_weights = build_eq_x_r_vec(&fold.r_ic, field_cfg)?;
     let a_powers = build_sha_residual_eval_powers(&fold.a, field_cfg);
     let lambda_powers = build_sha_lambda_powers(&fold.lambda, field_cfg);
@@ -3010,6 +3077,7 @@ pub fn prove_prepared_fold_first_mixed_hyrax<C, U, Zt, F, const D: usize>(
     pp: &LinearIdealFoldProverParams<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     shape: &UairShape<U>,
     prepared_instances: &[PreparedProductionShaProverInstance<Zt, F, D>],
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     LinearIdealFoldProveOutput<
@@ -3046,6 +3114,7 @@ where
         pp,
         shape,
         prepared_instances,
+        booleanity_catalog,
         transcript,
     )?;
     let decide = decide_fold_first_mixed_hyrax::<C, U, Zt, F, D>(pp, &fold, transcript)?;
@@ -3082,6 +3151,7 @@ pub fn verify_fold_first_linear_ideal_fold_mixed_hyrax<C, U, Zt, F, const D: usi
     vs: &VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxMixedCommitment<C>, D>],
     proof: &FoldFirstShaMixedHyraxProof<C, F>,
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
 where
@@ -3116,6 +3186,7 @@ where
     }
     absorb_production_sha_statement_metadata(transcript);
     transcript.absorb_slice(FOLD_FIRST_SHA_DOMAIN_LABEL);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
     let publics = verify_mixed_hyrax_public_projection_phase::<C, U, Zt, F, D>(
@@ -3125,7 +3196,7 @@ where
         transcript,
     )?;
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let rho: F = transcript.get_transcribable_field_challenge(field_cfg);
@@ -3194,6 +3265,7 @@ pub fn verify_linear_ideal_fold_packed_hyrax<C, U, Zt, F, const D: usize>(
     vs: &VerifiedLinearIdealFoldSetup<AllHyraxPCSTypes<C>, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, HyraxCommitment<C>, D>],
     proof: &ProductionShaPackedHyraxProof<C, F>,
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<FoldedLinearIdealInstance<F, (), ProjectedPublic<F>>, LinearIdealFoldError<F>>
 where
@@ -3232,13 +3304,14 @@ where
     }
 
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
     let publics = verify_packed_hyrax_public_projection_phase::<C, U, Zt, F, D>(
         vs, instances, proof, transcript,
     )?;
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let beta = sample_instance_batch_challenge(transcript, instances.len(), field_cfg)?;
@@ -3410,10 +3483,16 @@ where
         witness_polys.arbitrary.len(),
         witness_polys.int.len(),
     )?;
+    // The mixed-Hyrax path commits only the non-derived word columns; the
+    // sigma columns are reconstructed from these by the verifier.
+    let committed_binary: MleTable<BinaryPoly<D>> = COMMITTED_SHA_WORD_COLS
+        .iter()
+        .map(|col| witness_polys.binary[col.index()].clone())
+        .collect();
     HyraxPCS::<C, BinaryLanes>::commit_binary_and_int::<Zt::Int, D>(
         &pcs_params.binary,
         &pcs_params.int,
-        &witness_polys.binary,
+        &committed_binary,
         &witness_polys.int,
     )
     .map_err(Into::into)
@@ -4817,7 +4896,12 @@ where
         phase = "pcs_lifted_evals",
     )
     .in_scope(|| {
-        build_folded_sha_pcs_lifted_evals_with_row_weights(folded_trace, r_0_eq_weights, field_cfg)
+        build_folded_sha_pcs_lifted_evals_with_row_weights(
+            folded_trace,
+            r_0_eq_weights,
+            field_cfg,
+            &ShaWordCol::ALL,
+        )
     })?;
     tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -4881,7 +4965,12 @@ where
         phase = "pcs_lifted_evals",
     )
     .in_scope(|| {
-        build_folded_sha_pcs_lifted_evals_with_row_weights(folded_trace, r_0_eq_weights, field_cfg)
+        build_folded_sha_pcs_lifted_evals_with_row_weights(
+            folded_trace,
+            r_0_eq_weights,
+            field_cfg,
+            &COMMITTED_SHA_WORD_COLS,
+        )
     })?;
     tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -4946,7 +5035,12 @@ where
         phase = "pcs_lifted_evals",
     )
     .in_scope(|| {
-        build_folded_sha_pcs_lifted_evals_with_row_weights(folded_trace, r_0_eq_weights, field_cfg)
+        build_folded_sha_pcs_lifted_evals_with_row_weights(
+            folded_trace,
+            r_0_eq_weights,
+            field_cfg,
+            &ShaWordCol::ALL,
+        )
     })?;
     tracing::info_span!(
         target: "zinc_protocol::production_sha",
@@ -5255,6 +5349,7 @@ pub fn verify_linear_ideal_fold<P, U, Zt, F, const D: usize>(
     vs: &VerifiedLinearIdealFoldSetup<P, U, Zt, F, D>,
     instances: &[UairInstance<'_, Zt::Int, Zt::Int, PCSCommitments<P, Zt, F, D>, D>],
     proof: &ProductionLinearIdealFoldProof<P, Zt, F, D>,
+    booleanity_catalog: ShaBooleanityCatalog,
     transcript: &mut impl Transcript,
 ) -> Result<
     FoldedLinearIdealInstance<F, PCSCommitments<P, Zt, F, D>, ProjectedPublic<F>>,
@@ -5295,12 +5390,13 @@ where
     }
 
     absorb_production_sha_statement_metadata(transcript);
+    absorb_sha_booleanity_catalog(transcript, booleanity_catalog);
     absorb_uair_shape_metadata(transcript, &vs.shape);
 
     let publics =
         verify_public_projection_phase::<P, U, Zt, F, D>(vs, instances, proof, transcript)?;
 
-    let booleanity_sources = production_sha_booleanity_sources();
+    let booleanity_sources = production_sha_booleanity_sources_for(booleanity_catalog);
 
     let r_ic = sample_pre_ideal_challenge(transcript, field_cfg);
     let beta = sample_instance_batch_challenge(transcript, instances.len(), field_cfg)?;
@@ -5743,6 +5839,7 @@ where
         &subclaim.sumcheck_subclaim.point,
         &endpoint_binding_powers,
         field_cfg,
+        &ShaWordCol::ALL,
     )?;
     verify_sha_endpoint_multipoint_open_evals(&subclaim, &open_evals, &shift_specs, field_cfg)?;
     Ok(subclaim)
@@ -5815,6 +5912,7 @@ where
         &subclaim.sumcheck_subclaim.point,
         &endpoint_binding_powers,
         field_cfg,
+        &COMMITTED_SHA_WORD_COLS,
     )?;
     verify_sha_endpoint_multipoint_open_evals(&subclaim, &open_evals, &shift_specs, field_cfg)?;
     Ok(subclaim)
@@ -5886,6 +5984,7 @@ where
         &subclaim.sumcheck_subclaim.point,
         &endpoint_binding_powers,
         field_cfg,
+        &ShaWordCol::ALL,
     )?;
     verify_sha_endpoint_multipoint_open_evals(&subclaim, &open_evals, &shift_specs, field_cfg)?;
     Ok(subclaim)
@@ -6334,7 +6433,8 @@ where
         P::ArbitraryPCS::batch_size(&folded_commitments.arbitrary),
         P::IntPCS::batch_size(&folded_commitments.int),
     )?;
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, ShaWordCol::COUNT)?;
     let arbitrary_lifted: &[DynamicPolynomialF<F>] = &[];
 
     let mut transcript = PcsVerifierTranscript {
@@ -6468,11 +6568,12 @@ where
 {
     ensure_production_sha_word_degree::<F, D>()?;
     validate_production_sha_batch_sizes::<F>(ShaWordCol::COUNT, 0, ShaIntCol::COUNT)?;
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, ShaWordCol::COUNT)?;
     let arbitrary_lifted: &[DynamicPolynomialF<F>] = &[];
 
     let arbitrary_scalar_lanes: Vec<Vec<Vec<C::ScalarField>>> = Vec::new();
-    let binary_field_lanes = folded_sha_binary_field_lanes(folded_trace);
+    let binary_field_lanes = folded_sha_binary_field_lanes(folded_trace, &ShaWordCol::ALL);
     let int_field_lanes = folded_sha_int_field_lanes(folded_trace);
 
     let mut transcript = PcsProverTranscript {
@@ -6598,9 +6699,9 @@ where
     IntScalarLane: HyraxLanes<C, Zt::Int, D>,
 {
     ensure_production_sha_word_degree::<F, D>()?;
-    validate_production_sha_batch_sizes::<F>(ShaWordCol::COUNT, 0, ShaIntCol::COUNT)?;
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
-    let binary_field_lanes = folded_sha_binary_field_lanes(folded_trace);
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, NUM_COMMITTED_SHA_WORD_COLS)?;
+    let binary_field_lanes = folded_sha_binary_field_lanes(folded_trace, &COMMITTED_SHA_WORD_COLS);
     let int_field_lanes = folded_sha_int_field_lanes(folded_trace);
 
     let mut transcript = PcsProverTranscript {
@@ -6670,14 +6771,23 @@ where
                 got: 0,
                 expected: 1,
             })?;
-    validate_production_sha_batch_sizes::<F>(
-        <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::batch_size(
-            &first_commitment.binary,
-        ),
-        0,
-        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::batch_size(&first_commitment.int),
-    )?;
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
+    let received_binary_batch = <HyraxPCS<C, BinaryLanes> as PCS<F, BinaryPoly<D>, D>>::batch_size(
+        &first_commitment.binary,
+    );
+    if received_binary_batch != NUM_COMMITTED_SHA_WORD_COLS {
+        return Err(ProductionShaError::UnsupportedProductionShaPcsShape(
+            "mixed Hyrax expects one binary commitment batch per committed SHA word column",
+        ));
+    }
+    let received_int_batch =
+        <HyraxPCS<C, IntScalarLane> as PCS<F, Zt::Int, D>>::batch_size(&first_commitment.int);
+    if received_int_batch != ShaIntCol::COUNT {
+        return Err(ProductionShaError::UnsupportedProductionShaPcsShape(
+            "mixed Hyrax expects one int commitment batch per SHA int column",
+        ));
+    }
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, NUM_COMMITTED_SHA_WORD_COLS)?;
 
     let mut transcript = PcsVerifierTranscript {
         fs_transcript: Blake3Transcript::default(),
@@ -6757,7 +6867,8 @@ where
 {
     ensure_production_sha_word_degree::<F, D>()?;
     validate_production_sha_batch_sizes::<F>(ShaWordCol::COUNT, 0, ShaIntCol::COUNT)?;
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, ShaWordCol::COUNT)?;
     let layout = packed_sha_layout::<F>(pcs_params.binary.num_cols())?;
     let values = packed_sha_folded_trace_values::<C, F>(folded_trace, layout)?;
 
@@ -6845,7 +6956,8 @@ where
             "packed SHA Hyrax expects one packed commitment",
         ));
     }
-    let (binary_lifted, int_lifted) = split_folded_sha_pcs_lifted_evals(folded_lifted_evals)?;
+    let (binary_lifted, int_lifted) =
+        split_folded_sha_pcs_lifted_evals(folded_lifted_evals, ShaWordCol::COUNT)?;
     let layout = packed_sha_layout::<F>(pcs_params.binary.num_cols())?;
 
     let mut transcript = PcsVerifierTranscript {
@@ -7539,18 +7651,25 @@ fn build_folded_sha_pcs_lifted_evals<F>(
     folded_trace: &ProjectedTrace<F>,
     r_0: &[F],
     field_cfg: &F::Config,
+    word_cols: &'static [ShaWordCol],
 ) -> Result<Vec<DynamicPolynomialF<F>>, ProductionShaError<F>>
 where
     F: PrimeField + DelayedFieldProductSum,
 {
     let row_weights = build_eq_x_r_vec(r_0, field_cfg)?;
-    build_folded_sha_pcs_lifted_evals_with_row_weights(folded_trace, &row_weights, field_cfg)
+    build_folded_sha_pcs_lifted_evals_with_row_weights(
+        folded_trace,
+        &row_weights,
+        field_cfg,
+        word_cols,
+    )
 }
 
 fn build_folded_sha_pcs_lifted_evals_with_row_weights<F>(
     folded_trace: &ProjectedTrace<F>,
     row_weights: &[F],
     field_cfg: &F::Config,
+    word_cols: &'static [ShaWordCol],
 ) -> Result<Vec<DynamicPolynomialF<F>>, ProductionShaError<F>>
 where
     F: PrimeField + DelayedFieldProductSum,
@@ -7564,7 +7683,7 @@ where
     }
     #[cfg(debug_assertions)]
     validate_projected_trace(folded_trace)?;
-    let word_lifted = cfg_iter!(&ShaWordCol::ALL)
+    let word_lifted = cfg_iter!(word_cols)
         .map(|&col| {
             let coeffs = sha_word_bits_at_point_with_weights_inner_product_unchecked(
                 folded_trace,
@@ -7589,11 +7708,12 @@ where
 
 fn split_folded_sha_pcs_lifted_evals<F>(
     lifted_evals: &[DynamicPolynomialF<F>],
+    word_count: usize,
 ) -> Result<(&[DynamicPolynomialF<F>], &[DynamicPolynomialF<F>]), ProductionShaError<F>>
 where
     F: PrimeField,
 {
-    let expected = ShaWordCol::COUNT + ShaIntCol::COUNT;
+    let expected = word_count + ShaIntCol::COUNT;
     if lifted_evals.len() != expected {
         return Err(ProductionShaError::LengthMismatch {
             label: "folded SHA PCS lifted evals",
@@ -7601,22 +7721,19 @@ where
             expected,
         });
     }
-    validate_folded_sha_pcs_lifted_evals_canonical(lifted_evals)?;
-    Ok(lifted_evals.split_at(ShaWordCol::COUNT))
+    validate_folded_sha_pcs_lifted_evals_canonical(lifted_evals, word_count)?;
+    Ok(lifted_evals.split_at(word_count))
 }
 
 fn validate_folded_sha_pcs_lifted_evals_canonical<F>(
     lifted_evals: &[DynamicPolynomialF<F>],
+    word_count: usize,
 ) -> Result<(), ProductionShaError<F>>
 where
     F: PrimeField,
 {
     for (idx, lifted_eval) in lifted_evals.iter().enumerate() {
-        let max_len = if idx < ShaWordCol::COUNT {
-            SHA_WORD_BITS
-        } else {
-            1
-        };
+        let max_len = if idx < word_count { SHA_WORD_BITS } else { 1 };
         if lifted_eval.coeffs.len() > max_len {
             return Err(ProductionShaError::NonCanonicalProofObject(
                 "folded SHA lifted eval has too many coefficients",
@@ -7689,11 +7806,14 @@ where
         .collect()
 }
 
-fn folded_sha_binary_field_lanes<F>(folded_trace: &ProjectedTrace<F>) -> Vec<Vec<&[F]>>
+fn folded_sha_binary_field_lanes<'a, F>(
+    folded_trace: &'a ProjectedTrace<F>,
+    word_cols: &[ShaWordCol],
+) -> Vec<Vec<&'a [F]>>
 where
     F: PrimeField,
 {
-    ShaWordCol::ALL
+    word_cols
         .iter()
         .map(|col| {
             (0..SHA_WORD_BITS)
@@ -7868,11 +7988,12 @@ fn multipoint_open_evals_from_pcs_lifted<F>(
     r_0: &[F],
     endpoint_binding_powers: &[F],
     field_cfg: &F::Config,
+    word_cols: &[ShaWordCol],
 ) -> Result<Vec<F>, ProductionShaError<F>>
 where
     F: PrimeField,
 {
-    split_folded_sha_pcs_lifted_evals(lifted_evals)?;
+    split_folded_sha_pcs_lifted_evals(lifted_evals, word_cols.len())?;
     validate_sha_word_powers(endpoint_binding_powers)?;
     layout
         .sources
@@ -7882,12 +8003,20 @@ where
                 sha_public_at_point(folded_public, col, 0, r_0, field_cfg)
                     .map_err(ProductionShaError::from)
             }
-            ShaMpSource::Word { col } => evaluate_lifted_sha_word_at_powers(
-                &lifted_evals[col.index()],
-                endpoint_binding_powers,
-                field_cfg,
-            ),
-            ShaMpSource::Int { col } => Ok(lifted_evals[ShaWordCol::COUNT + col.index()]
+            ShaMpSource::Word { col } => {
+                let slot = word_cols
+                    .iter()
+                    .position(|candidate| *candidate == col)
+                    .ok_or(ProductionShaError::UnsupportedProductionShaPcsShape(
+                        "multipoint layout references a word column without a commitment slot",
+                    ))?;
+                evaluate_lifted_sha_word_at_powers(
+                    &lifted_evals[slot],
+                    endpoint_binding_powers,
+                    field_cfg,
+                )
+            }
+            ShaMpSource::Int { col } => Ok(lifted_evals[word_cols.len() + col.index()]
                 .coeffs
                 .first()
                 .cloned()
@@ -8491,7 +8620,26 @@ struct RowExpressionLayout {
 
 impl RowExpressionLayout {
     fn new() -> Self {
-        let word_sources = production_sha_endpoint_word_sources();
+        // The row-expression evaluator runs prover-side over the folded
+        // trace, which still materializes the derived sigma columns; extend
+        // the endpoint source list with the sigma reads the residual
+        // expressions consume. (The verifier's endpoint terminal instead
+        // reconstructs sigma from the committed parents.)
+        let mut word_sources = production_sha_endpoint_word_sources();
+        for source in [
+            (ShaWordCol::Sigma0, 0usize),
+            (ShaWordCol::Sigma0, 3),
+            (ShaWordCol::Sigma1, 0),
+            (ShaWordCol::Sigma1, 3),
+            (ShaWordCol::SmallSigma0, 0),
+            (ShaWordCol::SmallSigma0, 1),
+            (ShaWordCol::SmallSigma1, 0),
+            (ShaWordCol::SmallSigma1, 14),
+        ] {
+            if !word_sources.contains(&source) {
+                word_sources.push(source);
+            }
+        }
         let int_sources = production_sha_endpoint_int_sources();
         let mut public_scalar_sources = ShaPublicCol::ALL
             .iter()
@@ -9600,20 +9748,23 @@ pub fn production_sha_endpoint_word_sources() -> Vec<(ShaWordCol, usize)> {
         }
     };
 
-    for col in ShaWordCol::ALL {
+    // The derived sigma columns have no commitment slot; their endpoint
+    // values are reconstructed from parent sources (A/E/W and the overflow
+    // columns, provided below at every row shift the sigma consumers need).
+    for col in COMMITTED_SHA_WORD_COLS {
         push(col, 0);
     }
     for (col, shifts) in [
-        (ShaWordCol::A, &[1usize, 2, 4][..]),
-        (ShaWordCol::E, &[1usize, 2, 4][..]),
-        (ShaWordCol::Sigma0, &[3usize][..]),
-        (ShaWordCol::Sigma1, &[3usize][..]),
-        (ShaWordCol::W, &[9usize, 16][..]),
-        (ShaWordCol::SmallSigma0, &[1usize][..]),
-        (ShaWordCol::SmallSigma1, &[14usize][..]),
+        (ShaWordCol::A, &[1usize, 2, 3, 4][..]),
+        (ShaWordCol::E, &[1usize, 2, 3, 4][..]),
+        (ShaWordCol::W, &[1usize, 9, 14, 16][..]),
         (ShaWordCol::Uef, &[2usize, 3][..]),
         (ShaWordCol::UNegEg, &[2usize, 3][..]),
         (ShaWordCol::Maj, &[2usize, 3][..]),
+        (ShaWordCol::OvSigma0, &[3usize][..]),
+        (ShaWordCol::OvSigma1, &[3usize][..]),
+        (ShaWordCol::OvSmallSigma0, &[1usize][..]),
+        (ShaWordCol::OvSmallSigma1, &[14usize][..]),
     ] {
         for &shift in shifts {
             push(col, shift);
@@ -10347,14 +10498,28 @@ where
     F: PrimeField,
 {
     match source {
-        ShaBooleanitySource::WordBit { col, bit } => Ok(source_bits(endpoint_evals, *col, 0)?
-            .get(*bit)
-            .cloned()
-            .ok_or(ProductionShaError::LengthMismatch {
-                label: "endpoint bit",
-                got: *bit,
-                expected: 32,
-            })?),
+        ShaBooleanitySource::WordBit { col, bit } => {
+            if SHA_DERIVED_WORD_COLS.contains(col) {
+                // Derived sigma columns have no endpoint source of their own;
+                // reconstruct the bit from the committed parents (only the
+                // Full/Tier1 booleanity catalogs reach this arm).
+                let field_cfg = virtuals.ch1[0].cfg();
+                let poly = derived_sigma_endpoint_word_poly(endpoint_evals, *col, 0, field_cfg)?;
+                return Ok(poly
+                    .coeffs
+                    .get(*bit)
+                    .cloned()
+                    .unwrap_or_else(|| F::zero_with_cfg(field_cfg)));
+            }
+            Ok(source_bits(endpoint_evals, *col, 0)?
+                .get(*bit)
+                .cloned()
+                .ok_or(ProductionShaError::LengthMismatch {
+                    label: "endpoint bit",
+                    got: *bit,
+                    expected: 32,
+                })?)
+        }
         ShaBooleanitySource::VirtualCh1 { bit } => {
             Ok(virtuals
                 .ch1
@@ -10691,11 +10856,7 @@ where
 
     let a = endpoint_word_poly(endpoint_evals, ShaWordCol::A, 0, field_cfg)?;
     let e = endpoint_word_poly(endpoint_evals, ShaWordCol::E, 0, field_cfg)?;
-    let sigma0 = endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma0, 0, field_cfg)?;
-    let sigma1 = endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma1, 0, field_cfg)?;
     let w = endpoint_word_poly(endpoint_evals, ShaWordCol::W, 0, field_cfg)?;
-    let small_sigma0 = endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma0, 0, field_cfg)?;
-    let small_sigma1 = endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma1, 0, field_cfg)?;
     let ov_sigma0 = endpoint_word_poly(endpoint_evals, ShaWordCol::OvSigma0, 0, field_cfg)?;
     let ov_sigma1 = endpoint_word_poly(endpoint_evals, ShaWordCol::OvSigma1, 0, field_cfg)?;
     let ov_small_sigma0 =
@@ -10704,18 +10865,31 @@ where
         endpoint_word_poly(endpoint_evals, ShaWordCol::OvSmallSigma1, 0, field_cfg)?;
     let w_shift16 = endpoint_word_poly(endpoint_evals, ShaWordCol::W, 16, field_cfg)?;
     let w_shift9 = endpoint_word_poly(endpoint_evals, ShaWordCol::W, 9, field_cfg)?;
-    let small_sigma0_shift1 =
-        endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma0, 1, field_cfg)?;
-    let small_sigma1_shift14 =
-        endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma1, 14, field_cfg)?;
     let a_shift4 = endpoint_word_poly(endpoint_evals, ShaWordCol::A, 4, field_cfg)?;
     let e_shift4 = endpoint_word_poly(endpoint_evals, ShaWordCol::E, 4, field_cfg)?;
-    let sigma0_shift3 = endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma0, 3, field_cfg)?;
-    let sigma1_shift3 = endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma1, 3, field_cfg)?;
     let uef_shift3 = endpoint_word_poly(endpoint_evals, ShaWordCol::Uef, 3, field_cfg)?;
     let uneg_eg_shift3 = endpoint_word_poly(endpoint_evals, ShaWordCol::UNegEg, 3, field_cfg)?;
     let maj_shift3 = endpoint_word_poly(endpoint_evals, ShaWordCol::Maj, 3, field_cfg)?;
     let mu_packed = endpoint_word_poly(endpoint_evals, ShaWordCol::MuPacked, 0, field_cfg)?;
+
+    // The sigma columns are not committed; reconstruct their endpoint values
+    // from the committed parents at every consumed row shift.
+    let sigma0 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma0, 0, field_cfg)?;
+    let sigma1 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma1, 0, field_cfg)?;
+    let small_sigma0 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma0, 0, field_cfg)?;
+    let small_sigma1 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma1, 0, field_cfg)?;
+    let sigma0_shift3 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma0, 3, field_cfg)?;
+    let sigma1_shift3 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::Sigma1, 3, field_cfg)?;
+    let small_sigma0_shift1 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma0, 1, field_cfg)?;
+    let small_sigma1_shift14 =
+        derived_sigma_endpoint_word_poly(endpoint_evals, ShaWordCol::SmallSigma1, 14, field_cfg)?;
 
     let public_k_shift3 = endpoint_public_const_poly_with_row_weights(
         folded_public,
@@ -10892,6 +11066,55 @@ where
     let mut coeffs = source_bits(endpoint_evals, col, shift)?.to_vec();
     coeffs.resize(32, F::zero_with_cfg(field_cfg));
     Ok(DynamicPolynomialF::new_trimmed(coeffs))
+}
+
+/// Endpoint value of a derived sigma column, reconstructed from the
+/// committed parent and overflow columns at the same row shift. Each sigma
+/// identity holds pointwise per row, so it commutes with the row-weighted,
+/// row-shifted endpoint reads (out-of-range rows contribute zero to both
+/// sides).
+fn derived_sigma_endpoint_word_poly<F>(
+    endpoint_evals: &ShaEndpointEvals<F>,
+    col: ShaWordCol,
+    shift: usize,
+    field_cfg: &F::Config,
+) -> Result<DynamicPolynomialF<F>, ProductionShaError<F>>
+where
+    F: PrimeField,
+{
+    let one = F::one_with_cfg(field_cfg);
+    let two = one.clone() + &one;
+    let (parent_col, rotations, truncating_shift, ov_col) = match col {
+        ShaWordCol::Sigma0 => (ShaWordCol::A, [10u32, 19, 30], None, ShaWordCol::OvSigma0),
+        ShaWordCol::Sigma1 => (ShaWordCol::E, [7u32, 21, 26], None, ShaWordCol::OvSigma1),
+        ShaWordCol::SmallSigma0 => (
+            ShaWordCol::W,
+            [25u32, 14, 3],
+            Some(3),
+            ShaWordCol::OvSmallSigma0,
+        ),
+        ShaWordCol::SmallSigma1 => (
+            ShaWordCol::W,
+            [15u32, 13, 10],
+            Some(10),
+            ShaWordCol::OvSmallSigma1,
+        ),
+        _ => {
+            return Err(ProductionShaError::UnsupportedProductionShaPcsShape(
+                "column is not a derived sigma column",
+            ));
+        }
+    };
+    let parent = endpoint_word_poly(endpoint_evals, parent_col, shift, field_cfg)?;
+    let ov = endpoint_word_poly(endpoint_evals, ov_col, shift, field_cfg)?;
+    let last_term = match truncating_shift {
+        Some(amount) => parent.shift_r_c(amount),
+        None => parent.rot_c(rotations[2]),
+    };
+    Ok(
+        parent.rot_c(rotations[0]) + &parent.rot_c(rotations[1]) + &last_term
+            - &scale_endpoint_poly(&ov, &two),
+    )
 }
 
 fn endpoint_int_const_poly<F>(
@@ -11218,6 +11441,7 @@ mod tests {
         FromWithConfig, crypto_bigint_boxed_monty::BoxedMontyField, crypto_bigint_int::Int,
         crypto_bigint_uint::Uint,
     };
+    use zinc_piop::neutron_nova::production_sha_booleanity_sources;
     use zinc_piop::neutron_nova::{
         SHA_ROW_COUNT, SHA_WORD_BITS, expression_folded_row_sum,
         expression_folded_row_sum_with_vectors, fold_projected_traces, prepare_sha_sumfold_basis,
@@ -12660,7 +12884,7 @@ mod tests {
         let field_cfg = cfg();
         let folded_lifted = fake_folded_lifted_evals();
         let (binary_lifted, int_lifted) =
-            split_folded_sha_pcs_lifted_evals(&folded_lifted).unwrap();
+            split_folded_sha_pcs_lifted_evals(&folded_lifted, ShaWordCol::COUNT).unwrap();
         let r_0 = sparse_r_ic();
 
         for source in 0..PACKED_SHA_SOURCE_COUNT {
@@ -12740,7 +12964,13 @@ mod tests {
                 TestShaZincTypes,
                 F,
                 TEST_DEGREE_PLUS_ONE,
-            >(&pp, &shape, &prepared, &mut prover_transcript)
+            >(
+                &pp,
+                &shape,
+                &prepared,
+                ShaBooleanityCatalog::Full,
+                &mut prover_transcript,
+            )
             .expect("packed Hyrax production SHA ProjectionFold proof succeeds");
 
             assert_eq!(output.proof.instance_commitments.len(), 8);
@@ -12763,6 +12993,7 @@ mod tests {
                 &vs,
                 &output.fresh_instances,
                 &output.proof,
+                ShaBooleanityCatalog::Full,
                 &mut verifier_transcript,
             )
             .expect("packed Hyrax production SHA ProjectionFold proof verifies");
@@ -12812,6 +13043,7 @@ mod tests {
             &pp,
             &shape,
             &witnesses,
+            ShaBooleanityCatalog::Full,
             &mut prover_transcript,
         )
         .expect("production SHA ProjectionFold proof succeeds");
@@ -12821,6 +13053,7 @@ mod tests {
             &vs,
             &output.fresh_instances,
             &output.proof,
+            ShaBooleanityCatalog::Full,
             &mut verifier_transcript,
         )
         .expect("production SHA ProjectionFold proof verifies");
@@ -12870,12 +13103,19 @@ mod tests {
             TestShaZincTypes,
             F,
             TEST_DEGREE_PLUS_ONE,
-        >(&pp, &shape, &prepared, &mut prover_transcript)
+        >(
+            &pp,
+            &shape,
+            &prepared,
+            ShaBooleanityCatalog::Full,
+            &mut prover_transcript,
+        )
         .expect("mixed Hyrax production SHA ProjectionFold proof succeeds");
 
         assert_eq!(output.proof.instance_commitments.len(), 8);
         for commitment in &output.proof.instance_commitments {
-            assert_eq!(commitment.binary.batch_size(), ShaWordCol::COUNT);
+            // The derived sigma columns are reconstructed, not committed.
+            assert_eq!(commitment.binary.batch_size(), NUM_COMMITTED_SHA_WORD_COLS);
             assert_eq!(commitment.int.batch_size(), ShaIntCol::COUNT);
         }
 
@@ -12890,12 +13130,252 @@ mod tests {
             &vs,
             &output.fresh_instances,
             &output.proof,
+            ShaBooleanityCatalog::Full,
             &mut verifier_transcript,
         )
         .expect("mixed Hyrax production SHA ProjectionFold proof verifies");
 
         assert_eq!(verified.target, output.folded_instance.target);
         assert_eq!(verified.public, output.folded_instance.public);
+    }
+
+    #[test]
+    fn fold_first_mixed_hyrax_roundtrips_all_booleanity_catalogs() {
+        type C = ark_bn254::G1Affine;
+        type F = ArkF;
+        type P = AllHyraxPCSTypes<C>;
+        type U = Sha256CompressionSliceUair<ShaInt>;
+
+        let field_cfg = ();
+        let initial_state = SHA256_INITIAL_STATE;
+        let message = vec!["hello world"; 40].join(" ");
+        let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("test message should canonically pad to 8 SHA-256 blocks");
+        let (witnesses, _final_state) =
+            synthesize_sha256_chain_witnesses::<ShaInt, 8>(initial_state, message_blocks)
+                .expect("SHA-256 UAIR witnesses synthesize");
+        let shape = UairShape::<U>::new(SHA_ROW_VARS);
+        let prepared = prepare_fold_first_linear_ideal_fold_witnesses::<
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(&shape, &witnesses, &field_cfg)
+        .expect("fold-first witnesses prepare");
+        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C, F>();
+        let pp =
+            LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
+                pcs_params,
+                field_cfg.clone(),
+                3,
+            );
+        let vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(
+            LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+            shape.clone(),
+        )
+        .expect("production SHA verifier setup succeeds");
+
+        let prove_with = |catalog: ShaBooleanityCatalog| {
+            let mut prover_transcript = Blake3Transcript::new();
+            prove_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                TestShaZincTypes,
+                F,
+                TEST_DEGREE_PLUS_ONE,
+            >(&pp, &shape, &prepared, catalog, &mut prover_transcript)
+            .expect("fold-first mixed Hyrax prover succeeds")
+        };
+
+        for catalog in [
+            ShaBooleanityCatalog::Full,
+            ShaBooleanityCatalog::Tier1DropChMajAux,
+            ShaBooleanityCatalog::Tier2DropXorResults,
+        ] {
+            let output = prove_with(catalog);
+            // Only the committed word columns are opened; sigma is derived.
+            assert_eq!(
+                output.proof.witness_lifted_evals.len(),
+                NUM_COMMITTED_SHA_WORD_COLS + ShaIntCol::COUNT
+            );
+            let mut verifier_transcript = Blake3Transcript::new();
+            let verified = verify_fold_first_linear_ideal_fold_mixed_hyrax::<
+                C,
+                U,
+                TestShaZincTypes,
+                F,
+                TEST_DEGREE_PLUS_ONE,
+            >(
+                &vs,
+                &output.fresh_instances,
+                &output.proof,
+                catalog,
+                &mut verifier_transcript,
+            )
+            .expect("fold-first mixed Hyrax proof verifies");
+            assert_eq!(verified.target, output.folded_instance.target);
+            assert_eq!(verified.public, output.folded_instance.public);
+        }
+
+        // A prover/verifier catalog mismatch diverges the transcript at the
+        // catalog absorb and must fail cleanly rather than panic.
+        let output = prove_with(ShaBooleanityCatalog::Tier2DropXorResults);
+        let mut verifier_transcript = Blake3Transcript::new();
+        assert!(
+            verify_fold_first_linear_ideal_fold_mixed_hyrax::<
+                C,
+                U,
+                TestShaZincTypes,
+                F,
+                TEST_DEGREE_PLUS_ONE,
+            >(
+                &vs,
+                &output.fresh_instances,
+                &output.proof,
+                ShaBooleanityCatalog::Full,
+                &mut verifier_transcript,
+            )
+            .is_err(),
+            "catalog mismatch must be rejected"
+        );
+    }
+
+    #[test]
+    fn derived_sigma_endpoint_matches_trace_and_tampering_is_rejected() {
+        type C = ark_bn254::G1Affine;
+        type F = ArkF;
+        type P = AllHyraxPCSTypes<C>;
+        type U = Sha256CompressionSliceUair<ShaInt>;
+
+        let field_cfg = ();
+        let initial_state = SHA256_INITIAL_STATE;
+        let message = vec!["hello world"; 40].join(" ");
+        let message_blocks = sha256_padded_message_blocks::<8>(message.as_bytes())
+            .expect("test message should canonically pad to 8 SHA-256 blocks");
+        let (witnesses, _final_state) =
+            synthesize_sha256_chain_witnesses::<ShaInt, 8>(initial_state, message_blocks)
+                .expect("SHA-256 UAIR witnesses synthesize");
+        let shape = UairShape::<U>::new(SHA_ROW_VARS);
+        let prepared = prepare_fold_first_linear_ideal_fold_witnesses::<
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(&shape, &witnesses, &field_cfg)
+        .expect("fold-first witnesses prepare");
+
+        // Differential: for an honest trace the derived sigma endpoint values
+        // equal the trace-sourced ones at every consumed (column, shift).
+        let trace = &prepared[0].instance.trace;
+        let r_star: Vec<F> = (0..SHA_ROW_VARS)
+            .map(|i| F::from((7 + 3 * i) as u64))
+            .collect();
+        let row_weights = build_eq_x_r_vec(&r_star, &field_cfg).expect("eq weights");
+        let scalar_a = F::from(5u64);
+        let endpoint_evals =
+            build_sha_endpoint_evals_from_trace(trace, &r_star, &scalar_a, &field_cfg)
+                .expect("endpoint evals build");
+        for (col, shift) in [
+            (ShaWordCol::Sigma0, 0usize),
+            (ShaWordCol::Sigma0, 3),
+            (ShaWordCol::Sigma1, 0),
+            (ShaWordCol::Sigma1, 3),
+            (ShaWordCol::SmallSigma0, 0),
+            (ShaWordCol::SmallSigma0, 1),
+            (ShaWordCol::SmallSigma1, 0),
+            (ShaWordCol::SmallSigma1, 14),
+        ] {
+            let derived = derived_sigma_endpoint_word_poly(&endpoint_evals, col, shift, &field_cfg)
+                .expect("derived sigma endpoint");
+            let expected_bits = sha_endpoint_word_bits_with_row_weights(
+                trace,
+                col,
+                shift,
+                &row_weights,
+                &field_cfg,
+            )
+            .expect("trace-sourced sigma endpoint");
+            let expected = DynamicPolynomialF::new_trimmed(expected_bits.to_vec());
+            assert_eq!(
+                derived, expected,
+                "sigma derivation mismatch at {col:?}@{shift}"
+            );
+        }
+
+        // Tamper rejection: prove with a corrupted trace and require failure.
+        let (pcs_params, pcs_verifier_params) = all_hyrax_test_pcs_params::<C, F>();
+        let pp =
+            LinearIdealFoldProverParams::<P, U, TestShaZincTypes, F, TEST_DEGREE_PLUS_ONE>::new(
+                pcs_params,
+                field_cfg.clone(),
+                3,
+            );
+        let vs = setup_verify_linear_ideal_fold_mixed_hyrax::<
+            C,
+            U,
+            TestShaZincTypes,
+            F,
+            TEST_DEGREE_PLUS_ONE,
+        >(
+            LinearIdealFoldVerifierParams::new(pcs_verifier_params, field_cfg),
+            shape.clone(),
+        )
+        .expect("production SHA verifier setup succeeds");
+
+        let assert_tamper_rejected = |col: ShaWordCol, bit: usize, row: usize, context: &str| {
+            let mut tampered = prepared.clone();
+            let idx = bit_slice_index(col.index(), bit, SHA_WORD_BITS);
+            let value = tampered[2].instance.trace.bit_slices[idx].evaluations[row].clone();
+            tampered[2].instance.trace.bit_slices[idx].evaluations[row] = F::from(1u64) - value;
+            let mut prover_transcript = Blake3Transcript::new();
+            let proved = prove_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                TestShaZincTypes,
+                F,
+                TEST_DEGREE_PLUS_ONE,
+            >(
+                &pp,
+                &shape,
+                &tampered,
+                ShaBooleanityCatalog::Tier2DropXorResults,
+                &mut prover_transcript,
+            );
+            let Ok(output) = proved else {
+                // Debug builds may already reject inside the prover.
+                return;
+            };
+            let mut verifier_transcript = Blake3Transcript::new();
+            assert!(
+                verify_fold_first_linear_ideal_fold_mixed_hyrax::<
+                    C,
+                    U,
+                    TestShaZincTypes,
+                    F,
+                    TEST_DEGREE_PLUS_ONE,
+                >(
+                    &vs,
+                    &output.fresh_instances,
+                    &output.proof,
+                    ShaBooleanityCatalog::Tier2DropXorResults,
+                    &mut verifier_transcript,
+                )
+                .is_err(),
+                "tampered witness must be rejected: {context}"
+            );
+        };
+
+        // Flipping an overflow bit changes the derived sigma the verifier
+        // reconstructs; flipping the trace's sigma copy diverges from the
+        // committed parents. Both must fail verification.
+        assert_tamper_rejected(ShaWordCol::OvSigma0, 6, 20, "OvSigma0 bit flip");
+        assert_tamper_rejected(ShaWordCol::Sigma0, 6, 20, "trace Sigma0 bit flip");
     }
 
     #[test]
@@ -13756,7 +14236,12 @@ mod tests {
         assert_eq!(subclaim.sumcheck_subclaim.point, r_0);
 
         let layout = production_sha_multipoint_layout();
-        assert_eq!(layout.sources.len(), ShaWordCol::COUNT + ShaIntCol::COUNT);
+        // Only committed word columns appear in the multipoint layout; the
+        // derived sigma columns are reconstructed from parents.
+        assert_eq!(
+            layout.sources.len(),
+            NUM_COMMITTED_SHA_WORD_COLS + ShaIntCol::COUNT
+        );
         assert_eq!(
             layout.shifts.len(),
             production_sha_endpoint_word_sources()
@@ -13930,6 +14415,7 @@ mod tests {
             &r_0,
             &endpoint_binding_powers,
             &field_cfg,
+            &ShaWordCol::ALL,
         )
         .unwrap();
         let a0_idx = layout
@@ -13970,6 +14456,7 @@ mod tests {
             &r_0,
             &endpoint_binding_powers,
             &field_cfg,
+            &ShaWordCol::ALL,
         )
         .unwrap();
         assert_ne!(open_evals[a0_idx], bad_open_evals[a0_idx]);
@@ -13979,7 +14466,7 @@ mod tests {
     fn folded_lifted_evals_must_be_canonical_and_32_bit() {
         let field_cfg = cfg();
         let mut lifted = vec![DynamicPolynomialF::ZERO; ShaWordCol::COUNT + ShaIntCol::COUNT];
-        split_folded_sha_pcs_lifted_evals(&lifted).unwrap();
+        split_folded_sha_pcs_lifted_evals(&lifted, ShaWordCol::COUNT).unwrap();
         ensure_production_sha_word_degree::<F, 32>().unwrap();
         assert!(matches!(
             ensure_production_sha_word_degree::<F, 8>(),
@@ -13992,14 +14479,14 @@ mod tests {
         lifted[ShaWordCol::A.index()] =
             DynamicPolynomialF::new(vec![F::zero_with_cfg(&field_cfg); SHA_WORD_BITS + 1]);
         assert!(matches!(
-            split_folded_sha_pcs_lifted_evals(&lifted),
+            split_folded_sha_pcs_lifted_evals(&lifted, ShaWordCol::COUNT),
             Err(ProductionShaError::NonCanonicalProofObject(_))
         ));
 
         lifted[ShaWordCol::A.index()] =
             DynamicPolynomialF::new(vec![f(1), F::zero_with_cfg(&field_cfg)]);
         assert!(matches!(
-            split_folded_sha_pcs_lifted_evals(&lifted),
+            split_folded_sha_pcs_lifted_evals(&lifted, ShaWordCol::COUNT),
             Err(ProductionShaError::NonCanonicalProofObject(_))
         ));
 
@@ -14007,7 +14494,7 @@ mod tests {
         lifted[ShaWordCol::COUNT + ShaIntCol::CompSchedule.index()] =
             DynamicPolynomialF::new(vec![f(1), f(2)]);
         assert!(matches!(
-            split_folded_sha_pcs_lifted_evals(&lifted),
+            split_folded_sha_pcs_lifted_evals(&lifted, ShaWordCol::COUNT),
             Err(ProductionShaError::NonCanonicalProofObject(_))
         ));
     }

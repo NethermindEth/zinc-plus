@@ -35,9 +35,9 @@ use tracing::{
 use tracing_subscriber::{layer::Context, prelude::*, registry::LookupSpan};
 use zinc_piop::neutron_nova::{
     MleTable, PreparedProductionShaNativeView, ProjectedPublic, ProjectedTrace, SHA_ROW_COUNT,
-    SHA_ROW_VARS, SHA_WORD_BITS, ShaBinaryFoldField, ShaIntCol, ShaLinearAccumulatorField,
-    ShaPublicCol, ShaPublicWordCol, ShaSmallFieldDecode, ShaSuffixScannerField, ShaWordCol,
-    bit_slice_index,
+    SHA_ROW_VARS, SHA_WORD_BITS, ShaBinaryFoldField, ShaBooleanityCatalog, ShaIntCol,
+    ShaLinearAccumulatorField, ShaPublicCol, ShaPublicWordCol, ShaSmallFieldDecode,
+    ShaSuffixScannerField, ShaWordCol, bit_slice_index,
 };
 use zinc_poly::mle::DenseMultilinearExtension;
 use zinc_poly::univariate::dynamic::over_field::DynamicPolyVecF;
@@ -1997,13 +1997,18 @@ impl ProvePhase {
 
 #[derive(Clone, Debug)]
 struct PhaseSpanTiming {
-    phase: ProvePhase,
+    phase: Option<ProvePhase>,
+    raw: String,
     entered_at: Option<Instant>,
 }
 
 #[derive(Clone, Default)]
 struct PhaseTimingLayer {
     totals_ms: Arc<Mutex<[f64; PROVE_PHASE_COUNT]>>,
+    // Every span's busy time keyed by its raw `phase` field, so sub-phases not
+    // in the fixed `ProvePhase` set (decider/commit/fold internals) can be
+    // profiled without extending the enum.
+    all_phases_ms: Arc<Mutex<HashMap<String, f64>>>,
 }
 
 static PHASE_TIMING_LAYER: OnceLock<PhaseTimingLayer> = OnceLock::new();
@@ -2011,6 +2016,7 @@ static PHASE_TIMING_LAYER: OnceLock<PhaseTimingLayer> = OnceLock::new();
 #[derive(Default)]
 struct PhaseFieldVisitor {
     phase: Option<ProvePhase>,
+    raw: Option<String>,
 }
 
 const HYRAX_WIDTH_SWEEP_WARMUP_RUNS: usize = 2;
@@ -2056,6 +2062,7 @@ impl Visit for PhaseFieldVisitor {
     fn record_str(&mut self, field: &TracingField, value: &str) {
         if field.name() == "phase" {
             self.phase = ProvePhase::from_name(value);
+            self.raw = Some(value.to_owned());
         }
     }
 
@@ -2067,6 +2074,7 @@ impl Visit for PhaseFieldVisitor {
                 .and_then(|value| value.strip_suffix('"'))
                 .unwrap_or(&value);
             self.phase = ProvePhase::from_name(value);
+            self.raw = Some(value.to_owned());
         }
     }
 }
@@ -2075,6 +2083,32 @@ impl PhaseTimingLayer {
     fn reset(&self) {
         let mut totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
         *totals = [0.0; PROVE_PHASE_COUNT];
+        self.all_phases_ms
+            .lock()
+            .expect("phase timing mutex poisoned")
+            .clear();
+    }
+
+    /// Busy-time in ms for every observed `phase`, sorted descending.
+    fn all_phases_sorted(&self) -> Vec<(String, f64)> {
+        let map = self
+            .all_phases_ms
+            .lock()
+            .expect("phase timing mutex poisoned");
+        let mut entries: Vec<(String, f64)> =
+            map.iter().map(|(name, ms)| (name.clone(), *ms)).collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries
+    }
+
+    /// Busy-time in ms for a single raw phase name (0.0 if never seen).
+    fn raw_phase_ms(&self, name: &str) -> f64 {
+        self.all_phases_ms
+            .lock()
+            .expect("phase timing mutex poisoned")
+            .get(name)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     fn phase_ms(totals: &[f64; PROVE_PHASE_COUNT], phase: ProvePhase) -> f64 {
@@ -2133,14 +2167,15 @@ where
     fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let mut visitor = PhaseFieldVisitor::default();
         attrs.record(&mut visitor);
-        let Some(phase) = visitor.phase else {
+        let Some(raw) = visitor.raw else {
             return;
         };
         let Some(span) = ctx.span(id) else {
             return;
         };
         span.extensions_mut().insert(PhaseSpanTiming {
-            phase,
+            phase: visitor.phase,
+            raw,
             entered_at: None,
         });
     }
@@ -2148,7 +2183,7 @@ where
     fn on_record(&self, id: &Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
         let mut visitor = PhaseFieldVisitor::default();
         values.record(&mut visitor);
-        let Some(phase) = visitor.phase else {
+        let Some(raw) = visitor.raw else {
             return;
         };
         let Some(span) = ctx.span(id) else {
@@ -2156,7 +2191,8 @@ where
         };
         let mut extensions = span.extensions_mut();
         if let Some(timing) = extensions.get_mut::<PhaseSpanTiming>() {
-            timing.phase = phase;
+            timing.phase = visitor.phase;
+            timing.raw = raw;
         }
     }
 
@@ -2182,8 +2218,16 @@ where
             return;
         };
         let elapsed_ms = elapsed_ms(start);
-        let mut totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
-        totals[timing.phase.index()] += elapsed_ms;
+        if let Some(phase) = timing.phase {
+            let mut totals = self.totals_ms.lock().expect("phase timing mutex poisoned");
+            totals[phase.index()] += elapsed_ms;
+        }
+        *self
+            .all_phases_ms
+            .lock()
+            .expect("phase timing mutex poisoned")
+            .entry(timing.raw.clone())
+            .or_insert(0.0) += elapsed_ms;
     }
 }
 
@@ -2441,6 +2485,7 @@ where
         pp,
         shape,
         prepared_instances,
+        v1_booleanity_catalog(),
         &mut transcript,
     )
     .expect("mixed Hyrax phase-timing probe failed");
@@ -4117,15 +4162,20 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let mut prover_transcript = Blake3Transcript::new();
-            let traced_output =
-                prove_prepared_linear_ideal_fold_mixed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&pp, &shape, &prepared_instances, &mut prover_transcript)
-                .expect("traced instance-sweep mixed Hyrax prover failed");
+            let traced_output = prove_prepared_linear_ideal_fold_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                &pp,
+                &shape,
+                &prepared_instances,
+                v1_booleanity_catalog(),
+                &mut prover_transcript,
+            )
+            .expect("traced instance-sweep mixed Hyrax prover failed");
 
             let mut verifier_transcript = Blake3Transcript::new();
             let traced_verified = verify_linear_ideal_fold_mixed_hyrax::<
@@ -4138,6 +4188,7 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
                 &vs,
                 &traced_output.fresh_instances,
                 &traced_output.proof,
+                v1_booleanity_catalog(),
                 &mut verifier_transcript,
             )
             .expect("traced instance-sweep mixed Hyrax verifier failed");
@@ -4155,7 +4206,13 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
             RealEcdsaBenchZincTypes,
             HyraxF,
             DEGREE_PLUS_ONE,
-        >(&pp, &shape, &prepared_instances, &mut transcript)
+        >(
+            &pp,
+            &shape,
+            &prepared_instances,
+            v1_booleanity_catalog(),
+            &mut transcript,
+        )
         .expect("instance-sweep mixed Hyrax prover failed")
     });
     let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
@@ -4166,7 +4223,13 @@ fn measure_projectionfold_mixed_hyrax_instances_with_samples<const N: usize, con
                 RealEcdsaBenchZincTypes,
                 HyraxF,
                 DEGREE_PLUS_ONE,
-            >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
+            >(
+                &vs,
+                &output.fresh_instances,
+                &output.proof,
+                v1_booleanity_catalog(),
+                &mut transcript,
+            )
             .expect("instance-sweep mixed Hyrax verifier failed")
     });
     let raw = production_mixed_hyrax_proof_raw_bytes(&output.proof);
@@ -4272,21 +4335,27 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
 
     // Per-stage probe: fold stage (with the commit span isolated by the
     // phase-timing layer) and the deferred decider, on one untimed pass.
+    let booleanity_catalog = fold_first_booleanity_catalog();
     let probe_layer = phase_timing_layer();
     let (fold_stage_ms, decide_stage_ms) = {
         let mut best = (f64::MAX, f64::MAX);
         for _pass in 0..3 {
             let mut transcript = Blake3Transcript::new();
             let fold_start = Instant::now();
-            let (_fresh, fold_output) =
-                fold_prepared_fold_first_mixed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&pp, &shape, &prepared_instances, &mut transcript)
-                .expect("fold-first sweep fold stage failed");
+            let (_fresh, fold_output) = fold_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                &pp,
+                &shape,
+                &prepared_instances,
+                booleanity_catalog,
+                &mut transcript,
+            )
+            .expect("fold-first sweep fold stage failed");
             let fold_ms = elapsed_ms(fold_start);
             let decide_start = Instant::now();
             decide_fold_first_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>(
@@ -4322,15 +4391,20 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             let mut transcript = Blake3Transcript::new();
-            let (_fresh, fold_output) =
-                fold_prepared_fold_first_mixed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&pp, &shape, &prepared_instances, &mut transcript)
-                .expect("traced fold-first fold stage failed");
+            let (_fresh, fold_output) = fold_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                &pp,
+                &shape,
+                &prepared_instances,
+                booleanity_catalog,
+                &mut transcript,
+            )
+            .expect("traced fold-first fold stage failed");
             decide_fold_first_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>(
                 &pp,
                 &fold_output,
@@ -4338,6 +4412,76 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
             )
             .expect("traced fold-first decide stage failed");
         });
+    }
+
+    if env_bool_or("SHA256_COMBINED_SWEEP_PROFILE_ONCE", false) {
+        // Sub-phase breakdown: warm once, then measure one monolithic prove
+        // under the per-`phase` timing layer and dump every span's busy time
+        // plus commit / fold-core / decide roll-ups.
+        let run_once = || {
+            let mut transcript = Blake3Transcript::new();
+            let (_fresh, fold_output) = fold_prepared_fold_first_mixed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                &pp,
+                &shape,
+                &prepared_instances,
+                booleanity_catalog,
+                &mut transcript,
+            )
+            .expect("profile fold stage failed");
+            decide_fold_first_mixed_hyrax::<C, U, RealEcdsaBenchZincTypes, HyraxF, DEGREE_PLUS_ONE>(
+                &pp,
+                &fold_output,
+                &mut transcript,
+            )
+            .expect("profile decide stage failed");
+        };
+        run_once();
+        probe_layer.reset();
+        let prove_start = Instant::now();
+        run_once();
+        let prove_wall = elapsed_ms(prove_start);
+
+        let ms = |name: &str| probe_layer.raw_phase_ms(name);
+        let commit = ms("fresh_instances");
+        let precompute = ms("fresh_precompute_pcs");
+        let commit_msm = ms("fresh_commit_mixed_hyrax_instances");
+        let assembly = commit - precompute - commit_msm;
+        let core = ms("fold_first_gram")
+            + ms("fold_first_skip_round")
+            + ms("fold_projected_traces")
+            + ms("fold_first_folded_ideal")
+            + ms("fold_prover_data");
+        let decide = ms("row_sumcheck") + ms("endpoint_multipoint") + ms("pcs_opening");
+
+        eprintln!(
+            "=== fold-first PROFILE_ONCE N={N} tier={booleanity_catalog:?} prove_wall={prove_wall:.2}ms ==="
+        );
+        eprintln!("all spans (busy ms, parents include children):");
+        for (name, span_ms) in probe_layer.all_phases_sorted() {
+            eprintln!("  {span_ms:9.3}  {name}");
+        }
+        eprintln!(
+            "roll-up: COMMIT {commit:.2} (precompute {precompute:.2} + msm {commit_msm:.2} + assembly {assembly:.2})  |  FOLD-CORE {core:.2}  |  DECIDE {decide:.2} (row {:.2} + endpoint {:.2} + open {:.2})",
+            ms("row_sumcheck"),
+            ms("endpoint_multipoint"),
+            ms("pcs_opening"),
+        );
+        eprintln!(
+            "decide detail: row_build {:.2} row_core {:.2} | endpoint_resolver {:.2} endpoint_reduce {:.2} endpoint_terminal {:.2} | pcs_open_core {:.2} pcs_lifted_evals {:.2}",
+            ms("row_sumcheck_build_group"),
+            ms("row_sumcheck_prove_core"),
+            ms("endpoint_resolver"),
+            ms("endpoint_reduce"),
+            ms("endpoint_terminal"),
+            ms("pcs_open_core"),
+            ms("pcs_lifted_evals"),
+        );
     }
 
     let measured_prover_warmups = warmup_runs.saturating_sub(1);
@@ -4349,7 +4493,13 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
             RealEcdsaBenchZincTypes,
             HyraxF,
             DEGREE_PLUS_ONE,
-        >(&pp, &shape, &prepared_instances, &mut transcript)
+        >(
+            &pp,
+            &shape,
+            &prepared_instances,
+            booleanity_catalog,
+            &mut transcript,
+        )
         .expect("fold-first sweep mixed Hyrax prover failed")
     });
     let (_, verifier_stats) = measure_warmed(warmup_runs, sample_count, || {
@@ -4360,7 +4510,13 @@ fn measure_foldfirst_mixed_hyrax_instances_with_samples<const N: usize>(
             RealEcdsaBenchZincTypes,
             HyraxF,
             DEGREE_PLUS_ONE,
-        >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
+        >(
+            &vs,
+            &output.fresh_instances,
+            &output.proof,
+            booleanity_catalog,
+            &mut transcript,
+        )
         .expect("fold-first sweep mixed Hyrax verifier failed")
     });
     let raw = fold_first_mixed_hyrax_proof_raw_bytes(&output.proof);
@@ -4435,6 +4591,32 @@ fn env_bool_or(name: &str, default: bool) -> bool {
             _ => panic!("{name} must be a boolean value"),
         })
         .unwrap_or(default)
+}
+
+fn env_booleanity_catalog_or(name: &str, default: ShaBooleanityCatalog) -> ShaBooleanityCatalog {
+    std::env::var(name)
+        .ok()
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "full" => ShaBooleanityCatalog::Full,
+            "tier1" => ShaBooleanityCatalog::Tier1DropChMajAux,
+            "tier2" => ShaBooleanityCatalog::Tier2DropXorResults,
+            _ => panic!("{name} must be one of full, tier1, tier2"),
+        })
+        .unwrap_or(default)
+}
+
+fn fold_first_booleanity_catalog() -> ShaBooleanityCatalog {
+    env_booleanity_catalog_or(
+        "SHA256_COMBINED_SWEEP_BOOLEANITY_TIER",
+        ShaBooleanityCatalog::Tier2DropXorResults,
+    )
+}
+
+fn v1_booleanity_catalog() -> ShaBooleanityCatalog {
+    env_booleanity_catalog_or(
+        "SHA256_COMBINED_SWEEP_V1_BOOLEANITY_TIER",
+        ShaBooleanityCatalog::Full,
+    )
 }
 
 fn env_usize_filter(name: &str) -> Option<Vec<usize>> {
@@ -5353,7 +5535,13 @@ pub fn run_hyrax_width_sweep_report() {
                         RealEcdsaBenchZincTypes,
                         HyraxF,
                         DEGREE_PLUS_ONE,
-                    >(&mixed_pp, &shape, &prepared_instances, &mut transcript)
+                    >(
+                        &mixed_pp,
+                        &shape,
+                        &prepared_instances,
+                        ShaBooleanityCatalog::Full,
+                        &mut transcript,
+                    )
                     .expect("mixed Hyrax prover failed")
                 });
             let (_, mixed_verifier_stats) =
@@ -5369,6 +5557,7 @@ pub fn run_hyrax_width_sweep_report() {
                         &mixed_vs,
                         &mixed_output.fresh_instances,
                         &mixed_output.proof,
+                        ShaBooleanityCatalog::Full,
                         &mut transcript,
                     )
                     .expect("mixed Hyrax verifier failed")
@@ -5418,74 +5607,85 @@ pub fn run_hyrax_width_sweep_report() {
     }
 
     let (widths, skipped_widths) = packed_width_candidates::<HyraxF>();
-    let measure_packed_hyrax = |variant: String,
-                                width: usize,
-                                sample_count: usize|
-     -> HyraxWidthSweepRow {
-        let layout = packed_sha_layout::<HyraxF>(width).expect("candidate packed width is valid");
-        let (pcs_params, verifier_params) =
-            projection_sha_packed_hyrax_pcs_params::<C, HyraxF>(width);
-        let pp = LinearIdealFoldProverParams::<
-            P,
-            U,
-            RealEcdsaBenchZincTypes,
-            HyraxF,
-            DEGREE_PLUS_ONE,
-        >::new(pcs_params, hyrax_field_cfg.clone(), 3);
-        let vs = setup_verify_linear_ideal_fold_packed_hyrax::<
-            C,
-            U,
-            RealEcdsaBenchZincTypes,
-            HyraxF,
-            DEGREE_PLUS_ONE,
-        >(
-            LinearIdealFoldVerifierParams::new(verifier_params, hyrax_field_cfg.clone()),
-            shape.clone(),
-        )
-        .expect("packed Hyrax verifier setup succeeds");
-        let (output, prover_stats) =
-            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
-                let mut transcript = Blake3Transcript::new();
-                prove_prepared_linear_ideal_fold_packed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&pp, &shape, &prepared_instances, &mut transcript)
-                .expect("packed Hyrax prover failed")
-            });
-        let (_, verifier_stats) =
-            measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
-                let mut transcript = Blake3Transcript::new();
-                verify_linear_ideal_fold_packed_hyrax::<
-                    C,
-                    U,
-                    RealEcdsaBenchZincTypes,
-                    HyraxF,
-                    DEGREE_PLUS_ONE,
-                >(&vs, &output.fresh_instances, &output.proof, &mut transcript)
-                .expect("packed Hyrax verifier failed")
-            });
-        let raw = production_packed_hyrax_proof_raw_bytes(&output.proof);
-        let fresh_ecc = output
-            .proof
-            .instance_commitments
-            .iter()
-            .map(|commitment| commitment.group_point_count())
-            .sum();
-        hyrax_width_sweep_row(
-            HyraxReportCategory::ProjectionFoldPackedHyrax,
-            variant,
-            Some(width),
-            Some(layout.ecc_points_per_instance()),
-            Some(fresh_ecc),
-            prover_stats,
-            verifier_stats,
-            raw.len(),
-            zstd_len(&raw),
-        )
-    };
+    let measure_packed_hyrax =
+        |variant: String, width: usize, sample_count: usize| -> HyraxWidthSweepRow {
+            let layout =
+                packed_sha_layout::<HyraxF>(width).expect("candidate packed width is valid");
+            let (pcs_params, verifier_params) =
+                projection_sha_packed_hyrax_pcs_params::<C, HyraxF>(width);
+            let pp = LinearIdealFoldProverParams::<
+                P,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >::new(pcs_params, hyrax_field_cfg.clone(), 3);
+            let vs = setup_verify_linear_ideal_fold_packed_hyrax::<
+                C,
+                U,
+                RealEcdsaBenchZincTypes,
+                HyraxF,
+                DEGREE_PLUS_ONE,
+            >(
+                LinearIdealFoldVerifierParams::new(verifier_params, hyrax_field_cfg.clone()),
+                shape.clone(),
+            )
+            .expect("packed Hyrax verifier setup succeeds");
+            let (output, prover_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    let mut transcript = Blake3Transcript::new();
+                    prove_prepared_linear_ideal_fold_packed_hyrax::<
+                        C,
+                        U,
+                        RealEcdsaBenchZincTypes,
+                        HyraxF,
+                        DEGREE_PLUS_ONE,
+                    >(
+                        &pp,
+                        &shape,
+                        &prepared_instances,
+                        ShaBooleanityCatalog::Full,
+                        &mut transcript,
+                    )
+                    .expect("packed Hyrax prover failed")
+                });
+            let (_, verifier_stats) =
+                measure_warmed(HYRAX_WIDTH_SWEEP_WARMUP_RUNS, sample_count, || {
+                    let mut transcript = Blake3Transcript::new();
+                    verify_linear_ideal_fold_packed_hyrax::<
+                        C,
+                        U,
+                        RealEcdsaBenchZincTypes,
+                        HyraxF,
+                        DEGREE_PLUS_ONE,
+                    >(
+                        &vs,
+                        &output.fresh_instances,
+                        &output.proof,
+                        ShaBooleanityCatalog::Full,
+                        &mut transcript,
+                    )
+                    .expect("packed Hyrax verifier failed")
+                });
+            let raw = production_packed_hyrax_proof_raw_bytes(&output.proof);
+            let fresh_ecc = output
+                .proof
+                .instance_commitments
+                .iter()
+                .map(|commitment| commitment.group_point_count())
+                .sum();
+            hyrax_width_sweep_row(
+                HyraxReportCategory::ProjectionFoldPackedHyrax,
+                variant,
+                Some(width),
+                Some(layout.ecc_points_per_instance()),
+                Some(fresh_ecc),
+                prover_stats,
+                verifier_stats,
+                raw.len(),
+                zstd_len(&raw),
+            )
+        };
 
     for (label, width) in &widths {
         rows.push(measure_packed_hyrax(
@@ -6720,7 +6920,11 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
                 F,
                 DEGREE_PLUS_ONE,
             >(
-                &pp, &shape, &prepared_instances, &mut transcript
+                &pp,
+                &shape,
+                &prepared_instances,
+                ShaBooleanityCatalog::Full,
+                &mut transcript,
             ))
             .expect("ProjectionFold Concise prover failed");
         });
@@ -6733,7 +6937,13 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
         RealEcdsaBenchZincTypes,
         F,
         DEGREE_PLUS_ONE,
-    >(&pp, &shape, &prepared_instances, &mut prover_transcript)
+    >(
+        &pp,
+        &shape,
+        &prepared_instances,
+        ShaBooleanityCatalog::Full,
+        &mut prover_transcript,
+    )
     .expect("proof generation for ProjectionFold verifier bench");
 
     let mut verifier_transcript = Blake3Transcript::new();
@@ -6742,6 +6952,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
             &vs,
             &output.fresh_instances,
             &output.proof,
+            ShaBooleanityCatalog::Full,
             &mut verifier_transcript,
         )
         .expect("ProjectionFold verifier preflight failed");
@@ -6762,7 +6973,13 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
             RealEcdsaBenchZincTypes,
             F,
             DEGREE_PLUS_ONE,
-        >(&pp, &shape, &prepared_instances, &mut prover_transcript)
+        >(
+            &pp,
+            &shape,
+            &prepared_instances,
+            ShaBooleanityCatalog::Full,
+            &mut prover_transcript,
+        )
         .expect("ProjectionFold traced prover failed");
 
         let mut verifier_transcript = Blake3Transcript::new();
@@ -6776,6 +6993,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
             &vs,
             &traced_output.fresh_instances,
             &traced_output.proof,
+            ShaBooleanityCatalog::Full,
             &mut verifier_transcript,
         )
         .expect("ProjectionFold traced verifier failed");
@@ -6796,6 +7014,7 @@ fn bench_projectionfold_sha256_concise_hyrax<C, F>(
                 &vs,
                 &output.fresh_instances,
                 &output.proof,
+                ShaBooleanityCatalog::Full,
                 &mut transcript,
             ))
             .expect("ProjectionFold Concise verifier failed");
