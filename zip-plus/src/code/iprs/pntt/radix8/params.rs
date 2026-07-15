@@ -225,6 +225,38 @@ impl Config for PnttConfigF65537 {
     }
 }
 
+
+mod f7340033 {
+    #![allow(non_local_definitions)]
+    use ark_ff::{Fp64, MontBackend, MontConfig};
+    #[derive(MontConfig)]
+    #[modulus = "7340033"]
+    #[generator = "3"]
+    pub struct Config;
+
+    pub type Backend = MontBackend<Config, 1>;
+    pub type Field = Fp64<Backend>;
+
+    #[allow(clippy::cast_possible_truncation)] // We know modulus is small enough.
+    pub const MODULUS: u32 = Config::MODULUS.0[0] as u32;
+}
+
+/// Pseudo NTT configuration for F7340033 (7 * 2^20 + 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PnttConfig7340033;
+
+impl Config for PnttConfig7340033 {
+    type Field = f7340033::Field;
+    const FIELD_MODULUS: u32 = f7340033::MODULUS;
+    const BASE_TWIDDLES: [PnttInt; 8] =
+        [1, 2001861, 2306278, -3413510, -1, -2001861, -2306278, 3413510];
+
+    fn field_to_int_normalized(x: Self::Field) -> PnttInt {
+        let big_int = f7340033::Backend::into_bigint(x);
+        precompute::normalize_field_element(big_int.0[0], Self::FIELD_MODULUS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +266,11 @@ mod tests {
         let expected = precompute::precompute_roots_of_unity::<C>(8);
         let our = C::BASE_TWIDDLES.to_vec();
         assert_eq!(expected, our);
+    }
+
+    #[test]
+    fn check_twiddles_7340033() {
+        check_twiddles_generic::<PnttConfig7340033>();
     }
 
     #[test]
