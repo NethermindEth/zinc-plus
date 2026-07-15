@@ -54,8 +54,11 @@ cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_precision_loss = "deny"
 cast_sign_loss = "deny"
+clone_on_copy = "warn"
 needless_return = "deny"
 panicking_overflow_checks = "deny"
+redundant_clone = "deny"
+unnecessary_to_owned = "deny"
 unwrap_used = "deny"
 
 [profile.release]

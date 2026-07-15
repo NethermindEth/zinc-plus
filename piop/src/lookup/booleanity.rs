@@ -203,7 +203,7 @@ where
         let comb_fn: CombFn<F> = {
             let alpha_powers = alpha_powers.clone();
             let one = one.clone();
-            let zero = zero.clone();
+            let zero = zero;
             Box::new(move |mle_values: &[F]| {
                 let eq_r_val = &mle_values[0];
                 let sum = batched_booleanity_sum(&mle_values[1..], &alpha_powers, &zero, &one);
@@ -215,7 +215,7 @@ where
         //    `build_eq_x_r_inner` rejects empty inputs, so handle num_vars == 1
         //    explicitly by emitting the empty-product table `[1]`.
         let eq_other_table: Vec<F::Inner> = if num_vars <= 1 {
-            vec![one.clone().into_inner()]
+            vec![one.into_inner()]
         } else {
             build_eq_x_r_inner(&r[1..], field_cfg)?.evaluations
         };

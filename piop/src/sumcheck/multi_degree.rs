@@ -635,6 +635,13 @@ impl<F: FromPrimitiveWithConfig> MultiDegreeSumcheck<F> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::redundant_clone
+)]
 mod tests {
     use super::*;
     use crypto_bigint::{U128, const_monty_params};

@@ -174,7 +174,7 @@ where
     let leaves = (0..num_leaves)
         .map(|_| rng.random::<<Zt as ZipTypes>::Cw>())
         .collect_vec();
-    let matrix: DenseRowMatrix<_> = vec![leaves.clone()].into();
+    let matrix: DenseRowMatrix<_> = vec![leaves].into();
     let rows = matrix.to_rows_slices();
 
     group.bench_function(
@@ -281,7 +281,7 @@ pub fn prove<
         let mut t = transcript.clone();
         do_prove!(&mut t);
         CombinedProof {
-            comm: commitment.clone(),
+            comm: commitment,
             proof_transcript: t.stream.into_inner(),
         }
     };

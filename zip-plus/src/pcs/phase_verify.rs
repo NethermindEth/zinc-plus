@@ -195,7 +195,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         // MontyField's FromWithConfig does this; BoxedMontyField's does not and will
         // panic.
         let lhs = MBSInnerProduct::inner_product_field(&combined_row, &q_1, zero_f.clone())?;
-        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f.clone())?;
+        let rhs = MBSInnerProduct::inner_product_field(&coeffs, &b, zero_f)?;
 
         if lhs != rhs {
             return Err(ZipError::InvalidPcsOpen("Coherence failure".into()));

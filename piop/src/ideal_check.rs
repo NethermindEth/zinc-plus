@@ -354,7 +354,7 @@ pub enum IdealCheckError<F: PrimeField> {
     EqPolyConstructionError(#[from] PolyArithErrors),
 }
 
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::redundant_clone)]
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{

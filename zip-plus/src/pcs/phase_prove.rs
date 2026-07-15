@@ -193,7 +193,7 @@ impl<Zt: ZipTypes, Lc: LinearCode<Zt>> ZipPlus<Zt, Lc> {
         transcript.write_field_elements(&b)?;
         // Compute eval = <q_0, b> (inner product in field), <q_2, b> in paper
         // It is safe to use inner_product_unchecked because we're in a field.
-        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f.clone())?;
+        let eval = MBSInnerProduct::inner_product::<UNCHECKED>(&q_0, &b, zero_f)?;
 
         // Matrix-vector product over the flat poly_comb_r layout:
         // Each poly is a row-major (num_rows x row_len) matrix, and coeffs is the

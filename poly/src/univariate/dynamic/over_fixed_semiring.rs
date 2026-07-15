@@ -460,7 +460,7 @@ mod tests {
         z -= y.clone();
         assert_eq!(z, res);
 
-        let mut z = x.clone();
+        let mut z = x;
         z -= &y;
         assert_eq!(z, res);
 
@@ -489,7 +489,7 @@ mod tests {
         z -= y.clone();
         assert_eq!(z, res);
 
-        let mut z = x.clone();
+        let mut z = x;
         z -= &y;
         assert_eq!(z, res);
     }
@@ -519,7 +519,7 @@ mod tests {
         );
         assert_eq!(DynamicPolynomialFS::ZERO * &x, DynamicPolynomialFS::ZERO);
 
-        let mut y = x.clone();
+        let mut y = x;
 
         y *= DynamicPolynomialFS::ZERO;
 
